@@ -5225,9 +5225,9 @@ public sealed class DarlingManagedPostgres
             return "its permissions could not be restricted";
         }
 
-        if (!DarlingFileSecurity.IsTrustedOwner(storeFolder))
+        if (!DarlingFileSecurity.IsTrustedStoreOwner(storeFolder))
         {
-            return "it is not owned by SYSTEM, Administrators or the service account";
+            return "it is not owned by SYSTEM, Administrators, TrustedInstaller, the service account or the service's own account";
         }
 
         if (DarlingFileSecurity.IsReadableByOrdinaryUsers(storeFolder))
@@ -5287,18 +5287,31 @@ public sealed class DarlingManagedPostgres
     /// Why the managed store must not be initialized or started under <paramref name="storeFolder"/>, or null when it
     /// may. Judges what the service writes into the store folder and opens again on every start: the data directory,
     /// <c>pg.log</c>, <c>server.key</c>, <c>server.crt</c> and the service log folder. Each one that exists must not be
-    /// a junction or link, must be owned by SYSTEM, Administrators or the service account, and must not be readable by
-    /// Users, Authenticated Users, Everyone or INTERACTIVE; the data directory and the log folder must also grant no
-    /// write or permission change to anyone else; and the data directory's own entries (<c>postgresql.conf</c>,
-    /// <c>postgresql.auto.conf</c>, <c>pg_hba.conf</c> and the rest) must be owned the same way. initdb, pg_ctl and the
-    /// key writers open these names without asking who made them, and PostgreSQL does not check who owns a data
-    /// directory on Windows, so something another user made first would be used as it is. An item or folder that
-    /// cannot be listed or read is reported, never skipped as if it were empty. Unlike <see cref="StoreFolderProblem"/>
-    /// this judges an existing store too: its files are the ones a start would run.
+    /// a junction or link and must be owned by SYSTEM, Administrators, TrustedInstaller, the service account or this
+    /// service's own account (<c>NT SERVICE\&lt;service name&gt;</c>, which still owns the files after the Log On account
+    /// was changed); the data directory's own entries (<c>postgresql.conf</c>, <c>postgresql.auto.conf</c>,
+    /// <c>pg_hba.conf</c> and the rest) must be owned the same way. initdb, pg_ctl and the key writers open these names
+    /// without asking who made them, and PostgreSQL does not check who owns a data directory on Windows, so something
+    /// another user made first would be used as it is. An item or folder that cannot be opened, listed or read is
+    /// reported, never skipped as if it were empty.
+    ///
+    /// <para>An item that passes those and is readable by Users, Authenticated Users, Everyone or INTERACTIVE, or, for
+    /// a directory, can be written to or have its permissions changed by anyone beyond the trusted accounts, is not
+    /// refused. The service owns or can restore it, so it is given the protected ACL through a handle opened without
+    /// following links and judged again; it is refused only when that rewrite fails or the second look still finds
+    /// the access. An earlier release locked the store folder best-effort, and a store it could not lock reaches this
+    /// check with the access its parent folder handed down. Unlike <see cref="StoreFolderProblem"/> this judges an
+    /// existing store too: its files are the ones a start would run.</para>
     /// </summary>
+    /// <param name="tightenItem">Gives <paramref name="path"/> (a file or directory under the store folder) the
+    /// protected ACL; null on success, otherwise why not. A seam: production uses
+    /// <see cref="DarlingFileSecurity.HardenWithoutFollowingLinks"/>.</param>
     [SupportedOSPlatform("windows")]
-    internal static string? StoreContentsProblem(string storeFolder, string dataDirectory, string serverLogPath, string logFolder)
+    internal static string? StoreContentsProblem(
+        string storeFolder, string dataDirectory, string serverLogPath, string logFolder,
+        Func<string, bool, string, string?>? tightenItem = null)
     {
+        tightenItem ??= TightenStoreItem;
         var items = new List<(string Path, bool IsDirectory)>
         {
             (dataDirectory, true),
@@ -5317,9 +5330,10 @@ public sealed class DarlingManagedPostgres
             items.Add((logFolderFull, true));
         }
 
+        var anchor = Path.TrimEndingDirectorySeparator(Path.GetFullPath(storeFolder));
         foreach (var (path, isDirectory) in items)
         {
-            if (StoreItemProblem(path, isDirectory) is { } problem)
+            if (StoreItemProblem(path, isDirectory, anchor, tightenItem) is { } problem)
             {
                 return problem;
             }
@@ -5331,9 +5345,9 @@ public sealed class DarlingManagedPostgres
             {
                 /* A data directory's own entries are the ones PostgreSQL reads on start. A link among them is the
                    operator's own relocation (pg_wal), so only the owner is judged here. */
-                if (!DarlingFileSecurity.IsTrustedOwner(entry))
+                if (!DarlingFileSecurity.IsTrustedStoreOwner(entry))
                 {
-                    return $"{entry} is not owned by SYSTEM, Administrators or the service account{DarlingFileSecurity.DescribeOwnerAndExposure(entry)}";
+                    return $"{entry} is not owned by SYSTEM, Administrators, TrustedInstaller, the service account or the service's own account{DarlingFileSecurity.DescribeOwnerAndExposure(entry)}";
                 }
             }
         }
@@ -5350,7 +5364,7 @@ public sealed class DarlingManagedPostgres
     }
 
     [SupportedOSPlatform("windows")]
-    private static string? StoreItemProblem(string path, bool isDirectory)
+    private static string? StoreItemProblem(string path, bool isDirectory, string anchor, Func<string, bool, string, string?> tightenItem)
     {
         FileAttributes attributes;
         try
@@ -5371,22 +5385,62 @@ public sealed class DarlingManagedPostgres
             return $"{path} is a junction or symbolic link";
         }
 
-        if (!DarlingFileSecurity.IsTrustedOwner(path))
+        if (!DarlingFileSecurity.IsTrustedStoreOwner(path))
         {
-            return $"{path} is not owned by SYSTEM, Administrators or the service account{DarlingFileSecurity.DescribeOwnerAndExposure(path)}";
+            return $"{path} is not owned by SYSTEM, Administrators, TrustedInstaller, the service account or the service's own account{DarlingFileSecurity.DescribeOwnerAndExposure(path)}";
         }
 
+        if (StoreItemExposure(path, isDirectory) is not { } exposure)
+        {
+            return null;
+        }
+
+        /* Owned by someone the service trusts, so the service can give it the protected ACL itself. The anchor is the
+           store folder, or the folder above the item when it sits elsewhere. */
+        var below = DarlingPathContainment.IsStrictlyBelow(anchor, Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)));
+        var why = tightenItem(path, isDirectory, below ? anchor : Path.GetDirectoryName(Path.GetFullPath(path))!);
+        if (why is not null)
+        {
+            return $"{exposure}, and its permissions could not be restricted ({why})";
+        }
+
+        return StoreItemExposure(path, isDirectory) is { } still
+            ? $"{still}, and still is after its permissions were restricted"
+            : null;
+    }
+
+    /// <summary>How an item the service owns or trusts the owner of is open to other accounts: readable by the
+    /// four "anyone on this box" groups, or, for a directory, writable by an account beyond the trusted ones. Null
+    /// when it is not.</summary>
+    [SupportedOSPlatform("windows")]
+    private static string? StoreItemExposure(string path, bool isDirectory)
+    {
         if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
         {
             return $"{path} is readable by Users, Authenticated Users, Everyone or INTERACTIVE";
         }
 
-        if (isDirectory && DarlingFileSecurity.WriteAccessBeyondTrusted(path) is { } others)
+        if (isDirectory && DarlingFileSecurity.StoreWriteAccessBeyondTrusted(path) is { } others)
         {
             return $"{path} can be changed by {others}";
         }
 
         return null;
+    }
+
+    /// <summary>The protected ACL on one store item, through a handle opened without following links, the way
+    /// <c>--harden-files</c> applies it. Null on success, otherwise why not.</summary>
+    [SupportedOSPlatform("windows")]
+    private static string? TightenStoreItem(string path, bool isDirectory, string anchor)
+    {
+        try
+        {
+            return DarlingFileSecurity.HardenWithoutFollowingLinks(path, isDirectory, allowInteractive: false, anchor);
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException)
+        {
+            return ex.Message;
+        }
     }
 
     /// <summary>The gate on <see cref="StoreContentsProblem"/>, before initdb on a new store and before the server is
@@ -5404,9 +5458,13 @@ public sealed class DarlingManagedPostgres
             $"Refusing to initialize or start the managed store under {storeFolder}: {problem}. The data directory holds query " +
             "text, plans and every monitored server's encrypted password, PostgreSQL does not check who owns its data " +
             "directory on Windows, and the service runs what it finds in these files, so it will not use ones it cannot " +
-            "tell are its own. If you changed the service's Log On account, the previous account still owns them: from an " +
-            $"ELEVATED prompt run   icacls \"{storeFolder}\" /setowner \"*S-1-5-32-544\" /T /C /L   and start the service " +
-            "again. If you did not, another user may have made them first: do not keep them. Stop the service, delete the " +
+            "tell are its own. If the item named above is owned by an account that is not SYSTEM, Administrators or " +
+            "this service (the previous Log On account of an earlier install, say), from an ELEVATED prompt run   " +
+            $"icacls \"{storeFolder}\" /setowner \"*S-1-5-32-544\" /T /C /L   and start the service again. If it is " +
+            "readable or changeable by other accounts and the service could not restrict it, from an ELEVATED prompt run   " +
+            "icacls \"<the item named above>\" /inheritance:r /grant \"SYSTEM:(OI)(CI)F\" \"Administrators:(OI)(CI)F\" " +
+            $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(OI)(CI)F\"   and start the service again. If it is a " +
+            "link, or another user may have made it first, do not keep it: stop the service, delete the " +
             $"item named above (deleting {_dataDirectory} destroys the collected history), and run install-darling.ps1 " +
             "again, which creates the store folder with the right owner and ACL before the first start.");
     }

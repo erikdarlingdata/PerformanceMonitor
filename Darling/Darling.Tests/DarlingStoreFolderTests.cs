@@ -617,15 +617,20 @@ public sealed class DarlingStoreFolderScriptTests
 /// The service's own check of the data directory, <c>pg.log</c>, <c>server.key</c>, <c>server.crt</c> and the log folder,
 /// run before initdb and before the server starts on an existing store.
 /// </summary>
+[Collection("darling-config-env")]
 public sealed class DarlingStoreContentsGateTests
 {
     private static readonly SecurityIdentifier s_users = new(WellKnownSidType.BuiltinUsersSid, null);
 
-    private static string NewStore(bool withLogs = true)
+    private static string NewStore(bool withLogs = true, bool lockStoreFolder = true)
     {
         var store = Path.Combine(Path.GetTempPath(), "darling-contents-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(store);
-        DarlingFileSecurity.HardenDirectory(store, allowInteractiveTraverse: false);
+        if (lockStoreFolder)
+        {
+            DarlingFileSecurity.HardenDirectory(store, allowInteractiveTraverse: false);
+        }
+
         Directory.CreateDirectory(Path.Combine(store, "pg"));
         File.WriteAllText(Path.Combine(store, "pg", "postgresql.conf"), "x");
         File.WriteAllText(Path.Combine(store, "pg.log"), "x");
@@ -675,20 +680,44 @@ public sealed class DarlingStoreContentsGateTests
         }
     }
 
+    private static bool HasOrdinaryUserAccess(string path)
+    {
+        var broad = new[]
+        {
+            s_users,
+            new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null),
+            new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+            new SecurityIdentifier(WellKnownSidType.InteractiveSid, null),
+        };
+        FileSystemSecurity security = Directory.Exists(path) ? new DirectoryInfo(path).GetAccessControl() : new FileInfo(path).GetAccessControl();
+        return security.GetAccessRules(true, true, typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .Any(rule => rule.AccessControlType == AccessControlType.Allow && broad.Contains((SecurityIdentifier)rule.IdentityReference));
+    }
+
+    /// <summary>A directory the service owns that Users can read is given the protected ACL and accepted, and the
+    /// entries below it lose the access they inherited.</summary>
     [Theory]
     [InlineData("pg")]
     [InlineData("logs")]
-    public void ADirectoryReadableByUsers_IsRefused(string name)
+    public void ADirectoryReadableByUsers_IsTightened_AndAccepted(string name)
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
         var store = NewStore();
         try
         {
-            Grant(Path.Combine(store, name), FileSystemRights.Read);
-            var problem = Problem(store);
-            Assert.NotNull(problem);
-            Assert.Contains(name, problem, StringComparison.Ordinal);
-            Assert.Contains("readable", problem, StringComparison.Ordinal);
+            var path = Path.Combine(store, name);
+            Grant(path, FileSystemRights.Read);
+            Assert.True(HasOrdinaryUserAccess(path));
+
+            Assert.Null(Problem(store));
+
+            Assert.False(HasOrdinaryUserAccess(path));
+            Assert.True(new DirectoryInfo(path).GetAccessControl().AreAccessRulesProtected);
+            if (name == "pg")
+            {
+                Assert.False(HasOrdinaryUserAccess(Path.Combine(path, "postgresql.conf")), "the entries below the data directory carry no inherited Users access");
+            }
         }
         finally
         {
@@ -699,16 +728,19 @@ public sealed class DarlingStoreContentsGateTests
     [Theory]
     [InlineData("pg")]
     [InlineData("logs")]
-    public void ADirectoryUsersCanWriteTo_IsRefused(string name)
+    public void ADirectoryUsersCanWriteTo_IsTightened_AndAccepted(string name)
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
         var store = NewStore();
         try
         {
-            Grant(Path.Combine(store, name), FileSystemRights.WriteData | FileSystemRights.AppendData);
-            var problem = Problem(store);
-            Assert.NotNull(problem);
-            Assert.Contains("can be changed by", problem, StringComparison.Ordinal);
+            var path = Path.Combine(store, name);
+            Grant(path, FileSystemRights.WriteData | FileSystemRights.AppendData | FileSystemRights.ChangePermissions);
+            Assert.NotNull(DarlingFileSecurity.StoreWriteAccessBeyondTrusted(path));
+
+            Assert.Null(Problem(store));
+
+            Assert.Null(DarlingFileSecurity.StoreWriteAccessBeyondTrusted(path));
         }
         finally
         {
@@ -719,7 +751,7 @@ public sealed class DarlingStoreContentsGateTests
     [Theory]
     [InlineData("pg.log")]
     [InlineData("server.key")]
-    public void AFileReadableByUsers_IsRefused(string name)
+    public void AFileReadableByUsers_IsTightened_AndAccepted(string name)
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
         var store = NewStore();
@@ -730,15 +762,222 @@ public sealed class DarlingStoreContentsGateTests
             var security = info.GetAccessControl();
             security.AddAccessRule(new FileSystemAccessRule(s_users, FileSystemRights.Read, AccessControlType.Allow));
             info.SetAccessControl(security);
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(path));
 
-            var problem = Problem(store);
-            Assert.NotNull(problem);
-            Assert.Contains(name, problem, StringComparison.Ordinal);
-            Assert.Contains("readable", problem, StringComparison.Ordinal);
+            Assert.Null(Problem(store));
+
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(path));
+            Assert.True(new FileInfo(path).GetAccessControl().AreAccessRulesProtected);
         }
         finally
         {
             Remove(store);
+        }
+    }
+
+    /// <summary>A store the previous release could not lock (its folder was left open to Users, so the data
+    /// directory, pg.log, the keys and the log folder all inherited the read) is tightened item by item and starts.</summary>
+    [Fact]
+    public void AStoreThePreviousReleaseCouldNotLock_IsTightened_AndAccepted()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+        var store = NewStore(lockStoreFolder: false);
+        try
+        {
+            File.WriteAllText(Path.Combine(store, "server.crt"), "x");
+            Grant(store, FileSystemRights.Read);
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(Path.Combine(store, "pg")));
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(Path.Combine(store, "pg.log")));
+
+            Assert.Null(Problem(store));
+
+            foreach (var name in new[] { "pg", "pg.log", "server.key", "server.crt", "logs" })
+            {
+                Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(Path.Combine(store, name)), name);
+            }
+
+            Assert.False(HasOrdinaryUserAccess(Path.Combine(store, "pg", "postgresql.conf")));
+        }
+        finally
+        {
+            Remove(store);
+        }
+    }
+
+    /// <summary>The rewrite is refused, with the reason, when it cannot be done (the service has no right to change
+    /// the ACL of an item an administrator made), and when it reports success but the access is still there.</summary>
+    [Theory]
+    [InlineData("pg")]
+    [InlineData("pg.log")]
+    [InlineData("logs")]
+    public void ARewriteThatFails_IsRefused_WithTheReason(string name)
+    {
+        const string reason = "access is denied";
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+        var store = NewStore();
+        try
+        {
+            var path = Path.Combine(store, name);
+            if (Directory.Exists(path))
+            {
+                Grant(path, FileSystemRights.Read);
+            }
+            else
+            {
+                var info = new FileInfo(path);
+                var security = info.GetAccessControl();
+                security.AddAccessRule(new FileSystemAccessRule(s_users, FileSystemRights.Read, AccessControlType.Allow));
+                info.SetAccessControl(security);
+            }
+
+            var problem = DarlingManagedPostgres.StoreContentsProblem(
+                store, Path.Combine(store, "pg"), Path.Combine(store, "pg.log"), Path.Combine(store, "logs"),
+                (item, isDirectory, anchor) => item == path ? reason : null);
+
+            Assert.NotNull(problem);
+            Assert.Contains(path, problem, StringComparison.Ordinal);
+            Assert.Contains("could not be restricted", problem, StringComparison.Ordinal);
+            Assert.Contains(reason, problem, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Remove(store);
+        }
+    }
+
+    [Fact]
+    public void ARewriteThatChangesNothing_IsRefused()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+        var store = NewStore();
+        try
+        {
+            Grant(Path.Combine(store, "pg"), FileSystemRights.Read);
+
+            var problem = DarlingManagedPostgres.StoreContentsProblem(
+                store, Path.Combine(store, "pg"), Path.Combine(store, "pg.log"), Path.Combine(store, "logs"),
+                (item, isDirectory, anchor) => null);
+
+            Assert.NotNull(problem);
+            Assert.Contains("still is after its permissions were restricted", problem, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Remove(store);
+        }
+    }
+
+    /// <summary>An install whose Log On account was changed still has the store owned by, and granting, the account
+    /// Windows derives from the service name. It is accepted while the service runs as another account.</summary>
+    [Fact]
+    public void AStoreOwnedByTheServicesOwnAccount_IsAccepted_WhileRunningAsAnotherAccount()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+        var store = NewStore();
+        var me = WindowsIdentity.GetCurrent().User!;
+        var someoneElse = new SecurityIdentifier(WellKnownSidType.NetworkServiceSid, null);
+        try
+        {
+            if (!TryOwnEverything(store, me))
+            {
+                return;
+            }
+
+            try
+            {
+                DarlingFileSecurity.UseStoreTrustForTests(runningAccount: someoneElse, ownServiceSid: me);
+                Assert.Null(Problem(store));
+            }
+            finally
+            {
+                DarlingFileSecurity.UseStoreTrustForTests(null, null);
+            }
+        }
+        finally
+        {
+            Remove(store);
+        }
+    }
+
+    /// <summary>The same store, owned by an ordinary user: neither the running account nor the service's own.</summary>
+    [Fact]
+    public void AStoreAnOrdinaryUserOwns_IsStillRefused_WhileRunningAsAnotherAccount()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+        var store = NewStore();
+        var me = WindowsIdentity.GetCurrent().User!;
+        var someoneElse = new SecurityIdentifier(WellKnownSidType.NetworkServiceSid, null);
+        try
+        {
+            if (!TryOwnEverything(store, me))
+            {
+                return;
+            }
+
+            try
+            {
+                DarlingFileSecurity.UseStoreTrustForTests(runningAccount: someoneElse, ownServiceSid: null);
+                var problem = Problem(store);
+                Assert.NotNull(problem);
+                Assert.Contains("is not owned by", problem, StringComparison.Ordinal);
+            }
+            finally
+            {
+                DarlingFileSecurity.UseStoreTrustForTests(null, null);
+            }
+        }
+        finally
+        {
+            Remove(store);
+        }
+    }
+
+    /// <summary>The service-name account is derived the way Windows derives it: the same function gives
+    /// TrustedInstaller's account from its name, and the name this service runs under is the one the installer uses.</summary>
+    [Fact]
+    public void TheServiceNameAccount_IsDerivedTheWayWindowsDerivesIt()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "NT SERVICE accounts are Windows-only.");
+        var windows = (SecurityIdentifier)new NTAccount(@"NT SERVICE\TrustedInstaller").Translate(typeof(SecurityIdentifier));
+        Assert.Equal(windows, DarlingFileSecurity.ServiceSidFor("TrustedInstaller"));
+        Assert.Equal(windows, DarlingFileSecurity.ServiceSidFor("trustedinstaller"));
+        Assert.Equal("PerformanceMonitor Darling", DarlingCliCommands.ServiceName);
+        Assert.Equal(
+            "S-1-5-80-3826879063-3043247242-2228279017-3709363858-944500918",
+            DarlingFileSecurity.ServiceSidFor(DarlingCliCommands.ServiceName).Value);
+    }
+
+    /// <summary>Makes <paramref name="me"/> the owner of every item the gate judges; false (the test passes without
+    /// checking anything) when this account may not.</summary>
+    private static bool TryOwnEverything(string store, SecurityIdentifier me)
+    {
+        try
+        {
+            foreach (var name in new[] { "pg", "pg.log", "server.key", "logs", "pg/postgresql.conf" })
+            {
+                var path = Path.Combine(store, name.Replace('/', Path.DirectorySeparatorChar));
+                if (Directory.Exists(path))
+                {
+                    var info = new DirectoryInfo(path);
+                    var security = info.GetAccessControl();
+                    security.SetOwner(me);
+                    info.SetAccessControl(security);
+                }
+                else
+                {
+                    var info = new FileInfo(path);
+                    var security = info.GetAccessControl();
+                    security.SetOwner(me);
+                    info.SetAccessControl(security);
+                }
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException or IOException)
+        {
+            Assert.Skip("this account may not make itself the owner: " + ex.Message);
+            return false;
         }
     }
 

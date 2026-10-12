@@ -8,12 +8,14 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -26,6 +28,7 @@ namespace Darling.Tests;
 /// through the injected sink and the internal <see cref="DarlingFileLoggerProvider.Flush"/> seam — no real Event
 /// Log needed.
 /// </summary>
+[Collection("darling-config-env")]
 public sealed class DarlingFileLoggerProviderTests : IDisposable
 {
     private readonly string _tempRoot =
@@ -117,6 +120,162 @@ public sealed class DarlingFileLoggerProviderTests : IDisposable
         }
 
         Assert.True(File.Exists(provider.CurrentLogFile()), "the provider still writes its log");
+        Assert.Null(provider.StartupFailure);
+    }
+
+    private static void MakeJunction(string link, string target)
+    {
+        using var process = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+        });
+        process!.StandardOutput.ReadToEnd();
+        process.WaitForExit();
+    }
+
+    /// <summary>The log folder is a link, so locking it by path would change the folder it points to: file logging is
+    /// turned off, the reason is kept for the host's console, and the folder behind the link is left as it was.</summary>
+    [Fact]
+    public void ALogDirectoryThatIsAJunction_TurnsFileLoggingOff_AndLeavesItsTargetAlone()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only.");
+
+        Directory.CreateDirectory(_tempRoot);
+        var target = Path.Combine(_tempRoot, "elsewhere");
+        Directory.CreateDirectory(target);
+        var logDir = Path.Combine(_tempRoot, "logs");
+        MakeJunction(logDir, target);
+
+        var reports = new ConcurrentQueue<string>();
+        using var provider = new DarlingFileLoggerProvider(logDir, reports.Enqueue);
+        provider.CreateLogger("Test").LogInformation("a line");
+        provider.Flush();
+
+        Assert.NotNull(provider.StartupFailure);
+        Assert.Contains("junction or symbolic link", provider.StartupFailure, StringComparison.Ordinal);
+        Assert.Single(reports);
+        Assert.Empty(Directory.GetFiles(target));
+        Assert.False(new DirectoryInfo(target).GetAccessControl().AreAccessRulesProtected, "the folder behind the link keeps its ACL");
+    }
+
+    /// <summary>The folder above the log folder is the link: the lock by path would follow it just the same.</summary>
+    [Fact]
+    public void ALogDirectoryBelowAJunction_TurnsFileLoggingOff()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only.");
+
+        Directory.CreateDirectory(_tempRoot);
+        var target = Path.Combine(_tempRoot, "elsewhere");
+        Directory.CreateDirectory(target);
+        var parent = Path.Combine(_tempRoot, "parent");
+        MakeJunction(parent, target);
+
+        var reports = new ConcurrentQueue<string>();
+        using var provider = new DarlingFileLoggerProvider(Path.Combine(parent, "logs"), reports.Enqueue);
+
+        Assert.NotNull(provider.StartupFailure);
+        Assert.Contains("junction or symbolic link", provider.StartupFailure, StringComparison.Ordinal);
+        Assert.Single(reports);
+    }
+
+    /// <summary>A log folder some other user made, and so owns, is not locked and written to: its owner could give
+    /// itself access again whenever it liked.</summary>
+    [Fact]
+    public void ALogDirectoryAnOrdinaryUserOwns_TurnsFileLoggingOff()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var logDir = Path.Combine(_tempRoot, "logs");
+        var directory = Directory.CreateDirectory(logDir);
+        var me = WindowsIdentity.GetCurrent().User!;
+        try
+        {
+            var security = directory.GetAccessControl();
+            security.SetOwner(me);
+            directory.SetAccessControl(security);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException or IOException)
+        {
+            Assert.Skip("this account may not make itself the owner: " + ex.Message);
+        }
+
+        var reports = new ConcurrentQueue<string>();
+        try
+        {
+            /* The service runs as another account, and this folder belongs to neither it nor the service's own. */
+            DarlingFileSecurity.UseStoreTrustForTests(
+                runningAccount: new SecurityIdentifier(WellKnownSidType.NetworkServiceSid, null), ownServiceSid: null);
+            using var provider = new DarlingFileLoggerProvider(logDir, reports.Enqueue);
+
+            Assert.NotNull(provider.StartupFailure);
+            Assert.Contains("is not owned by", provider.StartupFailure, StringComparison.Ordinal);
+            Assert.Single(reports);
+            Assert.False(new DirectoryInfo(logDir).GetAccessControl().AreAccessRulesProtected, "the folder is not locked");
+        }
+        finally
+        {
+            DarlingFileSecurity.UseStoreTrustForTests(null, null);
+        }
+    }
+
+    /// <summary>The same folder, owned by the service's own account (which still owns it after the Log On account was
+    /// changed), is locked and written to.</summary>
+    [Fact]
+    public void ALogDirectoryTheServicesOwnAccountOwns_IsStillLogged()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var logDir = Path.Combine(_tempRoot, "logs");
+        var directory = Directory.CreateDirectory(logDir);
+        var me = WindowsIdentity.GetCurrent().User!;
+        try
+        {
+            var security = directory.GetAccessControl();
+            security.SetOwner(me);
+            directory.SetAccessControl(security);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException or IOException)
+        {
+            Assert.Skip("this account may not make itself the owner: " + ex.Message);
+        }
+
+        var reports = new ConcurrentQueue<string>();
+        try
+        {
+            DarlingFileSecurity.UseStoreTrustForTests(
+                runningAccount: new SecurityIdentifier(WellKnownSidType.NetworkServiceSid, null), ownServiceSid: me);
+            using (var provider = new DarlingFileLoggerProvider(logDir, reports.Enqueue))
+            {
+                Assert.Null(provider.StartupFailure);
+                Assert.Empty(reports);
+            }
+        }
+        finally
+        {
+            DarlingFileSecurity.UseStoreTrustForTests(null, null);
+
+            /* The lock above left this account out of the folder; it owns it, so it can take its access back to clean up. */
+            var restore = directory.GetAccessControl();
+            restore.AddAccessRule(new FileSystemAccessRule(me, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+            directory.SetAccessControl(restore);
+        }
+    }
+
+    /// <summary>The file-logging-off reason reaches the host's console logger once it exists: the Event Log copy
+    /// goes nowhere on a hand install with no registered event source, and the file provider drops everything while
+    /// it is off.</summary>
+    [Fact]
+    public void TheHost_WritesTheFileLoggingOffReasonToItsLoggers_RightAfterItIsBuilt()
+    {
+        var program = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Program.cs");
+        var build = program.IndexOf("var host = builder.Build();", StringComparison.Ordinal);
+        var report = program.IndexOf("fileLoggerProvider.StartupFailure", StringComparison.Ordinal);
+        var run = program.IndexOf("host.Run();", StringComparison.Ordinal);
+
+        Assert.True(build >= 0 && report > build && report < run, "the reason is logged after the host is built and before it runs");
+        Assert.Contains("LogWarning(\"{Warning}\", fileLogFailure)", program, StringComparison.Ordinal);
     }
 
     /// <summary>

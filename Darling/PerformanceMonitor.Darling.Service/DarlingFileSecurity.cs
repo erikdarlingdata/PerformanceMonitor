@@ -406,8 +406,9 @@ public static class DarlingFileSecurity
     private const uint DaclSecurityInformation = 0x00000004;
     private const uint ProtectedDaclSecurityInformation = 0x80000000;
 
-    /// <summary>Opens a file or directory (backup semantics) for its security, sharing everything but delete, so it
-    /// cannot be renamed or removed while it is held.</summary>
+    /// <summary>Opens a file or directory (backup semantics) for its security. Holding the handle does not keep the
+    /// name where it is: what protects the write is that the checks and the ACL change all go through this one
+    /// handle, so they apply to the object that was opened, whatever the name points at afterwards.</summary>
     private static Microsoft.Win32.SafeHandles.SafeFileHandle OpenForSecurity(string path, bool followLink, uint access)
     {
         var handle = CreateFileW(
@@ -604,10 +605,12 @@ public static class DarlingFileSecurity
         | FileSystemRights.WriteAttributes | FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles
         | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
 
-    private static string? AccessBeyondTrusted(FileSystemSecurity security, FileSystemRights? onlyRights = null, bool includeOwner = false)
+    private static string? AccessBeyondTrusted(
+        FileSystemSecurity security, FileSystemRights? onlyRights = null, bool includeOwner = false, Func<SecurityIdentifier, bool>? isTrusted = null)
     {
+        isTrusted ??= IsTrusted;
         var accounts = new List<string>();
-        if (includeOwner && security.GetOwner(typeof(SecurityIdentifier)) is SecurityIdentifier owner && !IsTrusted(owner))
+        if (includeOwner && security.GetOwner(typeof(SecurityIdentifier)) is SecurityIdentifier owner && !isTrusted(owner))
         {
             accounts.Add(AccountName(owner) + " (the owner)");
         }
@@ -616,7 +619,7 @@ public static class DarlingFileSecurity
         {
             if (rule.AccessControlType != AccessControlType.Allow
                 || rule.IdentityReference is not SecurityIdentifier sid
-                || IsTrusted(sid)
+                || isTrusted(sid)
                 || (onlyRights is { } mask && (rule.FileSystemRights & mask) == 0)
                 || (onlyRights is not null && rule.PropagationFlags.HasFlag(PropagationFlags.InheritOnly)))
             {
@@ -647,6 +650,115 @@ public static class DarlingFileSecurity
 
     private static bool IsTrusted(SecurityIdentifier sid) =>
         sid.Equals(LocalSystem) || sid.Equals(Administrators) || sid.Equals(ServiceAccount);
+
+    /* The store folder and what the service writes into it are judged against a wider owner list than the
+       credential files: an install whose Log On account was changed after the service first ran still has them
+       owned by the account Windows derives from the service's name. */
+    private static SecurityIdentifier? _ownServiceSidOverride;
+
+    /// <summary>Substitutes the running account and the service-name account in the store checks; null for both
+    /// restores the real ones. A test cannot make a file owned by the real service-name account.</summary>
+    internal static void UseStoreTrustForTests(SecurityIdentifier? runningAccount, SecurityIdentifier? ownServiceSid)
+    {
+        _serviceAccountOverride = runningAccount;
+        _ownServiceSidOverride = ownServiceSid;
+    }
+
+    /// <summary>
+    /// The SID Windows derives from a service name (what <c>sc.exe showsid</c> prints): the SHA-1 of the upper-cased
+    /// name in UTF-16LE, its first 20 bytes read as five little-endian integers under <c>S-1-5-80</c>. Computed rather
+    /// than looked up, because Windows answers for <c>NT SERVICE\&lt;name&gt;</c> only while a service of that name is
+    /// registered, and the SID that owns files outlives the registration. install-darling.ps1 derives it the same way.
+    /// </summary>
+    internal static SecurityIdentifier ServiceSidFor(string serviceName)
+    {
+        /* SHA-1 because Windows derives the account from the name with it: this finds the account, it protects nothing. */
+#pragma warning disable CA5350
+        var hash = System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.Unicode.GetBytes(serviceName.ToUpperInvariant()));
+#pragma warning restore CA5350
+        var parts = new string[5];
+        for (var i = 0; i < parts.Length; i++)
+        {
+            parts[i] = BitConverter.ToUInt32(hash, i * 4).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return new SecurityIdentifier("S-1-5-80-" + string.Join('-', parts));
+    }
+
+    /// <summary>This service's own account, <c>NT SERVICE\&lt;service name&gt;</c>, from the name it is registered under.</summary>
+    private static SecurityIdentifier OwnServiceSid => _ownServiceSidOverride ?? ServiceSidFor(DarlingCliCommands.ServiceName);
+
+    /// <summary>
+    /// Who may own, or hold access on, the store folder and what the service writes into it: SYSTEM,
+    /// Administrators, TrustedInstaller, the account the service runs as, and this service's own service SID
+    /// (<c>NT SERVICE\&lt;service name&gt;</c>). The last is what the files belong to on an install whose Log On account
+    /// was changed after the service first ran. Only that service's own process (or a holder of the restore
+    /// privilege) can make an object owned by it, so an ordinary user cannot become it. install-darling.ps1 trusts
+    /// the same list.
+    /// </summary>
+    private static bool IsTrustedStoreSid(SecurityIdentifier sid) =>
+        IsTrusted(sid) || sid.Equals(OwnServiceSid) || sid.Equals(ServiceSidFor("TrustedInstaller"));
+
+    /// <summary><see cref="IsTrustedOwner"/> against the wider list the store checks use (<see cref="IsTrustedStoreSid"/>).</summary>
+    public static bool IsTrustedStoreOwner(string path)
+    {
+        try
+        {
+            return SecurityOf(path).GetOwner(typeof(SecurityIdentifier)) is SecurityIdentifier owner && IsTrustedStoreSid(owner);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary><see cref="WriteAccessBeyondTrusted(string)"/> against the store checks' owner list.</summary>
+    public static string? StoreWriteAccessBeyondTrusted(string directory)
+    {
+        try
+        {
+            return AccessBeyondTrusted(new DirectoryInfo(directory).GetAccessControl(), DirectoryChangeRights, includeOwner: true, IsTrustedStoreSid);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
+        {
+            return $"its permissions could not be read ({ex.Message})";
+        }
+    }
+
+    /// <summary>
+    /// Why the service must not write its log files into <paramref name="folder"/>, or null when it may: the folder
+    /// or the folder above it is a junction or symbolic link, or the folder is owned by anyone outside the store
+    /// owner list. A folder the service locks by path is locked wherever a link on that path leads, and its owner
+    /// can always give itself access again.
+    /// </summary>
+    public static string? LogFolderProblem(string folder)
+    {
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder));
+        var parent = Path.GetDirectoryName(full);
+        foreach (var candidate in new[] { full, parent })
+        {
+            if (candidate is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                if ((File.GetAttributes(candidate) & FileAttributes.ReparsePoint) != 0)
+                {
+                    return $"{candidate} is a junction or symbolic link";
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                return $"{candidate} could not be read ({ex.Message})";
+            }
+        }
+
+        return IsTrustedStoreOwner(full)
+            ? null
+            : $"{full} is not owned by SYSTEM, Administrators, TrustedInstaller, the service account or the service's own account{DescribeOwnerAndExposure(full)}";
+    }
 
     /// <summary>
     /// Opens <paramref name="path"/>, a file only the service reads, and judges it through that one handle (#4044

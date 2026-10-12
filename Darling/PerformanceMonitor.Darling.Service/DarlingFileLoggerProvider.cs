@@ -106,26 +106,54 @@ public sealed class DarlingFileLoggerProvider : ILoggerProvider
                either (#1581): surface it ONCE so an operator learns file logging is disabled instead of
                discovering it only when they tail an empty log directory. */
             _enabled = false;
-            ReportFailureOnce(
-                $"File logging is disabled - cannot create or restrict log directory '{_logDirectory}': {ex.GetType().Name}: {ex.Message}");
+            StartupFailure = $"File logging is disabled - cannot create or restrict log directory '{_logDirectory}': {ex.GetType().Name}: {ex.Message}";
+            ReportFailureOnce(StartupFailure);
         }
 
         _flushTimer = new Timer(_ => Flush(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
     }
 
     /// <summary>
+    /// Why file logging was turned off when the provider was built (the log folder could not be created, trusted or
+    /// restricted), or null when it is on. The Event Log copy of this message reaches nobody on a hand install with
+    /// no registered event source, so the host also writes it to its console logger once that exists.
+    /// </summary>
+    internal string? StartupFailure { get; }
+
+    /// <summary>
     /// Limits the log folder to SYSTEM, Administrators and the service account on Windows, whatever the layout: the
     /// logs name hosts, logins and error text, and the folder otherwise takes the access its parent under
     /// ProgramData hands down, which includes ordinary users' read. The store folder's own lock covers the logs only
     /// when they happen to sit under it, so this does not depend on where <c>postgres.dataDirectory</c> points or on
-    /// whether the store is managed. A folder whose ACL cannot be set is not written to: the caller treats the throw
-    /// as a logging failure and reports it once.
+    /// whether the store is managed. The folder is locked only once it is known to be the service's own: it, and the
+    /// folder above it, must not be a junction or symbolic link, and it must be owned by SYSTEM, Administrators,
+    /// TrustedInstaller, the service account or the service's own account, since an owner can always give itself access
+    /// again and a lock by path follows a link. A folder that fails that is not written to: the caller treats the throw
+    /// as a logging failure and reports it once. So is one whose ACL cannot be set, unless it is already closed to
+    /// everyone else (an install whose Log On account was changed still has it owned by the previous account, which
+    /// the new one cannot re-lock) and then logging continues.
     /// </summary>
     private static void RestrictLogDirectory(string logDirectory)
     {
-        if (OperatingSystem.IsWindows())
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        if (DarlingFileSecurity.LogFolderProblem(logDirectory) is { } problem)
+        {
+            throw new InvalidOperationException(problem);
+        }
+
+        try
         {
             DarlingFileSecurity.HardenDirectory(logDirectory, allowInteractiveTraverse: false);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or InvalidOperationException
+            && !DarlingFileSecurity.IsReadableByOrdinaryUsers(logDirectory)
+            && DarlingFileSecurity.StoreWriteAccessBeyondTrusted(logDirectory) is null)
+        {
+            /* Already as closed as the lock would make it. */
         }
     }
 

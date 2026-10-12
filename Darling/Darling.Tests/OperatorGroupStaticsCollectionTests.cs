@@ -16,8 +16,9 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// The tests that set the operator-group stand-in (<c>DarlingFileSecurity.UseOperatorGroupForTests</c>) or the
-/// file-access sink (<c>DarlingSecretSource.ReportFileAccessTo</c>) change statics the whole test process shares.
+/// The tests that set the operator-group stand-in (<c>DarlingFileSecurity.UseOperatorGroupForTests</c>), the store
+/// owner stand-ins (<c>DarlingFileSecurity.UseStoreTrustForTests</c>) or the file-access sink
+/// (<c>DarlingSecretSource.ReportFileAccessTo</c>) change statics the whole test process shares.
 /// Run beside the classes that harden real files, one test's stand-in lands inside another's ACL assertion. Every
 /// class that sets either joins the <c>darling-config-env</c> collection, which is defined with parallelization off
 /// so it runs alone.
@@ -31,6 +32,8 @@ public sealed class OperatorGroupStaticsCollectionTests
         typeof(DarlingFileSecurityTests),
         typeof(DarlingSecretFileAccessTests),
         typeof(DarlingHardenFilesJunctionTests),
+        typeof(DarlingStoreContentsGateTests),
+        typeof(DarlingFileLoggerProviderTests),
     };
 
     [Fact]
@@ -60,9 +63,11 @@ public sealed class OperatorGroupStaticsCollectionTests
     {
         var expected = new[]
         {
+            "DarlingFileLoggerProviderTests.cs",
             "DarlingFileSecurityTests.cs",
             "DarlingHardenFilesVerbTests.cs",
             "DarlingSecretFileAccessTests.cs",
+            "DarlingStoreFolderTests.cs",
         };
 
         var directory = PathTo("Darling", "Darling.Tests");
@@ -71,6 +76,7 @@ public sealed class OperatorGroupStaticsCollectionTests
             {
                 var text = File.ReadAllText(file);
                 return text.Contains("UseOperatorGroupForTests(", StringComparison.Ordinal)
+                    || text.Contains("UseStoreTrustForTests(", StringComparison.Ordinal)
                     || text.Contains("ReportFileAccessTo(", StringComparison.Ordinal);
             })
             .Select(Path.GetFileName)
