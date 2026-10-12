@@ -321,12 +321,25 @@ public sealed class ActualPlanModificationCheckGuardTests
     [Theory]
     [InlineData("Lite/Windows/QueryStatsHistoryWindow.xaml.cs")]
     [InlineData("Lite/Controls/ServerTab.Plans.cs")]
-    [InlineData("Darling/PerformanceMonitor.Darling.Viewer/QueryStatsHistoryWindow.xaml.cs")]
-    [InlineData("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.ActualPlan.cs")]
-    [InlineData("Darling/PerformanceMonitor.Darling.Viewer/FinOpsTab.Loaders.cs")]
     public void ThePlanLookupByQueryHash_SkipsAnEmptyOrAllZeroHash(string relative)
         => Assert.Contains("QueryModificationDetector.IsUsableQueryHash(",
             File.ReadAllText(Path.Combine(RepoRoot(), relative)), StringComparison.Ordinal);
+
+    /// <summary>
+    /// The Darling viewer's query_stats entry points hand their hash to the flow behind the shared hash gate, and the
+    /// gate rejects an empty or all-zero hash (#5639); the flow then reads the stored text and plan by that hash.
+    /// </summary>
+    [Theory]
+    [InlineData("Darling/PerformanceMonitor.Darling.Viewer/QueryStatsHistoryWindow.xaml.cs")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.ActualPlan.cs")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Viewer/FinOpsTab.Loaders.cs")]
+    public void TheDarlingQueryStatsEntryPoints_GateOnTheHash_BeforeTheFlowReadsTheStoredText(string relative)
+    {
+        Assert.Contains("ViewerActualPlanFlow.TryCheckQueryStatsHash(",
+            File.ReadAllText(Path.Combine(RepoRoot(), relative)), StringComparison.Ordinal);
+        Assert.Contains("QueryModificationDetector.IsUsableQueryHash(",
+            File.ReadAllText(Path.Combine(RepoRoot(), "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.ActualPlan.cs")), StringComparison.Ordinal);
+    }
 
     // ── source reading ──
 

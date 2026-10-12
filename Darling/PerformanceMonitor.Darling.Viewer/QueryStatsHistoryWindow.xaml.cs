@@ -273,7 +273,10 @@ public partial class QueryStatsHistoryWindow : Window
     {
         if (string.IsNullOrEmpty(_queryHash)) return;
 
-        if (!ViewerActualPlanFlow.TryBuildQueryStatsArgs(this, _queryHash, _databaseName, _queryText, out var argsJson))
+        /* #5639: an empty or all-zero hash names no particular query. The flow reads the text the service will run
+           (the latest stored text for the hash and database, which can differ from this window's text) and uses
+           it for the prompt, the modification check and the digest in the request. */
+        if (!ViewerActualPlanFlow.TryCheckQueryStatsHash(this, _queryHash))
         {
             return;
         }
@@ -284,16 +287,12 @@ public partial class QueryStatsHistoryWindow : Window
         _actualPlanCts = new System.Threading.CancellationTokenSource();
 
         var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
-            this, _dataService, _serverId, _serverName, _databaseName, _queryText,
-            /* #5639: the stored plan is read before the prompt (a monitoring-store read); an empty or all-zero hash
-               names no particular query, so no plan is looked up by it and the warning shows. */
-            PerformanceMonitor.PlanAnalysis.QueryModificationDetector.IsUsableQueryHash(_queryHash)
-                ? () => _dataService.GetQueryStatsPlanXmlAsync(_serverId, _databaseName, _queryHash)
-                : null,
-            argsJson,
+            this, _dataService, _serverId, _serverName, _databaseName,
+            queryText: null, fetchPlanXml: null, argsJson: "",
             onStarted: () => System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait,
             onFinished: () => System.Windows.Input.Mouse.OverrideCursor = null,
-            _actualPlanCts.Token);
+            _actualPlanCts.Token,
+            queryStatsHash: _queryHash);
 
         if (planXml != null)
             await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, _queryText, _databaseName);

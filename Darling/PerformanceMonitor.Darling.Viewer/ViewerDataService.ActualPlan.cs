@@ -10,6 +10,8 @@ using System;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.PlanAnalysis;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -52,14 +54,53 @@ public sealed partial class ViewerDataService
             s_planFetchArgsOptions);
 
     /// <summary>
-    /// The viewer-side gate for a <c>query_stats</c> actual-plan request (#5639): builds the args only for a row
-    /// whose hash names a particular query (not empty, not all zeros) and that holds query text to confirm.
-    /// Otherwise returns false with the message to show, and no request is made.
+    /// Reads the query text (and stored estimated plan) the SERVICE will run for a <c>query_stats</c> actual-plan
+    /// request, with the same SQL the service uses (<see cref="ActualPlanStoredQuery.QueryStatsResolveSql"/>) and
+    /// the same key (server, hash, database; a blank database binds as the empty string, as the service binds it).
+    /// The row a grid shows can hold a different text (an older capture, or a sample), so the confirm prompt shows
+    /// THIS text and the request carries ITS digest (#5639). Returns null when the store holds no text for the key;
+    /// a failed read throws. The plan falls back to the plan lookup the history windows use, which also finds an
+    /// oversized plan in the backlog.
     /// </summary>
-    public static bool TryBuildActualPlanArgs(
-        string? queryHash, string? databaseName, string? queryText, out string argsJson, out string refusal)
+    public async Task<StoredActualPlanQuery?> ResolveQueryStatsActualPlanQueryAsync(
+        int serverId, string? databaseName, string queryHash, CancellationToken cancellationToken = default)
     {
-        argsJson = "";
+        string? queryText;
+        string? planXml;
+        await using (var command = _dataSource.CreateCommand(ActualPlanStoredQuery.QueryStatsResolveSql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = queryHash });
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = NullIfBlank(databaseName) ?? "" });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            queryText = reader.IsDBNull(0) ? null : reader.GetString(0);
+            planXml = PayloadDimensions.ResolveContent(
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(3) ? null : reader.GetFieldValue<byte[]>(3));
+        }
+
+        if (string.IsNullOrWhiteSpace(queryText))
+        {
+            return null;
+        }
+
+        planXml ??= await GetQueryStatsPlanXmlAsync(serverId, NullIfBlank(databaseName) ?? "", queryHash, cancellationToken);
+        return new StoredActualPlanQuery(queryText, planXml);
+    }
+
+    /// <summary>
+    /// The viewer-side gate for a <c>query_stats</c> actual-plan request (#5639): true only for a row whose hash
+    /// names a particular query (not empty, not all zeros). Otherwise returns false with the message to show, and
+    /// no request is made.
+    /// </summary>
+    public static bool TryCheckActualPlanQueryHash(string? queryHash, out string refusal)
+    {
         if (!QueryModificationDetector.IsUsableQueryHash(queryHash))
         {
             refusal = "This row has no usable query hash (it is empty or all zeros), so the stored text cannot be tied to "
@@ -67,15 +108,47 @@ public sealed partial class ViewerDataService
             return false;
         }
 
-        if (string.IsNullOrEmpty(queryText))
-        {
-            refusal = "This row has no query text to confirm. Nothing was run.";
-            return false;
-        }
-
-        argsJson = BuildActualPlanArgs(queryHash!, databaseName, queryText);
         refusal = "";
         return true;
+    }
+
+    /// <summary>
+    /// Reads the text the service will run (through <paramref name="resolve"/>, the store read above) and builds
+    /// everything the prompt and the request need from THAT text (#5639): the text the prompt shows, the stored
+    /// plan for the modification check, and the args carrying the digest of that same text. The row text a grid
+    /// held is never an input, so a row showing an older or a sample text cannot make the digest disagree with
+    /// what the service resolves. A read that finds nothing or fails returns a result that carries no args, so
+    /// nothing is sent. Cancellation passes through.
+    /// </summary>
+    public static async Task<QueryStatsActualPlanPreparation> PrepareQueryStatsActualPlanAsync(
+        Func<Task<StoredActualPlanQuery?>> resolve, string queryHash, string? databaseName)
+    {
+        ArgumentNullException.ThrowIfNull(resolve);
+        StoredActualPlanQuery? stored;
+        try
+        {
+            stored = await resolve();
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return new QueryStatsActualPlanPreparation(QueryStatsActualPlanLookup.ReadFailed, "", null, "", ex.Message);
+        }
+
+        if (stored is null || string.IsNullOrWhiteSpace(stored.QueryText))
+        {
+            return new QueryStatsActualPlanPreparation(QueryStatsActualPlanLookup.NothingStored, "", null, "", null);
+        }
+
+        return new QueryStatsActualPlanPreparation(
+            QueryStatsActualPlanLookup.Ready,
+            stored.QueryText,
+            stored.PlanXml,
+            BuildActualPlanArgs(queryHash, databaseName, stored.QueryText),
+            null);
     }
 
     /// <summary>
@@ -189,6 +262,29 @@ public enum ActualPlanStatus
     /// <summary>The service did not report a terminal result within the poll budget (still running).</summary>
     TimedOut,
 }
+
+/// <summary>The query text the service will run for a <c>query_stats</c> actual-plan request, with the stored
+/// estimated plan read beside it (#5639).</summary>
+public sealed record StoredActualPlanQuery(string QueryText, string? PlanXml);
+
+/// <summary>What reading the stored text for a <c>query_stats</c> actual-plan request found.</summary>
+public enum QueryStatsActualPlanLookup
+{
+    /// <summary>The store holds the text; the prompt and the request are built from it.</summary>
+    Ready,
+
+    /// <summary>The store holds no text for the hash and database; nothing is prompted or sent.</summary>
+    NothingStored,
+
+    /// <summary>The read failed; nothing is prompted or sent.</summary>
+    ReadFailed,
+}
+
+/// <summary>The prompt text, stored plan and request args for a <c>query_stats</c> actual-plan request, all built
+/// from the text the service will run. <see cref="ArgsJson"/> is empty unless <see cref="Lookup"/> is
+/// <see cref="QueryStatsActualPlanLookup.Ready"/>; <see cref="Error"/> carries a failed read's message.</summary>
+public sealed record QueryStatsActualPlanPreparation(
+    QueryStatsActualPlanLookup Lookup, string QueryText, string? PlanXml, string ArgsJson, string? Error);
 
 /// <summary>An actual-plan capture's outcome: the plan XML on success, else a message to surface.</summary>
 public sealed record ActualPlanResult(ActualPlanStatus Status, string? PlanXml, string? Message);

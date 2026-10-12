@@ -39,10 +39,10 @@ public partial class ViewerServerTab
 
         var label = $"Actual Plan - {stats.QueryHash}";
 
-        /* #5639: the args carry the digest of the row's FULL text; the SERVICE re-resolves the latest text for the
-           hash and runs it only when it matches. The stored ESTIMATED plan for modification detection is read
-           from the viewer's own store below. */
-        if (!ViewerActualPlanFlow.TryBuildQueryStatsArgs(Window.GetWindow(this)!, stats.QueryHash, stats.DatabaseName, stats.QueryText, out var argsJson))
+        /* #5639: an empty or all-zero hash names no particular query. The row's text can differ from the latest
+           stored text the SERVICE runs, so the flow reads that text (same SQL and database as the service); the
+           prompt, the modification check and the digest in the request all use it. */
+        if (!ViewerActualPlanFlow.TryCheckQueryStatsHash(Window.GetWindow(this)!, stats.QueryHash))
         {
             return;
         }
@@ -53,20 +53,15 @@ public partial class ViewerServerTab
 
         var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
             Window.GetWindow(this)!, _dataService, _server.ServerId, _server.DisplayName, stats.DatabaseName,
-            stats.QueryText,
-            /* #5639: read before the prompt (a monitoring-store read); a failed read counts as no plan, and an
-               empty or all-zero hash names no particular query, so no plan is looked up by it. */
-            PerformanceMonitor.PlanAnalysis.QueryModificationDetector.IsUsableQueryHash(stats.QueryHash)
-                ? () => _dataService.GetQueryStatsPlanXmlAsync(_server.ServerId, stats.DatabaseName, stats.QueryHash)
-                : null,
-            argsJson,
+            queryText: null, fetchPlanXml: null, argsJson: "",
             onStarted: () =>
             {
                 ShowPlanLoading(label);
                 PlanLoadingLabel.Text = $"Capturing actual plan (re-executing): {label}";
             },
             onFinished: null,
-            _planLoadCts.Token);
+            _planLoadCts.Token,
+            queryStatsHash: stats.QueryHash);
 
         if (planXml != null)
         {

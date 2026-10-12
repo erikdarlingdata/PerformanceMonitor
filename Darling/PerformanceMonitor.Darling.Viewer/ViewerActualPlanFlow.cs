@@ -40,7 +40,12 @@ public static class ViewerActualPlanFlow
     /// <param name="fetchPlanXml">Reads the stored estimated plan for modification detection BEFORE the prompt (a
     /// read of the monitoring store; nothing runs on the monitored server). The service re-resolves the text by
     /// identifier when it executes. Null, a null result, a failed read or an unparseable plan all make the detector
-    /// fail safe to "modifying" (#5639).</param>
+    /// fail safe to "modifying" (#5639). Ignored for a <paramref name="queryStatsHash"/> request.</param>
+    /// <param name="queryStatsHash">Set for a <c>query_stats</c> request (Top Queries, Query-Stats history, FinOps
+    /// High Impact). The flow then reads the text the service will run (the latest stored text for this hash and
+    /// <paramref name="databaseName"/>), and the prompt, the modification check and the digest in the request all
+    /// use that text; <paramref name="queryText"/>, <paramref name="fetchPlanXml"/> and <paramref name="argsJson"/>
+    /// are not used (#5639). Query Store and snapshot requests leave it null.</param>
     public static async Task<string?> RequestActualPlanAsync(
         Window owner,
         ViewerDataService dataService,
@@ -52,7 +57,8 @@ public static class ViewerActualPlanFlow
         string argsJson,
         Action? onStarted,
         Action? onFinished,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? queryStatsHash = null)
     {
         /* A read-only seat can't enqueue a command — short-circuit with the explanation (the enqueue's
            ViewerReadOnlyException is the belt-and-braces backstop, handled below too). */
@@ -73,7 +79,42 @@ public static class ViewerActualPlanFlow
         try
         {
             string? estimatedPlanXml = null;
-            if (fetchPlanXml != null)
+            if (queryStatsHash != null)
+            {
+                /* #5639: a query_stats request (Top Queries, Query-Stats history, FinOps High Impact) runs the
+                   LATEST stored text for the hash and database, which is often not the text the grid row holds.
+                   Read that text now, from the same database and with the same SQL the service uses, so the
+                   prompt shows it and the request carries its digest. Nothing found, or a failed read, shows a
+                   message and sends nothing. */
+                QueryStatsActualPlanPreparation prepared;
+                try
+                {
+                    Mouse.OverrideCursor = Cursors.Wait;
+                    prepared = await ViewerDataService.PrepareQueryStatsActualPlanAsync(
+                        () => Task.Run(() => dataService.ResolveQueryStatsActualPlanQueryAsync(
+                            serverId, databaseName, queryStatsHash, cancellationToken), cancellationToken),
+                        queryStatsHash, databaseName);
+                }
+                catch (OperationCanceledException)
+                {
+                    return null;
+                }
+                finally
+                {
+                    Mouse.OverrideCursor = null;
+                }
+
+                if (prepared.Lookup != QueryStatsActualPlanLookup.Ready)
+                {
+                    ShowStoredTextUnavailable(owner, prepared);
+                    return null;
+                }
+
+                queryText = prepared.QueryText;
+                estimatedPlanXml = prepared.PlanXml;
+                argsJson = prepared.ArgsJson;
+            }
+            else if (fetchPlanXml != null)
             {
                 try
                 {
@@ -212,21 +253,35 @@ public static class ViewerActualPlanFlow
     }
 
     /// <summary>
-    /// #5639: builds the args for a <c>query_stats</c> actual-plan request from the row's hash, database and FULL
-    /// query text (the digest of that text rides the args so the service runs only the text the prompt shows).
-    /// A row whose hash is empty or all zeros, or that holds no text, is refused here with a message and no
-    /// request is made.
+    /// #5639: the gate before a <c>query_stats</c> actual-plan request (pass the hash on as
+    /// <c>queryStatsHash</c>). A row whose hash is empty or all zeros names no particular query, so it is refused
+    /// here with a message and no request is made.
     /// </summary>
-    public static bool TryBuildQueryStatsArgs(
-        Window owner, string? queryHash, string? databaseName, string? queryText, out string argsJson)
+    public static bool TryCheckQueryStatsHash(Window owner, string? queryHash)
     {
-        if (ViewerDataService.TryBuildActualPlanArgs(queryHash, databaseName, queryText, out argsJson, out var refusal))
+        if (ViewerDataService.TryCheckActualPlanQueryHash(queryHash, out var refusal))
         {
             return true;
         }
 
         MessageBox.Show(owner, refusal, "Actual Plan", MessageBoxButton.OK, MessageBoxImage.Information);
         return false;
+    }
+
+    /// <summary>#5639: nothing is prompted or sent when the text the service would run cannot be read.</summary>
+    private static void ShowStoredTextUnavailable(Window owner, QueryStatsActualPlanPreparation prepared)
+    {
+        if (prepared.Lookup == QueryStatsActualPlanLookup.NothingStored)
+        {
+            MessageBox.Show(owner,
+                "No stored query text was found for this query, so there is nothing to run. Nothing was run.",
+                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        MessageBox.Show(owner,
+            $"The stored query text could not be read, so the request was not made. Nothing was run.\n\n{prepared.Error}",
+            "Actual Plan Error", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
     /// <summary>Surfaces a non-captured outcome (no-plan info, or a failure/timeout warning with the service's message).</summary>

@@ -720,7 +720,10 @@ public partial class FinOpsTab
             return;
         }
 
-        if (!ViewerActualPlanFlow.TryBuildQueryStatsArgs(Window.GetWindow(this)!, hi.QueryHash, hi.DatabaseName, hi.FullQueryText, out var argsJson))
+        /* #5639: an empty or all-zero hash names no particular query. The row holds a SAMPLE text, so the flow
+           reads the text the service will run (the latest stored text for the hash and database) and the
+           prompt, the modification check and the request's digest all use that text. */
+        if (!ViewerActualPlanFlow.TryCheckQueryStatsHash(Window.GetWindow(this)!, hi.QueryHash))
         {
             return;
         }
@@ -729,13 +732,11 @@ public partial class FinOpsTab
 
         var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
             Window.GetWindow(this)!, _dataService, _server.ServerId, _server.DisplayName, hi.DatabaseName,
-            hi.FullQueryText,
-            /* #5639: the row's stored plan; an empty or all-zero hash names no particular query, so it counts as no plan. */
-            PerformanceMonitor.PlanAnalysis.QueryModificationDetector.IsUsableQueryHash(hi.QueryHash) ? () => System.Threading.Tasks.Task.FromResult<string?>(hi.QueryPlanXml) : null,
-            argsJson,
+            queryText: null, fetchPlanXml: null, argsJson: "",
             onStarted: () => System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait,
             onFinished: () => System.Windows.Input.Mouse.OverrideCursor = null,
-            System.Threading.CancellationToken.None);
+            System.Threading.CancellationToken.None,
+            queryStatsHash: hi.QueryHash);
 
         if (planXml != null)
         {

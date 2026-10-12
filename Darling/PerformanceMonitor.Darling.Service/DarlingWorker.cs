@@ -13626,15 +13626,7 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// copy, so no SQL text ever rides on the command payload. Serves Top Queries, Query-Stats history, and the
     /// FinOps High Impact grid. The third column (isolation level) is NULL here (query_stats does not capture it).
     /// Public const so a test can pin its shape ($1 server_id, $2 query_hash, $3 database_name).</summary>
-    public const string ResolveStoredQueryForActualPlanSql = @"
-SELECT query_text, query_plan_xml, NULL::text AS transaction_isolation_level, query_plan_gz
-FROM v_query_stats
-WHERE server_id = $1
-AND   query_hash = $2
-AND   database_name = $3
-AND   query_text IS NOT NULL
-ORDER BY collection_time DESC
-LIMIT 1";
+    public const string ResolveStoredQueryForActualPlanSql = ActualPlanStoredQuery.QueryStatsResolveSql; /* #5639: the viewer reads its prompt text with this same constant */
 
     /// <summary>The <c>query_store_stats</c> resolver — the Query Store history surface's identifier (server_id +
     /// database_name + query_id) to its captured query text + stored plan. $1 server_id, $2 database_name, $3

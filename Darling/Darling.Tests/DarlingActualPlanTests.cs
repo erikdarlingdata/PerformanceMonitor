@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.PlanAnalysis;
 using Xunit;
@@ -174,7 +175,7 @@ public sealed class ActualPlanRequestTests
     {
         /* Longer than the 1,000-character prompt copy: the digest must cover the whole row text. */
         var full = ConfirmedText + new string(' ', 2000) + "-- tail";
-        Assert.True(ViewerDataService.TryBuildActualPlanArgs("0xABCD", "master", full, out var args, out _));
+        var args = ViewerDataService.BuildActualPlanArgs("0xABCD", "master", full);
         Assert.True(ActualPlanRequest.TryParse(args, out var req));
         Assert.Equal(QueryTextDigest.Compute(full), req.ConfirmedSha256);
         Assert.NotEqual(QueryTextDigest.Compute(full[..1000]), req.ConfirmedSha256);
@@ -190,16 +191,125 @@ public sealed class ActualPlanRequestTests
     [InlineData("   ")]
     public void Viewer_RefusesAnUnusableHash(string? hash)
     {
-        Assert.False(ViewerDataService.TryBuildActualPlanArgs(hash, "master", ConfirmedText, out var args, out var refusal));
-        Assert.Equal("", args);
+        Assert.False(ViewerDataService.TryCheckActualPlanQueryHash(hash, out var refusal));
         Assert.Contains("no usable query hash", refusal, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Viewer_AcceptsAHashThatNamesAQuery()
+        => Assert.True(ViewerDataService.TryCheckActualPlanQueryHash("0xABCD", out _));
+
+    // ── #5639: the viewer reads the text the service will run, and the prompt and digest come from it ──
+
+    private const string RowText = "SELECT TOP (1) * FROM dbo.t /* the sample text the grid row shows */";
+    private const string StoredText = "DELETE TOP (1) FROM dbo.t WHERE id = 7; /* the latest stored text */";
+
+    [Fact]
+    public async Task Viewer_PromptTextAndDigest_ComeFromTheResolvedText_NotTheRowText()
+    {
+        var prepared = await ViewerDataService.PrepareQueryStatsActualPlanAsync(
+            () => Task.FromResult<StoredActualPlanQuery?>(new StoredActualPlanQuery(StoredText, "<ShowPlanXML/>")),
+            "0xABCD", "master");
+
+        Assert.Equal(QueryStatsActualPlanLookup.Ready, prepared.Lookup);
+        Assert.Equal(StoredText, prepared.QueryText);
+        Assert.Equal("<ShowPlanXML/>", prepared.PlanXml);
+        Assert.True(ActualPlanRequest.TryParse(prepared.ArgsJson, out var req));
+        Assert.Equal(QueryTextDigest.Compute(StoredText), req.ConfirmedSha256);
+        Assert.NotEqual(QueryTextDigest.Compute(RowText), req.ConfirmedSha256);
+        /* The service accepts it: the resolved text is the one it digests. */
+        Assert.Null(DarlingWorker.RefuseActualPlanRequest(req));
+        Assert.Null(DarlingWorker.RefuseChangedActualPlanText(req, StoredText));
+        /* A newer capture landing after the prompt is the only way a refusal happens now. */
+        Assert.NotNull(DarlingWorker.RefuseChangedActualPlanText(req, StoredText + " /* newer */"));
+    }
+
+    [Fact]
+    public async Task Viewer_NothingStored_SendsNothing()
+    {
+        var prepared = await ViewerDataService.PrepareQueryStatsActualPlanAsync(
+            () => Task.FromResult<StoredActualPlanQuery?>(null), "0xABCD", "master");
+
+        Assert.Equal(QueryStatsActualPlanLookup.NothingStored, prepared.Lookup);
+        Assert.Equal("", prepared.ArgsJson);
+        Assert.Equal("", prepared.QueryText);
+    }
+
+    [Fact]
+    public async Task Viewer_BlankStoredText_IsTreatedAsNothingStored()
+    {
+        var prepared = await ViewerDataService.PrepareQueryStatsActualPlanAsync(
+            () => Task.FromResult<StoredActualPlanQuery?>(new StoredActualPlanQuery("   ", null)), "0xABCD", "master");
+
+        Assert.Equal(QueryStatsActualPlanLookup.NothingStored, prepared.Lookup);
+        Assert.Equal("", prepared.ArgsJson);
+    }
+
+    [Fact]
+    public async Task Viewer_FailedRead_SendsNothing_AndKeepsTheMessage()
+    {
+        var prepared = await ViewerDataService.PrepareQueryStatsActualPlanAsync(
+            () => throw new InvalidOperationException("store is down"), "0xABCD", "master");
+
+        Assert.Equal(QueryStatsActualPlanLookup.ReadFailed, prepared.Lookup);
+        Assert.Equal("", prepared.ArgsJson);
+        Assert.Equal("store is down", prepared.Error);
+    }
+
+    [Fact]
+    public async Task Viewer_CancelledRead_Propagates()
+        => await Assert.ThrowsAsync<OperationCanceledException>(() => ViewerDataService.PrepareQueryStatsActualPlanAsync(
+            () => throw new OperationCanceledException(), "0xABCD", "master"));
+
+    /// <summary>The viewer and the service read the text with ONE shared SQL constant, aliased and not copied.</summary>
+    [Fact]
+    public void ViewerAndService_ReadTheTextWithTheSameSharedSql()
+    {
+        Assert.Equal(ActualPlanStoredQuery.QueryStatsResolveSql, DarlingWorker.ResolveStoredQueryForActualPlanSql);
+
+        var root = RepoRoot();
+        var service = File.ReadAllText(Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var viewer = File.ReadAllText(Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.ActualPlan.cs"));
+        Assert.Contains("ResolveStoredQueryForActualPlanSql = ActualPlanStoredQuery.QueryStatsResolveSql;", service, StringComparison.Ordinal);
+        Assert.Contains("CreateCommand(ActualPlanStoredQuery.QueryStatsResolveSql)", viewer, StringComparison.Ordinal);
+
+        /* Neither end carries its own copy of the statement. */
+        foreach (var text in new[] { service, viewer })
+        {
+            Assert.DoesNotContain("SELECT query_text, query_plan_xml, NULL::text AS transaction_isolation_level", text, StringComparison.Ordinal);
+        }
+
+        /* The service binds a blank database as the empty string; so must the viewer. */
+        Assert.Contains("NullIfBlank(databaseName) ?? \"\"", viewer, StringComparison.Ordinal);
+    }
+
+    /// <summary>Every query_stats entry point hands its hash to the flow, which reads the service's text before the prompt.</summary>
     [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    public void Viewer_RefusesARowWithNoText(string? text)
-        => Assert.False(ViewerDataService.TryBuildActualPlanArgs("0xABCD", "master", text, out _, out _));
+    [InlineData("QueryStatsHistoryWindow.xaml.cs")]
+    [InlineData("ViewerServerTab.ActualPlan.cs")]
+    [InlineData("FinOpsTab.Loaders.cs")]
+    public void TheQueryStatsEntryPoints_LetTheFlowResolveTheText(string file)
+    {
+        var text = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer", file));
+        Assert.Contains("TryCheckQueryStatsHash(", text, StringComparison.Ordinal);
+        Assert.Contains("queryStatsHash:", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("TryBuildQueryStatsArgs", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheFlow_ReadsTheResolvedText_BeforeTheCheckAndThePrompt()
+    {
+        var source = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerActualPlanFlow.cs"));
+        var resolve = source.IndexOf("PrepareQueryStatsActualPlanAsync(", StringComparison.Ordinal);
+        var adopt = source.IndexOf("argsJson = prepared.ArgsJson;", StringComparison.Ordinal);
+        var detect = source.IndexOf("QueryModificationDetector.Detect(", StringComparison.Ordinal);
+        var confirm = source.IndexOf("if (!Confirm(", StringComparison.Ordinal);
+        var run = source.IndexOf(".ExecuteActualPlanAsync(", StringComparison.Ordinal);
+        Assert.True(resolve > 0 && resolve < adopt && adopt < detect && detect < confirm && confirm < run,
+            "the resolve must come before the check, the prompt and the run");
+        Assert.Contains("queryText = prepared.QueryText;", source, StringComparison.Ordinal);
+        Assert.Contains("Task.Run(", source, StringComparison.Ordinal); /* off the UI thread */
+    }
 
     private static ActualPlanRequest QueryStatsRequest(string? digest, string hash = "0xABCD")
         => new(hash, null, null, null, "master", digest);
@@ -266,7 +376,7 @@ public sealed class ActualPlanRequestTests
     [Fact]
     public void ViewerAndServiceAgreeOnTheDigestWireShape()
     {
-        Assert.True(ViewerDataService.TryBuildActualPlanArgs("0xABCD", "master", ConfirmedText, out var args, out _));
+        var args = ViewerDataService.BuildActualPlanArgs("0xABCD", "master", ConfirmedText);
         Assert.True(ActualPlanRequest.TryParse(args, out var req));
         Assert.Null(DarlingWorker.RefuseActualPlanRequest(req));
         Assert.Null(DarlingWorker.RefuseChangedActualPlanText(req, ConfirmedText));
