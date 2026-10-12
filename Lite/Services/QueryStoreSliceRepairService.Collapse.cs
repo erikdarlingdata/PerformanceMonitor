@@ -182,13 +182,4 @@ public sealed partial class QueryStoreSliceRepairService
             columns.Where(c => !keySet.Contains(c) && IsMeasurement(c))
                    .Select(c => $"{c} = {stagingAlias}.{c}"));
     }
-
-    /// <summary>The full projection: key columns as-is, everything else combined, in the source's own order.</summary>
-    private static string BuildProjection(IReadOnlyList<string> columns, IReadOnlyList<string> key)
-    {
-        var keySet = new HashSet<string>(key, StringComparer.OrdinalIgnoreCase);
-        return string.Join(
-            ", ",
-            columns.Select(c => keySet.Contains(c) ? c : $"{CombineExpression(c)} AS {c}"));
-    }
 }

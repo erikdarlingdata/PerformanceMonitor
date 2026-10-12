@@ -71,6 +71,14 @@ public sealed partial class QueryStoreSliceRepairService
     private readonly DuckDbInitializer _duckDb;
     private readonly string _archivePath;
     private readonly ILogger<QueryStoreSliceRepairService>? _logger;
+    private int _surveysRun;
+
+    /// <summary>
+    /// How many times <see cref="SurveyAsync"/> has run on this instance (#5653). A survey is the most
+    /// expensive thing this service does, so a startup that runs one more than it needs is a defect the
+    /// tests can pin by number.
+    /// </summary>
+    internal int SurveysRun => Volatile.Read(ref _surveysRun);
 
     public QueryStoreSliceRepairService(DuckDbInitializer duckDb, string archivePath, ILogger<QueryStoreSliceRepairService>? logger = null)
     {
@@ -324,6 +332,12 @@ SELECT
     /// </summary>
     public async Task RepairOnStartupAsync(CancellationToken cancellationToken = default)
     {
+        /* Which attempt this start is, once known. Zero until the attempt table has been read. */
+        long attemptNumber = 0;
+        /* False until RecordAttemptAsync has written this start's row. attemptNumber is only the number this start
+           WILL be; until the row exists the next start runs the very same attempt again, so a failure before it
+           must not claim the attempt was used or that it was the last one. */
+        var attemptRecorded = false;
         try
         {
             if (await AlreadyRepairedAsync(cancellationToken))
@@ -340,6 +354,7 @@ SELECT
                something cheap. The shape quoted in the message is what the last attempt RECORDED rather than
                what a fresh survey would find, which is the same number that survey would have cost us. */
             var attempts = await ReadAttemptsAsync(cancellationToken);
+            attemptNumber = attempts.Count + 1;
             if (attempts.Count >= MaxStartupAttempts)
             {
                 /* Report BOTH halves of the outstanding work. Naming only the hot groups would read as "0 left
@@ -393,9 +408,11 @@ SELECT
                 archiveFiles);
 
             await RecordAttemptAsync(survey.HotGroups, archiveFiles, survey.Unreadable.Count);
+            attemptRecorded = true;
 
             var result = await RepairAsync(
                 new Progress<string>(message => _logger?.LogInformation("#1912 {Message}", message)),
+                survey,
                 cancellationToken);
 
             if (result.FullyRepaired)
@@ -420,8 +437,9 @@ SELECT
                    the union_by_name view still reads them, with #1907's read-side tie-break resolving their
                    split slices deterministically. */
                 _logger?.LogWarning(
-                    "#1912 Query Store repair finished with {Count} file(s) unrepaired; they will be retried on the next start. {Failures}",
+                    "#1912 Query Store repair finished with {Count} file(s) unrepaired. {Outlook} {Failures}",
                     result.Failures.Count,
+                    RetryOutlook(attemptNumber),
                     string.Join(" | ", result.Failures));
             }
         }
@@ -439,9 +457,33 @@ SELECT
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "#1912 Query Store repair could not run; it will be retried on the next start");
+            _logger?.LogError(
+                ex,
+                "#1912 Query Store repair could not run. {Outlook}",
+                attemptRecorded ? RetryOutlook(attemptNumber) : UncountedAttemptOutlook);
         }
     }
+
+    /// <summary>
+    /// The outlook when a start failed before it wrote its attempt row (#5653): the failure happened in the read-only
+    /// part (checking the marker, reading the attempt table, or the survey), so this start was not counted against
+    /// <see cref="MaxStartupAttempts"/> and the next start runs the repair again.
+    /// </summary>
+    internal const string UncountedAttemptOutlook =
+        "This start did not get as far as recording a repair attempt, so it was not counted against the limit " +
+        "and the repair will run again on the next start.";
+
+    /// <summary>
+    /// What happens to a repair that did not finish (#5653). The old text said "will be retried on the next
+    /// start" after every attempt, including the last one, after which the next start skips the repair. The last
+    /// attempt says so, and names what the user can do about it.
+    /// </summary>
+    internal static string RetryOutlook(long attemptNumber) =>
+        attemptNumber >= MaxStartupAttempts
+            ? $"This was attempt {attemptNumber} of {MaxStartupAttempts}, the last one: the repair will NOT run again on the next start. " +
+              "The app collects normally, and reads still resolve the duplicate rows deterministically. To try again, free up disk space " +
+              $"if the failures above mention it, then drop the '{AttemptTable}' table from the store."
+            : $"This was attempt {attemptNumber} of {MaxStartupAttempts}; the unrepaired files will be retried on the next start.";
 
     /// <summary>
     /// Counts the split slices waiting in the hot table and in every archive file. Reads only; writes nothing.
@@ -454,6 +496,12 @@ SELECT
     /// </summary>
     public async Task<Survey> SurveyAsync(CancellationToken cancellationToken = default)
     {
+        Interlocked.Increment(ref _surveysRun);
+        if (BeforeSurveyHook is { } beforeSurvey)
+        {
+            await beforeSurvey();
+        }
+
         long groups = 0;
         long rows = 0;
 
@@ -584,9 +632,13 @@ FROM (SELECT COUNT(*) AS c FROM read_parquet('{EscapePath(file)}') GROUP BY {str
     /// archive. The COPY carries <c>COMPRESSION ZSTD</c> because that is what wrote these files — omitting it
     /// silently switches codec and inflates them (measured: 28 MB becoming 69 MB).</para>
     /// </summary>
-    public async Task<RepairResult> RepairAsync(IProgress<string>? progress = null, CancellationToken cancellationToken = default)
+    public async Task<RepairResult> RepairAsync(
+        IProgress<string>? progress = null, Survey? survey = null, CancellationToken cancellationToken = default)
     {
-        var survey = await SurveyAsync(cancellationToken);
+        /* #5653: the startup path already surveyed to decide whether there is work and to record the attempt,
+           and hands that survey over. Surveying again here ran the hot GROUP BY and three scans of every archive
+           file twice per start. A caller with no survey (the public API) still gets a fresh one. */
+        survey ??= await SurveyAsync(cancellationToken);
         long removed = 0;
         var failures = new List<string>(survey.Unreadable);
 
@@ -679,15 +731,34 @@ HAVING COUNT(*) > 1";
         var rewroteArchive = false;
         foreach (var file in survey.Archive.Where(a => a.Groups > 0))
         {
+            /* A handed-in survey can be older than the file set: archiving or compaction may have removed a file
+               since it ran. A file that is gone has nothing left to repair, and treating it as a failure would
+               withhold the completion marker for good. A file REPLACED since the survey is not caught here: it is
+               rewritten from its current bytes, and the row and execution checks against the survey's figures
+               refuse to promote it if they no longer agree. */
+            if (!File.Exists(file.Path))
+            {
+                _logger?.LogInformation("#1912 archive file {File} no longer exists; nothing to repair", file.Path);
+                continue;
+            }
+
             try
             {
                 removed += await RewriteArchiveFileAsync(file, progress, cancellationToken);
                 rewroteArchive = true;
             }
+            catch (RewriteSkippedException skipped)
+            {
+                /* Not an error: nothing was written and the original is untouched. It still goes into the failures
+                   so the completion marker is withheld and a later start, once space exists, retries it. */
+                failures.Add($"{Path.GetFileName(file.Path)}: {skipped.Message}");
+                _logger?.LogWarning("#1912 archive repair skipped for {File}: {Reason}", file.Path, skipped.Message);
+                progress?.Report($"Archive {Path.GetFileName(file.Path)}: SKIPPED - {skipped.Message}");
+            }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 failures.Add($"{Path.GetFileName(file.Path)}: {ex.Message}");
-                _logger?.LogError(ex, "#1912 archive repair failed for {File}; the original was left in place and will be retried", file.Path);
+                _logger?.LogError(ex, "#1912 archive repair failed for {File}; the original was left in place", file.Path);
                 progress?.Report($"Archive {Path.GetFileName(file.Path)}: NOT repaired — {ex.Message}");
             }
         }
@@ -701,6 +772,135 @@ HAVING COUNT(*) > 1";
         }
 
         return new RepairResult(removed, failures);
+    }
+
+    /// <summary>The file could not be rewritten safely right now; nothing was written. Carries the reason for the log.</summary>
+    private sealed class RewriteSkippedException(string message) : Exception(message);
+
+    /// <summary>The most DuckDB may spill to its temp folder while one archive file is rewritten (#5653).</summary>
+    internal const long RewriteSpillCeilingBytes = 4L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// The folder next to the archive where the rewrite's own DuckDB instance spills (#5653). Emptied and removed after each file.
+    ///
+    /// <para>The name is fixed, not per file or per run. That is safe only because the files are rewritten one at a
+    /// time (the <c>foreach</c> over the survey in <c>RepairAsync</c> awaits each rewrite before it starts the next),
+    /// so no two rewrites ever share the folder, and each one clears it before it starts. Rewriting files in parallel
+    /// would need a folder per rewrite.</para>
+    /// </summary>
+    internal const string RewriteSpillFolderName = "slice_repair_tmp";
+
+    /// <summary>Below this much temp room the rewrite is not started: it would only fail part way through.</summary>
+    internal const long RewriteSpillFloorBytes = 256L * 1024 * 1024;
+
+    /// <summary>
+    /// The rewritten copy that has to fit beside the original: the file plus half again, since a rewrite has been
+    /// seen to grow (before the row order was kept, a file that lost 40 rows grew by a third).
+    /// </summary>
+    internal static long RewriteCopyBytes(long fileBytes) => fileBytes + (fileBytes / 2);
+
+    /// <summary>
+    /// How much DuckDB may spill to its temp folder while one archive file is rewritten (#5653), taken from what
+    /// the volume can give rather than from a guess about the file: the free space, less the rewritten copy and
+    /// less the reserve the store itself keeps writing into, within <see cref="RewriteSpillCeilingBytes"/>. It can
+    /// come out negative on a nearly full disk. An unreadable volume (null) gets the ceiling, as compaction treats
+    /// it as enough. The caller skips the file when this is under <see cref="RewriteSpillFloorBytes"/>.
+    ///
+    /// <para>The cap is not a prediction. An earlier version asked for 16 times the file, from one 199 MiB file that
+    /// spilled 2.7 GiB under the old query, which carried the text and plan columns through the aggregate. The
+    /// current query aggregates only the key and the measurements. Measured on a generated 159 MiB file with the real
+    /// <c>query_store_stats</c> columns, it completed with the temp folder capped at 2 MiB (under 0.013 times the
+    /// file, against 13.6 times before), so sizing the ask from the file would skip files the disk can hold. If the
+    /// rewrite does run out of its cap, DuckDB fails the statement, the temp file goes, and the original stays.</para>
+    /// </summary>
+    internal static long RewriteSpillCapBytes(long? freeBytes, long fileBytes, long reserveBytes) =>
+        freeBytes is long free
+            ? Math.Min(RewriteSpillCeilingBytes, free - RewriteCopyBytes(fileBytes) - reserveBytes)
+            : RewriteSpillCeilingBytes;
+
+    /// <summary>
+    /// True when a DuckDB failure is the temp folder filling up: its own cap (<c>max_temp_directory_size</c>) or the
+    /// disk under it.
+    /// </summary>
+    internal static bool IsOutOfTempSpace(Exception ex)
+    {
+        var text = ex.ToString();
+        return text.Contains("max_temp_directory_size", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Out of Disk Space", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("not enough space", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("offload data block", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Test seam only, null in production: runs first in <see cref="SurveyAsync"/>, so a test can make the survey throw.</summary>
+    internal Func<Task>? BeforeSurveyHook { get; set; }
+
+    /// <summary>Test seam only: the smallest spill cap a rewrite will start with. A test lowers it; production keeps <see cref="RewriteSpillFloorBytes"/>.</summary>
+    internal long SpillFloorBytes { get; set; } = RewriteSpillFloorBytes;
+
+    /// <summary>Test seam only, null in production: runs just before the COPY, on the rewrite's own DuckDB instance (the one the cap is set on).</summary>
+    internal Func<DuckDBConnection, Task>? InsideSpillCapHook { get; set; }
+
+    /// <summary>
+    /// Opens the DuckDB instance one archive file is rewritten on (#5653): its own in-memory instance, with its own
+    /// <c>temp_directory</c>, its own <c>max_temp_directory_size</c> (the cap) and its own <c>memory_limit</c>, the way
+    /// archive compaction runs its merges (<see cref="ParquetCompaction.MergeBatchToFile"/>).
+    ///
+    /// <para><b>Why not the store's own instance.</b> <c>max_temp_directory_size</c> and <c>memory_limit</c> are
+    /// instance-wide. The repair runs un-awaited at startup while the UI keeps reading, so a cap set on the store's
+    /// instance would hold every other query to it (as low as 256 MiB) for as long as a rewrite runs, and a
+    /// concurrent archive read that needs more temp room than that would fail. The rewrite reads one parquet file and
+    /// writes one parquet file, so it needs nothing from the store's tables and loses nothing by running apart.</para>
+    ///
+    /// <para>If opening or configuring the instance fails, the connection is disposed before the error leaves, so
+    /// a failed setup never strands an open in-memory instance. <paramref name="afterOpen"/> is a test seam only
+    /// (null in production): it runs right after the open, inside that guard, so a test can make the setup fail and
+    /// then check the connection it was handed.</para>
+    /// </summary>
+    internal static async Task<DuckDBConnection> OpenRewriteInstanceAsync(
+        string spillDirectory, long capBytes, CancellationToken cancellationToken,
+        Func<DuckDBConnection, Task>? afterOpen = null)
+    {
+        var capMiB = Math.Max(1, capBytes / (1024 * 1024));
+        Directory.CreateDirectory(spillDirectory);
+        var connection = new DuckDBConnection("DataSource=:memory:");
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+            if (afterOpen is not null)
+            {
+                await afterOpen(connection);
+            }
+
+            using var settings = connection.CreateCommand();
+            settings.CommandText =
+                $"SET memory_limit = '{ArchiveService.MainConnectionCopyMemoryLimit}'; " +
+                $"SET threads = {ParquetCompaction.DefaultThreads}; " +
+                $"SET temp_directory = '{EscapePath(spillDirectory.Replace('\\', '/'))}'; " +
+                $"SET max_temp_directory_size = '{capMiB}MiB';";
+            await settings.ExecuteNonQueryAsync(cancellationToken);
+            return connection;
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Removes the rewrite's spill folder, whatever is left in it. Best effort: the next rewrite clears it first.</summary>
+    private static void DeleteSpillFolder(string spillDirectory)
+    {
+        try
+        {
+            if (Directory.Exists(spillDirectory))
+            {
+                Directory.Delete(spillDirectory, recursive: true);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* A file still held open, or an antivirus scan; the next rewrite clears the folder before it starts. */
+        }
     }
 
     /// <summary>
@@ -718,6 +918,34 @@ HAVING COUNT(*) > 1";
     {
         var temp = file.Path + ".repair-tmp";
         var beforeBytes = new FileInfo(file.Path).Length;
+
+        /* #5653: look at the disk BEFORE the COPY, and size the spill allowance from what the volume can give: the
+           free space less the rewritten copy and the reserve, up to 4 GiB. A file is skipped only when that leaves
+           under the floor, so a nearly full disk is not asked for more than it has, and a roomy one is not turned
+           away by a guess about how much this file will spill. If the rewrite then runs out of its cap, DuckDB
+           fails the statement and the catch around the COPY below turns it into a failure that names temp space.
+           The reader is the one compaction uses (#5377); an unreadable volume (null) counts as enough.
+
+           One volume: the archive folder. The file being rewritten (file.Path) is listed from _archivePath, the
+           .repair-tmp output sits beside it, and the spill folder (slice_repair_tmp) is created under _archivePath
+           below, so free space on _archivePath is the right number for the spill and the output alike. The
+           reserve is compaction's #5377 rule, sized from the database file: the larger of the flat headroom and
+           the file's length. When the database lives on another volume, holding that much back on this one keeps
+           more free than this rewrite needs, which only errs toward skipping. */
+        var freeBytes = _duckDb.AvailableFreeBytesProvider(_archivePath);
+        var reserveBytes = DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath);
+        var copyBytes = RewriteCopyBytes(beforeBytes);
+        var spillCapBytes = RewriteSpillCapBytes(freeBytes, beforeBytes, reserveBytes);
+        if (spillCapBytes < SpillFloorBytes)
+        {
+            throw new RewriteSkippedException(
+                $"not enough free disk space to rewrite this file safely: {FormatBytes(freeBytes ?? 0)} free, " +
+                $"{FormatBytes(copyBytes)} needed for the rewritten copy ({FormatBytes(beforeBytes)} file), " +
+                $"{FormatBytes(reserveBytes)} kept as the reserve, which leaves {FormatBytes(Math.Max(0, spillCapBytes))} for " +
+                $"temporary spill, under the {FormatBytes(SpillFloorBytes)} a rewrite needs. The file was left as it is. " +
+                "This start's repair attempt was used.");
+        }
+
         long rewrittenRows;
         long rewrittenExecutions;
 
@@ -735,21 +963,48 @@ HAVING COUNT(*) > 1";
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken);
 
-            var columns = await ColumnsOfParquetAsync(connection, file.Path, cancellationToken);
+            var columnTypes = await ColumnTypesOfParquetAsync(connection, file.Path, cancellationToken);
+            var columns = columnTypes.Select(c => c.Name).ToList();
             var key = KeyColumnsFor(columns);
-            var projection = BuildProjection(columns, key);
+            var rewrite = BuildRewriteSelect(columnTypes, key, EscapePath(file.Path));
 
-            await ArchiveService.WithRaisedCopyMemoryLimit(connection, async () =>
+            /* The COPY runs on its OWN DuckDB instance (OpenRewriteInstanceAsync), so the spill cap and the memory
+               limit it sets do not reach the connections the UI is reading through. The store lock above is still
+               held for the whole rewrite, exactly as before. The folder is cleared first because a crash can strand
+               one, and removed after because it is only ever scratch. */
+            var spillDirectory = Path.Combine(_archivePath, RewriteSpillFolderName);
+            DeleteSpillFolder(spillDirectory);
+            try
             {
-                using var command = connection.CreateCommand();
-                command.CommandText = $@"
+                using (var rewriteInstance = await OpenRewriteInstanceAsync(spillDirectory, spillCapBytes, cancellationToken))
+                {
+                    if (InsideSpillCapHook is { } hook)
+                    {
+                        await hook(rewriteInstance);
+                    }
+
+                    using var command = rewriteInstance.CreateCommand();
+                    command.CommandText = $@"
 COPY (
-    SELECT {projection}
-    FROM read_parquet('{EscapePath(file.Path)}')
-    GROUP BY {string.Join(", ", key)}
+{rewrite}
 ) TO '{EscapePath(temp)}' ({ParquetCompaction.ArchiveCopyOptions})";
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            });
+                    await command.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && IsOutOfTempSpace(ex))
+            {
+                /* The statement failed and the original was only read, so it is untouched. A half-written sibling
+                   would only take disk the next try needs. */
+                try { File.Delete(temp); } catch (IOException) { /* the retry's COPY overwrites it */ }
+                throw new InvalidOperationException(
+                    $"the rewrite ran out of temporary space (DuckDB was allowed {FormatBytes(spillCapBytes)} of temp folder, " +
+                    $"with {FormatBytes(freeBytes ?? 0)} free on the volume). The original was left untouched. " +
+                    $"DuckDB said: {ex.Message}", ex);
+            }
+            finally
+            {
+                DeleteSpillFolder(spillDirectory);
+            }
 
             (rewrittenRows, rewrittenExecutions) = await MeasureRewrittenAsync(connection, temp, cancellationToken);
         }
@@ -779,7 +1034,7 @@ COPY (
             throw new InvalidOperationException(
                 $"Archive repair of {name} did not conserve its contents — " +
                 $"{rewrittenRows:N0} rows (expected {expectedRows:N0}) and {rewrittenExecutions:N0} executions " +
-                $"(expected {file.Executions:N0}). The original was left untouched and will be retried.");
+                $"(expected {file.Executions:N0}). The original was left untouched.");
         }
 
         /* WRITE LOCK, for the swap instant only — this is where a live path's bytes are replaced, and a reader
@@ -795,15 +1050,17 @@ COPY (
 
         progress?.Report($"Archive {name}: {file.RowsRemoved:N0} row(s) removed ({FormatBytes(beforeBytes)} -> {FormatBytes(afterBytes)}).");
 
-        /* The size can GROW despite the repair removing rows, and an operator watching their archive get
-           bigger after a row-removing repair deserves the reason rather than a support ticket: parquet size is
-           dominated by per-column compression of row groups, and the rewrite re-lays those out. Measured on a
-           real archive file, 22,760 rows removed and the file still went 28.0 MB to 31.6 MB. */
+        /* The rewrite keeps the file's row order and its column types (#5653), so a repaired file is not expected to
+           be bigger than the original. Before that, it could be: the old rewrite returned rows in hash order and
+           stored execution_count as DOUBLE, and a file that lost 40 rows grew from 17.4 to 23.4 MB. If it grows
+           anyway, say so plainly instead of explaining it away: the contents were just verified (rows and execution
+           total), so the operator needs to know the data is fine and the size is unexpected. */
         if (afterBytes > beforeBytes)
         {
             progress?.Report(
-                $"  ({name} grew despite losing rows — parquet size follows row-group layout and per-column " +
-                "compression, not row count. The data is correct and smaller; its encoding is simply less lucky.)");
+                $"  ({name} is larger after the repair despite losing rows, which is not expected: the rewrite keeps the " +
+                "file's row order and column types. Its rows and execution total were checked against the original before " +
+                "it replaced it, so the data is intact.)");
         }
 
         _logger?.LogInformation(
@@ -890,6 +1147,71 @@ COPY (
         using var command = connection.CreateCommand();
         command.CommandText = $"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}' ORDER BY ordinal_position";
         return await ReadStringsAsync(command, cancellationToken);
+    }
+
+    /// <summary>
+    /// The SELECT that rewrites one archive file with its split slices collapsed (#5653).
+    ///
+    /// <para><b>Shape.</b> A narrow aggregate (the key, the first row's position in the file and the recombined
+    /// measurements, with no text column in it) is joined back to the file on that position. The result keeps the
+    /// join's order, which is the file's own order in all but a handful of rows.</para>
+    ///
+    /// <para><b>No ORDER BY, on purpose.</b> DuckDB does not promise any order through a join, and on a 272 MiB
+    /// generated file with the real columns 2 rows of 2.4 million came out of place. Sorting them back would sort the
+    /// whole wide row: the same file took 87.6 s and spilled 2.5 GiB (9.3 times its size) with the ORDER BY, against
+    /// 38.2 s and no spill without it. And <see cref="RewriteArchiveFileAsync"/> holds the store's READ lock for the whole
+    /// rewrite, so a collector write that queues behind that lock blocks every new UI read for as long as the rewrite
+    /// runs. Row order affects only the file's size and how well row groups prune, never the data, and no Lite reader of
+    /// these files depends on file order (every LIMIT that picks a row, and every pick of a "latest" row, carries its
+    /// own ORDER BY or <c>arg_max</c>; the remaining <c>LIMIT 1</c> reads only ask whether any row exists). Do not add the sort back without the time and the lock in view.</para>
+    ///
+    /// <para><b>History.</b> The old shape was one wide <c>GROUP BY</c> over every column.
+    /// That carried every attribute through the hash aggregate (a reporter's 199 MiB file spilled 2.7 GiB), and its
+    /// output came back in hash order, which lost the time order the archiver wrote and the compression that rides
+    /// on it (a file that lost 40 rows grew from 17.4 to 23.4 MB).</para>
+    ///
+    /// <para><b>Types.</b> The recombined values are cast back to the column's own type. <c>SUM</c> of a BIGINT is
+    /// a HUGEINT, which parquet stores as DOUBLE, so <c>execution_count</c> used to come back as DOUBLE. A group of
+    /// one row is not recombined at all: its row passes through byte for byte (the old shape also turned a lone
+    /// row's average into NULL when its execution count was 0).</para>
+    /// </summary>
+    internal static string BuildRewriteSelect(
+        IReadOnlyList<(string Name, string Type)> columns, IReadOnlyList<string> key, string escapedPath)
+    {
+        var names = columns.Select(c => c.Name).ToList();
+        var keySet = new HashSet<string>(key, StringComparer.OrdinalIgnoreCase);
+        var narrow = BuildMeasurementProjection(names, key, "MIN(file_row_number)", "__survivor");
+        var select = string.Join(
+            ", ",
+            columns.Select(c => keySet.Contains(c.Name) || !IsMeasurement(c.Name)
+                ? $"t.{c.Name}"
+                : $"CASE WHEN s.__slices > 1 THEN CAST(s.{c.Name} AS {c.Type}) ELSE t.{c.Name} END AS {c.Name}"));
+
+        return $@"    SELECT {select}
+    FROM read_parquet('{escapedPath}', file_row_number = true) AS t
+    JOIN (
+        SELECT {narrow}, COUNT(*) AS __slices
+        FROM read_parquet('{escapedPath}', file_row_number = true)
+        GROUP BY {string.Join(", ", key)}
+    ) AS s ON t.file_row_number = s.__survivor";
+    }
+
+    /// <summary>
+    /// A parquet file's columns with their DuckDB types.
+    /// </summary>
+    private static async Task<IReadOnlyList<(string Name, string Type)>> ColumnTypesOfParquetAsync(
+        DuckDBConnection connection, string file, CancellationToken cancellationToken)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"DESCRIBE SELECT * FROM read_parquet('{EscapePath(file)}')";
+        var values = new List<(string, string)>();
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            values.Add((reader.GetString(0), reader.GetString(1)));
+        }
+
+        return values;
     }
 
     /// <summary>

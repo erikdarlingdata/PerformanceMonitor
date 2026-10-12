@@ -1017,12 +1017,12 @@ public class CollectionBackgroundService : BackgroundService
         try
         {
             using var process = Process.GetCurrentProcess();
-            var wsMb = process.WorkingSet64 / 1024 / 1024;
-            var privMb = process.PrivateMemorySize64 / 1024 / 1024;
-            var gcMb = GC.GetTotalMemory(forceFullCollection: false) / 1024 / 1024;
+            var wsMiB = process.WorkingSet64 / 1024 / 1024;
+            var privMiB = process.PrivateMemorySize64 / 1024 / 1024;
+            var gcMiB = GC.GetTotalMemory(forceFullCollection: false) / 1024 / 1024;
             _logger?.LogInformation(
-                "Process memory: WS={WorkingSetMb} MB, Private={PrivateMb} MB, GC heap={GcMb} MB",
-                wsMb, privMb, gcMb);
+                "Process memory: WS={WorkingSetMiB} MiB, Private={PrivateMiB} MiB, GC heap={GcMiB} MiB",
+                wsMiB, privMiB, gcMiB);
         }
         catch (Exception ex)
         {
