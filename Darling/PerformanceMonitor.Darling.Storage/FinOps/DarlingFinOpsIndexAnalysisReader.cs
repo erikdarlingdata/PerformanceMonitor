@@ -371,7 +371,11 @@ LIMIT 1";
             inputs.Add(ReadIndexObjectStatsRow(reader));
         }
 
-        return inputs;
+        /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) keeps its last
+           index snapshot in the store, and listed in the analysis, the compression recommendation and the rollups as if it
+           were current. Its rows are left out here, at the one read every consumer shares. Unknown (no snapshot) keeps all. */
+        return await CurrentDatabaseScope.OmitDroppedAsync(
+            dataSource, inputs, r => serverId, r => r.DatabaseName, DatabaseFilter.All, cancellationToken);
     }
 
     /// <summary>
