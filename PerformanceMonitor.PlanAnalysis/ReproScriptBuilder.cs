@@ -152,7 +152,7 @@ public static partial class ReproScriptBuilder
            separator, so the USE line is skipped entirely rather than emitted with an embedded line break that
            a line-based batch splitter (unlike the bracket-aware ones this project ships) would read as its
            own GO. Decided before the header is built so the warning lands in it. */
-        var skipUseForControlChars = !string.IsNullOrEmpty(databaseName) && DatabaseNameHasControlCharsRegex().IsMatch(databaseName);
+        var skipUseForControlChars = !string.IsNullOrEmpty(databaseName) && PlanRegex.IsMatch(DatabaseNameHasControlCharsRegex(), databaseName, "control characters in the database name", onTimeout: true);
         if (skipUseForControlChars)
         {
             warnings.Add("Database name contains control or line-separator characters — USE statement omitted for safety.");
@@ -292,7 +292,7 @@ public static partial class ReproScriptBuilder
 
         foreach (var pattern in tempTablePatterns)
         {
-            if (Regex.IsMatch(queryText, pattern, RegexOptions.IgnoreCase))
+            if (PlanRegex.IsMatch(queryText, pattern, RegexOptions.IgnoreCase, "temp table references", onTimeout: true))
             {
                 warnings.Add("Query references temp table(s) — reproduction may require creating the temp table first");
                 break;
@@ -314,7 +314,7 @@ public static partial class ReproScriptBuilder
 
         foreach (var pattern in tableVarPatterns)
         {
-            if (Regex.IsMatch(queryText, pattern, RegexOptions.IgnoreCase))
+            if (PlanRegex.IsMatch(queryText, pattern, RegexOptions.IgnoreCase, "table variable references", onTimeout: true))
             {
                 warnings.Add("Query may reference table variable(s) — reproduction may require declaring and populating the table variable first");
                 break;
@@ -505,7 +505,9 @@ public static partial class ReproScriptBuilder
     {
         /* \p{Cc} covers CR, LF, tab and NEL; U+2028 and U+2029 are the Unicode line and
            paragraph separators, which some editors also treat as line breaks. */
-        return Regex.Replace(text ?? "", @"[\p{Cc}\u2028\u2029]", " ")
+        // Char by char rather than a regex: a replacement that could time out and hand the text back unchanged
+        // would leave the line breaks this exists to remove.
+        return string.Concat((text ?? "").Select(c => char.IsControl(c) || c == '\u2028' || c == '\u2029' ? ' ' : c))
             .Replace("*/", "* /")
             .Replace("/*", "/ *");
     }
@@ -517,7 +519,8 @@ public static partial class ReproScriptBuilder
     /// </summary>
     private static bool IsValidParameterName(string name)
     {
-        return Regex.IsMatch(name, @"\A@[\p{L}\p{Nd}_@#$]+\z");
+        // A name that cannot be checked in time is not valid: it is dropped from the script.
+        return PlanRegex.IsMatch(name, @"\A@[\p{L}\p{Nd}_@#$]+\z", RegexOptions.None, "parameter name check", onTimeout: false);
     }
 
     /// <summary>
@@ -532,10 +535,11 @@ public static partial class ReproScriptBuilder
     private static bool IsValidDataType(string dataType)
     {
         const string name = @"(?:\[[\p{L}\p{Nd}_ ]+\]|[\p{L}_][\p{L}\p{Nd}_]*)";
-        return Regex.IsMatch(
+        // A type that cannot be checked in time is not valid: it is dropped with the existing warning.
+        return PlanRegex.IsMatch(
             dataType,
             $@"\A{name}(?:\.{name}){{0,2}}(?: *\( *(?:max|[0-9]+(?: *, *(?:[0-9]+|{name}))?) *\))?\z",
-            RegexOptions.IgnoreCase);
+            RegexOptions.IgnoreCase, "parameter data type check", onTimeout: false);
     }
 
     /// <summary>
@@ -550,15 +554,15 @@ public static partial class ReproScriptBuilder
 
         /* Integer/decimal/float/money forms: -12, 3.14, 1.5E+3, $9.99. [0-9], not \d,
            which also matches digits from other scripts that T-SQL doesn't read as numbers. */
-        if (Regex.IsMatch(value, @"\A-?\$?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?\z"))
+        if (PlanRegex.IsMatch(value, @"\A-?\$?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?\z", RegexOptions.None, "parameter value check", onTimeout: false))
             return true;
 
         /* Binary literal */
-        if (Regex.IsMatch(value, @"\A0x[0-9A-Fa-f]*\z"))
+        if (PlanRegex.IsMatch(value, @"\A0x[0-9A-Fa-f]*\z", RegexOptions.None, "parameter value check", onTimeout: false))
             return true;
 
         /* One complete string literal — every embedded quote must be doubled */
-        if (Regex.IsMatch(value, @"\AN?'([^']|'')*'\z"))
+        if (PlanRegex.IsMatch(value, @"\AN?'([^']|'')*'\z", RegexOptions.None, "parameter value check", onTimeout: false))
             return true;
 
         return false;
@@ -574,7 +578,7 @@ public static partial class ReproScriptBuilder
         var extractedNames = new HashSet<string>(parameters.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
 
         /* Find all @variable references in the query text */
-        var matches = AtVariableRegExp().Matches(queryText);
+        var matches = PlanRegex.Matches(AtVariableRegExp(), queryText, "unresolved variables in the script");
         var seenVars = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (Match match in matches)
@@ -605,7 +609,7 @@ public static partial class ReproScriptBuilder
         return unresolved;
     }
 
-    [GeneratedRegex(@"@\w+", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"@\w+", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex AtVariableRegExp();
 
     /// <summary>
@@ -613,7 +617,7 @@ public static partial class ReproScriptBuilder
     /// name has no legitimate reason to contain one; when it does, the USE line is
     /// skipped rather than emitted with an embedded line break.
     /// </summary>
-    [GeneratedRegex(@"[\p{Cc}\u2028\u2029]")]
+    [GeneratedRegex(@"[\p{Cc}\u2028\u2029]", RegexOptions.None, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex DatabaseNameHasControlCharsRegex();
 }
 

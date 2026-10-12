@@ -227,7 +227,7 @@ public partial class PlanViewerControl
             try
             {
                 var (ok, text) = await ClipboardText.TryReadAsync();
-                if (ok && !string.IsNullOrWhiteSpace(text))
+                if (ok && !string.IsNullOrWhiteSpace(text) && !CallerPlanXmlPrompt.Refuse(text))
                 {
                     try
                     {

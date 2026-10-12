@@ -349,9 +349,49 @@ public sealed class DarlingListenerTlsTests
                 $"{labels.Surface} TLS: the {(form == "pem" ? "private key file" : "PKCS#12 bundle")} {file} is readable by ordinary users"
                 + $"{DarlingFileSecurity.DescribeOwnerAndExposure(file)}. Only SYSTEM, Administrators and the service account should be able to read it. "
                 + $"Restrict it with: icacls \"{file}\" /inheritance:r /grant:r \"NT AUTHORITY\\SYSTEM:(F)\" \"BUILTIN\\Administrators:(F)\" "
-                + $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(R)\"",
+                + $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(R)\" /remove:g *S-1-5-32-545 *S-1-5-11 *S-1-1-0 *S-1-5-4",
                 Assert.Single(log.At(LogLevel.Warning)));
         }
+    }
+
+    /// <summary>
+    /// A key file that ordinary users can read is named even when it then FAILS to load (a key that is not a key, a
+    /// PFX under a wrong password): the file stays on disk readable either way. The listener still binds
+    /// loopback-only, the refusal is logged, and the Warning names the file exactly once.
+    /// </summary>
+    [Theory]
+    [InlineData("pem")]
+    [InlineData("pfx")]
+    public void Resolve_KeyFileReadableByUsers_AndLoadFails_StillWarns(string form)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        using var temp = new TempDir();
+        using var cert = Make("unloadable", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), ips: new[] { "192.168.1.205" });
+        var block = form == "pem"
+            ? WritePem(temp, cert)
+            : WritePfx(temp, cert, exportPassword: "right-password", configPassword: "wrong-password");
+        var file = form == "pem" ? block.KeyPath! : block.PfxPath!;
+        if (form == "pem")
+        {
+            File.WriteAllText(file, "this is not a private key");
+        }
+
+        GrantUsersRead(file);
+        Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(file), "the arrangement must make the file readable");
+        var log = new RecordingLogger();
+
+        var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), ListenerTlsLabels.Web, block, Listen, Port, null);
+
+        Assert.False(outcome.Expose);
+        Assert.Null(outcome.Certificate);
+        Assert.Single(log.At(LogLevel.Critical));
+        Assert.Equal(
+            $"{ListenerTlsLabels.Web.Surface} TLS: the {(form == "pem" ? "private key file" : "PKCS#12 bundle")} {file} is readable by ordinary users"
+            + $"{DarlingFileSecurity.DescribeOwnerAndExposure(file)}. Only SYSTEM, Administrators and the service account should be able to read it. "
+            + $"Restrict it with: icacls \"{file}\" /inheritance:r /grant:r \"NT AUTHORITY\\SYSTEM:(F)\" \"BUILTIN\\Administrators:(F)\" "
+            + $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(R)\" /remove:g *S-1-5-32-545 *S-1-5-11 *S-1-1-0 *S-1-5-4",
+            Assert.Single(log.At(LogLevel.Warning)));
     }
 
     /// <summary>

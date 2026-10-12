@@ -103,7 +103,7 @@ public static partial class ParameterCard
             // comment is not a hint, so the OPTIMIZE FOR UNKNOWN check runs on the masked text, not
             // the raw statement text.
             var hasOptimizeForUnknown = statementText.Contains("OPTIMIZE", StringComparison.OrdinalIgnoreCase)
-                && OptimizeForUnknownRegExp().IsMatch(maskedStatementText);
+                && PlanRegex.IsMatch(OptimizeForUnknownRegExp(), maskedStatementText, "OPTIMIZE FOR UNKNOWN in the parameter card");
 
             annotations.Add(hasOptimizeForUnknown
                 ? new ParameterCardAnnotation(
@@ -146,7 +146,8 @@ public static partial class ParameterCard
         if (rootNode != null)
             CollectTableVariableNames(rootNode, tableVarNames);
 
-        var matches = AtVariableRegExp().Matches(queryText);
+        // A pass cut short by a timeout lists the variables found so far.
+        var matches = PlanRegex.Matches(AtVariableRegExp(), queryText, "unresolved variables in the parameter card");
         var seenVars = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (Match match in matches)
@@ -179,10 +180,10 @@ public static partial class ParameterCard
             CollectTableVariableNames(child, names);
     }
 
-    [GeneratedRegex(@"OPTIMIZE\s+FOR\s+UNKNOWN", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"OPTIMIZE\s+FOR\s+UNKNOWN", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex OptimizeForUnknownRegExp();
 
-    [GeneratedRegex(@"@\w+", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"@\w+", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex AtVariableRegExp();
 }
 

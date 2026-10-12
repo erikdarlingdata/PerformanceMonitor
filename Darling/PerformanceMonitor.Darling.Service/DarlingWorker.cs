@@ -197,6 +197,15 @@ public sealed class DarlingWorker : BackgroundService
        hour retries, and the latch stays exactly where it was meanwhile. */
     private static readonly TimeSpan s_timescaleReprobeBudget = TimeSpan.FromSeconds(10);
 
+    /* The whole-attempt budget for the hourly retry of a failed start-path role provisioning. The attempt is
+       three credential-file reads, one connection, a stored-secret read, a settings read and one DDL batch, each
+       command carrying the bootstrap deadline (ServiceCommandDeadlines.BootstrapSeconds, 60 s), and that batch
+       was measured at under a tenth of a second on a store of production size. Two minutes is two of those
+       deadlines: a store that cannot answer inside it is not one this hour's attempt was going to heal, and the
+       next hour tries again. It runs behind the compression read and every other tenant of the tick, so it
+       spends none of the compression check's phase guard band. */
+    private static readonly TimeSpan s_roleProvisioningRetryBudget = TimeSpan.FromMinutes(2);
+
     /* ─────────────── store-object convergence (#3817) ─────────────── */
 
     /// <summary>
@@ -873,6 +882,13 @@ public sealed class DarlingWorker : BackgroundService
     /* #3914: this process provisioned the least-privilege roles on the compose distribution's own store, so the
        reload keeps their statement_timeout current as it does on a managed store. Set only on success. */
     private bool _composeStoreRolesProvisioned;
+
+    /* The managed store's data directory while the start-path role provisioning has failed and not yet succeeded;
+       null when it succeeded or does not apply. Non-null makes the hourly store-maintenance tick retry it
+       (RetryRoleProvisioningAsync), because provisioning otherwise runs once per start: a failed attempt left the
+       roles, and the credential files the web and MCP hosts wait for, unset until the next restart. Written by
+       the start path before the loop and then only by that tick, so it is never written concurrently. */
+    private string? _roleProvisioningRetryDirectory;
     private IReadOnlyList<ScheduleOverride> _scheduleOverrides = Array.Empty<ScheduleOverride>();
 
     /* The service-pause flag (Stage 2): read from config_service.paused on every reload and honored by
@@ -1850,6 +1866,10 @@ LIMIT 1";
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        /* A file: secret whose target ordinary users can read is reported through the service log; the resolver
+           itself has no logger. Set before the first config read, which is the first resolve. */
+        DarlingSecretSource.ReportFileAccessTo(message => _logger.LogWarning("{Warning}", message));
+
         _executeStartedUtc = DateTime.UtcNow;
         /* #5477: build the statement filter's first-call costs off the startup path, so the first alert with a
            large report does not pay them. Never throws, logs nothing. */
@@ -2237,7 +2257,7 @@ LIMIT 1";
                install re-homed to a domain account for integrated auth (#1823), granting the virtual
                account would be a fix that cannot work. */
             var remediation =
-                $"icacls \"{path}\" /inheritance:d   then   icacls \"{path}\" /remove:g \"BUILTIN\\Users\"   " +
+                $"icacls \"{path}\" /inheritance:d   then   icacls \"{path}\" {DarlingFileSecurity.RemoveOrdinaryUserGrantsArgument}   " +
                 $"then   icacls \"{path}\" /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}:(F)\"";
 
             _logger.LogError(
@@ -2249,10 +2269,17 @@ LIMIT 1";
                 path, DarlingFileSecurity.DescribeOwnerAndExposure(path), ex.Message, remediation);
         }
 
+        /* Once per start, here rather than beside every credential file: the same group is missing for all of
+           them, and the harden above already ran without it (SYSTEM, Administrators and the service only). */
+        if (DarlingFileSecurity.OperatorGroup is null)
+        {
+            _logger.LogWarning("{Warning}", DarlingFileSecurity.OperatorGroupMissingWarning);
+        }
+
         if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
         {
             _logger.LogCritical(
-                "{Path} is READABLE by Users/Authenticated Users/Everyone. It holds every monitored server's " +
+                "{Path} is READABLE by Users/Authenticated Users/Everyone/INTERACTIVE. It holds every monitored server's " +
                 "encrypted password plus the MCP and web access tokens, all protected with machine-scoped DPAPI — " +
                 "so any local user who can open this file can recover ALL of it. Remove the inherited read access " +
                 "(or move the install out of a world-readable folder such as one created directly under C:\\).",
@@ -2316,7 +2343,7 @@ LIMIT 1";
                    runnable commands so an elevated human can finish the job the service cannot — naming
                    the identity the service runs as, which is not the virtual account on a re-homed install. */
                 var remediation =
-                    $"icacls \"{backup}\" /inheritance:d   then   icacls \"{backup}\" /remove:g \"BUILTIN\\Users\"   " +
+                    $"icacls \"{backup}\" /inheritance:d   then   icacls \"{backup}\" {DarlingFileSecurity.RemoveOrdinaryUserGrantsArgument}   " +
                     $"then   icacls \"{backup}\" /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}:(F)\"";
 
                 logger.LogError(
@@ -2616,6 +2643,21 @@ LIMIT 1";
            result rather than the two being one call), so the census below only has to look for the
            pin on the Create line itself — no reassignment in between for a future edit to slip
            an unpinned read behind. */
+
+        /* A string Npgsql cannot use throws from the Create below, leaves this method and ExecuteAsync, and the
+           host logs that exception to the console, the Event Log and the file log with its message and its inner
+           exception. Npgsql's text for that can quote part of the string (a password with an unquoted ';' makes the
+           text after it the "keyword", and a password tail that becomes a Host value with a ':' in it makes the text
+           after the ':' a bad port). So prove the string first, with Npgsql's own construction step (the guard builds
+           and disposes a data source, and opens nothing): the exception that leaves is the formatter's text, with no
+           inner exception, and the host still stops exactly as it did. The keywords added below (search path,
+           application name, session time zone) take part in none of Npgsql's construction checks, so a string that
+           passes here does not throw from the Create below for a parse or a validation reason. */
+        if (DarlingStoreConnection.TryDescribeParseFailure(storeConnectionString) is { } unusableStoreString)
+        {
+            throw new InvalidOperationException("postgres.connectionString could not be used: " + unusableStoreString);
+        }
+
         DarlingSelfAlertEvaluator.CollectionGapReport? collectionGapReport = null;
         await using var postgres = NpgsqlDataSource.Create(
             DarlingStoreConnection.PinSessionTimeZoneUtc(
@@ -2817,9 +2859,11 @@ LIMIT 1";
            out-of-band via tools/provision-roles.sql. */
         if (config.Postgres.Managed && OperatingSystem.IsWindows())
         {
+            string? provisioningDirectory = null;
             try
             {
                 var dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
+                provisioningDirectory = dataDirectory;
                 /* #2918: record what provisioning actually WROTE onto the roles, not what the store holds
                    afterwards. This runs BEFORE SeedIfEmptyAsync, so on a brand-new store there is no
                    config_service row to read and the roles get the 15 s default while the seed then inserts
@@ -2832,9 +2876,13 @@ LIMIT 1";
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                /* The hourly store-maintenance tick retries it (RetryRoleProvisioningAsync), and every start does. */
+                _roleProvisioningRetryDirectory = provisioningDirectory;
                 _logger.LogError(
-                    "Least-privilege role provisioning failed — the Viewer's admin/viewer roles may be stale " +
-                    "until the next successful start: {Message}", ex.Message);
+                    "Least-privilege role provisioning failed — the Viewer's admin/viewer roles may be stale, and " +
+                    "a role credential file the web and MCP hosts wait for is not written until an attempt " +
+                    "succeeds; it is retried on the hourly store-maintenance tick and on the next start: {Message}",
+                    ex.Message);
                 /* Provisioning stopped before its own rules section: a store that has never had the password rules
                    would keep none while the viewer and mcp roles keep their earlier credentials. Best effort; the
                    call warns for itself and never throws. */
@@ -3143,6 +3191,9 @@ LIMIT 1";
            holds — including on a store-unreachable boot. Re-published on every reload below. */
         _mcpState.Publish(config.Mcp.Enabled, config.Mcp.Port);
         _webState.Publish(config.Web.Enabled, config.Web.Port);
+        /* The SMTP settings in force (the store's when the view loaded, else darling.json's): a setup that sends its
+           login without encryption is named in the log, because no settings window is open for it. */
+        DarlingSmtpWarning.Log(config.Smtp, _logger);
         /* #2298: publish the effective server set the same way — store-authoritative when the view loaded,
            else the darling.json servers, which is what this run will actually collect from either way. The
            MCP host's plan-fetch resolver reads this instead of re-reading the store as the mcp role. */
@@ -6286,6 +6337,7 @@ LIMIT 1";
         }
 
         StoreConfigProvider.ApplyToConfig(config, view);
+        DarlingSmtpWarning.Log(config.Smtp, _logger); // the reloaded SMTP settings, same warning as at start
         /* #1560/#1562: the MCP + web host supervisors pick these up within their poll interval — the viewer's
            Settings toggles round-trip to a live start/stop/rebind with no service restart. */
         _mcpState.Publish(config.Mcp.Enabled, config.Mcp.Port);
@@ -9856,6 +9908,69 @@ LIMIT $3";
     }
 
     /// <summary>
+    /// The hourly retry of a managed store's role provisioning that failed at start (fleet-level, on the
+    /// compression tick, outside the TimescaleDB gate). Provisioning runs once per start, and a failed attempt
+    /// left the roles' passwords unset and the credential files the web and MCP hosts wait for unwritten until the
+    /// next restart. This runs <see cref="DarlingManagedRoles.EnsureProvisionedAsync"/> again once per tick, on a
+    /// connection from the worker's pool, until one attempt succeeds.
+    ///
+    /// <para><b>What a retry does and does not carry over.</b> Nothing: a failed attempt writes no credential file
+    /// (see <see cref="DarlingManagedRoles.EnsureProvisionedAsync"/>), so each retry generates its passwords again.
+    /// A success writes the files, and the hosts, which poll for them, connect with the passwords the store now
+    /// holds; it also records what the roles were given as the reload baseline, exactly as the start path does, so
+    /// the first control-plane reload does not trust a value that never landed.</para>
+    ///
+    /// <para><b>Logged once per attempt.</b> The start path's error line is the first failure; each failed retry
+    /// writes one warning naming the message (the provisioning code reports a failed attempt by throwing, so this
+    /// is the only place that failure is logged). The outcomes read differently, as the other tenants' do: shutdown is quiet,
+    /// running out <see cref="s_roleProvisioningRetryBudget"/> is its own warning, anything else a warning naming
+    /// the message. No rethrow, so the sweep loop never sees this fail. A success clears the retry.</para>
+    ///
+    /// <para><b>Deadlines.</b> The commands inside carry the bootstrap deadline they always did. That is right on
+    /// this cadence, unlike the control-plane reload's: it runs at most once an hour, only after a failure, on its
+    /// own connection and under the whole-attempt budget above, and the batch is catalog DDL whose cost does not
+    /// grow with the store's data.</para>
+    /// </summary>
+    private async Task RetryRoleProvisioningAsync(CancellationToken cancellationToken)
+    {
+        var dataDirectory = _roleProvisioningRetryDirectory;
+        if (dataDirectory is null || _postgres is null || !OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var attemptClock = Stopwatch.StartNew();
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(s_roleProvisioningRetryBudget);
+
+        try
+        {
+            _appliedComposeStatementTimeoutSeconds =
+                await DarlingManagedRoles.EnsureProvisionedAsync(_postgres, dataDirectory, _logger, budget.Token);
+            _roleProvisioningRetryDirectory = null;
+            _logger.LogInformation(
+                "Least-privilege role provisioning succeeded on the hourly retry after {ElapsedMs} ms: the role credential files are written, so the web and MCP hosts connect with the passwords the store holds.",
+                attemptClock.ElapsedMilliseconds);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* Shutdown - quiet and expected. The next start provisions from scratch. */
+        }
+        catch (OperationCanceledException) when (budget.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "Least-privilege role provisioning retry exceeded its {BudgetSeconds}s budget after {ElapsedMs} ms and was cut short; the next hourly tick tries again.",
+                (long)s_roleProvisioningRetryBudget.TotalSeconds, attemptClock.ElapsedMilliseconds);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Least-privilege role provisioning retry failed after {ElapsedMs} ms; the next hourly tick tries again: {Message}",
+                attemptClock.ElapsedMilliseconds, ex.Message);
+        }
+    }
+
+    /// <summary>
     /// The #3812 hourly retention re-evaluation (fleet-level, Timescale-only, on the compression tick): run
     /// <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync(NpgsqlConnection, ILogger, TimescaleSupport.RetentionSweepPass, CancellationToken)"/>
     /// as the <see cref="TimescaleSupport.RetentionSweepPass.Periodic"/> pass on a connection from the worker's
@@ -12138,6 +12253,12 @@ AND   j.hypertable_name = '{relation}'", connection))
                TimescaleDB has no policy jobs to sample. */
             await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
         }
+
+        /* The retry of a start-path role provisioning that failed. Outside the TimescaleDB gate on
+           purpose: provisioning does not depend on the extension, so a plain-PostgreSQL store retries too.
+           Directly after the gate, ahead of the later tenants, so it spends none of the compression read's phase.
+           Its own method and its own catch-all; nothing to do (and nothing awaited) unless a start failed. */
+        await RetryRoleProvisioningAsync(stoppingToken);
 
         /* #5582: the ninth tenant, same contract - its own method, its own catch-all, one awaited statement. The exact stamp-grain
            rollup of the wide Query Store table (V173) needs no TimescaleDB (its tables are plain and the wide table is a plain
