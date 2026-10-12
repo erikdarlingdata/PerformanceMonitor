@@ -2033,36 +2033,8 @@ public sealed class AlertEngine
                         queueContext.Details.Add(cpuItem);
                     }
 
-                    var requestClock = Stopwatch.StartNew();
-                    try
-                    {
-                        var activeRequests = await _readAdapter.GetLongRunningQueriesAsync(
-                            key,
-                            thresholdMinutes: 0,
-                            maxResults: ActiveMaintenanceProbeMaxRows,
-                            excludeSpServerDiagnostics: false,
-                            excludeWaitFor: false,
-                            excludeBackups: false,
-                            excludeMiscWaits: false,
-                            excludeCdc: false,
-                            Array.Empty<string>(),
-                            LongRunningQueryExclusions.None,
-                            ct);
-                        foreach (var requestItem in AlertContextBuilders.BuildRunnableQueueRequestItems(activeRequests.Sessions))
-                        {
-                            queueContext.Details.Add(requestItem);
-                        }
-                    }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger?.LogWarning("Could not read active sessions for the Runnable Queue card's top requests on {Server} after {ElapsedMs} ms - the alert fires without them: {Message}",
-                            serverName, requestClock.ElapsedMilliseconds, ex.Message);
-                        _readFailures?.RecordReadFailure(key, "runnable queue top requests", requestClock.ElapsedMilliseconds);
-                    }
+                    await AddRunnableQueueRequestItemsAsync(queueContext, key, serverName, ct);
+                    readClock.Restart();
 
                     var detailText = AlertContextBuilders.ContextToDetailText(queueContext);
 
@@ -2107,6 +2079,51 @@ public sealed class AlertEngine
         {
             _logger?.LogError("Failed to check runnable queue for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "runnable queue", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>
+    /// Adds the Runnable Queue card's top-request items (#5641) from the newest query snapshot: the unfiltered,
+    /// threshold-zero active-session read the High CPU card's maintenance probe uses, ranked by CPU time in
+    /// <see cref="AlertContextBuilders.BuildRunnableQueueRequestItems"/>. Its own method with its own clock, like the
+    /// High CPU probe, so a fault here records the time THIS read ran and not the window read's.
+    ///
+    /// <para>Log-and-degrade, never suppress: a failed read costs the card its request items and nothing else. The
+    /// condition was evaluated correctly and the fire has been decided, so Warning rather than Error, counted on the
+    /// #3013 surface because it IS a store read the alert pass swallowed.</para>
+    /// </summary>
+    private async Task AddRunnableQueueRequestItemsAsync(
+        AlertContext queueContext, string key, string serverName, CancellationToken ct)
+    {
+        var requestClock = Stopwatch.StartNew();
+        try
+        {
+            var activeRequests = await _readAdapter.GetLongRunningQueriesAsync(
+                key,
+                thresholdMinutes: 0,
+                maxResults: ActiveMaintenanceProbeMaxRows,
+                excludeSpServerDiagnostics: false,
+                excludeWaitFor: false,
+                excludeBackups: false,
+                excludeMiscWaits: false,
+                excludeCdc: false,
+                Array.Empty<string>(),
+                LongRunningQueryExclusions.None,
+                ct);
+            foreach (var requestItem in AlertContextBuilders.BuildRunnableQueueRequestItems(activeRequests.Sessions))
+            {
+                queueContext.Details.Add(requestItem);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning("Could not read active sessions for the Runnable Queue card's top requests on {Server} after {ElapsedMs} ms - the alert fires without them: {Message}",
+                serverName, requestClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "runnable queue top requests", requestClock.ElapsedMilliseconds);
         }
     }
 
