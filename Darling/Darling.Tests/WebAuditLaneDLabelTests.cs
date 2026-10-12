@@ -56,7 +56,7 @@ public sealed class WebAuditLaneDLabelTests
         var tabs = Js("pages", "server-tabs.js");
         Assert.Contains("{ key: \"hyperthread_ratio\", label: \"Logical CPUs per socket\"", tabs, StringComparison.Ordinal);
         Assert.DoesNotContain("label: \"HT ratio\"", tabs, StringComparison.Ordinal);
-        Assert.Contains("{ key: \"plan_cache_mb\", label: \"Plan cache (memory clerk)\", format: \"mb\" },", tabs, StringComparison.Ordinal);
+        Assert.Contains("{ key: \"plan_cache_mb\", label: \"Plan cache (all cache stores)\", format: \"mb\" },", tabs, StringComparison.Ordinal);
         Assert.Contains("{ key: \"summary.total_size_mb\", label: \"Cached plans size\", format: \"mb\" },", tabs, StringComparison.Ordinal);
         Assert.Contains("{ key: \"pct_of_sweep_budget_per_run\", label: \"% of run budget\"", tabs, StringComparison.Ordinal);
         /* fmtMs prints seconds above a second ("32.9 s"), so the header carries no unit. */

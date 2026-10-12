@@ -3034,7 +3034,7 @@ const MEMORY_STATS = [
   { key: "total_server_memory_mb", label: "Total server", format: "mb" },
   { key: "target_server_memory_mb", label: "Target server", format: "mb" },
   { key: "buffer_pool_mb", label: "Buffer pool", format: "mb" },
-  { key: "plan_cache_mb", label: "Plan cache (memory clerk)", format: "mb" },
+  { key: "plan_cache_mb", label: "Plan cache (all cache stores)", format: "mb" },
   { key: "system_memory_state", label: "System state", format: "text", small: true, nullKey: "system_memory_state_note" },
   { key: "sql_memory_model", label: "Memory model", format: "text", small: true },
 ];
