@@ -74,4 +74,25 @@ public sealed class CurrentDatabasesTests : IDisposable
         /* Seen from a clock past the horizon, the same newest snapshot is stale: unknown. */
         Assert.Null(await service.GetCurrentDatabasesAsync(ServerId, DateTime.UtcNow + LocalDataService.CurrentDatabasesHorizon + TimeSpan.FromHours(1)));
     }
+
+    /// <summary>Review M2: with an as_of the set is the newest snapshot at or before it, horizon measured from it, so a database dropped
+    /// since the window still counts for the window.</summary>
+    [Fact]
+    public async Task AsOf_UsesTheSnapshotAtOrBeforeIt()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var service = new LocalDataService(_duckDb);
+
+        await SnapshotAsync(TimeSpan.FromHours(73), "GoneDb", "LiveDb");
+        await SnapshotAsync(TimeSpan.FromMinutes(5), "LiveDb");
+
+        var asOf = DateTime.UtcNow - TimeSpan.FromHours(70);
+        var then = await service.GetCurrentDatabasesAsync(ServerId, asOfUtc: asOf);
+        Assert.Equal(new[] { "GoneDb", "LiveDb" }, then!.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+
+        /* Past the horizon measured from the anchor, that snapshot is stale: unknown. */
+        Assert.Null(await service.GetCurrentDatabasesAsync(ServerId, asOfUtc: asOf + LocalDataService.CurrentDatabasesHorizon));
+        /* No anchor: the newest snapshot, as before. */
+        Assert.Equal(new[] { "LiveDb" }, (await service.GetCurrentDatabasesAsync(ServerId))!.ToArray());
+    }
 }

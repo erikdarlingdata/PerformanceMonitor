@@ -139,6 +139,10 @@ SELECT @count;";
     {
         var recommendations = new List<RecommendationRow>();
         var secondary = await SecondaryReplicaScope.ReadAsync(_duckDb, serverId, DateTime.UtcNow, System.Threading.CancellationToken.None);
+        /* #5633 review M3: the databases the server has now (its newest database_states snapshot; null when unknown, which filters
+           nothing), as Darling's recommendations reader does. The two rules below read DuckDB history, where a database dropped
+           last week still has rows; the live-query rules (1, 4, 5, 7) are current by construction. */
+        var currentDatabases = await GetCurrentDatabasesAsync(serverId);
 
         // 1. Enterprise feature usage audit (live SQL query)
         try
@@ -544,7 +548,8 @@ ORDER BY
                 ? await GetIdleDatabasesAsync(serverId)
                 : new List<IdleDatabaseRow>();
             /* #5558: zero reads on a secondary copy is not idleness (its readers may be elsewhere). */
-            idleDbs = idleDbs.Where(d => !AgReplicaScope.IsSkipped(secondary, d.DatabaseName)).ToList();
+            idleDbs = idleDbs.Where(d => !AgReplicaScope.IsSkipped(secondary, d.DatabaseName)
+                && !IsDroppedDatabase(currentDatabases, d.DatabaseName)).ToList();
             if (idleDbs.Count > 0)
             {
                 var totalSizeGb = idleDbs.Sum(d => d.TotalSizeMb) / 1024m;
@@ -813,6 +818,12 @@ HAVING SUM(delta_reads) > 1000";
             while (await ioReader.ReadAsync())
             {
                 var dbName = ioReader.IsDBNull(0) ? "" : ioReader.GetString(0);
+                /* Review M3: a dropped database keeps its history here; Darling's storage-tier rule leaves it out. */
+                if (IsDroppedDatabase(currentDatabases, dbName))
+                {
+                    continue;
+                }
+
                 var totalReads = ioReader.IsDBNull(1) ? 0L : ToInt64(ioReader.GetValue(1));
                 var totalStallRead = ioReader.IsDBNull(2) ? 0L : ToInt64(ioReader.GetValue(2));
                 var totalWrites = ioReader.IsDBNull(3) ? 0L : ToInt64(ioReader.GetValue(3));

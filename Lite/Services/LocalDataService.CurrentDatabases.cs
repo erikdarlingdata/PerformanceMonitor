@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 
@@ -19,22 +20,34 @@ public partial class LocalDataService
     /// hours, the twin of Darling's <c>CurrentDatabaseScope.SnapshotHorizon</c>.</summary>
     internal static readonly TimeSpan CurrentDatabasesHorizon = TimeSpan.FromHours(6);
 
+    /// <summary>True when <paramref name="current"/> is known and does not name <paramref name="databaseName"/> (ordinal, the twin of
+    /// Darling's <c>CurrentDatabaseScope.IsDropped</c>): unknown filters nothing.</summary>
+    internal static bool IsDroppedDatabase(IReadOnlyList<string>? current, string? databaseName)
+        => current is not null && databaseName is not null && !current.Contains(databaseName, StringComparer.Ordinal);
+
     /// <summary>
     /// #5633 item 4: the databases the server's newest <c>database_states</c> snapshot names, on the same SQL text as the
     /// Query Store backfill's gone-database check (<see cref="QueryStoreBackfillState.NewestSnapshotSql"/>), read from
     /// <c>v_database_states</c> (hot plus archive). Null when that is unknown (no snapshot, as on an Azure SQL Database or a
     /// store that never collected it; one older than <see cref="CurrentDatabasesHorizon"/>; no database names; a failed
-    /// read), and every caller then filters nothing.
+    /// read), and every caller then filters nothing. <paramref name="asOfUtc"/> (#5633 review M2) is a historical read's anchor: the
+    /// newest snapshot at or before it, with the horizon measured from it, so a database dropped after the window still counts for it.
     /// </summary>
-    public async Task<IReadOnlyList<string>?> GetCurrentDatabasesAsync(int serverId, DateTime? nowUtc = null)
+    public async Task<IReadOnlyList<string>?> GetCurrentDatabasesAsync(int serverId, DateTime? nowUtc = null, DateTime? asOfUtc = null)
     {
         try
         {
             using var connection = await OpenConnectionAsync();
             using var command = connection.CreateCommand();
-            command.CommandText = QueryStoreBackfillState.NewestSnapshotSql.Replace("FROM database_states", "FROM v_database_states", StringComparison.Ordinal);
+            command.CommandText = (asOfUtc is null ? QueryStoreBackfillState.NewestSnapshotSql : QueryStoreBackfillState.NewestSnapshotAtOrBeforeSql)
+                .Replace("FROM database_states", "FROM v_database_states", StringComparison.Ordinal);
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = (nowUtc ?? DateTime.UtcNow) - CurrentDatabasesHorizon });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = (asOfUtc ?? nowUtc ?? DateTime.UtcNow) - CurrentDatabasesHorizon });
+            if (asOfUtc is { } ceiling)
+            {
+                command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = ceiling });
+            }
+
             var names = new List<string>();
             using var reader = await command.ExecuteReaderAsync();
             while (await reader.ReadAsync())

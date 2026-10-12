@@ -52,13 +52,53 @@ public sealed class ComposeServerScopeResolveNamesTests
         Assert.Equal(new[] { "NO-SUCH-SERVER" }, scope);
     }
 
-    [Fact]
-    public void AmbiguousName_IsRefused_WithTheResolversSentence()
+    /// <summary>Review M1: a name with no EXACT match is a removed or disabled server's history name, never the resolver's partial
+    /// hit. "sql2022" is contained in "sql2022-host" and "Prod" in both display names; neither may be remapped.</summary>
+    [Theory]
+    [InlineData("sql2022")]
+    [InlineData("Prod")]
+    [InlineData("Orders")]
+    public void PartialName_IsNotRemapped_ToAnotherServer(string name)
     {
-        var (_, refusal) = ComposeServerScope.ResolveNames(new[] { "Prod" }, Servers);
+        var (scope, refusal) = ComposeServerScope.ResolveNames(new[] { name }, Servers);
+        Assert.Null(refusal);
+        Assert.Equal(new[] { name }, scope);
+    }
+
+    /// <summary>The scenario from the review: "SQL01" was removed, "SQL01-DR" is the only enabled server.</summary>
+    [Fact]
+    public void RemovedServerName_ThatIsAPrefixOfAnEnabledServer_StaysAsWritten()
+    {
+        var enabled = new[] { new DarlingServerResolver.RegisteredServer(7, "SQL01-DR", null) };
+        var (scope, refusal) = ComposeServerScope.ResolveNames(new[] { "SQL01" }, enabled);
+        Assert.Null(refusal);
+        Assert.Equal(new[] { "SQL01" }, scope);
+    }
+
+    [Fact]
+    public void SeveralServersSharingAnExactName_AreRefused_WithTheResolversSentence()
+    {
+        var shared = new[]
+        {
+            new DarlingServerResolver.RegisteredServer(1, "sql-a", "Prod"),
+            new DarlingServerResolver.RegisteredServer(2, "sql-b", "prod"),
+        };
+        var (_, refusal) = ComposeServerScope.ResolveNames(new[] { "Prod" }, shared);
         Assert.NotNull(refusal);
         var message = McpHelpers.ErrorMessageOf(refusal!);
         Assert.Contains("matches 2 monitored servers", message, StringComparison.Ordinal);
-        Assert.Contains("sql2022-host", message, StringComparison.Ordinal);
+        Assert.Contains("sql-a", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Item 17: a name that matches no registered or stored server stays as written and is reported as not found, naming it
+    /// (the run's W13 answer, shared by the web panel run and the MCP tool), never zero rows with no message.</summary>
+    [Fact]
+    public void UnknownName_IsReportedNotFound_NamingIt()
+    {
+        var (scope, refusal) = ComposeServerScope.ResolveNames(new[] { "NO-SUCH-SERVER" }, Servers);
+        Assert.Null(refusal);
+        var message = DarlingWebEndpoints.UnknownServerMessage(scope, new[] { "NO-SUCH-SERVER" }, new System.Text.Json.Nodes.JsonArray());
+        Assert.NotNull(message);
+        Assert.Contains("'NO-SUCH-SERVER'", message, StringComparison.Ordinal);
     }
 }

@@ -76,7 +76,7 @@ public sealed record CollectorRunFacts(
                     $"No procedure executed in the last {hoursBack}h that matches this request: the procedure_stats collector ran successfully {SuccessfulRunsInWindow} time(s) in the window and recorded nothing for it."));
         }
 
-        var last = LastSuccessUtc is { } at ? $" (its last successful run was {at:yyyy-MM-dd HH:mm:ss} UTC)" : "";
+        var last = LastSuccessUtc is { } at ? string.Create(CultureInfo.InvariantCulture, $" (its last successful run was {at:yyyy-MM-dd HH:mm:ss} UTC)") : "";
         return ("unavailable",
             $"The procedure_stats collector has no successful run inside the last {hoursBack}h{last}, so this window was not measured. This is a collection gap, not an all-clear: check collection health.");
     }
@@ -94,6 +94,6 @@ public sealed record CollectorRunFacts(
             return null;
         }
 
-        return $"No trace flags are enabled as of the trace_flags collector's latest successful run ({LastSuccessUtc:yyyy-MM-dd HH:mm:ss} UTC).";
+        return string.Create(CultureInfo.InvariantCulture, $"No trace flags are enabled as of the trace_flags collector's latest successful run ({LastSuccessUtc:yyyy-MM-dd HH:mm:ss} UTC).");
     }
 }
