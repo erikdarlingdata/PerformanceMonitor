@@ -327,7 +327,7 @@ public static class FinOpsRecommendationFigures
 
         var totalGb = candidates.Sum(c => c.ReservedMb ?? 0m) / 1024m;
         var topItems = candidates.Take(5)
-            .Select(c => $"{c.SchemaName}.{c.TableName} ({(c.ReservedMb ?? 0m) / 1024m:N1}GB)")
+            .Select(c => $"{(string.IsNullOrEmpty(c.DatabaseName) ? "" : c.DatabaseName + ".")}{c.SchemaName}.{c.TableName} ({(c.ReservedMb ?? 0m) / 1024m:N1}GB)")
             .ToList();
 
         return new FinOpsRecommendation

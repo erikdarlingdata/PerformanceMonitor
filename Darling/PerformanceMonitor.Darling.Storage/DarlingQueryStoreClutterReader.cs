@@ -269,7 +269,9 @@ public static class DarlingQueryStoreClutterReader
                 reader.IsDBNull(10) ? null : reader.GetInt32(10)));
         }
 
-        return rows;
+        /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
+           database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, cancellationToken);
     }
 
     /* ─────────────────────────── (b) plan churn ─────────────────────────── */
@@ -407,7 +409,9 @@ public static class DarlingQueryStoreClutterReader
                 reader.GetInt32(10)));
         }
 
-        return rows;
+        /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
+           database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, cancellationToken);
     }
 
     /* ─────────────────────────── (c) configuration ─────────────────────────── */
@@ -486,7 +490,9 @@ public static class DarlingQueryStoreClutterReader
                 reader.IsDBNull(12) ? null : reader.GetString(12)));
         }
 
-        return rows;
+        /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
+           database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, cancellationToken);
     }
 
     /* ─────────────────────────── (d) QDS waits + the clerk ─────────────────────────── */

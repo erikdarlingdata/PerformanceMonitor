@@ -154,6 +154,17 @@ public sealed class McpConfigHistoryTools
         }
     }
 
+    /// <summary>#5633 item 19: the empty message of get_trace_flag_changes. When the trace_flags collector's newest successful run stored zero rows,
+    /// no flag is on, and that is what it says; otherwise the old "at least two snapshots" text, which is then the true one. Darling's twin is
+    /// <c>DarlingMcpConfigHistoryTools.NoTraceFlagChanges</c>; the words for "no flag is on" are shared in <see cref="CollectorRunFacts"/>.</summary>
+    internal static string NoTraceFlagChangesMessage(CollectorRunFacts runFacts, int hoursBack)
+    {
+        var none = runFacts.NoTraceFlagsEnabled();
+        return none is null
+            ? $"No trace flag changes detected in the last {hoursBack}h. Config is captured on connect, so at least two snapshots are needed to detect a change."
+            : none + " A run that finds no flag stores no rows, so there is nothing to diff, and turning off the last flag does not appear as a change here.";
+    }
+
     [McpServerTool(Name = "get_trace_flag_changes"), Description("Gets trace flag change history by diffing DBCC TRACESTATUS snapshots. Shows which trace flags were enabled or disabled, with scope (global/session) and the change time. NOTE: config is captured on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two.")]
     public static async Task<string> GetTraceFlagChanges(
         LocalDataService dataService,
@@ -174,7 +185,7 @@ public sealed class McpConfigHistoryTools
             if (rows.Count == 0)
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "trace_flags")
                     ?? McpHelpers.Status("empty",
-                        $"No trace flag changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.",
+                        NoTraceFlagChangesMessage(await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "trace_flags"), hours_back),
                         (await WindowNoticeAsync(dataService, QueryWindowRelation.TraceFlags, resolved.ServerId, hours_back, windowEnd, "trace_flags", emptyAnswer: true)).AsHints());
 
             var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.TraceFlags, resolved.ServerId, hours_back, windowEnd, "trace_flags");
