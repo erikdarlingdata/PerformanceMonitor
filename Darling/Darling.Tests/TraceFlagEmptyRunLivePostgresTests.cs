@@ -130,6 +130,7 @@ public sealed class TraceFlagEmptyRunLivePostgresTests
             await PlantFlagAsync(connection, now.AddHours(-30), 3226, ct);
             await PlantRunAsync(connection, now.AddHours(-30), "SUCCESS", 1, ct);
             await PlantRunAsync(connection, now.AddHours(-3), "ERROR", 0, ct);
+            await PlantRunAsync(connection, now.AddHours(-2), "PERMISSIONS", 0, ct);
 
             Assert.Empty(await DarlingCollectorRunFactsReader.ReadEmptyTraceFlagRunsAsync(postgres, ServerId, now.AddHours(-168), now, ct));
             var json = await DarlingMcpConfigHistoryTools.GetTraceFlagChanges(postgres, ServerName);
@@ -142,6 +143,83 @@ public sealed class TraceFlagEmptyRunLivePostgresTests
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
+    }
+
+    /// <summary>#5633 item 19 review (Medium-1, Low-3): the baseline arm stops at the window start minus the trace_flags retention (30 days
+    /// by default, the fleet override when one is set). An empty run older than that is older than the oldest trace_flags rows the store
+    /// holds, so a later capture must not pair with it as a flag turned on.</summary>
+    [Fact]
+    public async Task AnEmptyRunOlderThanTheRetention_IsNotABaseline_ByEveryDarlingRead_AndAFleetOverrideMovesTheBound()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live trace-flag empty-run test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var insertedFleetRow = false;
+        var bodySucceeded = false;
+        try
+        {
+            var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
+            var windowStart = now.AddHours(-168);
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            /* Day -50: an empty run. Day -3h: the flag appears (it has really been on since day -40, the rows that said so purged). */
+            var tooOld = now.AddDays(-50);
+            var on = now.AddHours(-3);
+            await PlantRunAsync(connection, tooOld, "SUCCESS", 0, ct);
+            await PlantFlagAsync(connection, on, 3226, ct);
+            await PlantRunAsync(connection, on, "SUCCESS", 1, ct);
+
+            /* Default retention 30 days: the floor is windowStart - 30 days = day -37, so the day -50 run is no baseline. */
+            Assert.Empty(await DarlingCollectorRunFactsReader.ReadEmptyTraceFlagRunsAsync(postgres, ServerId, windowStart, now, ct));
+            Assert.Empty(await ReadTimesAsync(postgres, ViewerDataService.EmptyTraceFlagRunsSql, windowStart, now, ct));
+            Assert.Empty(await ReadTimesAsync(postgres, DarlingAnalysisService.EmptyTraceFlagRunsForAttributionSql, windowStart, now, ct));
+            var json = await DarlingMcpConfigHistoryTools.GetTraceFlagChanges(postgres, ServerName);
+            Assert.DoesNotContain("enabled", json.Replace("\"change_type\":\"modified\"", string.Empty));
+
+            /* A configured fleet retention is the bound's input: 90 days puts the floor at day -97, so the day -50 run is the baseline again. */
+            var hasFleetRow = await ScalarCountAsync(connection, "SELECT count(*) FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = 'trace_flags'", ct) > 0;
+            if (!hasFleetRow)
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO config.config_collector_schedules (server_id, collector_name, retention_days, enabled) VALUES (NULL, 'trace_flags', 90, TRUE)");
+                insertedFleetRow = true;
+
+                var runs = await DarlingCollectorRunFactsReader.ReadEmptyTraceFlagRunsAsync(postgres, ServerId, windowStart, now, ct);
+                Assert.Single(runs);
+                Assert.True(Within(runs[0], tooOld));
+                Assert.Single(await ReadTimesAsync(postgres, ViewerDataService.EmptyTraceFlagRunsSql, windowStart, now, ct));
+                Assert.Single(await ReadTimesAsync(postgres, DarlingAnalysisService.EmptyTraceFlagRunsForAttributionSql, windowStart, now, ct));
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                if (insertedFleetRow)
+                {
+                    await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt,
+                        "DELETE FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = 'trace_flags'");
+                }
+
+                await DeleteRowsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
+    private static async Task<long> ScalarCountAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(sql, connection);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct));
     }
 
     private static DateTime ParseUtc(string value) =>

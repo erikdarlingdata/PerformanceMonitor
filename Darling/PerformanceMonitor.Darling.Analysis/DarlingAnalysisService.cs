@@ -1173,11 +1173,12 @@ ORDER BY database_name, capture_time";
     /// <summary>
     /// The successful <c>trace_flags</c> runs that stored ZERO rows (#5633 item 19), the empty snapshots the trace-flag diff
     /// needs: the collector writes no row when no flag is enabled, so without these "the last flag was disabled" is invisible.
-    /// Bounded like <see cref="TraceFlagSnapshotsForAttributionSql"/>: the runs inside the window plus the newest one before it.
+    /// Bounded like <see cref="TraceFlagSnapshotsForAttributionSql"/>: the runs inside the window plus the newest one before it,
+    /// that one no older than the window start minus the trace_flags retention (<see cref="DarlingRetentionHorizons.TraceFlagsBaselineFloorSql"/>).
     /// SUCCESS only and <c>rows_collected = 0</c> only (NULL is not recorded). <c>$1</c> server_id, <c>$2</c> window start,
     /// <c>$3</c> window end.
     /// </summary>
-    public const string EmptyTraceFlagRunsForAttributionSql = @"
+    public static readonly string EmptyTraceFlagRunsForAttributionSql = $@"
 (SELECT collection_time
  FROM collection_log
  WHERE server_id = $1
@@ -1194,6 +1195,7 @@ UNION ALL
  AND   status = 'SUCCESS'
  AND   rows_collected = 0
  AND   collection_time < $2
+ AND   collection_time >= {DarlingRetentionHorizons.TraceFlagsBaselineFloorSql("$2")}
  ORDER BY collection_time DESC
  LIMIT 1)";
 

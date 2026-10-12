@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -53,10 +54,12 @@ internal static class DarlingCollectorRunFactsReader
     /// The successful trace_flags runs that stored ZERO rows (#5633 item 19), the empty snapshots the trace-flag change diff
     /// needs: a run that finds no flag enabled stores nothing, so without these the last flag being turned off never shows.
     /// Bounded like the change read: the runs inside the window $2..$3 (naive UTC), plus the one newest run before $2, which is
-    /// the baseline for a change on the window's first capture. SUCCESS only (a failed run did not look) and
+    /// the baseline for a change on the window's first capture. That baseline run is no older than $2 minus the trace_flags
+    /// retention (<see cref="DarlingRetentionHorizons.TraceFlagsBaselineFloorSql"/>): an older empty run is older than the oldest
+    /// trace_flags rows the store holds, so it would pair with a later capture as a flag turned on. SUCCESS only (a failed run did not look) and
     /// <c>rows_collected = 0</c> only (NULL is "not recorded", not "found nothing"). $1 server_id.
     /// </summary>
-    public const string EmptyTraceFlagRunsSql = """
+    public static readonly string EmptyTraceFlagRunsSql = $"""
         (SELECT collection_time
          FROM v_collection_log
          WHERE server_id = $1
@@ -73,6 +76,7 @@ internal static class DarlingCollectorRunFactsReader
          AND   status = 'SUCCESS'
          AND   rows_collected = 0
          AND   collection_time < $2
+         AND   collection_time >= {DarlingRetentionHorizons.TraceFlagsBaselineFloorSql("$2")}
          ORDER BY collection_time DESC
          LIMIT 1)
         """;
