@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
@@ -134,6 +135,92 @@ public sealed class PgDeadlockRepairTests
         Assert.DoesNotContain("sql_normalized", PgDeadlockRemask.FindingRepairPageSql, StringComparison.Ordinal);
         Assert.DoesNotContain("Sql Normalized", PgDeadlockRemask.FindingAlertRepairPageSql, StringComparison.Ordinal);
         Assert.Contains("NOT COALESCE(r.raw_hash, false) THEN p.graph_text", PgDeadlockRemask.ReportRepairPageSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>A main-stage walk that spans three slices, each but the last cut by the budget after a finished batch,
+    /// and that rewrote nothing and left nothing, is a clean walk: the stage is done.</summary>
+    [Fact]
+    public void AMainStageWalkOverThreeSlices_ThatRewroteNothing_EndsDone()
+    {
+        var stage = new PgDeadlockRemask.StageProgress("report");
+        for (var slice = 0; slice < 3; slice++)
+        {
+            for (var row = 0; row < 5; row++)
+            {
+                stage.Count(PgDeadlockRemask.RowOutcome.Unchanged, batchClosed: true);
+            }
+
+            if (slice < 2)
+            {
+                stage.CutBySlice();
+                Assert.False(stage.WalkInterrupted);
+                Assert.False(stage.Done);
+            }
+        }
+
+        PgDeadlockRemask.EndWalk(stage, NullLogger.Instance);
+        Assert.True(stage.Done);
+        Assert.False(stage.GaveUp);
+        Assert.Equal(1, stage.Walks);
+    }
+
+    /// <summary>A cut before the page's first row, or after a closed batch, interrupts nothing; one inside a batch
+    /// makes the whole walk unclean however many slices it spans, and such walks end in giving up.</summary>
+    [Fact]
+    public void ACutInsideABatch_MakesTheWalkUnclean_AcrossSlices()
+    {
+        var stage = new PgDeadlockRemask.StageProgress("report");
+        stage.CutBySlice();
+        Assert.False(stage.WalkInterrupted);
+
+        stage.Count(PgDeadlockRemask.RowOutcome.Unchanged, batchClosed: true);
+        stage.Count(PgDeadlockRemask.RowOutcome.Unchanged, batchClosed: false);
+        stage.CutBySlice();
+        Assert.True(stage.WalkInterrupted);
+
+        /* The next slice is cut cleanly; the flag stays for the walk. */
+        stage.Count(PgDeadlockRemask.RowOutcome.Unchanged, batchClosed: true);
+        stage.CutBySlice();
+        Assert.True(stage.WalkInterrupted);
+
+        PgDeadlockRemask.EndWalk(stage, NullLogger.Instance);
+        Assert.False(stage.Done);
+        Assert.False(stage.GaveUp);
+        Assert.False(stage.WalkInterrupted);
+        Assert.Equal(1, stage.NoProgressWalks);
+
+        for (var walk = 0; walk < PgDeadlockRemask.MaxRescansPerProcess; walk++)
+        {
+            stage.Count(PgDeadlockRemask.RowOutcome.Unchanged, batchClosed: false);
+            stage.CutBySlice();
+            PgDeadlockRemask.EndWalk(stage, NullLogger.Instance);
+        }
+
+        Assert.True(stage.GaveUp);
+    }
+
+    /// <summary>A rewrite or a left row in any slice of a walk keeps it from being the clean one.</summary>
+    [Theory]
+    [InlineData(PgDeadlockRemask.RowOutcome.Rewritten)]
+    [InlineData(PgDeadlockRemask.RowOutcome.Left)]
+    public void ARewriteOrALeftRowInAnySlice_KeepsTheWalkFromBeingClean(PgDeadlockRemask.RowOutcome outcome)
+    {
+        var stage = new PgDeadlockRemask.StageProgress("alert");
+        stage.Count(PgDeadlockRemask.RowOutcome.Unchanged, batchClosed: true);
+        stage.CutBySlice();
+        stage.Count(outcome, batchClosed: true);
+        stage.CutBySlice();
+        stage.Count(PgDeadlockRemask.RowOutcome.Unchanged, batchClosed: true);
+        PgDeadlockRemask.EndWalk(stage, NullLogger.Instance);
+        Assert.False(stage.Done);
+    }
+
+    /// <summary>The main stages and the repair stages end a budget-cut walk through the one method.</summary>
+    [Fact]
+    public void BothPassesEndABudgetCutThroughTheSharedRule()
+    {
+        var source = ReadSource("Darling/PerformanceMonitor.Darling.Service/PgDeadlockRemask.cs");
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(source, @"stage\.CutBySlice\(\);").Count);
     }
 
     /// <summary>The worker runs the repair behind its own gate.</summary>

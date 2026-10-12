@@ -1931,8 +1931,10 @@ AND   xmin = $3::xid";
         /// <summary>Rows the current walk left as they were: changed under the write, or a rewrite that failed.</summary>
         public int WalkLeft { get; set; }
 
-        /// <summary>True once a cancel or a failure has cut the current walk short (#4012's review, finding 2): such a
-        /// walk is never the clean one a stage is done after, however little it counted.</summary>
+        /// <summary>True once a failure, a cut inside a batch (<see cref="CutBySlice"/>) or a restart of the finding
+        /// table's walk has interrupted the current walk, over all of its slices (#4012's review, finding 2): such a
+        /// walk is never the clean one a stage is done after, however little it counted. A slice's budget that cuts
+        /// the walk after a finished batch does not set it.</summary>
         public bool WalkInterrupted { get; set; }
 
         /// <summary>Walks that rewrote nothing but left rows or were cut short, which count toward
@@ -1949,6 +1951,11 @@ AND   xmin = $3::xid";
         /// tried again from the start.</summary>
         public DateTime? GaveUpUtc { get; set; }
 
+        /// <summary>True while the page in hand has a batch open: a row was counted that did not close its batch (or,
+        /// for the finding walk, the page is the batch and has rows counted), so the walk's cursor does not yet stand
+        /// after that row. Cleared at each page's start, and by a slice's end.</summary>
+        internal bool BatchOpen { get; set; }
+
         /// <summary>Counts one row's outcome toward the current walk.</summary>
         public void Count(RowOutcome outcome)
         {
@@ -1962,6 +1969,32 @@ AND   xmin = $3::xid";
             }
         }
 
+        /// <summary>Counts one row's outcome, and whether the row closed its batch (the walk's cursor moved to
+        /// it).</summary>
+        internal void Count(RowOutcome outcome, bool batchClosed)
+        {
+            Count(outcome);
+            BatchOpen = !batchClosed;
+        }
+
+        /// <summary>
+        /// A slice's budget (or the service's shutdown) cut the stage's walk. The one rule for the main stages and the
+        /// repair stages: a cut after a finished batch, or before the page's first row, leaves the cursor on a closed
+        /// batch, every finished row counted, and the walk goes on there on the next tick, so it is neither unclean
+        /// nor a new walk. A cut inside a batch makes the walk unclean: the batch is read again from its start. The
+        /// walk's counts and flag live on the stage, so a walk that spans many slices is clean only if it rewrote
+        /// nothing, left nothing and was never cut inside a batch or failed, over all of them.
+        /// </summary>
+        internal void CutBySlice()
+        {
+            if (BatchOpen)
+            {
+                WalkInterrupted = true;
+            }
+
+            BatchOpen = false;
+        }
+
         /// <summary>A stage that gave up, as it was before its first walk.</summary>
         internal void Reset()
         {
@@ -1971,6 +2004,7 @@ AND   xmin = $3::xid";
             WalkRewritten = 0;
             WalkLeft = 0;
             WalkInterrupted = false;
+            BatchOpen = false;
             NoProgressWalks = 0;
             ConsecutiveFailures = 0;
             SkipTicks = 0;
@@ -2103,7 +2137,9 @@ AND   xmin = $3::xid";
     /// retention.</para>
     ///
     /// <para><b>A stage is done only after a whole walk that counted no rewrite and left nothing, and that no
-    /// cancel or failure cut short</b> (#4012's review, findings 2 and 4). Each row's outcome is counted as it is
+    /// failure or cut inside a batch interrupted, over all of the slices it spans</b> (#4012's review, findings 2 and
+    /// 4). A budget cut after a finished batch resumes at the cursor and interrupts nothing
+    /// (<see cref="StageProgress.CutBySlice"/>, the rule <see cref="RunRepairAsync"/> follows too). Each row's outcome is counted as it is
     /// finished, through its slice's per-row callback, so a page cut short loses none. A walk that rewrote rows is
     /// followed by another, which catches a row an UPDATE moved behind the cursor; one that rewrote nothing but left
     /// rows or was cut short counts toward <see cref="MaxRescansPerProcess"/>. A stage that gave up is tried again
@@ -2171,9 +2207,9 @@ AND   xmin = $3::xid";
             }
 
             int examined = 0, rewritten = 0, left = 0;
-            void Counted(RowOutcome outcome)
+            void Counted(RowOutcome outcome, bool batchClosed)
             {
-                stage.Count(outcome);
+                stage.Count(outcome, batchClosed);
                 rewritten += outcome == RowOutcome.Rewritten ? 1 : 0;
                 left += outcome == RowOutcome.Left ? 1 : 0;
                 progress.RowCounted?.Invoke(stage, outcome);
@@ -2183,6 +2219,7 @@ AND   xmin = $3::xid";
             {
                 while (!stage.Done)
                 {
+                    stage.BatchOpen = false;
                     if (connection.State != System.Data.ConnectionState.Open)
                     {
                         /* A Broken connection must be closed before it can open again. */
@@ -2198,7 +2235,7 @@ AND   xmin = $3::xid";
                            store; an incident this pass rebuilt carries RebuiltIncidentMarker and is never keyed. */
                         var (next, e, _, _) = await RemaskStoredAlertsAsync(
                             connection, progress.AlertCursor, key, reportsMayBeRaw: true,
-                            (row, outcome) => { progress.AlertCursor = row ?? progress.AlertCursor; Counted(outcome); }, cancellationToken);
+                            (row, outcome) => { progress.AlertCursor = row ?? progress.AlertCursor; Counted(outcome, row is not null); }, cancellationToken);
                         progress.AlertCursor = next;
                         page = (next is null, e);
                     }
@@ -2206,14 +2243,14 @@ AND   xmin = $3::xid";
                     {
                         var (next, e, _, _) = await RemaskStoredAlertsAsync(
                             connection, progress.AlertKeyCursor, key, reportsMayBeRaw: false,
-                            (row, outcome) => { progress.AlertKeyCursor = row ?? progress.AlertKeyCursor; Counted(outcome); }, cancellationToken);
+                            (row, outcome) => { progress.AlertKeyCursor = row ?? progress.AlertKeyCursor; Counted(outcome, row is not null); }, cancellationToken);
                         progress.AlertKeyCursor = next;
                         page = (next is null, e);
                     }
                     else if (ReferenceEquals(stage, progress.Reports))
                     {
                         var (next, e, _, _) = await RemaskStoredReportsAsync(
-                            connection, progress.ReportCursor, (row, outcome) => { progress.ReportCursor = row ?? progress.ReportCursor; Counted(outcome); }, cancellationToken);
+                            connection, progress.ReportCursor, (row, outcome) => { progress.ReportCursor = row ?? progress.ReportCursor; Counted(outcome, row is not null); }, cancellationToken);
                         progress.ReportCursor = next;
                         page = (next is null, e);
                     }
@@ -2221,7 +2258,7 @@ AND   xmin = $3::xid";
                     {
                         var walk = new FindingWalk { Filenode = progress.FindingFilenode };
                         var (next, e, _, _) = await RemaskStoredFindingsAsync(
-                            connection, progress.FindingCursor, (row, outcome) => { progress.FindingCursor = row ?? progress.FindingCursor; Counted(outcome); }, walk, cancellationToken);
+                            connection, progress.FindingCursor, (row, outcome) => { progress.FindingCursor = row ?? progress.FindingCursor; Counted(outcome, row is not null); }, walk, cancellationToken);
                         progress.FindingCursor = next;
                         progress.FindingFilenode = walk.Filenode;
                         stage.WalkInterrupted |= walk.Restarted;
@@ -2230,7 +2267,7 @@ AND   xmin = $3::xid";
                     else
                     {
                         var (next, e, _, _) = await RemaskStoredFindingAlertsAsync(
-                            connection, progress.FindingAlertCursor, (row, outcome) => { progress.FindingAlertCursor = row ?? progress.FindingAlertCursor; Counted(outcome); }, cancellationToken);
+                            connection, progress.FindingAlertCursor, (row, outcome) => { progress.FindingAlertCursor = row ?? progress.FindingAlertCursor; Counted(outcome, row is not null); }, cancellationToken);
                         progress.FindingAlertCursor = next;
                         page = (next is null, e);
                     }
@@ -2244,6 +2281,7 @@ AND   xmin = $3::xid";
                     }
 
                     stage.ConsecutiveFailures = 0;
+                    stage.BatchOpen = false;
                     examined += page.Examined;
                     if (page.End)
                     {
@@ -2253,9 +2291,10 @@ AND   xmin = $3::xid";
             }
             catch (Exception) when (cancellationToken.IsCancellationRequested)
             {
-                /* The tick's budget (or shutdown) ended it: each walk's cursor stands at the last row it finished,
-                   and every finished row is counted; the walk is not a clean one. */
-                stage.WalkInterrupted = true;
+                /* The tick's budget (or shutdown) ended it: each walk's cursor stands on the last batch it finished
+                   and every finished row is counted. The walk goes on there on the next tick, unclean only if the
+                   cut fell inside a batch (the repair stages' rule: StageProgress.CutBySlice). */
+                stage.CutBySlice();
                 LogTick(stage, examined, rewritten, left, logger, finished: false);
                 return;
             }
@@ -2345,9 +2384,9 @@ AND   xmin = $3::xid";
             }
 
             int examined = 0, rewritten = 0, left = 0;
-            void Counted(RowOutcome outcome)
+            void Counted(RowOutcome outcome, bool batchClosed)
             {
-                stage.Count(outcome);
+                stage.Count(outcome, batchClosed);
                 rewritten += outcome == RowOutcome.Rewritten ? 1 : 0;
                 left += outcome == RowOutcome.Left ? 1 : 0;
                 progress.RowCounted?.Invoke(stage, outcome);
@@ -2357,6 +2396,7 @@ AND   xmin = $3::xid";
             {
                 while (!stage.Done)
                 {
+                    stage.BatchOpen = false;
                     if (connection.State != System.Data.ConnectionState.Open)
                     {
                         await connection.CloseAsync();
@@ -2367,7 +2407,7 @@ AND   xmin = $3::xid";
                     if (ReferenceEquals(stage, progress.RepairReports))
                     {
                         var (next, e, _, _) = await RepairStoredReportStatementsAsync(
-                            connection, progress.RepairReportCursor, (row, outcome) => { progress.RepairReportCursor = row ?? progress.RepairReportCursor; Counted(outcome); }, cancellationToken);
+                            connection, progress.RepairReportCursor, (row, outcome) => { progress.RepairReportCursor = row ?? progress.RepairReportCursor; Counted(outcome, row is not null); }, cancellationToken);
                         progress.RepairReportCursor = next;
                         page = (next is null, e);
                     }
@@ -2377,7 +2417,7 @@ AND   xmin = $3::xid";
                            carries, and one this pass cannot resolve is left as it is. */
                         var (next, e, _, _) = await RepairStoredAlertsAsync(
                             connection, progress.RepairAlertCursor,
-                            (row, outcome) => { progress.RepairAlertCursor = row ?? progress.RepairAlertCursor; Counted(outcome); }, cancellationToken);
+                            (row, outcome) => { progress.RepairAlertCursor = row ?? progress.RepairAlertCursor; Counted(outcome, row is not null); }, cancellationToken);
                         progress.RepairAlertCursor = next;
                         page = (next is null, e);
                     }
@@ -2385,7 +2425,7 @@ AND   xmin = $3::xid";
                     {
                         var walk = new FindingWalk { Filenode = progress.RepairFindingFilenode };
                         var (next, e, _, _) = await RepairStoredFindingsAsync(
-                            connection, progress.RepairFindingCursor, (row, outcome) => { progress.RepairFindingCursor = row ?? progress.RepairFindingCursor; Counted(outcome); },
+                            connection, progress.RepairFindingCursor, (row, outcome) => { progress.RepairFindingCursor = row ?? progress.RepairFindingCursor; Counted(outcome, row is not null); },
                             walk, cancellationToken);
                         progress.RepairFindingCursor = next;
                         progress.RepairFindingFilenode = walk.Filenode;
@@ -2395,13 +2435,14 @@ AND   xmin = $3::xid";
                     else
                     {
                         var (next, e, _, _) = await RepairStoredFindingAlertsAsync(
-                            connection, progress.RepairFindingAlertCursor, (row, outcome) => { progress.RepairFindingAlertCursor = row ?? progress.RepairFindingAlertCursor; Counted(outcome); },
+                            connection, progress.RepairFindingAlertCursor, (row, outcome) => { progress.RepairFindingAlertCursor = row ?? progress.RepairFindingAlertCursor; Counted(outcome, row is not null); },
                             cancellationToken);
                         progress.RepairFindingAlertCursor = next;
                         page = (next is null, e);
                     }
 
                     stage.ConsecutiveFailures = 0;
+                    stage.BatchOpen = false;
                     examined += page.Examined;
                     if (page.End)
                     {
@@ -2413,9 +2454,10 @@ AND   xmin = $3::xid";
             {
                 /* The slice's budget ended it. Each walk's cursor stands on a closed batch (the last report batch, alert
                    instant or finding block range it finished), every finished row is counted, and the next tick
-                   resumes there, so the walk goes on and is neither unclean nor a new one. Only a failure or a Left
-                   row makes a repair walk unclean: a store too big for one slice would otherwise never end a clean
-                   walk, and never reach its marker. */
+                   resumes there, so the walk goes on and is neither unclean nor a new one, as for the main stages
+                   (StageProgress.CutBySlice): a store too big for one slice would otherwise never end a clean walk,
+                   and never reach its marker. A failure, a Left row or a cut inside a batch makes the walk unclean. */
+                stage.CutBySlice();
                 LogTick(stage, examined, rewritten, left, logger, finished: false);
                 return;
             }
@@ -2460,7 +2502,7 @@ AND   xmin = $3::xid";
 
     /// <summary>A walk reached its table's end: done when it counted no rewrite, left nothing and was not cut short,
     /// otherwise walked again.</summary>
-    private static void EndWalk(StageProgress stage, ILogger logger)
+    internal static void EndWalk(StageProgress stage, ILogger logger)
     {
         stage.Walks++;
         if (stage.WalkRewritten == 0 && stage.WalkLeft == 0 && !stage.WalkInterrupted)
@@ -2471,13 +2513,14 @@ AND   xmin = $3::xid";
         {
             GiveUp(stage);
             logger.LogWarning(
-                "PostgreSQL deadlocks: {Left} stored {Stage} row(s) could not be re-masked, or no walk of them finished uncut, in {Walks} walks, and they are tried again in a day; every read still normalizes them.",
+                "PostgreSQL deadlocks: {Walks} walks of the stored {Stage} rows ended without a clean one, and they are tried again in a day. The last walk left {Left} row(s) as they were (changed under the write, or a rewrite that failed), or was interrupted by a failure or by a pass cut inside a batch; every read still normalizes them.",
                 stage.WalkLeft, stage.Name, stage.Walks);
         }
 
         stage.WalkRewritten = 0;
         stage.WalkLeft = 0;
         stage.WalkInterrupted = false;
+        stage.BatchOpen = false;
     }
 
     private static void LogTick(StageProgress stage, int examined, int rewritten, int left, ILogger logger, bool finished)

@@ -1423,6 +1423,77 @@ WHERE victim_pid = 10004", ct);
     }
 
     /// <summary>
+    /// A report walk the slice's budget cuts after a finished batch resumes at its cursor on the next tick and is
+    /// not an unclean one: the stage finishes (a second walk, clean, ends it) and does not give up. A second walk
+    /// that rewrites nothing and is cut at a batch boundary the same way is done after the slices that follow.
+    /// </summary>
+    [Fact]
+    public async Task AReportWalkCutAtABatchBoundary_ResumesFinishesAndIsDone()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        await PlantRawReportsAsync(connection, PgDeadlockRemask.MaxReportRowsPerPass + 150, DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2), ct);
+
+        /* The budget ends the first tick part-way through the report stage's first page; each report is a batch of its own. */
+        using var cut = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        var counted = 0;
+        progress.RowCounted = (stage, outcome) =>
+        {
+            if (ReferenceEquals(stage, progress.Reports) && outcome == PgDeadlockRemask.RowOutcome.Rewritten && ++counted == 40)
+            {
+                cut.Cancel();
+            }
+        };
+        await PgDeadlockRemask.RunAsync(connection, progress, s_key, NullLoggerFor(), cut.Token);
+
+        Assert.True(progress.Alerts.Done);
+        Assert.False(progress.Reports.WalkInterrupted);
+        Assert.False(progress.Reports.Done);
+        Assert.NotNull(progress.ReportCursor);
+
+        progress.RowCounted = null;
+        for (var tick = 0; tick < 6 && !progress.Reports.Done; tick++)
+        {
+            await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        }
+
+        Assert.True(progress.Reports.Done);
+        Assert.False(progress.Reports.GaveUp);
+        Assert.Equal(0L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+
+        /* Nothing is left to rewrite: a walk cut at a batch boundary and finished over later slices is clean. */
+        using var secondCut = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var second = new PgDeadlockRemask.RemaskProgress();
+        var seen = 0;
+        second.RowCounted = (stage, _) =>
+        {
+            if (ReferenceEquals(stage, second.Reports) && ++seen == 40)
+            {
+                secondCut.Cancel();
+            }
+        };
+        await PgDeadlockRemask.RunAsync(connection, second, s_key, NullLoggerFor(), secondCut.Token);
+        Assert.False(second.Reports.WalkInterrupted);
+        Assert.False(second.Reports.Done);
+
+        second.RowCounted = null;
+        for (var tick = 0; tick < 6 && !second.Reports.Done; tick++)
+        {
+            await TickAsTheWorkerAsync(connection, second, s_key, NullLoggerFor(), ct);
+        }
+
+        Assert.True(second.Reports.Done);
+        Assert.False(second.Reports.GaveUp);
+        Assert.Equal(1, second.Reports.Walks);
+    }
+
+    /// <summary>
     /// One backend the victim of two deadlocks within a second, in a store written before the upgrade, is two raw
     /// reports at one place (server, collection time, occurred time, victim pid). The anchor names each by its
     /// position among the place's raw hashes, so both are rewritten in one walk, each with its own graph's values,
