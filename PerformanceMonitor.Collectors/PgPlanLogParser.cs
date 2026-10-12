@@ -97,15 +97,21 @@ public static class PgPlanLogParser
        narrower: self-hosted's own SQL regex only ever needed the space family (PostgreSQL's own default),
        so it gained the same timestamp anchor without the colon alternative rather than a capability neither
        transport asked for. */
+    /* Every pattern in this type runs under this match bound (the same one PgSettingRedactor.TimeBoundPattern
+       carries on the fingerprint pair below). A match that runs out of time withholds what it was reading:
+       FromBlock skips that one plan, Extract stops with the plans it has already taken. */
+    private static readonly TimeSpan s_matchTimeout = TimeSpan.FromSeconds(1);
+
     private static readonly Regex s_planBlock = new(
         @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
         + @"(?:[^ \[\n]+ [^\[\n]*\[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
         + @"[ :](-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)",
-        RegexOptions.Compiled | RegexOptions.Multiline);
+        RegexOptions.Compiled | RegexOptions.Multiline,
+        s_matchTimeout);
 
     /* Every log_line_prefix escape (%-something), used to find the FIRST one after %p — the escape that
        actually renders the token this parser's (-?\d+) group captured (#4501). */
-    private static readonly Regex s_anyEscapeToken = new("%.", RegexOptions.Compiled);
+    private static readonly Regex s_anyEscapeToken = new("%.", RegexOptions.Compiled, s_matchTimeout);
 
     /// <summary>
     /// Whether the all-digit token <see cref="s_planBlock"/> captures right after the bracketed pid is a
@@ -141,9 +147,18 @@ public static class PgPlanLogParser
         }
 
         var afterPid = logLinePrefix[(pidIndex + 2)..];
-        var nextEscape = s_anyEscapeToken.Match(afterPid);
 
-        return nextEscape.Success && string.Equals(nextEscape.Value, "%Q", StringComparison.Ordinal);
+        try
+        {
+            var nextEscape = s_anyEscapeToken.Match(afterPid);
+
+            return nextEscape.Success && string.Equals(nextEscape.Value, "%Q", StringComparison.Ordinal);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // Not read to its end: the captured token is not taken as a query id.
+            return false;
+        }
     }
 
     /* Condition fields, where a bare number is a VALUE rather than part of a name. Enumerated rather than
@@ -205,6 +220,20 @@ public static class PgPlanLogParser
 
         var trustQueryId = PrefixCarriesQueryIdAfterPid(logLinePrefix);
 
+        try
+        {
+            ExtractInto(plans, logBody, trustQueryId);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // The rest of the body is not read: the plans taken so far stand, and nothing unread is stored.
+        }
+
+        return plans;
+    }
+
+    private static void ExtractInto(List<ParsedPlan> plans, string logBody, bool trustQueryId)
+    {
         foreach (Match match in s_planBlock.Matches(logBody))
         {
             if (!long.TryParse(match.Groups[1].Value, out var capturedQueryId)
@@ -225,8 +254,6 @@ public static class PgPlanLogParser
                 plans.Add(parsed.Value);
             }
         }
-
-        return plans;
     }
 
     /// <summary>
@@ -264,7 +291,16 @@ public static class PgPlanLogParser
         root.Remove("Query Text");
         root.Remove("Query Parameters");
 
-        Redact(plan);
+        try
+        {
+            Redact(plan);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            /* The masking ran out of time on this plan's text: the plan is skipped, the way a block the tail
+               read cut in half is, so no unmasked text is stored and the caller's other plans still map. */
+            return null;
+        }
 
         var json = root.ToJsonString();
 
@@ -325,8 +361,8 @@ public static class PgPlanLogParser
        hash reads. The hash of a plan whose text held a quoted name with an apostrophe in it, or a literal the
        fingerprint pattern left standing, therefore changes once, when the plan is next parsed; every other plan
        keeps its hash. The hash is never taken over a raw value. */
-    private static readonly Regex s_storedPlanLiteral = new(
-        @"""(?:[^""]|"""")*""|'(?:[^']|'')*'", RegexOptions.Compiled);
+    internal static readonly PgSettingRedactor.TimeBoundPattern s_storedPlanLiteral = new(
+        @"""(?:[^""]|"""")*""|'(?:[^']|'')*'", RegexOptions.Compiled, TimeSpan.FromSeconds(1));
 
     private static string Scrub(string text, string fieldName)
     {

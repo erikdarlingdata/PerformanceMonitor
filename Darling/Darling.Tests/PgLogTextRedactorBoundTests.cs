@@ -202,10 +202,10 @@ public sealed class PgLogTextRedactorBoundTests
     }
 
     [Fact]
-    public void EveryPatternInBothRedactors_RunsUnderAMatchTimeout()
+    public void EveryPatternInTheRedactorsAndThePlanParser_RunsUnderAMatchTimeout()
     {
         var regexes = new List<Regex>();
-        foreach (var type in new[] { typeof(PgLogTextRedactor), typeof(PgSettingRedactor) })
+        foreach (var type in new[] { typeof(PgLogTextRedactor), typeof(PgSettingRedactor), typeof(PgPlanLogParser) })
         {
             foreach (var field in type.GetFields(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic))
             {
@@ -244,7 +244,7 @@ public sealed class PgLogTextRedactorBoundTests
         }
 
         var owner = value.GetType().DeclaringType;
-        if (owner != typeof(PgLogTextRedactor) && owner != typeof(PgSettingRedactor))
+        if (owner != typeof(PgLogTextRedactor) && owner != typeof(PgSettingRedactor) && owner != typeof(PgPlanLogParser))
         {
             yield break;
         }
