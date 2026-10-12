@@ -428,6 +428,76 @@ public sealed class DarlingWebSignInHardeningTests
         Assert.All(held, r => Assert.True(int.Parse(r.Response.Headers.RetryAfter.ToString(), System.Globalization.CultureInfo.InvariantCulture) >= 1));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SixteenConcurrentRightTokens_FromOneSource_AllSignIn(bool staged)
+    {
+        using var server = await BuildServer(networkMode: true);
+        const int Burst = 16;
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = 0;
+
+        /* In-flight reservations count against the free allowance; a sign-in that only meets those waits for
+           them instead of being answered 429. */
+        var tasks = new Task<HttpContext>[Burst];
+        for (var i = 0; i < Burst; i++)
+        {
+            tasks[i] = Task.Run(() => DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, Token, configure: c =>
+            {
+                if (staged)
+                {
+                    c.Request.ContentLength = null;
+                    c.Request.Body = new MeteredBody(
+                        System.Text.Encoding.UTF8.GetBytes("token=" + Token), gate.Task, () => Interlocked.Increment(ref entered));
+                }
+            }));
+        }
+
+        if (staged)
+        {
+            Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref entered) == Burst, TimeSpan.FromSeconds(30)),
+                "the staged requests did not all reach their body read");
+            gate.SetResult();
+        }
+
+        var replies = await Task.WhenAll(tasks);
+        Assert.All(replies, r => Assert.Equal(StatusCodes.Status302Found, r.Response.StatusCode));
+    }
+
+    [Fact]
+    public async Task OtherSourcesSpendingTheTotalBudget_DoNotStopASourceThatSignedIn_AndTheHoldSaysWhy()
+    {
+        using var server = await BuildServer(networkMode: true);
+
+        var worker = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, Token);
+        Assert.Equal(StatusCodes.Status302Found, worker.Response.StatusCode);
+
+        var sources = DarlingSignInThrottle.GlobalMaxAttempts / (DarlingSignInThrottle.FreeFailures + 1);
+        for (var k = 0; k < sources; k++)
+        {
+            for (var j = 0; j <= DarlingSignInThrottle.FreeFailures; j++)
+            {
+                var miss = await DarlingWebHostGateLiveTests.PostSignIn(
+                    server, ListenIp, IPAddress.Parse("192.168.1." + (100 + k)), "wrong-" + k + "-" + j);
+                Assert.Equal(StatusCodes.Status200OK, miss.Response.StatusCode);
+            }
+        }
+
+        /* A source that has not signed in is held by the total, and the answer says so. */
+        var stranger = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, IPAddress.Parse("192.168.1.51"), Token);
+        var body = await BodyOf(stranger);
+        Assert.Equal(StatusCodes.Status429TooManyRequests, stranger.Response.StatusCode);
+        Assert.Contains("not necessarily this one", body, StringComparison.Ordinal);
+        Assert.Contains("restarting the service clears it", body, StringComparison.Ordinal);
+        Assert.True(int.Parse(stranger.Response.Headers.RetryAfter.ToString(), System.Globalization.CultureInfo.InvariantCulture)
+            > (int)DarlingSignInThrottle.MaxDelay.TotalSeconds);
+
+        /* The source that signed in earlier still signs in. */
+        var again = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, Token);
+        Assert.Equal(StatusCodes.Status302Found, again.Response.StatusCode);
+    }
+
     [Fact]
     public async Task TheHeldAnswer_SaysNoTokenIsComparedAndThatARestartClearsTheWait()
     {

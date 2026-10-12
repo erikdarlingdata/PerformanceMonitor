@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Net;
@@ -53,7 +54,12 @@ public sealed class DarlingMcpBearerThrottleTests
 
     private static IPAddress SourceFor(bool networkMode) => networkMode ? InCidrRemote : IPAddress.Loopback;
 
-    private static IPAddress OtherSourceFor(bool networkMode) => networkMode ? OtherInCidrRemote : IPAddress.IPv6Loopback;
+    /* Every loopback address is ONE source, so "another source" on the loopback bind is a non-loopback one. */
+    private static IPAddress OtherSourceFor(bool networkMode) => networkMode ? OtherInCidrRemote : IPAddress.Parse("203.0.113.7");
+
+    /// <summary>The i-th source that spends part of the total budget.</summary>
+    private static IPAddress SpenderFor(bool networkMode, int i) =>
+        IPAddress.Parse((networkMode ? "192.168.1." : "203.0.113.") + (100 + i).ToString(CultureInfo.InvariantCulture));
 
     private sealed class Clock
     {
@@ -62,7 +68,7 @@ public sealed class DarlingMcpBearerThrottleTests
         public DateTime Read() => Now;
     }
 
-    private readonly record struct Reply(int Status, string? RetryAfter, string? WwwAuthenticate);
+    private readonly record struct Reply(int Status, string? RetryAfter, string? WwwAuthenticate, string Body = "");
 
     /// <summary>The REAL <c>ConfigureMcpServices</c> and <c>ConfigurePipeline</c>, the two calls the start path
     /// makes, with a data source no case opens (every request stops at a gate or at tools/list).</summary>
@@ -122,12 +128,28 @@ public sealed class DarlingMcpBearerThrottleTests
         });
 
         using var reader = new System.IO.StreamReader(ctx.Response.Body);
-        await reader.ReadToEndAsync();
+        var body = await reader.ReadToEndAsync();
 
         return new Reply(
             ctx.Response.StatusCode,
             ctx.Response.Headers.RetryAfter.Count == 0 ? null : ctx.Response.Headers.RetryAfter.ToString(),
-            ctx.Response.Headers.WWWAuthenticate.Count == 0 ? null : ctx.Response.Headers.WWWAuthenticate.ToString());
+            ctx.Response.Headers.WWWAuthenticate.Count == 0 ? null : ctx.Response.Headers.WWWAuthenticate.ToString(),
+            body);
+    }
+
+    /// <summary>Spends the whole total budget from other sources: fifteen of them, each using its free misses
+    /// and the one that starts its wait.</summary>
+    private static async Task SpendTheTotalBudget(TestServer server, string host, bool networkMode)
+    {
+        var sources = DarlingSignInThrottle.GlobalMaxAttempts / (DarlingSignInThrottle.FreeFailures + 1);
+        for (var k = 0; k < sources; k++)
+        {
+            for (var j = 0; j <= DarlingSignInThrottle.FreeFailures; j++)
+            {
+                var refused = await ToolsListAsync(server, "/", host, SpenderFor(networkMode, k), "Bearer wrong-" + k + "-" + j);
+                Assert.Equal(StatusCodes.Status401Unauthorized, refused.Status);
+            }
+        }
     }
 
     private static string Seconds(TimeSpan span) =>
@@ -264,9 +286,11 @@ public sealed class DarlingMcpBearerThrottleTests
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task ManyConcurrentWrongTokens_FromOneSource_CompareExactlyTheAllowance_AndTheRestAreHeld(bool networkMode)
+    [InlineData(true, 64)]
+    [InlineData(false, 64)]
+    [InlineData(true, 16)]
+    [InlineData(false, 16)]
+    public async Task ManyConcurrentWrongTokens_FromOneSource_CompareExactlyTheAllowance_AndTheRestAreHeld(bool networkMode, int burst)
     {
         var clock = new Clock();
         using var server = await BuildServer(networkMode, requireToken: !networkMode, clock);
@@ -274,11 +298,10 @@ public sealed class DarlingMcpBearerThrottleTests
         var source = SourceFor(networkMode);
 
         /* The free number of misses plus the one that starts the wait: the most one source gets compared in
-           a window. 64 requests released together must not compare more than that. */
-        const int Burst = 64;
+           a window. Requests released together must not compare more than that. */
         var gate = new System.Threading.ManualResetEventSlim(false);
-        var tasks = new Task<Reply>[Burst];
-        for (var i = 0; i < Burst; i++)
+        var tasks = new Task<Reply>[burst];
+        for (var i = 0; i < burst; i++)
         {
             var guess = "Bearer burst-" + i;
             tasks[i] = Task.Run(async () =>
@@ -294,12 +317,156 @@ public sealed class DarlingMcpBearerThrottleTests
         var compared = replies.Count(r => r.Status == StatusCodes.Status401Unauthorized);
         var held = replies.Where(r => r.Status == StatusCodes.Status429TooManyRequests).ToList();
         Assert.Equal(DarlingSignInThrottle.FreeFailures + 1, compared);
-        Assert.Equal(Burst - compared, held.Count);
+        Assert.Equal(burst - compared, held.Count);
         Assert.All(held, r => Assert.True(int.Parse(r.RetryAfter!, CultureInfo.InvariantCulture) >= 1));
 
         /* And the right token is held with the rest while the wait lasts. */
         var right = await ToolsListAsync(server, "/", host, source, "Bearer " + Token);
         Assert.Equal(StatusCodes.Status429TooManyRequests, right.Status);
+    }
+
+    /// <summary>Releases one request per entry together and returns each reply with whether its token was the right one.</summary>
+    private static async Task<(Reply Reply, bool Right)[]> Release(
+        TestServer server, string host, IPAddress source, IReadOnlyList<bool> rightTokens)
+    {
+        var gate = new System.Threading.ManualResetEventSlim(false);
+        var tasks = new Task<(Reply, bool)>[rightTokens.Count];
+        for (var i = 0; i < rightTokens.Count; i++)
+        {
+            var right = rightTokens[i];
+            var authorization = "Bearer " + (right ? Token : "wrong-" + i);
+            tasks[i] = Task.Run(async () =>
+            {
+                gate.Wait();
+                return (await ToolsListAsync(server, "/", host, source, authorization), right);
+            });
+        }
+
+        gate.Set();
+        return await Task.WhenAll(tasks);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SixteenConcurrentRightTokens_AreAllServed(bool networkMode)
+    {
+        var clock = new Clock();
+        using var server = await BuildServer(networkMode, requireToken: !networkMode, clock);
+
+        /* The reservations of requests still in flight count against the free allowance; a request that only
+           meets those waits for them instead of being answered 429. */
+        for (var round = 0; round < 5; round++)
+        {
+            var replies = await Release(server, HostFor(networkMode), SourceFor(networkMode), Enumerable.Repeat(true, 16).ToList());
+            Assert.All(replies, r => Assert.Equal(StatusCodes.Status200OK, r.Reply.Status));
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ConcurrentRightTokens_BesideAFewWrongOnes_AreAllServed_AndTheWrongOnesAreCompared(bool networkMode)
+    {
+        var clock = new Clock();
+        using var server = await BuildServer(networkMode, requireToken: !networkMode, clock);
+
+        /* Two wrong tokens are inside the free number, so no wait starts whatever the order. */
+        var mix = Enumerable.Repeat(true, 14).Concat(Enumerable.Repeat(false, 2)).ToList();
+        var replies = await Release(server, HostFor(networkMode), SourceFor(networkMode), mix);
+
+        Assert.All(replies.Where(r => r.Right), r => Assert.Equal(StatusCodes.Status200OK, r.Reply.Status));
+        Assert.All(replies.Where(r => !r.Right), r => Assert.Equal(StatusCodes.Status401Unauthorized, r.Reply.Status));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ConcurrentRightAndWrongTokens_CompareNoMoreWrongTokensThanTheAllowance(bool networkMode)
+    {
+        var clock = new Clock();
+        using var server = await BuildServer(networkMode, requireToken: !networkMode, clock);
+
+        var mix = Enumerable.Repeat(true, 8).Concat(Enumerable.Repeat(false, 8)).ToList();
+        var replies = await Release(server, HostFor(networkMode), SourceFor(networkMode), mix);
+
+        /* The wait starts with the fourth wrong token, so exactly that many were compared; a right token is
+           served only if it came before the wait, and held (never compared) after it. */
+        Assert.Equal(DarlingSignInThrottle.FreeFailures + 1, replies.Count(r => r.Reply.Status == StatusCodes.Status401Unauthorized));
+        Assert.All(replies.Where(r => r.Reply.Status == StatusCodes.Status401Unauthorized), r => Assert.False(r.Right));
+        Assert.All(replies.Where(r => r.Reply.Status == StatusCodes.Status200OK), r => Assert.True(r.Right));
+        Assert.All(replies.Where(r => r.Reply.Status == StatusCodes.Status429TooManyRequests),
+            r => Assert.True(int.Parse(r.Reply.RetryAfter!, CultureInfo.InvariantCulture) >= 1));
+        Assert.Equal(replies.Length, replies.Count(r => r.Reply.Status is StatusCodes.Status401Unauthorized
+            or StatusCodes.Status200OK or StatusCodes.Status429TooManyRequests));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task OtherSourcesSpendingTheTotalBudget_DoNotStopASourceThatPresentedTheRightToken(bool networkMode)
+    {
+        var clock = new Clock();
+        using var server = await BuildServer(networkMode, requireToken: !networkMode, clock);
+        var host = HostFor(networkMode);
+        var worker = SourceFor(networkMode);
+
+        /* A client that works: its right token is served. */
+        Assert.Equal(StatusCodes.Status200OK, (await ToolsListAsync(server, "/", host, worker, "Bearer " + Token)).Status);
+
+        await SpendTheTotalBudget(server, host, networkMode);
+
+        /* A source that has not presented the right token is held by the total, and the answer says so. */
+        var stranger = await ToolsListAsync(server, "/", host, OtherSourceFor(networkMode), "Bearer " + Token);
+        Assert.Equal(StatusCodes.Status429TooManyRequests, stranger.Status);
+        Assert.Contains("not necessarily this one", stranger.Body, StringComparison.Ordinal);
+        Assert.Contains("restarting the service clears it", stranger.Body, StringComparison.Ordinal);
+        Assert.Contains("No token is compared", stranger.Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("from this address", stranger.Body, StringComparison.Ordinal);
+        Assert.True(int.Parse(stranger.RetryAfter!, CultureInfo.InvariantCulture) > (int)DarlingSignInThrottle.MaxDelay.TotalSeconds);
+
+        /* The working client keeps being served, request after request, while the total is spent. */
+        for (var i = 0; i < 5; i++)
+        {
+            Assert.Equal(StatusCodes.Status200OK, (await ToolsListAsync(server, "/", host, worker, "Bearer " + Token)).Status);
+        }
+
+        /* Its own wait is not lifted: wrong tokens from that source still start it, and then even the right
+           token waits, with the per-source answer. */
+        for (var i = 0; i <= DarlingSignInThrottle.FreeFailures; i++)
+        {
+            Assert.Equal(StatusCodes.Status401Unauthorized, (await ToolsListAsync(server, "/", host, worker, "Bearer wrong-own-" + i)).Status);
+        }
+
+        var held = await ToolsListAsync(server, "/", host, worker, "Bearer " + Token);
+        Assert.Equal(StatusCodes.Status429TooManyRequests, held.Status);
+        Assert.Contains("from this address", held.Body, StringComparison.Ordinal);
+        Assert.Equal(Seconds(DarlingSignInThrottle.BaseDelay), held.RetryAfter);
+    }
+
+    [Fact]
+    public async Task EveryLoopbackAddress_ShareOneWait_OnTheLoopbackBind()
+    {
+        var clock = new Clock();
+        using var server = await BuildServer(networkMode: false, requireToken: true, clock);
+
+        /* Four wrong tokens from four loopback spellings are one source's four. */
+        var spellings = new[] { "127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.3" };
+        foreach (var spelling in spellings)
+        {
+            var refused = await ToolsListAsync(server, "/", "localhost", IPAddress.Parse(spelling), "Bearer wrong-" + spelling);
+            Assert.Equal(StatusCodes.Status401Unauthorized, refused.Status);
+        }
+
+        foreach (var spelling in new[] { "127.0.0.1", "127.9.9.9", "::1" })
+        {
+            var held = await ToolsListAsync(server, "/", "localhost", IPAddress.Parse(spelling), "Bearer " + Token);
+            Assert.Equal(StatusCodes.Status429TooManyRequests, held.Status);
+        }
+
+        /* A source that is not loopback is its own. */
+        var other = await ToolsListAsync(server, "/", "localhost", OtherSourceFor(networkMode: false), "Bearer " + Token);
+        Assert.Equal(StatusCodes.Status200OK, other.Status);
     }
 
     [Fact]

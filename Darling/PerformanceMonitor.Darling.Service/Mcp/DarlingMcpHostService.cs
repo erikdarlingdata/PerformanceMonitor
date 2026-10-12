@@ -1761,37 +1761,51 @@ public sealed class DarlingMcpHostService : BackgroundService
                    what happens on the loopback bind.
 
                    An attempt is checked against the wait and counted in ONE atomic step BEFORE the token is
-                   compared (BeginAttempt), so attempts that arrive together are counted one by one and only
-                   the allowance is compared. Inside the wait (or when the total budget across every source is
-                   spent) nothing is compared and the answer is 429 + Retry-After; that includes a correct
-                   token, since answering it would tell the caller which attempt was right. The wait is per
-                   source address (IPv6 by its /64), so on the loopback bind every local client is one source,
-                   and behind a proxy every client is the proxy's address: this host does not read forwarded
+                   compared (BeginAttemptAsync), so attempts that arrive together are counted one by one and
+                   only the allowance is compared. When the allowance is used up only by attempts still in
+                   flight (parallel requests from one client), this attempt waits briefly for them instead of
+                   being refused. Inside the wait (or when the total budget across every source is spent and
+                   this source has not presented the right token recently) nothing is compared and the answer
+                   is 429 + Retry-After; that includes a correct token, since answering it would tell the
+                   caller which attempt was right. The wait is per source address (IPv6 by its /64, every
+                   loopback address as one), so on the loopback bind every local client is one source, and
+                   behind a proxy every client is the proxy's address: this host does not read forwarded
                    headers. The wait is in memory; restarting the service clears it. */
                 var attempt = default(SignInAttempt);
                 if (ExtractBearerToken(authorization) is not null)
                 {
-                    attempt = tokenThrottle.BeginAttempt(source, now);
+                    attempt = await tokenThrottle.BeginAttemptAsync(source, clock, context.RequestAborted);
+                    now = clock();
                     if (attempt.IsHeld)
                     {
                         var seconds = (int)Math.Ceiling(attempt.RetryAfter.TotalSeconds);
+                        var totalHold = attempt.Hold == SignInHold.Total;
                         refusals.Report(
                             _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status429TooManyRequests, remote,
-                            $"requests from this source are held for {seconds} more second(s) after repeated wrong bearer tokens; no token is compared during the wait, and restarting the service clears it",
+                            totalHold
+                                ? $"requests are held for {seconds} more second(s): {DarlingSignInThrottle.GlobalMaxAttempts} wrong bearer tokens arrived within the hour from several addresses, so no token is compared from an address that has not presented a correct one recently; restarting the service clears it, and the failing client is in this log with its 401 lines (fix its token or take it out of allowFrom)"
+                                : $"requests from this source are held for {seconds} more second(s) after repeated wrong bearer tokens; no token is compared during the wait, and restarting the service clears it",
                             now);
                         context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
                         context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
                         context.Response.ContentType = "text/plain; charset=utf-8";
                         await context.Response.WriteAsync(
-                            $"Too many wrong bearer tokens from this address. Try again in {seconds} seconds. "
-                            + "No token is compared during the wait. The wait is kept in memory: restarting the service clears it.");
+                            totalHold
+                                ? $"Bearer tokens are held for {seconds} seconds: {DarlingSignInThrottle.GlobalMaxAttempts} wrong tokens arrived in the last hour from several addresses, "
+                                  + "not necessarily this one. No token is compared from an address that has not presented a correct one recently. "
+                                  + "The hold is kept in memory: restarting the service clears it. Find the client that sends the wrong token and fix it or take it out of allowFrom, or the hold returns."
+                                : $"Too many wrong bearer tokens from this address. Try again in {seconds} seconds. "
+                                  + "No token is compared during the wait. The wait is kept in memory: restarting the service clears it.");
                         return;
                     }
                 }
 
-                if (!IsBearerTokenAuthorized(authorization, token))
+                var authorized = IsBearerTokenAuthorized(authorization, token);
+                if (!authorized)
                 {
-                    /* A reserved attempt that missed stays counted; it needs no further call. */
+                    /* The reserved attempt's miss is recorded now: the wait is computed from recorded misses,
+                       and attempts waiting on this one are decided again. */
+                    tokenThrottle.Missed(attempt);
 
                     /* THREE client states, never the token's value. Each one is a different next step
                        for the operator, which is the whole point of logging this at all:

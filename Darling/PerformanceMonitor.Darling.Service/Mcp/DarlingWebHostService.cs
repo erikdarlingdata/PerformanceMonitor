@@ -2104,24 +2104,32 @@ public sealed class DarlingWebHostService : BackgroundService
            before the token is compared: attempts staged on open connections and released together are
            counted one by one, and only the allowance reaches the comparison. */
         var source = DarlingSignInThrottle.SourceKey(remote);
+        var attempt = await signInThrottle.BeginAttemptAsync(source, static () => DateTime.UtcNow, context.RequestAborted);
         now = DateTime.UtcNow;
-        var attempt = signInThrottle.BeginAttempt(source, now);
         if (attempt.IsHeld)
         {
             var seconds = (int)Math.Ceiling(attempt.RetryAfter.TotalSeconds);
+            var totalHold = attempt.Hold == SignInHold.Total;
             refusals.Report(
                 _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status429TooManyRequests, remote,
-                $"sign-in attempts from this source are held for {seconds} more second(s) after repeated failures; no token is compared during the wait, and restarting the service clears it",
+                totalHold
+                    ? $"sign-in attempts are held for {seconds} more second(s): {DarlingSignInThrottle.GlobalMaxAttempts} wrong tokens arrived within the hour from several addresses, so no token is compared from an address that has not signed in recently; restarting the service clears it, and the failing client is in this log (fix its token or take it out of allowFrom)"
+                    : $"sign-in attempts from this source are held for {seconds} more second(s) after repeated failures; no token is compared during the wait, and restarting the service clears it",
                 now);
             context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
             await WriteSignInErrorAsync(context, StatusCodes.Status429TooManyRequests,
-                $"Too many failed sign-in attempts. Try again in {seconds} seconds. No token is compared during the wait. "
-                + "The wait is kept in memory: restarting the service clears it.");
+                totalHold
+                    ? $"Sign-in is held for {seconds} seconds: {DarlingSignInThrottle.GlobalMaxAttempts} wrong tokens arrived in the last hour from several addresses, not necessarily this one. "
+                      + "No token is compared from an address that has not signed in recently. "
+                      + "The hold is kept in memory: restarting the service clears it. Find the client that sends the wrong token and fix it or take it out of allowFrom, or the hold returns."
+                    : $"Too many failed sign-in attempts. Try again in {seconds} seconds. No token is compared during the wait. "
+                      + "The wait is kept in memory: restarting the service clears it.");
             return;
         }
 
         if (!DarlingHostBinding.FixedTimeTokenEquals(form.GetValueOrDefault("token", string.Empty), accessToken))
         {
+            signInThrottle.Missed(attempt);
             refusals.Report(
                 _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status200OK, remote,
                 "the posted token does not match web.network.encryptedToken, so the login page was served instead",
