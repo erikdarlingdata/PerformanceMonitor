@@ -85,7 +85,64 @@ public sealed class QuerySpillsDistinctQueryCountLiveTests
         }
     }
 
-    private static async Task SeedAsync(NpgsqlConnection c, string queryHash, DateTime at, long spills, CancellationToken ct)
+    /// <summary>
+    /// Review round 2 Medium-4: <c>QUERY_HIGH_DOP.high_dop_queries</c> drives the 5/20 threshold and the "N queries" text, so it counts
+    /// DISTINCT (database, query_hash) like the spill count, not one per snapshot row.
+    /// </summary>
+    [Fact]
+    public async Task HighDopQueryCount_CountsDistinctQueries_NotSnapshotRows()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the QUERY_HIGH_DOP distinct-count live test.");
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await DeleteRowsAsync(connection, ct);
+        }
+
+        try
+        {
+            var periodEnd = DateTime.SpecifyKind(new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
+            await using (var connection = new NpgsqlConnection(connectionString))
+            {
+                await connection.OpenAsync(ct);
+                /* Query A runs at DOP 16 in three snapshots, B in one, C only at DOP 4: four rows above DOP 8, two distinct queries. */
+                await SeedAsync(connection, "0xDOPA", periodEnd.AddMinutes(-90), 0, ct, maxDop: 16);
+                await SeedAsync(connection, "0xDOPA", periodEnd.AddMinutes(-60), 0, ct, maxDop: 16);
+                await SeedAsync(connection, "0xDOPA", periodEnd.AddMinutes(-30), 0, ct, maxDop: 16);
+                await SeedAsync(connection, "0xDOPB", periodEnd.AddMinutes(-45), 0, ct, maxDop: 16);
+                await SeedAsync(connection, "0xDOPC", periodEnd.AddMinutes(-40), 0, ct, maxDop: 4);
+            }
+
+            var context = new AnalysisContext
+            {
+                ServerId = TestServerId,
+                ServerName = TestServerName,
+                TimeRangeStart = periodEnd.AddHours(-4),
+                TimeRangeEnd = periodEnd,
+                ServerUtcOffset = TimeSpan.Zero,
+            };
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var facts = await new PgFactCollector(postgres).CollectFactsAsync(context);
+
+            var dop = Assert.Single(facts, f => f.Key == "QUERY_HIGH_DOP");
+            Assert.Equal(2.0, dop.Value);
+            Assert.Equal(2.0, dop.Metadata["high_dop_query_count"]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
+    private static async Task SeedAsync(NpgsqlConnection c, string queryHash, DateTime at, long spills, CancellationToken ct, int maxDop = 1)
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO collect.query_stats
@@ -94,7 +151,7 @@ INSERT INTO collect.query_stats
      delta_logical_reads, delta_logical_writes, delta_physical_reads, delta_rows, delta_spills,
      min_dop, max_dop, min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time)
 VALUES
-    ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,10,10000,20000,500,0,5,100,$11,1,1,800,1500,1600,3000)", c);
+    ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,10,10000,20000,500,0,5,100,$11,1,$12,800,1500,1600,3000)", c);
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
         command.Parameters.AddWithValue(at);
         command.Parameters.AddWithValue(TestServerId);
@@ -106,6 +163,7 @@ VALUES
         command.Parameters.AddWithValue(queryHash + "PLANH");
         command.Parameters.AddWithValue("SELECT * FROM SpillsTable");
         command.Parameters.AddWithValue(spills);
+        command.Parameters.AddWithValue(maxDop);
         await command.ExecuteNonQueryAsync(ct);
     }
 

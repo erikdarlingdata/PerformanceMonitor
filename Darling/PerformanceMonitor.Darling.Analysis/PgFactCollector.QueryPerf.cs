@@ -45,9 +45,12 @@ WITH current_maxdop AS
 )
 SELECT
     SUM(v.delta_spills) AS total_spills,
-    COUNT(CASE WHEN v.max_dop > 8
-                AND (m.value_in_use IS NULL OR m.value_in_use = 0 OR v.max_dop <= m.value_in_use)
-               THEN 1 END) AS high_dop_queries,
+    /* #5633: DISTINCT (database, query_hash), like spilling_queries below. This count drives the QUERY_HIGH_DOP threshold (5/20) and
+       its N-queries text, and v_query_stats holds one row per query per snapshot, so one high-DOP query seen in 20 collections
+       scored at full severity as 20 queries. A NULL hash collapses to one per database, as for spilling_queries. */
+    COUNT(DISTINCT CASE WHEN v.max_dop > 8
+                         AND (m.value_in_use IS NULL OR m.value_in_use = 0 OR v.max_dop <= m.value_in_use)
+                        THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS high_dop_queries,
     COUNT(DISTINCT CASE WHEN v.delta_spills > 0
                         THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS spilling_queries,
     SUM(v.delta_execution_count) AS total_executions,
