@@ -157,9 +157,11 @@ public sealed class ViewerSystemEventsDataStartTests
         table.Columns.Add("severity", typeof(int));
         table.Columns.Add("error_number", typeof(int));
         table.Columns.Add("text_data", typeof(string));
+        table.Columns.Add("filename", typeof(string));
+        table.Columns.Add("event_class", typeof(int));
         foreach (var local in storedLocal)
         {
-            table.Rows.Add(local, "Data File Auto Grow", "db", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, 55, 1_500_000L, 256L, DBNull.Value, DBNull.Value, DBNull.Value);
+            table.Rows.Add(local, "Data File Auto Grow", "db", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, 55, 1_500_000L, 256L, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value);
         }
 
         using var reader = table.CreateDataReader();

@@ -196,6 +196,8 @@ public sealed class StoredServerClockRowTextTests
         table.Columns.Add("severity", typeof(int));
         table.Columns.Add("error_number", typeof(int));
         table.Columns.Add("text_data", typeof(string));
+        table.Columns.Add("filename", typeof(string));
+        table.Columns.Add("event_class", typeof(int));
         return table;
     }
 
@@ -210,11 +212,11 @@ public sealed class StoredServerClockRowTextTests
         foreach (var label in new[] { "first-pass", "second-pass" })
         {
             table.Rows.Add(Naive(2026, 11, 1, 1, 30), "Data File Auto Grow", label, DBNull.Value, DBNull.Value, DBNull.Value,
-                DBNull.Value, 55, 1_500_000L, 256L, DBNull.Value, DBNull.Value, DBNull.Value);
+                DBNull.Value, 55, 1_500_000L, 256L, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value);
         }
 
         table.Rows.Add(Naive(2026, 11, 1, 2, 30), "Data File Auto Grow", "after", DBNull.Value, DBNull.Value, DBNull.Value,
-            DBNull.Value, 55, 1_500_000L, 256L, DBNull.Value, DBNull.Value, DBNull.Value);
+            DBNull.Value, 55, 1_500_000L, 256L, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value);
 
         List<DefaultTraceEventRow> rows;
         using (var reader = table.CreateDataReader())
