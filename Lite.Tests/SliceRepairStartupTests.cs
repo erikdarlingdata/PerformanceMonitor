@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging;
@@ -118,6 +119,69 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
     }
 
     /// <summary>
+    /// #5693: the startup repair reports its progress lines before it returns. They used to go through
+    /// <c>Progress&lt;T&gt;</c>, which posts each report to the captured synchronization context (the thread pool
+    /// when there is none), so they were logged late and on another thread. The test runs the repair under a context
+    /// that records every post made by a <c>Progress&lt;T&gt;</c>: the old code posts at least one, the inline
+    /// reporter posts none. That makes it fail every run, not only when the pool is slow.
+    /// </summary>
+    [Fact]
+    public async Task StartupRepair_LogsItsProgressLines_BeforeItReturns()
+    {
+        await WriteSplitArchiveAsync(Path.Combine(_archivePath, "202605_query_store_stats.parquet"));
+
+        var log = new CapturingLogger();
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath, log);
+        var context = new ProgressPostCountingContext();
+        var previous = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(context);
+        try
+        {
+            await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previous);
+        }
+
+        Assert.Equal(0, context.ProgressPosts);
+
+        var progress = log.Entries
+            .Where(l => l.Level == LogLevel.Information && l.Message.StartsWith("#1912 ", StringComparison.Ordinal))
+            .Select(l => l.Message).ToList();
+        var archive = progress.FindIndex(m => m.Contains("Archive 202605_query_store_stats.parquet:", StringComparison.Ordinal));
+        var views = progress.FindIndex(m => m.Contains("Archive views rebuilt", StringComparison.Ordinal));
+        Assert.True(archive >= 0 && archive < views, "the archive line and the views line must both be logged, in that order");
+
+        var countAtReturn = log.Entries.Count;
+        await Task.Delay(250, TestContext.Current.CancellationToken);
+        Assert.Equal(countAtReturn, log.Entries.Count);
+    }
+
+    /// <summary>Forwards every post to the thread pool, and counts the ones that come from a <c>Progress&lt;T&gt;</c>.</summary>
+    private sealed class ProgressPostCountingContext : SynchronizationContext
+    {
+        private int _progressPosts;
+
+        public int ProgressPosts => Volatile.Read(ref _progressPosts);
+
+        public override void Post(SendOrPostCallback d, object? state)
+        {
+            var owner = d.Target?.GetType();
+            if (owner is { IsGenericType: true } && owner.GetGenericTypeDefinition() == typeof(Progress<>))
+            {
+                Interlocked.Increment(ref _progressPosts);
+            }
+
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                SetSynchronizationContext(this);
+                d(state);
+            });
+        }
+    }
+
+    /// <summary>
     /// #5653: with too little free disk for the rewrite, the file is left alone and the run says why, instead of
     /// starting a COPY that dies part way through with the disk full.
     /// </summary>
@@ -129,14 +193,14 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
         var before = File.ReadAllBytes(file);
         _duckDb.AvailableFreeBytesProvider = _ => 1024 * 1024;
 
-        var log = new List<(LogLevel Level, string Message)>();
-        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath, new CapturingLogger(log));
+        var log = new CapturingLogger();
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath, log);
         await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
 
         Assert.Equal(before, File.ReadAllBytes(file));
         Assert.False(File.Exists(file + ".repair-tmp"));
         Assert.False(await service.AlreadyRepairedAsync(TestContext.Current.CancellationToken));
-        Assert.Contains(log, l => l.Level == LogLevel.Warning && l.Message.Contains("free disk space", StringComparison.Ordinal)
+        Assert.Contains(log.Entries, l => l.Level == LogLevel.Warning && l.Message.Contains("free disk space", StringComparison.Ordinal)
             && l.Message.Contains("reserve", StringComparison.Ordinal) && l.Message.Contains("rewritten copy", StringComparison.Ordinal)
             && l.Message.Contains("temporary spill", StringComparison.Ordinal) && l.Message.Contains("attempt was used", StringComparison.Ordinal));
     }
@@ -192,17 +256,17 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
         await WriteSplitArchiveAsync(Path.Combine(_archivePath, "202605_query_store_stats.parquet"));
         _duckDb.AvailableFreeBytesProvider = _ => 1024 * 1024;
 
-        var log = new List<(LogLevel Level, string Message)>();
-        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath, new CapturingLogger(log));
+        var log = new CapturingLogger();
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath, log);
 
         await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
-        var first = log.Single(l => l.Level == LogLevel.Warning && l.Message.Contains("file(s) unrepaired", StringComparison.Ordinal)).Message;
+        var first = log.Entries.Single(l => l.Level == LogLevel.Warning && l.Message.Contains("file(s) unrepaired", StringComparison.Ordinal)).Message;
         Assert.Contains("will be retried on the next start", first, StringComparison.Ordinal);
         Assert.DoesNotContain("NOT run again", first, StringComparison.Ordinal);
 
         log.Clear();
         await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
-        var last = log.Single(l => l.Level == LogLevel.Warning && l.Message.Contains("file(s) unrepaired", StringComparison.Ordinal)).Message;
+        var last = log.Entries.Single(l => l.Level == LogLevel.Warning && l.Message.Contains("file(s) unrepaired", StringComparison.Ordinal)).Message;
         Assert.Contains("the last one", last, StringComparison.Ordinal);
         Assert.Contains("will NOT run again", last, StringComparison.Ordinal);
         Assert.Contains("free up disk space", last, StringComparison.Ordinal);
@@ -222,8 +286,8 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
         await WriteSplitArchiveAsync(Path.Combine(_archivePath, "202605_query_store_stats.parquet"));
         _duckDb.AvailableFreeBytesProvider = _ => 1024 * 1024;
 
-        var log = new List<(LogLevel Level, string Message)>();
-        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath, new CapturingLogger(log));
+        var log = new CapturingLogger();
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath, log);
 
         await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
         Assert.Equal(1, await service.AttemptCountAsync(TestContext.Current.CancellationToken));
@@ -232,7 +296,7 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
         service.BeforeSurveyHook = () => throw new InvalidOperationException("the survey ran out of memory");
         await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
 
-        var failed = log.Single(l => l.Level == LogLevel.Error && l.Message.Contains("could not run", StringComparison.Ordinal)).Message;
+        var failed = log.Entries.Single(l => l.Level == LogLevel.Error && l.Message.Contains("could not run", StringComparison.Ordinal)).Message;
         Assert.DoesNotContain("the last one", failed, StringComparison.Ordinal);
         Assert.DoesNotContain("NOT run again", failed, StringComparison.Ordinal);
         Assert.DoesNotContain(QueryStoreSliceRepairService.AttemptTable, failed, StringComparison.Ordinal);
@@ -297,8 +361,8 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
 
         /* A 2 MiB allowance (floor lowered so the file starts), then a statement that must spill far more. */
         _duckDb.AvailableFreeBytesProvider = _ => reserve + RewriteCopy(before.Length) + (2 * MiB);
-        var log = new List<(LogLevel Level, string Message)>();
-        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath, new CapturingLogger(log))
+        var log = new CapturingLogger();
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath, log)
         {
             SpillFloorBytes = 1 * MiB,
             InsideSpillCapHook = async connection =>
@@ -316,8 +380,8 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(before, File.ReadAllBytes(file));
         Assert.False(File.Exists(file + ".repair-tmp"));
         Assert.False(await service.AlreadyRepairedAsync(TestContext.Current.CancellationToken));
-        Assert.Contains(log, l => l.Level == LogLevel.Error && l.Message.Contains("202605_query_store_stats", StringComparison.Ordinal));
-        Assert.Contains(log, l => l.Level == LogLevel.Warning && l.Message.Contains("temporary space", StringComparison.Ordinal));
+        Assert.Contains(log.Entries, l => l.Level == LogLevel.Error && l.Message.Contains("202605_query_store_stats", StringComparison.Ordinal));
+        Assert.Contains(log.Entries, l => l.Level == LogLevel.Warning && l.Message.Contains("temporary space", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -467,13 +531,31 @@ COPY (
         await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    internal sealed class CapturingLogger(List<(LogLevel Level, string Message)> sink) : ILogger<QueryStoreSliceRepairService>
+    /// <summary>
+    /// Captures what the service logs. The list is written under a lock and read as a snapshot under the same lock
+    /// (#5693), so a line logged from another thread cannot make a reader fail with "Collection was modified".
+    /// </summary>
+    internal sealed class CapturingLogger : ILogger<QueryStoreSliceRepairService>
     {
+        private readonly List<(LogLevel Level, string Message)> _entries = [];
+        private readonly object _gate = new();
+
+        public IReadOnlyList<(LogLevel Level, string Message)> Entries
+        {
+            get { lock (_gate) { return [.. _entries]; } }
+        }
+
+        public void Clear() { lock (_gate) { _entries.Clear(); } }
+
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
         public bool IsEnabled(LogLevel logLevel) => true;
 
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-            Func<TState, Exception?, string> formatter) => sink.Add((logLevel, formatter(state, exception)));
+            Func<TState, Exception?, string> formatter)
+        {
+            var message = formatter(state, exception);
+            lock (_gate) { _entries.Add((logLevel, message)); }
+        }
     }
 }

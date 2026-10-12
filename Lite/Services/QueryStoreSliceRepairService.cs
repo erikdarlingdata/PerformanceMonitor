@@ -411,7 +411,7 @@ SELECT
             attemptRecorded = true;
 
             var result = await RepairAsync(
-                new Progress<string>(message => _logger?.LogInformation("#1912 {Message}", message)),
+                new InlineLogProgress(_logger),
                 survey,
                 cancellationToken);
 
@@ -1243,4 +1243,13 @@ COPY (
         bytes >= 1024L * 1024L
             ? $"{bytes / (1024.0 * 1024.0):N1} MB"
             : $"{bytes / 1024.0:N0} KB";
+
+    /* #5693: logs each progress line on the calling thread, before Report returns. Progress<T> posts every report
+       to the captured synchronization context or the thread pool, so from a background task the lines were
+       logged late, on pool threads, and could land after the repair returned and out of order with the warnings
+       logged inline. */
+    private sealed class InlineLogProgress(ILogger<QueryStoreSliceRepairService>? logger) : IProgress<string>
+    {
+        public void Report(string value) => logger?.LogInformation("#1912 {Message}", value);
+    }
 }
