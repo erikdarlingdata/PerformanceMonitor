@@ -101,12 +101,12 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
     {
         var sql = DarlingPlanCorrectionReader.PlanCorrectionsCollapsedSql;
 
-        SqlTextPin.AssertExpresses("PARTITION BY database_name, recommendation_name ORDER BY collection_time DESC", sql,
-            "the newest capture of each recommendation is no longer the one row kept");
-        SqlTextPin.AssertExpresses("MIN(collection_time) OVER (PARTITION BY database_name, recommendation_name) AS first_seen", sql,
-            "the recommendation's first capture is no longer reported");
-        SqlTextPin.AssertExpresses("COUNT(*) OVER (PARTITION BY database_name, recommendation_name) AS capture_count", sql,
-            "the capture count is no longer reported");
+        SqlTextPin.AssertExpresses("PARTITION BY database_name, recommendation_name, query_id ORDER BY collection_time DESC, score DESC NULLS LAST, regressed_plan_id DESC NULLS LAST, last_refresh DESC NULLS LAST", sql,
+            "the newest capture of each recommendation is no longer the one row kept, or a collection_time tie no longer resolves deterministically");
+        SqlTextPin.AssertExpresses("MIN(collection_time) OVER (PARTITION BY database_name, recommendation_name, query_id) AS first_seen", sql,
+            "the recommendation's first capture is no longer reported, or two queries sharing a recommendation name collapse into one row");
+        SqlTextPin.AssertExpresses("COUNT(*) OVER (PARTITION BY database_name, recommendation_name, query_id) AS capture_count", sql,
+            "the capture count is no longer reported, or two queries sharing a recommendation name collapse into one row");
         SqlTextPin.AssertExpresses("WHERE newest_rank = 1", sql, "every capture, not one per recommendation, comes back");
         SqlTextPin.AssertExpresses("recommendation_name IS NOT NULL", sql, "enablement-only rows come back as phantom recommendations");
         SqlTextPin.AssertExpresses("WHERE server_id = $1", sql, "the read is not scoped to the requested server");

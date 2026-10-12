@@ -179,6 +179,84 @@ public sealed class BlockingWaitCountTests
         Assert.Contains("55", waitRange, StringComparison.Ordinal);
     }
 
+    /* ---- #5644 review (W1/W2): the XE-or-DMV choice is made BEFORE the excluded-database filter ---- */
+
+    private static List<BlockedProcessAlertRow> InDb(List<BlockedProcessAlertRow> rows, string db)
+    {
+        foreach (var r in rows) r.DatabaseName = db;
+        return rows;
+    }
+
+    private static readonly string[] ExcludedOnly = { "excl" };
+
+    [Fact]
+    public void XeReportsOnlyInAnExcludedDatabase_AreNotReplacedByDmvWaitsElsewhere()
+    {
+        var rows = InDb(OneWait(102, 100, T0, 5), "excl");
+        rows.AddRange(InDb(OneWait(202, 200, T0.AddMinutes(5), 3, source: BlockedProcessAlertRow.DmvSnapshotSource), "other"));
+
+        Assert.Empty(AlertContextBuilders.BlockingWaitRows(rows, ExcludedOnly));
+        Assert.Null(AlertContextBuilders.BuildBlockingContext("srv", rows, ExcludedOnly));
+    }
+
+    [Fact]
+    public void XeReportsInANonExcludedDatabase_AreTheSource_AndDmvWaitsAreIgnored()
+    {
+        var rows = InDb(OneWait(102, 100, T0, 5), "other");
+        rows.AddRange(InDb(OneWait(202, 200, T0.AddMinutes(5), 3, source: BlockedProcessAlertRow.DmvSnapshotSource), "other"));
+        rows.AddRange(InDb(OneWait(302, 300, T0.AddMinutes(9), 3), "excl"));
+
+        var counted = AlertContextBuilders.BlockingWaitRows(rows, ExcludedOnly);
+
+        var wait = Assert.Single(counted);
+        Assert.Equal(BlockedProcessAlertRow.XeReportSource, wait.Source);
+        Assert.Equal(102, wait.BlockedSpid);
+    }
+
+    [Fact]
+    public void NoXeReportsAtAll_CountsTheDmvWaits_OutsideTheExcludedDatabases()
+    {
+        var rows = InDb(OneWait(102, 100, T0, 1, source: BlockedProcessAlertRow.DmvSnapshotSource), "other");
+        rows.AddRange(InDb(OneWait(202, 200, T0.AddMinutes(5), 1, source: BlockedProcessAlertRow.DmvSnapshotSource), "excl"));
+
+        var wait = Assert.Single(AlertContextBuilders.BlockingWaitRows(rows, ExcludedOnly));
+        Assert.Equal(BlockedProcessAlertRow.DmvSnapshotSource, wait.Source);
+        Assert.Equal(102, wait.BlockedSpid);
+    }
+
+    [Fact]
+    public async Task Engine_DoesNotFire_WhenTheOnlyXeReportsAreExcluded_AndDmvWaitsSitElsewhere()
+    {
+        var h = new AlertEngineTests.Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingCountThreshold = 1;
+        h.Settings.ExcludedDatabasesList.Add("excl");
+        var engine = h.Build();
+
+        h.Adapter.Blocking.AddRange(InDb(OneWait(102, 100, T0, 5), "excl"));
+        h.Adapter.Blocking.AddRange(InDb(OneWait(202, 200, T0.AddMinutes(5), 3, source: BlockedProcessAlertRow.DmvSnapshotSource), "other"));
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Engine_Fires_OnXeWaits_WhenXeIsInANonExcludedDatabase()
+    {
+        var h = new AlertEngineTests.Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingCountThreshold = 1;
+        h.Settings.ExcludedDatabasesList.Add("excl");
+        var engine = h.Build();
+
+        h.Adapter.Blocking.AddRange(InDb(OneWait(102, 100, T0, 5), "other"));
+        h.Adapter.Blocking.AddRange(InDb(OneWait(202, 200, T0.AddMinutes(5), 3, source: BlockedProcessAlertRow.DmvSnapshotSource), "other"));
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("1", fired.CurrentValue);
+    }
+
     /* ---- the SQL form of the same rule (PostgreSQL): the fleet tile, the analysis fact and the summaries run it ---- */
 
     private static string ValuesSource(IReadOnlyList<BlockedProcessAlertRow> rows, int server) =>

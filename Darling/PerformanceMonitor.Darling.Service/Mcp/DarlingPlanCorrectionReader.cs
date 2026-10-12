@@ -92,7 +92,8 @@ LIMIT $4";
 
     /// <summary>
     /// #5644 W21: <see cref="PlanCorrectionsSql"/> collapsed to ONE row per recommendation (database + the engine's
-    /// <c>recommendation_name</c>). The collector re-captures every open recommendation on every cycle, so the per-capture
+    /// <c>recommendation_name</c> + the <c>query_id</c> it targets, because the engine can reuse a name for a different query
+    /// after a restart). The collector re-captures every open recommendation on every cycle, so the per-capture
     /// read above fills a 50-row page with three recommendations seen seventeen times each. This read returns each
     /// recommendation's NEWEST capture (so <c>collection_time</c> is its last-seen time and the state is its latest), with
     /// <c>first_seen</c> (its oldest capture in the window) and <c>capture_count</c> (captures in the window) as the two
@@ -126,9 +127,9 @@ WITH captured AS (
         execute_action_initiated_time,
         revert_action_initiated_by,
         revert_action_initiated_time,
-        ROW_NUMBER() OVER (PARTITION BY database_name, recommendation_name ORDER BY collection_time DESC) AS newest_rank,
-        MIN(collection_time) OVER (PARTITION BY database_name, recommendation_name) AS first_seen,
-        COUNT(*) OVER (PARTITION BY database_name, recommendation_name) AS capture_count
+        ROW_NUMBER() OVER (PARTITION BY database_name, recommendation_name, query_id ORDER BY collection_time DESC, score DESC NULLS LAST, regressed_plan_id DESC NULLS LAST, last_refresh DESC NULLS LAST) AS newest_rank,
+        MIN(collection_time) OVER (PARTITION BY database_name, recommendation_name, query_id) AS first_seen,
+        COUNT(*) OVER (PARTITION BY database_name, recommendation_name, query_id) AS capture_count
     FROM plan_correction
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -165,7 +166,7 @@ SELECT
     capture_count
 FROM captured
 WHERE newest_rank = 1
-ORDER BY collection_time DESC, score DESC
+ORDER BY collection_time DESC, score DESC, database_name, query_id
 LIMIT $4";
 
     /// <summary>

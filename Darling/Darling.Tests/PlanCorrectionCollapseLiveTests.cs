@@ -115,6 +115,83 @@ public sealed class PlanCorrectionCollapseLiveTests
         }
     }
 
+    /// <summary>
+    /// #5644 W21 review: the engine can reuse a recommendation name (<c>PR_1</c>) for a different query after a restart.
+    /// Two recommendations that share a name but not a query stay two rows, each with its own capture count, and two
+    /// captures of one recommendation at the identical instant resolve to the higher-scored row on every run.
+    /// </summary>
+    [Fact]
+    public async Task ReusedRecommendationName_ForADifferentQuery_StaysASeparateRow_AndATieIsDeterministic()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live collapse test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            var newest = DateTime.SpecifyKind(
+                new DateTime(DateTime.UtcNow.AddMinutes(-5).Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond), DateTimeKind.Unspecified);
+
+            /* Query 11 under PR_1 three times; the same name for query 22 twice, the later two inserted at one instant
+               with different scores (the lower score is inserted LAST so insertion order cannot decide the winner). */
+            await PlantRawAsync(connection, 1, newest.AddMinutes(-10), "PR_1", 11, "A", 50, ct);
+            await PlantRawAsync(connection, 2, newest.AddMinutes(-5), "PR_1", 11, "A", 50, ct);
+            await PlantRawAsync(connection, 3, newest, "PR_1", 11, "A", 50, ct);
+            await PlantRawAsync(connection, 4, newest.AddMinutes(-5), "PR_1", 22, "B", 60, ct);
+            await PlantRawAsync(connection, 5, newest, "PR_1", 22, "B-high", 90, ct);
+            await PlantRawAsync(connection, 6, newest, "PR_1", 22, "B-low", 10, ct);
+
+            var collapsed = await DarlingPlanCorrectionReader.GetCollapsedPlanCorrectionsAsync(
+                postgres, ServerId, newest.AddHours(-1), newest.AddHours(1), cap: 50, cancellationToken: ct);
+
+            Assert.Equal(2, collapsed.Count);
+            var first = Assert.Single(collapsed, r => r.QueryId == 11);
+            Assert.Equal(3, first.CaptureCount);
+            Assert.Equal(newest.AddMinutes(-10), first.FirstSeen);
+            var second = Assert.Single(collapsed, r => r.QueryId == 22);
+            Assert.Equal(3, second.CaptureCount);
+            Assert.Equal(newest.AddMinutes(-5), second.FirstSeen);
+            Assert.Equal("B-high", second.RecommendationState);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task PlantRawAsync(
+        NpgsqlConnection connection, long collectionId, DateTime collectionTime, string recommendationName, long queryId, string state, int score, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            """
+            INSERT INTO plan_correction
+                (collection_id, collection_time, server_id, server_name, database_name, recommendation_name,
+                 recommendation_state, query_id, score)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            """, connection);
+        command.Parameters.AddWithValue(900 + collectionId);
+        command.Parameters.AddWithValue(collectionTime);
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue("collapse_probe_db");
+        command.Parameters.AddWithValue(recommendationName);
+        command.Parameters.AddWithValue(state);
+        command.Parameters.AddWithValue(queryId);
+        command.Parameters.AddWithValue(score);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     private static async Task PlantAsync(NpgsqlConnection connection, DateTime collectionTime, int recommendation, int capture, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(

@@ -41,8 +41,11 @@ public class BlockingDeadlockContextBuilderTests
 
     private static BlockedProcessAlertRow Blocked(
         string db = "StackOverflow", string obj = "", string blockedSql = "", string blockingSql = "",
-        long waitMs = 5000, string lockMode = "", string xml = "", DateTime? eventTime = null) => new()
+        long waitMs = 5000, string lockMode = "", string xml = "", DateTime? eventTime = null, int spid = 0) => new()
     {
+        /* #5644 W1: rows with one blocked spid, blocker and start are ONE wait; a test that wants separate
+           waits gives each its own spid. */
+        BlockedSpid = spid,
         EventTime = eventTime ?? new DateTime(2026, 6, 19, 12, 0, 0),
         DatabaseName = db,
         ContentiousObject = obj,
@@ -111,7 +114,7 @@ public class BlockingDeadlockContextBuilderTests
         /* 12 distinct chains -> 10 shown + "+2 more" trailer (gotqn's report: never silently drop). */
         var rows = new List<BlockedProcessAlertRow>();
         for (int i = 0; i < 12; i++)
-            rows.Add(Blocked(obj: $"db.dbo.Table{i}", waitMs: 1000 + i));
+            rows.Add(Blocked(obj: $"db.dbo.Table{i}", waitMs: 1000 + i, spid: i + 1));
 
         var context = AlertContextBuilders.BuildBlockingContext(Server, rows, NoExclusions);
 
@@ -128,9 +131,9 @@ public class BlockingDeadlockContextBuilderTests
     {
         var rows = new List<BlockedProcessAlertRow>
         {
-            Blocked(obj: "db.dbo.A"),                                       /* DMV-style row: no XML */
-            Blocked(obj: "db.dbo.B", xml: "<blocked-process-report first/>"),
-            Blocked(obj: "db.dbo.C", xml: "<blocked-process-report second/>")
+            Blocked(obj: "db.dbo.A", spid: 1),                              /* DMV-style row: no XML */
+            Blocked(obj: "db.dbo.B", xml: "<blocked-process-report first/>", spid: 2),
+            Blocked(obj: "db.dbo.C", xml: "<blocked-process-report second/>", spid: 3)
         };
 
         var context = AlertContextBuilders.BuildBlockingContext(Server, rows, NoExclusions);
@@ -164,9 +167,9 @@ public class BlockingDeadlockContextBuilderTests
     {
         var rows = new List<BlockedProcessAlertRow>
         {
-            Blocked(obj: "db.dbo.A", xml: "<blocked-process-report for=\"A\"/>"),
-            Blocked(obj: "db.dbo.B", xml: "<blocked-process-report for=\"B\"/>"),
-            Blocked(obj: "db.dbo.C")                                            /* DMV-style row: no report */
+            Blocked(obj: "db.dbo.A", xml: "<blocked-process-report for=\"A\"/>", spid: 1),
+            Blocked(obj: "db.dbo.B", xml: "<blocked-process-report for=\"B\"/>", spid: 2),
+            Blocked(obj: "db.dbo.C", spid: 3)                                          /* DMV-style row: no report */
         };
 
         var context = AlertContextBuilders.BuildBlockingContext(Server, rows, NoExclusions);
