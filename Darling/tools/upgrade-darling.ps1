@@ -856,21 +856,19 @@ function Get-DarlingPreLockTrustedSidsForRerun([string]$serviceName, $existingSe
     return [pscustomobject]@{ Trusted = @(Get-DarlingPreLockTrustedSids); ServiceSids = @(Get-DarlingServiceSids $existingAccount $serviceName) }
 }
 
-# The absolute paths darling.json names that sit inside $folder (#5627): the store (postgres.dataDirectory), a
-# certificate or key (a tls pfxPath, certPath or keyPath) and any 'file:' reference. Returns Lines, each one
-# '"path" (what names it)', and Incomplete, true when a value was left out or the list was cut. A regex over the
-# comment-stripped text, as Get-DarlingExtraServiceWriteDirectories does, because Windows PowerShell 5.1's
-# ConvertFrom-Json rejects comments and trailing commas. Each value is read on its own, so one that cannot be read as a path
-# is left out and the rest still print: a value holding a control character, a line break or any of < > | " is
-# left out, so is one over 260 characters, and a value that starts with two slashes or two backslashes (a network share
-# or device path) is not looked up and counts as Incomplete, and at most 10 are listed. A darling.json that cannot be read counts
-# as Incomplete; a missing one names nothing. Kept byte-identical in install-darling.ps1 and
-# upgrade-darling.ps1.
-function Get-DarlingConfiguredPathsUnder([string]$folder) {
-    $config = Join-Path $folder 'darling.json'
-    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return [pscustomobject]@{ Lines = @(); Incomplete = $false } }
+# The values darling.json gives as paths (#5627, #5700): postgres.dataDirectory, a tls pfxPath, certPath or keyPath, and any 'file:'
+# reference. Returns Entries, each one @(what, value) in the order darling.json names them (the value with doubled backslashes
+# written once and trimmed, and 'what' the setting's name); Skipped, the 'what' of every value left out; and Unreadable, true when
+# darling.json exists but could not be read (a missing one names nothing). A regex over the comment-stripped text, as
+# Get-DarlingExtraServiceWriteDirectories does, because Windows PowerShell 5.1's ConvertFrom-Json rejects comments and trailing
+# commas. Each value is read on its own, so one that cannot be read as a path is left out and the rest still come back: a value
+# holding a control character, a line break or any of < > | " is left out, so is one over 260 characters, and a value that
+# starts with two slashes or two backslashes (a network share or device path) is not looked up and is left out too. An empty
+# value is not an entry. A relative value is an entry. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingConfiguredPathEntries([string]$config) {
+    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return [pscustomobject]@{ Entries = @(); Skipped = @(); Unreadable = $false } }
     try { $text = Get-Content -LiteralPath $config -Raw -ErrorAction Stop }
-    catch { return [pscustomobject]@{ Lines = @(); Incomplete = $true } }
+    catch { return [pscustomobject]@{ Entries = @(); Skipped = @(); Unreadable = $true } }
     $stripped = ($text -split "`r?`n" | ForEach-Object { $_ -replace '(?<!:)//.*$', '' }) -join "`n"
     $named = @()
     foreach ($match in [regex]::Matches($stripped, '"(dataDirectory|pfxPath|certPath|keyPath)"\s*:\s*"((?:[^"\\]|\\.)*)"', 'IgnoreCase')) {
@@ -880,15 +878,32 @@ function Get-DarlingConfiguredPathsUnder([string]$folder) {
     foreach ($match in [regex]::Matches($stripped, '"file:\s*((?:[^"\\]|\\.)*)"')) {
         $named += , @('a file: reference', $match.Groups[1].Value)
     }
-    $found = @()
-    $incomplete = $false
+    $entries = @()
+    $skipped = @()
     foreach ($pair in $named) {
+        $value = ($pair[1] -replace '\\\\', '\').Trim()
+        if ($value.Length -gt 260 -or $value -match '[\p{C}\p{Zl}\p{Zp}<>|"]') { $skipped += $pair[0]; continue }
+        if ($value -match '^(\\\\|//)') { $skipped += $pair[0]; continue }
+        if ($value) { $entries += , @($pair[0], $value) }
+    }
+    return [pscustomobject]@{ Entries = $entries; Skipped = $skipped; Unreadable = $false }
+}
+
+# The absolute paths darling.json names that sit inside $folder (#5627): the store (postgres.dataDirectory), a
+# certificate or key (a tls pfxPath, certPath or keyPath) and any 'file:' reference. Returns Lines, each one
+# '"path" (what names it)', and Incomplete, true when a value was left out or the list was cut. The values come from
+# Get-DarlingConfiguredPathEntries, so what that function leaves out is Incomplete here, and at most 10 are listed. A value
+# that cannot be looked up as a path is left out and counts as Incomplete. A darling.json that cannot be read counts
+# as Incomplete; a missing one names nothing. Kept byte-identical in install-darling.ps1 and
+# upgrade-darling.ps1.
+function Get-DarlingConfiguredPathsUnder([string]$folder) {
+    $read = Get-DarlingConfiguredPathEntries (Join-Path $folder 'darling.json')
+    $incomplete = $read.Unreadable -or $read.Skipped.Count -gt 0
+    $found = @()
+    foreach ($entry in $read.Entries) {
         try {
-            $value = ($pair[1] -replace '\\\\', '\').Trim()
-            if ($value.Length -gt 260 -or $value -match '[\p{C}\p{Zl}\p{Zp}<>|"]') { $incomplete = $true; continue }
-            if ($value -match '^(\\\\|//)') { $incomplete = $true; continue }
-            if ($value -and [IO.Path]::IsPathRooted($value) -and (Test-PathIsAtOrUnder $value $folder)) {
-                $found += "`"$value`" ($($pair[0]))"
+            if ([IO.Path]::IsPathRooted($entry[1]) -and (Test-PathIsAtOrUnder $entry[1] $folder)) {
+                $found += "`"$($entry[1])`" ($($entry[0]))"
             }
         }
         catch { $incomplete = $true }
@@ -896,6 +911,97 @@ function Get-DarlingConfiguredPathsUnder([string]$folder) {
     $found = @($found | Select-Object -Unique)
     if ($found.Count -gt 10) { $found = @($found | Select-Object -First 10); $incomplete = $true }
     return [pscustomobject]@{ Lines = $found; Incomplete = $incomplete }
+}
+
+# The TLS private-key files darling.json names (#5700): every pfxPath (a PKCS#12 bundle, certificate and key together)
+# and keyPath (a PEM key). A certPath is a public certificate and is not one. Read with Get-DarlingConfiguredPathEntries,
+# so it is the same parse the rest of the script uses. Returns Paths, each absolute path once; Relative, the values that are
+# not a drive-letter path (the service reads those from its own working directory, which this script cannot know, so they
+# are not touched); and Incomplete, true when darling.json could not be read or a pfxPath or keyPath value was left out.
+# Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingTlsKeyFiles([string]$folder) {
+    $read = Get-DarlingConfiguredPathEntries (Join-Path $folder 'darling.json')
+    $paths = @()
+    $relative = @()
+    foreach ($entry in $read.Entries) {
+        if ($entry[0] -ine 'pfxPath' -and $entry[0] -ine 'keyPath') { continue }
+        try {
+            if ($entry[1] -match '^[A-Za-z]:[\\/]') { $paths += [IO.Path]::GetFullPath($entry[1]) }
+            else { $relative += $entry[1] }
+        }
+        catch { $relative += $entry[1] }
+    }
+    $skippedKey = @($read.Skipped | Where-Object { $_ -ieq 'pfxPath' -or $_ -ieq 'keyPath' })
+    return [pscustomobject]@{
+        Paths      = @($paths | Select-Object -Unique)
+        Relative   = @($relative | Select-Object -Unique)
+        Incomplete = ($read.Unreadable -or $skippedKey.Count -gt 0)
+    }
+}
+
+# Gives each TLS private-key file darling.json names (Get-DarlingTlsKeyFiles) the protection darling.json gets (#5700): inheritance
+# off, and SYSTEM, Administrators and the service account only, each with full control. The operator group gets nothing on a
+# key file: the Viewer and the CLI read darling.json, and nothing but the service reads a key. A file outside $folder gets the
+# change on the FILE only, never on its folder. Each file is checked afterwards, and one that a user group can still
+# read is a problem. A missing file, a file with more than one name or a link, a relative path and a failure are problems too, each a sentence
+# that carries the icacls line that fixes it. Returns Secured, one 'path (where it is)' per file changed and verified, and
+# Problems. It writes nothing to the console and never throws, so the caller decides how loudly to say it and an install or
+# upgrade is never failed over it. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Protect-DarlingTlsKeyFiles([string]$folder, [string]$serviceAccount) {
+    $secured = @()
+    $problems = @()
+    try {
+        $keys = Get-DarlingTlsKeyFiles $folder
+        foreach ($relativePath in $keys.Relative) {
+            $problems += "The TLS key file '$relativePath' is a relative path, which the service reads from its own working directory, so its permissions were not changed. Use an absolute path in darling.json, then run this script again."
+        }
+        if ($keys.Incomplete) {
+            $problems += "Not every pfxPath or keyPath value in darling.json could be read, so a TLS key file may have been left out. Check each one is a plain absolute path, then run this script again."
+        }
+        foreach ($path in $keys.Paths) {
+            $where = if (Test-PathIsAtOrUnder $path $folder) { 'in the install folder' } else { 'outside the install folder; only the file was changed, not its folder' }
+            $fix = "icacls `"$path`" /inheritance:r /grant:r `"*S-1-5-18:F`" `"*S-1-5-32-544:F`" `"${serviceAccount}:F`""
+            try {
+                $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                if ($null -eq $item -or $item.PSIsContainer) {
+                    $problems += "The TLS key file '$path' that darling.json names was not found, so no permissions were set on it. Once it is in place, run: $fix"
+                    continue
+                }
+                if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or (Get-DarlingFileNameCount $path) -ne 1) {
+                    $problems += "The TLS key file '$path' has more than one name (it is a hard link), could not be checked, or is a link to another file, so its permissions were not changed. Replace it with an ordinary copy, then run this script again."
+                    continue
+                }
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $systemSid = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
+                $adminsSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
+                $serviceSid = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate([System.Security.Principal.SecurityIdentifier])
+                $acl = New-Object System.Security.AccessControl.FileSecurity
+                $acl.SetAccessRuleProtection($true, $false)
+                foreach ($sid in @($systemSid, $adminsSid, $serviceSid)) {
+                    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)))
+                }
+                Set-Acl -LiteralPath $path -AclObject $acl
+                $after = Get-Acl -LiteralPath $path
+                $open = @($after.Access | Where-Object {
+                    $aceSid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+                    $_.AccessControlType -eq 'Allow' -and ($aceSid.IsWellKnown($wk::BuiltinUsersSid) -or $aceSid.IsWellKnown($wk::InteractiveSid) -or $aceSid.IsWellKnown($wk::WorldSid) -or $aceSid.IsWellKnown($wk::AuthenticatedUserSid))
+                })
+                if ($open.Count -gt 0 -or -not $after.AreAccessRulesProtected) {
+                    $problems += "The TLS key file '$path' is STILL readable by ordinary users after its permissions were set. Run from an elevated prompt: $fix"
+                }
+                else {
+                    $secured += "$path ($where)"
+                }
+            }
+            catch {
+                $problems += "The permissions on the TLS key file '$path' could not be set ($($_.Exception.Message)). Run from an elevated prompt: $fix"
+            }
+        }
+    }
+    catch {
+        $problems += "The TLS key files darling.json names could not be checked ($($_.Exception.Message)). Find each pfxPath and keyPath in darling.json and lock it to SYSTEM, Administrators and the service account."
+    }
+    return [pscustomobject]@{ Secured = $secured; Problems = $problems }
 }
 
 # Where the new zip goes (#5627). Under C:\Program Files already, the folder to use is a different one.
@@ -3335,8 +3441,14 @@ else {
         #
         # Best-effort and non-fatal: a backup that is taken but not hardened is strictly better than an
         # upgrade that refuses to proceed, and the operator is told which.
+        #
+        # A TLS key file that sits directly in the install root (a pfxPath or keyPath darling.json names, #5700) was
+        # copied too, and gets the same restriction as the config copy: the copy took the root's inherited DACL.
+        $tlsKeyNames = @()
+        try { $tlsKeyNames = @((Get-DarlingTlsKeyFiles $InstallRoot).Paths | Where-Object { [IO.Path]::GetDirectoryName($_).TrimEnd('\') -ieq $InstallRoot.TrimEnd('\') } | ForEach-Object { [IO.Path]::GetFileName($_) }) }
+        catch { $tlsKeyNames = @() }
         $secretCopies = @(Get-ChildItem -LiteralPath $backupPath -File -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -ieq 'darling.json' -or $_.Extension -ieq '.dpapi' })
+            Where-Object { $_.Name -ieq 'darling.json' -or $_.Extension -ieq '.dpapi' -or $tlsKeyNames -contains $_.Name })
 
         # An enumeration that fails - a locked handle, an AV scan mid-copy - yields an EMPTY set, not an
         # error, so without this the loop below would simply not run and nothing would be said. That is the
@@ -3365,11 +3477,11 @@ else {
                 $after = Get-Acl -LiteralPath $copy.FullName
                 $stillOpen = @($after.Access | Where-Object { $_.IdentityReference -match 'Users|Everyone|Authenticated' })
                 if ((-not $after.AreAccessRulesProtected) -or $stillOpen.Count -gt 0) {
-                    Warn "Restricting $($copy.Name) in the rollback backup reported success but the file is STILL readable by ordinary users (protected=$($after.AreAccessRulesProtected)). It holds encrypted credentials - restrict it by hand, or delete the backup."
+                    Warn "Restricting $($copy.Name) in the rollback backup reported success but the file is STILL readable by ordinary users (protected=$($after.AreAccessRulesProtected)). It holds credentials or a private key - restrict it by hand, or delete the backup."
                 }
             }
             catch {
-                Warn "Could not restrict $($copy.Name) in the rollback backup ($($_.Exception.Message)). It holds encrypted credentials and inherited the install root's permissions - restrict it by hand, or delete the backup."
+                Warn "Could not restrict $($copy.Name) in the rollback backup ($($_.Exception.Message)). It holds credentials or a private key and inherited the install root's permissions - restrict it by hand, or delete the backup."
             }
         }
     }
@@ -3586,6 +3698,22 @@ elseif ($onDomainController) {
 }
 else {
     Warn "Could not create the local group '$operatorGroupName': $operatorGroupProblem The service will start, but darling.json and the store's admin and viewer credentials stay readable by SYSTEM, Administrators and the service account only, so the Viewer and the CLI cannot read them without elevation. Create the group from an elevated prompt (net localgroup `"$operatorGroupName`" /add), add the people who run the Viewer or the CLI, then restart the service so it grants the group."
+}
+
+# ============================ the TLS key files (#5700) ============================
+#
+# The TLS private-key files darling.json names (a pfxPath or keyPath) get the protection darling.json gets: SYSTEM,
+# Administrators and the service account, no operator read (nothing but the service reads a key), inheritance off. A key
+# file in the install root otherwise keeps the BUILTIN\Users read it inherited. A key file outside the install folder gets
+# the change on the FILE only. Protect-DarlingTlsKeyFiles is the function install-darling.ps1 runs, and it never throws:
+# a file it cannot find or secure is a warning with the icacls line that fixes it, and the service still starts.
+if (-not $logonAccount) {
+    Warn "Could not read which account '$serviceName' logs on as, so the TLS key files darling.json names were NOT locked rather than locked around a guess. Fix the lookup and re-run this script, or run icacls on each pfxPath and keyPath file to leave it to SYSTEM, Administrators and the service account."
+}
+else {
+    $tlsKeyResult = Protect-DarlingTlsKeyFiles $InstallRoot $logonAccount
+    foreach ($line in $tlsKeyResult.Secured) { Good "TLS key file $line is locked to SYSTEM, Administrators and the service account." }
+    foreach ($line in $tlsKeyResult.Problems) { Warn $line }
 }
 
 # ============================ the store folder ============================

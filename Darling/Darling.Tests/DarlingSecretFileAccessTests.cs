@@ -122,7 +122,7 @@ public sealed class DarlingSecretFileAccessTests
 
         var at = source.IndexOf("public static int HardenFiles(", StringComparison.Ordinal);
         Assert.True(at >= 0, "HardenFiles is gone");
-        var body = source[at..Math.Min(source.Length, at + 10000)];
+        var body = source[at..Math.Min(source.Length, at + 13000)];
 
         foreach (var file in new[] { "pg-credential.dpapi", "pg-admin-credential.dpapi", "pg-viewer-credential.dpapi", "pg-mcp-credential.dpapi" })
         {

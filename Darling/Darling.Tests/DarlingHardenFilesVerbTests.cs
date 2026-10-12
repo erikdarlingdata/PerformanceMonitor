@@ -103,8 +103,8 @@ public class DarlingHardenFilesVerbTests
 
         /* The same window as the two pins below: #4004's review added the log-hash key's targets to the list, which
            moved the verify pass past the old 6,000, and its round 2 the junction refusal (DarlingHardenFilesJunctionTests),
-           which moved it past 8,000. */
-        var body = source[at..Math.Min(source.Length, at + 10000)];
+           which moved it past 8,000, and #5700 the TLS key files (past 10,000). */
+        var body = source[at..Math.Min(source.Length, at + 13000)];
 
         /* It re-reads rather than trusting the call. */
         Assert.Contains("DarlingFileSecurity.IsReadableByOrdinaryUsers(", body, StringComparison.Ordinal);
@@ -146,7 +146,7 @@ public class DarlingHardenFilesVerbTests
         var at = source.IndexOf("public static int HardenFiles(", StringComparison.Ordinal);
         Assert.True(at >= 0, "HardenFiles is gone (#2352)");
 
-        var body = source[at..Math.Min(source.Length, at + 10000)];
+        var body = source[at..Math.Min(source.Length, at + 13000)];
 
         /* It asks the SCM, and hardens for what it gets back. */
         Assert.Contains("RegisteredServiceAccount(ServiceName)", body, StringComparison.Ordinal);
@@ -175,7 +175,7 @@ public class DarlingHardenFilesVerbTests
 
         var at = source.IndexOf("public static int HardenFiles(", StringComparison.Ordinal);
         /* 11,000: the viewer and mcp credentials joined the target list, which moved the verify pass past 10,000. */
-        var body = source[at..Math.Min(source.Length, at + 11000)];
+        var body = source[at..Math.Min(source.Length, at + 14000)];
 
         Assert.Contains("GrantsHardenedAccount(", body, StringComparison.Ordinal);
         Assert.Contains("LOCKED OUT", body, StringComparison.Ordinal);
@@ -358,6 +358,93 @@ public class DarlingHardenFilesJunctionTests
                 Directory.Delete(junction);
             }
 
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>
+    /// #5700: the TLS private-key files darling.json names (the pfxPath and keyPath of web.network.tls and
+    /// mcp.network.tls) are hardened like the config: a pfx in the install folder that carried a Users read grant is left
+    /// to SYSTEM, Administrators and the service account; a key outside the install folder gets the same on the FILE
+    /// only (its folder's ACL is unchanged); a named file that is not there is reported with the icacls line that fixes
+    /// it; a certPath is a public certificate and keeps its ACL; and a relative path is skipped with a reason.
+    /// </summary>
+    [Fact]
+    public void ConfiguredTlsKeyFiles_AreHardened_AMissingOneIsReported_AndACertificateIsLeftAlone()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("DACLs are Windows'.");
+            return;
+        }
+
+        /* A registered service makes the verb harden for that account, process-wide. */
+        Assert.SkipWhen(DarlingFileSecurity.RegisteredServiceAccount("PerformanceMonitor Darling") is not null,
+            "The Darling service is registered on this machine.");
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-tls-");
+        var install = Path.Combine(scratch.FullName, "install");
+        var outside = Path.Combine(scratch.FullName, "outside");
+        try
+        {
+            Directory.CreateDirectory(install);
+            Directory.CreateDirectory(outside);
+            var pfx = Path.Combine(install, "web.pfx");
+            var key = Path.Combine(outside, "mcp.key");
+            var certificate = Path.Combine(outside, "mcp.crt");
+            var missingKey = Path.Combine(install, "gone.key");
+            foreach (var file in new[] { pfx, key, certificate })
+            {
+                File.WriteAllText(file, "placeholder");
+                var info = new FileInfo(file);
+                var acl = info.GetAccessControl();
+                acl.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null),
+                    System.Security.AccessControl.FileSystemRights.ReadAndExecute,
+                    System.Security.AccessControl.AccessControlType.Allow));
+                info.SetAccessControl(acl);
+                Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(file), $"{file} should start out readable by Users");
+            }
+
+            var outsideFolderAcl = Sddl(outside);
+            var certificateAcl = Sddl(certificate);
+            var config = Path.Combine(install, "darling.json");
+            string Json(string path) => System.Text.Json.JsonSerializer.Serialize(path);
+            File.WriteAllText(config,
+                "{\"postgres\":{\"managed\":false,\"connectionString\":\"Host=127.0.0.1;Username=darling\"},"
+                + "\"web\":{\"network\":{\"tls\":{\"pfxPath\":" + Json(pfx) + "}}},"
+                + "\"mcp\":{\"network\":{\"tls\":{\"certPath\":" + Json(certificate) + ",\"keyPath\":" + Json(key) + "}}}}");
+
+            var output = new StringWriter();
+            var error = new StringWriter();
+            DarlingCliCommands.HardenFiles(config, output, error);
+            var said = output.ToString() + error.ToString();
+
+            Assert.DoesNotContain("could not load", said, StringComparison.Ordinal);
+            Assert.Contains($"SECURED  {pfx} (the TLS key file, web.network.tls.pfxPath)", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains($"SECURED  {key} (the TLS key file, mcp.network.tls.keyPath)", output.ToString(), StringComparison.Ordinal);
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(pfx));
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(key));
+            Assert.Equal(outsideFolderAcl, Sddl(outside));
+            Assert.Equal(certificateAcl, Sddl(certificate));
+            Assert.DoesNotContain(certificate, said, StringComparison.Ordinal);
+
+            /* A named file that is not there is reported, with the line that fixes it. */
+            File.WriteAllText(config,
+                "{\"postgres\":{\"managed\":false,\"connectionString\":\"Host=127.0.0.1;Username=darling\"},"
+                + "\"web\":{\"network\":{\"tls\":{\"pfxPath\":" + Json(pfx) + ",\"keyPath\":" + Json(missingKey) + "}}},"
+                + "\"mcp\":{\"network\":{\"tls\":{\"pfxPath\":\"relative.pfx\"}}}}");
+            var secondOutput = new StringWriter();
+            var secondError = new StringWriter();
+            DarlingCliCommands.HardenFiles(config, secondOutput, secondError);
+
+            Assert.Contains($"MISSING  {missingKey} (the TLS key file, web.network.tls.keyPath): not found", secondError.ToString(), StringComparison.Ordinal);
+            Assert.Contains($"icacls \"{missingKey}\" /inheritance:r /grant:r", secondError.ToString(), StringComparison.Ordinal);
+            Assert.Contains("SKIPPED  relative.pfx (the TLS key file, mcp.network.tls.pfxPath): a relative path", secondError.ToString(), StringComparison.Ordinal);
+            Assert.Contains($"SECURED  {pfx} (the TLS key file, web.network.tls.pfxPath)", secondOutput.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
             DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
         }
     }

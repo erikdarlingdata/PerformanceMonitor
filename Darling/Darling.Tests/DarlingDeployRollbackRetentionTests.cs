@@ -803,7 +803,8 @@ public sealed class DarlingDeployRollbackRetentionTests
            this assertion looked forward and so inspected the catch blocks instead of the AddAccessRule
            calls — an Interactive grant added beside the other two, which is exactly where anyone would put
            one, sat before the window and passed. */
-        var aclStart = script.IndexOf("$acl = New-Object System.Security.AccessControl.FileSecurity", StringComparison.Ordinal);
+        /* From the copy on: Protect-DarlingTlsKeyFiles (#5700) builds an ACL of its own earlier in the script. */
+        var aclStart = script.IndexOf("$acl = New-Object System.Security.AccessControl.FileSecurity", copy, StringComparison.Ordinal);
         Assert.True(aclStart > 0 && aclStart < harden, "the rollback harden block no longer builds its own ACL — this pin needs rewriting");
         Assert.DoesNotContain("InteractiveSid", script[aclStart..harden], StringComparison.Ordinal);
 

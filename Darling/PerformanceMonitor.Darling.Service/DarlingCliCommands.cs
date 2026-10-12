@@ -1,4 +1,4 @@
-﻿/*
+﻿﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -370,7 +370,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --export-viewer-config [dir] [--config <path>]  Write a ready-to-copy viewer folder (darling.json + server.crt + README.txt)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json, the store credentials and the log-hash key (run elevated)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json, the store credentials, the log-hash key and the TLS key files darling.json names (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
@@ -4065,7 +4065,43 @@ public static class DarlingCliCommands
     /// the list is readable as a policy rather than as control flow — which file gets INTERACTIVE read is the
     /// only judgement in this verb, and it should be visible at a glance.
     /// </summary>
-    private readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
+    private readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What, bool ReportWhenMissing = false);
+
+    /// <summary>
+    /// The TLS private-key files darling.json names (#5700): the PKCS#12 bundle (<c>pfxPath</c>) and the PEM key
+    /// (<c>keyPath</c>) of <c>web.network.tls</c> and <c>mcp.network.tls</c>, trimmed as the loader trims them and
+    /// listed once each. A <c>certPath</c> is a public certificate and is not listed. Each entry is the path as
+    /// written and the setting that names it.
+    /// </summary>
+    internal static IReadOnlyList<(string Path, string Setting)> TlsKeyFilesNamed(DarlingConfig config)
+    {
+        var found = new List<(string Path, string Setting)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Add(string? path, string setting)
+        {
+            var trimmed = path?.Trim();
+            if (!string.IsNullOrEmpty(trimmed) && seen.Add(trimmed))
+            {
+                found.Add((trimmed, setting));
+            }
+        }
+
+        foreach (var (section, tls) in new[] { ("web", config.Web?.Network?.Tls), ("mcp", config.Mcp?.Network?.Tls) })
+        {
+            Add(tls?.PfxPath, $"{section}.network.tls.pfxPath");
+            Add(tls?.KeyPath, $"{section}.network.tls.keyPath");
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// The <c>icacls</c> line that leaves a TLS key file to SYSTEM, Administrators and the service account; the
+    /// same shape the service logs when it finds such a file readable by ordinary users.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string TlsKeyFileIcaclsLine(string path) =>
+        $"icacls \"{path}\" /inheritance:r /grant:r \"*S-1-5-18:F\" \"*S-1-5-32-544:F\" \"{DarlingFileSecurity.ServiceAccountDisplayName}:F\"";
 
     /// <summary>
     /// Re-applies the secret-file ACLs, elevated (#2352).
@@ -4098,9 +4134,11 @@ public static class DarlingCliCommands
            targets fall back to the documented default location. */
         string? dataDirectory = null;
         string? keyDirectory = null;
+        DarlingConfig? loadedConfig = null;
         try
         {
             var config = DarlingConfig.Load(configPath);
+            loadedConfig = config;
             dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
             keyDirectory = DarlingLogHashKeyFile.DirectoryFor(config, resolvedConfig);
         }
@@ -4148,6 +4186,36 @@ public static class DarlingCliCommands
             targets.Add(new(Path.Combine(storeRoot, DarlingStoreUpgrade.PreUpgradeConfFileName), false, false, "the pre-upgrade postgresql.conf"));
         }
 
+        /* #5700: the TLS private-key files darling.json names get the config file's protection (the operator group
+           reads the config for the Viewer; nothing but the service reads a key, so a key file has no operator read).
+           A file outside the install folder gets the ACL on the FILE only, never on its folder. A missing one is
+           reported, not skipped: the service fails to load a certificate it cannot find. A relative path is left
+           alone, because the service resolves it from its own working directory, which this verb cannot know. */
+        var relativeTlsKeyFiles = new List<(string Path, string Setting)>();
+        if (loadedConfig is not null)
+        {
+            foreach (var (keyFile, setting) in TlsKeyFilesNamed(loadedConfig))
+            {
+                string? full;
+                try
+                {
+                    full = Path.IsPathRooted(keyFile) ? Path.GetFullPath(keyFile) : null;
+                }
+                catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+                {
+                    full = null;
+                }
+
+                if (full is null)
+                {
+                    relativeTlsKeyFiles.Add((keyFile, setting));
+                    continue;
+                }
+
+                targets.Add(new(full, AllowInteractive: false, IsDirectory: false, $"the TLS key file, {setting}", ReportWhenMissing: true));
+            }
+        }
+
         /* #4004: a bring-your-own service keeps its log-hash key in darling-keys beside darling.json, a directory the
            service creates with no INTERACTIVE access at all, so it gets none here either. Only when darling-keys IS
            this install's key directory (#4004 review): on a managed install it never exists legitimately, and the
@@ -4187,12 +4255,19 @@ public static class DarlingCliCommands
         var exposed = 0;
         var touched = 0;
         var refused = 0;
+        var missingTlsKeyFiles = 0;
 
         foreach (var target in targets)
         {
             var exists = target.IsDirectory ? Directory.Exists(target.Path) : File.Exists(target.Path);
             if (!exists)
             {
+                if (target.ReportWhenMissing)
+                {
+                    error.WriteLine($"  MISSING  {target.Path} ({target.What}): not found, so no ACL was applied. Once it is in place, run: {TlsKeyFileIcaclsLine(target.Path)}");
+                    missingTlsKeyFiles++;
+                }
+
                 continue;
             }
 
@@ -4261,6 +4336,16 @@ public static class DarlingCliCommands
             {
                 output.WriteLine($"  SECURED  {target.Path} ({target.What})");
             }
+        }
+
+        foreach (var (keyFile, setting) in relativeTlsKeyFiles)
+        {
+            error.WriteLine($"  SKIPPED  {keyFile} (the TLS key file, {setting}): a relative path, which the service resolves from its own working directory, so this verb did not guess. Use an absolute path in darling.json, then re-run.");
+        }
+
+        if (missingTlsKeyFiles > 0)
+        {
+            error.WriteLine($"{missingTlsKeyFiles} TLS key file(s) named in darling.json were not found.");
         }
 
         output.WriteLine();
