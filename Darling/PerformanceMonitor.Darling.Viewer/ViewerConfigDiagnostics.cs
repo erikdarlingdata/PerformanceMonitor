@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -111,6 +112,15 @@ public static class ViewerConfigDiagnostics
             lines.Add(Line(
                 "connection",
                 $"COULD NOT BE PARSED ({ex.GetType().Name}) — check postgres.connectionString in darling.json"));
+            return lines;
+        }
+
+        /* A string that parses but that Npgsql cannot build a data source from (a Host value with a ':' tail, a port out of
+           range) is described by the formatter's text. Its Host would otherwise be printed as written, and the text after
+           the ':' can be the tail of a password. A string with no Host is the formatter's sentence too. */
+        if (DarlingStoreConnection.TryDescribeParseFailure(connectionString) is { } unusable)
+        {
+            lines.Add(Line("connection", $"COULD NOT BE USED — {unusable}"));
             return lines;
         }
 

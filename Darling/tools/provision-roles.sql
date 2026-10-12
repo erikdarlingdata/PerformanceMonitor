@@ -62,8 +62,14 @@
 --      SCRAM-SHA-256 verifier, which PostgreSQL stores as-is, or set the passwords afterwards with psql's
 --      \password admin, \password viewer and \password mcp, which compute the verifier locally and send
 --      only that. A password literal is kept verbatim by anything that records statement text:
---      log_statement, a failed statement's STATEMENT line in the server log, auto_explain, and
---      pg_stat_statements with utility tracking on.
+--      log_statement set to ddl, mod or all, log_min_duration_statement set to 0 or more, a failed statement's
+--      STATEMENT line in the server log, auto_explain, pg_stat_statements with utility tracking on, and
+--      pg_stat_monitor with utility tracking on (pg_stat_monitor.pgsm_track_utility, on by default). pgaudit's role
+--      class writes ALTER ROLE statements to the log too, with the statement text while pgaudit.log_statement is on
+--      (its default). Step 0 turns off the first four, the utility tracking of both modules, and
+--      pgaudit.log_statement, for this session when the role running the script is allowed to. Only a superuser can
+--      change a pgaudit setting, so for any other role the pgaudit entries of this run keep their statement text:
+--      keep the passwords out of the statements as above.
 --   2. If your database is not named "darling", change it in the REVOKE/GRANT ... ON DATABASE
 --      lines and in the ALTER DATABASE note at the bottom.
 --   3. If the owner role is not "darling", change it in the ALTER DEFAULT PRIVILEGES FOR ROLE
@@ -72,8 +78,10 @@
 --   Needs psql 10 or later (step 1 says why):
 --   psql -X -h <host> -U <owner> -d darling -f provision-roles.sql
 --
---   -X keeps your own psqlrc out of the run: an \set AUTOCOMMIT off in it would leave every role, grant and
---   setting uncommitted while psql still exits 0, and an ON_ERROR_STOP in it would change where the run stops.
+--   -X keeps your own psqlrc out of the run: an \set AUTOCOMMIT off in it would leave steps 3 to 5 (the write
+--   grants, the default privileges and the public hardening) uncommitted while psql still exits 0, and an
+--   ON_ERROR_STOP in it would change where the run stops. The roles, the passwords, the read grants, the
+--   secret-column carve and the password key table revoke (step 2d) commit at the script's own COMMIT.
 --
 -- NAME-COLLISION SAFETY: the roles are the bare, un-prefixed names "admin", "viewer" and "mcp". If your
 -- cluster ALREADY has a role by any of those names that this script did not create, it will NOT be
@@ -81,19 +89,132 @@
 -- same-named role without that marker makes this script FAIL LOUD (rename or drop the other role first,
 -- or use a dedicated cluster/database for the Darling store). That includes the roles the service
 -- provisions on the compose store, which carry 'darling-compose' instead.
+--
+-- The marker is a public string, so it does not show who made a role. From PostgreSQL 16 a role with CREATEROLE
+-- holds ADMIN OPTION on every role it creates, which lets it reset that role's password and grant it onward. So
+-- a marked role is refused too (the same stop as above) while a role that is not a superuser, not the database
+-- owner and not the role running this script holds ADMIN OPTION on it. To go on, run the script as that login (it
+-- is then the role running it, so the check leaves it out), or, as a superuser, revoke that option (a login that
+-- created the role cannot revoke the option itself) or drop the role. A plain membership (GRANT viewer TO
+-- some_analyst) is not refused.
+--
+-- AN OWNER WHO IS NOT A SUPERUSER can run this script, with these limits:
+--   * It needs CREATEROLE. From PostgreSQL 16 it also needs ADMIN OPTION on each of the three roles to set a
+--     password or take back an attribute, and it holds that option only on a role it created itself. A role a
+--     superuser made needs GRANT <role> TO <owner> WITH ADMIN OPTION from a superuser first. The guard in step 1
+--     checks this before any password is sent, and stops the run when the owner cannot change one of the three
+--     roles that already exist: it has no CREATEROLE, the role is a superuser, from PostgreSQL 16 it lacks ADMIN
+--     OPTION on the role, or before 16 the role has REPLICATION (only a superuser can change such a role). The
+--     stop names the role and the remedy: a superuser runs GRANT <role> TO <owner> WITH ADMIN OPTION, or runs
+--     this script. The guard also stops the run when one of the three roles is a member of a role that would
+--     outrank the grants below (the owner, a superuser or BYPASSRLS role, pg_read_all_data, pg_write_all_data,
+--     pg_read_server_files, pg_write_server_files or pg_execute_server_program) and the owner cannot revoke that
+--     membership: from PostgreSQL 16 revoking needs ADMIN OPTION on the role the membership is in, and no role
+--     holds that option on itself. The stop names each membership. A password line that still fails (a
+--     password-check module can reject a password) is written to the server log with its password, unless step 0
+--     could turn off log_min_error_statement for the session.
+--   * pg_stat_statements: while the module is loaded with utility tracking on, step 0 fails for this owner, and
+--     the guard in step 1 then stops the run before any password is sent. Either GRANT SET ON PARAMETER
+--     pg_stat_statements.track_utility TO <owner> (PostgreSQL 15 and later), so step 0 can turn it off for this
+--     session, or turn it off for the cluster (step 1b).
+--   * The superuser-only lines (temp_file_limit, log_min_duration_statement, log_parameter_max_length) fail, and
+--     psql carries on. SUPERUSER is not switched off, nor is REPLICATION, BYPASSRLS or CREATEDB unless the owner
+--     holds that attribute itself (PostgreSQL 16 and later; before 16 only a superuser can change REPLICATION or
+--     BYPASSRLS), and a role membership the owner is not allowed to revoke stays. Step 1 prints a WARNING for
+--     each of those, so read psql's output.
+--   * Step 0 cannot turn off log_statement, log_min_duration_statement or log_min_error_statement for this session
+--     unless the owner was granted SET on them (PostgreSQL 15 and later). Where log_statement is ddl, mod or all,
+--     log_min_duration_statement is 0 or more, log_transaction_sample_rate is above 0, log_min_duration_sample is 0 or
+--     more with log_statement_sample_rate above 0, or pgaudit.log covers the role class while pgaudit.log_statement is
+--     on, the run's password lines are written to the server log: the script prints a WARNING after step 0 when it
+--     sees any of them, and you should keep the passwords out of the lines, as in BEFORE RUNNING above.
 -- ============================================================================================
 
 -- 0. Keep this script's own role DDL out of pg_stat_statements (#3899). Step 1 sends each password as an
 --    ALTER ROLE ... PASSWORD literal, and while pg_stat_statements is loaded with utility tracking on (the
 --    module's default), it records that statement VERBATIM, password included, where any superuser or
 --    pg_read_all_stats member (a monitoring agent's pg_monitor login, say) can read it. This covers this
---    session only; step 1b says how to turn it off for good. Harmless when the module is not loaded, and
---    superuser-only when it is, like the rest of this script.
+--    session only; step 1b says how to turn it off for good. Harmless when the module is not loaded. When it is
+--    loaded, this SET needs a superuser, or an owner that was granted SET on the parameter (PostgreSQL 15 and
+--    later): for any other owner it fails, and the first statement of the guard in step 1 then stops the run
+--    before a password is sent.
 SET pg_stat_statements.track_utility = off;
+
+--    pg_stat_monitor tracks utility statements through pg_stat_monitor.pgsm_track_utility (on by default), so it gets
+--    the same switch and the same stop in the guard. The setting can be changed by any role.
+SET pg_stat_monitor.pgsm_track_utility = off;
+
+--    The same for the server log. log_statement set to ddl, mod or all writes each ALTER ROLE ... PASSWORD line to
+--    the log as sent, and log_min_duration_statement (or log_min_duration_sample) at 0 or more writes it with its
+--    duration, so these turn that logging off for this session (this run's own role and grant statements are then
+--    not logged either). A statement that fails is written to the log with its text whenever its error is at or
+--    above log_min_error_statement (error by default), so that is raised to panic, which no statement reaches. The
+--    debug_print_parse, debug_print_rewritten and debug_print_plan settings write a statement's tree, literals
+--    included, so they are switched off too, and so is pgaudit.log_statement, which adds the statement text to
+--    pgaudit's entries. Every one of them except the debug_print ones is superuser-only, so an owner that was not granted SET on it
+--    (PostgreSQL 15 and later) is refused, quietly, and the setting stays as it is: the README says what that owner
+--    does then. A setting this server does not have (the two sampling ones need PostgreSQL 13 and 12) is skipped.
+DO $$
+DECLARE
+   log_setting record;
+BEGIN
+   FOR log_setting IN
+      SELECT name, value
+      FROM (VALUES ('log_statement', 'none'), ('log_min_duration_statement', '-1'),
+                   ('log_min_duration_sample', '-1'), ('log_transaction_sample_rate', '0'),
+                   ('log_min_error_statement', 'panic'), ('debug_print_parse', 'off'),
+                   ('debug_print_rewritten', 'off'), ('debug_print_plan', 'off'),
+                   ('pgaudit.log_statement', 'off')) AS log_settings (name, value)
+   LOOP
+      BEGIN
+         PERFORM set_config(log_setting.name, log_setting.value, false);
+      EXCEPTION WHEN insufficient_privilege OR undefined_object THEN
+         NULL;
+      END;
+   END LOOP;
+END $$;
+
+--    What step 0 could not turn off is said here, before any password is sent: the role running the script was not
+--    allowed to change the setting, so the run's password lines are written to the server log. The settings are
+--    log_statement at ddl, mod or all, log_min_duration_statement at 0 or more, log_transaction_sample_rate above 0
+--    (every statement of a sampled transaction is logged), log_min_duration_sample at 0 or more with
+--    log_statement_sample_rate above 0, and pgaudit.log covering the role class (role or all, and not -role) while
+--    pgaudit.log_statement is on. This is a WARNING and the run goes on, because the passwords may already be
+--    SCRAM-SHA-256 verifiers.
+DO $$
+DECLARE
+   logging_on text;
+BEGIN
+   SELECT string_agg(name || ' = ' || setting
+                     || CASE name
+                           WHEN 'log_min_duration_sample' THEN ' with log_statement_sample_rate = '
+                              || (SELECT sample.setting FROM pg_settings AS sample WHERE sample.name = 'log_statement_sample_rate')
+                           WHEN 'pgaudit.log' THEN ' with pgaudit.log_statement = on'
+                           ELSE ''
+                        END, ', ' ORDER BY name) INTO logging_on
+   FROM pg_settings
+   WHERE CASE name
+            WHEN 'log_statement' THEN setting IN ('ddl', 'mod', 'all')
+            WHEN 'log_min_duration_statement' THEN setting::bigint >= 0
+            WHEN 'log_transaction_sample_rate' THEN setting::numeric > 0
+            WHEN 'log_min_duration_sample' THEN setting::bigint >= 0
+               AND (SELECT sample.setting::numeric FROM pg_settings AS sample WHERE sample.name = 'log_statement_sample_rate') > 0
+            WHEN 'pgaudit.log' THEN (SELECT statement.setting FROM pg_settings AS statement WHERE statement.name = 'pgaudit.log_statement') = 'on'
+               AND (string_to_array(replace(lower(setting), ' ', ''), ',') && ARRAY['role', 'all'])
+               AND NOT ('-role' = ANY (string_to_array(replace(lower(setting), ' ', ''), ',')))
+            ELSE false
+         END;
+   IF logging_on IS NOT NULL THEN
+      RAISE WARNING 'The server log records the statements of this run (%). The ALTER ROLE ... PASSWORD lines are written to it with their passwords, because step 0 could not turn that logging off for this role. Put a SCRAM-SHA-256 verifier in each ALTER ROLE line in place of the literal, or set the passwords afterwards with the psql password command, or run this script as a superuser.', logging_on;
+   END IF;
+END $$;
 
 -- 1. Roles (CREATE ROLE has no IF NOT EXISTS -> guard with a DO block). Idempotent: re-running
 --    this script re-asserts the password below, so it doubles as a password rotation. A fresh role
 --    is stamped 'darling-managed'; an unmarked same-named role fails loud (never repurposed).
+--    The guard carries no password. A statement that fails is written to the server log with its whole text,
+--    and the guard is the statement that fails when it stops the run, so it creates each role without one and the
+--    ALTER ROLE lines after it set them.
 -- Stop on an error for this guard alone (#4746): a script-wide stop would end a non-superuser owner before any grant.
 -- The caller's own ON_ERROR_STOP (psql -v ON_ERROR_STOP=1, or psqlrc) is saved first and put back after the guard,
 -- not forced off. From psql 10 an unset ON_ERROR_STOP reads as off, so the saved value is always on or off. In psql 9.6
@@ -102,31 +223,224 @@ SET pg_stat_statements.track_utility = off;
 \set darling_saved_stop :ON_ERROR_STOP
 \set ON_ERROR_STOP on
 DO $$
+DECLARE
+   other_holder record;
+   unchangeable text;
+   remedy text;
 BEGIN
+   -- First, before any role is touched: with utility tracking still on for this session, pg_stat_statements would
+   -- record the password statements below verbatim, so stop. NULL (the module is not loaded) passes.
+   IF current_setting('pg_stat_statements.track_utility', true) = 'on' THEN
+      RAISE EXCEPTION 'pg_stat_statements.track_utility is on for this session. pg_stat_statements records the password statements of this script verbatim, and any pg_read_all_stats member can read them. The script created and changed nothing. Do one of these three things, then run the script again. Run GRANT SET ON PARAMETER pg_stat_statements.track_utility TO <owner> as a superuser (PostgreSQL 15 and later). Then step 0 can turn it off for this session. Or set pg_stat_statements.track_utility = off in postgresql.conf and reload, which turns it off for the whole cluster (step 1b). Or run this script as a superuser.';
+   END IF;
+   -- The same stop for pg_stat_monitor, which tracks utility statements through pgsm_track_utility. Any role can switch it
+   -- off for its session and step 0 does, so this is reached only when that setting is on anyway (a parameter reset, say).
+   IF current_setting('pg_stat_monitor.pgsm_track_utility', true) IN ('on', 'yes', 'true', '1') THEN
+      RAISE EXCEPTION 'pg_stat_monitor.pgsm_track_utility is on for this session. pg_stat_monitor tracks the password statements of this script. The script created and changed nothing. Set pg_stat_monitor.pgsm_track_utility = off in postgresql.conf and reload, which turns it off for the whole cluster, then run the script again.';
+   END IF;
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'admin') THEN
-      CREATE ROLE admin LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_ADMIN_PASSWORD';
+      CREATE ROLE admin LOGIN NOSUPERUSER;
       COMMENT ON ROLE admin IS 'darling-managed';
    ELSIF shobj_description((SELECT oid FROM pg_roles WHERE rolname = 'admin'), 'pg_authid') IS DISTINCT FROM 'darling-managed' THEN
       RAISE EXCEPTION 'Role "admin" already exists and was not created by Darling (missing the ''darling-managed'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'viewer') THEN
-      CREATE ROLE viewer LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_VIEWER_PASSWORD';
+      CREATE ROLE viewer LOGIN NOSUPERUSER;
       COMMENT ON ROLE viewer IS 'darling-managed';
    ELSIF shobj_description((SELECT oid FROM pg_roles WHERE rolname = 'viewer'), 'pg_authid') IS DISTINCT FROM 'darling-managed' THEN
       RAISE EXCEPTION 'Role "viewer" already exists and was not created by Darling (missing the ''darling-managed'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mcp') THEN
-      CREATE ROLE mcp LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_MCP_PASSWORD';
+      CREATE ROLE mcp LOGIN NOSUPERUSER;
       COMMENT ON ROLE mcp IS 'darling-managed';
    ELSIF shobj_description((SELECT oid FROM pg_roles WHERE rolname = 'mcp'), 'pg_authid') IS DISTINCT FROM 'darling-managed' THEN
       RAISE EXCEPTION 'Role "mcp" already exists and was not created by Darling (missing the ''darling-managed'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
+   -- The marker does not show who made a role, so a marked role is also refused while a role that is not a
+   -- superuser, not the role running this script and not the database owner holds ADMIN OPTION on it: that role
+   -- could reset its password and grant it onward. (A role this run created has no holder but the one running it.)
+   -- Plain memberships do not count, and neither does the owner of a first run that a superuser then rotates.
+   FOR other_holder IN
+      SELECT granted.rolname AS role_name, string_agg(quote_ident(holder.rolname), ', ' ORDER BY holder.rolname) AS holders
+      FROM pg_auth_members AS membership
+      JOIN pg_roles AS granted ON granted.oid = membership.roleid
+      JOIN pg_roles AS holder ON holder.oid = membership.member
+      WHERE granted.rolname IN ('admin', 'viewer', 'mcp')
+        AND membership.admin_option
+        AND NOT holder.rolsuper
+        AND holder.rolname <> current_user
+        AND holder.oid <> (SELECT datdba FROM pg_database WHERE datname = current_database())
+      GROUP BY granted.rolname
+      ORDER BY granted.rolname
+   LOOP
+      RAISE EXCEPTION 'Role "%" carries the ''darling-managed'' marker, but another login holds ADMIN OPTION on it: %. That login is not a superuser, not the database owner and not the role running this script. It can reset the password of the role or grant the role to other roles, and the marker does not show who made the role. To go on, run this script as that login, which this check leaves out. If more than one login is listed, run the script as one of them after the others lose the option. Or, as a superuser, revoke that ADMIN OPTION (a login that created the role cannot revoke it itself), or drop the role.', other_holder.role_name, other_holder.holders;
+   END LOOP;
+   -- A role that is not a superuser must also be able to change the three roles. If it cannot, each ALTER ROLE ... PASSWORD
+   -- below fails, the server writes the failed statement to its log WITH the password, and psql exits 0 unless the caller
+   -- set ON_ERROR_STOP. So a run by such a role stops here, before any password is sent. The ALTER ROLE lines need:
+   -- the CREATEROLE attribute; roles that are not superusers; from PostgreSQL 16, ADMIN OPTION on each role (pg_has_role
+   -- tests the same thing ALTER ROLE does, and a role this run just created passes because its creator holds the option);
+   -- before 16, roles without REPLICATION. Every role exists at this point, and a superuser is never stopped here.
+   IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
+      IF NOT (SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user) THEN
+         RAISE EXCEPTION 'The role running this script, %, is not a superuser and does not have CREATEROLE. It cannot change the passwords of the roles admin, viewer and mcp. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script again as a superuser, or as a role that has CREATEROLE.', quote_ident(current_user);
+      END IF;
+      SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname) INTO unchangeable
+      FROM pg_roles
+      WHERE rolname IN ('admin', 'viewer', 'mcp') AND rolsuper;
+      IF unchangeable IS NOT NULL THEN
+         RAISE EXCEPTION 'These roles are superusers: %. The role running this script, %, is not a superuser, so it cannot change them. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script again as a superuser.', unchangeable, quote_ident(current_user);
+      END IF;
+      IF current_setting('server_version_num')::int >= 160000 THEN
+         SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname), string_agg(format('GRANT %I TO %I WITH ADMIN OPTION;', rolname, current_user), ' ' ORDER BY rolname)
+         INTO unchangeable, remedy
+         FROM pg_roles
+         WHERE rolname IN ('admin', 'viewer', 'mcp') AND NOT pg_has_role(current_user, oid, 'MEMBER WITH ADMIN OPTION');
+         IF unchangeable IS NOT NULL THEN
+            RAISE EXCEPTION 'The role running this script, %, does not hold ADMIN OPTION on these roles: %. From PostgreSQL 16 a role needs that option to change the password of another role. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script as a superuser. Or, as a superuser, run these statements and then run this script again: %', quote_ident(current_user), unchangeable, remedy;
+         END IF;
+      ELSE
+         SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname) INTO unchangeable
+         FROM pg_roles
+         WHERE rolname IN ('admin', 'viewer', 'mcp') AND rolreplication;
+         IF unchangeable IS NOT NULL THEN
+            RAISE EXCEPTION 'These roles have the REPLICATION attribute: %. Before PostgreSQL 16 only a superuser can change a role that has it, and the role running this script, %, is not a superuser. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script again as a superuser.', unchangeable, quote_ident(current_user);
+         END IF;
+      END IF;
+      -- A membership of one of the three roles that outranks every grant below (a role that is, or is a member of, the
+      -- owner, a superuser or BYPASSRLS role, or a predefined role that reads or writes every table or the server's files
+      -- or programs) is revoked after the passwords, and the block that revokes it can only warn when the role running
+      -- this script lacks the right to. So the run stops here, before a password is sent, as it does when it cannot change
+      -- the roles at all. From PostgreSQL 16 revoking needs ADMIN OPTION on the role the membership is in, and no role
+      -- holds that on itself; it also removes only the row recorded with the grantor it names (the block that revokes
+      -- names the recorded one), so the role running this script must be able to act as that grantor, which it can
+      -- when it is, or inherits the privileges of, that role. Before 16 CREATEROLE is enough, except for a superuser role.
+      SELECT string_agg(format('%I in %I', member.rolname, granted.rolname), ', ' ORDER BY member.rolname, granted.rolname)
+      INTO unchangeable
+      FROM pg_auth_members AS membership
+      JOIN pg_roles AS granted ON granted.oid = membership.roleid
+      JOIN pg_roles AS member ON member.oid = membership.member
+      WHERE member.rolname IN ('admin', 'viewer', 'mcp')
+        AND EXISTS (
+           SELECT 1
+           FROM pg_roles AS voiding
+           WHERE (voiding.rolsuper
+                  OR voiding.rolbypassrls
+                  OR voiding.oid IN ((SELECT oid FROM pg_roles WHERE rolname = current_user), (SELECT datdba FROM pg_database WHERE datname = current_database()))
+                  OR voiding.rolname IN ('pg_read_all_data', 'pg_write_all_data', 'pg_read_server_files', 'pg_write_server_files', 'pg_execute_server_program'))
+             AND pg_has_role(granted.oid, voiding.oid, 'MEMBER'))
+        AND NOT CASE WHEN current_setting('server_version_num')::int >= 160000
+                     THEN pg_has_role(current_user, granted.oid, 'MEMBER WITH ADMIN OPTION')
+                          AND pg_has_role(current_user, membership.grantor, 'USAGE')
+                     ELSE NOT granted.rolsuper END;
+      IF unchangeable IS NOT NULL THEN
+         RAISE EXCEPTION 'These roles are members of roles whose privileges outrank the grants below: %. The role running this script, %, cannot revoke those memberships. The script created and changed nothing. It stopped here before a password is sent, so that no role keeps privileges the carve does not hold back. Run this script again as a superuser, or have a superuser revoke those memberships first (from PostgreSQL 16 with GRANTED BY the grantor that recorded each one).', unchangeable, quote_ident(current_user);
+      END IF;
+   END IF;
 END $$;
 \set ON_ERROR_STOP :darling_saved_stop
 
-ALTER ROLE admin  LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_ADMIN_PASSWORD';
-ALTER ROLE viewer LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_VIEWER_PASSWORD';
-ALTER ROLE mcp    LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_MCP_PASSWORD';
+-- The passwords. Each ALTER names LOGIN and the password only: NOSUPERUSER here would fail for an owner that is
+-- not a superuser (it needs one for any change to that attribute), and a run that fails these three lines rotates
+-- nothing while psql still exits 0. The roles were created NOSUPERUSER; the next block takes the attributes back.
+ALTER ROLE admin  LOGIN PASSWORD 'CHANGE_ME_ADMIN_PASSWORD';
+ALTER ROLE viewer LOGIN PASSWORD 'CHANGE_ME_VIEWER_PASSWORD';
+ALTER ROLE mcp    LOGIN PASSWORD 'CHANGE_ME_MCP_PASSWORD';
+
+-- Attributes and memberships (managed mode's step 1b and section 11). A role this script ADOPTS (it already
+-- carries the marker) keeps whatever was granted to it since: CREATEROLE, CREATEDB, REPLICATION or BYPASSRLS on
+-- viewer or mcp would outrank every grant below, and so would a membership (pg_read_all_data undoes the
+-- secret-column carve, and a membership in the owner is every privilege the owner has). So every one is taken
+-- back, every run.
+--   As a superuser these are managed mode's statements exactly: every attribute off by name, and every membership
+--   in which one of the roles is the MEMBER revoked, GRANTED BY the recorded grantor (since PostgreSQL 16 a plain
+--   REVOKE removes only the grants the bootstrap superuser made), with CASCADE (a grant the member itself made
+--   with an ADMIN OPTION depends on the membership).
+--   Otherwise it goes as far as the owner's privileges allow. From PostgreSQL 16, REPLICATION, BYPASSRLS and
+--   CREATEDB need the owner to hold that attribute itself, and a membership can be revoked only with ADMIN OPTION on
+--   the role it is in. Before 16, REPLICATION and BYPASSRLS need a superuser. SUPERUSER always needs a superuser,
+--   and a role that has SUPERUSER, or before 16 REPLICATION, has already stopped the run at the guard. What remains
+--   draws a WARNING, and the run carries on. Any other error (a lock or statement timeout, a concurrent change to a
+--   role) stops the run: the attributes and the memberships are two blocks, so a failure in one never undoes the
+--   other, and the stop is on for both, so psql does not carry on past a role that kept an attribute or a membership.
+\set ON_ERROR_STOP on
+DO $$
+DECLARE
+   as_superuser boolean := (SELECT rolsuper FROM pg_roles WHERE rolname = current_user);
+   item record;
+   attribute text;
+BEGIN
+   FOR item IN
+      SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls
+      FROM pg_roles
+      WHERE rolname IN ('admin', 'viewer', 'mcp')
+      ORDER BY rolname
+   LOOP
+      IF as_superuser THEN
+         EXECUTE format('ALTER ROLE %I NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS', item.rolname);
+      ELSE
+         FOREACH attribute IN ARRAY array_remove(ARRAY[
+               CASE WHEN item.rolsuper THEN 'SUPERUSER' END,
+               CASE WHEN item.rolcreaterole THEN 'CREATEROLE' END,
+               CASE WHEN item.rolcreatedb THEN 'CREATEDB' END,
+               CASE WHEN item.rolreplication THEN 'REPLICATION' END,
+               CASE WHEN item.rolbypassrls THEN 'BYPASSRLS' END], NULL)
+         LOOP
+            BEGIN
+               EXECUTE format('ALTER ROLE %I NO%s', item.rolname, attribute);
+            EXCEPTION WHEN insufficient_privilege THEN
+               RAISE WARNING 'Role "%" still has the % attribute: switching it off needs a superuser, or, from PostgreSQL 16, an owner that holds % itself.', item.rolname, attribute, attribute;
+            END;
+         END LOOP;
+      END IF;
+   END LOOP;
+END $$;
+
+DO $$
+DECLARE
+   as_superuser boolean := (SELECT rolsuper FROM pg_roles WHERE rolname = current_user);
+   item record;
+   remaining text;
+BEGIN
+   FOR item IN
+      SELECT granted.rolname AS granted, member.rolname AS member, grantor.rolname AS grantor
+      FROM pg_auth_members AS membership
+      JOIN pg_roles AS granted ON granted.oid = membership.roleid
+      JOIN pg_roles AS member ON member.oid = membership.member
+      LEFT JOIN pg_roles AS grantor ON grantor.oid = membership.grantor
+      WHERE member.rolname IN ('admin', 'viewer', 'mcp')
+   LOOP
+      BEGIN
+         EXECUTE format('REVOKE %I FROM %I', item.granted, item.member)
+            || CASE WHEN (as_superuser OR current_setting('server_version_num')::int >= 160000) AND item.grantor IS NOT NULL
+                    THEN format(' GRANTED BY %I', item.grantor) ELSE '' END
+            || ' CASCADE';
+      EXCEPTION WHEN insufficient_privilege THEN
+         RAISE WARNING 'Role "%" is still a member of "%": revoking that needs a superuser, or ADMIN OPTION on "%" and the right to act as "%", the role that granted it.', item.member, item.granted, item.granted, item.grantor;
+      END;
+   END LOOP;
+   -- Nothing that outranks the grants below may be left. From PostgreSQL 16 a revoke removes only the row recorded
+   -- with the grantor it names and warns, without an error, when it finds none, so the memberships are read again
+   -- here and a voiding one that is still there stops the run (exit 3 under the stop above) before any grant.
+   SELECT string_agg(format('%I in %I', member.rolname, granted.rolname), ', ' ORDER BY member.rolname, granted.rolname)
+   INTO remaining
+   FROM pg_auth_members AS membership
+   JOIN pg_roles AS granted ON granted.oid = membership.roleid
+   JOIN pg_roles AS member ON member.oid = membership.member
+   WHERE member.rolname IN ('admin', 'viewer', 'mcp')
+     AND EXISTS (
+        SELECT 1
+        FROM pg_roles AS voiding
+        WHERE (voiding.rolsuper
+               OR voiding.rolbypassrls
+               OR voiding.oid IN ((SELECT oid FROM pg_roles WHERE rolname = current_user), (SELECT datdba FROM pg_database WHERE datname = current_database()))
+               OR voiding.rolname IN ('pg_read_all_data', 'pg_write_all_data', 'pg_read_server_files', 'pg_write_server_files', 'pg_execute_server_program'))
+          AND pg_has_role(granted.oid, voiding.oid, 'MEMBER'));
+   IF remaining IS NOT NULL THEN
+      RAISE EXCEPTION 'These roles are still members of roles whose privileges outrank the grants below: %. The run revoked every membership it could, and these remain, so it stopped before any grant. The passwords above were already set. Revoke them as a superuser (REVOKE <role> FROM <member> GRANTED BY <grantor>, as recorded in pg_auth_members), then run this script again.', remaining;
+   END IF;
+END $$;
+\set ON_ERROR_STOP :darling_saved_stop
 
 -- 1a. statement_timeout backstop on viewer and mcp (Custom Views v2, #1563): the web dashboard's compose surface
 --     and the MCP custom-view tools run network-reachable aggregations over a raw, no-rollup store, so this caps
@@ -188,6 +502,14 @@ ALTER ROLE mcp    SET log_parameter_max_length = 0;
 --    holds no secrets, so admin+viewer read all of it. config: admin (the writer, and the Settings
 --    window's identity) reads every column; viewer reads all config tables too -- MINUS the secret columns
 --    carved in step 2b. mcp gets viewer's read surface in its own statements, carved the same way.
+--    Steps 2 to 2d are ONE transaction (managed mode sends the same statements as one batch, which is one
+--    implicit transaction): the blanket config grants below give viewer and mcp table-wide SELECT on the secret
+--    columns, and on the password key tables (step 2d), until the carve and the revoke take it back, and committed on
+--    their own they would leave that window open on every run, and for good if a statement in them failed. Now they
+--    commit together or not at all, so an error anywhere in them leaves the read roles with no read access, never a
+--    blanket grant. psql rolls the
+--    transaction back at the COMMIT after an error, with ON_ERROR_STOP off, and at exit with it on.
+BEGIN;
 GRANT USAGE ON SCHEMA collect, config TO admin, viewer;
 GRANT SELECT ON ALL TABLES IN SCHEMA collect TO admin, viewer;
 GRANT SELECT ON ALL TABLES IN SCHEMA config  TO admin, viewer;
@@ -244,10 +566,21 @@ GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_re
 -- same names, so the same carve applies: the webhook URLs and the PagerDuty routing key are bearer secrets and
 -- are deliberately NOT granted. configured_channels is a GENERATED presence column (which channels a route
 -- sets, never their values) that exists so this carve can still answer "what does route 3 configure".
--- Created by V131, so re-run this script AFTER the service has migrated your store to V131.
+-- Created by V131, so re-run this script AFTER the service has migrated your store to V131. On a store below V131
+-- the pair below is skipped (the table does not exist yet), so the rest of the carve still commits; unguarded, its
+-- error would abort the transaction and roll back the grants above with it. It runs as EXECUTE of a dollar-quoted
+-- string, so the statements are sent only when the table exists. If they fail on a store that has the table, the
+-- whole transaction rolls back and the read roles keep no access.
+DO $$
+BEGIN
+   IF to_regclass('config.config_notification_routes') IS NOT NULL THEN
+      EXECUTE $v131$
 REVOKE SELECT ON config.config_notification_routes FROM viewer;
 GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at)
     ON config.config_notification_routes TO viewer;
+$v131$;
+   END IF;
+END $$;
 
 -- 2c. The SAME carve for mcp (#3914): it reads exactly what viewer reads, so it is denied exactly the same
 --     secret columns -- the column lists are identical to 2b's, and the drift test holds both to the C# list.
@@ -272,13 +605,55 @@ GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_re
               -- beside it), so it stays granted.
               pagerduty_auto_resolve)
     ON config.config_notification TO mcp;
+-- V131 again, guarded the same way (see 2b).
+DO $$
+BEGIN
+   IF to_regclass('config.config_notification_routes') IS NOT NULL THEN
+      EXECUTE $v131$
 REVOKE SELECT ON config.config_notification_routes FROM mcp;
 GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at)
     ON config.config_notification_routes TO mcp;
+$v131$;
+   END IF;
+END $$;
 -- The collector run times (V160, #4938): get_collection_health reads them as mcp. The blanket config SELECT above
 -- already covers the table when it exists at that point; naming it makes the grant explicit and idempotent, mirroring
 -- how the schedule tables are read, so a store that reaches V160 after an earlier provisioning is covered by the re-run.
+-- Guarded like the V131 pair above: on a store below V160 the table does not exist, and an unguarded GRANT would abort
+-- the transaction and roll back every grant before it.
+DO $$
+BEGIN
+   IF to_regclass('config.config_collector_run_times') IS NOT NULL THEN
+      EXECUTE $v160$
 GRANT SELECT ON config.config_collector_run_times TO mcp;
+$v160$;
+   END IF;
+END $$;
+
+-- 2d. The password key tables (V165 and V167, #5366), still inside the transaction. The blanket config grants above gave
+--     SELECT on them to admin, viewer and mcp, and the COMMIT below makes whatever is granted by then durable, so the
+--     revoke is in effect at the COMMIT: every privilege on each of these tables that exists is taken from PUBLIC and
+--     the three roles, and SELECT on the key and service-state tables goes back to admin alone, the same result as
+--     managed mode's batch. Step 3g repeats it after the grants of step 3, which give admin write access, and also
+--     removes triggers and foreign keys, so a stop anywhere between here and 3g never leaves viewer or mcp able to read
+--     them. The tables are looked up one at a time: a store below V165 has none, a store at V165 or V166 has no
+--     candidate table.
+DO $do$
+DECLARE
+    key_table text;
+BEGIN
+    FOREACH key_table IN ARRAY ARRAY['password_key', 'password_key_service', 'legacy_secret_pin', 'legacy_secret_pin_marker', 'legacy_secret_pin_candidate']
+    LOOP
+        IF pg_catalog.to_regclass(pg_catalog.format('config.%I', key_table)) IS NOT NULL THEN
+            EXECUTE pg_catalog.format('REVOKE ALL ON config.%I FROM PUBLIC, admin, viewer, mcp CASCADE', key_table);
+            IF key_table IN ('password_key', 'password_key_service') THEN
+                EXECUTE pg_catalog.format('GRANT SELECT ON config.%I TO admin', key_table);
+            END IF;
+        END IF;
+    END LOOP;
+END
+$do$;
+COMMIT;
 
 -- 3. config writes -- admin gets the whole schema.
 GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;
@@ -729,6 +1104,7 @@ GRANT UPDATE (server_id, name, host, database, auth, username, encrypted_passwor
 --     legacy pin candidate table by V167: on a store below V165 the block warns and skips, so the rest of the script
 --     (the PUBLIC revoke below included) still runs; re-run the script once the service has migrated the store to V167.
 --     A store at V165 or V166 gets the four-table revoke now, and the candidate table's own revoke once V167 has made it.
+--     Step 2d has already taken the read grants away before the COMMIT; what follows is the part that has to come last.
 DO $do$
 DECLARE
     stray record;
