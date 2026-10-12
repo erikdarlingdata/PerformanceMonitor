@@ -86,6 +86,34 @@ public sealed class PlanRegressionRowcountRungTests
     }
 
     [Fact]
+    public void TheScript_AddsTheIntervalTablesRowcountColumn_InItsOwnGuard_WithRawsType()
+    {
+        var sql = Statements();
+
+        /* collect.query_store_interval_latest never had avg_rowcount (V143), yet the interval-table read and the daily build both
+           read it: the rung adds it as a nullable bigint, the type of collect.query_store_stats.avg_rowcount, with no default and
+           no backfill (an older interval row keeps NULL, so its rows per call is unknown). */
+        Assert.Contains("ALTER TABLE collect.query_store_interval_latest ADD COLUMN avg_rowcount bigint;", sql, StringComparison.Ordinal);
+
+        /* Its own column check, so each column add is idempotent on its own: the rowcount_sum guard cannot skip it. */
+        var ownGuard = sql.IndexOf("column_name = 'avg_rowcount'", StringComparison.Ordinal);
+        var alter = sql.IndexOf("ALTER TABLE collect.query_store_interval_latest", StringComparison.Ordinal);
+        var firstEnd = sql.IndexOf("END IF;", StringComparison.Ordinal);
+        Assert.True(firstEnd >= 0 && firstEnd < ownGuard && ownGuard < alter, "the avg_rowcount add sits in its own IF NOT EXISTS, after the rowcount_sum one closes");
+        Assert.Contains("table_name = 'query_store_interval_latest'", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheIntervalUpsert_WritesAvgRowcount_OnInsertAndOnConflict()
+    {
+        var sql = QueryStoreIntervalLatest.UpsertSql;
+
+        Assert.Contains($"force_failure_count,{Environment.NewLine}        avg_rowcount,{Environment.NewLine}        query_text", sql.ReplaceLineEndings(), StringComparison.Ordinal);
+        Assert.Contains("s.avg_rowcount,", sql, StringComparison.Ordinal);
+        Assert.Contains("avg_rowcount = EXCLUDED.avg_rowcount,", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheProbeNamesTheColumn_AndMapsAFullyMigratedStoreToThisTopRung()
     {
         Assert.Contains("attname = 'rowcount_sum'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
@@ -137,8 +165,14 @@ public sealed class PlanRegressionRowcountRungTests
                     "SELECT data_type || ':' || is_nullable FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'plan_regression_daily' AND column_name = 'rowcount_sum'", ct));
             Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct));
 
+            /* The interval table has the raw table's rows-per-call column too (V143 created it without one). */
+            const string IntervalColumnSql =
+                "SELECT data_type || ':' || is_nullable FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'query_store_interval_latest' AND column_name = 'avg_rowcount'";
+            Assert.Equal("bigint:YES", await ScalarAsync(connection, IntervalColumnSql, ct));
+
             /* An upgrade: one rung behind, with two days built and valid (built_seq = late_seq) and one never built. */
             await ExecAsync(connection, "ALTER TABLE collect.plan_regression_daily DROP COLUMN rowcount_sum", ct);
+            await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest DROP COLUMN avg_rowcount", ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + RungVersion, ct);
             await ExecAsync(connection,
                 "INSERT INTO collect.plan_regression_daily_built (server_id, day, late_seq, built_seq, built_at, source_rows) VALUES "
@@ -152,14 +186,22 @@ public sealed class PlanRegressionRowcountRungTests
                 await ScalarAsync(connection,
                     "SELECT data_type || ':' || is_nullable FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'plan_regression_daily' AND column_name = 'rowcount_sum'", ct));
 
+            Assert.Equal("bigint:YES", await ScalarAsync(connection, IntervalColumnSql, ct));
+
             /* Every built day now reads as stale, so a read takes it from the interval table. */
             Assert.Equal(0L, await ScalarAsync(connection,
                 "SELECT count(*) FROM collect.plan_regression_daily_built WHERE built_seq = late_seq", ct));
             Assert.Equal("4,1,8", await ScalarAsync(connection,
                 "SELECT string_agg(late_seq::text, ',' ORDER BY server_id, day) FROM collect.plan_regression_daily_built", ct));
 
-            /* The rung's text run again: the column exists, so nothing moves. */
+            /* The rung's text run again: the columns exist, so nothing moves. */
             await ExecAsync(connection, Rung.Sql, ct);
+            Assert.Equal("bigint:YES", await ScalarAsync(connection, IntervalColumnSql, ct));
+
+            /* The two column adds are independent: with only avg_rowcount missing, running the text adds it and leaves the days alone. */
+            await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest DROP COLUMN avg_rowcount", ct);
+            await ExecAsync(connection, Rung.Sql, ct);
+            Assert.Equal("bigint:YES", await ScalarAsync(connection, IntervalColumnSql, ct));
             Assert.Equal("4,1,8", await ScalarAsync(connection,
                 "SELECT string_agg(late_seq::text, ',' ORDER BY server_id, day) FROM collect.plan_regression_daily_built", ct));
 

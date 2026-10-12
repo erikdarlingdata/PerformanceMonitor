@@ -48,7 +48,7 @@ public sealed class QueryStoreIntervalLatestWriterTests
 SELECT
     database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time,
     collection_time, query_plan_hash, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
-    last_execution_time, is_forced_plan, force_failure_count, query_text
+    last_execution_time, is_forced_plan, force_failure_count, query_text, avg_rowcount
 FROM collect.query_store_interval_latest
 WHERE server_id = @server_id";
 
@@ -65,7 +65,8 @@ SELECT
     (array_agg(last_execution_time ORDER BY collection_time DESC, execution_count DESC))[1],
     (array_agg(is_forced_plan ORDER BY collection_time DESC, execution_count DESC))[1],
     (array_agg(force_failure_count ORDER BY collection_time DESC, execution_count DESC))[1],
-    (array_agg(query_text ORDER BY collection_time DESC, execution_count DESC))[1]
+    (array_agg(query_text ORDER BY collection_time DESC, execution_count DESC))[1],
+    (array_agg(avg_rowcount ORDER BY collection_time DESC, execution_count DESC))[1]
 FROM collect.query_store_stats
 WHERE server_id = @server_id
 AND   execution_type_desc = 'Regular'

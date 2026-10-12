@@ -92,13 +92,19 @@ public partial class DuckDbFactCollector : IFactCollector
     private static void ReportCollectionFailure(
         Exception ex,
         AnalysisContext context,
-        [CallerMemberName] string collectMethod = "")
+        [CallerMemberName] string collectMethod = "",
+        bool record = true)
     {
-        context.RecordCollectionFailure(
-            CollectionFailure.FamilyOf(collectMethod),
-            collectMethod,
-            ex is OperationCanceledException ? CollectionFailureOutcome.Cancelled : CollectionFailureOutcome.Error,
-            ex);
+        /* record: false logs the failure without marking the family unread - for a read whose fact carries the gap itself
+           (#5631's plan-input check keeps a candidate it could not compare, counted unverified). */
+        if (record)
+        {
+            context.RecordCollectionFailure(
+                CollectionFailure.FamilyOf(collectMethod),
+                collectMethod,
+                ex is OperationCanceledException ? CollectionFailureOutcome.Cancelled : CollectionFailureOutcome.Error,
+                ex);
+        }
 
         /* #4316 round 1 B1: ex is now also the third argument, not just interpolated into the message, so
            the log entry carries the full exception (stack and inner-exception chain), not just its message —

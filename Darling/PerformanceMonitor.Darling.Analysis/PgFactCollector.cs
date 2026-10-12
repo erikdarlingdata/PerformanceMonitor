@@ -158,9 +158,13 @@ public sealed partial class PgFactCollector : IFactCollector
     private void ReportCollectionFailure(
         Exception ex,
         AnalysisContext context,
-        [CallerMemberName] string collectMethod = "")
+        [CallerMemberName] string collectMethod = "",
+        bool record = true)
     {
-        context.RecordCollectionFailure(CollectionFailure.FamilyOf(collectMethod), collectMethod, ClassifyOutcome(ex), ex);
+        /* record: false logs the classified reason without marking the family unread — for a read whose caller decides, once
+           per pass, whether the family counts as unread (#5630's plan-input check: a fact that carries the gap is not unread). */
+        if (record)
+            context.RecordCollectionFailure(CollectionFailure.FamilyOf(collectMethod), collectMethod, ClassifyOutcome(ex), ex);
 
         if (PgBaselineProvider.IsCommandTimeout(ex))
         {

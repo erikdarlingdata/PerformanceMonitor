@@ -1748,11 +1748,11 @@ public static class FactAdvice
                 inv.Append(" The statistics changed between the two compiles.");
         }
         else if (basis == 1)
-            inv.Append($". Query Store has the faster plan on record{bestAgeText}, and both plans were compiled for the same parameter values, so this is a plan choice that got worse — not a query that inherently costs more.");
+            inv.Append($". Query Store has the faster plan on record{bestAgeText}, so this is a plan choice that got worse — not a query that inherently costs more: both plans were compiled for the same parameter values.");
         else if (basis == 2)
-            inv.Append($". Query Store has the faster plan on record{bestAgeText}. The two plans were compiled for different parameter values, and the statistics they used changed between the compiles (updated, or a different set), so the plan may have flipped after a statistics update.");
+            inv.Append($". Query Store has the faster plan on record{bestAgeText}, so the newer plan costs more. The two plans were compiled for different parameter values, and the statistics they used changed between the compiles (updated, or a different set), so the plan may have flipped after a statistics update.");
         else
-            inv.Append($". Query Store has the faster plan on record{bestAgeText}, but the compiled parameter values and statistics of the two plans could not be compared, so the cause is not established.");
+            inv.Append($". Query Store has the faster plan on record{bestAgeText}, so the newer plan costs more, but the compiled parameter values and statistics of the two plans could not be compared, so the cause is not established.");
         var crossInput = FactMeta(facts, "PLAN_REGRESSION", "cross_input_excluded_count");
         if (crossInput is > 0)
             inv.Append($" {Plural(crossInput.Value, "other query")} {(crossInput.Value == 1 ? "was" : "were")} left out: the statement recompiles on every call, the newer plan returns many times the rows of the cheaper one at no higher cost per row, or the plans were compiled for different parameter values over unchanged statistics.");

@@ -56,6 +56,9 @@ public partial class DuckDbFactCollector
     private sealed class PlanFetchBudget
     {
         public int Left = MaxPlanInputFetches;
+
+        /// <summary>True once the pass has logged a plan-input fault, so a broken source is one event, not one per fetch.</summary>
+        public bool FaultReported;
     }
 
     /// <summary>
@@ -174,16 +177,26 @@ public partial class DuckDbFactCollector
         {
             return PlanInputComparison.JudgePlans(latestXml, bestXml);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
+            /* Only the exception's type goes to the log: the plans are customer text, and a parser's message can quote them. */
+            if (!budget.FaultReported)
+            {
+                budget.FaultReported = true;
+                ReportCollectionFailure(
+                    new InvalidOperationException($"The two plans could not be compared ({ex.GetType().Name})."),
+                    context, nameof(CollectPlanRegressionFactsAsync), record: false);
+            }
+
             return PlanInputOutcome.KeepUnverified;
         }
     }
 
     /// <summary>
     /// One bounded fetch: null when the budget is spent, the source has no plan, the fetch fails, or the
-    /// fetch or the pass's fetch time runs out. Only the pass's own cancellation escapes. Nothing about the
-    /// plan or the failure is logged.
+    /// fetch or the pass's fetch time runs out. Only the pass's own cancellation escapes. The plan is never
+    /// logged; the first fault of a pass (not a timeout) is logged once, through the collector's failure report, without
+    /// marking the family unread.
     /// </summary>
     private async Task<string?> FetchPlanForInputsAsync(
         AnalysisContext context, PlanFetchBudget budget,
@@ -202,12 +215,16 @@ public partial class DuckDbFactCollector
                 .WaitAsync(one.Token);
             return string.IsNullOrWhiteSpace(xml) ? null : xml;
         }
-        catch (OperationCanceledException) when (!context.CancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            return null;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
+            /* One fetch's own timeout is an OperationCanceledException with the pass's token unfired: expected, so unverified
+               and not logged. Anything else is a fault in the plan source. */
+            if (ex is not OperationCanceledException && !budget.FaultReported)
+            {
+                budget.FaultReported = true;
+                ReportCollectionFailure(ex, context, nameof(CollectPlanRegressionFactsAsync), record: false);
+            }
+
             return null;
         }
     }

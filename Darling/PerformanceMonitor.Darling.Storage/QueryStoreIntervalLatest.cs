@@ -255,6 +255,7 @@ WITH
         last_execution_time,
         is_forced_plan,
         force_failure_count,
+        avg_rowcount,
         query_text
     )
     SELECT DISTINCT ON (" + BatchIdentityColumns + @")
@@ -274,6 +275,7 @@ WITH
         s.last_execution_time,
         s.is_forced_plan,
         s.force_failure_count,
+        s.avg_rowcount,
         s.query_text
     FROM collect.query_store_stats AS s
     WHERE s.server_id = $1
@@ -295,6 +297,7 @@ WITH
         last_execution_time = EXCLUDED.last_execution_time,
         is_forced_plan = EXCLUDED.is_forced_plan,
         force_failure_count = EXCLUDED.force_failure_count,
+        avg_rowcount = EXCLUDED.avg_rowcount,
         query_text = EXCLUDED.query_text
     WHERE (EXCLUDED.collection_time, EXCLUDED.execution_count) > (t.collection_time, t.execution_count)
     RETURNING 1

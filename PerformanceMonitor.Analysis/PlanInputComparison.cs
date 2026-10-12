@@ -124,7 +124,7 @@ public static class PlanInputComparison
     /// rows, is <see cref="PlanInputOutcome.NeedsPlans"/>. Rows per call are floored at <see cref="RowFloor"/>.
     /// </summary>
     /// <param name="statementText">The statement text, or null / the withheld placeholder when it is unavailable.</param>
-    /// <param name="factor">The regression factor: the newer plan's CPU per call divided by the cheaper plan's.</param>
+    /// <param name="factor">The detector's regression factor, as both collectors read it from <c>regression_factor</c>: the newer plan's CPU per call divided by the cheaper plan's for a CPU-detected row, and half the duration ratio for a duration-dominant row. The per-row test below is therefore a cost-per-row ratio only for a CPU-detected row.</param>
     /// <param name="rowsLatest">Rows per call of the newer plan, or null when unknown.</param>
     /// <param name="rowsBest">Rows per call of the cheaper plan, or null when unknown.</param>
     public static PlanInputOutcome JudgeBeforePlans(string? statementText, double factor, double? rowsLatest, double? rowsBest)

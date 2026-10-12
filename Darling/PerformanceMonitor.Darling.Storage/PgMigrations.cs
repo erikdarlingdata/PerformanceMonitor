@@ -951,7 +951,11 @@ END $$;";
     /// the column filled. Both happen only when the column is added, so a second run of the text changes nothing. Catalog-only: a
     /// nullable column without a default does not rewrite the table, and the built table is one row per server and day. The lock
     /// timeout is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V173's, because the new column needs an ACCESS EXCLUSIVE
-    /// lock on the table. No GRANT: the <c>collect</c> schema's blanket SELECT covers a column. <b>No Lite twin:</b> Lite has no
+    /// lock on the table. The same migration adds <c>collect.query_store_interval_latest.avg_rowcount</c> (<c>bigint</c>, as
+    /// <c>query_store_stats.avg_rowcount</c>) in its own idempotent step: the interval table never had it, and the new rows-per-call
+    /// reads need it. No backfill: interval rows written before the upgrade keep a NULL, so rows per call is NULL for them and the
+    /// output-size rule skips them (a missing count never reads as a small one). On a day-partitioned store the column is added to the
+    /// parent and the partitions inherit it. No GRANT: the <c>collect</c> schema's blanket SELECT covers a column. <b>No Lite twin:</b> Lite has no
     /// PostgreSQL store.
     /// </summary>
     private static readonly string V175Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
@@ -968,6 +972,22 @@ BEGIN
     THEN
         ALTER TABLE collect.plan_regression_daily ADD COLUMN rowcount_sum numeric;
         UPDATE collect.plan_regression_daily_built SET late_seq = late_seq + 1;
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'collect'
+        AND   table_name = 'query_store_interval_latest'
+        AND   column_name = 'avg_rowcount'
+    )
+    THEN
+        ALTER TABLE collect.query_store_interval_latest ADD COLUMN avg_rowcount bigint;
     END IF;
 END
 $$;";

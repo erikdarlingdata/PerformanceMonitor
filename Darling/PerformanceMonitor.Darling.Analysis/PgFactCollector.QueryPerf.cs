@@ -846,6 +846,8 @@ ORDER BY c.regression_factor DESC";
             var judgedKeys = new HashSet<PlanRegressionOffender>();
             var judgements = new Dictionary<int, PlanInputJudgement>();
             var planReads = new PlanReadFailures();
+            /* Two replica rows of one query can be two candidates over the same two plans: one read and one comparison, as Lite's. */
+            var planOutcomes = new Dictionary<(string Database, long Latest, long Best), PlanInputOutcome>();
             for (var i = 0; i < candidates.Count; i++)
             {
                 if (kept.Count >= PlanRegressionMaxOffenders)
@@ -860,7 +862,7 @@ ORDER BY c.regression_factor DESC";
                         if (candidates[j].DatabaseName != queryKey.DatabaseName || candidates[j].QueryId != queryKey.QueryId)
                             continue;
 
-                        var verdict = await JudgePlanRegressionInputsAsync(connection, context, candidates[j], planReads);
+                        var verdict = await JudgePlanRegressionInputsAsync(connection, context, candidates[j], planReads, planOutcomes);
                         if (verdict.Exclude)
                         {
                             excludedKeys.Add(queryKey);
@@ -1063,11 +1065,13 @@ AND   m.plan_id = ANY($3)";
     /// output); neither of those reads a plan. Otherwise the two stored plans are read, and a pair compiled for different
     /// parameter values over unchanged statistics is out, while the same values, or different values after a statistics
     /// update, are kept. Anything that cannot be checked (a plan or the statement text is missing, unreadable or withheld, or
-    /// the read failed) keeps the candidate, as before, and counts as unverified. Only the outcome leaves
+    /// the read failed) keeps the candidate, as before, and counts as unverified. A pair of plans already judged in this pass
+    /// (<paramref name="planOutcomes"/>) is not read again. Only the outcome leaves
     /// <see cref="PlanInputComparison"/>: no value is logged or stored.
     /// </summary>
     private async Task<PlanInputJudgement> JudgePlanRegressionInputsAsync(
-        NpgsqlConnection connection, AnalysisContext context, PlanRegressionCandidate candidate, PlanReadFailures planReads)
+        NpgsqlConnection connection, AnalysisContext context, PlanRegressionCandidate candidate, PlanReadFailures planReads,
+        Dictionary<(string Database, long Latest, long Best), PlanInputOutcome> planOutcomes)
     {
         var text = candidate.StatementText;
         var textUnknown = string.IsNullOrWhiteSpace(text) || WithheldStatementMarker.IsMarker(text);
@@ -1079,6 +1083,10 @@ AND   m.plan_id = ANY($3)";
 
         if (candidate.LatestPlanId is not long latestId || candidate.BestPlanId is not long bestId)
             return new PlanInputJudgement(PlanInputOutcome.KeepUnverified, Unverified: true);
+
+        var pairKey = (candidate.DatabaseName, latestId, bestId);
+        if (planOutcomes.TryGetValue(pairKey, out var cachedOutcome))
+            return JudgementFor(cachedOutcome);
 
         string? latestXml = null;
         string? bestXml = null;
@@ -1109,17 +1117,23 @@ AND   m.plan_id = ANY($3)";
         {
             /* The check could not run, so the candidate stays, as it did before the check existed. The caller records the
                failure once for the pass (#2826), so a broken connection is one event, not one per candidate. */
+            if (planReads.Count == 0)
+                ReportCollectionFailure(ex, context, nameof(CollectPlanRegressionFactsAsync), record: false);
             planReads.Add(ex);
+            planOutcomes[pairKey] = PlanInputOutcome.KeepUnverified;
             return new PlanInputJudgement(PlanInputOutcome.KeepUnverified, Unverified: true);
         }
 
         var outcome = PlanInputComparison.JudgePlans(latestXml, bestXml);
-        if (PlanInputComparison.IsDrop(outcome))
-            return new PlanInputJudgement(outcome, Unverified: false);
+        planOutcomes[pairKey] = outcome;
+        return JudgementFor(outcome);
 
-        /* A kept pair is unverified when the plans could not be compared, or when the statement text was missing or withheld
-           (the OPTION (RECOMPILE) check could not run). */
-        return new PlanInputJudgement(outcome, Unverified: outcome == PlanInputOutcome.KeepUnverified || textUnknown);
+        PlanInputJudgement JudgementFor(PlanInputOutcome planOutcome) =>
+            PlanInputComparison.IsDrop(planOutcome)
+                ? new PlanInputJudgement(planOutcome, Unverified: false)
+                /* A kept pair is unverified when the plans could not be compared, or when the statement text was missing or
+                   withheld (the OPTION (RECOMPILE) check could not run). */
+                : new PlanInputJudgement(planOutcome, Unverified: planOutcome == PlanInputOutcome.KeepUnverified || textUnknown);
     }
 
     public const string ProcedureStatsSql = @"
