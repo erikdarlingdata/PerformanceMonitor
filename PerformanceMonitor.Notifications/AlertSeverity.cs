@@ -70,6 +70,10 @@ internal static class AlertSeverity
                such SQL Server row WAS a CRITICAL fire. CRITICAL is therefore the faithful replay, not a
                default for the metric; a new fire site for this name must pass its grade explicitly. */
             "Poison Wait" => ("#DC2626", "CRITICAL", "\U0001F534"),
+            /* #5641: graded at its fire site (Warning at the Warning bar, Critical at the Critical bar) and every
+               live fire carries the tier on Context.SeverityOverride, so this arm styles only an override-less
+               replay; it never fired presence-flat red, so WARNING-amber is the faithful replay. */
+            "Runnable Queue" => ("#D97706", "WARNING", "\U0001F7E0"),
             "Long-Running Query" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #3653 (A8e): fires with an explicit WARNING override now (and only Warning — the engine's fire
                site says why no Critical tier exists), so this arm styles pre-#3653 replays, which were amber. */

@@ -42,6 +42,9 @@ public sealed class AlertEngineTests
         public bool BlockingEnabled { get; set; }
         public bool DeadlockEnabled { get; set; }
         public bool PoisonWaitEnabled { get; set; }
+        public bool RunnableQueueEnabled { get; set; }
+        public int RunnableQueueWarningPerScheduler { get; set; } = 8;
+        public int RunnableQueueCriticalPerScheduler { get; set; } = 16;
         public bool LongRunningQueryEnabled { get; set; }
         public bool TempDbSpaceEnabled { get; set; }
         public bool LowDiskEnabled { get; set; }
@@ -107,6 +110,10 @@ public sealed class AlertEngineTests
            unfiltered — the seam contract is a dumb window sum; the engine does the thresholding. */
         public List<PoisonWaitAccumulation> PoisonWaits { get; } = new();
         public int PoisonWaitWindowMinutesAsked { get; private set; }
+        /* #5641: the window the engine grades; whatever a test puts here comes back as is. */
+        public RunnableQueueWindow RunnableQueue { get; set; } = RunnableQueueWindow.Empty;
+        public int RunnableQueueWindowMinutesAsked { get; private set; }
+        public int RunnableQueueReads { get; private set; }
         public List<LongRunningQueryInfo> LongRunning { get; } = new();
         public List<VolumeFreeSpaceInfo> Volumes { get; } = new();
         public List<PvsPressureInfo> PvsDatabases { get; } = new();
@@ -149,6 +156,13 @@ public sealed class AlertEngineTests
         {
             PoisonWaitWindowMinutesAsked = windowMinutes;
             return Task.FromResult(new List<PoisonWaitAccumulation>(PoisonWaits));
+        }
+
+        public Task<RunnableQueueWindow> GetRunnableQueueWindowAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default)
+        {
+            RunnableQueueWindowMinutesAsked = windowMinutes;
+            RunnableQueueReads++;
+            return Task.FromResult(RunnableQueue);
         }
 
         /* #3495's degrade arm: the CPU card's fire-time maintenance probe rides this same seam, and the
@@ -4677,6 +4691,8 @@ public sealed class AlertEngineTests
         public Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("store down");
+        public Task<RunnableQueueWindow> GetRunnableQueueWindowAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(string serverKey, int thresholdMinutes, int maxResults, bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc, IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");

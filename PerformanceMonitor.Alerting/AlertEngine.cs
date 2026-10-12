@@ -128,6 +128,9 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastBlockingWaitAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastDeadlockAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueCollectionTime = new();
+    private readonly ConcurrentDictionary<string, bool> _activeRunnableQueueAlert = new();
 
     /* The collection_time of the newest wait_stats row inside the window last actually fired on. Read
        adapters answer "how much poison wait accumulated over the last 10 minutes, and when was the
@@ -420,6 +423,7 @@ public sealed class AlertEngine
         await CheckBlockingAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, blockingDeadlockExcluded, ct);
         await CheckDeadlocksAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, blockingDeadlockExcluded, ct);
         await CheckPoisonWaitsAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckRunnableQueueAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         await CheckLongRunningQueriesAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckTempDbSpaceAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
@@ -1943,6 +1947,121 @@ public sealed class AlertEngine
         {
             _logger?.LogError("Failed to check poison waits for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :337 */
             _readFailures?.RecordReadFailure(key, "poison waits", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /* ---------------- runnable queue (#5641) ---------------- */
+
+    /// <summary>
+    /// The Runnable Queue alert (#5641): runnable tasks per visible online scheduler, the AVERAGE of the stored
+    /// <c>cpu_scheduler_stats.avg_runnable_tasks_count</c> samples over the last
+    /// <see cref="RunnableQueueEvaluator.WindowMinutes"/> minutes, graded like Poison Wait: Warning at or above the
+    /// Warning bar (8 by default), Critical at or above the Critical bar (16). No alert read scheduler queue depth
+    /// before this one: on 2026-10-09 a 4-vCPU read replica sat at about 57 runnable tasks per scheduler and client
+    /// timeouts began about six minutes before the first (High CPU) alert. The bars and their measurement are on
+    /// <see cref="RunnableQueueEvaluator"/>.
+    ///
+    /// <para><b>Fewer than <see cref="RunnableQueueEvaluator.MinimumSamples"/> samples is not an observation.</b> The
+    /// check does not evaluate: it fires nothing and clears nothing, so a collection gap cannot page on one busy
+    /// sample and cannot announce "Cleared" on silence (the #3282 rule Poison Wait applies to an empty read). A
+    /// standing alert clears only when an evaluable window sits under the Warning bar.</para>
+    ///
+    /// <para>Cooldown, mute, the fresh-sample guard and the resolution notice are Poison Wait's, unchanged. The alert
+    /// is one per server; its mute context carries no wait type.</para>
+    /// </summary>
+    private async Task CheckRunnableQueueAsync(
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+    {
+        if (!_settings.RunnableQueueEnabled)
+        {
+            return;
+        }
+
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            var window = await _readAdapter.GetRunnableQueueWindowAsync(key, RunnableQueueEvaluator.WindowMinutes, ct);
+            readClock.Restart();
+
+            /* Not enough samples: neither a fire nor a clear. */
+            if (!RunnableQueueEvaluator.IsEvaluable(window))
+            {
+                return;
+            }
+
+            var finding = RunnableQueueEvaluator.Evaluate(
+                window, _settings.RunnableQueueWarningPerScheduler, _settings.RunnableQueueCriticalPerScheduler);
+
+            if (finding is not null)
+            {
+                _activeRunnableQueueAlert[key] = true;
+
+                /* The window is a rolling average, so a cooldown-elapsed re-ask against an unrefreshed store hands
+                   back the SAME newest sample (Poison Wait's guard, same reasoning): a fire waits for a sample
+                   newer than the one last fired on. */
+                bool hasFreshCollection = !_lastRunnableQueueCollectionTime.TryGetValue(key, out var lastCollectionTime)
+                    || finding.NewestCollectionTime > lastCollectionTime;
+
+                if (!suppressed && hasFreshCollection && CooldownElapsed(_lastRunnableQueueAlert, key, now, alertCooldown))
+                {
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = RunnableQueueEvaluator.MetricName };
+                    bool isMuted = _isAlertMuted(muteCtx);
+                    _lastRunnableQueueAlert[key] = now;
+                    _lastRunnableQueueCollectionTime[key] = finding.NewestCollectionTime;
+
+                    /* Severity rides on the context override as well as the outcome, for the reason the Poison Wait
+                       site gives (the channel builders read the context; Darling's deliverer folds the outcome's in
+                       only when the context has none). */
+                    var queueContext = new AlertContext { SeverityOverride = finding.Severity };
+                    AlertSampleAge.Stamp(queueContext, "scheduler stats", finding.NewestCollectionTime, now);
+
+                    /* #5641 Lane 2 hook: the detail block (CPU percent for the same minute, the top requests from the
+                       latest query snapshot) is added to queueContext here, through AlertContextBuilders, before
+                       ContextToDetailText runs. This lane leaves the context without detail items. */
+
+                    var detailText = AlertContextBuilders.ContextToDetailText(queueContext);
+
+                    var delivery = await FireAsync(new AlertOutcome(
+                        key, serverName, RunnableQueueEvaluator.MetricName,
+                        finding.CurrentValueText,
+                        finding.ThresholdText,
+                        queueContext, detailText,
+                        NumericCurrentValue: finding.AveragePerScheduler,
+                        NumericThresholdValue: finding.BarCrossed,
+                        Muted: isMuted, Severity: finding.Severity,
+                        ShortMessage: finding.Summary), ct);
+                    AfterFire(RunnableQueueEvaluator.MetricName, _lastRunnableQueueAlert, key, now, alertCooldown, delivery);
+
+                    /* A fire nobody received forgets the sample marker, so the retry counts the window as fresh (#4752). */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        _lastRunnableQueueCollectionTime.TryRemove(key, out _);
+                    }
+                    readClock.Restart();
+                }
+            }
+            else if (_activeRunnableQueueAlert.TryGetValue(key, out var wasActive) && wasActive)
+            {
+                _activeRunnableQueueAlert[key] = false;
+                if (!suppressed)
+                {
+                    await NotifyResolutionAsync(new AlertResolution(
+                        key, serverName, RunnableQueueEvaluator.MetricName,
+                        "Runnable Queue Cleared",
+                        string.Create(CultureInfo.InvariantCulture,
+                            $"{serverName}: Runnable tasks per scheduler averaged over the last {RunnableQueueEvaluator.WindowMinutes} minutes are back below threshold")), ct);
+                    readClock.Restart();
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Failed to check runnable queue for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "runnable queue", readClock.ElapsedMilliseconds);
         }
     }
 

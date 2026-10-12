@@ -782,6 +782,23 @@ public sealed class AlertsConfig
     [JsonPropertyName("poisonWaitThresholdMs")]
     public int PoisonWaitThresholdMs { get; set; } = 500;
 
+    /// <summary>The Runnable Queue alert (#5641) switch: runnable tasks per visible online scheduler, averaged over
+    /// <see cref="RunnableQueueEvaluator.WindowMinutes"/> minutes. ON by default, like Poison Wait. Persisted as the
+    /// store column <c>runnable_queue_enabled</c> (V177).</summary>
+    [JsonPropertyName("runnableQueueEnabled")]
+    public bool RunnableQueueEnabled { get; set; } = true;
+
+    /// <summary>Runnable Queue Warning bar (#5641), runnable tasks per scheduler, window average. Shipped 8 (the
+    /// measurement is on <see cref="RunnableQueueEvaluator"/>). Read through <see cref="RunnableQueueEvaluator.ClampBars"/>.
+    /// Store column <c>runnable_queue_warning_per_scheduler</c> (V177).</summary>
+    [JsonPropertyName("runnableQueueWarningPerScheduler")]
+    public int RunnableQueueWarningPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultWarningPerScheduler;
+
+    /// <summary>Runnable Queue Critical bar (#5641). Shipped 16. Never read below the Warning bar. Store column
+    /// <c>runnable_queue_critical_per_scheduler</c> (V177).</summary>
+    [JsonPropertyName("runnableQueueCriticalPerScheduler")]
+    public int RunnableQueueCriticalPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultCriticalPerScheduler;
+
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;
 

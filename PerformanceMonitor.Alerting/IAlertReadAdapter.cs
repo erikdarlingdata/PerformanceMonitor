@@ -99,6 +99,25 @@ public interface IAlertReadAdapter
         string serverKey, int windowMinutes, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// The scheduler run-queue window for the Runnable Queue alert (#5641), from the <c>cpu_scheduler_stats</c> rows
+    /// the collector already stores: how many samples fell in the last <paramref name="windowMinutes"/> minutes, the
+    /// AVERAGE of their <c>avg_runnable_tasks_count</c> (runnable tasks per visible online scheduler, the number the
+    /// bars were measured on; never the node or offline-CPU columns, #5656), and the NEWEST sample's
+    /// <c>scheduler_count</c>, <c>total_runnable_tasks_count</c> and <c>collection_time</c>.
+    /// <para>
+    /// <b>Dumb by contract.</b> No threshold and no minimum-sample rule is applied here: the engine grades against
+    /// <see cref="RunnableQueueEvaluator"/>, and it needs the sample count to tell "not enough samples to judge"
+    /// from "judged and quiet". A sample whose <c>avg_runnable_tasks_count</c> is NULL is not counted. An empty
+    /// window comes back as <see cref="RunnableQueueWindow.Empty"/>, never null. The window is bounded below on
+    /// <c>collection_time</c> with the same naive-UTC parameter style the poison-wait read uses; both stores keep
+    /// microseconds. <paramref name="windowMinutes"/> is passed so the read's cutoff and the engine's summary text
+    /// are one number by construction.
+    /// </para>
+    /// </summary>
+    Task<RunnableQueueWindow> GetRunnableQueueWindowAsync(
+        string serverKey, int windowMinutes, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Currently-running queries over <paramref name="thresholdMinutes"/> elapsed, longest first,
     /// from the LATEST collection snapshot only (and only if that snapshot is under 10 minutes
     /// old — a stale store must not alert). Mirrors Lite's read exactly: user sessions only

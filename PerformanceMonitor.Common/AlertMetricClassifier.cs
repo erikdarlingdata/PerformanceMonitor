@@ -189,6 +189,9 @@ namespace PerformanceMonitor.Common
                render in the same unit, which is why the arm did not change). Long-running query carries
                elapsed minutes. */
             "Poison Wait" => $"{value:F0} ms",
+
+            /* #5641: Runnable Queue carries the window's average runnable tasks per scheduler, and the bar it crossed. */
+            "Runnable Queue" => $"{value:F1} per scheduler",
             "Long-Running Query" => $"{value:F0} m",
 
             /* #5450: "Collection Gap At Start" carries the whole minutes the service was not collecting before
