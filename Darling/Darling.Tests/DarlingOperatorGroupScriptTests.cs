@@ -156,6 +156,33 @@ public sealed class DarlingOperatorGroupScriptTests
         Assert.DoesNotContain("Fail ", between, StringComparison.Ordinal);
     }
 
+    /// <summary>A fresh install that cannot make the group stops, but only once the service can read its files. Step 1b2
+    /// locks the tree with no grant for the service and sc.exe create registers it to start automatically, so a stop before
+    /// step 4b2's grant would leave a service that cannot read its own binaries. The refusal comes after that grant and
+    /// before the service starts, and none is placed between the two lock calls.</summary>
+    [Fact]
+    public void TheInstallerRefusesAGroupItCannotMake_AfterTheServiceIsGrantedItsFiles_AndBeforeItStarts()
+    {
+        var script = Script("install-darling.ps1");
+        const string refusalText = "Could not create the local group '$operatorGroupName'";
+
+        var firstLock = script.IndexOf("Invoke-InstallTreeLock $lockAccount -StopOnOpen", StringComparison.Ordinal);
+        var serviceLock = script.IndexOf("Invoke-InstallTreeLock $serviceAccount", StringComparison.Ordinal);
+        var refusal = script.IndexOf(refusalText, StringComparison.Ordinal);
+        var start = script.IndexOf("Start-Service -Name $serviceName", StringComparison.Ordinal);
+
+        Assert.True(firstLock >= 0 && serviceLock > firstLock, "the two install-tree lock calls are gone or out of order");
+        Assert.True(refusal >= 0 && start > refusal, "the installer no longer refuses a group it cannot make before it starts the service");
+        Assert.True(refusal > serviceLock,
+            "the group refusal must come after the service is granted its files (step 4b2): a stop between step 1b2's lock " +
+            "and that grant leaves an auto-start service that cannot read its own binaries");
+
+        var window = script.Substring(firstLock, serviceLock - firstLock);
+        Assert.DoesNotContain(refusalText, window, StringComparison.Ordinal);
+        Assert.Equal(1, Regex.Matches(script, Regex.Escape(refusalText)).Count);
+        Assert.Contains("Fail @\"", script.Substring(refusal - 40, 40), StringComparison.Ordinal);
+    }
+
     /// <summary>Runs the extracted lookup under Windows PowerShell against a group that already exists, which is the
     /// path that changes nothing, so this creates nothing. The group is one of this machine's own accounts when it has
     /// one; otherwise a built-in group is looked up under the BUILTIN domain in place of the machine name, which

@@ -2161,7 +2161,7 @@ function Initialize-DarlingOperatorGroup([string]$groupName) {
 # NT AUTHORITY\INTERACTIVE gets nothing: it covered every logged-on user, not only the people who run the
 # Viewer. Best-effort: a failure warns rather than aborting an otherwise good install, and the service
 # re-asserts the live config's ACL at every startup. The operator group is the one thing that stops the
-# install, once the files are locked: see the end of this step.
+# install, once the files are locked and the service can read them: see the end of step 4b2.
 #
 # Covers darling.json AND its .bak-* siblings (#1721). The CLI's config-editing verbs back the file up
 # before rewriting it, and File.Copy does NOT carry the source DACL - a backup takes the DIRECTORY's
@@ -2178,7 +2178,7 @@ function Initialize-DarlingOperatorGroup([string]$groupName) {
 # The operator group is created first because the grant below needs its SID. A failure to create it does not
 # skip the hardening (that would leave darling.json readable by BUILTIN\Users): the files are locked to SYSTEM,
 # Administrators and the service account without the group, which fails closed, and the install stops at the
-# end of this step with the reason.
+# end of step 4b2 with the reason, not in this step (see there).
 $operatorSid = $null
 $operatorGroupProblem = $null
 if (-not $onDomainController) {
@@ -2293,8 +2293,7 @@ if ($failed.Count -gt 0) {
 
 # Who gets the operator group's access is the administrator's decision, so this script never adds a member. It
 # says who to add and what that person is being trusted with. A group that could not be created stops the
-# install here, after the files above are already locked, so nothing is open to other accounts while it is fixed: an
-# unattended install then reports a non-zero exit instead of finishing with a Viewer nobody can open.
+# install, but at the end of step 4b2, not here.
 if ($operatorSid) {
     Write-Host ''
     Write-Host "Local group '$operatorGroupName' is in place. This script never adds members to it."
@@ -2307,13 +2306,7 @@ elseif ($onDomainController) {
     Write-Host "Domain controller: the local group '$operatorGroupName' was not created and nothing was granted to it (see the warning above). Run the Viewer and the CLI elevated." -ForegroundColor Yellow
 }
 else {
-    Fail @"
-Could not create the local group '$operatorGroupName': $operatorGroupProblem
-darling.json is restricted to SYSTEM, Administrators and the service account, so nothing is open to other accounts, but the
-Viewer and the CLI cannot read it without elevation until the group exists. The install stops here, before
-the service starts. Create the group from an elevated prompt, then re-run this script:
-  net localgroup "$operatorGroupName" /add
-"@
+    Write-Host "The local group '$operatorGroupName' could not be created: $operatorGroupProblem" -ForegroundColor Yellow
 }
 
 # -- 4b2. Grant the service its access to the locked tree (#4034) ----------------------------------------
@@ -2324,6 +2317,22 @@ the service starts. Create the group from an elevated prompt, then re-run this s
 # upgrade-darling.ps1 runs the same function, so an install made before these steps is locked at its next
 # upgrade.
 Invoke-InstallTreeLock $serviceAccount
+
+# A fresh install that could not make the operator group stops here, not back in step 4b where the failure
+# happened. 1b2 locked the tree with no grant for the service, and sc.exe create registered it to start
+# automatically, so a stop anywhere between those and the call above would leave a service that cannot read its
+# own files. Now the service can, the files are locked closed, and nothing has started, so the refusal costs the
+# operator one re-run, before Start-Service. (upgrade-darling.ps1 warns and carries on for the same condition:
+# there the service is already installed and its own start tightens the files again.)
+if (-not $operatorSid -and -not $onDomainController) {
+    Fail @"
+Could not create the local group '$operatorGroupName': $operatorGroupProblem
+darling.json is restricted to SYSTEM, Administrators and the service account, so nothing is open to other accounts, but the
+Viewer and the CLI cannot read it without elevation until the group exists. The install stops here, before
+the service starts. Create the group from an elevated prompt, then re-run this script:
+  net localgroup "$operatorGroupName" /add
+"@
+}
 
 # -- 4b3. Create the store folder before the service does -------------------------------------------------
 # The store folder is the parent of postgres.dataDirectory: %ProgramData%\PerformanceMonitorDarling unless
