@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// The read now rolls the threads of one session and wait type up within a capture: <c>thread_count</c> says how many, and a blocker equal
 /// to the session is flagged <c>intra_query_parallelism</c> and never reported as a blocker.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class WaitingTasksRollup5633Tests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");

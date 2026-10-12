@@ -211,7 +211,7 @@ public sealed class McpQueryTools
             var requestedStart = nowUtc.AddHours(-hours_back);
             /* #5633 item 4: with no database named, rank the databases the server has now (its newest database_states snapshot), not one
                dropped since: its rows would fill the page. Unknown (no snapshot) narrows nothing. A named database is read as asked. */
-            var procedureDatabases = string.IsNullOrEmpty(database_name) ? await dataService.GetCurrentDatabasesAsync(resolved.ServerId) : null;
+            var procedureDatabases = string.IsNullOrEmpty(database_name) ? await dataService.GetCurrentDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : nowUtc) : null;
             var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? procedureDatabases : new[] { database_name }, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {

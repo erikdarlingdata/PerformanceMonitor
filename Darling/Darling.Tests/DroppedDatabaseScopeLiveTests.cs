@@ -161,6 +161,68 @@ public sealed class DroppedDatabaseScopeLiveTests
         Assert.Equal(new[] { "GoneDb" }, namedConfig.Select(c => c.DatabaseName).ToArray());
     }
 
+    /// <summary>
+    /// Review M2: a read with an as_of uses the newest snapshot AT OR BEFORE it (horizon from it), so a database dropped after the
+    /// window still ranks in a window it existed in. Review M2 (second half): a row stamped after the newest snapshot is a database
+    /// created since it, and is kept (the snapshot is up to 30 minutes old).
+    /// </summary>
+    [Fact]
+    public async Task AsOfReads_UseTheSnapshotAtOrBeforeIt_AndARowNewerThanTheSnapshotIsKept()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), BaseSkip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        const string serverName = "dropped-scope-asof";
+        var serverId = ServerIdHelper.GetDeterministicHashCode(serverName);
+        await DarlingMcpTestData.RegisterServerAsync(connection, serverId, serverName, ct);
+        var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
+        var windowTime = now.AddHours(-72);
+        foreach (var (database, weight) in new[] { ("GoneDb", 900L), ("LiveDb", 100L) })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
+                                               delta_worker_time, delta_elapsed_time, delta_execution_count, delta_spills, sample_interval_seconds)
+                  VALUES ($1,$2,$3,$4,$5,'dbo','usp_Work',$6,$7,$8,$9,0,60)",
+                CollectionIdGenerator.Next(), windowTime, serverId, serverName, database, "0xH" + database, weight * 1000L, weight * 2000L, weight);
+        }
+
+        /* Three days ago both existed; the newest snapshot (5 minutes ago) names LiveDb only, so GoneDb was dropped since. */
+        await SnapshotAsync(connection, serverId, serverName, TimeSpan.FromHours(73), ct, "GoneDb", "LiveDb");
+        await SnapshotAsync(connection, serverId, serverName, TimeSpan.FromMinutes(5), ct, "LiveDb");
+
+        static List<string> Databases(string json) =>
+            JsonDocument.Parse(json).RootElement.GetProperty("procedures").EnumerateArray()
+                .Select(p => p.GetProperty("database_name").GetString()!).ToList();
+
+        var asOf = windowTime.AddHours(2).ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal(new[] { "GoneDb", "LiveDb" },
+            Databases(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 12, top: 20, as_of: asOf)));
+
+        /* The set itself: at or before the anchor, and unknown when that snapshot is older than the horizon from the anchor. */
+        var then = await CurrentDatabaseScope.ReadAsync(dataSource, serverId, asOfUtc: windowTime.AddHours(2), cancellationToken: ct);
+        Assert.Equal(new[] { "GoneDb", "LiveDb" }, then!.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        Assert.Null(await CurrentDatabaseScope.ReadAsync(dataSource, serverId, asOfUtc: windowTime.AddHours(2) + CurrentDatabaseScope.SnapshotHorizon, cancellationToken: ct));
+        Assert.Equal(new[] { "LiveDb" }, (await CurrentDatabaseScope.ReadAsync(dataSource, serverId, cancellationToken: ct))!.ToArray());
+
+        /* A database created after the newest snapshot: its newest capture is newer than the snapshot, so it stays; GoneDb's is older. */
+        foreach (var (database, capturedAt) in new[] { ("GoneDb", now.AddHours(-1)), ("LiveDb", now.AddHours(-1)), ("NewDb", now.AddMinutes(-1)) })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode)
+                  VALUES ($1,$2,$3,$4,$5,'READ_ONLY','READ_WRITE',2,10,8192,'AUTO',21,200,60,'AUTO')",
+                CollectionIdGenerator.Next(), capturedAt, serverId, serverName, database);
+        }
+
+        var config = await DarlingQueryStoreClutterReader.GetConfigAsync(dataSource, new[] { serverId }, now.AddDays(-2), now.AddMinutes(5), cancellationToken: ct);
+        Assert.Equal(new[] { "LiveDb", "NewDb" }, config.Select(c => c.DatabaseName).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+    }
+
     [Fact]
     public void TheScopeRules_UnknownFiltersNothing_AndANamedDatabaseIsKept()
     {
