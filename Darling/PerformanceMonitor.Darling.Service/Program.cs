@@ -232,8 +232,13 @@ if (args.Length > 0 && DarlingCliCommands.IsHardenFilesVerb(args[0]))
         return 1;
     }
 
-    var configPath = args.Length > 1 ? args[1] : null;
-    return DarlingCliCommands.HardenFiles(configPath, Console.Out, Console.Error);
+    /* #5700: --tls-key-files-only runs just the TLS key-file step, for the install and upgrade scripts (not in the
+       help text). The other argument, if any, is the config path. */
+    var tlsKeyFilesOnly = args.Skip(1).Any(DarlingCliCommands.IsTlsKeyFilesOnlyFlag);
+    var configPath = args.Skip(1).FirstOrDefault(arg => !DarlingCliCommands.IsTlsKeyFilesOnlyFlag(arg));
+    return tlsKeyFilesOnly
+        ? DarlingCliCommands.HardenTlsKeyFilesOnly(configPath, Console.Out, Console.Error)
+        : DarlingCliCommands.HardenFiles(configPath, Console.Out, Console.Error);
 }
 
 /* CLI verbs: enable/disable the embedded MCP + web-dashboard endpoints on a HEADLESS managed deployment. Each

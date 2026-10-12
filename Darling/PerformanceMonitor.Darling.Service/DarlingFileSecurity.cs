@@ -332,7 +332,22 @@ public static class DarlingFileSecurity
     /// than one name is refused.</para>
     /// </summary>
     /// <returns>Null once the ACL is applied; otherwise why it was not, and nothing was changed.</returns>
-    public static string? HardenWithoutFollowingLinks(string path, bool isDirectory, bool allowInteractive, string anchorDirectory)
+    public static string? HardenWithoutFollowingLinks(string path, bool isDirectory, bool allowInteractive, string anchorDirectory) =>
+        ApplyWithoutFollowingLinks(
+            path, anchorDirectory,
+            () => isDirectory ? HardenedDirectorySecurity(allowInteractive) : HardenedFileSecurity(allowInteractive));
+
+    /// <summary>
+    /// The TLS key-file ACL (<see cref="HardenedKeyFileSecurity"/>) applied the way
+    /// <see cref="HardenWithoutFollowingLinks"/> applies one: through a handle to exactly the checked file, refused when
+    /// the leaf or a folder on its path up to <paramref name="anchorDirectory"/> is a junction or symbolic link, when the
+    /// handle's final path is not the path asked for, or when the file has more than one name (#5700).
+    /// </summary>
+    /// <returns>Null once the ACL is applied; otherwise why it was not, and nothing was changed.</returns>
+    public static string? HardenKeyFileWithoutFollowingLinks(string path, string anchorDirectory) =>
+        ApplyWithoutFollowingLinks(path, anchorDirectory, HardenedKeyFileSecurity);
+
+    private static string? ApplyWithoutFollowingLinks(string path, string anchorDirectory, Func<NativeObjectSecurity> buildSecurity)
     {
         var anchor = Path.TrimEndingDirectorySeparator(Path.GetFullPath(anchorDirectory));
         var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
@@ -373,7 +388,7 @@ public static class DarlingFileSecurity
             return $"{full} resolves to {actual}, so a junction or symbolic link is on its path";
         }
 
-        NativeObjectSecurity security = isDirectory ? HardenedDirectorySecurity(allowInteractive) : HardenedFileSecurity(allowInteractive);
+        var security = buildSecurity();
         var descriptor = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
         var dacl = new byte[descriptor.DiscretionaryAcl!.BinaryLength];
         descriptor.DiscretionaryAcl.GetBinaryForm(dacl, 0);
@@ -496,6 +511,25 @@ public static class DarlingFileSecurity
     /// </summary>
     public static void HardenFile(string path, bool allowInteractiveRead) =>
         new FileInfo(path).SetAccessControl(HardenedFileSecurity(allowInteractiveRead));
+
+    /// <summary>
+    /// The ACL of a TLS private-key file (#5700): SYSTEM and Administrators full control, the service account read
+    /// only, the DACL protected so nothing is inherited, and no operator-group grant (only the service reads a key).
+    /// The service never writes the file, and a read-only grant carries none of the write bits the install tree lock
+    /// strips an untrusted account of, so that lock leaves the file as this ACL set it. Returned as the ACL, not
+    /// applied: <see cref="HardenKeyFileWithoutFollowingLinks"/> applies it.
+    /// </summary>
+    private static FileSecurity HardenedKeyFileSecurity()
+    {
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+
+        AddFile(security, LocalSystem, FileSystemRights.FullControl);
+        AddFile(security, Administrators, FileSystemRights.FullControl);
+        AddFile(security, ServiceAccount, FileSystemRights.Read | FileSystemRights.Synchronize);
+
+        return security;
+    }
 
     /// <summary>
     /// Creates <paramref name="path"/>, which must not exist yet, with <see cref="HardenFile"/>'s ACL applied AT

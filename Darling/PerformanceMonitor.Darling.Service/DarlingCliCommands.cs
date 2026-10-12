@@ -1,4 +1,4 @@
-﻿﻿/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -122,6 +122,11 @@ public static class DarlingCliCommands
     /// granted, so it can only log the remedy. This is the actor that carries it out.</summary>
     public static bool IsHardenFilesVerb(string arg) =>
         string.Equals(arg, "--harden-files", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The flag that makes <see cref="IsHardenFilesVerb"/>'s verb run only <see cref="HardenTlsKeyFilesOnly(string?, TextWriter, TextWriter)"/>
+    /// (#5700); the scripts pass it, and it is not in the help text.</summary>
+    public static bool IsTlsKeyFilesOnlyFlag(string arg) =>
+        string.Equals(arg, "--tls-key-files-only", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The verb <see cref="EnableMcpAsync"/> handles — enable the MCP endpoint in the store (+ firewall).</summary>
     public static bool IsEnableMcpVerb(string arg) =>
@@ -4065,7 +4070,7 @@ public static class DarlingCliCommands
     /// the list is readable as a policy rather than as control flow — which file gets INTERACTIVE read is the
     /// only judgement in this verb, and it should be visible at a glance.
     /// </summary>
-    private readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What, bool ReportWhenMissing = false);
+    private readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
 
     /// <summary>
     /// The TLS private-key files darling.json names (#5700): the PKCS#12 bundle (<c>pfxPath</c>) and the PEM key
@@ -4096,12 +4101,199 @@ public static class DarlingCliCommands
     }
 
     /// <summary>
-    /// The <c>icacls</c> line that leaves a TLS key file to SYSTEM, Administrators and the service account; the
-    /// same shape the service logs when it finds such a file readable by ordinary users.
+    /// The <c>icacls</c> line that leaves a TLS key file to SYSTEM and Administrators with full control and the
+    /// service account with read only, nothing inherited: the ACL <see cref="HardenTlsKeyFiles"/> applies to a key
+    /// inside the install folder, and the line an administrator runs for one outside it. The read grant is the same
+    /// shape the service logs when it finds such a file readable by ordinary users.
     /// </summary>
     [SupportedOSPlatform("windows")]
     internal static string TlsKeyFileIcaclsLine(string path) =>
-        $"icacls \"{path}\" /inheritance:r /grant:r \"*S-1-5-18:F\" \"*S-1-5-32-544:F\" \"{DarlingFileSecurity.ServiceAccountDisplayName}:F\"";
+        $"icacls \"{path}\" /inheritance:r /grant:r \"*S-1-5-18:F\" \"*S-1-5-32-544:F\" \"{DarlingFileSecurity.ServiceAccountDisplayName}:(R)\"";
+
+    /// <summary>
+    /// Why a TLS key path from darling.json is not changed, or null when it is a fully qualified path on a drive
+    /// letter (#5700). A UNC path would rewrite a remote file's ACL (and the service reads it as the machine account,
+    /// not as itself); a path from the root of the current drive, a path relative to a drive's current directory
+    /// and a relative path all resolve against a directory this verb cannot know, so it never resolves them against
+    /// its own.
+    /// </summary>
+    internal static string? TlsKeyPathProblem(string keyFile)
+    {
+        var driveLetter = keyFile.Length >= 2 && char.IsAsciiLetter(keyFile[0]) && keyFile[1] == ':';
+        if (driveLetter && keyFile.Length >= 3 && keyFile[2] is '\\' or '/' && Path.IsPathFullyQualified(keyFile))
+        {
+            return null;
+        }
+
+        const string Advice = " Use a full path that starts with a drive letter in darling.json, then re-run.";
+        if (keyFile.StartsWith('\\') || keyFile.StartsWith('/'))
+        {
+            return "a network path or a path from the root of the current drive, which this verb does not change." + Advice;
+        }
+
+        if (driveLetter)
+        {
+            return "a path relative to a drive's current directory, which the service resolves from its own working directory, so this verb did not guess." + Advice;
+        }
+
+        return "a relative path, which the service resolves from its own working directory, so this verb did not guess." + Advice;
+    }
+
+    /// <summary>The tally <see cref="HardenTlsKeyFiles"/> hands <see cref="HardenFiles"/>: files that exist and were
+    /// examined, files still readable by ordinary users or not changed, files refused, and files named but not found.</summary>
+    internal readonly record struct TlsKeyFileResult(int Examined, int Exposed, int Refused, int Missing);
+
+    /// <summary>
+    /// The TLS key-file step of <see cref="HardenFiles"/> (#5700): each private-key file darling.json names, one
+    /// report line each. A key inside the install folder (<paramref name="installRoot"/>) is changed through a handle
+    /// to exactly the checked file (<see cref="DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks"/>): SYSTEM and
+    /// Administrators full control, the service account read only, nothing inherited. A key outside it is never
+    /// changed (an ACL set by path follows every junction a user-writable folder can hold): it is reported with
+    /// whether ordinary users can read it and the <c>icacls</c> line for an administrator to run. A path that is
+    /// not fully qualified on a drive letter is skipped with the reason, and a named file that is not there is
+    /// reported, because the service fails to load a certificate it cannot find. A line that is not SECURED goes to
+    /// <paramref name="problems"/>.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static TlsKeyFileResult HardenTlsKeyFiles(DarlingConfig config, string installRoot, TextWriter output, TextWriter problems)
+    {
+        var examined = 0;
+        var exposed = 0;
+        var refused = 0;
+        var missing = 0;
+        foreach (var (keyFile, setting) in TlsKeyFilesNamed(config))
+        {
+            var what = $"the TLS key file, {setting}";
+            if (TlsKeyPathProblem(keyFile) is { } problem)
+            {
+                problems.WriteLine($"  SKIPPED  {keyFile} ({what}): {problem}");
+                continue;
+            }
+
+            string full;
+            try
+            {
+                full = Path.GetFullPath(keyFile);
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                problems.WriteLine($"  SKIPPED  {keyFile} ({what}): not a valid path ({OneLine(ex.Message)}).");
+                continue;
+            }
+
+            if (!File.Exists(full))
+            {
+                problems.WriteLine($"  MISSING  {full} ({what}): not found, so no ACL was applied. Once it is in place, run: {TlsKeyFileIcaclsLine(full)}");
+                missing++;
+                continue;
+            }
+
+            examined++;
+            if (!IsBelow(installRoot, full))
+            {
+                var readable = DarlingFileSecurity.IsReadableByOrdinaryUsers(full);
+                problems.WriteLine(
+                    $"  NOT CHANGED (outside the install folder)  {full} ({what}): " +
+                    (readable ? "ordinary users can read it" : "ordinary users cannot read it") +
+                    $". To restrict it to SYSTEM, Administrators and the service account, run from an elevated prompt: {TlsKeyFileIcaclsLine(full)}");
+                if (readable)
+                {
+                    exposed++;
+                }
+
+                continue;
+            }
+
+            try
+            {
+                /* The leaf and every folder on the path up to the install folder are checked for a junction or symbolic
+                   link, and the change itself checks the handle again (final path, reparse bit, one name). */
+                var refusal = ReparsePointOnPath(installRoot, full)
+                    ?? DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks(full, installRoot);
+                if (refusal is not null)
+                {
+                    problems.WriteLine($"  REFUSED  {full} ({what}): {OneLine(refusal)}, so nothing was changed through it. Remove it and re-run.");
+                    refused++;
+                    continue;
+                }
+            }
+            catch (Exception ex)
+            {
+                problems.WriteLine($"  FAILED   {full} ({what}): {OneLine(ex.Message)}");
+                exposed++;
+                continue;
+            }
+
+            /* The claim is the re-read, not the call that returned without throwing. */
+            if (DarlingFileSecurity.IsReadableByOrdinaryUsers(full))
+            {
+                problems.WriteLine($"  STILL READABLE  {full} ({what})");
+                exposed++;
+            }
+            else if (!DarlingFileSecurity.GrantsHardenedAccount(full))
+            {
+                problems.WriteLine($"  LOCKED OUT  {full} ({what}): secured, but {DarlingFileSecurity.ServiceAccountDisplayName} cannot read it, so the service would fail on its next start. Grant that account read and re-run.");
+                exposed++;
+            }
+            else
+            {
+                output.WriteLine($"  SECURED  {full} ({what})");
+            }
+        }
+
+        return new TlsKeyFileResult(examined, exposed, refused, missing);
+    }
+
+    private static string OneLine(string text) => text.ReplaceLineEndings(" ");
+
+    /// <summary>
+    /// Only the TLS key-file step of <see cref="HardenFiles"/>, for the install and upgrade scripts
+    /// (<c>--harden-files --tls-key-files-only</c>; not in the help text). One line per file on standard output; the
+    /// exit code is 0 whenever the step ran, whatever it reported for each file, and 2 only when it could not run:
+    /// not elevated, no darling.json that loads, or no registered service account to grant the read to.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static int HardenTlsKeyFilesOnly(string? configPath, TextWriter output, TextWriter error) =>
+        HardenTlsKeyFilesOnly(configPath, output, error, IsElevated(), DarlingFileSecurity.RegisteredServiceAccount(ServiceName));
+
+    [SupportedOSPlatform("windows")]
+    internal static int HardenTlsKeyFilesOnly(string? configPath, TextWriter output, TextWriter error, bool elevated, SecurityIdentifier? serviceAccount)
+    {
+        if (!elevated)
+        {
+            error.WriteLine("The TLS key file step needs an elevated prompt (Run as administrator).");
+            return 2;
+        }
+
+        var resolvedConfig = DarlingConfig.ResolveConfigPath(configPath);
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"The TLS key file step could not load {resolvedConfig}: {OneLine(ex.Message)}");
+            return 2;
+        }
+
+        if (serviceAccount is null)
+        {
+            error.WriteLine($"The TLS key file step needs the '{ServiceName}' service to be registered, so it knows which account reads the key. Install the service first.");
+            return 2;
+        }
+
+        DarlingFileSecurity.HardenForAccount(serviceAccount);
+        if (TlsKeyFilesNamed(config).Count == 0)
+        {
+            output.WriteLine("No TLS key files are named in darling.json.");
+            return 0;
+        }
+
+        var installRoot = Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory;
+        HardenTlsKeyFiles(config, installRoot, output, output);
+        return 0;
+    }
 
     /// <summary>
     /// Re-applies the secret-file ACLs, elevated (#2352).
@@ -4186,36 +4378,6 @@ public static class DarlingCliCommands
             targets.Add(new(Path.Combine(storeRoot, DarlingStoreUpgrade.PreUpgradeConfFileName), false, false, "the pre-upgrade postgresql.conf"));
         }
 
-        /* #5700: the TLS private-key files darling.json names get the config file's protection (the operator group
-           reads the config for the Viewer; nothing but the service reads a key, so a key file has no operator read).
-           A file outside the install folder gets the ACL on the FILE only, never on its folder. A missing one is
-           reported, not skipped: the service fails to load a certificate it cannot find. A relative path is left
-           alone, because the service resolves it from its own working directory, which this verb cannot know. */
-        var relativeTlsKeyFiles = new List<(string Path, string Setting)>();
-        if (loadedConfig is not null)
-        {
-            foreach (var (keyFile, setting) in TlsKeyFilesNamed(loadedConfig))
-            {
-                string? full;
-                try
-                {
-                    full = Path.IsPathRooted(keyFile) ? Path.GetFullPath(keyFile) : null;
-                }
-                catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-                {
-                    full = null;
-                }
-
-                if (full is null)
-                {
-                    relativeTlsKeyFiles.Add((keyFile, setting));
-                    continue;
-                }
-
-                targets.Add(new(full, AllowInteractive: false, IsDirectory: false, $"the TLS key file, {setting}", ReportWhenMissing: true));
-            }
-        }
-
         /* #4004: a bring-your-own service keeps its log-hash key in darling-keys beside darling.json, a directory the
            service creates with no INTERACTIVE access at all, so it gets none here either. Only when darling-keys IS
            this install's key directory (#4004 review): on a managed install it never exists legitimately, and the
@@ -4255,19 +4417,12 @@ public static class DarlingCliCommands
         var exposed = 0;
         var touched = 0;
         var refused = 0;
-        var missingTlsKeyFiles = 0;
 
         foreach (var target in targets)
         {
             var exists = target.IsDirectory ? Directory.Exists(target.Path) : File.Exists(target.Path);
             if (!exists)
             {
-                if (target.ReportWhenMissing)
-                {
-                    error.WriteLine($"  MISSING  {target.Path} ({target.What}): not found, so no ACL was applied. Once it is in place, run: {TlsKeyFileIcaclsLine(target.Path)}");
-                    missingTlsKeyFiles++;
-                }
-
                 continue;
             }
 
@@ -4338,14 +4493,17 @@ public static class DarlingCliCommands
             }
         }
 
-        foreach (var (keyFile, setting) in relativeTlsKeyFiles)
+        /* #5700: the TLS private-key files darling.json names. */
+        if (loadedConfig is not null)
         {
-            error.WriteLine($"  SKIPPED  {keyFile} (the TLS key file, {setting}): a relative path, which the service resolves from its own working directory, so this verb did not guess. Use an absolute path in darling.json, then re-run.");
-        }
-
-        if (missingTlsKeyFiles > 0)
-        {
-            error.WriteLine($"{missingTlsKeyFiles} TLS key file(s) named in darling.json were not found.");
+            var tls = HardenTlsKeyFiles(loadedConfig, configDirectory, output, error);
+            touched += tls.Examined;
+            exposed += tls.Exposed;
+            refused += tls.Refused;
+            if (tls.Missing > 0)
+            {
+                error.WriteLine($"{tls.Missing} TLS key file(s) named in darling.json were not found.");
+            }
         }
 
         output.WriteLine();
