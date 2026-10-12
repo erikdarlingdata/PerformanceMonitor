@@ -119,11 +119,21 @@ LIMIT 1";
         /* Blocking count in last hour - uses XE blocked process reports */
         using (var cmd = connection.CreateCommand())
         {
-            /* Prefer the blocked-process-report; fall back to the always-on DMV snapshot (AWS RDS). */
+            /* Prefer the blocked-process-report; fall back to the always-on DMV snapshot (AWS RDS).
+               #5644 W1: both sides count WAITS, not report rows (BlockingWaits.WaitsCteSql, the definition the
+               alert engine, the analysis fact and Darling's fleet tile share): SQL Server writes a report for a
+               still-blocked session every threshold seconds, so one one-minute wait counted about eleven times. */
             cmd.CommandText = @"
+WITH " + BlockingWaits.WaitsCteSql(
+                BlockingWaits.SqlDialect.DuckDb, "xe_waits",
+                @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2" + SeparatelyMonitoredScope.BprFilter(separate, 3)) + @" AS ev") + "," + BlockingWaits.WaitsCteSql(
+                BlockingWaits.SqlDialect.DuckDb, "dmv_waits",
+                @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms
+    FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND event_time >= $2" + SeparatelyMonitoredScope.BprFilter(separate, 3)) + @"
 SELECT COALESCE(NULLIF(
-    (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2" + SeparatelyMonitoredScope.BprFilter(separate, 3)) + @" AS ev), 0),
-    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND event_time >= $2" + SeparatelyMonitoredScope.BprFilter(separate, 3) + @"))";
+    (SELECT COUNT(*) FROM xe_waits), 0),
+    (SELECT COUNT(*) FROM dmv_waits))";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
             SeparatelyMonitoredScope.AddParameters(cmd, separate);
