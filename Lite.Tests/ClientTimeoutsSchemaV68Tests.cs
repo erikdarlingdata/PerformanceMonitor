@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -154,6 +155,51 @@ public sealed class ClientTimeoutsSchemaV68Tests : IDisposable
         }
 
         return names;
+    }
+
+    [Fact]
+    public async Task TheCountRowAndTheSamples_AppendThroughTheRunnersPath_WithANullEventTimeOnTheCountRow()
+    {
+        var dbPath = Path.Combine(_tempDir, "lite-count-row.duckdb");
+        using var initializer = new DuckDbInitializer(dbPath);
+        await initializer.InitializeAsync();
+
+        using var conn = new DuckDBConnection($"Data Source={dbPath}");
+        await conn.OpenAsync();
+
+        var definition = AttentionCollector.Instance;
+        var runTime = new DateTime(2026, 10, 12, 12, 0, 0, DateTimeKind.Unspecified);
+        var sampleTime = runTime.AddDays(-3);
+        var rows = new[]
+        {
+            new AttentionCollector.Row { EventKind = AttentionCollector.KindSample, EventTime = sampleTime, AttentionCount = 0, DatabaseName = "db", StatementText = "SELECT 1" },
+            new AttentionCollector.Row { EventKind = AttentionCollector.KindCount, EventTime = null, AttentionCount = 7 },
+        };
+
+        using (var appender = conn.CreateAppender(definition.TargetTable))
+        {
+            foreach (var row in rows)
+            {
+                var appenderRow = appender.CreateRow();
+                if (definition.IncludesCollectionId)
+                {
+                    appenderRow.AppendValue(CollectionIdGenerator.Next());
+                }
+
+                appenderRow.AppendValue(runTime).AppendValue(42).AppendValue("s");
+                var writer = new AppenderCollectorRowWriter { CurrentRow = appenderRow };
+                definition.WritePayload(row, writer, new CollectorContext { ServerId = 42, ServerName = "s", CollectionTime = runTime, Deltas = null! });
+                appenderRow.EndRow();
+            }
+        }
+
+        /* Both rows carry the run's time as collection_time, the count row has no event_time, and the counts sum to the delta alone. */
+        Assert.Equal("count:2026-10-12 12:00:00:<null>:7|sample:2026-10-12 12:00:00:2026-10-09 12:00:00:0", await ScalarAsync(conn,
+            "SELECT string_agg(event_kind || ':' || strftime(collection_time, '%Y-%m-%d %H:%M:%S') || ':' || COALESCE(strftime(event_time, '%Y-%m-%d %H:%M:%S'), '<null>') || ':' || attention_count, '|' ORDER BY event_kind) FROM attention_events"));
+        Assert.Equal(7L, Convert.ToInt64(await ScalarAsync(conn, "SELECT CAST(SUM(attention_count) AS BIGINT) FROM attention_events")));
+
+        /* The watermark read (MAX(event_time)) is the newest sample, so a count row cannot move it. */
+        Assert.Equal(sampleTime, Convert.ToDateTime(await ScalarAsync(conn, "SELECT MAX(event_time) FROM attention_events")));
     }
 
     private static async Task ExecAsync(DuckDBConnection conn, string sql)

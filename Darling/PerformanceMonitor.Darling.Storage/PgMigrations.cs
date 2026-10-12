@@ -944,8 +944,8 @@ END $$;";
 
     /// <summary>
     /// V179 (#5640) - everything the Client Timeouts alert needs in the store, in one rung. (1) <c>collect.attention_events</c>: the
-    /// <c>AttentionCollector</c> table, one row per kept attention plus an <c>overflow</c> row for the events the ring buffer
-    /// lost. A collector table that stays a PLAIN table on every store (<c>ICollectorSchemaInfo.StaysPlainTable</c>): no hypertable, no compression and no
+    /// <c>AttentionCollector</c> table, one <c>count</c> row per run (the event_counter delta, event_time NULL) plus one <c>sample</c> row per kept ring-buffer
+    /// event (attention_count 0). A collector table that stays a PLAIN table on every store (<c>ICollectorSchemaInfo.StaysPlainTable</c>): no hypertable, no compression and no
     /// Timescale retention policy, because the 73rd hypertable is a grid decision (#3035, #3044, #3107) and its rows are low volume. Its 30-day
     /// retention is the time-sliced DELETE the retention sweep runs on both store kinds. A fresh store already has it from V1's catalog walk, so
     /// the CREATE is a no-op there and the real create on upgrade.

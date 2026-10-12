@@ -23,17 +23,20 @@ namespace PerformanceMonitor.Collectors;
 /// <c>PerformanceMonitor_Attention</c> session. The session carries two targets, and the collector uses each for
 /// what it is good at:
 ///
-/// <para><b>event_counter is the count.</b> It is exact however many events the session saw. Each run reads it and
-/// takes the delta from the prior count (staged in the collector state, so a restart does not lose it, and landed
-/// only once the rows of the same run are written): the delta is the number of attentions since the last run. A
-/// count BELOW the prior means the session restarted, so the whole current count is the delta.</para>
+/// <para><b>event_counter is the count, and only the count.</b> It is exact however many events the session saw. Each run
+/// reads it and writes ONE <c>count</c> row: <c>collection_time</c> is this run's time, <c>attention_count</c> is the
+/// counter's delta from the prior count (staged in the collector state, so a restart does not lose it, and landed only
+/// once the rows of the same run are written). A count BELOW the prior means the session restarted, so the whole current
+/// count is the delta. An unreadable counter writes no count row and keeps the prior, so the next delta spans both runs;
+/// the first run after a start has no prior and only stages one. The alert and any rate read <c>count</c> rows and
+/// nothing else, so the sum of <c>attention_count</c> equals what the session counted (#5640).</para>
 ///
-/// <para><b>ring_buffer is the detail.</b> It keeps at most max_events_limit events (1,000 by default), so a storm
-/// can lose detail. The rows newer than the stored watermark become one <c>attention</c> row each (attention_count 1).
-/// When the delta is larger than the rows kept, one <c>overflow</c> row carries the remainder, so the sum of
-/// <c>attention_count</c> always equals what the session counted. The first run after a start has no prior count: it
-/// keeps the rows newer than the watermark and writes no overflow row, because with nothing to subtract it cannot
-/// tell how many events the rows already stored account for.</para>
+/// <para><b>ring_buffer is the samples, and only the samples.</b> It keeps at most max_events_limit events (1,000 by
+/// default) and receives them up to MAX_DISPATCH_LATENCY (5 s) after the counter counts them, so it can never be summed
+/// against the counter: an event can sit in one but not yet the other, or fall between the two reads of a run. The rows
+/// newer than the stored watermark become one <c>sample</c> row each (attention_count 0, event_time set), deduplicated by
+/// that watermark. A sample never moves a count and a count never moves the watermark (a count row's event_time is
+/// NULL), so no event is counted twice and a storm lost from the ring buffer is still counted.</para>
 ///
 /// <para>The ring buffer's cast and shred run only when the target's execution_count moved (<see cref="XeShredGate"/>)
 /// or the counter did, so a quiet server pays for two integer reads. A missing session THROWs 50000 with
@@ -57,8 +60,11 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
     /// <summary>The app-managed session. The ensure (AlwaysOnXeSessions) creates it; this read names it.</summary>
     public const string XeSessionName = "PerformanceMonitor_Attention";
 
-    public const string KindAttention = "attention";
-    public const string KindOverflow = "overflow";
+    /// <summary>The run's one counter row: collection_time is the run's time, attention_count the counter delta, event_time NULL.</summary>
+    public const string KindCount = "count";
+
+    /// <summary>One kept ring-buffer event: the detail of an attention, attention_count 0, never summed into a count.</summary>
+    public const string KindSample = "sample";
 
     /// <summary>The stored statement text is cut here (after the statement filter).</summary>
     public const int MaxStatementTextLength = 4000;
@@ -75,8 +81,8 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
     public sealed class Row
     {
         public DateTime? EventTime { get; set; }
-        public string EventKind { get; set; } = KindAttention;
-        public long AttentionCount { get; set; } = 1;
+        public string EventKind { get; set; } = KindSample;
+        public long AttentionCount { get; set; }
         public string? DatabaseName { get; set; }
         public string? ClientAppName { get; set; }
         public string? ClientHostName { get; set; }
@@ -273,10 +279,6 @@ SELECT
         return current.Value >= prior.Value ? current.Value - prior.Value : current.Value;
     }
 
-    /// <summary>The overflow remainder: the counted events the kept rows do not cover, or 0 when nothing is missing or the delta is unknown.</summary>
-    public static long OverflowCount(long? delta, long kept) =>
-        delta is { } d && d > kept ? d - kept : 0;
-
     /// <summary>40 hex characters of a hash of the filtered statement text; null for no text or the filter's withheld marker.</summary>
     public static string? Fingerprint(string? filteredText)
     {
@@ -303,8 +305,8 @@ SELECT
             rows.Add(new Row
             {
                 EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
-                EventKind = KindAttention,
-                AttentionCount = 1,
+                EventKind = KindSample,
+                AttentionCount = 0,
                 /* A database-scoped session captures its own database, which the action may also name. */
                 DatabaseName = context.CurrentDatabaseName ?? (reader.IsDBNull(1) ? null : reader.GetString(1)),
                 ClientAppName = reader.IsDBNull(2) ? null : reader.GetString(2),
@@ -323,26 +325,14 @@ SELECT
             var executionCount = reader.IsDBNull(0) ? (long?)null : reader.GetInt64(0);
             var eventCount = reader.IsDBNull(1) ? (long?)null : reader.GetInt64(1);
 
-            var delta = CountDelta(eventCount, ReadLastCount(context.State, context.CurrentDatabaseName));
-            var overflow = OverflowCount(delta, rows.Count);
-            if (overflow > 0)
+            /* The one count row of the run. event_time stays NULL so it never moves the samples' watermark; collection_time is
+               stamped by the writer from the run's time, never from a watermark. No row when the delta is unknown. */
+            if (CountDelta(eventCount, ReadLastCount(context.State, context.CurrentDatabaseName)) is { } delta)
             {
-                /* Sits at the newest detail row's time, else the stored watermark, so it never moves the watermark past
-                   events the ring buffer has not dispatched yet; the counter still counts them in the next delta. */
-                DateTime? newest = null;
-                foreach (var row in rows)
-                {
-                    if (row.EventTime is { } t && (newest is null || t > newest))
-                    {
-                        newest = t;
-                    }
-                }
-
                 rows.Add(new Row
                 {
-                    EventTime = newest ?? context.Watermark ?? context.CollectionTime,
-                    EventKind = KindOverflow,
-                    AttentionCount = overflow,
+                    EventKind = KindCount,
+                    AttentionCount = delta,
                     DatabaseName = context.CurrentDatabaseName,
                 });
             }

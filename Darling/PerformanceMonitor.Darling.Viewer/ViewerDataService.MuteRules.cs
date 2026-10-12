@@ -55,22 +55,6 @@ SELECT id, enabled, created_at_utc, expires_at_utc, reason,
 FROM config_mute_rules
 ORDER BY created_at_utc DESC";
 
-    /// <summary>First store schema version whose <c>config_mute_rules</c> carries <c>client_app_pattern</c> (V179, #5640).</summary>
-    public const int MuteRuleClientAppMinSchemaVersion = 179;
-
-    /// <summary>
-    /// <see cref="MuteRulesSelectSql"/> for a store BELOW <see cref="MuteRuleClientAppMinSchemaVersion"/>: the same
-    /// 13 columns, with a typed NULL where <c>client_app_pattern</c> would be, so listing the rules works on a store
-    /// the service has not migrated yet (the read otherwise fails with 42703 and the list never opens).
-    /// <c>ViewerWave3Tests</c> pins it equal to the current statement apart from that one column.
-    /// </summary>
-    public const string MuteRulesSelectBeforeClientAppSql = @"
-SELECT id, enabled, created_at_utc, expires_at_utc, reason,
-       server_name, metric_name, database_pattern,
-       query_text_pattern, wait_type_pattern, job_name_pattern, server_id, NULL::text AS client_app_pattern
-FROM config_mute_rules
-ORDER BY created_at_utc DESC";
-
     public const string MuteRuleInsertSql = @"
 INSERT INTO config_mute_rules
     (id, enabled, created_at_utc, expires_at_utc, reason,
@@ -249,14 +233,9 @@ WHERE id = $1";
     {
         var rules = new List<MuteRule>();
 
-        /* #5640: gated on the probed store version like the other rung-dependent reads. An unknown version (the probe
-           could not answer) takes the current statement, as before this gate. */
-        var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
-        var selectSql = schemaVersion is int version && version < MuteRuleClientAppMinSchemaVersion
-            ? MuteRulesSelectBeforeClientAppSql
-            : MuteRulesSelectSql;
-
-        await using var command = _dataSource.CreateCommand(selectSql);
+        /* client_app_pattern (#5640) exists from V179, and the viewer refuses to connect to a store below its own
+           RequiredStoreSchemaVersion (MainWindow's connect-time gate), so no read reaches an older store: one statement. */
+        await using var command = _dataSource.CreateCommand(MuteRulesSelectSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

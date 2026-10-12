@@ -21,7 +21,7 @@ namespace Lite.Tests;
 /// <summary>
 /// #5640: the shared client-attention collector. Pins the batch text (a missing session THROWs 50000 so the host records
 /// SESSION_MISSING, never zero rows and SUCCESS; the counter read and the execution_count gate come before the cast), the
-/// counter-delta and restart arithmetic, the overflow row, the statement fingerprint and truncation, and the state it stages.
+/// counter-delta and restart arithmetic, the count row and the samples, the statement fingerprint and truncation, and the state it stages.
 /// </summary>
 public sealed class AttentionCollectorDefinitionTests
 {
@@ -158,10 +158,6 @@ public sealed class AttentionCollectorDefinitionTests
     {
         Assert.Null(AttentionCollector.CountDelta(10, null));
         Assert.Null(AttentionCollector.CountDelta(null, 10));
-        Assert.Equal(0, AttentionCollector.OverflowCount(null, 3));
-        Assert.Equal(0, AttentionCollector.OverflowCount(5, 5));
-        Assert.Equal(0, AttentionCollector.OverflowCount(5, 7));
-        Assert.Equal(2, AttentionCollector.OverflowCount(5, 3));
     }
 
     [Fact]
@@ -187,7 +183,7 @@ public sealed class AttentionCollectorDefinitionTests
     }
 
     [Fact]
-    public async Task ReadAsync_WithAPrior_WritesOneRowPerEvent_AndAnOverflowRowForTheEventsTheRingBufferLost()
+    public async Task ReadAsync_WithAPrior_WritesOneSamplePerEvent_AndOneCountRowWithTheCounterDelta()
     {
         var context = MakeContext(state: Prior(100));
         var t1 = Now.AddSeconds(-30);
@@ -199,14 +195,15 @@ public sealed class AttentionCollectorDefinitionTests
         var rows = await AttentionCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         Assert.Equal(3, rows.Count);
-        Assert.All(rows.Take(2), r => Assert.Equal(AttentionCollector.KindAttention, r.EventKind));
-        Assert.All(rows.Take(2), r => Assert.Equal(1, r.AttentionCount));
+        Assert.All(rows.Take(2), r => Assert.Equal(AttentionCollector.KindSample, r.EventKind));
+        Assert.All(rows.Take(2), r => Assert.Equal(0, r.AttentionCount));
         Assert.Equal(4000, rows[1].StatementText!.Length);
         Assert.NotNull(rows[1].StatementFingerprint);
-        var overflow = rows[2];
-        Assert.Equal(AttentionCollector.KindOverflow, overflow.EventKind);
-        Assert.Equal(5, overflow.AttentionCount);
-        Assert.Equal(t2, overflow.EventTime);
+
+        /* The count is the counter's delta and nothing else: two samples neither reduce it nor add to it. */
+        var count = Assert.Single(rows, r => r.EventKind == AttentionCollector.KindCount);
+        Assert.Equal(7, count.AttentionCount);
+        Assert.Null(count.EventTime);
         Assert.Equal(7, rows.Sum(r => r.AttentionCount));
 
         Assert.Equal("107", context.StagedItemState[AttentionCollector.CountStateKey]);
@@ -214,7 +211,7 @@ public sealed class AttentionCollectorDefinitionTests
     }
 
     [Fact]
-    public async Task ReadAsync_WhenTheCounterFell_TheSessionRestarted_AndTheDeltaIsTheCurrentCount()
+    public async Task ReadAsync_WhenTheCounterFell_TheSessionRestarted_AndTheCountRowIsTheCurrentCount()
     {
         var context = MakeContext(state: Prior(500));
         using var reader = FakeCollectorDataReader.WithResultSets(
@@ -223,13 +220,13 @@ public sealed class AttentionCollectorDefinitionTests
 
         var rows = await AttentionCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
-        Assert.Equal(3, rows.Count);
-        Assert.DoesNotContain(rows, r => r.EventKind == AttentionCollector.KindOverflow);
+        Assert.Equal(3, rows.Count(r => r.EventKind == AttentionCollector.KindSample));
+        Assert.Equal(3, Assert.Single(rows, r => r.EventKind == AttentionCollector.KindCount).AttentionCount);
         Assert.Equal("3", context.StagedItemState[AttentionCollector.CountStateKey]);
     }
 
     [Fact]
-    public async Task ReadAsync_OnTheFirstRun_WritesNoOverflowRow_EvenWhenTheCounterIsFarAboveTheKeptRows()
+    public async Task ReadAsync_OnTheFirstRun_WritesSamplesButNoCountRow_AndOnlyStagesThePrior()
     {
         var context = MakeContext();
         using var reader = FakeCollectorDataReader.WithResultSets(new[] { Event(Now.AddSeconds(-5)) }, Trailer(3, 900));
@@ -237,33 +234,167 @@ public sealed class AttentionCollectorDefinitionTests
         var rows = await AttentionCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         Assert.Single(rows);
-        Assert.Equal(AttentionCollector.KindAttention, rows[0].EventKind);
+        Assert.Equal(AttentionCollector.KindSample, rows[0].EventKind);
         Assert.Equal("900", context.StagedItemState[AttentionCollector.CountStateKey]);
     }
 
     [Fact]
-    public async Task ReadAsync_OverflowWithNoDetail_SitsAtTheWatermark_NotAtTheReadTime()
+    public async Task TheCountRow_HasNoTimeOfItsOwn_SoItIsStampedWithTheRunsCollectionTime_NeverTheWatermark()
     {
-        var watermark = Now.AddMinutes(-2);
-        var context = MakeContext(state: Prior(10), watermark: watermark);
+        var context = MakeContext(state: Prior(10), watermark: Now.AddDays(-3));
         using var reader = FakeCollectorDataReader.WithResultSets(Array.Empty<object[]>(), Trailer(4, 25));
-
         var rows = await AttentionCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
-        var overflow = Assert.Single(rows);
-        Assert.Equal(15, overflow.AttentionCount);
-        Assert.Equal(watermark, overflow.EventTime);
+        var count = Assert.Single(rows);
+        Assert.Equal(AttentionCollector.KindCount, count.EventKind);
+        Assert.Equal(15, count.AttentionCount);
+        Assert.Null(count.EventTime);
+
+        /* collection_time is not a payload column: the host stamps every row of the run with context.CollectionTime, and the
+           count row's payload carries no time that could stand in for it (event_time is NULL, so the watermark never moves). */
+        var writer = new RecordingCollectorRowWriter();
+        AttentionCollector.Instance.WritePayload(count, writer, context);
+        Assert.Null(writer.Values[0]);
+        Assert.Equal(AttentionCollector.KindCount, writer.Values[1]);
+        Assert.Equal(15L, writer.Values[2]);
+        Assert.DoesNotContain(writer.Values, v => v is DateTime);
+        Assert.Equal(Now, context.CollectionTime);
+    }
+
+    /* Several runs against one simulated store: the ring buffer holds whatever has been DISPATCHED to it, the counter holds
+       whatever the session has COUNTED (they differ by up to 5 s of dispatch latency), the stored samples dedupe by the
+       event_time watermark exactly as the host's MAX(event_time) read does, and the staged state lands after each run. */
+    private sealed class Sim
+    {
+        public Dictionary<string, string> State { get; } = new();
+        public List<AttentionCollector.Row> Store { get; } = new();
+
+        public DateTime? Watermark => Store.Max(r => r.EventTime);
+
+        public async Task RunAsync(DateTime[] ringBuffer, long? counter)
+        {
+            var watermark = Watermark;
+            var context = MakeContext(state: new Dictionary<string, string>(State), watermark: watermark);
+            var visible = ringBuffer.Where(t => watermark is not { } w || t > w).OrderBy(t => t).Select(t => Event(t)).ToArray();
+            using var reader = FakeCollectorDataReader.WithResultSets(visible, Trailer(1, counter));
+            var rows = await AttentionCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+            Store.AddRange(rows);
+            foreach (var kv in context.StagedItemState)
+            {
+                State[kv.Key] = kv.Value;
+            }
+        }
+
+        public long CountedTotal => Store.Where(r => r.EventKind == AttentionCollector.KindCount).Sum(r => r.AttentionCount);
+        public int CountRows => Store.Count(r => r.EventKind == AttentionCollector.KindCount);
+        public int SampleCount => Store.Count(r => r.EventKind == AttentionCollector.KindSample);
+        public long SumOfAllCounts => Store.Sum(r => r.AttentionCount);
     }
 
     [Fact]
-    public async Task ReadAsync_QuietCycle_WritesNothing_StagesTheCounts_AndMeasuresGated()
+    public async Task TwoRuns_AnEventTheCounterHasAndTheRingBufferDoesNot_IsCountedOnce_AndSampledOnceLater()
+    {
+        var sim = new Sim();
+        await sim.RunAsync(Array.Empty<DateTime>(), 100);                       // first run: only stages 100
+        var late = new[] { Now.AddSeconds(-62), Now.AddSeconds(-61), Now.AddSeconds(-60) };
+
+        /* Run N: the counter already counts the 3 attentions, the ring buffer has not been dispatched them yet. */
+        await sim.RunAsync(Array.Empty<DateTime>(), 103);
+        Assert.Equal(3, sim.CountedTotal);
+        Assert.Equal(0, sim.SampleCount);
+
+        /* Run N+1: the ring buffer has them now, the counter does not move. They are samples, and the total stays 3. */
+        await sim.RunAsync(late, 103);
+        Assert.Equal(3, sim.CountedTotal);
+        Assert.Equal(3, sim.SampleCount);
+        Assert.Equal(3, sim.SumOfAllCounts);
+
+        /* Run N+2: the same events are still in the ring buffer; the watermark keeps them from being sampled twice. */
+        await sim.RunAsync(late, 103);
+        Assert.Equal(3, sim.CountedTotal);
+        Assert.Equal(3, sim.SampleCount);
+    }
+
+    [Fact]
+    public async Task AnEventBetweenTheCounterReadAndTheRingBufferRead_IsCountedOnce()
+    {
+        var sim = new Sim();
+        await sim.RunAsync(Array.Empty<DateTime>(), 50);
+
+        /* Run N: the counter was read first (50), the event fired, then the ring buffer read caught it: a sample, delta 0. */
+        var between = new[] { Now.AddSeconds(-61) };
+        await sim.RunAsync(between, 50);
+        Assert.Equal(0, sim.CountedTotal);
+        Assert.Equal(1, sim.SampleCount);
+
+        /* Run N+1: the counter shows it. The watermark keeps the sample from being written again, and the count is 1, not 2. */
+        await sim.RunAsync(between, 51);
+        Assert.Equal(1, sim.CountedTotal);
+        Assert.Equal(1, sim.SampleCount);
+        Assert.Equal(1, sim.SumOfAllCounts);
+    }
+
+    [Fact]
+    public async Task AnUnreadableCounterInBetween_WritesNoCountRow_AndTheNextDeltaSpansBothRuns_CountedOnce()
+    {
+        var sim = new Sim();
+        await sim.RunAsync(Array.Empty<DateTime>(), 10);
+
+        var first = Now.AddSeconds(-130);
+        var second = Now.AddSeconds(-70);
+        var third = Now.AddSeconds(-10);
+        await sim.RunAsync(new[] { first }, 11);
+        Assert.Equal(1, sim.CountedTotal);
+        Assert.Equal(1, sim.CountRows);
+
+        await sim.RunAsync(new[] { first, second }, null);
+        Assert.Equal(1, sim.CountRows);                                          // no row for the unreadable run
+        Assert.Equal("11", sim.State[AttentionCollector.CountStateKey]);         // the prior is kept, not guessed over
+
+        await sim.RunAsync(new[] { first, second, third }, 13);
+        Assert.Equal(3, sim.CountedTotal);                                       // 11 -> 13 is 2, spanning both runs
+        Assert.Equal(3, sim.SampleCount);
+        Assert.Equal(3, sim.SumOfAllCounts);
+    }
+
+    [Fact]
+    public async Task ACounterReset_CountsTheCurrentValueAsTheDelta_ThenResumesDifferencing()
+    {
+        var sim = new Sim();
+        await sim.RunAsync(Array.Empty<DateTime>(), 500);
+        await sim.RunAsync(Array.Empty<DateTime>(), 505);
+        Assert.Equal(5, sim.CountedTotal);
+
+        await sim.RunAsync(Array.Empty<DateTime>(), 2);                          // the session restarted
+        Assert.Equal(7, sim.CountedTotal);
+
+        await sim.RunAsync(Array.Empty<DateTime>(), 6);
+        Assert.Equal(11, sim.CountedTotal);
+    }
+
+    [Fact]
+    public async Task TheFirstRun_StagesThePrior_WritesNoCountRow_AndTheSecondRunCountsFromIt()
+    {
+        var sim = new Sim();
+        await sim.RunAsync(Array.Empty<DateTime>(), 40);
+        Assert.Empty(sim.Store);
+        Assert.Equal("40", sim.State[AttentionCollector.CountStateKey]);
+
+        await sim.RunAsync(Array.Empty<DateTime>(), 41);
+        Assert.Equal(1, sim.CountedTotal);
+    }
+
+    [Fact]
+    public async Task ReadAsync_QuietCycle_WritesOneZeroCountRow_StagesTheCounts_AndMeasuresGated()
     {
         var context = MakeContext(state: Prior(25));
         using var reader = FakeCollectorDataReader.WithResultSets(Array.Empty<object[]>(), Trailer(4, 25, gated: true));
 
         var rows = await AttentionCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
-        Assert.Empty(rows);
+        var count = Assert.Single(rows);
+        Assert.Equal(AttentionCollector.KindCount, count.EventKind);
+        Assert.Equal(0, count.AttentionCount);
         Assert.Equal("25", context.StagedItemState[AttentionCollector.CountStateKey]);
         Assert.Contains(context.Measurements, m => m.Label == AttentionCollector.ShredGatedMeasurement && m.Value == 1);
     }
@@ -288,7 +419,8 @@ public sealed class AttentionCollectorDefinitionTests
 
         var rows = await AttentionCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
-        Assert.Equal("ringdb", Assert.Single(rows).DatabaseName);
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, r => Assert.Equal("ringdb", r.DatabaseName));
         Assert.Equal("2", context.StagedItemState["attention_event_count:ringdb"]);
         Assert.Equal("8", context.StagedItemState["xe_execution_count:ringdb"]);
     }
