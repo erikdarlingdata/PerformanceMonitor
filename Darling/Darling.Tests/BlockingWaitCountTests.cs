@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// each carrying the wait time so far, with a few milliseconds of jitter between the event timestamp and the wait
 /// time (the wait start is derived, so it drifts by that much between reports of one wait).
 /// </summary>
+[Collection("live-postgres")]
 public sealed class BlockingWaitCountTests
 {
     private static readonly DateTime T0 = new(2026, 10, 9, 9, 0, 0, DateTimeKind.Unspecified);
