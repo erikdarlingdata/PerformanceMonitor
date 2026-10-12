@@ -24,8 +24,9 @@ namespace PerformanceMonitorLite.Mcp;
 ///
 /// <para>Unlike Darling, Lite adds no bearer token: its endpoint is loopback-only behind the shared Host-header
 /// guard, and it has no token or caller check to gate on. The setting is the whole switch, so with it on ANY program
-/// on this computer that can reach the port can mute and unmute analysis findings; the setting's tooltip, the sample
-/// settings and the Lite MCP docs say so.</para>
+/// on this computer that can reach the port can mute and unmute analysis findings; the sample settings
+/// (<c>settings.sample.json</c>) and the README's MCP section say so. The setting has no UI control, so it has no
+/// tooltip.</para>
 /// </summary>
 internal static class McpWritePolicy
 {

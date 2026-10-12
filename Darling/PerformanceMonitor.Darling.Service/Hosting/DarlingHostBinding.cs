@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.Versioning;
@@ -243,9 +244,15 @@ internal static class DarlingHostBinding
     /// <c>token</c>), and below this it is too short to protect a network-facing port.</summary>
     internal const int MinimumTokenLength = 16;
 
+    /// <summary>The fewest different characters an access token may use. Length alone passes a token such as
+    /// sixteen copies of one letter, which a handful of guesses finds; this keeps the floor from being met by
+    /// padding. A generated token (the wizard's 32 random characters, or the README's one-liner) is far above it.</summary>
+    internal const int MinimumDistinctTokenCharacters = 6;
+
     /// <summary>
     /// PURE: why a resolved token cannot gate an exposed surface, or null when it can. Empty (nothing to
-    /// compare against) and too short (see <see cref="MinimumTokenLength"/>) both fail closed; the caller logs
+    /// compare against), too short (see <see cref="MinimumTokenLength"/>) and too repetitive (see
+    /// <see cref="MinimumDistinctTokenCharacters"/>) all fail closed; the caller logs
     /// the text at Critical and binds loopback-only. Says nothing about the token's value, and does not give
     /// its length either: a short token is "shorter than" the floor, never "N characters long".
     /// </summary>
@@ -260,6 +267,12 @@ internal static class DarlingHostBinding
         {
             return $"is shorter than {MinimumTokenLength} characters, and at least {MinimumTokenLength} are required for an exposed surface "
                 + "(--configure-network generates 32; to make one yourself, see the token note in the README)";
+        }
+
+        if (token.Distinct().Count() < MinimumDistinctTokenCharacters)
+        {
+            return $"uses fewer than {MinimumDistinctTokenCharacters} different characters, and at least {MinimumDistinctTokenCharacters} are required for an exposed surface "
+                + "(--configure-network generates a random 32-character token; to make one yourself, see the token note in the README)";
         }
 
         return null;

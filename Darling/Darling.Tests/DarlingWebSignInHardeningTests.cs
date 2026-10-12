@@ -46,7 +46,8 @@ public sealed class DarlingWebSignInHardeningTests
     private static readonly IPAddress NotAProxyRemote = IPAddress.Parse("192.168.1.11");
 
     private static async Task<TestServer> BuildServer(
-        bool networkMode, IReadOnlyList<IPNetwork>? trustedProxies = null, DarlingWebOidcClient? oidcClient = null)
+        bool networkMode, IReadOnlyList<IPNetwork>? trustedProxies = null, DarlingWebOidcClient? oidcClient = null,
+        string? publicBaseUrlHost = "monitor.example.com", bool sendHsts = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -72,8 +73,9 @@ public sealed class DarlingWebSignInHardeningTests
             allowedCidr: IPNetwork.Parse(AllowedCidr),
             accessToken: Token,
             oidcClient: oidcClient,
-            publicBaseUrlHost: "monitor.example.com",
-            trustedProxies: trustedProxies);
+            publicBaseUrlHost: publicBaseUrlHost,
+            trustedProxies: trustedProxies,
+            sendHsts: sendHsts);
 
         await app.StartAsync();
         return app.GetTestServer();
@@ -122,9 +124,29 @@ public sealed class DarlingWebSignInHardeningTests
     }
 
     [Fact]
-    public async Task Hsts_IsSentOverHttpsOnly()
+    public async Task Hsts_IsOffByDefault_EvenOverHttps()
     {
         using var server = await BuildServer(networkMode: false);
+
+        var secure = await Get(server, "/x", "localhost", IPAddress.Loopback, ctx => ctx.Request.Scheme = "https");
+        Assert.Equal(0, secure.Response.Headers.StrictTransportSecurity.Count);
+        Assert.False(new PerformanceMonitor.Darling.Service.WebNetworkConfig().Hsts);
+    }
+
+    [Fact]
+    public void TheHstsSetting_IsReadFromTheNetworkBlock_AndHandedToThePipeline()
+    {
+        var network = System.Text.Json.JsonSerializer.Deserialize<PerformanceMonitor.Darling.Service.WebNetworkConfig>("{\"hsts\":true}");
+        Assert.True(network!.Hsts);
+
+        var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
+        Assert.Contains("sendHsts: network?.Hsts ?? false", web, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Hsts_WhenTheOperatorTurnsItOn_IsSentOverHttpsOnly()
+    {
+        using var server = await BuildServer(networkMode: false, sendHsts: true);
 
         var plain = await Get(server, "/x", "localhost", IPAddress.Loopback);
         Assert.Equal(0, plain.Response.Headers.StrictTransportSecurity.Count);
@@ -318,6 +340,146 @@ public sealed class DarlingWebSignInHardeningTests
 
         Assert.Equal(StatusCodes.Status302Found, ctx.Response.StatusCode);
         Assert.True(ctx.Response.Headers.SetCookie.Count > 0);
+    }
+
+    /* ---------------- a proxy that rewrites Host, forwarded hosts, IDN names ---------------- */
+
+    private const string ProxiedOrigin = "https://darling.corp";
+
+    [Fact]
+    public async Task BehindAProxyThatRewritesHost_ASecFetchSiteSameOriginPost_SignsIn_WithNoPublicBaseUrl()
+    {
+        using var server = await BuildServer(networkMode: true, publicBaseUrlHost: null);
+
+        /* nginx's default proxy_pass sends the backend's own name as Host, while the browser's Origin is the
+           name it used. */
+        var ctx = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp + ":5153", InCidrRemote, Token, configure: c =>
+        {
+            c.Request.Headers.Origin = ProxiedOrigin;
+            c.Request.Headers["Sec-Fetch-Site"] = "same-origin";
+        });
+
+        Assert.Equal(StatusCodes.Status302Found, ctx.Response.StatusCode);
+        Assert.True(ctx.Response.Headers.SetCookie.Count > 0);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("same-site")]
+    [InlineData("cross-site")]
+    [InlineData("none")]
+    public async Task BehindAProxyThatRewritesHost_AnythingButSameOrigin_IsJudgedByTheOriginHeader_AndRefused(string? fetchSite)
+    {
+        using var server = await BuildServer(networkMode: true, publicBaseUrlHost: null);
+
+        var ctx = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp + ":5153", InCidrRemote, Token, configure: c =>
+        {
+            c.Request.Headers.Origin = ProxiedOrigin;
+            if (fetchSite is not null)
+            {
+                c.Request.Headers["Sec-Fetch-Site"] = fetchSite;
+            }
+        });
+
+        Assert.Equal(StatusCodes.Status403Forbidden, ctx.Response.StatusCode);
+        Assert.Equal(0, ctx.Response.Headers.SetCookie.Count);
+        Assert.Contains("web.publicBaseUrl", await BodyOf(ctx), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("same-site")]
+    [InlineData("cross-site")]
+    [InlineData("none")]
+    [InlineData(null)]
+    public async Task ANullOrigin_IsRefused_UnlessTheBrowserSaysSameOrigin(string? fetchSite)
+    {
+        using var server = await BuildServer(networkMode: true);
+
+        var ctx = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, Token, configure: c =>
+        {
+            c.Request.Headers.Origin = "null";
+            if (fetchSite is not null)
+            {
+                c.Request.Headers["Sec-Fetch-Site"] = fetchSite;
+            }
+        });
+
+        Assert.Equal(StatusCodes.Status403Forbidden, ctx.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ASameSiteFetchSite_WithAnOriginOfAnotherHost_IsRefused()
+    {
+        using var server = await BuildServer(networkMode: true);
+
+        var ctx = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, Token, configure: c =>
+        {
+            c.Request.Headers.Origin = "https://evil.example";
+            c.Request.Headers["Sec-Fetch-Site"] = "same-site";
+        });
+
+        Assert.Equal(StatusCodes.Status403Forbidden, ctx.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task BehindATrustedProxy_TheForwardedHost_IsTheHostTheOriginIsComparedWith()
+    {
+        /* The proxy rewrites Host to its backend name and forwards the name the browser used. The Host guard
+           admits the forwarded name (here the listen IP), and a browser that sends no Sec-Fetch-Site is
+           judged by its Origin against that forwarded name, port included. */
+        using var server = await BuildServer(networkMode: true, trustedProxies: OneProxy(), publicBaseUrlHost: null);
+
+        var viaProxy = await DarlingWebHostGateLiveTests.PostSignIn(server, "127.0.0.1:5153", ProxyRemote, Token, configure: c =>
+        {
+            c.Request.Headers["X-Forwarded-For"] = InCidrRemote.ToString();
+            c.Request.Headers["X-Forwarded-Proto"] = "https";
+            c.Request.Headers["X-Forwarded-Host"] = ListenIp + ":8443";
+            c.Request.Headers.Origin = "https://" + ListenIp + ":8443";
+        });
+        Assert.Equal(StatusCodes.Status302Found, viaProxy.Response.StatusCode);
+
+        var wrongPort = await DarlingWebHostGateLiveTests.PostSignIn(server, "127.0.0.1:5153", ProxyRemote, Token, configure: c =>
+        {
+            c.Request.Headers["X-Forwarded-For"] = InCidrRemote.ToString();
+            c.Request.Headers["X-Forwarded-Host"] = ListenIp + ":8443";
+            c.Request.Headers.Origin = "https://" + ListenIp + ":9999";
+        });
+        Assert.Equal(StatusCodes.Status403Forbidden, wrongPort.Response.StatusCode);
+
+        /* From a source that is not a configured proxy the forwarded host is ignored. */
+        var notAProxy = await DarlingWebHostGateLiveTests.PostSignIn(server, "127.0.0.1:5153", NotAProxyRemote, Token, configure: c =>
+        {
+            c.Request.Headers["X-Forwarded-Host"] = ListenIp + ":8443";
+            c.Request.Headers.Origin = "https://" + ListenIp + ":8443";
+        });
+        Assert.Equal(StatusCodes.Status403Forbidden, notAProxy.Response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("https://xn--bcher-kva.example", "bücher.example", null, true)]
+    [InlineData("https://bücher.example", "xn--bcher-kva.example", null, true)]
+    [InlineData("https://BÜCHER.example", "xn--bcher-kva.example", null, true)]
+    [InlineData("https://xn--bcher-kva.example", "elsewhere.example", "bücher.example", true)]
+    [InlineData("https://bücher.example", "elsewhere.example", "xn--bcher-kva.example", true)]
+    [InlineData("https://xn--bcher-kva.example", "xn--mnchen-3ya.example", null, false)]
+    [InlineData("https://bücher.example", "münchen.example", "xn--mnchen-3ya.example", false)]
+    public void AnIdnHostName_ComparesEqualInUnicodeAndPunycode(string origin, string requestHost, string? publicHost, bool expected)
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Headers.Origin = origin;
+        ctx.Request.Host = new HostString(requestHost);
+
+        Assert.Equal(expected, DarlingWebHostService.IsSameSiteSignIn(ctx.Request, publicHost));
+    }
+
+    [Theory]
+    [InlineData("localhost", "LOCALHOST", true)]
+    [InlineData("[::1]", "[::1]", true)]
+    [InlineData("[::1]", "127.0.0.1", false)]
+    [InlineData("a.example", "b.example", false)]
+    public void SameHostName_ComparesAsciiFormsAndKeepsLiteralsAsWritten(string left, string right, bool expected)
+    {
+        Assert.Equal(expected, DarlingWebHostService.SameHostName(left, right));
     }
 
     [Fact]
@@ -627,7 +789,7 @@ public sealed class DarlingWebSignInHardeningTests
     [Fact]
     public async Task BehindAConfiguredProxy_AForwardedHttpsSignIn_MintsASecureCookie()
     {
-        using var server = await BuildServer(networkMode: true, trustedProxies: OneProxy());
+        using var server = await BuildServer(networkMode: true, trustedProxies: OneProxy(), sendHsts: true);
         var ctx = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, ProxyRemote, Token, configure: c =>
         {
             c.Request.Headers["X-Forwarded-Proto"] = "https";

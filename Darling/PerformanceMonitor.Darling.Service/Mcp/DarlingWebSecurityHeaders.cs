@@ -52,7 +52,8 @@ internal sealed class DarlingWebSecurityHeaders
 {
     internal const string ContentSecurityPolicyHeader = "Content-Security-Policy";
 
-    /// <summary>One year of HSTS, no subdomains. HSTS is kept per HOST NAME and ignores the port (RFC 6797):
+    /// <summary>One year of HSTS, no subdomains, sent only when <c>web.network.hsts</c> is true (it is off by
+    /// default, because a browser keeps it for a year and it cannot be recalled). HSTS is kept per HOST NAME and ignores the port (RFC 6797):
     /// once a browser has reached the dashboard over HTTPS by name, it uses HTTPS for every port of that same
     /// name for a year, including any other service on that name that speaks plain HTTP. It covers no
     /// subdomain, because <c>includeSubDomains</c> is not sent. Sent only on a response to a request that came
@@ -73,11 +74,17 @@ internal sealed class DarlingWebSecurityHeaders
 
     private readonly RequestDelegate _next;
 
-    public DarlingWebSecurityHeaders(RequestDelegate next) => _next = next;
+    private readonly bool _sendHsts;
+
+    public DarlingWebSecurityHeaders(RequestDelegate next, bool sendHsts = false)
+    {
+        _next = next;
+        _sendHsts = sendHsts;
+    }
 
     public Task InvokeAsync(HttpContext context)
     {
-        context.Response.OnStarting(static state =>
+        context.Response.OnStarting(state =>
         {
             var headers = ((HttpContext)state).Response.Headers;
 
@@ -91,7 +98,7 @@ internal sealed class DarlingWebSecurityHeaders
             headers.XFrameOptions = "DENY";
             headers.XContentTypeOptions = "nosniff";
             headers["Referrer-Policy"] = "no-referrer";
-            if (((HttpContext)state).Request.IsHttps)
+            if (_sendHsts && ((HttpContext)state).Request.IsHttps)
             {
                 headers.StrictTransportSecurity = StrictTransportSecurityValue;
             }

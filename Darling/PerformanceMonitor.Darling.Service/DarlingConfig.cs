@@ -1783,6 +1783,15 @@ public sealed class WebNetworkConfig
     public string[]? TrustedProxies { get; set; }
 
     /// <summary>
+    /// True to send <c>Strict-Transport-Security</c> (one year, no subdomains) on every response to an HTTPS
+    /// request. Off by default: a browser that has seen it uses HTTPS for every port of this host name for a
+    /// year and cannot be told otherwise, including for other services on that name that speak plain HTTP.
+    /// Turn it on once the dashboard is reached over HTTPS only.
+    /// </summary>
+    [JsonPropertyName("hsts")]
+    public bool Hsts { get; set; }
+
+    /// <summary>
     /// True when any field is set — used only for the BYO "network.* is ignored" caller warning (D-BYO);
     /// NOT the same as "exposed".
     /// </summary>

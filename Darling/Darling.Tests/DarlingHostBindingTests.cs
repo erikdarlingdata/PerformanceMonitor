@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Net;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Service.Hosting;
@@ -694,8 +695,35 @@ public sealed class DarlingHostBindingTests
     [Fact]
     public void DescribeTokenProblem_AtOrAboveTheFloor_IsNull()
     {
-        Assert.Null(DarlingHostBinding.DescribeTokenProblem(new string('x', DarlingHostBinding.MinimumTokenLength)));
-        Assert.Null(DarlingHostBinding.DescribeTokenProblem(new string('x', 32)));  // what --configure-network generates
+        Assert.Null(DarlingHostBinding.DescribeTokenProblem("abcdefghijklmnopqrstuvwxyz012345"[..DarlingHostBinding.MinimumTokenLength]));
+        Assert.Null(DarlingHostBinding.DescribeTokenProblem("abcdefghijklmnopqrstuvwxyz012345"));  // the shape of what --configure-network generates
+    }
+
+    [Theory]
+    [InlineData("aaaaaaaaaaaaaaaa")]
+    [InlineData("abababababababababababab")]
+    [InlineData("0123401234012340123401234")]
+    public void DescribeTokenProblem_ALongTokenOfFewDifferentCharacters_IsAProblem_WithoutTheValueOrTheLength(string token)
+    {
+        Assert.True(token.Length >= DarlingHostBinding.MinimumTokenLength);
+
+        var problem = DarlingHostBinding.DescribeTokenProblem(token);
+
+        Assert.NotNull(problem);
+        Assert.Contains("fewer than " + DarlingHostBinding.MinimumDistinctTokenCharacters + " different characters", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain(token, problem, StringComparison.Ordinal);
+        Assert.DoesNotContain(token.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), problem, StringComparison.Ordinal);
+        Assert.False(DarlingHostBinding.ApplyTokenFloor(token, networkMode: true).NetworkMode);
+    }
+
+    [Fact]
+    public void DescribeTokenProblem_ExactlyTheDistinctCharacterFloor_Passes()
+    {
+        var token = new string('a', 10) + "bcdef" + new string('a', 5);
+
+        Assert.Equal(DarlingHostBinding.MinimumDistinctTokenCharacters, token.Distinct().Count());
+        Assert.Null(DarlingHostBinding.DescribeTokenProblem(token));
+        Assert.NotNull(DarlingHostBinding.DescribeTokenProblem(token.Replace('f', 'a')));
     }
 
     [Fact]
@@ -707,7 +735,7 @@ public sealed class DarlingHostBindingTests
         Assert.False(weak.NetworkMode);
         Assert.NotNull(weak.Problem);
 
-        var strong = DarlingHostBinding.ApplyTokenFloor(new string('x', 32), networkMode: true);
+        var strong = DarlingHostBinding.ApplyTokenFloor("abcdefghijklmnopqrstuvwxyz012345", networkMode: true);
         Assert.True(strong.NetworkMode);
         Assert.Null(strong.Problem);
 

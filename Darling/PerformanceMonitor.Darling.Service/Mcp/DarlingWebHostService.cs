@@ -861,7 +861,7 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies);
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -1082,6 +1082,8 @@ public sealed class DarlingWebHostService : BackgroundService
     /// passes false and registers no auth middleware, as before. The
     /// CIDR check inside the gate is a no-op for loopback, the only peers such a server has. Optional, so every
     /// other caller is unchanged.</param>
+    /// <param name="sendHsts"><c>web.network.hsts</c>: send <c>Strict-Transport-Security</c> on a response to an
+    /// HTTPS request. Off by default (see <see cref="DarlingWebSecurityHeaders.StrictTransportSecurityValue"/>).</param>
     /// <param name="trustedProxies">The reverse proxies whose <c>X-Forwarded-For</c> / <c>-Proto</c> /
     /// <c>-Host</c> headers are honored (<c>web.network.trustedProxies</c>, parsed by
     /// <see cref="DarlingHostBinding.TryParseTrustedProxies"/>). Null or empty (the default) means the headers
@@ -1100,7 +1102,8 @@ public sealed class DarlingWebHostService : BackgroundService
         PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null,
         bool requireTokenWhenLoopbackOnly = false,
         byte[]? sessionSigningKeyForTests = null,
-        IReadOnlyList<IPNetwork>? trustedProxies = null)
+        IReadOnlyList<IPNetwork>? trustedProxies = null,
+        bool sendHsts = false)
     {
         /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
            because this port is LAN-exposed on purpose - see DarlingHttpRefusalLog. Created per
@@ -1157,7 +1160,7 @@ public sealed class DarlingWebHostService : BackgroundService
            or sign-in page. It registers its stamp with OnStarting and decides nothing about the request, so
            it adds no surface ahead of the Host guard; a class middleware, so the Host guard stays the first
            app.Use lambda. */
-        app.UseMiddleware<DarlingWebSecurityHeaders>();
+        app.UseMiddleware<DarlingWebSecurityHeaders>(sendHsts);
 
         app.UseResponseCompression();
 
@@ -2081,10 +2084,11 @@ public sealed class DarlingWebHostService : BackgroundService
         {
             refusals.Report(
                 _logger, "Web dashboard", DarlingRefusalGate.SignIn, StatusCodes.Status403Forbidden, remote,
-                "the sign-in POST came from another site (its Origin or Referer does not name the host this dashboard serves), so it was not read or counted",
+                "the sign-in POST came from another site (its Sec-Fetch-Site says cross-site, or its Origin or Referer does not name the host this dashboard serves; behind a reverse proxy that rewrites Host, set web.publicBaseUrl), so it was not read or counted",
                 now);
             await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
-                "The sign-in request did not come from this dashboard's own page. Open the dashboard and use the form.");
+                "The sign-in request did not come from this dashboard's own page. Open the dashboard and use the form. "
+                + "Behind a reverse proxy that rewrites the Host header, set web.publicBaseUrl to the address the browser uses.");
             return;
         }
 
@@ -2144,18 +2148,29 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>
-    /// PURE (reads headers only): did this sign-in POST come from the dashboard's own page? A browser sends
-    /// <c>Origin</c> on a cross-site form post and <c>Referer</c> unless the page opted out; whichever is
-    /// there (Origin first) must name the host this request was addressed to, port included, or
-    /// <c>web.publicBaseUrl</c>'s host. <c>Sec-Fetch-Site: cross-site</c> is refused outright, and an Origin
-    /// that is not a URL (the string <c>null</c>) is refused. A request with neither header is not a
-    /// browser post from another page and passes, which keeps command-line and script sign-ins working.
+    /// PURE (reads headers only): did this sign-in POST come from the dashboard's own page? A browser states
+    /// it in <c>Sec-Fetch-Site</c>, which page script cannot set and which the browser works out from the URL
+    /// it actually used, so it is right behind a reverse proxy that rewrites <c>Host</c>: <c>same-origin</c>
+    /// passes and <c>cross-site</c> is refused. A browser that sends no <c>Sec-Fetch-Site</c> (or says
+    /// <c>same-site</c>) is judged by <c>Origin</c>, or <c>Referer</c> when Origin is missing: whichever is
+    /// there must name the host this request was addressed to, port included, or <c>web.publicBaseUrl</c>'s
+    /// host. Behind a proxy listed in <c>trustedProxies</c> the request's host is already the one the proxy
+    /// forwarded in <c>X-Forwarded-Host</c> (the forwarded-headers middleware replaces it), so that name is
+    /// compared too. An Origin that is not a URL (the string <c>null</c>) is refused. A request with none of
+    /// these headers is not a browser post from another page and passes, which keeps command-line and script
+    /// sign-ins working. Host names compare in their ASCII (punycode) form on both sides.
     /// </summary>
     internal static bool IsSameSiteSignIn(HttpRequest request, string? publicHostName)
     {
-        if (string.Equals(request.Headers["Sec-Fetch-Site"].ToString(), "cross-site", StringComparison.OrdinalIgnoreCase))
+        var fetchSite = request.Headers["Sec-Fetch-Site"].ToString();
+        if (string.Equals(fetchSite, "cross-site", StringComparison.OrdinalIgnoreCase))
         {
             return false;
+        }
+
+        if (string.Equals(fetchSite, "same-origin", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
         }
 
         var claimed = request.Headers.Origin.ToString();
@@ -2175,9 +2190,7 @@ public sealed class DarlingWebHostService : BackgroundService
             return false;
         }
 
-        if (publicHostName is not null
-            && (string.Equals(uri.Host, publicHostName, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(uri.IdnHost, publicHostName, StringComparison.OrdinalIgnoreCase)))
+        if (publicHostName is not null && SameHostName(uri.IdnHost, publicHostName))
         {
             return true;
         }
@@ -2189,9 +2202,29 @@ public sealed class DarlingWebHostService : BackgroundService
         }
 
         var portMatches = host.Port is int port ? uri.Port == port : uri.IsDefaultPort;
-        return portMatches
-            && (string.Equals(uri.Host, host.Host, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(uri.IdnHost, host.Host, StringComparison.OrdinalIgnoreCase));
+        return portMatches && SameHostName(uri.IdnHost, host.Host);
+    }
+
+    /// <summary>
+    /// PURE: two host names are the same name when their ASCII forms match (case-insensitive), so a Unicode
+    /// name and its punycode form compare equal. A name the IDN mapping rejects (an IPv6 literal, say)
+    /// is compared as written.
+    /// </summary>
+    internal static bool SameHostName(string left, string right)
+    {
+        return string.Equals(ToAsciiHostName(left), ToAsciiHostName(right), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ToAsciiHostName(string name)
+    {
+        try
+        {
+            return new System.Globalization.IdnMapping().GetAscii(name);
+        }
+        catch (ArgumentException)
+        {
+            return name;
+        }
     }
 
     /// <summary>

@@ -553,7 +553,7 @@ public sealed class DarlingMcpBearerThrottleTests
     [Fact]
     public void ANetworkTokenAtTheFloor_KeepsTheNetworkBind()
     {
-        var floor = DarlingHostBinding.ApplyTokenFloor(new string('x', DarlingHostBinding.MinimumTokenLength), networkMode: true);
+        var floor = DarlingHostBinding.ApplyTokenFloor("abcdefghijklmnopqrstuvwxyz012345"[..DarlingHostBinding.MinimumTokenLength], networkMode: true);
 
         Assert.True(floor.NetworkMode);
         Assert.Null(floor.Problem);
@@ -562,7 +562,7 @@ public sealed class DarlingMcpBearerThrottleTests
     [Fact]
     public void ALoopbackOnlyStart_IsNeverMovedToTheNetworkByTheFloor()
     {
-        Assert.False(DarlingHostBinding.ApplyTokenFloor(new string('x', 32), networkMode: false).NetworkMode);
+        Assert.False(DarlingHostBinding.ApplyTokenFloor("abcdefghijklmnopqrstuvwxyz012345", networkMode: false).NetworkMode);
     }
 
     [Fact]
