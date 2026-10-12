@@ -125,6 +125,43 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         Assert.Equal(60, locked.GetProperty("blocking_session_id").GetInt32());
     }
 
+    /// <summary>#5633 review L-a: threads of one session that DISAGREE. The row is the longest-waiting thread's wait, resource and
+    /// blocker (it used to be three independent MAXes: the alphabetically greatest resource beside another thread's duration, and the
+    /// highest-numbered blocker alone), and every other distinct blocker is listed in blocking_session_ids.</summary>
+    [Fact]
+    public async Task WaitingTasks_DisagreeingThreads_TakeResourceAndBlockerFromTheLongestWaitingThread()
+    {
+        await SeedThreadAsync(70, "LCK_M_S", 100L, 40, "zzz-shortest-wait");
+        await SeedThreadAsync(70, "LCK_M_S", 900L, 20, "aaa-longest-wait");
+        await SeedThreadAsync(70, "LCK_M_S", 500L, 30, "mmm-middle");
+        /* Session 71: the longest thread waits on its own session (parallelism); a shorter one is blocked by 12. */
+        await SeedThreadAsync(71, "CXPACKET", 800L, 71, "res-self");
+        await SeedThreadAsync(71, "CXPACKET", 300L, 12, "res-external");
+
+        var root = Parse(await McpWaitTools.GetWaitingTasks(_service, _serverManager, ServerName));
+        var tasks = root.GetProperty("tasks").EnumerateArray().ToList();
+
+        var disagree = tasks.Single(t => t.GetProperty("session_id").GetInt32() == 70);
+        Assert.Equal(900, disagree.GetProperty("wait_duration_ms").GetInt64());
+        Assert.Equal("aaa-longest-wait", disagree.GetProperty("resource_description").GetString());
+        Assert.Equal(20, disagree.GetProperty("blocking_session_id").GetInt32());
+        Assert.Equal(new[] { 20, 30, 40 }, disagree.GetProperty("blocking_session_ids").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+
+        var selfFirst = tasks.Single(t => t.GetProperty("session_id").GetInt32() == 71);
+        Assert.Equal(800, selfFirst.GetProperty("wait_duration_ms").GetInt64());
+        Assert.Equal("res-self", selfFirst.GetProperty("resource_description").GetString());
+        Assert.True(selfFirst.GetProperty("intra_query_parallelism").GetBoolean());
+        Assert.Equal(12, selfFirst.GetProperty("blocking_session_id").GetInt32());
+        Assert.Equal(JsonValueKind.Null, selfFirst.GetProperty("blocking_session_ids").ValueKind);
+    }
+
+    private Task SeedThreadAsync(int session, string waitType, long waitMs, int? blocker, string? resource) => ExecAsync(@"
+INSERT INTO waiting_tasks
+    (collection_id, collection_time, server_id, server_name, session_id, wait_type,
+     wait_duration_ms, blocking_session_id, resource_description, database_name)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        _nextId++, Naive(Minute(5)), _serverId, ServerName, session, waitType, waitMs, blocker, resource, "DbA");
+
     [Fact]
     public async Task WaitingTasks_OneName_ReturnsOnlyThatDatabasesTasks_AndEchoesTheName()
     {

@@ -56,7 +56,8 @@ SELECT
     COUNT(CASE WHEN v.max_dop > 8
                 AND (m.value_in_use IS NULL OR m.value_in_use = 0 OR v.max_dop <= m.value_in_use)
                THEN 1 END) AS high_dop_queries,
-    COUNT(CASE WHEN v.delta_spills > 0 THEN 1 END) AS spilling_queries,
+    COUNT(DISTINCT CASE WHEN v.delta_spills > 0
+                        THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS spilling_queries,
     SUM(v.delta_execution_count) AS total_executions,
     SUM(v.delta_worker_time) AS total_cpu_time_us
 FROM v_query_stats AS v
@@ -90,6 +91,7 @@ AND   v.delta_execution_count > 0";
                     Metadata = new Dictionary<string, double>
                     {
                         ["total_spills"] = totalSpills,
+                        /* #5633: DISTINCT queries (database + query_hash) with a spill, not snapshot rows. */
                         ["spilling_query_count"] = spillingQueries,
                         ["total_executions"] = totalExecutions
                     }
