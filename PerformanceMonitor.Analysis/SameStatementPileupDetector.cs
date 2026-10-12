@@ -445,7 +445,7 @@ public static class SameStatementPileupDetector
 
     /// <summary>
     /// The statement identity a pileup groups and fingerprints on: the row's <c>query_hash</c> when
-    /// present (the sys.dm_exec_requests statement hash — identical across sessions running the same
+    /// it is a usable hash (the sys.dm_exec_requests statement hash — identical across sessions running the same
     /// parameterized statement, and independent of Query Store), else a text-hash surrogate over the
     /// whitespace-normalized statement prefix. The surrogate exists for the rare null-hash row; it is
     /// honest about its reach (readers cap the projected text, so two distinct giant statements
@@ -455,12 +455,20 @@ public static class SameStatementPileupDetector
     /// <see cref="Evaluate"/> leaves it out). The marker is what a collector stores for any statement it
     /// withheld, so a text hash over it would put every withheld statement in one group and fire a pileup
     /// on statements that have nothing in common.</para>
+    /// <para>#5711: an all-zero hash (<c>0x0000000000000000</c>) is "the engine did not say", not a query: the
+    /// DMV reports it for requests with no statement hash (BACKUP, DBCC, some maintenance commands), and keying
+    /// on it pooled every such request in one database into one "statement". It takes the null-hash path, and
+    /// a row with no text has no identity (null) rather than a shared <c>text:empty</c> group. The rule is
+    /// <c>QueryHashIdentity.Identity</c> in PerformanceMonitor.Common, which this project cannot reference
+    /// (a ProjectReference changes the committed lock files of the deprecated projects too), so
+    /// <see cref="IsUnknownHash"/> and the fingerprint below are copies of it; <c>QueryHashIdentityParityTests</c>
+    /// runs both over one corpus and fails when they differ.</para>
     /// </summary>
     public static string? StatementIdentity(SnapshotRow row)
     {
-        if (!string.IsNullOrWhiteSpace(row.QueryHash))
+        if (!IsUnknownHash(row.QueryHash))
         {
-            return row.QueryHash.Trim().ToLowerInvariant();
+            return row.QueryHash!.Trim().ToLowerInvariant();
         }
 
         if (WithheldStatementMarker.IsMarker(row.QueryText))
@@ -469,7 +477,36 @@ public static class SameStatementPileupDetector
         }
 
         var text = NormalizeText(row.QueryText);
-        return text.Length == 0 ? "text:empty" : "text:" + ShortHash(text);
+        return text.Length == 0 ? null : "text:" + ShortHash(text);
+    }
+
+    /// <summary>
+    /// #5711: NULL, empty, or all-zero (<c>0</c>, <c>0x0000000000000000</c>) is no usable hash. A copy of
+    /// <c>QueryHashIdentity.IsUnknown</c> in PerformanceMonitor.Common (see <see cref="StatementIdentity"/> for why
+    /// it is a copy); <c>QueryHashIdentityParityTests</c> pins the two equal.
+    /// </summary>
+    private static bool IsUnknownHash(string? hash)
+    {
+        if (string.IsNullOrWhiteSpace(hash))
+        {
+            return true;
+        }
+
+        var span = hash.AsSpan().Trim();
+        if (span.Length > 2 && span[0] == '0' && (span[1] == 'x' || span[1] == 'X'))
+        {
+            span = span[2..];
+        }
+
+        foreach (var c in span)
+        {
+            if (c != '0')
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static Detection BuildDetection(
@@ -680,6 +717,8 @@ public static class SameStatementPileupDetector
         return false;
     }
 
+    /* The lower-case, whitespace-collapse step of QueryHashIdentity.StatementFingerprint in PerformanceMonitor.Common
+       (#5711); the pair is pinned equal by QueryHashIdentityParityTests. Change one, change the other. */
     private static string NormalizeText(string? text)
     {
         if (string.IsNullOrWhiteSpace(text))

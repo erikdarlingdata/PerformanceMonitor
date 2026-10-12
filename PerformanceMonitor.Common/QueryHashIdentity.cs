@@ -25,6 +25,11 @@ namespace PerformanceMonitor.Common;
 /// <see cref="Identity"/> keys a row by its real hash, else by <see cref="StatementFingerprint"/> over the stored
 /// (already scrubbed) statement text, else by nothing (NULL), so a row with neither stays out of every group rather
 /// than joining one.</para>
+///
+/// <para>Two copies live in <c>PerformanceMonitor.Analysis.SameStatementPileupDetector</c> (<c>IsUnknownHash</c> and the
+/// text fingerprint behind <c>StatementIdentity</c>): Analysis cannot reference this project, because that would change
+/// the committed <c>packages.lock.json</c> of the deprecated Dashboard projects as well. <c>QueryHashIdentityParityTests</c>
+/// runs both over one corpus; change one definition and that test fails until the other follows.</para>
 /// </summary>
 public static class QueryHashIdentity
 {

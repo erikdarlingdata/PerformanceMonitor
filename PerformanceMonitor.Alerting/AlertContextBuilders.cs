@@ -262,9 +262,14 @@ public static class AlertContextBuilders
     {
         if (queries is null || queries.Count == 0) return Array.Empty<AlertIncident>();
 
-        /* #1140: dedup key = query_hash (stable across literals/plans). Null hash -> no incident. */
+        /* #1140: dedup key = query_hash (stable across literals/plans). Null hash -> no incident.
+           #5711: an all-zero hash is "the engine did not say" (BACKUP, DBCC and some maintenance requests carry
+           0x0000000000000000), not a query, and keyed on as-is it folded every such request in one database into
+           one incident. QueryHashIdentity.Identity keys such a row by its statement text fingerprint instead, and
+           by nothing (no incident) when it has neither a hash nor text; a real hash keys exactly as before. */
         return queries
-            .Select(q => AlertFingerprint.ForKey(serverName, AlertFingerprint.Query, q.QueryHash ?? "",
+            .Select(q => AlertFingerprint.ForKey(serverName, AlertFingerprint.Query,
+                QueryHashIdentity.Identity(q.QueryHash, q.QueryText) ?? "",
                 string.IsNullOrEmpty(q.DatabaseName) ? Array.Empty<string>() : new[] { q.DatabaseName },
                 database: q.DatabaseName))
             .Where(i => i is not null).Select(i => i!).ToList();
