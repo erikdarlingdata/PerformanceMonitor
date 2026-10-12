@@ -43,7 +43,7 @@ public sealed class CiComposeWorkerSizingTests
     /* The product's formula, restated ONCE — same as CiClusterWorkerSizingTests. Both this test and the
        compose file are re-derived from the live catalog count on every run, so neither can be right about
        a stale hypertable count. */
-    private static int ExpectedBackgroundWorkers => TimescaleSupport.HypertableCount + 2;
+    private static int ExpectedBackgroundWorkers => 2 * TimescaleSupport.HypertableCount + 16;
 
     private static int ExpectedWorkerProcesses => 3 + ExpectedBackgroundWorkers + 8;
 

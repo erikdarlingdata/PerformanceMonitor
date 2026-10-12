@@ -416,7 +416,7 @@ settings. Every collector table becomes a hypertable — all 71 of them, 29 Post
 numbers move whenever collectors are added, and undersizing does not error — it silently stops
 compression and retention from running. See
 [Background workers](../Darling/README.md#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont);
-today the numbers are 74 and 85 for 72 hypertables, and both need a server restart. Managed mode does this itself.
+today the numbers are 160 and 171 for 72 hypertables, and both need a server restart. Managed mode does this itself.
 
 ## 5. First start, in console mode
 

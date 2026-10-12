@@ -496,6 +496,27 @@ public sealed class ManagedConfMigrationTests
         Assert.All(wals, l => Assert.Equal(ConfLineClassification.Ours, l.Classification));
     }
 
+    /// <summary>
+    /// The block the CURRENT formula writes (N = 2 x hypertables + 16, M = N + 11; #5633 item 14) is Ours, and so
+    /// is a worker count the current formula cannot produce but the legacy one can (odd N) only when M = N + 11.
+    /// </summary>
+    [Fact]
+    public void ClassifyLines_CurrentFormulaV2Block_IsOurs_AndAMismatchedProcessCountIsAHandEdit()
+    {
+        var current = DarlingManagedPostgres.DeriveWorkerSettings(40);
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV2 + "\n" +
+            $"timescaledb.max_background_workers = {current.MaxBackgroundWorkers}\n" +
+            $"max_worker_processes = {current.MaxWorkerProcesses}\n";
+        Assert.All(ClassifyLines(conf).Where(l => l.Text.StartsWith("timescaledb.max_background_workers", StringComparison.Ordinal)
+            || l.Text.StartsWith("max_worker_processes", StringComparison.Ordinal)),
+            l => Assert.Equal(ConfLineClassification.Ours, l.Classification));
+
+        var mismatched = "\n" + DarlingManagedPostgres.ConfMarkerV2 + "\n" +
+            $"timescaledb.max_background_workers = {current.MaxBackgroundWorkers}\n" +
+            $"max_worker_processes = {current.MaxWorkerProcesses + 1}\n";
+        Assert.Equal(ConfLineClassification.HandEdit, FindByText(ClassifyLines(mismatched), "max_worker_processes").Classification);
+    }
+
     /// <summary>v2's untouched block, at N = hypertableCount + 2 and M = N + 11, is Ours (#4336).</summary>
     [Fact]
     public void ClassifyLines_UntouchedV2Block_IsOurs()

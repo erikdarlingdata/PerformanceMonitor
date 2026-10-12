@@ -107,7 +107,7 @@ public sealed class DarlingManagedPostgresTests
     /// PostgreSQL's default max_worker_processes = 8 cannot launch the per-hypertable compression
     /// policy jobs (live smoke: "failed to start a background worker" storms). Pins the
     /// TimescaleDB-guidance sizing, DERIVED from the hypertable count so it never goes stale as
-    /// collectors are added: background workers = hypertables + 2; max_worker_processes = 3 + that + 8.
+    /// collectors are added: background workers = 2 x hypertables + 16 (#5633 item 14); max_worker_processes = 3 + that + 8.
     /// The count is <see cref="TimescaleSupport.HypertableCount"/> = the collector catalog PLUS collection_log
     /// (the V23 hypertable outside the catalog), so the collection_log compression policy is not under-provisioned.
     /// </summary>
@@ -119,7 +119,7 @@ public sealed class DarlingManagedPostgresTests
         Assert.Equal(TimescaleSupport.HypertableTables.Count + 1, TimescaleSupport.HypertableCount);
 
         var block = DarlingManagedPostgres.BuildWorkerSizingConfAppend();
-        var expectedBackgroundWorkers = TimescaleSupport.HypertableCount + 2;
+        var expectedBackgroundWorkers = 2 * TimescaleSupport.HypertableCount + 16;
         var expectedWorkerProcesses = 3 + expectedBackgroundWorkers + 8;
 
         Assert.Contains(DarlingManagedPostgres.ConfMarkerV2, block, StringComparison.Ordinal);
@@ -1903,8 +1903,8 @@ public sealed class DarlingManagedPostgresTests
         Assert.Contains("effective_cache_size = 24576MB", block, StringComparison.Ordinal);  /* 75% of 32 GB (was 11.86 GB = 75% of 16 GB) */
         Assert.Contains("maintenance_work_mem = 1638MB", block, StringComparison.Ordinal);   /* 5% of 32 GB, past the 1536 floor, under the 2 GB cap */
         Assert.Contains("work_mem = 64MB", block, StringComparison.Ordinal);                 /* RAM/512 = 64 MB, exactly the ceiling */
-        Assert.Contains("timescaledb.max_background_workers = 42", block, StringComparison.Ordinal);  /* 40 hypertables + 2 */
-        Assert.Contains("max_worker_processes = 53", block, StringComparison.Ordinal);       /* 3 + 42 + 8 */
+        Assert.Contains("timescaledb.max_background_workers = 96", block, StringComparison.Ordinal);  /* 2 x 40 hypertables + 16, #5633 item 14 */
+        Assert.Contains("max_worker_processes = 107", block, StringComparison.Ordinal);      /* 3 + 96 + 8 */
     }
 
     /// <summary>
@@ -3701,7 +3701,7 @@ public sealed class DarlingManagedPostgresTests
                 /* Derived, not hard-pinned (a "40" pin from the 27-hypertable era went stale when
                    collectors were added): the same HypertableCount formula BuildWorkerSizingConfAppend
                    writes into the conf, proven LIVE here. */
-                Assert.Equal((3 + (TimescaleSupport.HypertableCount + 2) + 8).ToString(CultureInfo.InvariantCulture), reader.GetString(2));
+                Assert.Equal((3 + (2 * TimescaleSupport.HypertableCount + 16) + 8).ToString(CultureInfo.InvariantCulture), reader.GetString(2));
                 /* The v3 memory block is LIVE, not merely written: work_mem and shared_buffers hold our
                    derived values (>= the 16 MB work_mem floor / 25%-of-RAM shared_buffers on any real host),
                    never the stock 4 MB / 128 MB defaults. */
