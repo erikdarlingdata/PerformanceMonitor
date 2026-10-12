@@ -346,11 +346,11 @@ public sealed class DarlingSecuritySplitLiveTests
             Assert.False(await HasPrivAsync(mcp, "config.config_command", "INSERT", ct));
             Assert.False(await HasPrivAsync(mcp, "config.analysis_muted", "DELETE", ct));
             Assert.False(await HasPrivAsync(mcp, "collect.analysis_findings", "UPDATE", ct));
-            /* #5633 item 13: and the caveat table gets INSERT + DELETE, a column-level UPDATE, and no TRUNCATE. */
-            Assert.True(await HasPrivAsync(mcp, "collect.analysis_collection_caveats", "INSERT", ct));
-            Assert.True(await HasPrivAsync(mcp, "collect.analysis_collection_caveats", "DELETE", ct));
-            Assert.False(await HasPrivAsync(mcp, "collect.analysis_collection_caveats", "UPDATE", ct));
-            Assert.False(await HasPrivAsync(mcp, "collect.analysis_collection_caveats", "TRUNCATE", ct));
+            /* #5633 item 13: the caveat table is the scheduled pass's state; mcp reads it and writes nothing. */
+            foreach (var privilege in new[] { "INSERT", "UPDATE", "DELETE", "TRUNCATE", "TRIGGER", "REFERENCES" })
+            {
+                Assert.False(await HasPrivAsync(mcp, "collect.analysis_collection_caveats", privilege, ct), privilege);
+            }
 
             /* #1599: mcp gets the SAME single-table custom_views write viewer has (the MCP custom-view tools) —
                proven by a real INSERT/UPDATE/DELETE round-trip as the mcp role (IDENTITY id needs no sequence
@@ -689,15 +689,13 @@ GRANT UPDATE (config_version, updated_at) ON config.config_service TO {ViewerRol
 ALTER DEFAULT PRIVILEGES FOR ROLE {OwnerRoleOf(owner)} IN SCHEMA collect GRANT SELECT ON TABLES TO {AdminRole}, {ViewerRole};
 
 -- The mcp-role analog (darling-network-endpoints, D3-role): viewer's read surface + the same secret-column
--- carve + the narrow analysis writes (two INSERTs, plus the #5633 caveat-table grant), mirroring DarlingManagedRoles.BuildProvisioningSql's
+-- carve + exactly the two narrow analysis INSERTs, mirroring DarlingManagedRoles.BuildProvisioningSql's
 -- section 6. Distinct disposable role so the shared store is never touched.
 GRANT USAGE ON SCHEMA collect, config TO {McpRole};
 GRANT SELECT ON ALL TABLES IN SCHEMA collect TO {McpRole};
 GRANT SELECT ON ALL TABLES IN SCHEMA config  TO {McpRole};
 {DarlingManagedRoles.BuildViewerColumnAclSql("config", McpRole)}
 GRANT INSERT ON collect.analysis_findings TO {McpRole};
-GRANT INSERT, DELETE ON collect.analysis_collection_caveats TO {McpRole};
-GRANT UPDATE (reason, last_seen_utc) ON collect.analysis_collection_caveats TO {McpRole};
 GRANT INSERT ON config.analysis_muted TO {McpRole};
 -- The mcp custom_views write (#1599): the MCP custom-view tools CRUD config.custom_views, so mcp gets the SAME
 -- single-table write viewer has (DarlingManagedRoles section 7). Never widens to a schema-wide config write.

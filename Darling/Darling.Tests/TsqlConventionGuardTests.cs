@@ -1573,6 +1573,12 @@ public sealed class TsqlConventionGuardTests
            the same expression-shaped member as the lines above. What its range strands is the pattern variable and the
            comparison, no T-SQL, no tempdb label and no SQL literal a census reads. ARRIVED with #5558. */
         "PerformanceMonitor.Common/AgReplicaScope.cs IsFresh",
+        /* #5633: CurrentDatabaseScope.Narrow, an expression-bodied member opening with a property pattern
+           (`dropped is { Count: > 0 }`) before its ternary, the shape of the #5452 lines above: the walk closes the range at
+           the pattern's own brace. What it strands is the ternary's arms (`DatabaseFilter.Excluding(dropped) : filter`),
+           which hold no string literal, so no census reads a T-SQL or tempdb site there; the SQL in this file sits in
+           members the walk reads whole. Checked against the file before listing. ARRIVED on the CI run of 5633's branch. */
+        "Darling/PerformanceMonitor.Darling.Storage/CurrentDatabaseScope.cs Narrow",
     ];
 
     /* ───────────────────────── the resolver, pinned on arranged source ───────────────────────── */
