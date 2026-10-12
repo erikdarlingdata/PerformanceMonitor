@@ -115,15 +115,23 @@ internal readonly record struct HostDataVolumeProfile(
     bool IsReady);
 
 /// <summary>PostgreSQL/TimescaleDB versions and the store-level numbers the issue's Problem section named:
-/// size, lifetime buffer hit, lifetime temp bytes, and the #4211 uncompressed-chunks-vs-RAM figure.</summary>
+/// size, lifetime buffer hit, lifetime temp bytes, and the #4211 uncompressed-chunks-vs-RAM figure.
+/// #5718: the two slow facts (size and uncompressed chunks) fail ALONE. <see cref="StoreSizeBytes"/> null
+/// means unavailable and <see cref="StoreSizeUnavailableReason"/> says why; <see cref="UncompressedChunkBytes"/>
+/// and <see cref="UncompressedChunkCount"/> null mean unavailable (a read that timed out), and
+/// <see cref="UncompressedUnavailableReason"/> says why. <see cref="StoreSizeAsOfUtc"/> is the sweep's
+/// <c>metric_time</c> (naive UTC) when the size came from the stored hourly figure, null when it was read live.</summary>
 internal readonly record struct HostStoreFacts(
     string PostgresVersion,
     string? TimescaleVersion,
     long? StoreSizeBytes,
     double? BufferHitRatioPercent,
     long? TempBytes,
-    long UncompressedChunkBytes,
-    int UncompressedChunkCount);
+    long? UncompressedChunkBytes,
+    int? UncompressedChunkCount,
+    DateTime? StoreSizeAsOfUtc = null,
+    string? StoreSizeUnavailableReason = null,
+    string? UncompressedUnavailableReason = null);
 
 /// <summary>One row of the <c>--check-settings</c> table: a setting's live value, where it came from, what
 /// this host would derive for it right now, and the verdict those two facts collapse to.
@@ -554,8 +562,11 @@ internal static class DarlingStoreHostProfile
     /// one-shot, user-invoked <c>--check-settings</c> read, so paying <c>pg_database_size</c>'s real cost here
     /// is the honest trade for a current number instead of a stale one. Ruling 9 (#4214) keeps this OUT of the
     /// once-per-start profile log — <see cref="GatherStartupProfileAsync"/> never calls
-    /// <see cref="GatherStoreFactsAsync"/> — so <c>--check-settings</c> and the later MCP read are this SQL's
-    /// only callers, both off the serial loop (see <c>SerialLoopStoreSizeSourceTests</c>, #3199).</summary>
+    /// <see cref="GatherStoreFactsAsync"/> (see <c>SerialLoopStoreSizeSourceTests</c>, #3199). #5718: the
+    /// POLLED reads (<c>get_store_host</c> over MCP and the web page) no longer run this SQL at all — they take
+    /// the sweep's stored figure (<c>StoreSelfMetrics.LatestStoreSizeWithTimeSql</c>) and report its age,
+    /// because the web page polls every few minutes and this read measured 5.8 s mean / 30.7 s max on a slow
+    /// store; <c>--check-settings</c> is the only caller left, and it fails this one fact alone on a timeout.</summary>
     public const string StoreSizeSql = "SELECT pg_database_size(current_database())";
 
     /// <summary>Lifetime buffer hit ratio and temp bytes for the current database — a single in-memory
@@ -582,8 +593,60 @@ SELECT
 FROM timescaledb_information.chunks
 WHERE NOT is_compressed";
 
-    internal static async Task<HostStoreFacts> GatherStoreFactsAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    /// <summary>
+    /// True when <paramref name="exception"/> is a store read that ran out of time, on either side of the
+    /// connection (#5718): Npgsql's own <c>CommandTimeout</c> (an <see cref="NpgsqlException"/> over a
+    /// <see cref="TimeoutException"/>, rendered as "Exception while reading from stream" with no SQLSTATE)
+    /// or the server's <c>statement_timeout</c> (<see cref="PostgresException"/>, SQLSTATE <c>57014</c>).
+    /// Matched on TYPE and SQLSTATE, never on message text, which <c>lc_messages</c> translates. Never true
+    /// for <see cref="OperationCanceledException"/>: the caller's own cancellation is not a slow store.
+    /// </summary>
+    internal static bool IsReadTimeout(Exception exception) =>
+        exception is not OperationCanceledException
+        && (exception is PostgresException { SqlState: PostgresErrorCodes.QueryCanceled }
+            || DarlingAlertReadAdapter.IsCommandTimeout(exception));
+
+    /// <summary>The wording a timed-out fact carries; the tool error's sentence is built from the same
+    /// words so the profile and the envelope cannot disagree about what happened (#5718).</summary>
+    internal static string DescribeReadTimeout(int seconds) => $"timed out after {seconds} s";
+
+    /// <summary>
+    /// The seam <see cref="GatherStoreFactsAsync"/> reads its slow facts through. The defaults are the
+    /// shipped reads; a live test substitutes a <c>pg_sleep</c> statement and a short deadline to force a
+    /// timeout on demand (#5718).
+    /// </summary>
+    internal sealed record StoreFactsReads
     {
+        /// <summary>Per-command deadline of the slow facts, in seconds.</summary>
+        public int SlowReadSeconds { get; init; } = ServiceCommandDeadlines.CliStoreReadSeconds;
+
+        /// <summary>The live store-size statement (a single bigint).</summary>
+        public string StoreSizeSql { get; init; } = DarlingStoreHostProfile.StoreSizeSql;
+
+        /// <summary>The uncompressed-chunk statement (a bigint and an integer).</summary>
+        public string UncompressedChunkSizeSql { get; init; } = DarlingStoreHostProfile.UncompressedChunkSizeSql;
+
+        /// <summary>The stored-size statement (a bigint and a timestamp).</summary>
+        public string StoredStoreSizeSql { get; init; } = StoreSelfMetrics.LatestStoreSizeWithTimeSql;
+    }
+
+    /// <summary>
+    /// Gathers the store facts. <paramref name="useStoredStoreSize"/> picks where the size comes from: false
+    /// (<c>--check-settings</c>, a one-shot console verb) pays <c>StoreSizeSql</c> live for a current number;
+    /// true (the polled <c>get_store_host</c> MCP and web reads, #5718) takes the hourly sweep's stored figure
+    /// and its <c>metric_time</c> instead, because the web page polls every few minutes and the live size
+    /// read measured 5.8 s mean / 30.7 s max on a store whose reads were slow.
+    ///
+    /// <para><b>Each slow fact fails alone (#5718).</b> A timeout or error in the size read or in the
+    /// uncompressed-chunk read marks only that fact unavailable, with the reason; the rest of the profile
+    /// returns. The caller's own cancellation is never swallowed here.</para>
+    /// </summary>
+    internal static async Task<HostStoreFacts> GatherStoreFactsAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken,
+        bool useStoredStoreSize = false, StoreFactsReads? reads = null)
+    {
+        reads ??= new StoreFactsReads();
+
         string version;
         await using (var cmd = new NpgsqlCommand(PostgresVersionSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds })
         {
@@ -604,15 +667,44 @@ WHERE NOT is_compressed";
         }
 
         long? storeSizeBytes = null;
+        DateTime? storeSizeAsOf = null;
+        string? storeSizeReason = null;
         try
         {
-            await using var cmd = new NpgsqlCommand(StoreSizeSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
-            storeSizeBytes = await cmd.ExecuteScalarAsync(cancellationToken) as long?;
+            if (useStoredStoreSize)
+            {
+                await using var cmd = new NpgsqlCommand(reads.StoredStoreSizeSql, connection) { CommandTimeout = reads.SlowReadSeconds };
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
+                {
+                    storeSizeBytes = reader.GetInt64(0);
+                    storeSizeAsOf = DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Unspecified);
+                }
+                else
+                {
+                    storeSizeReason = "no hourly sweep has recorded the store size yet";
+                }
+            }
+            else
+            {
+                await using var cmd = new NpgsqlCommand(reads.StoreSizeSql, connection) { CommandTimeout = reads.SlowReadSeconds };
+                storeSizeBytes = await cmd.ExecuteScalarAsync(cancellationToken) as long?;
+            }
         }
-        catch (PostgresException)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested && IsReadTimeout(ex))
         {
-            /* Least-privilege role without the right on pg_database_size's target -- reported as unavailable
+            /* #5718: a slow size read costs this one fact, not the whole profile. */
+            storeSizeBytes = null;
+            storeSizeAsOf = null;
+            storeSizeReason = DescribeReadTimeout(reads.SlowReadSeconds);
+        }
+        catch (PostgresException pg)
+        {
+            /* Least-privilege role without the right on the size read's target -- reported as unavailable
                rather than failing the whole profile. */
+            storeSizeBytes = null;
+            storeSizeAsOf = null;
+            storeSizeReason = $"this role cannot read it (SQLSTATE {pg.SqlState})";
         }
 
         double? hitRatio = null;
@@ -629,11 +721,15 @@ WHERE NOT is_compressed";
             }
         }
 
-        long uncompressedBytes = 0;
-        var uncompressedCount = 0;
+        /* The sweep stores no uncompressed-chunk total (store_metrics carries a per-object total, the
+           compressed before/after bytes and a chunk count, none of which is "bytes in chunks not yet
+           compressed"), so this fact stays a live read on every path and only its failure is contained (#5718). */
+        long? uncompressedBytes = 0;
+        int? uncompressedCount = 0;
+        string? uncompressedReason = null;
         try
         {
-            await using var cmd = new NpgsqlCommand(UncompressedChunkSizeSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
+            await using var cmd = new NpgsqlCommand(reads.UncompressedChunkSizeSql, connection) { CommandTimeout = reads.SlowReadSeconds };
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
@@ -641,14 +737,24 @@ WHERE NOT is_compressed";
                 uncompressedCount = reader.GetInt32(1);
             }
         }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested && IsReadTimeout(ex))
+        {
+            uncompressedBytes = null;
+            uncompressedCount = null;
+            uncompressedReason = DescribeReadTimeout(reads.SlowReadSeconds);
+        }
         catch (PostgresException)
         {
             /* timescaledb_information.chunks does not exist on this connection's database -- no TimescaleDB
                extension here (plain PostgreSQL BYO, or preloaded-but-not-CREATE-EXTENSION'd, same shape the
                JobExecutionLoggingSql remarks describe for a different GUC). Zero/zero is the honest answer. */
+            uncompressedBytes = 0;
+            uncompressedCount = 0;
         }
 
-        return new HostStoreFacts(version, timescaleVersion, storeSizeBytes, hitRatio, tempBytes, uncompressedBytes, uncompressedCount);
+        return new HostStoreFacts(
+            version, timescaleVersion, storeSizeBytes, hitRatio, tempBytes, uncompressedBytes, uncompressedCount,
+            storeSizeAsOf, storeSizeReason, uncompressedReason);
     }
 
     /* ===================================== Settings: attribution + verdict =============================== */
@@ -1031,11 +1137,12 @@ WHERE NOT is_compressed";
     /* ========================================== Orchestration ============================================ */
 
     internal static async Task<HostProfile> GatherAsync(
-        PostgresConfig postgres, NpgsqlConnection connection, CancellationToken cancellationToken)
+        PostgresConfig postgres, NpgsqlConnection connection, CancellationToken cancellationToken,
+        bool useStoredStoreSize = false, StoreFactsReads? reads = null)
     {
         var (platform, containerized, cpuCount, memory) = GatherHostFacts();
         var dataVolume = GatherDataVolume(ResolveVolumeAnchor(postgres));
-        var store = await GatherStoreFactsAsync(connection, cancellationToken);
+        var store = await GatherStoreFactsAsync(connection, cancellationToken, useStoredStoreSize, reads);
         var settings = await GatherSettingProfilesAsync(connection, postgres, memory.EffectiveBytes, dataVolume.FreeBytes, cancellationToken);
 
         /* Ruling 3 (#4214 part 2b): the cloud identity probe is reached from HERE only — never from
@@ -1174,6 +1281,10 @@ WHERE NOT is_compressed";
         {
             sb.Append("  size ").Append(FormatBytes(size)).Append('\n');
         }
+        else if (profile.Store.StoreSizeUnavailableReason is { } sizeReason)
+        {
+            sb.Append("  size unavailable: ").Append(sizeReason).Append('\n');
+        }
 
         if (profile.Store.BufferHitRatioPercent is { } hit)
         {
@@ -1185,12 +1296,20 @@ WHERE NOT is_compressed";
             sb.Append("  lifetime temp bytes ").Append(FormatBytes(temp)).Append('\n');
         }
 
-        var ramPercent = profile.Memory.EffectiveBytes > 0
-            ? 100.0 * profile.Store.UncompressedChunkBytes / profile.Memory.EffectiveBytes
-            : 0.0;
-        sb.Append("  uncompressed chunks: ").Append(FormatBytes(profile.Store.UncompressedChunkBytes)).Append(" in ")
-          .Append(profile.Store.UncompressedChunkCount).Append(" chunk(s), ")
-          .Append(ramPercent.ToString("0.0", CultureInfo.InvariantCulture)).Append("% of RAM").Append('\n');
+        if (profile.Store.UncompressedChunkBytes is { } uncompressedBytes && profile.Store.UncompressedChunkCount is { } uncompressedCount)
+        {
+            var ramPercent = profile.Memory.EffectiveBytes > 0
+                ? 100.0 * uncompressedBytes / profile.Memory.EffectiveBytes
+                : 0.0;
+            sb.Append("  uncompressed chunks: ").Append(FormatBytes(uncompressedBytes)).Append(" in ")
+              .Append(uncompressedCount).Append(" chunk(s), ")
+              .Append(ramPercent.ToString("0.0", CultureInfo.InvariantCulture)).Append("% of RAM").Append('\n');
+        }
+        else
+        {
+            sb.Append("  uncompressed chunks: unavailable: ")
+              .Append(profile.Store.UncompressedUnavailableReason ?? "not read").Append('\n');
+        }
         sb.Append('\n');
 
         AppendSettingsTable(sb, profile.Settings);
@@ -1239,6 +1358,8 @@ WHERE NOT is_compressed";
             tempBytes = profile.Store.TempBytes,
             uncompressedChunkBytes = profile.Store.UncompressedChunkBytes,
             uncompressedChunkCount = profile.Store.UncompressedChunkCount,
+            storeSizeUnavailableReason = profile.Store.StoreSizeUnavailableReason,
+            uncompressedUnavailableReason = profile.Store.UncompressedUnavailableReason,
             settings = profile.Settings.Select(s => new
             {
                 name = s.Name,

@@ -1206,6 +1206,20 @@ AND   total_bytes IS NOT NULL
 ORDER BY metric_time DESC
 LIMIT 1";
 
+    /// <summary>
+    /// <see cref="LatestStoreSizeSql"/> with the row's <c>metric_time</c> (naive UTC) added (#5718): the
+    /// polled <c>get_store_host</c> reads take the store size from the hourly sweep instead of paying
+    /// <c>pg_database_size</c> on every poll, and report how old the figure is. Same predicate and ordering,
+    /// so the same backward scan serves it. No parameters.
+    /// </summary>
+    public const string LatestStoreSizeWithTimeSql = $@"
+SELECT total_bytes, metric_time
+FROM collect.store_metrics
+WHERE object_kind = '{StoreObjectKind}'
+AND   total_bytes IS NOT NULL
+ORDER BY metric_time DESC
+LIMIT 1";
+
     /// <summary>The sweep's own retention — one bounded DELETE, no policy machinery. $1 cutoff (naive UTC,
     /// metric_time minus <see cref="RetentionDays"/> days).</summary>
     public const string RetentionDeleteSql = @"

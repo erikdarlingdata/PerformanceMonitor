@@ -24,7 +24,7 @@
  */
 
 import { el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, relTime, rollupTextId,
-         fmtInt, fmtMb, fmtPct, fmtBool, fmtText, bandClass, disclosure } from "../util.js";
+         fmtInt, fmtMb, fmtMs, fmtPct, fmtBool, fmtText, bandClass, disclosure } from "../util.js";
 import { gridTable } from "../panels.js";
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { relativeSpec } from "../time-range.js";
@@ -491,9 +491,15 @@ function renderStoreHostPayload(box, p) {
     [cellText("Data volume"), cellText(fmtMb(bytesToMb(vol.free_bytes)) + " free of " + fmtMb(bytesToMb(vol.total_bytes)) + " (" + fmtText(vol.filesystem) + ")" + (vol.note ? " — " + vol.note : ""))],
     [cellText("Managed store"), cellText(fmtBool(p.managed))],
     [cellText("PostgreSQL / TimescaleDB"), cellText(fmtText(store.postgres_version) + " / " + fmtText(store.timescale_version))],
-    [cellText("Store size"), cellText(fmtMb(bytesToMb(store.size_bytes)))],
+    /* #5718: the size is the hourly sweep's stored figure, so it says how old it is; a slow or refused read says
+       why the figure is missing instead of failing the whole card. */
+    [cellText("Store size"), cellText(store.size_bytes == null
+      ? "unavailable" + (store.size_unavailable_reason ? " (" + store.size_unavailable_reason + ")" : "")
+      : fmtMb(bytesToMb(store.size_bytes)) + (store.size_age_seconds == null ? "" : " (hourly sweep, " + fmtMs(store.size_age_seconds * 1000) + " old)"))],
     [cellText("Lifetime buffer hit"), cellText(fmtPct(store.buffer_hit_ratio_percent))],
-    [cellText("Uncompressed chunks"), cellText(fmtInt(store.uncompressed_chunk_count) + " chunks, " + fmtMb(bytesToMb(store.uncompressed_chunk_bytes)) + " (" + fmtPct(store.uncompressed_chunk_percent_of_ram) + " of RAM)")],
+    [cellText("Uncompressed chunks"), cellText(store.uncompressed_chunk_bytes == null
+      ? "unavailable" + (store.uncompressed_unavailable_reason ? " (" + store.uncompressed_unavailable_reason + ")" : "")
+      : fmtInt(store.uncompressed_chunk_count) + " chunks, " + fmtMb(bytesToMb(store.uncompressed_chunk_bytes)) + " (" + fmtPct(store.uncompressed_chunk_percent_of_ram) + " of RAM)")],
   ]);
 
   const settingsBody = settings.length
