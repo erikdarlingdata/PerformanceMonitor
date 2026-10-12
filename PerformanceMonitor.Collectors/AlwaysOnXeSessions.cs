@@ -225,10 +225,10 @@ public static class AlwaysOnXeSessions
     };
 
     /// <summary>
-    /// The shared name of the client-timeout capture (#5640), the one every install and both products read. The attention
-    /// collector and its reads name the session through this constant, so the reader and the lifecycle can never disagree.
+    /// The shared name of the client-timeout capture (#5640), the one every install and both products read. It is the
+    /// attention collector's own constant, so the reader and this lifecycle can never disagree.
     /// </summary>
-    public const string AttentionXeSessionName = "PerformanceMonitor_Attention";
+    public const string AttentionXeSessionName = AttentionCollector.XeSessionName;
 
     /// <summary>The capture's own suffix, cut from the shared name: <c>Deadlock</c>, <c>BlockedProcess</c> or <c>Attention</c>.</summary>
     private static string SuffixFor(AlwaysOnXeSessionKind kind) => SharedNameFor(kind).Substring(Prefix.Length);
