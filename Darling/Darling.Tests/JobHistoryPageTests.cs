@@ -355,7 +355,8 @@ public sealed class JobHistoryPageTests
         Assert.Contains("el(\"div\", { class: \"jh-message\"", tabs, StringComparison.Ordinal);
 
         var css = Wwwroot("css", "app.css");
-        Assert.Matches("\\.jh-message \\{[^}]*min-width: 2[0-9]rem;[^}]*-webkit-line-clamp: 3;", css);
+        Assert.Matches(@"\.jh-message \{[^}]*min-width: 2[0-9]rem;", css);
+        Assert.Matches(@"\.clamp-text \{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;", css); // one line (#5644 W11), was 3 lines
     }
 
     [Fact]

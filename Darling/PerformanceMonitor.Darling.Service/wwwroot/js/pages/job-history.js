@@ -25,7 +25,7 @@ import { VIZ } from "../panels.js";
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { relativeSpec } from "../time-range.js";
 import { orderServers } from "../server-order.js";
-import { el, mount, clear, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, localTime, makeActivatable } from "../util.js";
+import { el, mount, clear, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, localTime, makeActivatable, clampText } from "../util.js";
 
 /** The default range, in hours. The range itself is the shared time range picker's (#5562). */
 export const DEFAULT_HOURS = 24;
@@ -53,15 +53,16 @@ export const JOB_HISTORY_COLUMNS = [
   { key: "duration_formatted", label: "Duration", sortValue: (r) => r.duration_seconds },
   { key: "retries", label: "Retries", format: "int" },
   { key: "last_success", label: "Last Success", format: "time" },
-  { key: "message", label: "Message", wrap: true, render: messageCell },
+  { key: "message", label: "Message", clamp: true, render: messageCell },
 ];
 
 /* The Message column (the morning walk, W2). A failed step's message can run to thousands of characters and sat in a
-   column the table squeezed to about 90 px, so each row grew 150-250 px tall. The cell now has a readable width and
-   shows the first few lines only; the whole message opens in the detail pane when the row is clicked. */
+   column the table squeezed to about 90 px, so each row grew 150-250 px tall. The cell has a readable width and is
+   clipped to ONE line (#5644 W11, was three), with the full text in the tooltip;
+   the whole message opens in the detail pane when the row is clicked. */
 function messageCell(r) {
   const text = r && r.message != null ? String(r.message) : "";
-  return el("div", { class: "jh-message", title: text || null, text });
+  return el("div", { class: "jh-message" }, [clampText(text, { expandable: false })]);
 }
 
 /* A run has no id in the read, so the open row is found again after a rebuild by what identifies it. */

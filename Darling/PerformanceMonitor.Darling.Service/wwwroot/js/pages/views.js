@@ -25,7 +25,7 @@
  * descriptions) reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
-import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, fmtNum } from "../util.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, fmtNum } from "../util.js";
 import { rollingHoursPicker } from "../page-range.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
 import { orderServers } from "../server-order.js";
@@ -803,7 +803,7 @@ function renderAlertCell(cell, index, readSet, sourceSet, scope, opts, limiter) 
   if (cell.type === "status") {
     return el("div", { class: "notebook-panel panel card" }, [
       el("h3", {}, [cell.title || "Status"]),
-      el("div", { class: "panel-body" }, [el("span", { class: "fv", text: cell.status || "Unknown" })]),
+      el("div", { class: "panel-body" }, [el("span", { class: "fv", text: localizeIsoText(cell.status || "Unknown") })]),
     ]);
   }
   if (cell.type === "read") {

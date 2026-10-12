@@ -476,6 +476,11 @@ table.data th {
 table.data tbody tr:nth-child(even) { background: var(--row-alt); }
 table.data td.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.data td.wrap { white-space: normal; max-width: 620px; }
+/* A long text cell on one line, the rest on demand (#5644 W11). The full text stays in the node; the clip is only paint. */
+table.data td.clamp { max-width: 28rem; }
+.clamp-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clamp-text[role="button"] { cursor: pointer; }
+.clamp-text.open { white-space: pre-wrap; overflow-wrap: anywhere; }
 .plan-summary { display: flex; flex-wrap: wrap; gap: 0 1rem; margin: 4px 0; }
 table.data td.pre { white-space: pre-wrap; }
 table.data td.mono { font-family: var(--mono); font-size: 0.78rem; }
@@ -1313,7 +1318,7 @@ pre.code {
 .locking-detail-counters dd { margin: 0; font-variant-numeric: tabular-nums; }
 
 /* Job History (W2): the Message cell keeps a readable width and shows the first 3 lines; the row's detail pane holds the whole message. */
-.jh-message { min-width: 24rem; max-width: 40rem; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; }
+.jh-message { min-width: 24rem; max-width: 40rem; }
 .jh-detail:empty { display: none; }
 .jh-detail { background: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; margin: 8px 0; }
 .jh-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
