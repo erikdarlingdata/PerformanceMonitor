@@ -143,7 +143,8 @@ public sealed class TestCpuAccountantTests
     {
         // #5459: the clock interrupt can land on a test that is only waiting, and the counter then reads one whole
         // tick for it. Plant exactly that: the idle side burns one counter tick of its own. A bound under one tick
-        // (the old 10 ms) failed here every time; two tick-sized bounds keep the sides apart and still pass.
+        // (the old 10 ms) failed here every time. The planted tick plus one stray clock tick is two ticks, so the
+        // upper bound is three ticks, exclusive, and the busy comparison below keeps the sides apart.
         long busyBurn = BusyTicks;
         long strayTick = TickTicks;
         var busy = ChargedTicks(() => { Burn(busyBurn); return Task.CompletedTask; });
@@ -154,7 +155,9 @@ public sealed class TestCpuAccountantTests
         });
         await Task.WhenAll(busy, idle);
         Assert.InRange(busy.Result, busyBurn, busyBurn * 4);
-        Assert.InRange(idle.Result, strayTick, IdleLimitTicks - 1);
+        Assert.InRange(idle.Result, strayTick, IdleLimitTicks + TickTicks - 1);
+        Assert.True(idle.Result < busy.Result,
+            $"the idle test was charged {idle.Result / TimeSpan.TicksPerMillisecond} ms, not less than the busy test's {busy.Result / TimeSpan.TicksPerMillisecond} ms");
     }
 
     [Fact]
