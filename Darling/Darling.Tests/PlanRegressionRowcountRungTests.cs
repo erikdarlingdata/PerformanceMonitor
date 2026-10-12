@@ -114,26 +114,31 @@ public sealed class PlanRegressionRowcountRungTests
     }
 
     [Fact]
-    public void TheProbeNamesTheColumn_AndMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeNamesTheColumn_AndMapsToThisRungWhenNoLaterSentinelIsPresent()
     {
         Assert.Contains("attname = 'rowcount_sum'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        /* #5640: V179's sentinel is appended after this one, so this rung is no longer the top. */
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         Assert.Equal("hasPlanRegressionDailyRowcount", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasServiceVersion", parameters[ProbeOrdinal - 1].Name);
-        Assert.Equal(ProbeOrdinal, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 1, parameters.Length - 1);
+        Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal + 1].Name);
 
         /* Every sentinel present maps to exactly this build's version; this sentinel absent maps one rung back. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-        Assert.Equal(RungVersion, (int)method.Invoke(null, all)!);
+        var withoutLater = (object[])all.Clone();
+        withoutLater[ProbeOrdinal + 1] = false;
+        Assert.Equal(RungVersion, (int)method.Invoke(null, withoutLater)!);
 
-        var behind = (object[])all.Clone();
+        var behind = (object[])withoutLater.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(RungVersion - 1, (int)method.Invoke(null, behind)!);
 

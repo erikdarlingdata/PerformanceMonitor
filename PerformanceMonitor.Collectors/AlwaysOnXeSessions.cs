@@ -20,6 +20,7 @@ public enum AlwaysOnXeSessionKind
 {
     Deadlock,
     BlockedProcess,
+    Attention,
 }
 
 /// <summary>Which session of a kind an install reads in one Azure SQL Database: the name every install shares, or its own.</summary>
@@ -214,6 +215,7 @@ public static class AlwaysOnXeSessions
     {
         AlwaysOnXeSessionKind.Deadlock => DeadlocksCollector.XeSessionName,
         AlwaysOnXeSessionKind.BlockedProcess => BlockedProcessReportCollector.XeSessionName,
+        AlwaysOnXeSessionKind.Attention => AttentionCollector.XeSessionName,
         _ => throw new ArgumentOutOfRangeException(nameof(kind)),
     };
 

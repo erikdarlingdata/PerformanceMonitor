@@ -943,6 +943,51 @@ END $$;";
     private static readonly string V174Sql = ServiceVersionTable.CreateSql;
 
     /// <summary>
+    /// V179 (#5640) - everything the Client Timeouts alert needs in the store, in one rung. (1) <c>collect.attention_events</c>: the
+    /// <c>AttentionCollector</c> table, one row per kept attention plus an <c>overflow</c> row for the events the ring buffer
+    /// lost. A collector table, so the hypertable, compression and 30-day retention come from the catalog at runtime, as V29's note
+    /// describes; a fresh store already has it from V1's catalog walk, so the CREATE is a no-op there and the real create on upgrade.
+    /// Columns are exactly <c>PgSchemaGenerator.CreateTable</c>'s output for the catalog entry. (2)
+    /// <c>config.config_mute_rules.client_app_pattern</c>: the client-application match for mute rules (nullable text, no default,
+    /// like V157's <c>server_id</c>). (3) Three alert settings on <c>config.config_alert_settings</c>, named like V177's:
+    /// <c>client_timeouts_enabled</c> (<c>boolean NOT NULL DEFAULT FALSE</c>: the alert ships OFF until the bars are checked against a
+    /// week of capture on the field stores), <c>client_timeouts_warning_per_minute</c> (default 10) and
+    /// <c>client_timeouts_critical_per_minute</c> (default 60), attentions per minute averaged over three minutes. The defaults are
+    /// a guess from "a healthy app rarely times out", not a measured normal rate. Written as literals because a migration's text is
+    /// frozen at the version it ships in. No CHECK on the bounds, no reload beacon of its own (V17's trigger bumps the version on any
+    /// write to the settings row), no GRANT (the <c>collect</c> and <c>config</c> schemas carry blanket SELECT and table-level
+    /// grants). Catalog-only: every added column is nullable or has a constant default. Every statement is idempotent. <b>Lite twin:</b>
+    /// the DuckDB bump to schema 68. Sequenced after V176-V178 (#5638, #5641, #5684), which are in other open changes.
+    /// </summary>
+    private const string V179Sql = @"
+CREATE TABLE IF NOT EXISTS collect.attention_events (
+    attention_event_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    event_time timestamp,
+    event_kind text,
+    attention_count bigint,
+    database_name text,
+    client_app_name text,
+    client_hostname text,
+    session_id integer,
+    request_id integer,
+    interrupt_duration_us bigint,
+    statement_fingerprint text,
+    statement_text text
+);
+
+CREATE INDEX IF NOT EXISTS idx_attention_events_time ON collect.attention_events(server_id, collection_time);
+
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS client_app_pattern text;
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS client_timeouts_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS client_timeouts_warning_per_minute integer NOT NULL DEFAULT 10,
+    ADD COLUMN IF NOT EXISTS client_timeouts_critical_per_minute integer NOT NULL DEFAULT 60;";
+
+    /// <summary>
     /// V175 (#5631) — <c>collect.plan_regression_daily.rowcount_sum</c>: the day's sum of <c>avg_rowcount * execution_count</c> for
     /// the plan, so PLAN_REGRESSION can tell a plan whose cost followed a much bigger output from a real regression on the daily
     /// path, as it can on the raw and interval-table paths. NULL when any interval of the day had no <c>avg_rowcount</c>, so a
@@ -1279,6 +1324,7 @@ $rung$;";
         new Migration(173, "query-store-compose-stamp", V173Sql),
         new Migration(174, "service-version", V174Sql),
         new Migration(175, "plan-regression-daily-rowcount", V175Sql),
+        new Migration(179, "client-timeouts-alert", V179Sql),
     };
 
     /// <summary>
