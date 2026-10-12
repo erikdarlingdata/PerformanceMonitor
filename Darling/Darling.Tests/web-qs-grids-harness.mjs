@@ -55,7 +55,7 @@ try {
 const UTC_STAMP = "2026-01-15T17:30:00.0000000";
 const regressions = [{ severity: "High", database_name: "d1", query_text: "select 1", query_id: 7, additional_duration_ms: 5, baseline_cpu_ms: 11, recent_cpu_ms: 12, baseline_reads: 13, recent_reads: 14, baseline_exec_count: 15, recent_exec_count: 16, baseline_plan_count: 1, recent_plan_count: 2, last_execution_time: UTC_STAMP }];
 const completions = [{ event_time: UTC_STAMP, statement: "select 2", event_type: "rpc", duration_ms: 9, logical_reads: 21, physical_reads: 22, writes: 23, row_count: 24, session_id: 55, client_app_name: "AppX", server_principal_name: "loginx", database_name: "d1" }];
-const recommendations = [{ collection_time: UTC_STAMP, query_text: "select 3", database_name: "d1", recommendation_state: "Active", score: 90, query_id: 7, regressed_plan_id: 101, last_good_plan_id: 100, last_good_plan_forcing_type: "AUTO", regressed_plan_execution_count: 31, valid_since: UTC_STAMP, last_refresh: UTC_STAMP, execute_action_initiated_by: "System", execute_action_initiated_time: UTC_STAMP }];
+const recommendations = [{ first_seen: UTC_STAMP, collection_time: UTC_STAMP, capture_count: 3, query_text: "select 3", database_name: "d1", recommendation_state: "Active", score: 90, query_id: 7, regressed_plan_id: 101, last_good_plan_id: 100, last_good_plan_forcing_type: "AUTO", regressed_plan_execution_count: 31, valid_since: UTC_STAMP, last_refresh: UTC_STAMP, execute_action_initiated_by: "System", execute_action_initiated_time: UTC_STAMP }];
 answers = {
   get_query_store_regressions: { regressions },
   get_long_query_completions: { completions },

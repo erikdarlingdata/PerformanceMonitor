@@ -1367,7 +1367,7 @@ export async function openServerTabAt(server, tMs, item, { beforeRoute = null, s
     if (typeof beforeRoute === "function") beforeRoute();
     /* Bring the item's own grid into view once the router has built the tab. The router's hashchange listener was
        added first (app.js), and for a server already on screen renderServer paints the tab synchronously, so the new
-       panels are in place when this one runs. A chart and a grid share the title "Deadlocks"; the grid is the later one.
+       panels are in place when this one runs. The Blocking tab's chart is "Deadlock trend" (#5644 W16), so the grid is the one "Deadlocks" panel there.
        The listener is once-only, and added after the range is taken, so a refused range leaves none behind. */
     if (typeof window.addEventListener === "function") {
       window.addEventListener(

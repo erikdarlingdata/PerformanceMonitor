@@ -114,6 +114,9 @@ public sealed class WebPartialWindowBehaviourTests
         Assert.Equal("stored at " + a + " and not collected since " + b + ".", S(r, "sentence"));
         Assert.Equal("last event " + a, S(r, "emptyStripText"));
         Assert.Equal("since " + b, S(r, "noticeStripText"));
+        // G1a: plainText (lane C, W8) and localizeIsoText (lane E, W20) both run in the strips.
+        Assert.Equal("TRUNCATED: since " + b + ": 9 indexes match and 5 were returned. Rows are ordered by total wait time descending.", S(r, "bothEmpty"));
+        Assert.Equal(S(r, "bothEmpty"), S(r, "bothNotice"));
         Assert.Equal("nothing to change 10/9/2026, 10:36:32 AM", S(r, "noStamp"));
         Assert.Equal("null", S(r, "nonString"));
         Assert.DoesNotContain("T", a);

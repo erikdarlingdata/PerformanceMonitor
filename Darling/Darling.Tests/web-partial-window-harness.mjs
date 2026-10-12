@@ -93,5 +93,9 @@ out.noStamp = localizeIsoText("nothing to change 10/9/2026, 10:36:32 AM");
 out.nonString = String(localizeIsoText(null));
 out.emptyStripText = emptyStrip("last event " + iso).textContent;
 out.noticeStripText = noticeStrip("since " + isoZ).textContent;
+/* G1a: a caller-wording sentence that also carries an instant gets BOTH treatments (plainText rewrites the wording, then the instant goes local) */
+const both = "since " + isoZ + ": 9 indexes match and 5 were returned. Rows are ordered by total wait time descending; raise limit to see more.";
+out.bothEmpty = emptyStrip("TRUNCATED: " + both).textContent;
+out.bothNotice = noticeStrip("TRUNCATED: " + both).textContent;
 
 console.log(JSON.stringify(out));
