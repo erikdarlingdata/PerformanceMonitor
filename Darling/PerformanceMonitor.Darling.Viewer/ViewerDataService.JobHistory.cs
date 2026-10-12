@@ -237,11 +237,14 @@ public sealed partial class ViewerDataService
     /// </summary>
     /// <param name="sinceUtc">The window's start: the one the grid's read takes.</param>
     /// <param name="untilUtc">The window's end for a range that ended in the past, else null.</param>
+    /// <param name="serverId">The server picked in the tab's Server drop-down, or null at All Servers: the read is that server's, so a
+    /// category only another server has is not offered (picking it would give an empty grid).</param>
     /// <param name="cancellationToken">Cancels the read.</param>
-    public Task<List<string>> GetJobHistoryCategoriesAsync(DateTime sinceUtc, DateTime? untilUtc = null, CancellationToken cancellationToken = default) =>
+    public Task<List<string>> GetJobHistoryCategoriesAsync(
+        DateTime sinceUtc, DateTime? untilUtc = null, int? serverId = null, CancellationToken cancellationToken = default) =>
         DarlingJobHistoryReader.GetCategoriesAsync(
             _dataSource, sinceUtc, untilUtc is { } until ? until.AddTicks(-TimeSpan.TicksPerMicrosecond) : null,
-            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, serverId, cancellationToken);
 
     /// <summary>
     /// The exact window, after the server-local to UTC conversion: keeps the runs at or after

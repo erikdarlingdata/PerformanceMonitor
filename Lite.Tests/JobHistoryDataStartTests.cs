@@ -316,6 +316,89 @@ VALUES
         Assert.Contains("Quiet category", await service.GetJobHistoryCategoriesAsync(Start, _end.AddDays(-1)));
     }
 
+    /// <summary>
+    /// #5703 (review bot): the per-server read numbers its optional parameters by position ($5 is the end bound when the range ended,
+    /// then Status, then Category), so the Category placeholder is $7 with an end and a Status and $6 with an end alone. Each
+    /// combination is run on DuckDB and must return exactly the rows its filters name.
+    /// </summary>
+    [Fact]
+    public async Task AFinishedRange_WithStatusAndCategory_OrCategoryAlone_ReturnsExactlyTheMatchingRuns()
+    {
+        await SeedClockAsync(ServerA, OffsetA);
+        await SeedClockAsync(ServerB, OffsetB);
+
+        /* In the range (it ended a day ago): a failure in "Quiet category" and one in "Other category" on server A, and server B's
+           successes in "Uncategorized (Local)". After its end: a newer "Quiet category" failure, which the end bound keeps out. */
+        await SeedFailureAsync(ServerA, OffsetA, _end.AddDays(-2), _end, "Quiet category");
+        await SeedFailureAsync(ServerA, OffsetA, _end.AddDays(-2).AddHours(-1), _end, "Other category");
+        await SeedFailureAsync(ServerA, OffsetA, _end.AddHours(-5), _end, "Quiet category");
+        await SeedPageAsync(ServerB, OffsetB, 30, _end.AddDays(-1).AddMinutes(-30), _end);
+
+        var service = new LocalDataService(_duckDb);
+        var rangeEnd = _end.AddDays(-1);
+        const int cap = 50;
+
+        async Task<List<(int ServerId, string? Category, int Status, DateTime RunUtc)>> ReadAsync(int? server, int? status, string? category) =>
+            (await service.GetJobHistoryWithClocksAsync(Start, cap, server, windowEndUtc: rangeEnd, runStatus: status, category: category))
+                .Rows.Select(r => (r.ServerId, r.CategoryName, r.RunStatus, r.RunDateTimeUtc!.Value)).ToList();
+
+        /* End + status + category ($6 and $7): the one failure in the category inside the range. */
+        var statusAndCategory = await ReadAsync(null, 0, "quiet category");
+        var failure = Assert.Single(statusAndCategory);
+        Assert.Equal((ServerA, "Quiet category", 0), (failure.ServerId, failure.Category, failure.Status));
+        Assert.True(failure.RunUtc <= rangeEnd, "the run after the range's end must not be read");
+
+        /* The same on one server. */
+        Assert.Single(await ReadAsync(ServerA, 0, "Quiet category"));
+        Assert.Empty(await ReadAsync(ServerB, 0, "Quiet category"));
+
+        /* End + category alone ($6): the category's runs inside the range, whatever their status. */
+        var byCategory = await ReadAsync(null, null, "Quiet category");
+        Assert.Equal(statusAndCategory, byCategory);
+        var other = Assert.Single(await ReadAsync(null, null, "OTHER CATEGORY"));
+        Assert.Equal("Other category", other.Category);
+        Assert.Equal(30, (await ReadAsync(null, null, "Uncategorized (Local)")).Count);
+
+        /* A status that the category never had, and a category nobody has, give nothing. */
+        Assert.Empty(await ReadAsync(null, 1, "Quiet category"));
+        Assert.Empty(await ReadAsync(null, 0, "No such category"));
+
+        /* End + status alone ($6): both failures in the range, and none of server B's successes. */
+        Assert.Equal(new[] { "Other category", "Quiet category" }, (await ReadAsync(null, 0, null)).Select(r => r.Category!).Order().ToArray());
+    }
+
+    /// <summary>
+    /// #5703 (review bot): the Category choices are the picked server's. At All Servers they hold every server's categories; with one
+    /// server picked, only that server's, so a pick never gives an empty grid. The server's parameter follows the end bound's ($3 with
+    /// an end, $2 without).
+    /// </summary>
+    [Fact]
+    public async Task TheCategoryChoices_AreThePickedServers_AndFleetWideAtAllServers()
+    {
+        await SeedClockAsync(ServerA, OffsetA);
+        await SeedClockAsync(ServerB, OffsetB);
+        await SeedFailureAsync(ServerA, OffsetA, _end.AddDays(-2), _end, "Quiet category");
+        await SeedFailureAsync(ServerA, OffsetA, _end.AddHours(-5), _end, "Recent category");
+        await SeedPageAsync(ServerB, OffsetB, 5, _end.AddMinutes(-1), _end);
+
+        var service = new LocalDataService(_duckDb);
+
+        Assert.Equal(
+            new[] { "Quiet category", "Recent category", "Uncategorized (Local)" },
+            (await service.GetJobHistoryCategoriesAsync(Start)).ToArray());
+        Assert.Equal(
+            new[] { "Quiet category", "Recent category", "Uncategorized (Local)" },
+            (await service.GetJobHistoryCategoriesAsync(Start, null, null)).ToArray());
+        Assert.Equal(new[] { "Quiet category", "Recent category" }, (await service.GetJobHistoryCategoriesAsync(Start, null, ServerA)).ToArray());
+        Assert.Equal(new[] { "Uncategorized (Local)" }, (await service.GetJobHistoryCategoriesAsync(Start, null, ServerB)).ToArray());
+
+        /* With a range end the server's parameter is $3. */
+        var rangeEnd = _end.AddDays(-1);
+        Assert.Equal(new[] { "Quiet category" }, (await service.GetJobHistoryCategoriesAsync(Start, rangeEnd, ServerA)).ToArray());
+        Assert.Empty(await service.GetJobHistoryCategoriesAsync(Start, rangeEnd, ServerB));
+        Assert.Empty(await service.GetJobHistoryCategoriesAsync(Start, rangeEnd, 99999));
+    }
+
     [Fact]
     public void TheCap_IsThe2000TheReadTakes_AndTheNoteStepGetsTheSameConstant()
     {

@@ -19,7 +19,8 @@ namespace PerformanceMonitor.Common;
 /// <para>The drop-downs only grow. A read that Status or Category narrowed holds only the matching runs, and the row cap keeps the
 /// newest runs of the whole fleet, so the rows alone would drop the quiet server (or a category) from the choices and the operator
 /// could not pick it back. Each refresh therefore merges three sources: the choices already on offer, the choices known without
-/// reading the runs (every monitored server; every category with a run in the window, from a read the row cap does not touch),
+/// reading the runs (every monitored server; every category with a run in the window, from a read the row cap does not touch and that is
+/// the picked server's when one is picked, the whole fleet's at All Servers),
 /// and the rows just read. A name in the rows wins over an older name, because the rows speak the names the grid shows (a renamed
 /// server), and a Category spelling in the rows wins over one already on offer, as it did before the choices grew (the tab used to
 /// rebuild both lists from the rows alone). Servers sort as they did then, by <c>OrderBy(ServerName)</c> with the default string

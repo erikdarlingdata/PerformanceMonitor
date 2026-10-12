@@ -194,9 +194,12 @@ public partial class JobHistoryTab : UserControl
             var categoryFilter = GetSelectedCategory();
             /* #5703: the Category choices that do not depend on the runs read: read once per window and every few minutes after, beside
                the grid's read; a failure costs the extra choices and never the grid. */
-            var choicesKey = (Span: (rangeEndUtc ?? nowUtc) - startUtc, FixedEnd: rangeEndUtc);
-            var categoriesTask = choicesKey != _choicesKey || DateTime.UtcNow - _choicesReadAtUtc > ChoicesLifetime
-                ? ReadKnownCategoriesAsync(startUtc, rangeEndUtc, choicesKey)
+            /* Keyed on what identifies the window and the server (JobHistoryChoicesKey), not on its span: a live window with a fixed
+               start (Today, Month to Date, "since X") grows its span on every 30 s refresh, which would read them every time. The read
+               is the picked server's (all servers at All Servers), so the drop-down offers no category the pick would leave empty. */
+            var choicesKey = LiteTimeRange.ChoicesKeyOf(RangePicker, startUtc, rangeEndUtc, nowUtc, serverId);
+            var categoriesTask = _choicesFreshness.NeedsRead(choicesKey, DateTime.UtcNow)
+                ? ReadKnownCategoriesAsync(startUtc, rangeEndUtc, serverId, choicesKey)
                 : null;
             var readTask = System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc, statusFilter, categoryFilter));
 
@@ -396,11 +399,11 @@ public partial class JobHistoryTab : UserControl
     /// <summary>How long the category choices read beside the grid stay current before they are read again.</summary>
     private static readonly TimeSpan ChoicesLifetime = TimeSpan.FromMinutes(5);
 
-    /// <summary>Every category with a run in the window, as the last read found them (<see cref="LocalDataService.GetJobHistoryCategoriesAsync"/>).</summary>
+    /// <summary>Every category with a run in the window (the picked server's when one is picked), as the last read found them (<see cref="LocalDataService.GetJobHistoryCategoriesAsync"/>).</summary>
     private List<string> _knownCategories = [];
 
-    private (TimeSpan Span, DateTime? FixedEnd)? _choicesKey;
-    private DateTime _choicesReadAtUtc = DateTime.MinValue;
+    /// <summary>When the choices are read again: for a different window or server, or after <see cref="ChoicesLifetime"/>.</summary>
+    private readonly JobHistoryChoicesFreshness _choicesFreshness = new(ChoicesLifetime);
 
     /// <summary>The configured servers the job history collector runs on, by the name the grid's Server column speaks (the shell's
     /// snapshot, <see cref="LocalDataService.BuildJobHistoryChoiceMap"/>). A disabled server or an Azure SQL Database cannot have job
@@ -414,12 +417,12 @@ public partial class JobHistoryTab : UserControl
 
     /// <summary>Reads the window's categories. Never throws: a failed read returns null and is logged.</summary>
     private async System.Threading.Tasks.Task<List<string>?> ReadKnownCategoriesAsync(
-        DateTime startUtc, DateTime? endUtc, (TimeSpan Span, DateTime? FixedEnd) key)
+        DateTime startUtc, DateTime? endUtc, int? serverId, JobHistoryChoicesKey key)
     {
         var service = _dataService!;
         try
         {
-            var categories = await System.Threading.Tasks.Task.Run(() => service.GetJobHistoryCategoriesAsync(startUtc, endUtc));
+            var categories = await System.Threading.Tasks.Task.Run(() => service.GetJobHistoryCategoriesAsync(startUtc, endUtc, serverId));
             _choicesFailures.Succeeded("categories");
             return categories;
         }
@@ -435,13 +438,13 @@ public partial class JobHistoryTab : UserControl
         }
     }
 
-    private readonly ChoicesFailureLogGate<(TimeSpan Span, DateTime? FixedEnd)> _choicesFailures = new();
+    private readonly ChoicesFailureLogGate<JobHistoryChoicesKey> _choicesFailures = new();
 
     /// <summary>Takes the categories read beside the grid once they arrive, and only if this load is still the current one (null when
     /// this load did not read them, or the read failed, which keeps the last ones and reads again on the next load). The grid is
     /// already bound: it never waits on this read (<see cref="JobHistoryLoadSteps.ApplyWhenCurrentAsync{T}"/>).</summary>
     private System.Threading.Tasks.Task<bool> ApplyKnownCategoriesAsync(
-        System.Threading.Tasks.Task<List<string>?>? categoriesTask, (TimeSpan Span, DateTime? FixedEnd) key, int gen, List<JobHistoryRow> rows) =>
+        System.Threading.Tasks.Task<List<string>?>? categoriesTask, JobHistoryChoicesKey key, int gen, List<JobHistoryRow> rows) =>
         JobHistoryLoadSteps.ApplyWhenCurrentAsync(categoriesTask, () => _loads.Superseded(nameof(LoadJobsAsync), gen), categories =>
         {
             if (categories is null)
@@ -450,8 +453,7 @@ public partial class JobHistoryTab : UserControl
             }
 
             _knownCategories = categories;
-            _choicesKey = key;
-            _choicesReadAtUtc = DateTime.UtcNow;
+            _choicesFreshness.Record(key, DateTime.UtcNow);
             PopulateServerFilter(rows);
             PopulateCategoryFilter(rows);
         });

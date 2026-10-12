@@ -108,3 +108,59 @@ public sealed class ChoicesFailureLogGate<TKey> where TKey : notnull
         }
     }
 }
+
+/// <summary>
+/// What identifies the window and server the Job History choices were read for (#5703). The choices read is an uncapped DISTINCT
+/// over the fleet, so the tab reads it once per window and again only after a lifetime, not on every auto-refresh. The key must
+/// therefore stay the same across refreshes of one window and change when the window or the server changes:
+/// <list type="bullet">
+/// <item>A <b>relative</b> preset ("Past 24 hours") slides its start with now, so its identity is its length.</item>
+/// <item>A window with a <b>fixed start</b> (a calendar period such as Today or Month to Date, or "since X") is identified by that start.
+/// Its end is part of the key only when the window is not live: a live window's end is now, and keying on it (or on the span, which
+/// grows with it) would make the key new on every load and read the choices every time.</item>
+/// <item>The <b>server</b> picked in the Server drop-down is part of the key: the Category read is that server's.</item>
+/// </list>
+/// </summary>
+/// <param name="StartUtc">The window's start, for a window whose start is fixed; null for a relative preset.</param>
+/// <param name="Span">The window's length, for a relative preset; null otherwise.</param>
+/// <param name="FixedEndUtc">The window's end, for a window that has ended; null for a live window.</param>
+/// <param name="ServerId">The picked server, or null at All Servers.</param>
+public readonly record struct JobHistoryChoicesKey(DateTime? StartUtc, TimeSpan? Span, DateTime? FixedEndUtc, int? ServerId)
+{
+    /// <summary>The key for one load's window.</summary>
+    /// <param name="startSlides">True when the start moves with now (a relative preset), false when it is fixed.</param>
+    /// <param name="startUtc">The window's start for this load.</param>
+    /// <param name="endUtc">The window's end for this load (now, for a live window).</param>
+    /// <param name="endIsLive">True when the window's end is now.</param>
+    /// <param name="serverId">The picked server, or null at All Servers.</param>
+    public static JobHistoryChoicesKey For(bool startSlides, DateTime startUtc, DateTime endUtc, bool endIsLive, int? serverId) =>
+        startSlides
+            ? new JobHistoryChoicesKey(null, endUtc - startUtc, null, serverId)
+            : new JobHistoryChoicesKey(startUtc, null, endIsLive ? null : endUtc, serverId);
+}
+
+/// <summary>
+/// When the Job History choices are read again (#5703): when the window or server changed (a different
+/// <see cref="JobHistoryChoicesKey"/>) or after <c>lifetime</c> since the last read that fully succeeded. The clock is passed in, so
+/// a test drives several refreshes without waiting.
+/// </summary>
+public sealed class JobHistoryChoicesFreshness
+{
+    private readonly TimeSpan _lifetime;
+    private JobHistoryChoicesKey? _key;
+    private DateTime _readAtUtc = DateTime.MinValue;
+
+    /// <param name="lifetime">How long a read stays current for an unchanged key.</param>
+    public JobHistoryChoicesFreshness(TimeSpan lifetime) => _lifetime = lifetime;
+
+    /// <summary>True when this load should start the choices reads.</summary>
+    public bool NeedsRead(JobHistoryChoicesKey key, DateTime nowUtc) =>
+        _key != key || nowUtc - _readAtUtc > _lifetime;
+
+    /// <summary>Records that every half of the choices was read for <paramref name="key"/> at <paramref name="nowUtc"/>.</summary>
+    public void Record(JobHistoryChoicesKey key, DateTime nowUtc)
+    {
+        _key = key;
+        _readAtUtc = nowUtc;
+    }
+}

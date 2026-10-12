@@ -153,19 +153,23 @@ ORDER BY server_id";
     /// busy server fills that cap, so a quieter server's categories would otherwise reach the drop-down only after a Status filter
     /// surfaced them. The bounds are the pre-filter's zone slack, the one <see cref="ReadJobHistoryServerIdsAsync"/> uses: the stored
     /// <c>run_datetime</c> is a server's wall clock, UTC-12 to UTC+14 from the UTC window, plus the hour the per-server read widens by.
-    /// A category whose only run sits in that margin can be offered, which costs an empty grid and never a missing choice.
+    /// A category whose only run sits in that margin can be offered, which costs an empty grid and never a missing choice. With
+    /// <paramref name="serverId"/> the read is that server's, so the drop-down is not offered a category only another server has (a pick
+    /// that would give an empty grid); without it the read is fleet-wide.
     /// </summary>
     /// <param name="windowStartUtc">The window's start: the instant the grid's read takes.</param>
     /// <param name="windowEndUtc">The window's end for a range that ended in the past, else null.</param>
-    public async Task<List<string>> GetJobHistoryCategoriesAsync(DateTime windowStartUtc, DateTime? windowEndUtc = null)
+    /// <param name="serverId">The one server to read, or null for every server.</param>
+    public async Task<List<string>> GetJobHistoryCategoriesAsync(DateTime windowStartUtc, DateTime? windowEndUtc = null, int? serverId = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         var endClause = windowEndUtc.HasValue ? "\nAND   run_datetime <= $2" : string.Empty;
+        var serverClause = serverId.HasValue ? $"\nAND   server_id = ${(windowEndUtc.HasValue ? 3 : 2)}" : string.Empty;
         command.CommandText = $@"
 SELECT DISTINCT category_name
 FROM v_job_history
-WHERE run_datetime >= $1{endClause}
+WHERE run_datetime >= $1{endClause}{serverClause}
 AND   category_name IS NOT NULL
 AND   category_name <> ''
 ORDER BY category_name";
@@ -173,6 +177,11 @@ ORDER BY category_name";
         if (windowEndUtc is { } end)
         {
             command.Parameters.Add(new DuckDBParameter { Value = end.AddHours(15) });
+        }
+
+        if (serverId is { } server)
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = server });
         }
 
         var categories = new List<string>();

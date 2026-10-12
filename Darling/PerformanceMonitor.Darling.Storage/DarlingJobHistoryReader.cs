@@ -42,7 +42,8 @@ public sealed record DarlingJobHistoryRow(
 
 /// <summary>
 /// Optional filters on the job-history read, applied inside the per-server top-N so the row limit counts only
-/// matching rows. The viewer passes none (it filters on the grid); the MCP tool passes what the caller asked for.
+/// matching rows. The MCP tool passes what the caller asked for, and the viewer's Job History tab passes its Status and Category
+/// choices (#5703), so a filter is applied before the row cap rather than to the rows the cap kept.
 /// Job name and category match exactly, ignoring case. <paramref name="UntilUtc"/> (naive UTC) is an optional end
 /// instant: the SQL bounds the newest runs by it (widened by an hour, like the start) and the job stats exactly,
 /// and <see cref="DarlingJobHistoryReader.GetAsync"/> then cuts the runs exactly in C#.
@@ -169,26 +170,35 @@ public static class DarlingJobHistoryReader
     /// own, with no row cap and no Status or Category filter, because the grid's read keeps the newest runs of the whole fleet and a
     /// busy server fills that cap, so the categories of a quieter server would otherwise reach the drop-down only after a Status
     /// filter surfaced them. The window is the grid's, widened by the hour the grid's pre-filter widens by (<see cref="BuildCategoriesSql"/>);
-    /// a category whose only run sits in that margin can be offered, which costs an empty grid and never a missing choice.
+    /// a category whose only run sits in that margin can be offered, which costs an empty grid and never a missing choice. With
+    /// <paramref name="serverId"/> the read is that server's, so the drop-down is not offered a category only another server has (a pick
+    /// that would give an empty grid); without it the read is fleet-wide.
     /// </summary>
     /// <param name="dataSource">The store.</param>
     /// <param name="sinceUtc">The window's start (naive UTC), the grid's.</param>
     /// <param name="untilUtc">The window's end (naive UTC) for a range that ended in the past, else null.</param>
     /// <param name="commandTimeoutSeconds">The read's deadline.</param>
+    /// <param name="serverId">The one server to read, or null for every server.</param>
     /// <param name="cancellationToken">Cancels the read.</param>
     public static async Task<List<string>> GetCategoriesAsync(
-        NpgsqlDataSource dataSource, DateTime sinceUtc, DateTime? untilUtc, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+        NpgsqlDataSource dataSource, DateTime sinceUtc, DateTime? untilUtc, int commandTimeoutSeconds, int? serverId = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
 
         var categories = new List<string>();
-        await using var command = dataSource.CreateCommand(BuildCategoriesSql(untilUtc.HasValue));
+        await using var command = dataSource.CreateCommand(BuildCategoriesSql(untilUtc.HasValue, serverId.HasValue));
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(sinceUtc) });
         if (untilUtc is { } until)
         {
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(until, DateTimeKind.Unspecified) });
+        }
+
+        if (serverId is { } server)
+        {
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = server });
         }
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -205,10 +215,13 @@ public static class DarlingJobHistoryReader
     /// (<c>job_history</c> is partitioned on <c>collection_time</c>, so the floor lets the planner exclude chunks, as in
     /// <see cref="BuildJobHistorySql"/>); with <paramref name="bounded"/>, $3 is the window end. <c>run_datetime</c> is the server's
     /// wall clock, so each server's latest collected UTC offset (0 when none) moves the bound onto it, widened by an hour as the grid's
-    /// pre-filter is.
+    /// pre-filter is. With <paramref name="forServer"/>, the next parameter after those (the window end when bounded, else $3) is the
+    /// server's id.
     /// </summary>
-    public static string BuildCategoriesSql(bool bounded)
+    public static string BuildCategoriesSql(bool bounded, bool forServer = false)
     {
+        var serverSql = forServer ? $"\nAND   jh.server_id = ${(bounded ? 4 : 3)}" : string.Empty;
+
         var untilSql = bounded
             ? "\nAND   jh.run_datetime <= $3 + make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) + interval '1 hour'"
             : string.Empty;
@@ -226,7 +239,7 @@ SELECT DISTINCT jh.category_name
 FROM job_history AS jh
 LEFT JOIN svr ON svr.server_id = jh.server_id
 WHERE jh.collection_time >= $2
-AND   jh.run_datetime >= $1 + make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) - interval '1 hour'{untilSql}
+AND   jh.run_datetime >= $1 + make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) - interval '1 hour'{untilSql}{serverSql}
 AND   jh.category_name IS NOT NULL
 AND   jh.category_name <> ''
 ORDER BY jh.category_name";

@@ -183,9 +183,16 @@ public sealed class JobHistoryFilterBeforeCapLiveTests
             /* The window bounds the category read: from two days ago neither quiet run is in it; a range that ended 3.5 days ago holds only the success. */
             var recent = await viewer.GetJobHistoryCategoriesAsync(now.AddDays(-2), cancellationToken: ct);
             Assert.DoesNotContain(CategoryB, recent);
-            var ended = await viewer.GetJobHistoryCategoriesAsync(start, now.AddDays(-3).AddHours(-12), ct);
+            var ended = await viewer.GetJobHistoryCategoriesAsync(start, now.AddDays(-3).AddHours(-12), cancellationToken: ct);
             Assert.DoesNotContain(CategoryB, ended);
             Assert.Contains(CategoryA, ended);
+
+            /* With one server picked the read is that server's: the busy server has no run in category B, so B is not offered (a pick of
+               it would give an empty grid), while the quiet server's own read offers both. The server's parameter follows the end's. */
+            Assert.Equal(new[] { CategoryA }, await viewer.GetJobHistoryCategoriesAsync(start, serverId: BusyServer, cancellationToken: ct));
+            Assert.Equal(new[] { CategoryA, CategoryB }.Order(StringComparer.Ordinal), await viewer.GetJobHistoryCategoriesAsync(start, serverId: QuietServer, cancellationToken: ct));
+            Assert.Equal(new[] { CategoryA }, await viewer.GetJobHistoryCategoriesAsync(start, now.AddDays(-3).AddHours(-12), QuietServer, ct));
+            Assert.Empty(await viewer.GetJobHistoryCategoriesAsync(start, serverId: 987654, cancellationToken: ct));
 
             bodySucceeded = true;
         }
