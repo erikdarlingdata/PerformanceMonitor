@@ -22,8 +22,10 @@ namespace Darling.Tests;
 /// The log text and setting redactors read a field in time that grows with its length, whatever the field repeats:
 /// a value slot ends at the first place the text after it begins and does not try every other split, a field
 /// longer than <see cref="PgLogTextRedactor.MaxSqlFieldLength"/> is withheld without being matched, and a pattern that
-/// still outruns its bound withholds the whole field.
+/// still outruns its bound withholds the whole field. The class runs in <c>[Collection("timing")]</c>: its time
+/// bounds are judged against the runner's load.
 /// </summary>
+[Collection("timing")]
 public sealed class PgLogTextRedactorBoundTests
 {
     private const string W = PgLogTextRedactor.WithheldValues;
