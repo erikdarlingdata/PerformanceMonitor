@@ -200,6 +200,8 @@ public partial class JobHistoryTab : UserControl
                 : null;
             var readTask = System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc, statusFilter, categoryFilter));
 
+            var (all, readClocks) = await readTask;
+
             /* The last supersede check and the bind sit in one synchronous run (JobHistoryLoadSteps.BindWhenCurrentAsync): a load that
                was current at the check cannot be superseded before it binds, so an older load never binds over a newer one. The
                Category choices are applied after the bind, by a load that is still current; the grid never waits on their read. */
@@ -208,7 +210,6 @@ public partial class JobHistoryTab : UserControl
                 return;
             }
 
-            var (all, readClocks) = await readTask;
             var choicesApplied = ApplyKnownCategoriesAsync(categoriesTask, choicesKey, gen, all);
 
             var displayCount = JobHistoryDataGrid.ItemsSource is ICollection<JobHistoryRow> coll ? coll.Count : all.Count;
