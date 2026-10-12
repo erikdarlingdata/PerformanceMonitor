@@ -14,6 +14,7 @@ using System.Linq;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -1125,6 +1126,226 @@ public sealed class DarlingStoreContentsGateTests
         }
     }
 
+    /// <summary>A real store folder, and a link to it in a folder of its own that only this account can change.</summary>
+    private static (string Store, string Container, string Link) NewLinkedStore()
+    {
+        var store = NewStore();
+        var container = Path.Combine(Path.GetTempPath(), "darling-contents-link-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(container);
+        var link = Path.Combine(container, "store");
+        Junction(link, store);
+        return (store, container, link);
+    }
+
+    private static void RemoveLinked(string store, string container, string link)
+    {
+        try { Directory.Delete(link); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* The junction is already gone. */
+        }
+
+        Remove(container);
+        Remove(store);
+    }
+
+    private static string? LinkedProblem(string link, ILogger? logger = null) =>
+        DarlingManagedPostgres.StoreContentsProblemThroughLink(
+            link, Path.Combine(link, "pg"), Path.Combine(link, "pg.log"), Path.Combine(link, "logs"), logger);
+
+    /// <summary>A store folder that is a link is used when the link's owner is trusted, the folder it sits in is closed
+    /// to ordinary users and the folder it points to has a trusted owner: it logs one warning and the judging and the
+    /// locking happen on the real folder.</summary>
+    [Fact]
+    public void AStoreFolderLinkWithATrustedOwnerAndAClosedParent_IsAccepted_WithOneWarning()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only.");
+        var (store, container, link) = NewLinkedStore();
+        try
+        {
+            Assert.True(DarlingManagedPostgres.IsLink(link));
+            var logger = new CapturingTestLogger();
+            Assert.Null(LinkedProblem(link, logger));
+            Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+            Assert.Contains("darling.json", logger.Joined, StringComparison.Ordinal);
+            Assert.Contains(store, logger.Joined, StringComparison.OrdinalIgnoreCase);
+
+            /* The real folder is the one judged: an item it has that Users can read is tightened there, through the link. */
+            File.WriteAllText(Path.Combine(store, "server.crt"), "x");
+            Grant(Path.Combine(store, "logs"), FileSystemRights.ReadAndExecute);
+            Assert.Null(LinkedProblem(link));
+            Assert.False(HasOrdinaryUserAccess(Path.Combine(store, "logs")));
+            Assert.Equal(Path.Combine(store, "pg"), DarlingManagedPostgres.RemapIntoTarget(Path.Combine(link, "pg"), link, store), ignoreCase: true);
+        }
+        finally
+        {
+            RemoveLinked(store, container, link);
+        }
+    }
+
+    [Fact]
+    public void AStoreFolderLinkWhoseOwnerIsNotTrusted_IsRefused()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only.");
+        var (store, container, link) = NewLinkedStore();
+        try
+        {
+            DarlingFileSecurity.UseStoreTrustForTests(null, null, linkOwner: path => path == link ? s_users : null);
+            var problem = LinkedProblem(link);
+            Assert.NotNull(problem);
+            Assert.Contains("is not owned by", problem, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DarlingFileSecurity.UseStoreTrustForTests(null, null);
+            RemoveLinked(store, container, link);
+        }
+    }
+
+    [Theory]
+    [InlineData(FileSystemRights.DeleteSubdirectoriesAndFiles)]
+    [InlineData(FileSystemRights.ChangePermissions)]
+    [InlineData(FileSystemRights.Modify)]
+    public void AStoreFolderLinkInAFolderUsersCanChange_IsRefused(FileSystemRights rights)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only.");
+        var (store, container, link) = NewLinkedStore();
+        try
+        {
+            Grant(container, rights);
+            var problem = LinkedProblem(link);
+            Assert.NotNull(problem);
+            Assert.Contains("could be replaced by", problem, StringComparison.Ordinal);
+        }
+        finally
+        {
+            RemoveLinked(store, container, link);
+        }
+    }
+
+    /// <summary>%ProgramData% lets Users create files and folders in it, which cannot replace a link that is there.</summary>
+    [Fact]
+    public void AStoreFolderLinkInAFolderUsersCanOnlyCreateIn_IsAccepted()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only.");
+        var (store, container, link) = NewLinkedStore();
+        try
+        {
+            Grant(container, FileSystemRights.WriteData | FileSystemRights.AppendData);
+            Assert.Null(LinkedProblem(link));
+        }
+        finally
+        {
+            RemoveLinked(store, container, link);
+        }
+    }
+
+    /// <summary>The target's owner is judged on its own: the service runs as another account here, so the real
+    /// folder this account made is not a trusted one, while the link's owner stands in as Administrators.</summary>
+    [Fact]
+    public void AStoreFolderLinkToAFolderWithAnUntrustedOwner_IsRefused()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only.");
+        var (store, container, link) = NewLinkedStore();
+        var someoneElse = new SecurityIdentifier(WellKnownSidType.NetworkServiceSid, null);
+        var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        try
+        {
+            var me = WindowsIdentity.GetCurrent().User!;
+            var info = new DirectoryInfo(store);
+            var security = info.GetAccessControl();
+            security.SetOwner(me);
+            try { info.SetAccessControl(security); }
+            catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException or IOException)
+            {
+                Assert.Skip("this account may not make itself the owner: " + ex.Message);
+            }
+
+            DarlingFileSecurity.UseStoreTrustForTests(runningAccount: someoneElse, ownServiceSid: null, linkOwner: path => path == link ? administrators : null);
+            var problem = LinkedProblem(link);
+            Assert.NotNull(problem);
+            Assert.Contains(store, problem, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("is not owned by", problem, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DarlingFileSecurity.UseStoreTrustForTests(null, null);
+            RemoveLinked(store, container, link);
+        }
+    }
+
+    /// <summary>One hop only: a link to another link is refused, wherever that one points.</summary>
+    [Fact]
+    public void AStoreFolderLinkToAnotherLink_IsRefused()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only.");
+        var store = NewStore();
+        var container = Path.Combine(Path.GetTempPath(), "darling-contents-chain-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(container);
+        var second = Path.Combine(container, "second");
+        var first = Path.Combine(container, "first");
+        try
+        {
+            Junction(second, store);
+            Junction(first, second);
+            Assert.True(DarlingManagedPostgres.IsLink(first) && DarlingManagedPostgres.IsLink(second));
+            var problem = LinkedProblem(first);
+            Assert.NotNull(problem);
+            Assert.Contains("only one link is followed", problem, StringComparison.Ordinal);
+        }
+        finally
+        {
+            foreach (var junction in new[] { first, second })
+            {
+                try { Directory.Delete(junction); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    /* The junction is already gone. */
+                }
+            }
+
+            Remove(container);
+            Remove(store);
+        }
+    }
+
+    /// <summary>The superuser credential file is judged by the store's owner list: one owned by the service's own
+    /// account is accepted whichever account the service runs as, and one an ordinary user owns is refused.</summary>
+    [Fact]
+    public void TheCredentialFile_IsAcceptedForTheServicesOwnAccount_AndRefusedForAnOrdinaryUser()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+        var store = NewStore();
+        var file = Path.Combine(store, DarlingManagedPostgres.CredentialFileName);
+        var me = WindowsIdentity.GetCurrent().User!;
+        var someoneElse = new SecurityIdentifier(WellKnownSidType.NetworkServiceSid, null);
+        try
+        {
+            File.WriteAllText(file, "x");
+            var info = new FileInfo(file);
+            var security = info.GetAccessControl();
+            security.SetOwner(me);
+            try { info.SetAccessControl(security); }
+            catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException or IOException)
+            {
+                Assert.Skip("this account may not make itself the owner: " + ex.Message);
+            }
+
+            DarlingFileSecurity.UseStoreTrustForTests(runningAccount: someoneElse, ownServiceSid: me);
+            Assert.Null(DarlingManagedPostgres.CredentialOwnerRefusal(file));
+
+            DarlingFileSecurity.UseStoreTrustForTests(runningAccount: someoneElse, ownServiceSid: null);
+            var refusal = DarlingManagedPostgres.CredentialOwnerRefusal(file);
+            Assert.NotNull(refusal);
+            Assert.Contains("is not owned by", refusal, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DarlingFileSecurity.UseStoreTrustForTests(null, null);
+            Remove(store);
+        }
+    }
+
     /// <summary>A data directory this account cannot list is refused with the reason, not read as an empty one.</summary>
     [Fact]
     public void ADataDirectoryThatCannotBeListed_IsRefused_NeverTreatedAsEmpty()
@@ -1207,8 +1428,8 @@ public sealed class DarlingStoreContentsGateTests
     public void TheGate_RunsOnceInEnsureRunning_BeforeInitdbAndBeforeAnyServerStart()
     {
         var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedPostgres.cs");
-        var harden = source.IndexOf("var storeFolderLocked = TryHardenDirectory(ParentOf(_dataDirectory));", StringComparison.Ordinal);
-        var gate = source.IndexOf("RefuseUntrustedStoreContents(ParentOf(_dataDirectory));", StringComparison.Ordinal);
+        var harden = source.IndexOf("var storeFolderLocked = TryHardenDirectory(storeFolder, viaLink);", StringComparison.Ordinal);
+        var gate = source.IndexOf("RefuseUntrustedStoreContents(storeLink);", StringComparison.Ordinal);
         var existing = source.IndexOf("var existingCluster = File.Exists(", StringComparison.Ordinal);
         var initdb = source.IndexOf("await InitializeClusterAsync(binDirectory, cancellationToken);", StringComparison.Ordinal);
         var major = source.IndexOf("await EnsureDataDirectoryMajorAsync(binDirectory, networkPlan, cancellationToken);", StringComparison.Ordinal);
@@ -1216,6 +1437,6 @@ public sealed class DarlingStoreContentsGateTests
 
         Assert.True(harden >= 0 && gate > harden, "the store contents are judged after the store folder is locked");
         Assert.True(gate < existing && gate < initdb && gate < major && gate < start, "the check precedes initdb, the major upgrade and every server start");
-        Assert.Single(Regex.Matches(source, @"RefuseUntrustedStoreContents\(ParentOf"));
+        Assert.Single(Regex.Matches(source, @"RefuseUntrustedStoreContents\(storeLink"));
     }
 }

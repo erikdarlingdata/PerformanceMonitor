@@ -775,6 +775,52 @@ public static class DarlingFileSecurity
         }
     }
 
+    private const FileSystemRights EntrySwapRights =
+        FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles
+        | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
+
+    /// <summary>
+    /// Which of Users, Everyone and Authenticated Users may remove or replace an entry of <paramref name="directory"/>,
+    /// or change who may: a Delete, delete-child, change-permissions or take-ownership grant that applies to the folder
+    /// itself, comma-separated; null when none do. Rights that only add new entries (create files, create folders) are
+    /// not counted: %ProgramData% hands them to Users, and they cannot rename or remove an entry that is already there.
+    /// A DACL that cannot be read is reported, not passed.
+    /// </summary>
+    public static string? EntryChangeByOrdinaryUsers(string directory)
+    {
+        try
+        {
+            var groups = new[]
+            {
+                new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null),
+                new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+            };
+            var names = new List<string>();
+            foreach (FileSystemAccessRule rule in new DirectoryInfo(directory).GetAccessControl().GetAccessRules(true, true, typeof(SecurityIdentifier)))
+            {
+                if (rule.AccessControlType == AccessControlType.Allow
+                    && (rule.FileSystemRights & EntrySwapRights) != 0
+                    && !rule.PropagationFlags.HasFlag(PropagationFlags.InheritOnly)
+                    && rule.IdentityReference is SecurityIdentifier sid
+                    && Array.Exists(groups, group => group.Equals(sid)))
+                {
+                    var name = AccountName(sid);
+                    if (!names.Contains(name))
+                    {
+                        names.Add(name);
+                    }
+                }
+            }
+
+            return names.Count == 0 ? null : string.Join(", ", names);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
+        {
+            return $"its permissions could not be read ({ex.Message})";
+        }
+    }
+
     /// <summary>
     /// Why the service must not write its log files into <paramref name="folder"/>, or null when it may: the folder
     /// or the folder above it is a junction or symbolic link, or the folder is owned by anyone outside the store

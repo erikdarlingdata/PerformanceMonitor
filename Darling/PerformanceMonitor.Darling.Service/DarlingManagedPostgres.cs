@@ -3032,12 +3032,29 @@ public sealed class DarlingManagedPostgres
            the operator's Viewer can reach the admin/viewer credential files beside the data directory.
            Re-applied every start (self-healing, like the conf append) so an existing loose install is
            tightened too. Done BEFORE initdb so the data-dir subtree inherits the locked-down ACL. */
-        Directory.CreateDirectory(ParentOf(_dataDirectory));
-        var storeFolderLocked = TryHardenDirectory(ParentOf(_dataDirectory));
+        var storeLink = ParentOf(_dataDirectory);
+        Directory.CreateDirectory(storeLink);
+
+        /* A store folder that is a link is used only when the link, the folder it sits in and the folder it points to
+           are trusted (an earlier release started on one). From here on the real folder is the one that is judged and
+           locked, through a handle opened on it without following a further link. */
+        if (ResolveStoreFolder(storeLink, _logger, out var storeFolder) is { } linkProblem)
+        {
+            throw new InvalidOperationException(
+                $"Refusing to initialize or start the managed store under {storeLink}: {linkProblem}. A store folder that is " +
+                "a junction or symbolic link is used only when the link points straight at a folder, the link and that " +
+                "folder are owned by SYSTEM, Administrators or this service, and the folder the link sits in cannot be " +
+                "changed by Users, Everyone or Authenticated Users. Set the data directory in darling.json to the real " +
+                $"folder, or from an ELEVATED prompt remove the link (rmdir \"{storeLink}\" removes the link and leaves the " +
+                "folder it points to as it is).");
+        }
+
+        var viaLink = !string.Equals(storeFolder, storeLink, StringComparison.Ordinal);
+        var storeFolderLocked = TryHardenDirectory(storeFolder, viaLink);
 
         /* The data directory, pg.log, server.key and the log folder are the names the service writes into and opens
            again on every start: refuse ones another user made first, before initdb or the server touches them. */
-        RefuseUntrustedStoreContents(ParentOf(_dataDirectory));
+        RefuseUntrustedStoreContents(storeLink);
 
         /* Age out any pre-upgrade rollback copy BEFORE this start's own upgrade can create a new one.
            Running it afterwards would bump the brand-new copy's counter on the very start that produced
@@ -3079,7 +3096,7 @@ public sealed class DarlingManagedPostgres
                 throw new InvalidOperationException(DarlingStoreUpgrade.DescribeDisplacedStore(_dataDirectory, displaced));
             }
 
-            RefuseInitdbOnUnlockedStoreFolder(ParentOf(_dataDirectory), storeFolderLocked);
+            RefuseInitdbOnUnlockedStoreFolder(storeFolder, storeFolderLocked);
             await InitializeClusterAsync(binDirectory, cancellationToken);
 
             /* Read here too, so this first start records the new store's TimescaleDB state under this runtime and
@@ -5161,20 +5178,34 @@ public sealed class DarlingManagedPostgres
            trusted across any future account change), because the field report behind it read "tampered
            with or pre-planted" and reached for re-initializing a healthy store. The service cannot fix
            this itself: taking ownership needs a privilege a service account is not granted. */
-        if (!DarlingFileSecurity.IsTrustedOwner(_credentialPath))
+        if (CredentialOwnerRefusal(_credentialPath) is { } refusal)
         {
-            throw new InvalidOperationException(
-                $"The managed Postgres credential file {_credentialPath} is not owned by SYSTEM, Administrators, or the " +
-                $"service account{DarlingFileSecurity.DescribeOwnerAndExposure(_credentialPath)}. If you changed the " +
-                "service's Log On account, that is the previous service account still owning the file — from an ELEVATED " +
-                $"prompt run   takeown /f \"{_credentialPath}\" /a   then   " +
-                $"icacls \"{_credentialPath}\" /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}:(F)\"   and start " +
-                "the service again. If you did NOT change the service account, treat the file as tampered with or " +
-                "pre-planted: investigate, then restore it from backup or re-initialize the data directory (destroys " +
-                "collected history).");
+            throw new InvalidOperationException(refusal);
         }
 
         return DarlingSecrets.Unprotect(File.ReadAllText(_credentialPath).Trim());
+    }
+
+    /// <summary>Why the superuser credential file must not be read, or null when its owner is one the service trusts:
+    /// the store's list (SYSTEM, Administrators, TrustedInstaller, the account the service runs as and the service's own
+    /// service SID), through the same helper.</summary>
+    [SupportedOSPlatform("windows")]
+    internal static string? CredentialOwnerRefusal(string credentialPath)
+    {
+        if (DarlingFileSecurity.IsTrustedStoreOwner(credentialPath))
+        {
+            return null;
+        }
+
+        return
+            $"The managed Postgres credential file {credentialPath} is not owned by SYSTEM, Administrators, TrustedInstaller, the " +
+            $"service account or the service's own account{DarlingFileSecurity.DescribeOwnerAndExposure(credentialPath)}. If you changed the " +
+            "service's Log On account twice, that is the previous service account still owning the file — from an ELEVATED " +
+            $"prompt run   takeown /f \"{credentialPath}\" /a   then   " +
+            $"icacls \"{credentialPath}\" /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}:(F)\"   and start " +
+            "the service again. If you did NOT change the service account, treat the file as tampered with or " +
+            "pre-planted: investigate, then restore it from backup or re-initialize the data directory (destroys " +
+            "collected history).";
     }
 
     /// <summary>
@@ -5184,10 +5215,23 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     /// <returns>Whether the ACL was applied; a first start refuses initdb when it was not.</returns>
     [SupportedOSPlatform("windows")]
-    private bool TryHardenDirectory(string path)
+    private bool TryHardenDirectory(string path, bool viaLink = false)
     {
         try
         {
+            if (viaLink)
+            {
+                /* The real folder a store-folder link points to: opened without following a further link, and kept open
+                   while its ACL is written. */
+                if (DarlingFileSecurity.HardenWithoutFollowingLinks(
+                        path, isDirectory: true, allowInteractive: true, Path.GetDirectoryName(path)!) is { } why)
+                {
+                    throw new InvalidOperationException(why);
+                }
+
+                return true;
+            }
+
             DarlingFileSecurity.HardenDirectory(path, allowInteractiveTraverse: true);
             return true;
         }
@@ -5249,6 +5293,123 @@ public sealed class DarlingManagedPostgres
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Settles which folder is the store folder. A real folder is itself. A store folder that is a junction or symbolic
+    /// link is the real folder it points to, but only when the link's own owner is trusted (read without following the
+    /// link), the folder the link sits in grants Users, Everyone and Authenticated Users no right to remove or replace
+    /// an entry or change its permissions, the link points straight at a directory (not at another link, not at a drive
+    /// root) and that directory's owner is trusted. Anything else is refused with the reason. An earlier release ran on
+    /// such a store, so it is not refused outright; it logs one warning that the supported way to place the store
+    /// elsewhere is the data directory in <c>darling.json</c>. Every check and permission write after this one runs on
+    /// the returned folder, never on the link.
+    /// </summary>
+    /// <returns>Null when the store may be used, with <paramref name="effectiveFolder"/> the folder to judge and
+    /// restrict; otherwise why not.</returns>
+    [SupportedOSPlatform("windows")]
+    internal static string? ResolveStoreFolder(string storeFolder, ILogger? logger, out string effectiveFolder)
+    {
+        effectiveFolder = storeFolder;
+        if (!IsLink(storeFolder))
+        {
+            return null;
+        }
+
+        var link = Path.TrimEndingDirectorySeparator(Path.GetFullPath(storeFolder));
+        string target;
+        try
+        {
+            var next = new DirectoryInfo(link).ResolveLinkTarget(returnFinalTarget: false);
+            if (next is null)
+            {
+                return $"{link} is a junction or symbolic link whose target could not be read";
+            }
+
+            var full = Path.GetFullPath(next.FullName);
+            if (string.Equals(Path.GetPathRoot(full), full, StringComparison.OrdinalIgnoreCase))
+            {
+                return $"{link} is a junction or symbolic link to a drive root, {full}";
+            }
+
+            target = Path.TrimEndingDirectorySeparator(full);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return $"{link} is a junction or symbolic link whose target could not be read ({ex.Message})";
+        }
+
+        if (!DarlingFileSecurity.IsTrustedStoreLinkOwner(link))
+        {
+            return $"{link} is a junction or symbolic link that is not owned by SYSTEM, Administrators, TrustedInstaller, the service account or the service's own account";
+        }
+
+        var parent = Path.GetDirectoryName(link);
+        if (parent is null)
+        {
+            return $"{link} is a junction or symbolic link with no folder above it";
+        }
+
+        if (DarlingFileSecurity.EntryChangeByOrdinaryUsers(parent) is { } writers)
+        {
+            return $"{link} is a junction or symbolic link in {parent}, where it could be replaced by {writers}";
+        }
+
+        if (!Directory.Exists(target))
+        {
+            return $"{link} is a junction or symbolic link to {target}, which is not a directory that exists";
+        }
+
+        if (IsLink(target))
+        {
+            return $"{link} is a junction or symbolic link to {target}, which is itself a link: only one link is followed";
+        }
+
+        if (!DarlingFileSecurity.IsTrustedStoreOwner(target))
+        {
+            return $"{link} is a junction or symbolic link to {target}, which is not owned by SYSTEM, Administrators, TrustedInstaller, the service account or the service's own account{DarlingFileSecurity.DescribeOwnerAndExposure(target)}";
+        }
+
+        logger?.LogWarning(
+            "The store folder {StoreFolder} is a junction or symbolic link to {Target}. The service uses the folder it points to " +
+            "as the store folder and judges and restricts it there. Setting the data directory in darling.json to the real " +
+            "folder is the supported way to place the store elsewhere.",
+            link, target);
+        effectiveFolder = target;
+        return null;
+    }
+
+    /// <summary>A path under <paramref name="linkFolder"/> as the same path under <paramref name="target"/>; any other path as it is.</summary>
+    internal static string RemapIntoTarget(string path, string linkFolder, string target)
+    {
+        var link = Path.TrimEndingDirectorySeparator(Path.GetFullPath(linkFolder));
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        return DarlingPathContainment.IsStrictlyBelow(link, full) ? Path.Join(target, full[(link.Length + 1)..]) : path;
+    }
+
+    /// <summary><see cref="StoreContentsProblem"/> for a store folder that may be a link: the link is settled first
+    /// (<see cref="ResolveStoreFolder"/>) and every path is then judged under the folder it points to.</summary>
+    [SupportedOSPlatform("windows")]
+    internal static string? StoreContentsProblemThroughLink(
+        string storeFolder, string dataDirectory, string serverLogPath, string logFolder,
+        ILogger? logger = null, Func<string, bool, string, string?>? tightenItem = null)
+    {
+        if (ResolveStoreFolder(storeFolder, logger, out var effective) is { } problem)
+        {
+            return problem;
+        }
+
+        if (string.Equals(effective, storeFolder, StringComparison.Ordinal))
+        {
+            return StoreContentsProblem(storeFolder, dataDirectory, serverLogPath, logFolder, tightenItem);
+        }
+
+        return StoreContentsProblem(
+            effective,
+            RemapIntoTarget(dataDirectory, storeFolder, effective),
+            RemapIntoTarget(serverLogPath, storeFolder, effective),
+            RemapIntoTarget(logFolder, storeFolder, effective),
+            tightenItem);
     }
 
     /// <summary>The fresh-cluster gate on <see cref="StoreFolderProblem"/>: a startup error that names the folder and
@@ -5460,7 +5621,7 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     private void RefuseUntrustedStoreContents(string storeFolder)
     {
-        if (StoreContentsProblem(storeFolder, _dataDirectory, _serverLogPath, DarlingFileLoggerProvider.DefaultLogDirectory()) is not { } problem)
+        if (StoreContentsProblemThroughLink(storeFolder, _dataDirectory, _serverLogPath, DarlingFileLoggerProvider.DefaultLogDirectory()) is not { } problem)
         {
             return;
         }
