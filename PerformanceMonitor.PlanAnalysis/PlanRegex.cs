@@ -12,16 +12,19 @@ namespace PerformanceMonitor.PlanAnalysis;
 /// such as <c>\s*AND\s+PROBE\s*\(...</c> on a long run of spaces backtracks for minutes. Two limits apply:
 /// <list type="bullet">
 /// <item><description>each call has a match timeout (<see cref="TimeoutMilliseconds"/>);</description></item>
-/// <item><description>inside <see cref="BeginPlan()"/>, all the calls of one plan share one time budget
-/// (<see cref="PlanBudgetMilliseconds"/>), counted as the time spent inside regex calls. Once it is spent,
-/// every further call is skipped.</description></item>
+/// <item><description>inside <see cref="BeginPlan()"/>, one plan has a wall-clock deadline
+/// (<see cref="PlanBudgetMilliseconds"/>) that starts when the analysis starts and counts all the time, in
+/// regex calls and out of them. The regex helpers check it, and so do the loops that run without a regex
+/// (<see cref="TimeIsUp"/>). Once it has passed, every further check is skipped.</description></item>
 /// </list>
 /// A timeout or a skipped call never throws and never quietly changes the answer: the check is recorded
 /// (<see cref="TakeSkipped"/>), and the analyzer adds one note to the statement that names the checks it
-/// skipped. Each helper takes the check's name for that note, and each call site picks the answer a timeout
-/// gives, on the side that keeps a warning rather than drops it:
+/// skipped. A skipped check is a missing result and never an invented one: a warning that states a fact about
+/// the text is raised only when the text shows it. Each helper takes the check's name for that note, and each
+/// call site picks the answer a timeout gives:
 /// <list type="bullet">
-/// <item><description><c>IsMatch</c> gives the caller's <c>onTimeout</c> value;</description></item>
+/// <item><description><c>IsMatch</c> gives the caller's <c>onTimeout</c> value, or, in the overloads that take a
+/// linear fallback, the answer of a plain text search that needs no regex and is not recorded as skipped;</description></item>
 /// <item><description><c>Match</c> and <c>Replace</c> report through <c>completed</c> that they did not finish;</description></item>
 /// <item><description><c>Matches</c> yields lazily, so a caller's early exit still ends the pass, and its
 /// <see cref="MatchRun.Incomplete"/> says the pass stopped before the end.</description></item>
@@ -36,10 +39,12 @@ internal static class PlanRegex
     internal const int TimeoutMilliseconds = 250;
 
     /// <summary>
-    /// The regex time one plan may spend in total, in milliseconds. Analyzing a normal plan spends a few
-    /// milliseconds in regex calls, so 2 seconds is far above any real plan, while the worst case per plan
-    /// stays near 2 seconds plus one call's timeout instead of one timeout per predicate. The Darling
-    /// service and Lite analyze the top plans of every cycle, so this bounds the cycle's cost.
+    /// The wall-clock time one plan's analysis may run before its remaining checks are skipped, in
+    /// milliseconds, counted from the start of the analysis. Analyzing a normal plan takes a few milliseconds,
+    /// so 2 seconds is far above any real plan, while the worst case per plan stays near 2 seconds plus one
+    /// regex call's timeout or one pass over a predicate, no matter how much of the time goes to loops that
+    /// run without a regex. The Darling service and Lite analyze the top plans of every cycle, so this
+    /// bounds the cycle's cost.
     /// </summary>
     internal const int PlanBudgetMilliseconds = 2000;
 
@@ -54,24 +59,29 @@ internal static class PlanRegex
 
     private sealed class Budget
     {
-        private readonly long _limitTicks;
-        private long _usedTicks;
+        private readonly TimeSpan _limit;
+        private readonly long _startStamp = Stopwatch.GetTimestamp();
+        private readonly Func<TimeSpan>? _clock = ClockForTest;
+        private readonly TimeSpan _clockStart;
         private readonly List<string> _skipped = new();
 
-        internal Budget(TimeSpan limit) => _limitTicks = limit.Ticks;
-
-        internal bool Exhausted => _usedTicks >= _limitTicks;
-
-        internal TimeSpan Remaining => TimeSpan.FromTicks(Math.Max(0, _limitTicks - _usedTicks));
-
-        /// <summary>
-        /// Adds the time since <paramref name="startTimestamp"/>, or <paramref name="atLeast"/> when that is more:
-        /// the match timeout counts ticks coarser than a stopwatch, so a call it ended can read a little short.
-        /// </summary>
-        internal void Charge(long startTimestamp, TimeSpan atLeast = default)
+        internal Budget(TimeSpan limit)
         {
-            var elapsed = (long)((Stopwatch.GetTimestamp() - startTimestamp) * (TimeSpan.TicksPerSecond / (double)Stopwatch.Frequency));
-            _usedTicks += Math.Max(elapsed, atLeast.Ticks);
+            _limit = limit;
+            _clockStart = _clock?.Invoke() ?? TimeSpan.Zero;
+        }
+
+        private TimeSpan Elapsed => _clock != null ? _clock() - _clockStart : Stopwatch.GetElapsedTime(_startStamp);
+
+        internal bool Exhausted => Elapsed >= _limit;
+
+        internal TimeSpan Remaining
+        {
+            get
+            {
+                var left = _limit - Elapsed;
+                return left > TimeSpan.Zero ? left : TimeSpan.Zero;
+            }
         }
 
         internal void Skip(string check)
@@ -87,6 +97,14 @@ internal static class PlanRegex
             return taken;
         }
     }
+
+    /// <summary>
+    /// A test's own clock, read as the time since an origin of the test's choosing, on this thread only. A plan
+    /// that begins while it is set measures its deadline against it, so a test can spend the time limit
+    /// part-way through a loop without waiting.
+    /// </summary>
+    [ThreadStatic]
+    internal static Func<TimeSpan>? ClockForTest;
 
     // Analysis is synchronous, so the plan's budget lives on the thread that runs it.
     [ThreadStatic]
@@ -122,16 +140,23 @@ internal static class PlanRegex
     /// <summary>The checks skipped (timeout or spent budget) since the last call, without repeats. Empty outside a plan.</summary>
     internal static IReadOnlyList<string> TakeSkipped() => t_budget?.Take() ?? Array.Empty<string>();
 
-    /// <summary>False, with the check recorded as skipped, when the plan's budget is spent.</summary>
-    private static bool CanRun(string check)
+    /// <summary>False, with the check recorded as skipped when <paramref name="record"/>, once the plan's deadline has passed.</summary>
+    private static bool CanRun(string check, bool record = true)
     {
         var budget = t_budget;
         if (budget == null || !budget.Exhausted)
             return true;
 
-        budget.Skip(check);
+        if (record)
+            budget.Skip(check);
         return false;
     }
+
+    /// <summary>
+    /// For a loop that runs without a regex: true, with <paramref name="check"/> recorded as skipped, once the
+    /// plan's deadline has passed, and the loop must stop. Always false outside a plan.
+    /// </summary>
+    internal static bool TimeIsUp(string check) => !CanRun(check);
 
     private static void RecordTimeout(string check) => t_budget?.Skip(check);
 
@@ -146,29 +171,22 @@ internal static class PlanRegex
     }
 
     /// <summary>Runs one regex call under the budget. False when it was skipped or timed out; the check is recorded.</summary>
-    private static bool Run<T>(string check, Func<T> call, out T result)
+    private static bool Run<T>(string check, Func<T> call, out T result, bool record = true)
     {
         result = default!;
-        if (!CanRun(check))
+        if (!CanRun(check, record))
             return false;
 
-        var budget = t_budget;
-        var start = Stopwatch.GetTimestamp();
-        var timedOutAfter = TimeSpan.Zero;
         try
         {
             result = call();
             return true;
         }
-        catch (RegexMatchTimeoutException ex)
+        catch (RegexMatchTimeoutException)
         {
-            timedOutAfter = ex.MatchTimeout;
-            RecordTimeout(check);
+            if (record)
+                RecordTimeout(check);
             return false;
-        }
-        finally
-        {
-            budget?.Charge(start, timedOutAfter);
         }
     }
 
@@ -179,6 +197,14 @@ internal static class PlanRegex
 
     internal static bool IsMatch(string input, string pattern, RegexOptions options, TimeSpan timeout, string check, bool onTimeout = false) =>
         Run(check, () => Regex.IsMatch(input, pattern, options, Limit(timeout)), out var found) ? found : onTimeout;
+
+    /// <summary>
+    /// The regex's answer, or, when the call timed out or was skipped, <paramref name="withoutRegex"/>'s answer
+    /// on the same text: a linear text search that decides the same question. Nothing is recorded as skipped,
+    /// because the question was answered.
+    /// </summary>
+    internal static bool IsMatch(string input, string pattern, RegexOptions options, string check, Func<string, bool> withoutRegex) =>
+        Run(check, () => Regex.IsMatch(input, pattern, options, Limit(DefaultTimeout)), out var found, record: false) ? found : withoutRegex(input);
 
     /// <summary>The match, or <see cref="System.Text.RegularExpressions.Match.Empty"/> with <paramref name="completed"/> false.</summary>
     internal static Match Match(string input, string pattern, RegexOptions options, string check, out bool completed) =>
@@ -191,12 +217,13 @@ internal static class PlanRegex
     }
 
     /// <summary>The replaced text, or the input unchanged with <paramref name="completed"/> false.</summary>
-    internal static string Replace(string input, string pattern, string replacement, RegexOptions options, string check, out bool completed) =>
-        Replace(input, pattern, replacement, options, DefaultTimeout, check, out completed);
+    /// <param name="recordSkip">False when the caller answers the question another way if the call does not finish, so nothing is recorded as skipped.</param>
+    internal static string Replace(string input, string pattern, string replacement, RegexOptions options, string check, out bool completed, bool recordSkip = true) =>
+        Replace(input, pattern, replacement, options, DefaultTimeout, check, out completed, recordSkip);
 
-    internal static string Replace(string input, string pattern, string replacement, RegexOptions options, TimeSpan timeout, string check, out bool completed)
+    internal static string Replace(string input, string pattern, string replacement, RegexOptions options, TimeSpan timeout, string check, out bool completed, bool recordSkip = true)
     {
-        completed = Run(check, () => Regex.Replace(input, pattern, replacement, options, Limit(timeout)), out var replaced);
+        completed = Run(check, () => Regex.Replace(input, pattern, replacement, options, Limit(timeout)), out var replaced, recordSkip);
         return completed ? replaced : input;
     }
 
@@ -205,6 +232,17 @@ internal static class PlanRegex
     /// <summary>The answer when the call finished; <paramref name="onTimeout"/> when it timed out or was skipped.</summary>
     internal static bool IsMatch(Regex regex, string input, string check, bool onTimeout = false) =>
         TryIsMatch(regex, input, check, out var found) ? found : onTimeout;
+
+    /// <summary>The answer of <paramref name="regex"/>, or <paramref name="withoutRegex"/>'s when the call timed out or was skipped (nothing recorded).</summary>
+    internal static bool IsMatch(Regex regex, string input, string check, Func<string, bool> withoutRegex) =>
+        Run(check, () => regex.IsMatch(input), out var found, record: false) ? found : withoutRegex(input);
+
+    /// <summary>
+    /// <see cref="TryIsMatch(Regex, string, string, out bool)"/> on <c>input[start..(start + length)]</c>, read in
+    /// place with no copy. The range is the whole input as far as the pattern's anchors go.
+    /// </summary>
+    internal static bool TryIsMatch(Regex regex, string input, int start, int length, string check, out bool matched) =>
+        Run(check, () => regex.Match(input, start, length).Success, out matched);
 
     /// <summary>False when the call timed out or was skipped; <paramref name="matched"/> is then false.</summary>
     internal static bool TryIsMatch(Regex regex, string input, string check, out bool matched) =>
@@ -222,7 +260,10 @@ internal static class PlanRegex
     /// <c>foreach</c> early stops the pass. Each step is timed against the plan's budget. A timeout or a
     /// spent budget ends the list at the matches found so far and sets <see cref="MatchRun.Incomplete"/>.
     /// </summary>
-    internal static MatchRun Matches(Regex regex, string input, string check) => new(regex, input, check);
+    internal static MatchRun Matches(Regex regex, string input, string check) => new(regex, input, check, 0, input.Length);
+
+    /// <summary><see cref="Matches(Regex, string, string)"/> over <c>input[start..(start + length)]</c>, read in place with no copy.</summary>
+    internal static MatchRun Matches(Regex regex, string input, int start, int length, string check) => new(regex, input, check, start, length);
 
     /// <summary>One lazy pass over a regex's matches. Enumerate it once; read <see cref="Incomplete"/> afterwards.</summary>
     internal sealed class MatchRun : IEnumerable<Match>
@@ -230,12 +271,16 @@ internal static class PlanRegex
         private readonly Regex _regex;
         private readonly string _input;
         private readonly string _check;
+        private readonly int _start;
+        private readonly int _length;
 
-        internal MatchRun(Regex regex, string input, string check)
+        internal MatchRun(Regex regex, string input, string check, int start, int length)
         {
             _regex = regex;
             _input = input;
             _check = check;
+            _start = start;
+            _length = length;
         }
 
         /// <summary>True when the pass stopped before the end of the input because of a timeout or the spent budget.</summary>
@@ -255,7 +300,7 @@ internal static class PlanRegex
 
         private Match? Step(Match? previous)
         {
-            if (!Run(_check, () => previous == null ? _regex.Match(_input) : previous.NextMatch(), out var next))
+            if (!Run(_check, () => previous == null ? _regex.Match(_input, _start, _length) : previous.NextMatch(), out var next))
             {
                 Incomplete = true;
                 return null;

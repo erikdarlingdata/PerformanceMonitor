@@ -269,22 +269,118 @@ public sealed class PlanRegexTimeoutTests
     }
 
     [Fact]
-    public void Analyze_WithAnEmptyBudget_NamesTheSkippedChecks_AndKeepsTheOptimizeForUnknownWarning()
+    public void Analyze_WithAnEmptyBudget_DecidesTheOptimizeForUnknownHintFromTheText_AndRecordsNoSkip()
     {
-        const string text = "SELECT a FROM dbo.t OPTION (OPTIMIZE FOR UNKNOWN)";
+        const string withHint = "SELECT a FROM dbo.t OPTION (OPTIMIZE FOR UNKNOWN)";
+        const string withoutHint = "SELECT a FROM dbo.t WHERE a = 1";
 
-        var spent = Analyze(text, TimeSpan.Zero);
-        var normal = Analyze(text, TimeSpan.FromSeconds(30));
+        var spent = Analyze(withHint, TimeSpan.Zero);
+        var normal = Analyze(withHint, TimeSpan.FromSeconds(30));
+        var lacking = Analyze(withoutHint, TimeSpan.Zero);
 
-        // The hint is in the text, and a check that could not run keeps the warning.
+        // A text search answers the question the skipped regex would have, so the answers match and no skip is named.
         Assert.Contains(spent.PlanWarnings, w => w.WarningType == "Optimize For Unknown");
         Assert.Contains(normal.PlanWarnings, w => w.WarningType == "Optimize For Unknown");
+        Assert.DoesNotContain(spent.PlanWarnings, w => w.Message.Contains("OPTIMIZE FOR UNKNOWN hint"));
+        // A statement without the hint never gets the warning, whatever the budget.
+        Assert.DoesNotContain(lacking.PlanWarnings, w => w.WarningType == "Optimize For Unknown");
+    }
+
+    [Fact]
+    public void Analyze_WithAnEmptyBudget_NamesTheSkippedChecks()
+    {
+        // The cursor declaration is read by a regex with no text-search answer: it is named as skipped.
+        var spent = Analyze("DECLARE c CURSOR FAST_FORWARD FOR SELECT 1", TimeSpan.Zero);
 
         var note = Assert.Single(spent.PlanWarnings, w => w.WarningType == PlanAnalyzer.SkippedChecksWarningType);
         Assert.Contains("too large or complex", note.Message);
-        Assert.Contains("OPTIMIZE FOR UNKNOWN hint", note.Message);
+        Assert.Contains("cursor declaration", note.Message);
         Assert.Equal(40, note.RuleNumber);
+        Assert.DoesNotContain(spent.PlanWarnings, w => w.WarningType == "Cursor Missing LOCAL");
+
+        var normal = Analyze("DECLARE c CURSOR FAST_FORWARD FOR SELECT 1", TimeSpan.FromSeconds(30));
+        Assert.Contains(normal.PlanWarnings, w => w.WarningType == "Cursor Missing LOCAL");
         Assert.DoesNotContain(normal.PlanWarnings, w => w.WarningType == PlanAnalyzer.SkippedChecksWarningType);
+    }
+
+    private static PlanStatement SerialStatement(string text) => new()
+    {
+        StatementText = text,
+        NonParallelPlanReason = "MaxDOPSetToOne",
+        StatementSubTreeCost = 5.0
+    };
+
+    private static PlanStatement AnalyzeStatement(PlanStatement statement, TimeSpan budget)
+    {
+        var plan = new ParsedPlan { Batches = [new PlanBatch { Statements = [statement] }] };
+        PlanAnalyzer.Analyze(plan, null, null, budget, CancellationToken.None);
+        return statement;
+    }
+
+    [Fact]
+    public void Analyze_WithAnEmptyBudget_KeepsTheSerialPlanWarningWhenTheTextHoldsMaxdop1_AndDropsItWhenItDoesNot()
+    {
+        var with = AnalyzeStatement(SerialStatement("SELECT 1 OPTION (MAXDOP 1)"), TimeSpan.Zero);
+        var without = AnalyzeStatement(SerialStatement("SELECT 1 FROM dbo.t"), TimeSpan.Zero);
+
+        var warning = Assert.Single(with.PlanWarnings, w => w.WarningType == "Serial Plan");
+        Assert.Equal(PlanWarningSeverity.Warning, warning.Severity);
+        Assert.DoesNotContain(without.PlanWarnings, w => w.WarningType == "Serial Plan");
+        Assert.DoesNotContain(with.PlanWarnings, w => w.Message.Contains("MAXDOP 1 hint"));
+    }
+
+    /// <summary>A clock that moves 1 ms on every read: a plan with a budget of n ms is out of time after about n reads.</summary>
+    private static Func<TimeSpan> SteppingClock()
+    {
+        var now = TimeSpan.Zero;
+        return () => now += TimeSpan.FromMilliseconds(1);
+    }
+
+    [Fact]
+    public void Analyze_WhereverTheTimeLimitFalls_NeverReportsWhatTheTextLacks()
+    {
+        // The limit passes at a different check on each run. A statement with none of the hints below gets none
+        // of their warnings, and a predicate with a function only on the parameter side never reads as a column.
+        for (var reads = 0; reads <= 80; reads++)
+        {
+            try
+            {
+                PlanRegex.ClockForTest = SteppingClock();
+                var cursor = AnalyzeStatement(new PlanStatement { StatementText = "DECLARE c CURSOR LOCAL FAST_FORWARD FOR SELECT 1 OPTION (MAXDOP 4)" }, TimeSpan.FromMilliseconds(reads));
+                Assert.DoesNotContain(cursor.PlanWarnings, w => w.WarningType is "Cursor Missing LOCAL" or "Optimize For Unknown");
+
+                PlanRegex.ClockForTest = SteppingClock();
+                var serial = AnalyzeStatement(SerialStatement("SELECT 1 FROM dbo.t"), TimeSpan.FromMilliseconds(reads));
+                Assert.DoesNotContain(serial.PlanWarnings, w => w.WarningType == "Serial Plan");
+
+                PlanRegex.ClockForTest = SteppingClock();
+                var scan = AnalyzeScanWithPredicate("[dbo].[t].[a]=isnull([@p],(1)) AND [dbo].[t].[b]=upper([@q]) AND [dbo].[t].[c]=CONVERT_IMPLICIT(int,[@r],0)", TimeSpan.FromMilliseconds(reads));
+                Assert.DoesNotContain(scan.RootNode!.Warnings, w => w.Message.Contains("wrapping column") || w.Message.Contains("Function call") || w.Message.Contains("Implicit conversion"));
+            }
+            finally
+            {
+                PlanRegex.ClockForTest = null;
+            }
+        }
+    }
+
+    [Fact]
+    public void Analyze_ADeadlineThatPassesInsideTheConvertImplicitLoop_StopsTheLoop_AndWordsTheResultAsUnverified()
+    {
+        // The clock moves with every read, so the limit passes a few matches into the loop, not at its start.
+        PlanRegex.ClockForTest = SteppingClock();
+        try
+        {
+            using var plan = PlanRegex.BeginPlan(TimeSpan.FromMilliseconds(40));
+            var reason = PlanAnalyzer.DetectNonSargablePattern(HugeConvertImplicitPredicate(5_000));
+
+            Assert.Equal(PlanAnalyzer.UnverifiedNonSargableReason, reason);
+            Assert.Contains("CONVERT_IMPLICIT in a predicate", PlanRegex.TakeSkipped());
+        }
+        finally
+        {
+            PlanRegex.ClockForTest = null;
+        }
     }
 
     [Fact]
@@ -301,13 +397,16 @@ public sealed class PlanRegexTimeoutTests
     }
 
     [Fact]
-    public void ReadsAnotherInput_WhenTheCheckIsCutShort_KeepsTheWarning()
+    public void ReadsAnotherInput_WhenTheCheckIsCutShort_ProvesNothing_AndNamesTheSkippedCheck()
     {
         // "[@p1]" alone is a parameter list: no other input.
         Assert.False(PlanAnalyzer.ReadsAnotherInput("[@p1]"));
 
+        // A text that does name another input proves it only when the pass can read it.
+        Assert.True(PlanAnalyzer.ReadsAnotherInput("[dbo].[t].[c]"));
+
         using var plan = PlanRegex.BeginPlan(TimeSpan.Zero);
-        Assert.True(PlanAnalyzer.ReadsAnotherInput("[@p1]"));
+        Assert.False(PlanAnalyzer.ReadsAnotherInput("[dbo].[t].[c]"));
         Assert.Contains("lookup branch column references", PlanRegex.TakeSkipped());
     }
 
@@ -322,13 +421,49 @@ public sealed class PlanRegexTimeoutTests
     }
 
     [Fact]
-    public void ConvertImplicitWrapsColumn_WhenTheCheckIsCutShort_AssumesTheWorst()
+    public void ConvertImplicitWrapsColumn_WhenTheCheckIsCutShort_ReportsNoColumn_AndNamesTheSkippedCheck()
     {
         const string predicate = "[t].[a]=CONVERT_IMPLICIT(int,[@1],0)";
         Assert.False(PlanAnalyzer.ConvertImplicitWrapsColumn(predicate));
 
         using var plan = PlanRegex.BeginPlan(TimeSpan.Zero);
-        Assert.True(PlanAnalyzer.ConvertImplicitWrapsColumn(predicate));
+        Assert.False(PlanAnalyzer.ConvertImplicitWrapsColumn(predicate));
+        Assert.Contains("CONVERT_IMPLICIT in a predicate", PlanRegex.TakeSkipped());
+    }
+
+    private static string HugeConvertImplicitPredicate(int depth) =>
+        "[dbo].[t].[a]='" + string.Concat(Enumerable.Repeat("CONVERT_IMPLICIT(", depth)) + new string(')', depth) + "'";
+
+    private static PlanStatement AnalyzeScanWithPredicate(string predicate, TimeSpan budget)
+    {
+        var scan = new PlanNode
+        {
+            NodeId = 0,
+            PhysicalOp = "Table Scan",
+            LogicalOp = "Table Scan",
+            ObjectName = "dbo.t",
+            Predicate = predicate
+        };
+        var statement = new PlanStatement { StatementText = "SELECT a FROM dbo.t", RootNode = scan };
+        var plan = new ParsedPlan { Batches = [new PlanBatch { Statements = [statement] }] };
+        PlanAnalyzer.Analyze(plan, null, null, budget, CancellationToken.None);
+        return statement;
+    }
+
+    [Fact]
+    public void Analyze_AHugeConvertImplicitPredicate_StopsAtTheTimeLimit_AndNamesTheSkippedCheck()
+    {
+        // CONVERT_IMPLICIT( matches inside a string literal too, and each match scans to its closing parenthesis:
+        // the work outside the regex calls grows with the square of the predicate's length.
+        var predicate = HugeConvertImplicitPredicate(25_000);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        var statement = AnalyzeScanWithPredicate(predicate, TimeSpan.FromMilliseconds(200));
+
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5), $"took {clock.Elapsed}");
+        var note = Assert.Single(statement.RootNode!.Warnings.Concat(statement.PlanWarnings),
+            w => w.WarningType == PlanAnalyzer.SkippedChecksWarningType);
+        Assert.Contains("CONVERT_IMPLICIT in a predicate", note.Message);
     }
 
     [Fact]
@@ -389,6 +524,42 @@ public sealed class PlanRegexTimeoutTests
         Assert.Contains("PlanRegex.cs", names);
     }
 
+    // A static call on the Regex type, by its short or its fully qualified name. Only a word character before
+    // "Regex" rules it out (PlanRegex.IsMatch is a helper call).
+    private static readonly Regex StaticRegexCall =
+        new(@"(?<!\w)Regex\.(IsMatch|Match|Matches|Replace|Split|Count|EnumerateMatches)\(", RegexOptions.None, TimeSpan.FromSeconds(5));
+
+    // new Regex(...) and the target-typed form, Regex s_x = new(...), also fully qualified.
+    private const string RegexConstruction = @"\bnew\s+(?:global::)?(?:System\s*\.\s*Text\s*\.\s*RegularExpressions\s*\.\s*)?Regex\(|\bRegex\s+\w+\s*=\s*new\(";
+
+    [Theory]
+    [InlineData("var found = Regex.IsMatch(text, \"a\");")]
+    [InlineData("var found = System.Text.RegularExpressions.Regex.IsMatch(text, \"a\");")]
+    [InlineData("var replaced = global::System.Text.RegularExpressions.Regex.Replace(text, \"a\", \"b\");")]
+    [InlineData("var parts = System.Text.RegularExpressions.Regex.Split(text, \"a\");")]
+    public void TheStaticCallCheck_CatchesTheShortAndTheFullyQualifiedForm(string code)
+    {
+        Assert.Matches(StaticRegexCall, code);
+    }
+
+    [Theory]
+    [InlineData("var found = PlanRegex.IsMatch(text, \"a\", RegexOptions.None, \"check\");")]
+    [InlineData("var found = MyRegex.Match(text);")]
+    public void TheStaticCallCheck_LeavesTheHelperCallsAlone(string code)
+    {
+        Assert.DoesNotMatch(StaticRegexCall, code);
+    }
+
+    [Theory]
+    [InlineData("var r = new Regex(\"a\");")]
+    [InlineData("var r = new System.Text.RegularExpressions.Regex(\"a\");")]
+    [InlineData("var r = new global::System.Text.RegularExpressions.Regex(\"a\");")]
+    [InlineData("Regex r = new(\"a\");")]
+    public void TheConstructionCheck_CatchesTheShortAndTheFullyQualifiedForm(string code)
+    {
+        Assert.Matches(RegexConstruction, code);
+    }
+
     [Fact]
     public void PlanAnalysisProject_RunsNoRegexOutsideTheHelpers()
     {
@@ -403,8 +574,8 @@ public sealed class PlanRegexTimeoutTests
 
         foreach (var (file, code) in sources)
         {
-            // Static calls (Regex.IsMatch, Regex.Replace ...).
-            Assert.DoesNotMatch(new Regex(@"(?<![\w.])Regex\.(IsMatch|Match|Matches|Replace|Split|Count|EnumerateMatches)\("), code);
+            // Static calls (Regex.IsMatch, Regex.Replace ...), also fully qualified.
+            Assert.DoesNotMatch(StaticRegexCall, code);
 
             // Calls on a field, a local or a generated-regex method, by any name.
             foreach (var name in names)
@@ -440,7 +611,7 @@ public sealed class PlanRegexTimeoutTests
             }
 
             // new Regex(...) and the target-typed form, Regex s_x = new(...).
-            foreach (Match construction in Regex.Matches(code, @"\bnew\s+Regex\(|\bRegex\s+\w+\s*=\s*new\("))
+            foreach (Match construction in Regex.Matches(code, RegexConstruction))
             {
                 constructed++;
                 var arguments = Arguments(code, construction.Index + construction.Length - 1);
