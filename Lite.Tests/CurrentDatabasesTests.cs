@@ -95,4 +95,62 @@ public sealed class CurrentDatabasesTests : IDisposable
         /* No anchor: the newest snapshot, as before. */
         Assert.Equal(new[] { "LiveDb" }, (await service.GetCurrentDatabasesAsync(ServerId))!.ToArray());
     }
+
+    private async Task ProcedureAsync(string database, string objectName, long cpuUs)
+    {
+        using var connection = new DuckDBConnection($"Data Source={_dbPath}");
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        var at = DateTime.UtcNow - TimeSpan.FromHours(1);
+        cmd.CommandText = $"INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, object_type, last_execution_time, delta_execution_count, delta_worker_time, delta_elapsed_time) VALUES ({_nextId++}, TIMESTAMP '{at:yyyy-MM-dd HH:mm:ss}', {ServerId}, 'S', '{database}', 'dbo', '{objectName}', 'SQL_STORED_PROCEDURE', TIMESTAMP '{at:yyyy-MM-dd HH:mm:ss}', 10, {cpuUs}, {cpuUs})";
+        await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>Review L2 leftover: dropped = listed by an earlier snapshot and absent from the newest. A name no snapshot lists is never in
+    /// it; no snapshot or a stale newest one is unknown.</summary>
+    [Fact]
+    public async Task Dropped_IsWhatAnEarlierSnapshotListedAndTheNewestDoesNot()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var service = new LocalDataService(_duckDb);
+
+        Assert.Null(await service.GetDroppedDatabasesAsync(ServerId));
+
+        await SnapshotAsync(TimeSpan.FromHours(2), "GoneDb", "LiveDb");
+        await SnapshotAsync(TimeSpan.FromMinutes(10), "LiveDb");
+        Assert.Equal(new[] { "GoneDb" }, (await service.GetDroppedDatabasesAsync(ServerId))!.ToArray());
+
+        /* Stale newest snapshot: unknown, not "everything older is dropped". */
+        Assert.Null(await service.GetDroppedDatabasesAsync(ServerId, DateTime.UtcNow + LocalDataService.CurrentDatabasesHorizon + TimeSpan.FromHours(1)));
+
+        /* A window reaching back past the 6-hour horizon still finds a drop from before it. */
+        await SnapshotAsync(TimeSpan.FromHours(20), "OlderGoneDb", "LiveDb");
+        Assert.Equal(new[] { "GoneDb" }, (await service.GetDroppedDatabasesAsync(ServerId))!.ToArray());
+        Assert.Equal(new[] { "GoneDb", "OlderGoneDb" },
+            (await service.GetDroppedDatabasesAsync(ServerId, windowStartUtc: DateTime.UtcNow - TimeSpan.FromHours(24)))!.ToArray());
+    }
+
+    /// <summary>Review L2 leftover: the ranking leaves out a dropped database and still ranks a database created after the newest snapshot
+    /// (no snapshot names it).</summary>
+    [Fact]
+    public async Task TopProcedures_LeaveOutADroppedDatabase_AndRankADatabaseNoSnapshotNames()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var service = new LocalDataService(_duckDb);
+        await SnapshotAsync(TimeSpan.FromHours(2), "GoneDb", "LiveDb");
+        await SnapshotAsync(TimeSpan.FromMinutes(10), "LiveDb");
+        await ProcedureAsync("GoneDb", "usp_Gone", 900_000);
+        await ProcedureAsync("NewDb", "usp_New", 800_000);
+        await ProcedureAsync("LiveDb", "usp_Live", 100_000);
+
+        var dropped = await service.GetDroppedDatabasesAsync(ServerId);
+        var page = await service.GetTopProceduresByCpuAsync(ServerId, hoursBack: 24, top: 10, excludeDatabaseNames: dropped);
+        Assert.Equal(new[] { "usp_New", "usp_Live" }, page.Select(r => r.ObjectName));
+
+        var top1 = await service.GetTopProceduresByCpuAsync(ServerId, hoursBack: 24, top: 1, excludeDatabaseNames: dropped);
+        Assert.Equal("usp_New", Assert.Single(top1).ObjectName);
+
+        /* No exclusion: every database, as before. */
+        Assert.Equal(3, (await service.GetTopProceduresByCpuAsync(ServerId, hoursBack: 24, top: 10)).Count);
+    }
 }

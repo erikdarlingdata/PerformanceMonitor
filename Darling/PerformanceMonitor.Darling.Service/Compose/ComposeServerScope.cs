@@ -50,7 +50,7 @@ internal static class ComposeServerScope
             return (scope, null);
         }
 
-        var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
+        var (servers, fault) = await LoadAllOrFaultAsync(postgres, cancellationToken);
         if (fault is not null)
         {
             logger?.LogWarning("Compose server-scope resolution skipped: {Fault}", fault);
@@ -60,15 +60,58 @@ internal static class ComposeServerScope
         return ResolveNames(scope, servers);
     }
 
+    /// <summary>#5633 review L1: every registered server, enabled or not. The exact-name test must see a disabled registration whose
+    /// history is still stored, or an enabled server's display name could take its name. Parameter-free, like
+    /// <see cref="DarlingServerResolver.LoadEnabledServersSql"/>.</summary>
+    internal const string LoadAllServersSql = @"
+SELECT server_id, server_name, display_name
+FROM servers
+ORDER BY server_name";
+
+    private static async Task<(List<DarlingServerResolver.RegisteredServer> Servers, string? Fault)> LoadAllOrFaultAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var servers = new List<DarlingServerResolver.RegisteredServer>();
+            await using var command = postgres.CreateCommand(LoadAllServersSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                servers.Add(new DarlingServerResolver.RegisteredServer(
+                    reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+
+            return (servers, null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The same fault sentence and the same cancellation rule as the enabled-only read (#4203, #5678). */
+            return DarlingServerResolver.FaultOrCancel(ex, cancellationToken);
+        }
+    }
+
     /// <summary>The pure half of <see cref="ResolveNamesAsync"/>: the scope with each name placed in <paramref name="servers"/>, or the
     /// resolver's refusal for a name that is ambiguous.</summary>
     internal static (List<string> Scope, string? Refusal) ResolveNames(
         IReadOnlyList<string> scope, IReadOnlyList<DarlingServerResolver.RegisteredServer> servers)
     {
         var resolvedNames = new List<string>(scope.Count);
-        foreach (var name in scope)
+        foreach (var rawName in scope)
         {
-            if (servers.Any(s => string.Equals(s.ServerName, name, StringComparison.Ordinal)))
+            /* Review L1: trimmed, as the resolver trims (ResolveForRemoval), so " SQL01" resolves as "SQL01" does. A name that
+               matches nothing stays as it was written. */
+            var name = rawName.Trim();
+            if (servers.Any(s => string.Equals(s.ServerName, rawName, StringComparison.Ordinal)))
+            {
+                resolvedNames.Add(rawName);
+                continue;
+            }
+
+            /* Review L1: an exact stored server_name of ANY registration (enabled or not) is kept before display names are tried, so a
+               disabled "SQL01" with stored history is not taken by an enabled server whose display name is "SQL01". */
+            if (name.Length > 0 && servers.Any(s => string.Equals(s.ServerName, name, StringComparison.Ordinal)))
             {
                 resolvedNames.Add(name);
                 continue;
@@ -81,7 +124,7 @@ internal static class ComposeServerScope
                 || string.Equals(s.DisplayName, name, StringComparison.OrdinalIgnoreCase));
             if (!hasExact)
             {
-                resolvedNames.Add(name);
+                resolvedNames.Add(rawName);
                 continue;
             }
 

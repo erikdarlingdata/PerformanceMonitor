@@ -8,6 +8,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -100,5 +104,83 @@ public sealed class ComposeServerScopeResolveNamesTests
         var message = DarlingWebEndpoints.UnknownServerMessage(scope, new[] { "NO-SUCH-SERVER" }, new System.Text.Json.Nodes.JsonArray());
         Assert.NotNull(message);
         Assert.Contains("'NO-SUCH-SERVER'", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Review L1(b): the resolver trims, so a padded name resolves as the bare one does (a stored name, a display name).</summary>
+    [Theory]
+    [InlineData(" sql2022-host ", "sql2022-host")]
+    [InlineData("  Prod Orders", "sql2022-host")]
+    [InlineData("SQL2025-HOST\t", "sql2025-host")]
+    public void PaddedName_ResolvesAsTheBareNameDoes(string padded, string expected)
+    {
+        var (scope, refusal) = ComposeServerScope.ResolveNames(new[] { padded }, Servers);
+        Assert.Null(refusal);
+        Assert.Equal(new[] { expected }, scope);
+    }
+
+    /// <summary>Review L1(b): a padded name with no exact match stays as it was written.</summary>
+    [Fact]
+    public void PaddedUnknownName_StaysAsWritten()
+    {
+        var (scope, _) = ComposeServerScope.ResolveNames(new[] { " NO-SUCH " }, Servers);
+        Assert.Equal(new[] { " NO-SUCH " }, scope);
+    }
+
+    /// <summary>Review L1(a): the stored name of a DISABLED registration (the list the scope now loads holds every server) beats an
+    /// enabled server's display name, exactly and in another case.</summary>
+    [Theory]
+    [InlineData("SQL01")]
+    [InlineData(" SQL01 ")]
+    public void StoredNameOfAnyRegistration_BeatsAnotherServersDisplayName(string name)
+    {
+        var all = new[]
+        {
+            new DarlingServerResolver.RegisteredServer(1, "SQL01", "Old box"),
+            new DarlingServerResolver.RegisteredServer(2, "NEWBOX", "SQL01"),
+        };
+        var (scope, refusal) = ComposeServerScope.ResolveNames(new[] { name }, all);
+        Assert.Null(refusal);
+        Assert.Equal(new[] { "SQL01" }, scope);
+
+        var otherCase = new[]
+        {
+            new DarlingServerResolver.RegisteredServer(1, "sql01", "Old box"),
+            new DarlingServerResolver.RegisteredServer(2, "NEWBOX", "SQL01"),
+        };
+        var (caseScope, caseRefusal) = ComposeServerScope.ResolveNames(new[] { name }, otherCase);
+        Assert.Null(caseRefusal);
+        Assert.Equal(new[] { "sql01" }, caseScope);
+    }
+
+    /// <summary>Review L1(a): the registry read behind the scope has no is_enabled filter, so a disabled registration is seen.</summary>
+    [Fact]
+    public void TheScopeRegistryRead_CoversEveryRegisteredServer()
+    {
+        Assert.DoesNotContain("is_enabled", ComposeServerScope.LoadAllServersSql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("FROM servers", ComposeServerScope.LoadAllServersSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>Review L1(a), end to end: a DISABLED server "SQL01" with stored history is not taken by an enabled server whose display
+    /// name is "SQL01"; a padded display name still resolves to its enabled server.</summary>
+    [Fact]
+    public async Task ResolveNamesAsync_SeesDisabledRegistrations()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the live scope-name test.");
+        var ct = TestContext.Current.CancellationToken;
+        /* #1776 own-store: its own scratch database. */
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await DarlingMcpTestData.RegisterServerAsync(connection, 4101, "SQL01", ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, 4102, "NEWBOX", ct);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET is_enabled = FALSE WHERE server_id = 4101");
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET display_name = 'SQL01' WHERE server_id = 4102");
+
+        var (scope, refusal) = await ComposeServerScope.ResolveNamesAsync(dataSource, new List<string> { "SQL01", " NEWBOX " }, ct);
+        Assert.Null(refusal);
+        Assert.Equal(new[] { "SQL01", "NEWBOX" }, scope);
     }
 }

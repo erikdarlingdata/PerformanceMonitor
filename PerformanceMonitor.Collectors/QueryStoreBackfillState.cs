@@ -233,6 +233,22 @@ public static class QueryStoreBackfillState
         "SELECT database_name, collection_time FROM database_states WHERE server_id = $1 AND collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3)";
 
     /// <summary>
+    /// #5633 review: when each database was LAST named by a <c>database_states</c> snapshot of one server since a look-back floor:
+    /// <c>$1</c> server_id, <c>$2</c> floor. One row per database ever named since the floor (<c>database_name</c>, its newest
+    /// <c>collection_time</c>). A database whose last stamp is older than the newest stamp overall was dropped between the two: it
+    /// appears in an earlier snapshot and not in the newest. A name that never appears (a new database, or one the snapshot does not
+    /// list) is not here at all, so it is never judged dropped. The same text runs on PostgreSQL and on DuckDB.
+    /// </summary>
+    public const string LastSeenPerDatabaseSql =
+        "SELECT database_name, MAX(collection_time) FROM database_states WHERE server_id = $1 AND collection_time > $2 GROUP BY database_name";
+
+    /// <summary>
+    /// #5633 review: <see cref="LastSeenPerDatabaseSql"/> for a historical read: only snapshots AT OR BEFORE <c>$3</c> (the read's as_of).
+    /// </summary>
+    public const string LastSeenPerDatabaseAtOrBeforeSql =
+        "SELECT database_name, MAX(collection_time) FROM database_states WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 GROUP BY database_name";
+
+    /// <summary>
     /// #5483: is there a collected query_store row for one database at or after the snapshot's time:
     /// <c>$1</c> server_id, <c>$2</c> database, <c>$3</c> the snapshot's collection_time. A hit is proof the
     /// database was alive after the snapshot was taken, so its absence from the snapshot means "created since",

@@ -57,6 +57,40 @@ public partial class LocalDataService
     }
 
     /// <summary>
+    /// #5633 review: the exclusion twin of <see cref="BuildDbInClause"/>: <c>AND (column IS NULL OR column NOT IN ($k, ...))</c> for the
+    /// databases a read must leave out (the ones the server dropped), or <c>""</c> when there are none (the caller then adds no
+    /// parameters). NULL-safe: a row with no database name is not a dropped database, so it stays. The values are bound
+    /// from <paramref name="firstParamIndex"/> exactly as for <see cref="BuildDbInClause"/>.
+    /// </summary>
+    internal static string BuildDbExcludeClause(
+        IReadOnlyList<string>? excluded,
+        string column,
+        int firstParamIndex,
+        out List<object> values)
+    {
+        values = new List<object>();
+        if (excluded == null || excluded.Count == 0)
+        {
+            return "";
+        }
+
+        var sb = new StringBuilder();
+        sb.Append(" AND (").Append(column).Append(" IS NULL OR ").Append(column).Append(" NOT IN (");
+        for (int i = 0; i < excluded.Count; i++)
+        {
+            if (i > 0)
+            {
+                sb.Append(", ");
+            }
+            sb.Append('$').Append(firstParamIndex + i);
+            values.Add(excluded[i]);
+        }
+
+        sb.Append("))");
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// The aggregate-side form of a <see cref="BuildDbInClause"/> clause (#5414 M1): the same predicate without its
     /// leading <c>AND</c>, for a <c>FILTER (WHERE ...)</c> inside the per-collection aggregates of a trend read,
     /// or <c>""</c> when there is no filter. A trend's database filter belongs there and not in the WHERE: the

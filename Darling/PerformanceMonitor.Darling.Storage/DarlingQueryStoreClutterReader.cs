@@ -241,7 +241,7 @@ public static class DarlingQueryStoreClutterReader
     /// <param name="databases">#5244: the chosen databases (optional, so the Viewer's calls compile
     /// unchanged); <see cref="DatabaseFilter.All"/>, the default, is every database.</param>
     public static async Task<List<ReadCostRow>> GetReadCostAsync(
-        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default,
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default, DateTime? asOfUtc = null,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<ReadCostRow>();
@@ -271,7 +271,7 @@ public static class DarlingQueryStoreClutterReader
 
         /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
            database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
-        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.LastSlowestAt, cancellationToken);
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.LastSlowestAt, asOfUtc, cancellationToken);
     }
 
     /* ─────────────────────────── (b) plan churn ─────────────────────────── */
@@ -382,7 +382,7 @@ public static class DarlingQueryStoreClutterReader
 
     /// <param name="databases">#5244: the chosen databases (optional, so the Viewer's calls compile unchanged).</param>
     public static async Task<List<PlanChurnRow>> GetPlanChurnAsync(
-        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default,
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default, DateTime? asOfUtc = null,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<PlanChurnRow>();
@@ -411,7 +411,7 @@ public static class DarlingQueryStoreClutterReader
 
         /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
            database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
-        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.LastCollection, cancellationToken);
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.LastCollection, asOfUtc, cancellationToken);
     }
 
     /* ─────────────────────────── (c) configuration ─────────────────────────── */
@@ -457,7 +457,7 @@ public static class DarlingQueryStoreClutterReader
 
     /// <param name="databases">#5244: the chosen databases (optional, so the Viewer's calls compile unchanged).</param>
     public static async Task<List<ConfigRow>> GetConfigAsync(
-        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default,
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default, DateTime? asOfUtc = null,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<ConfigRow>();
@@ -492,7 +492,7 @@ public static class DarlingQueryStoreClutterReader
 
         /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
            database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
-        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.CapturedAt, cancellationToken);
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.CapturedAt, asOfUtc, cancellationToken);
     }
 
     /* ─────────────────────────── (d) QDS waits + the clerk ─────────────────────────── */

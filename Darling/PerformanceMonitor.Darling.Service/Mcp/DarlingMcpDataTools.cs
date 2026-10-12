@@ -1091,13 +1091,14 @@ public sealed class DarlingMcpDataTools
         {
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            /* #5633 item 4: with no database chosen the ranking covers the databases the server has now (its newest database_states
-               snapshot), not a database dropped since: the rank's LIMIT would otherwise fill with its rows, and a window that
-               reaches back past the drop returned nothing else. The omission is in the filter, so the SQL is unchanged. A database
-               the caller names is read as asked. Unknown (no snapshot) narrows nothing. */
+            /* #5633 item 4: with no database chosen the ranking leaves out the databases the server DROPPED (named by an earlier
+               database_states snapshot, absent from the newest), not a database dropped since: the rank's LIMIT would otherwise fill
+               with its rows, and a window that reaches back past the drop returned nothing else. The exclusion travels in the filter
+               ($6 of the statement). A database no snapshot ever listed (created after the newest one) is read. A database the
+               caller names is read as asked. Unknown (no snapshot) leaves out nothing. */
             /* Review M2: an as_of read takes the newest snapshot at or before the anchor, so a database dropped since the window still ranks. */
             databases = await CurrentDatabaseScope.NarrowAsync(postgres, resolved.ServerId, databases,
-                asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, cancellationToken: cancellationToken);
+                asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: requestedStart, cancellationToken: cancellationToken);
             var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, ranking, cancellationToken);
             var rows = routed.Rows;
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";

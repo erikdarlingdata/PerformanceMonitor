@@ -145,10 +145,23 @@ public sealed class DroppedDatabaseScopeLiveTests
         var configBefore = await DarlingQueryStoreClutterReader.GetConfigAsync(dataSource, new[] { serverId }, now.AddDays(-2), now.AddMinutes(5), cancellationToken: ct);
         Assert.Equal(2, configBefore.Count);
 
+        /* An earlier snapshot named GoneDb and LiveDb; the newest names LiveDb only, so GoneDb was dropped in between. */
+        await SnapshotAsync(connection, serverId, serverName, TimeSpan.FromHours(1), ct, "GoneDb", "LiveDb");
         await SnapshotAsync(connection, serverId, serverName, TimeSpan.FromMinutes(5), ct, "LiveDb");
 
-        /* The newest snapshot names LiveDb only: the page is LiveDb's even at top 1, where GoneDb used to take the slot. */
+        /* The page is LiveDb's even at top 1, where GoneDb used to take the slot. */
         Assert.Equal(new[] { "LiveDb" }, Databases(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 1)));
+
+        /* Review L2 leftover: NewDb was created after the newest snapshot, so NO snapshot names it. It is not a drop and it ranks (it is
+           the heaviest database, so it takes the top-1 slot) instead of staying hidden until the next snapshot. */
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
+                                           delta_worker_time, delta_elapsed_time, delta_execution_count, delta_spills, sample_interval_seconds)
+              VALUES ($1,$2,$3,$4,'NewDb','dbo','usp_Work','0xHNewDb',950000,1900000,950,0,60)",
+            CollectionIdGenerator.Next(), now.AddMinutes(-1), serverId, serverName);
+        Assert.Equal(new[] { "NewDb", "LiveDb" }, Databases(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 20)));
+        Assert.Equal(new[] { "NewDb" }, Databases(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 1)));
+        Assert.Equal(new[] { "GoneDb" }, (await CurrentDatabaseScope.ReadDroppedAsync(dataSource, serverId, windowStartUtc: now.AddHours(-168), cancellationToken: ct))!.ToArray());
         /* Named, a dropped database is a question about its history and is read as asked. */
         Assert.Equal(new[] { "GoneDb" }, Databases(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 20, database_name: "GoneDb")));
 
@@ -157,7 +170,7 @@ public sealed class DroppedDatabaseScopeLiveTests
         var churn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(dataSource, new[] { serverId }, now.AddDays(-2), now.AddMinutes(5), cancellationToken: ct);
         Assert.Equal(new[] { "LiveDb" }, churn.Select(c => c.DatabaseName).ToArray());
         var namedConfig = await DarlingQueryStoreClutterReader.GetConfigAsync(
-            dataSource, new[] { serverId }, now.AddDays(-2), now.AddMinutes(5), DatabaseFilter.One("GoneDb"), ct);
+            dataSource, new[] { serverId }, now.AddDays(-2), now.AddMinutes(5), DatabaseFilter.One("GoneDb"), cancellationToken: ct);
         Assert.Equal(new[] { "GoneDb" }, namedConfig.Select(c => c.DatabaseName).ToArray());
     }
 
@@ -231,9 +244,83 @@ public sealed class DroppedDatabaseScopeLiveTests
         Assert.False(CurrentDatabaseScope.IsDropped(current, "A"));
         Assert.True(CurrentDatabaseScope.IsDropped(current, "Z"));
         Assert.True(CurrentDatabaseScope.IsDropped(current, "a"));
+        var dropped = new HashSet<string>(StringComparer.Ordinal) { "Z" };
         Assert.True(CurrentDatabaseScope.Narrow(DatabaseFilter.All, null).IsAll);
-        Assert.Equal(new[] { "A" }, CurrentDatabaseScope.Narrow(DatabaseFilter.All, current).Names.ToArray());
-        Assert.Equal(new[] { "Z" }, CurrentDatabaseScope.Narrow(DatabaseFilter.One("Z"), current).Names.ToArray());
+        Assert.Equal(DatabaseFilter.All, CurrentDatabaseScope.Narrow(DatabaseFilter.All, new HashSet<string>(StringComparer.Ordinal)));
+        var narrowed = CurrentDatabaseScope.Narrow(DatabaseFilter.All, dropped);
+        Assert.True(narrowed.IsAll);
+        Assert.Equal(new[] { "Z" }, narrowed.ExcludedNames.ToArray());
+        Assert.Equal(new[] { "Z" }, CurrentDatabaseScope.Narrow(DatabaseFilter.One("Z"), dropped).Names.ToArray());
+        Assert.Empty(CurrentDatabaseScope.Narrow(DatabaseFilter.One("Z"), dropped).ExcludedNames);
+    }
+
+    /// <summary>Review L2 leftover: dropped = listed by an earlier snapshot and absent from the newest; a collector that stopped is unknown.</summary>
+    [Fact]
+    public void DroppedFrom_NamesOnlyWhatAnEarlierSnapshotListedAndTheNewestDoesNot()
+    {
+        var anchor = new DateTime(2026, 10, 12, 12, 0, 0, DateTimeKind.Unspecified);
+        var seen = new Dictionary<string, DateTime>(StringComparer.Ordinal)
+        {
+            ["Live"] = anchor.AddMinutes(-5),
+            ["Gone"] = anchor.AddMinutes(-35),
+        };
+        Assert.Equal(new[] { "Gone" }, CurrentDatabaseScope.DroppedFrom(seen, anchor)!.ToArray());
+        Assert.Empty(CurrentDatabaseScope.DroppedFrom(new Dictionary<string, DateTime> { ["Live"] = anchor.AddMinutes(-5) }, anchor)!);
+        Assert.Null(CurrentDatabaseScope.DroppedFrom(new Dictionary<string, DateTime>(), anchor));
+        Assert.Null(CurrentDatabaseScope.DroppedFrom(seen, anchor + CurrentDatabaseScope.SnapshotHorizon));
+        Assert.Equal(anchor - CurrentDatabaseScope.SnapshotHorizon, CurrentDatabaseScope.LookBackFloor(anchor, null));
+        Assert.Equal(anchor.AddHours(-24), CurrentDatabaseScope.LookBackFloor(anchor, anchor.AddHours(-24)));
+        Assert.Equal(anchor - CurrentDatabaseScope.DropLookBack, CurrentDatabaseScope.LookBackFloor(anchor, anchor.AddDays(-30)));
+
+        var filter = DatabaseFilter.Excluding(new[] { "Gone", " ", "Gone" });
+        Assert.True(filter.IsAll);
+        Assert.Equal(new[] { "Gone" }, filter.ExcludedNames.ToArray());
+        Assert.NotEqual(DatabaseFilter.All, filter);
+        Assert.Equal(DatabaseFilter.All, DatabaseFilter.Excluding(new[] { "" }));
+        Assert.Equal(" AND ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))", DatabaseFilter.ExcludeClause("database_name", 6));
+    }
+
+    /// <summary>
+    /// Review M3: get_query_store_clutter with as_of reads the snapshot at or before the anchor, so a database dropped after the window is
+    /// still reported for a window it existed in; without as_of the same database is left out.
+    /// </summary>
+    [Fact]
+    public async Task QueryStoreClutter_WithAsOf_KeepsADatabaseDroppedAfterTheWindow()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), BaseSkip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        const string serverName = "dropped-scope-clutter-asof";
+        var serverId = ServerIdHelper.GetDeterministicHashCode(serverName);
+        await DarlingMcpTestData.RegisterServerAsync(connection, serverId, serverName, ct);
+        var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
+        var windowTime = now.AddHours(-72);
+        foreach (var database in new[] { "GoneDb", "LiveDb" })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode)
+                  VALUES ($1,$2,$3,$4,$5,'READ_ONLY','READ_WRITE',2,10,8192,'AUTO',21,200,60,'AUTO')",
+                CollectionIdGenerator.Next(), windowTime, serverId, serverName, database);
+        }
+
+        await SnapshotAsync(connection, serverId, serverName, TimeSpan.FromHours(73), ct, "GoneDb", "LiveDb");
+        await SnapshotAsync(connection, serverId, serverName, TimeSpan.FromMinutes(5), ct, "LiveDb");
+
+        var asOf = windowTime.AddHours(2).ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+        var historical = await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(dataSource, serverName, 6, 20, false, asOf, null, ct);
+        Assert.Contains("GoneDb", historical, StringComparison.Ordinal);
+        Assert.Contains("LiveDb", historical, StringComparison.Ordinal);
+
+        var rows = await DarlingQueryStoreClutterReader.GetConfigAsync(dataSource, new[] { serverId }, windowTime.AddHours(-1), windowTime.AddHours(3), cancellationToken: ct);
+        Assert.Equal(new[] { "LiveDb" }, rows.Select(r => r.DatabaseName).ToArray());
+        var asOfRows = await DarlingQueryStoreClutterReader.GetConfigAsync(dataSource, new[] { serverId }, windowTime.AddHours(-1), windowTime.AddHours(3), asOfUtc: windowTime.AddHours(2), cancellationToken: ct);
+        Assert.Equal(new[] { "GoneDb", "LiveDb" }, asOfRows.Select(r => r.DatabaseName).OrderBy(n => n, StringComparer.Ordinal).ToArray());
     }
 
     [Fact]

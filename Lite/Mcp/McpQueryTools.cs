@@ -209,10 +209,13 @@ public sealed class McpQueryTools
             var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
 
             var requestedStart = nowUtc.AddHours(-hours_back);
-            /* #5633 item 4: with no database named, rank the databases the server has now (its newest database_states snapshot), not one
-               dropped since: its rows would fill the page. Unknown (no snapshot) narrows nothing. A named database is read as asked. */
-            var procedureDatabases = string.IsNullOrEmpty(database_name) ? await dataService.GetCurrentDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : nowUtc) : null;
-            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? procedureDatabases : new[] { database_name }, asOfUtc: windowEnd);
+            /* #5633 item 4: with no database named, rank without the databases the server DROPPED (named by an earlier database_states
+               snapshot and absent from the newest), not those dropped since: their rows would fill the page. A database no snapshot ever
+               listed (created after the newest one) is still read. Unknown (no snapshot) leaves out nothing. A named database is read as asked. */
+            var droppedDatabases = string.IsNullOrEmpty(database_name)
+                ? await dataService.GetDroppedDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : nowUtc, windowStartUtc: requestedStart)
+                : null;
+            var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, excludeDatabaseNames: droppedDatabases);
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats")
