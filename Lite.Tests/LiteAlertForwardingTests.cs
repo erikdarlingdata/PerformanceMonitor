@@ -567,6 +567,54 @@ public partial class LiteAlertForwardingTests : IDisposable
        2. Blocking rolling-count fire + watermark persist (old :118-196 + #1091/#1145)
        ===================================================================================== */
 
+    /* #5644 review (W1/W2): the XE-or-DMV choice is made on the rows BEFORE the excluded-database filter, so XE
+       reports that sit only in an excluded database do not fall back to DMV waits elsewhere (Lite's overview
+       makes the same choice on the unfiltered set). Lite runs the shared engine, so this is the Lite twin. */
+    [Fact]
+    public async Task Blocking_XeOnlyInExcludedDatabase_DoesNotFallBackToDmvWaits()
+    {
+        DisableAllChecks();
+        App.AlertBlockingEnabled = true;
+        App.AlertExcludedDatabases = new List<string> { "ExcludedDb" };
+        var h = new Harness();
+        var engine = h.Build();
+        var xe = BlockingRow(51);
+        xe.DatabaseName = "ExcludedDb";
+        var dmv = BlockingRow(61);
+        dmv.Source = BlockedProcessAlertRow.DmvSnapshotSource;
+        h.Adapter.Blocking.Add(xe);
+        h.Adapter.Blocking.Add(dmv);
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* The XE report now sits in a database that is not excluded: it fires on the XE wait alone. */
+        xe.DatabaseName = "StackOverflow";
+        h.Now = h.Now.AddMinutes(10);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("1", fired.CurrentValue);
+    }
+
+    [Fact]
+    public async Task Blocking_NoXeReports_FiresOnDmvWaits()
+    {
+        DisableAllChecks();
+        App.AlertBlockingEnabled = true;
+        var h = new Harness();
+        var engine = h.Build();
+        var dmv = BlockingRow(61);
+        dmv.Source = BlockedProcessAlertRow.DmvSnapshotSource;
+        h.Adapter.Blocking.Add(dmv);
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("1", fired.CurrentValue);
+    }
+
     [Fact]
     public async Task Blocking_FiresOnce_PersistsWatermark_AndEdgeTriggerHoldsWithinTheHour()
     {

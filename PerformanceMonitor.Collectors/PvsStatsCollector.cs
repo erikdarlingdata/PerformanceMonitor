@@ -205,7 +205,7 @@ SELECT /* PerformanceMonitorLite */
     online_index_version_store_size_mb =
         CONVERT(decimal(19,2), pvss.online_index_version_store_size_kb / 1024.0),
     database_data_size_mb =
-        CONVERT(decimal(19,2), df.total_db_size_kb / 1024.0),,
+        CONVERT(decimal(19,2), df.total_db_size_kb / 1024.0),
     current_aborted_transaction_count =
         pvss.current_aborted_transaction_count,
     oldest_active_transaction_id =

@@ -86,9 +86,11 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
         Assert.Contains("t.status = 1", text, StringComparison.Ordinal);
         /* #5644 W6: the bound is CONVERTed to datetime so it compares like for like with ft.StartTime. A bare datetime2
            parameter holding 10:49:13.643 sits BELOW the trace's own 10:49:13.6433333 (datetime ticks in 1/300 s),
-           so `>` held the newest stored event true on every poll and stored it again until a newer event came. */
+           so `>` held the newest stored event true on every poll and stored it again until a newer event came. The bound is
+           `>=` so an event the trace flushes into the watermark's own tick after a poll is read; ReadAsync drops the stored
+           rows of that tick by EventSequence (see the WatermarkTick tests). */
         Assert.Contains(
-            "ft.StartTime > CONVERT(datetime, COALESCE(@cutoff_time, DATEADD(HOUR, -24, SYSDATETIME())))",
+            "ft.StartTime >= CONVERT(datetime, COALESCE(@cutoff_time, DATEADD(HOUR, -24, SYSDATETIME())))",
             text, StringComparison.Ordinal);
         Assert.Contains("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED", text, StringComparison.Ordinal);
         Assert.Contains("OPTION(RECOMPILE)", text, StringComparison.Ordinal);
@@ -200,7 +202,7 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
 
         /* The keep is the FIRST arm of the OR that follows the StartTime bound, and every database predicate
            sits AFTER it — inside the other arm — so none of them can reach the 15457 row. */
-        var startTime = text.IndexOf("AND   ft.StartTime > ", StringComparison.Ordinal);
+        var startTime = text.IndexOf("AND   ft.StartTime >= ", StringComparison.Ordinal);
         var keepAt = text.IndexOf(keep, StringComparison.Ordinal);
         var systemDbs = text.IndexOf("ISNULL(ft.DatabaseID, 0) NOT IN (1, 3, 4)", StringComparison.Ordinal);
         var agDbs = text.IndexOf("ISNULL(ft.DatabaseID, 0) < 32761", StringComparison.Ordinal);
@@ -384,7 +386,9 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
         Assert.Empty(s_deltas.Calls);
 
         /* A reader carrying only the payload (no trailing path set) records nothing rather than throwing. */
-        Assert.Empty(context.PendingState);
+        Assert.False(context.PendingState.ContainsKey(DefaultTraceEventsCollector.LastTraceFilePathStateKey));
+        /* ... but it does record the newest tick's EventSequence for the next cycle's at-or-after read (#5644 W6). */
+        Assert.Equal(TickState(eventTime, "900001"), context.PendingState[DefaultTraceEventsCollector.WatermarkTickSequencesStateKey]);
     }
 
     /* ---- #1962: read the CURRENT rollover file in steady state, fall back when the trace moved ---- */
@@ -395,11 +399,12 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
     private static string Lf(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
 
     [Fact]
-    public void StateKeys_DeclaresTheLastSeenTracePath_AndTheDeclaringSetIsPinned()
+    public void StateKeys_DeclaresTheLastSeenTracePathAndTheWatermarkTickSequences_AndTheDeclaringSetIsPinned()
     {
         Assert.Equal(
-            new[] { "last_trace_file_path" },
+            new[] { "last_trace_file_path", "watermark_tick_event_sequences" },
             DefaultTraceEventsCollector.Instance.StateKeys.ToArray());
+        Assert.Equal("watermark_tick_event_sequences", DefaultTraceEventsCollector.WatermarkTickSequencesStateKey);
         Assert.Equal("last_trace_file_path", DefaultTraceEventsCollector.LastTraceFilePathStateKey);
 
         /* Almost every collector's dedup IS derivable from its rows (a MAX() over the target table), so it
@@ -511,6 +516,124 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
         Assert.Contains("OPTION(RECOMPILE);\n\nSELECT /* PerformanceMonitorLite */\n    current_trace_path = @current_trace_path;", text, StringComparison.Ordinal);
         Assert.DoesNotContain("current_trace_path = ft.", text, StringComparison.Ordinal);
         Assert.DoesNotContain("trace_path", string.Join(",", DefaultTraceEventsCollector.Instance.PayloadColumns.Select(c => c.Name)), StringComparison.Ordinal);
+    }
+
+    /* #5644 W6: the read is at-or-after the watermark tick (a strict `>` lost an event the trace flushed into the
+       watermark's own 3.33 ms tick after the poll), so the rows already stored for that tick come back and are
+       dropped here by EventSequence. */
+    private static readonly DateTime s_tick = new(2026, 7, 9, 10, 49, 13, 643, DateTimeKind.Unspecified);
+
+    private static string TickState(DateTime tick, string sequences)
+        => tick.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + sequences;
+
+    private static object[] TraceRow(DateTime eventTime, long sequence)
+    {
+        var row = Enumerable.Repeat((object)DBNull.Value, 21).ToArray();
+        row[0] = eventTime;
+        row[18] = sequence;
+        return row;
+    }
+
+    private static CollectorContext MakeTickContext(DateTime? watermark, string? tickState)
+    {
+        var context = MakeContext(watermark: watermark);
+        if (tickState is null)
+        {
+            return context;
+        }
+
+        return new CollectorContext
+        {
+            State = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [DefaultTraceEventsCollector.WatermarkTickSequencesStateKey] = tickState,
+            },
+            ServerId = context.ServerId,
+            ServerName = context.ServerName,
+            CollectionTime = context.CollectionTime,
+            Deltas = context.Deltas,
+            Target = context.Target,
+            Watermark = watermark,
+            ExcludedDatabases = context.ExcludedDatabases,
+            CollectSchemaChangeEvents = context.CollectSchemaChangeEvents,
+        };
+    }
+
+    [Fact]
+    public async Task ReadAsync_WatermarkTick_DropsTheStoredReRead_KeepsANewEventInTheSameTick_AndTheNextTick()
+    {
+        var context = MakeTickContext(s_tick, TickState(s_tick, "900,901"));
+        using var reader = new FakeCollectorDataReader(
+            TraceRow(s_tick.AddMilliseconds(10), 905),   /* next tick: kept */
+            TraceRow(s_tick, 902),                       /* same tick, flushed after the last poll: kept */
+            TraceRow(s_tick, 901),                       /* stored re-read: dropped */
+            TraceRow(s_tick, 900));                      /* stored re-read: dropped */
+
+        var rows = await DefaultTraceEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(new long?[] { 905, 902 }, rows.Select(r => r.EventSequence).ToArray());
+        /* The next cycle's watermark is the newer tick, so the state moves to it. */
+        Assert.Equal(
+            TickState(s_tick.AddMilliseconds(10), "905"),
+            context.PendingState[DefaultTraceEventsCollector.WatermarkTickSequencesStateKey]);
+    }
+
+    [Fact]
+    public async Task ReadAsync_WatermarkTick_WhenNothingNewerArrives_KeepsEveryStoredSequenceAndAddsTheNewOne()
+    {
+        var context = MakeTickContext(s_tick, TickState(s_tick, "900,901"));
+        using var reader = new FakeCollectorDataReader(TraceRow(s_tick, 902), TraceRow(s_tick, 900));
+
+        var rows = await DefaultTraceEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(new long?[] { 902 }, rows.Select(r => r.EventSequence).ToArray());
+        Assert.Equal(
+            TickState(s_tick, "900,901,902"),
+            context.PendingState[DefaultTraceEventsCollector.WatermarkTickSequencesStateKey]);
+    }
+
+    [Theory]
+    [InlineData(null)]                 /* nothing recorded: a first run, an upgrade, a restarted host */
+    [InlineData("not a state")]        /* malformed */
+    [InlineData("1:900,x")]            /* malformed sequence list */
+    [InlineData("1:900")]              /* recorded for a different tick than the watermark */
+    public async Task ReadAsync_WatermarkTick_WithNoUsableState_DropsNothing(string? state)
+    {
+        var context = MakeTickContext(s_tick, state);
+        using var reader = new FakeCollectorDataReader(TraceRow(s_tick, 900), TraceRow(s_tick, 901));
+
+        var rows = await DefaultTraceEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(2, rows.Count);
+    }
+
+    [Fact]
+    public async Task ReadAsync_WatermarkTick_WithNoWatermark_KeepsEverythingAndRecordsTheNewestTick()
+    {
+        var context = MakeTickContext(null, TickState(s_tick, "900"));
+        using var reader = new FakeCollectorDataReader(TraceRow(s_tick, 900), TraceRow(s_tick.AddMilliseconds(-10), 899));
+
+        var rows = await DefaultTraceEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(2, rows.Count);
+        Assert.Equal(TickState(s_tick, "900"), context.PendingState[DefaultTraceEventsCollector.WatermarkTickSequencesStateKey]);
+    }
+
+    [Fact]
+    public async Task ReadAsync_WatermarkTick_KeepsARowWithNoSequence_AndLeavesTheStateAloneOnAnEmptyRead()
+    {
+        var state = TickState(s_tick, "900");
+        var noSequence = TraceRow(s_tick, 0);
+        noSequence[18] = DBNull.Value;
+        var context = MakeTickContext(s_tick, state);
+        using var withRow = new FakeCollectorDataReader(noSequence);
+        var rows = await DefaultTraceEventsCollector.Instance.ReadAsync(withRow, context, CancellationToken.None);
+        Assert.Single(rows);
+
+        var emptyContext = MakeTickContext(s_tick, state);
+        using var empty = new FakeCollectorDataReader();
+        Assert.Empty(await DefaultTraceEventsCollector.Instance.ReadAsync(empty, emptyContext, CancellationToken.None));
+        Assert.False(emptyContext.PendingState.ContainsKey(DefaultTraceEventsCollector.WatermarkTickSequencesStateKey));
     }
 
     [Fact]

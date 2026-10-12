@@ -467,6 +467,12 @@ public static class ServerEpoch
         }
     }
 
+    /// <summary>Said after a SQL Server start-time pair (#5644 W20 leftover). <c>sqlserver_start_time</c> is the target's LOCAL clock
+    /// and the host does not know its offset, so the pair is not UTC and must not be written as an instant with a "Z": the web's
+    /// <c>localizeIsoText</c> would shift it by the server's UTC offset and show a start time that never happened. The banner names the clock
+    /// instead, so a reader does not take the pair for the browser's zone or for UTC.</summary>
+    internal const string ServerClockNote = " (server clock)";
+
     /// <summary>
     /// The sides of an identity change that actually moved, for a banner or a log line (#5644 W17): "start time A → B"
     /// and/or "server name X → Y", joined by a comma. A side that did not change is left out, because listing
@@ -480,7 +486,7 @@ public static class ServerEpoch
         if (replaced.StartTime.HasValue && current.StartTime.HasValue
             && replaced.StartTime.Value != current.StartTime.Value)
         {
-            parts.Add("start time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime));
+            parts.Add("start time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime) + ServerClockNote);
         }
 
         if (replaced.Name is not null && current.Name is not null
@@ -491,7 +497,7 @@ public static class ServerEpoch
 
         if (parts.Count == 0)
         {
-            parts.Add("start time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime));
+            parts.Add("start time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime) + ServerClockNote);
             parts.Add("server name " + Describe(replaced.Name) + " → " + Describe(current.Name));
         }
 

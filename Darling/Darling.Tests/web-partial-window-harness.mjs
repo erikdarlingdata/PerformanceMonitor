@@ -97,5 +97,8 @@ out.noticeStripText = noticeStrip("since " + isoZ).textContent;
 const both = "since " + isoZ + ": 9 indexes match and 5 were returned. Rows are ordered by total wait time descending; raise limit to see more.";
 out.bothEmpty = emptyStrip("TRUNCATED: " + both).textContent;
 out.bothNotice = noticeStrip("TRUNCATED: " + both).textContent;
+/* G1a: the restart banner names the server clock for a SQL Server start-time pair (the pair is not UTC, so no "Z" and no shift) */
+out.bannerText = "baseline discontinuity at 10/12/2026, 8:15:00 AM (restart) — instance identity changed — start time 2026-10-09 14:00:00 → 2026-10-12 08:15:00 (server clock); every delta baseline for this server was forgotten";
+out.bannerNotice = noticeStrip(out.bannerText).textContent;
 
 console.log(JSON.stringify(out));
