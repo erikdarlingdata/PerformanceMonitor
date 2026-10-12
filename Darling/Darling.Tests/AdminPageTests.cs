@@ -105,6 +105,19 @@ public sealed class AdminPageTests
             Assert.Contains("  " + g + ": [", gblock);
     }
 
+    /// <summary>#5641: the Runnable Queue group is drawn with its three fields (the switch and the two bars) and a
+    /// label, beside Poison wait in the thresholds section. get_alert_settings emits the same three keys
+    /// (<c>RunnableQueue_IsReportedThroughTheClamp_AndWrittenWithTheEnginesValidation</c>).</summary>
+    [Fact]
+    public void ThePage_DrawsTheRunnableQueueGroup_WithItsThreeFields()
+    {
+        var page = Page();
+        Assert.Contains("  runnable_queue: \"Runnable queue\",", page);
+        Assert.Contains("  runnable_queue: [\"enabled\", \"warning_per_scheduler\", \"critical_per_scheduler\"],", page);
+        var sections = page.IndexOf("export const SETTING_SECTIONS = [", StringComparison.Ordinal);
+        Assert.True(page.IndexOf("\"poison_wait\", \"runnable_queue\"", sections, StringComparison.Ordinal) > sections);
+    }
+
     [Fact]
     public void ThePage_OffersNoWriteCall()
     {
