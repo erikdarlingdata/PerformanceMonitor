@@ -87,8 +87,10 @@ public sealed class McpLatestSnapshotStampTests : IClassFixture<SharedDuckDbFixt
     public async Task GetResourceSemaphore_ReadsTheWindowBesideTheStampedSnapshot()
     {
         var (@base, anchor) = Past();
-        await SeedGrantAsync(@base.AddMinutes(-30), waiters: 12, timeoutsDelta: 3, grantedMb: 6000);
-        await SeedGrantAsync(@base, waiters: 0, timeoutsDelta: 0, grantedMb: 500);
+        /* #5644 W9: the largest grant (6000) is the calm latest snapshot, the storm (12 waiters) is 30 minutes
+           earlier at 500, so the two peaks are two different moments. */
+        await SeedGrantAsync(@base.AddMinutes(-30), waiters: 12, timeoutsDelta: 3, grantedMb: 500);
+        await SeedGrantAsync(@base, waiters: 0, timeoutsDelta: 0, grantedMb: 6000);
 
         var root = Parse(await McpMemoryTools.GetResourceSemaphore(_dataService, _serverManager, ServerName, 1, anchor));
 
@@ -109,6 +111,7 @@ public sealed class McpLatestSnapshotStampTests : IClassFixture<SharedDuckDbFixt
         Assert.Equal(3, window.GetProperty("timeout_errors_in_window").GetInt64());
         Assert.Equal(0, window.GetProperty("forced_grants_in_window").GetInt64());
         Assert.Equal(6000d, window.GetProperty("peak_granted_memory_mb").GetDouble());
+        Assert.Equal(Stamp(@base), window.GetProperty("peak_granted_at").GetString());
         Assert.Equal(2000d, window.GetProperty("min_available_memory_mb").GetDouble());
         Assert.Equal(Stamp(@base.AddMinutes(-30)), window.GetProperty("first_snapshot_at").GetString());
         /* The window's last snapshot IS the stamped one — one span, one set of rows, two halves. */
@@ -144,6 +147,7 @@ public sealed class McpLatestSnapshotStampTests : IClassFixture<SharedDuckDbFixt
         Assert.Equal(12, window.GetProperty("peak_waiter_count").GetInt64());
         Assert.Equal(3, window.GetProperty("timeout_errors_in_window").GetInt64());
         Assert.Equal(6000d, window.GetProperty("peak_granted_memory_mb").GetDouble());
+        Assert.Equal(Stamp(@base.AddMinutes(-30)), window.GetProperty("peak_granted_at").GetString());
         Assert.Equal(2, window.GetProperty("snapshots_in_window").GetInt64());
     }
 

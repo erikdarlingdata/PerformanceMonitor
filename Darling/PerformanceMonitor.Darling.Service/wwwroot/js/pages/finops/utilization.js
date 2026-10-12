@@ -62,9 +62,9 @@ const SUMMARY_STATS = [
   { key: "health_score", label: "Health", format: "int" },
   { key: "monthly_cost_text", label: "Budget", format: "text" },
   { key: "annual_cost_text", label: "Annual", format: "text" },
-  { key: "cpu.avg_cpu_pct", label: "Avg CPU %", format: "num1" },
-  { key: "cpu.p95_cpu_pct", label: "P95 CPU %", format: "num1" },
-  { key: "cpu.max_cpu_pct", label: "Max CPU %", format: "int" },
+  { key: "cpu.avg_cpu_pct", label: "Avg SQL Server CPU %", format: "num1" },
+  { key: "cpu.p95_cpu_pct", label: "P95 SQL Server CPU %", format: "num1" },
+  { key: "cpu.max_cpu_pct", label: "Max SQL Server CPU %", format: "int" },
   { key: "cpu.cpu_count", label: "vCores", format: "int", nullKey: "cpu.cpu_count_reason", showWhen: { key: "cpu.cpu_count_unit", equals: "vcores" } },
   { key: "cpu.cpu_count", label: "CPUs", format: "int", nullKey: "cpu.cpu_count_reason", hideWhen: { key: "cpu.cpu_count_unit", equals: "vcores" } },
   { key: "cpu.max_workers", label: "Max workers", format: "int" },
@@ -82,9 +82,9 @@ const SUMMARY_STATS = [
 const TREND_COLUMNS = [
   { key: "day_label", label: "Day" },
   { key: "verdict_label", label: "Status", sevKey: "verdict_sev" },
-  { key: "avg_cpu_pct", label: "Avg CPU %", format: "num1" },
-  { key: "p95_cpu_pct", label: "P95 CPU %", format: "num1" },
-  { key: "max_cpu_pct", label: "Max CPU %", format: "int" },
+  { key: "avg_cpu_pct", label: "Avg SQL Server CPU %", format: "num1" },
+  { key: "p95_cpu_pct", label: "P95 SQL Server CPU %", format: "num1" },
+  { key: "max_cpu_pct", label: "Max SQL Server CPU %", format: "int" },
   { key: "memory_ratio", label: "Mem Ratio", format: "num2" },
 ];
 /* utilization-keys:end */

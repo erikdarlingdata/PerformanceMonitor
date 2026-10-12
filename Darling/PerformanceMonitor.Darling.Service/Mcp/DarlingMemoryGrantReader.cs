@@ -74,13 +74,14 @@ internal static class DarlingMemoryGrantReader
     /// One (resource_semaphore_id, pool_id) — or, for the pool lens, one pool with <see cref="ResourceSemaphoreId"/>
     /// null — aggregated over EVERY snapshot in the window (#3541 A10). <see cref="PeakWaiterCount"/> /
     /// <see cref="PeakWaitersAt"/> is the storm detector: the most sessions ever seen waiting for a grant in the
-    /// window and the snapshot it happened at. The two <c>*InWindow</c> figures are SUMs of the stored per-interval
+    /// window and the snapshot it happened at. <see cref="PeakGrantedAt"/> is the snapshot of the largest
+    /// granted memory (<see cref="PeakGrantedMemoryMb"/>), a different moment when nothing waited then (#5644 W9). The two <c>*InWindow</c> figures are SUMs of the stored per-interval
     /// deltas — how many grants timed out / were forced across the whole window, not just the last interval.
     /// </summary>
     public sealed record MemoryGrantWindowRow(
         short? ResourceSemaphoreId, int PoolId, long SnapshotsInWindow, DateTime FirstSnapshotAt, DateTime LastSnapshotAt,
         long PeakWaiterCount, DateTime PeakWaitersAt, double PeakGrantedMemoryMb, double MinAvailableMemoryMb,
-        long TimeoutErrorsInWindow, long ForcedGrantsInWindow);
+        long TimeoutErrorsInWindow, long ForcedGrantsInWindow, DateTime PeakGrantedAt);
 
     /* ─────────────────────────── resource semaphore (latest snapshot, per semaphore) ─────────────────────────── */
 
@@ -275,6 +276,15 @@ internal static class DarlingMemoryGrantReader
                 collection_time AS peak_waiters_at
             FROM windowed
             ORDER BY resource_semaphore_id, pool_id, waiter_count DESC, collection_time DESC
+        ),
+        peak_grant AS
+        (
+            SELECT DISTINCT ON (resource_semaphore_id, pool_id)
+                resource_semaphore_id,
+                pool_id,
+                collection_time AS peak_granted_at
+            FROM windowed
+            ORDER BY resource_semaphore_id, pool_id, granted_memory_mb DESC NULLS LAST, collection_time DESC
         )
         SELECT
             a.resource_semaphore_id,
@@ -287,11 +297,15 @@ internal static class DarlingMemoryGrantReader
             a.peak_granted_memory_mb,
             a.min_available_memory_mb,
             a.timeout_errors_in_window,
-            a.forced_grants_in_window
+            a.forced_grants_in_window,
+            pg.peak_granted_at
         FROM agg AS a
         JOIN peak AS p
           ON p.resource_semaphore_id = a.resource_semaphore_id
          AND p.pool_id = a.pool_id
+        JOIN peak_grant AS pg
+          ON pg.resource_semaphore_id = a.resource_semaphore_id
+         AND pg.pool_id = a.pool_id
         ORDER BY a.pool_id, a.resource_semaphore_id
         """;
 
@@ -341,6 +355,14 @@ internal static class DarlingMemoryGrantReader
                 collection_time AS peak_waiters_at
             FROM per_snapshot
             ORDER BY pool_id, waiter_count DESC, collection_time DESC
+        ),
+        peak_grant AS
+        (
+            SELECT DISTINCT ON (pool_id)
+                pool_id,
+                collection_time AS peak_granted_at
+            FROM per_snapshot
+            ORDER BY pool_id, granted_memory_mb DESC NULLS LAST, collection_time DESC
         )
         SELECT
             CAST(NULL AS smallint) AS resource_semaphore_id,
@@ -353,9 +375,11 @@ internal static class DarlingMemoryGrantReader
             a.peak_granted_memory_mb,
             a.min_available_memory_mb,
             a.timeout_errors_in_window,
-            a.forced_grants_in_window
+            a.forced_grants_in_window,
+            pg.peak_granted_at
         FROM agg AS a
         JOIN peak AS p ON p.pool_id = a.pool_id
+        JOIN peak_grant AS pg ON pg.pool_id = a.pool_id
         ORDER BY a.pool_id
         """;
 
@@ -367,7 +391,7 @@ internal static class DarlingMemoryGrantReader
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
         ReadWindowAsync(postgres, MemoryGrantsWindowSql, serverId, startUtc, endUtc, cancellationToken);
 
-    /// <summary>The two window reads project the SAME eleven columns in the same order (the pool lens fills
+    /// <summary>The two window reads project the SAME twelve columns in the same order (the pool lens fills
     /// <c>resource_semaphore_id</c> with a typed NULL), so one materialiser serves both.</summary>
     private static async Task<List<MemoryGrantWindowRow>> ReadWindowAsync(
         NpgsqlDataSource postgres, string sql, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
@@ -390,7 +414,8 @@ internal static class DarlingMemoryGrantReader
                 reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
                 reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
                 reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                reader.IsDBNull(10) ? 0 : reader.GetInt64(10)));
+                reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                reader.GetDateTime(11)));
         }
 
         return rows;

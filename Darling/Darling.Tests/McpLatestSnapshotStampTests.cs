@@ -925,8 +925,8 @@ public sealed class McpLatestSnapshotStampLivePostgresTests
             var anchor = @base.AddMinutes(5).ToString("o") + "Z";
             var runningJobsLatest = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
 
-            /* ── memory grants: a storm 30 minutes before a calm latest snapshot ── */
-            foreach (var (t, waiters, timeouts, granted) in new[] { (@base.AddMinutes(-30), 12, 3L, 6000m), (@base, 0, 0L, 500m) })
+            /* ── memory grants: a storm 30 minutes before a calm latest snapshot; the largest grant (#5644 W9) is the calm one ── */
+            foreach (var (t, waiters, timeouts, granted) in new[] { (@base.AddMinutes(-30), 12, 3L, 500m), (@base, 0, 0L, 6000m) })
             {
                 await DarlingMcpTestData.ExecAsync(connection, ct,
                     @"INSERT INTO memory_grant_stats (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id, target_memory_mb, max_target_memory_mb, total_memory_mb, available_memory_mb, granted_memory_mb, used_memory_mb, grantee_count, waiter_count, timeout_error_count, forced_grant_count, timeout_error_count_delta, forced_grant_count_delta)
@@ -945,6 +945,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
             Assert.Equal(Stamp(@base.AddMinutes(-30)), windowRow.GetProperty("peak_waiters_at").GetString());
             Assert.Equal(3, windowRow.GetProperty("timeout_errors_in_window").GetInt64());
             Assert.Equal(6000d, windowRow.GetProperty("peak_granted_memory_mb").GetDouble());
+            Assert.Equal(Stamp(@base), windowRow.GetProperty("peak_granted_at").GetString());
             Assert.Equal(2000d, windowRow.GetProperty("min_available_memory_mb").GetDouble());
             Assert.Equal(Stamp(@base), windowRow.GetProperty("last_snapshot_at").GetString());
 
@@ -954,6 +955,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
             var poolWindow = Assert.Single(grants.GetProperty("window").EnumerateArray());
             Assert.Equal(JsonValueKind.Null, poolWindow.GetProperty("resource_semaphore_id").ValueKind);
             Assert.Equal(12, poolWindow.GetProperty("peak_waiter_count").GetInt64());
+            Assert.Equal(Stamp(@base), poolWindow.GetProperty("peak_granted_at").GetString());
+            Assert.Equal(Stamp(@base.AddMinutes(-30)), poolWindow.GetProperty("peak_waiters_at").GetString());
 
             /* ── scheduler: one snapshot three hours before the anchor — inside a 4 h search, outside a 1 h one ── */
             var schedulerAt = @base.AddMinutes(5).AddHours(-3);
