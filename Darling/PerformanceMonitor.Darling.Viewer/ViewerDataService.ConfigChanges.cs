@@ -129,6 +129,32 @@ public sealed partial class ViewerDataService
         ORDER BY capture_time, trace_flag
         """;
 
+    /// <summary>The successful trace_flags runs that stored ZERO rows (#5633 item 19): the empty snapshots the diff needs, since a run
+    /// that finds no flag stores nothing and the last flag being turned off would never show. Bounded like the change read: the runs in
+    /// the window plus the newest one before it (the baseline for a change on the window's first capture). SUCCESS only, and
+    /// <c>rows_collected = 0</c> only (NULL is not recorded). Twin of <c>DarlingCollectorRunFactsReader.EmptyTraceFlagRunsSql</c>.
+    /// $1 server_id, $2 window start, $3 window end (naive UTC).</summary>
+    public const string EmptyTraceFlagRunsSql = """
+        (SELECT collection_time
+         FROM v_collection_log
+         WHERE server_id = $1
+         AND   collector_name = 'trace_flags'
+         AND   status = 'SUCCESS'
+         AND   rows_collected = 0
+         AND   collection_time >= $2
+         AND   collection_time <= $3)
+        UNION ALL
+        (SELECT collection_time
+         FROM v_collection_log
+         WHERE server_id = $1
+         AND   collector_name = 'trace_flags'
+         AND   status = 'SUCCESS'
+         AND   rows_collected = 0
+         AND   collection_time < $2
+         ORDER BY collection_time DESC
+         LIMIT 1)
+        """;
+
     /* ─────────────────────────── public read + diff (composes the read with the shared ConfigChangeDiff) ─────────────────────────── */
 
     /// <summary>Server-configuration changes in the window [startUtc, endUtc]. Reads every snapshot up to
@@ -162,7 +188,8 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
         var snapshots = await ReadTraceFlagSnapshotsAsync(serverId, endUtc, cancellationToken);
-        return ConfigChangeDiff.DiffTraceFlagChanges(snapshots, startUtc, endUtc)
+        var emptyRuns = await ReadEmptyTraceFlagRunsAsync(serverId, startUtc, endUtc, cancellationToken);
+        return ConfigChangeDiff.DiffTraceFlagChanges(snapshots, emptyRuns, startUtc, endUtc)
             .Select(c => new TraceFlagChangeRow(c))
             .ToList();
     }
@@ -241,6 +268,24 @@ public sealed partial class ViewerDataService
         }
 
         return rows;
+    }
+
+    private async Task<List<DateTime>> ReadEmptyTraceFlagRunsAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
+    {
+        var times = new List<DateTime>();
+        await using var command = _dataSource.CreateCommand(EmptyTraceFlagRunsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            times.Add(reader.GetDateTime(0));
+        }
+
+        return times;
     }
 
     private async Task<List<ConfigChangeDiff.TraceFlagSnapshot>> ReadTraceFlagSnapshotsAsync(

@@ -81,7 +81,7 @@ public sealed class CollectorRunEmptyReasonTests
         var message = Field(DarlingMcpConfigHistoryTools.NoTraceFlagChanges("srv", 168, 1, McpWindowNotice.Unavailable, facts), "message");
 
         Assert.Contains("No trace flags are enabled as of", message, StringComparison.Ordinal);
-        Assert.Contains("turning off the last flag does not appear as a change", message, StringComparison.Ordinal);
+        Assert.Contains("counts as an empty capture", message, StringComparison.Ordinal);
     }
 
     [Theory]

@@ -1161,11 +1161,37 @@ AND   capture_time >= COALESCE(
 ORDER BY database_name, capture_time";
 
     /// <summary>
+    /// The successful <c>trace_flags</c> runs that stored ZERO rows (#5633 item 19), the empty snapshots the trace-flag diff
+    /// needs: the collector writes no row when no flag is enabled, so without these "the last flag was disabled" is invisible.
+    /// Bounded like <see cref="TraceFlagSnapshotsForAttributionSql"/>: the runs inside the window plus the newest one before it.
+    /// SUCCESS only and <c>rows_collected = 0</c> only (NULL is not recorded). <c>$1</c> server_id, <c>$2</c> window start,
+    /// <c>$3</c> window end.
+    /// </summary>
+    public const string EmptyTraceFlagRunsForAttributionSql = @"
+(SELECT collection_time
+ FROM collection_log
+ WHERE server_id = $1
+ AND   collector_name = 'trace_flags'
+ AND   status = 'SUCCESS'
+ AND   rows_collected = 0
+ AND   collection_time >= $2
+ AND   collection_time <= $3)
+UNION ALL
+(SELECT collection_time
+ FROM collection_log
+ WHERE server_id = $1
+ AND   collector_name = 'trace_flags'
+ AND   status = 'SUCCESS'
+ AND   rows_collected = 0
+ AND   collection_time < $2
+ ORDER BY collection_time DESC
+ LIMIT 1)";
+
+    /// <summary>
     /// The <c>trace_flags</c> snapshots the attribution set-diffs (#3653 A10, slice two): the same window
     /// rule again, over the per-enabled-flag rows <c>DBCC TRACESTATUS(-1)</c> yields. The baseline subquery
     /// finds the last capture WITH rows before the window — the collector writes none when no flag is enabled,
-    /// so a zero-flag capture is invisible to this read and to the diff alike (the blind spot
-    /// <c>ConfigChangeAttribution</c>'s remarks state). <c>$1</c> server_id, <c>$2</c> window start, <c>$3</c>
+    /// so a zero-flag capture is read separately, from <see cref="EmptyTraceFlagRunsForAttributionSql"/>. <c>$1</c> server_id, <c>$2</c> window start, <c>$3</c>
     /// window end.
     /// </summary>
     public const string TraceFlagSnapshotsForAttributionSql = @"
@@ -1315,6 +1341,7 @@ ORDER BY event_time_local";
 
             var databaseSnapshots = await ReadDatabaseConfigSnapshotsAsync(context);
             var traceFlagSnapshots = await ReadTraceFlagSnapshotsAsync(context);
+            var emptyTraceFlagRuns = await ReadEmptyTraceFlagRunsAsync(context);
 
             var serverEvents = ConfigChangeAttribution.GroupIntoEvents(
                 ConfigChangeDiff.DiffServerConfigChanges(snapshots, context.TimeRangeStart, context.TimeRangeEnd)
@@ -1327,9 +1354,9 @@ ORDER BY event_time_local";
                     .Select(c => (c.ChangeTime, ConfigChangeAttribution.SettingChange.ForDatabase(c.DatabaseName, c.SettingName, c.OldValue, c.NewValue))),
                 databaseSnapshots.Select(s => s.CaptureTime));
             var traceFlagEvents = ConfigChangeAttribution.GroupIntoEvents(
-                ConfigChangeDiff.DiffTraceFlagChanges(traceFlagSnapshots, context.TimeRangeStart, context.TimeRangeEnd)
+                ConfigChangeDiff.DiffTraceFlagChanges(traceFlagSnapshots, emptyTraceFlagRuns, context.TimeRangeStart, context.TimeRangeEnd)
                     .Select(c => (c.ChangeTime, ConfigChangeAttribution.SettingChange.ForTraceFlag(c.TraceFlag, c.ChangeType, c.Scope, c.PreviousStatus, c.NewStatus))),
-                traceFlagSnapshots.Select(s => s.CaptureTime));
+                traceFlagSnapshots.Select(s => s.CaptureTime).Concat(emptyTraceFlagRuns));
             var events = ConfigChangeAttribution.MergeSameConnectEvents(serverEvents.Concat(databaseEvents).Concat(traceFlagEvents));
             if (events.Count == 0)
                 return;
@@ -1415,6 +1442,26 @@ ORDER BY event_time_local";
         }
 
         return rows;
+    }
+
+    /// <summary>The times of the successful trace_flags runs that stored no row (#5633 item 19), through
+    /// <see cref="EmptyTraceFlagRunsForAttributionSql"/>. No catch of its own, for the reason <see cref="ReadDatabaseConfigSnapshotsAsync"/> states.</summary>
+    private async Task<List<DateTime>> ReadEmptyTraceFlagRunsAsync(AnalysisContext context)
+    {
+        var times = new List<DateTime>();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        using var cmd = new NpgsqlCommand(EmptyTraceFlagRunsForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeStart, DateTimeKind.Unspecified));
+        cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeEnd, DateTimeKind.Unspecified));
+
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            times.Add(reader.GetDateTime(0));
+        }
+
+        return times;
     }
 
     /// <summary>

@@ -218,6 +218,58 @@ public sealed class ConfigChangesReaderTests : IClassFixture<SharedDuckDbFixture
         Assert.Equal("No", modified.GlobalDisplay);
     }
 
+    /* #5633 item 19: a trace_flags run that finds no flag stores no rows, so the last flag being turned off was invisible. A
+       SUCCESSFUL run with rows_collected = 0 is now an empty snapshot; a failed run, or one whose count was not recorded, is not. */
+
+    [Fact]
+    public async Task TraceFlagChanges_FlagOnThenSuccessfulEmptyRun_ReportsTheFlagTurnedOff()
+    {
+        var service = new LocalDataService(_duckDb);
+        var on = Truncate(DateTime.UtcNow.AddHours(-5));
+        var empty = Truncate(DateTime.UtcNow.AddHours(-2));
+
+        await SeedTraceFlagAsync(on, 3226, status: true, isGlobal: true, isSession: false);
+        await SeedTraceFlagRunAsync(on, "SUCCESS", 1);
+        await SeedTraceFlagRunAsync(empty, "SUCCESS", 0);
+
+        var change = Assert.Single(await service.GetTraceFlagChangesAsync(ServerId));
+        Assert.Equal(3226, change.TraceFlag);
+        Assert.Equal("Trace flag 3226 DISABLED", change.ChangeDescription);
+        Assert.Equal(empty, change.ChangeTime);
+    }
+
+    [Fact]
+    public async Task TraceFlagChanges_FlagOnThenFailedOrUnrecordedRun_ReportsNoChange()
+    {
+        var service = new LocalDataService(_duckDb);
+        var on = Truncate(DateTime.UtcNow.AddHours(-5));
+
+        await SeedTraceFlagAsync(on, 3226, status: true, isGlobal: true, isSession: false);
+        await SeedTraceFlagRunAsync(on, "SUCCESS", 1);
+        await SeedTraceFlagRunAsync(Truncate(DateTime.UtcNow.AddHours(-3)), "ERROR", 0);
+        await SeedTraceFlagRunAsync(Truncate(DateTime.UtcNow.AddHours(-2)), "PERMISSIONS", 0);
+        await SeedTraceFlagRunAsync(Truncate(DateTime.UtcNow.AddHours(-1)), "SUCCESS", null);
+
+        Assert.Empty(await service.GetTraceFlagChangesAsync(ServerId));
+    }
+
+    [Fact]
+    public async Task TraceFlagChanges_SuccessfulEmptyRunThenFlagOn_ReportsTheFlagTurnedOn_EvenWhenTheEmptyRunPrecedesTheWindow()
+    {
+        var service = new LocalDataService(_duckDb);
+        var empty = Truncate(DateTime.UtcNow.AddHours(-30));
+        var on = Truncate(DateTime.UtcNow.AddHours(-3));
+
+        await SeedTraceFlagRunAsync(empty, "SUCCESS", 0);
+        await SeedTraceFlagAsync(on, 1117, status: true, isGlobal: true, isSession: false);
+        await SeedTraceFlagRunAsync(on, "SUCCESS", 1);
+
+        /* The default 24 h window starts after the empty run: the newest empty run BEFORE the window is the baseline. */
+        var change = Assert.Single(await service.GetTraceFlagChangesAsync(ServerId));
+        Assert.Equal("Trace flag 1117 ENABLED", change.ChangeDescription);
+        Assert.Equal(on, change.ChangeTime);
+    }
+
     // ── Row VM projection (server-time render, shared with the other grids) ──
 
     [Fact]
@@ -294,6 +346,23 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
         cmd.Parameters.Add(new DuckDBParameter { Value = status });
         cmd.Parameters.Add(new DuckDBParameter { Value = isGlobal });
         cmd.Parameters.Add(new DuckDBParameter { Value = isSession });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task SeedTraceFlagRunAsync(DateTime collectionTimeUtc, string status, long? rowsCollected)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected)
+VALUES ($1, $2, $3, 'trace_flags', $4, $5, $6)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "TestSrv" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = collectionTimeUtc });
+        cmd.Parameters.Add(new DuckDBParameter { Value = status });
+        cmd.Parameters.Add(new DuckDBParameter { Value = rowsCollected is null ? DBNull.Value : rowsCollected.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 }

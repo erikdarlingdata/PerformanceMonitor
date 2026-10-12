@@ -222,7 +222,9 @@ public sealed class DarlingMcpConfigHistoryTools
             var windowEndNaive = NaiveUtc(windowEnd);
             var windowStart = windowEndNaive.AddHours(-hours_back);
             var snapshots = await DarlingConfigHistoryReader.GetTraceFlagSnapshotsAsync(postgres, resolved.ServerId, cancellationToken);
-            var changes = ConfigChangeDiff.DiffTraceFlagChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
+            /* #5633 item 19: a successful run that stored no row is an empty snapshot, so the LAST flag being turned off is a change. */
+            var emptyRuns = await DarlingCollectorRunFactsReader.ReadEmptyTraceFlagRunsAsync(postgres, resolved.ServerId, windowStart, windowEndNaive, cancellationToken);
+            var changes = ConfigChangeDiff.DiffTraceFlagChanges(snapshots, emptyRuns, windowStart, UpperEdge(as_of, windowEndNaive));
             if (changes.Count == 0)
             {
                 /* Decide not_collected first: it carries no notice, so probing before it would throw the probe away. */
@@ -447,11 +449,11 @@ public sealed class DarlingMcpConfigHistoryTools
             return NoChanges(serverName, hoursBack, snapshotCount, notice);
         }
 
-        /* A run that finds no flag stores no rows, so the diff has no capture to compare and cannot show the last flag being turned off. Say so
-           rather than imply that an earlier flag is still on or that nothing ever changed. */
+        /* A run that finds no flag stores no rows; the diff reads each successful empty run as an empty capture, so a flag turned off shows as a
+           change at that run's time. Reaching this answer means none falls in the window: say that rather than imply an earlier flag is still on. */
         var message = snapshotCount == 0
             ? none + " No trace flag has ever been captured as enabled, so there is nothing to diff."
-            : none + " Earlier captures listed a flag; a run that finds none stores no rows, so turning off the last flag does not appear as a change here.";
+            : none + " Earlier captures listed a flag, and a successful run that finds none counts as an empty capture, so a flag turned off shows as a change at that run's time; none falls in this window.";
         return McpHelpers.Status(
             "empty",
             message,

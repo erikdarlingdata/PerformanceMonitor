@@ -162,7 +162,7 @@ public sealed class McpConfigHistoryTools
         var none = runFacts.NoTraceFlagsEnabled();
         return none is null
             ? $"No trace flag changes detected in the last {hoursBack}h. Config is captured on connect, so at least two snapshots are needed to detect a change."
-            : none + " A run that finds no flag stores no rows, so there is nothing to diff, and turning off the last flag does not appear as a change here.";
+            : none + " A successful run that finds no flag stores no rows and counts as an empty capture, so a flag turned off shows as a change at that run's time; none falls in this window.";
     }
 
     [McpServerTool(Name = "get_trace_flag_changes"), Description("Gets trace flag change history by diffing DBCC TRACESTATUS snapshots. Shows which trace flags were enabled or disabled, with scope (global/session) and the change time. NOTE: config is captured on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two.")]
