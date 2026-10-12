@@ -915,7 +915,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 15, 6),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 16, 6),
         /* 14th exempt since #4215: EvaluateStoreSettingsAsync's wrapper catch — the store-settings
            self-alert's report is a parameter, exactly like its StaleMute/WebTls siblings. 15th exempt
            since #4299: EvaluateRawPurgeOverHorizonAsync's wrapper catch — the raw-purge-over-horizon
@@ -1016,9 +1016,11 @@ public sealed class AlertReadFailureSurfaceTests
     /// read skips that rollup for the day, and the audit is the only place the day's thin hours are ever named.
     /// And a THIRTY-NINTH since #5641: the Runnable Queue window read ("runnable queue"), counted because a swallowed
     /// read neither fires nor clears the alert, so a population of them would leave a saturated scheduler queue
-    /// unreported for as long as the store stayed unreadable.</para>
+    /// unreported for as long as the store stayed unreadable. And a FORTIETH since #5641: the Runnable Queue card's top-request
+    /// read ("runnable queue top requests"), counted because it IS a store read the alert pass swallowed, though only
+    /// the card's request items go missing and the fire does not.</para>
     /// </summary>
-    private const int CountedSites = 39;
+    private const int CountedSites = 40;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

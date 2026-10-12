@@ -86,7 +86,7 @@ public static class IncidentDeliveryFilter
     /// <paramref name="deliverableDedupKeys"/> is <see cref="IncidentCooldown.Decision.DeliverableDedupKeys"/>:
     /// the fingerprints that were outside their own window at evaluation time. <c>null</c> means the alert
     /// carried no fingerprint at all and was evaluated on the metric-level fallback key (CPU, memory,
-    /// poison wait, tempdb, failed job, and the #2109 AG database alerts, whose context is one plain detail
+    /// poison wait, runnable queue, tempdb, failed job, and the #2109 AG database alerts, whose context is one plain detail
     /// item and no incidents) — there is nothing to filter, so the input is returned unchanged.
     /// </para>
     /// <para>
