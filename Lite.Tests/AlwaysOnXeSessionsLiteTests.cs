@@ -146,6 +146,7 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public async Task NoSessionAnywhere_CreatesTheSharedSession_StartedWithTheDatabase(AlwaysOnXeSessionKind kind)
     {
         var database = new ScriptedDatabase();
@@ -182,6 +183,7 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public async Task SharedSessionTheLoginCannotSee_IsStartedByName_ThenNeverDropped_AndTheInstallFallsBack(AlwaysOnXeSessionKind kind)
     {
         var shared = AlwaysOnXeSessions.SharedNameFor(kind);
@@ -202,6 +204,7 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public async Task StoppedSharedSession_GetsAStartByName_AndNoFallback(AlwaysOnXeSessionKind kind)
     {
         var shared = AlwaysOnXeSessions.SharedNameFor(kind);
@@ -220,6 +223,7 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public async Task InstallOnItsOwnSession_DropsItAndSwitchesBack_WhenTheSharedSessionReadsBackUsable(AlwaysOnXeSessionKind kind)
     {
         var shared = AlwaysOnXeSessions.SharedNameFor(kind);
@@ -446,6 +450,7 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public async Task ASharedSessionThatCannotBeUsed_WithNoId_SaysWhyThereIsNone_AndThatTheNextCycleTriesAgain(AlwaysOnXeSessionKind kind)
     {
         var shared = AlwaysOnXeSessions.SharedNameFor(kind);
