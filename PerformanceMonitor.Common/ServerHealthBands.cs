@@ -1720,6 +1720,35 @@ namespace PerformanceMonitor.Common
             collectorName is not null && EventCollectorNames.Contains(collectorName);
 
         /// <summary>
+        /// The collectors whose source holds nothing UNLESS something is enabled, running or configured (#5644 W13): a
+        /// trace-flag list with no flag turned on, a SQL Agent running-job snapshot with no job in flight, a plan-correction
+        /// list with no tuning recommendation, a replication-slot or standby list on a primary with none. A zero is the
+        /// normal answer for them, so <see cref="FormatOutputFinding"/> must not call a persistent zero "a look" (the
+        /// generic snapshot sentence the web audit flagged). Not event captures: nothing "occurred" - there is simply
+        /// nothing set up to report - which is why they are not in <see cref="EventCollectorNames"/> and why the
+        /// event sentence's "stores a row only when an event occurs" is not said of them. Same polarity rule as the event
+        /// list: a name is added only for a source that is genuinely empty by default, so an omission fails loud (the
+        /// "needs a look" sentence) rather than reassuring over a broken zero. Pinned against the catalog's real names by
+        /// both suites. The AG state collectors are handled separately (a not-applicable row where Always On is off).
+        /// </summary>
+        private static readonly HashSet<string> ZeroIsNormalCollectorNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "trace_flags",
+            "running_jobs",
+            "plan_correction",
+            "pg_replication_slots",
+            "pg_replication_stats",
+        };
+
+        /// <summary>True when a zero-row window is the normal answer for this collector's source (<see cref="ZeroIsNormalCollectorNames"/>, #5644).
+        /// False for every other collector and for a null name.</summary>
+        public static bool IsZeroNormalCollector(string? collectorName) =>
+            collectorName is not null && ZeroIsNormalCollectorNames.Contains(collectorName);
+
+        /// <summary>The names in <see cref="ZeroIsNormalCollectorNames"/>, so both suites can pin them against the catalog.</summary>
+        public static IReadOnlyCollection<string> ZeroIsNormalCollectorNamesForPinning => ZeroIsNormalCollectorNames;
+
+        /// <summary>
         /// The names in <see cref="EventCollectorNames"/>, exposed read-only so both suites can pin the set
         /// against the catalog's real collector names (every entry must be a collector that exists) and
         /// against the four the <c>get_collection_health</c> description has always named as its examples.
@@ -2767,7 +2796,8 @@ namespace PerformanceMonitor.Common
             bool deniedSinceLastSuccess,
             long noteCount,
             long faultedRuns,
-            bool isEventCollector)
+            bool isEventCollector,
+            bool isZeroNormal = false)
         {
             if (rowsStored > 0 || totalRuns <= 0)
             {
@@ -2859,6 +2889,24 @@ namespace PerformanceMonitor.Common
                     + "long completion, a blocking chain, a held xmin - so zero is the correct resting state "
                     + "on a well-behaved target and needs no action. No run recorded a note or a fault, "
                     + "which is what that reading rests on. "
+                    + ZeroOutputCaveat,
+                    totalRuns);
+            }
+
+            /* #5644 W13: a source that is empty unless something is enabled or running (ZeroIsNormalCollectorNames). Same
+               preconditions as the event sentence above (no denial, no fault, no note), so the reading rests on the same
+               facts; what differs is the reason a zero is fine - there is nothing set up to report - and it does not
+               claim the collector waits for an event. */
+            if (isZeroNormal)
+            {
+                return string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Stored 0 rows across {0:N0} runs with no current denial (denied_since_last_success is "
+                    + "false), so this collector read and found nothing rather than being unable to read. "
+                    + "Its source is empty unless something is enabled or running - a trace flag turned on, a "
+                    + "job in progress, a tuning recommendation, a replication slot - so zero is a normal answer "
+                    + "and needs no action. No run recorded a note or a fault, which is what that reading rests "
+                    + "on. "
                     + ZeroOutputCaveat,
                     totalRuns);
             }

@@ -220,10 +220,11 @@ public sealed class CollectionOutputBesideCostTests
 
         /* The precondition, named so a signature change reports itself rather than turning the assertions
            below into a vacuous pass over a list that no longer means what this test thinks. */
-        Assert.Equal(6, parameters.Length);
+        /* #5644: the zero-is-normal bool joined the event bool, computed from a name list the same way. */
+        Assert.Equal(7, parameters.Length);
 
         Assert.Equal(
-            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount", "faultedRuns", "isEventCollector" },
+            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount", "faultedRuns", "isEventCollector", "isZeroNormal" },
             parameters.Select(p => p.Name!).ToArray());
 
         Assert.DoesNotContain(parameters, p => p.ParameterType == typeof(string));

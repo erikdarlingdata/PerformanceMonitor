@@ -342,7 +342,25 @@ AND   {SqlServerCollectedTargetSql}";
     /// <para>$3 is the partition-column bound the event window cannot supply (#3895): without it both scans
     /// open every retained chunk to count the last hour. It cannot drop a row the window wants —
     /// <see cref="EventWindowFloor"/> says why.</para></summary>
-    public const string FleetBlockingSql = @"
+    /* #5644 W1: each side counts WAITS (a blocked session, its blocker and the wait's derived start), not report
+       rows, with the longest wait time as its max: SQL Server writes a report for a still-blocked session every
+       threshold seconds, so one one-minute wait was about eleven tile counts. BlockingWaits.WaitsCteSql is the
+       one definition the alert engine and the analysis fact share. The DMV side applies the same rule to its
+       snapshot rows (a wait seen in several snapshots is one wait). */
+    public static readonly string FleetBlockingSql = @"
+WITH " + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "xe_waits",
+        @"SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
+    FROM v_blocked_process_reports
+    WHERE event_time >= $1
+    AND   event_time <= $2
+    AND   collection_time >= $3", new[] { "server_id" }) + "," + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "dmv_waits",
+        @"SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
+    FROM v_dmv_blocking_snapshots
+    WHERE event_time >= $1
+    AND   event_time <= $2
+    AND   collection_time >= $3", new[] { "server_id" }) + @"
 SELECT
     COALESCE(xe.server_id, dmv.server_id) AS server_id,
     COALESCE(xe.cnt, 0) AS xe_count,
@@ -352,19 +370,13 @@ SELECT
 FROM
 (
     SELECT server_id, COUNT(*) AS cnt, MAX(wait_time_ms) AS max_wait
-    FROM v_blocked_process_reports
-    WHERE event_time >= $1
-    AND   event_time <= $2
-    AND   collection_time >= $3
+    FROM xe_waits
     GROUP BY server_id
 ) AS xe
 FULL OUTER JOIN
 (
     SELECT server_id, COUNT(*) AS cnt, MAX(wait_time_ms) AS max_wait
-    FROM v_dmv_blocking_snapshots
-    WHERE event_time >= $1
-    AND   event_time <= $2
-    AND   collection_time >= $3
+    FROM dmv_waits
     GROUP BY server_id
 ) AS dmv ON xe.server_id = dmv.server_id";
 

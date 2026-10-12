@@ -179,6 +179,30 @@ export function plainText(text) {
   t = t.replace(/\banswered_only: true\b/g, "the answered-only ranking");
   t = t.replace(/\banswered_only\b/g, "the answered-only ranking");
 
+  /* #5644 W8: clauses that tell an MCP client which parameter to pass. The page has no such control, so a clause that points
+     at one is dropped (the sentence before it still stands) and a filter name is said as the page names it. hours_back and
+     days_back are already put into words by namedTokenText, which runs first. */
+  /* A trend's width note: "...near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer
+     points." The page picks the width, so only the narrower range is left to say. */
+  t = t.replace(/pass bucket_minutes \(1-\d+\) for another width, or /g, "");
+  /* "raise limit": the pages have no row-limit control. "...filter - raise limit to see more." and "...returned; raise limit
+     (now 50) for more." lose the clause; ", or raise limit," and ", and raise limit if none ... shows one" lose theirs. */
+  t = t.replace(/\s*[;—–-]+\s*raise (?:the )?limit(?: \(now [\d,]+\))?(?: (?:to see|for) (?:more|the rest(?: of the rows)?))?(?=\.)/g, "");
+  t = t.replace(/Scope by server_name(?:, or raise limit,)? (to see the rest|to see them)\./g, "Select a single server $1.");
+  t = t.replace(/, or raise (?:the )?limit(?=[.,])/g, "");
+  t = t.replace(/, and raise limit if none of the databases returned shows one/g, "");
+  t = t.replace(/\bpass database_name to ask about one\b/g, "filter by database to ask about one");
+  t = t.replace(/\bpass database_name to chart one database per file\b/g, "choose a database to chart its files");
+  t = t.replace(/\bomit database_name for every database\b/g, "clear the database filter for every database");
+  /* The filters a "matched ..." sentence names: "matched database_name 'x' with blocking_only with wait_type 'y'". */
+  t = t.replace(/\bdatabase_name '/g, "database '");
+  t = t.replace(/\bwait_type '/g, "wait type '");
+  t = t.replace(/\bcollector_name '/g, "collector '");
+  t = t.replace(/\bmin_duration_ms (?=\d)/g, "minimum duration (ms) ");
+  t = t.replace(/\bblocking_only\b/g, "blocking queries only");
+  /* The system-health "events were captured, none qualified" closing. */
+  t = t.replace(/so this is the healthy answer for this read rather than missing data/g, "so this is a normal result, not missing data");
+
   /* A tool name: use get_collection_health -> use Collection Health. Only a real tool name; any other get_ word is the
      reader's own text (an object, a server) and stays as written. */
   t = t.replace(/(?<![\w.])get_([a-z0-9]+(?:_[a-z0-9]+)*)(?![\w])/g, (m, rest) => (TOOL_NAME_SET.has(m) ? toolWords(rest) : m));

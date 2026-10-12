@@ -159,12 +159,20 @@ LIMIT 1";
     /// and probe the window's chunks instead of every retained one. The two "ever" reads keep no bound:
     /// they ask for the newest event in all of history, which a floor would change the answer to.</para>
     /// </summary>
-    public const string ServerSummaryBlockingSql = @"
+    /* #5644 W1: the two counts are WAITS (BlockingWaits.WaitsCteSql), not report rows, as the fleet tile's are. */
+    public static readonly string ServerSummaryBlockingSql = @"
+WITH " + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "xe_waits",
+        @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_blocked_process_reports
+    WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + "," + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "dmv_waits",
+        @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + @"
 SELECT
-    (SELECT COUNT(*)          FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3),
-    (SELECT MAX(wait_time_ms) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3),
-    (SELECT COUNT(*)          FROM v_dmv_blocking_snapshots   WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3),
-    (SELECT MAX(wait_time_ms) FROM v_dmv_blocking_snapshots   WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3),
+    (SELECT COUNT(*)          FROM xe_waits),
+    (SELECT MAX(wait_time_ms) FROM xe_waits),
+    (SELECT COUNT(*)          FROM dmv_waits),
+    (SELECT MAX(wait_time_ms) FROM dmv_waits),
     (SELECT MAX(event_time)   FROM v_blocked_process_reports WHERE server_id = $1),
     (SELECT MAX(event_time)   FROM v_dmv_blocking_snapshots   WHERE server_id = $1)";
 
