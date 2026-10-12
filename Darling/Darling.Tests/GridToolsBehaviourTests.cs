@@ -93,7 +93,8 @@ public sealed class GridToolsBehaviourTests
         var texts = r.GetProperty("texts").EnumerateArray().Select(e => e.GetString()!).ToArray();
         Assert.Equal(3, texts.Length);
         Assert.Equal("5", texts[0]);
-        Assert.StartsWith("=SUM(A1)\t5\t", texts[1]);
+        // Copy row writes formula-looking text as text, as the desktop apps do; Copy cell (texts[0]) stays raw.
+        Assert.StartsWith("'=SUM(A1)\t5\t", texts[1]);
         var all = texts[2].Split('\n');
         Assert.Equal("Name\tN\tWhen\tTags", all[0]);
         // Sorted ascending by N, with the thousands separator the grid shows (the CSV carries 1234567).
@@ -133,6 +134,25 @@ public sealed class GridToolsBehaviourTests
             r.GetProperty("field").EnumerateArray().Select(e => e.GetString()!).ToArray());
         Assert.Equal("wait-stats-top-10-20260105-143007.csv", Str(r, "name"));
         Assert.Equal("table-20260105-143007.csv", Str(r, "nameEmpty"));
+    }
+
+    [Fact]
+    public void CopyRowAndCopyTable_WriteFormulaLookingTextAsText_AndKeepOneCellOneField()
+    {
+        var r = Run("tsvFormulas");
+        var texts = r.GetProperty("texts").EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+        // Copy cell stays raw: query text pasted into SSMS keeps its first character.
+        Assert.Equal("=cmd", texts[0]);
+        // Copy row: a leading formula character gets an apostrophe; a line break or tab before one is a space first.
+        Assert.Equal("'=cmd\t-1,234.5\t-7", texts[1]);
+        Assert.Equal("x =HYPERLINK(1)\t-2\t+3", texts[2]);
+        // Copy table: the header, then one line per row, three tab-separated fields on every line.
+        var all = texts[3].Split('\n');
+        Assert.Equal(new[] { "Q\tA\tB", "'=cmd\t-1,234.5\t-7", "x =HYPERLINK(1)\t-2\t+3", "'+1 =2\t1\t2", "'@SUM(1)\t1\t2", "'-cmd\t1\t2" }, all);
+        Assert.All(all, line => Assert.Equal(3, line.Split('\t').Length));
+        Assert.Equal(new[] { "'=1", "'+x", "'-x", "'@y", " =1", "-5", "-1,234.5", "-1e-3", "'-5x", "x =1" },
+            r.GetProperty("cells").EnumerateArray().Select(e => e.GetString()!).ToArray());
     }
 
     [Fact]

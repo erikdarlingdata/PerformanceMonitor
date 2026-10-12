@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+
 namespace PerformanceMonitor.Ui;
 
 /// <summary>
@@ -39,6 +41,52 @@ public static class SpreadsheetText
         }
 
         return IsFormulaStart(text[0]) && !IsPlainNumber(text) ? "'" + text : text;
+    }
+
+    /// <summary>
+    /// A text cell as the tab-separated copies (Copy Row, Copy All Rows, the keyboard copy) write it: every run of
+    /// tabs and line breaks becomes one space, then the cell goes through <see cref="Neutralize"/>. A tab or a line
+    /// break inside a cell would otherwise start a new cell or a new row when the text is pasted into a
+    /// spreadsheet, and the new piece would not carry the leading apostrophe. Mirrors the web grid's Copy row.
+    /// </summary>
+    public static string NeutralizeClipboardCell(string? text) => Neutralize(CollapseLineBreaks(text));
+
+    /// <summary>
+    /// Replaces every run of tabs, carriage returns and line feeds with one space. Text with none of them comes
+    /// back as the same instance; null becomes the empty string.
+    /// </summary>
+    public static string CollapseLineBreaks(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return string.Empty;
+        }
+
+        if (text.AsSpan().IndexOfAny('\t', '\r', '\n') < 0)
+        {
+            return text;
+        }
+
+        var sb = new System.Text.StringBuilder(text.Length);
+        var inRun = false;
+        foreach (var c in text)
+        {
+            if (c is '\t' or '\r' or '\n')
+            {
+                if (!inRun)
+                {
+                    sb.Append(' ');
+                    inRun = true;
+                }
+
+                continue;
+            }
+
+            inRun = false;
+            sb.Append(c);
+        }
+
+        return sb.ToString();
     }
 
     /// <summary>

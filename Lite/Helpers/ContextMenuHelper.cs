@@ -57,7 +57,8 @@ public static class ContextMenuHelper
     }
 
     /* One cell is copied exactly as it is: it is often query text on its way into SSMS, where a leading
-       apostrophe would break it. Copy Row, Copy All Rows and the CSV export still neutralize. */
+       apostrophe would break it. Copy Row and Copy All Rows also turn a tab or line break inside a cell into a space and neutralize; the CSV
+       export quotes such a cell and neutralizes. */
     public static void CopyCell(object sender)
     {
         var grid = FindParentDataGrid(sender);
@@ -75,7 +76,7 @@ public static class ContextMenuHelper
         var sb = new StringBuilder();
         foreach (var col in grid.Columns)
         {
-            sb.Append(GetCellValue(col, grid.CurrentItem));
+            sb.Append(DataGridExport.GetClipboardCellValue(col, grid.CurrentItem));
             sb.Append('\t');
         }
         ClipboardText.TrySetDataObject(sb.ToString().TrimEnd('\t'));
@@ -99,7 +100,7 @@ public static class ContextMenuHelper
         {
             foreach (var col in grid.Columns)
             {
-                sb.Append(GetCellValue(col, item));
+                sb.Append(DataGridExport.GetClipboardCellValue(col, item));
                 sb.Append('\t');
             }
             sb.AppendLine();

@@ -14,22 +14,32 @@ export function plainCell(text) {
   return String(text ?? "").replace(/[\t\r\n]+/g, " ");
 }
 
-/** Rows of already-formatted cells as tab-separated lines (the form a spreadsheet pastes into columns). */
-export function toTsv(rows) {
-  return rows.map((r) => r.map(plainCell).join("\t")).join("\n");
-}
-
 /* A spreadsheet runs a cell that starts with one of these as a formula. A leading apostrophe makes it text. A real
    number is left alone (a negative value is data, not a formula), and so is a string that is only a number
-   ("-5", "+3", "1e-3"); any other string is neutralised. */
+   ("-5", "+3", "1e-3", "-1,234.5"); any other string is neutralised. */
 const FORMULA_LEAD = /^[=+\-@\t\r]/;
-const PLAIN_NUMBER = /^[+-]?\d+(\.\d+)?([eE][+-]?\d+)?$/;
+const PLAIN_NUMBER = /^[+-]?\d[\d,]*(\.\d+)?([eE][+-]?\d+)?$/;
+
+/** The text with a leading apostrophe when a spreadsheet would read it as a formula; any other text comes back as it is. */
+export function neutralise(s) {
+  return FORMULA_LEAD.test(s) && !PLAIN_NUMBER.test(s) ? "'" + s : s;
+}
+
+/** One cell as Copy row and Copy table write it: line breaks collapsed to a space first, then written as text when it starts like a formula. */
+export function tsvCell(text) {
+  return neutralise(plainCell(text));
+}
+
+/** Rows of already-formatted cells as tab-separated lines (the form a spreadsheet pastes into columns). */
+export function toTsv(rows) {
+  return rows.map((r) => r.map(tsvCell).join("\t")).join("\n");
+}
 
 /** One CSV field, RFC 4180: quoted when it holds a comma, quote, CR or LF, with quotes doubled. */
 export function csvField(v) {
   if (v == null) return "";
   let s = v instanceof Date ? v.toISOString() : String(v);
-  if (typeof v === "string" && FORMULA_LEAD.test(s) && !PLAIN_NUMBER.test(s)) s = "'" + s;
+  if (typeof v === "string") s = neutralise(s);
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 

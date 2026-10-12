@@ -243,4 +243,128 @@ public sealed class SpreadsheetTextTests
 
         Assert.Contains(",'=1+1,", line);
     }
+
+    [Theory]
+    [InlineData("a\t=1", "a =1")]
+    [InlineData("a\n=1", "a =1")]
+    [InlineData("a\r\n+1", "a +1")]
+    [InlineData("a\r\n\r\n-1", "a -1")]
+    [InlineData("a\t\t@SUM(1)", "a @SUM(1)")]
+    [InlineData("\t=1", " =1")]
+    [InlineData("\r\n=1", " =1")]
+    [InlineData("=1\n=2", "'=1 =2")]
+    [InlineData("plain", "plain")]
+    public void ClipboardCell_CollapsesTabsAndLineBreaksToOneSpace_BeforeTheFormulaRule(string text, string expected)
+    {
+        Assert.Equal(expected, SpreadsheetText.NeutralizeClipboardCell(text));
+    }
+
+    [Theory]
+    [InlineData("SELECT 1 /*\n=HYPERLINK(\"https://x/\",\"open\")\n*/")]
+    [InlineData("x\r\n=1+1")]
+    [InlineData("x\r\n+1")]
+    [InlineData("x\r\n-1")]
+    [InlineData("x\r\n@SUM(1)")]
+    [InlineData("x\t=1+1")]
+    [InlineData("x\t+1")]
+    [InlineData("x\t-1")]
+    [InlineData("x\t@SUM(1)")]
+    [InlineData("x\r=1+1")]
+    [InlineData("\t=1+1")]
+    [InlineData("\r\n@SUM(1)")]
+    public void RowCopies_KeepOneCellOneField_AndNoFieldStartsLikeAFormula(string text)
+    {
+        var (copyAll, rowValues) = RunSta(() =>
+        {
+            var grid = BuildGridWithTexts(text);
+            var first = grid.Items.Cast<object>().First();
+            return (DataGridExport.BuildClipboardText(grid), DataGridExport.GetClipboardRowValues(grid, first));
+        });
+
+        // Copy All Rows: header line plus one line, two fields each. A tab or line break inside the cell would add fields or lines.
+        var lines = copyAll.TrimEnd('\r', '\n').Split("\r\n");
+        Assert.Equal(2, lines.Length);
+        Assert.All(lines, l => Assert.Equal(2, l.Split('\t').Length));
+        AssertNoFormulaField(copyAll.Split('\t', '\r', '\n'));
+
+        // Copy Row: the same two fields.
+        Assert.Equal(2, rowValues.Count);
+        AssertNoFormulaField(rowValues);
+        Assert.Equal(rowValues[0], lines[1].Split('\t')[0]);
+    }
+
+    private static void AssertNoFormulaField(System.Collections.Generic.IEnumerable<string> fields)
+    {
+        foreach (var field in fields)
+        {
+            if (field.Length == 0 || int.TryParse(field, out _)) continue;
+            Assert.DoesNotContain(field[0], "=+-@\t\r");
+        }
+    }
+
+    [Fact]
+    public void ClipboardCell_LeavesNumbersAndTheCsvExportAlone()
+    {
+        Assert.Equal("-5", DataGridExport.FormatForClipboard(-5));
+        Assert.Equal("-1,234.5", SpreadsheetText.NeutralizeClipboardCell("-1,234.5"));
+
+        // The CSV export keeps the line break inside a quoted field and still neutralizes the start.
+        var csv = RunSta(() => DataGridExport.BuildCsv(BuildGridWithTexts("a\n=1", "=1\r\nb"), ",").Replace("\r\n", "\n"));
+        Assert.Equal("Name,Value\n\"a\n=1\",-1\n\"'=1\nb\",-2\n", csv);
+    }
+
+    [Fact]
+    public void KeyboardCopy_CollapsesTabsAndLineBreaksInsideATextCell()
+    {
+        var content = RunSta(() =>
+        {
+            var grid = BuildGrid();
+            var item = grid.Items.Cast<object>().First();
+            var data = new DataGridRowClipboardEventArgs(item, 0, 1, isColumnHeadersRow: false);
+            data.ClipboardRowContent.Add(new DataGridClipboardCellContent(item, grid.Columns[0], "x\n=1+1"));
+            data.ClipboardRowContent.Add(new DataGridClipboardCellContent(item, grid.Columns[0], "x\t+1"));
+            data.ClipboardRowContent.Add(new DataGridClipboardCellContent(item, grid.Columns[0], "\r\n@SUM(1)"));
+            data.ClipboardRowContent.Add(new DataGridClipboardCellContent(item, grid.Columns[1], -5));
+            DataGridClipboardBehavior.FixHeaderCopy(grid, data);
+            return data.ClipboardRowContent.Select(c => c.Content).ToArray();
+        });
+
+        Assert.Equal(new object?[] { "x =1+1", "x +1", " @SUM(1)", -5 }, content);
+    }
+
+    [Fact]
+    public void RowCopies_ReadCellsThroughTheClipboardReader_InBothImplementations()
+    {
+        var ui = ParitySource.ReadFile("PerformanceMonitor.Ui/DataGridExport.cs");
+        var copyRow = ui.Substring(ui.IndexOf("public static void CopyRow(", StringComparison.Ordinal));
+        copyRow = copyRow.Substring(0, copyRow.IndexOf("public static void CopyAllRows(", StringComparison.Ordinal));
+        Assert.Contains("GetClipboardRowValues(", copyRow);
+        Assert.DoesNotContain("GetRowValues(", copyRow);
+
+        var build = ui.Substring(ui.IndexOf("public static string BuildClipboardText(", StringComparison.Ordinal));
+        build = build.Substring(0, build.IndexOf("public static string BuildCsv(", StringComparison.Ordinal));
+        Assert.Contains("GetClipboardRowValues(", build);
+        Assert.DoesNotContain("GetRowValues(", build);
+
+        var lite = ParitySource.ReadFile("Lite/Helpers/ContextMenuHelper.cs");
+        var rows = lite.Substring(lite.IndexOf("public static void CopyRow(", StringComparison.Ordinal));
+        rows = rows.Substring(0, rows.IndexOf("public static void ExportToCsv(", StringComparison.Ordinal));
+        Assert.Equal(2, rows.Split("GetClipboardCellValue(").Length - 1);
+        Assert.DoesNotContain("GetCellValue(", rows);
+    }
+
+    [Theory]
+    [InlineData("a,b", ";", "\"a,b\"")]
+    [InlineData("a;b", ",", "\"a;b\"")]
+    [InlineData("a\tb", ",", "\"a\tb\"")]
+    [InlineData("a|b", "|", "\"a|b\"")]
+    [InlineData("a\"b", ";", "\"a\"\"b\"")]
+    [InlineData("a\nb", ";", "\"a\nb\"")]
+    [InlineData("a\rb", "\t", "\"a\rb\"")]
+    [InlineData("plain", ";", "plain")]
+    [InlineData("", ";", "")]
+    public void CsvEscape_QuotesTheSeparatorQuoteBreakAndTheCommonDelimiters_WhateverTheSeparatorIs(string value, string separator, string expected)
+    {
+        Assert.Equal(expected, DataGridExport.CsvEscape(value, separator));
+    }
 }
