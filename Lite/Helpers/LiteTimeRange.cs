@@ -87,7 +87,6 @@ internal static class LiteTimeRange
         return BoundsOf(range, nowUtc);
     }
 
-    /// <summary><see cref="BoundsOf(TimeRangePicker, int, DateTime)"/> for a range already resolved.</summary>
     /// <summary>The Job History tab's choices key for the picked window (<see cref="PerformanceMonitor.Common.JobHistoryChoicesKey"/>):
     /// a relative preset (and the 24-hour fallback a picker with no range gets) slides its start with now, so it is keyed by its
     /// length, taken from the spec because the span of the resolved instants differs by a few milliseconds between two resolves.
@@ -106,6 +105,7 @@ internal static class LiteTimeRange
             : PerformanceMonitor.Common.JobHistoryChoicesKey.For(false, startUtc, endUtc ?? nowUtc, endUtc is null, serverId);
     }
 
+    /// <summary><see cref="BoundsOf(TimeRangePicker, int, DateTime)"/> for a range already resolved.</summary>
     internal static (DateTime startUtc, DateTime? endUtc) BoundsOf(ResolvedTimeRange range, DateTime nowUtc)
     {
         if (range.Spec.WholeHours is { } hours && hours > 0)
