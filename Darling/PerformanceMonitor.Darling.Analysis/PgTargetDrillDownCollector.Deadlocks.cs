@@ -218,14 +218,13 @@ LIMIT $4";
                    whichever way round. The flags say whether the caps cut what the reader is shown. */
                 var latestPid = reader.IsDBNull(8) ? (int?)null : Convert.ToInt32(reader.GetValue(8));
                 var latestHash = reader.IsDBNull(7) ? null : reader.GetString(7);
-                var latestRaw = !reader.IsDBNull(17) && reader.GetBoolean(17);
                 var graphMasked = PgDeadlockLogParser.NormalizeGraph(reader.IsDBNull(11) ? null : reader.GetString(11));
-                /* A row stored before #4005 holds its statement raw; the victim shown is then the normalized graph's
-                   own (PgDeadlockLogParser.VictimStatementOf), as the collector stores it since, and never the stored
-                   statement normalized alone, which can keep a value the graph withholds. A row in #4005's form
-                   stores the graph's already. Both go through the statement filter last. */
-                var victimNormalized = SensitiveStatements.Text(latestRaw
-                    ? PgDeadlockLogParser.VictimStatementOf(graphMasked?.TrimEnd('\n'), latestPid)
+                /* The victim shown is the normalized graph's own (PgDeadlockLogParser.VictimStatementOf), whatever
+                   state the row's hash is in and whichever build stored it: the stored statement normalized alone can
+                   keep a value the graph withholds, and a row an earlier build's pass rewrote holds it so. Only a row
+                   with no stored graph falls back to its statement. Both go through the statement filter last. */
+                var victimNormalized = SensitiveStatements.Text(graphMasked is not null
+                    ? PgDeadlockLogParser.VictimStatementOf(graphMasked.TrimEnd('\n'), latestPid)
                     : PgDeadlockLogParser.NormalizeStatement(reader.IsDBNull(9) ? null : reader.GetString(9)));
                 var victimStatement = victimNormalized is { Length: > StatementTextCap } ? victimNormalized[..StatementTextCap] : victimNormalized;
                 var graphNormalized = SensitiveStatements.Text(graphMasked);
@@ -353,18 +352,21 @@ LIMIT $4";
     /// every one is replaced by the <see cref="PgDeadlockLogParser.ReportIdentity"/> of the exemplar's latest
     /// report, which <c>get_pg_deadlock_detail</c> takes. Idempotent, and a no-op on a finding with no exemplars
     /// and on one this build wrote, whose section says <c>sql_normalized</c>.
+    /// <para><paramref name="restamped"/> reads a section that says <c>sql_normalized</c> all the same: the repair pass
+    /// (<c>PgDeadlockRemask</c>) sets it, once per store, because an earlier build's pass stamped sections whose
+    /// victim statements it had normalized alone, and the stamp cannot tell those from this build's.</para>
     /// <para>Returns whether it rewrote the section. <paramref name="markNormalized"/> stamps the rewritten section
     /// <c>sql_normalized</c>, for the pass that writes it back to the store (#4012): its text is then what this
     /// build writes, and a read or a later pass leaves it as it is.</para>
     /// </summary>
-    internal static bool NormalizeStoredDeadlockExemplars(AnalysisFinding finding, bool markNormalized = false)
+    internal static bool NormalizeStoredDeadlockExemplars(AnalysisFinding finding, bool markNormalized = false, bool restamped = false)
     {
         if (finding.DrillDown is null
             || !finding.DrillDown.TryGetValue(DeadlockExemplarsSection, out var section)
             || section is not JsonElement { ValueKind: JsonValueKind.Object } element
             || JsonNode.Parse(element.GetRawText()) is not JsonObject node
             || node["exemplars"] is not JsonArray exemplars
-            || (node["sql_normalized"] is JsonValue marker && marker.TryGetValue<bool>(out var normalized) && normalized))
+            || (!restamped && node["sql_normalized"] is JsonValue marker && marker.TryGetValue<bool>(out var normalized) && normalized))
             return false;
 
         var fingerprints = new List<(string Stored, string Normalized)>();

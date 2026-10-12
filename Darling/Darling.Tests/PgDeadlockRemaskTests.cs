@@ -298,7 +298,7 @@ public sealed class PgDeadlockRemaskTests
         Assert.True(AlertContextSerializer.TryDeserialize(gone.Value.ContextJson, out var context));
         Assert.Equal(s_key.DeadlockAlertKey(goneHash), context.Incidents![0].DedupKey);
         Assert.Equal(s_key.DeadlockAlertKey(goneHash[..31] + "0"), context.Incidents[1].DedupKey);
-        Assert.Equal("UPDATE creds SET pw = '?' WHERE id = ?", Assert.Single(context.Incidents[0].InvolvedObjects));
+        Assert.Equal(PgLogTextRedactor.WithheldStatement, Assert.Single(context.Incidents[0].InvolvedObjects));
         Assert.Equal("victim pid 3101, 2 participant(s)", Assert.Single(context.Incidents[1].InvolvedObjects));
         AssertNoSecret(gone.Value.ContextJson);
         Assert.DoesNotContain(goneHash, gone.Value.ContextJson, StringComparison.Ordinal);
@@ -965,7 +965,7 @@ public sealed class PgDeadlockRemaskTests
         Assert.Equal(s_key.DeadlockAlertKey(goneHash), dto.Incidents[1].DedupKey);
         Assert.Equal(Marked(AlertContextSerializer.Serialize(new AlertContext
         {
-            Incidents = [built, new AlertIncident(s_key.DeadlockAlertKey(goneHash), ["UPDATE creds SET pw = '?' WHERE id = ?"])],
+            Incidents = [built, new AlertIncident(s_key.DeadlockAlertKey(goneHash), [PgLogTextRedactor.WithheldStatement])],
         }), 0), first.Value.ContextJson);
         Assert.DoesNotContain(rawHash, first.Value.ContextJson, StringComparison.Ordinal);
         Assert.DoesNotContain(goneHash, first.Value.ContextJson, StringComparison.Ordinal);
@@ -996,7 +996,12 @@ public sealed class PgDeadlockRemaskTests
         var rebuiltBy4022 = AlertContextSerializer.Serialize(new AlertContext { Incidents = [built] });
         static PgDeadlockRemask.ResolvedReport Missing(string key) => new(PgDeadlockRemask.ReportState.Missing, null);
 
-        Assert.Null(PgDeadlockRemask.RemaskAlert(rebuiltBy4022, null, Missing, s_key, reportsMayBeRaw: true));
+        /* While a report may be raw, the key is left as it is; the statement, which nothing can be re-derived from, is
+           withheld whatever rule wrote it (the repair pass rebuilds it from the report's graph once it is found). */
+        var early = PgDeadlockRemask.RemaskAlert(rebuiltBy4022, null, Missing, s_key, reportsMayBeRaw: true);
+        Assert.NotNull(early);
+        Assert.Contains(built.DedupKey, early.Value.ContextJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(s_key.DeadlockAlertKey(built.DedupKey), early.Value.ContextJson, StringComparison.Ordinal);
 
         var keyed = PgDeadlockRemask.RemaskAlert(rebuiltBy4022, null, Missing, s_key);
         Assert.NotNull(keyed);

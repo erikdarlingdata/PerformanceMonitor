@@ -105,9 +105,6 @@ public sealed class PgLogValueSlotTests
         }
 
         /* A CSV value holding a newline runs onto the next line: nothing after the frame's head is trusted. */
-        Assert.Equal(
-            "COPY t, line 1: \"4111,Jane\n\tSQL statement \"SELECT 1\"",
-            "COPY t, line 1: \"4111,Jane\n\tSQL statement \"SELECT 1\"");
         Assert.Equal(W, PgLogTextRedactor.RedactContext("COPY t, line 1: \"4111,Jane\n\tSQL statement \"SELECT 1\""));
         Assert.Equal(
             "PL/pgSQL function g() line 2 at PERFORM\n\t" + W,

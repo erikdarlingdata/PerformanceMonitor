@@ -10738,6 +10738,32 @@ AND   j.hypertable_name = '{relation}'", connection))
                 }
             }
 
+            /* The deadlock text an earlier build's pass rewrote is brought to the current rules once per store
+               (PgDeadlockRemask.RulesVersion); the stage waits for the pass above to finish its walks, and the store's
+               marker keeps it from running again. Its own slice budget and catch, as the pass above has. */
+            if (_pgDeadlockRemask.RepairPending)
+            {
+                if (connection.State != ConnectionState.Open)
+                {
+                    await connection.CloseAsync();
+                    await connection.OpenAsync(budget.Token);
+                }
+
+                using var repairBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+                repairBudget.CancelAfter(PgDeadlockRemask.SliceBudget);
+                try
+                {
+                    await PgDeadlockRemask.RunRepairAsync(connection, _pgDeadlockRemask, _logger, repairBudget.Token);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException
+                    || (repairBudget.IsCancellationRequested && !budget.IsCancellationRequested))
+                {
+                    _logger.LogWarning(
+                        "PostgreSQL deadlocks: repairing stored deadlock text failed, and is retried next hour: {Message}",
+                        ex.Message);
+                }
+            }
+
             /* #5097: the store's own statement history, on this same hourly tick so it lands on the census' grid.
                ITS OWN catch, and a Warning once: a store whose owner cannot run the reader function (a bring-your-own
                store without the extension) repeats the same failure hourly, and none of it may cost the
