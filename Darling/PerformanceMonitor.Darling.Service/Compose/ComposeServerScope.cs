@@ -13,6 +13,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -29,6 +31,65 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 internal static class ComposeServerScope
 {
+    /// <summary>
+    /// #5633 item 17: maps each scoped name to the registry's stored <c>server_name</c> through the resolver every other server-scoped tool
+    /// uses (exact, then display name, then partial, case-insensitive), so a panel spec naming a server by its display name or a
+    /// case-different spelling reads that server instead of returning no rows. A name the resolver cannot place stays as written: it is
+    /// either a removed or disabled server whose history is still stored (#5525) or a name nobody registered, which the run's
+    /// unknown-server answer (W13) names when nothing is stored under it. A name that matches SEVERAL servers is refused with the
+    /// resolver's own sentence, because reading an arbitrary one of them would be a silent guess. The registry read faulting leaves the
+    /// scope untouched (the same fail-open the unregistered-name lookup has).
+    /// </summary>
+    public static async Task<(List<string>? Scope, string? Refusal)> ResolveNamesAsync(
+        NpgsqlDataSource postgres, List<string>? scope, CancellationToken cancellationToken, ILogger? logger = null)
+    {
+        if (scope is not { Count: > 0 })
+        {
+            return (scope, null);
+        }
+
+        var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
+        if (fault is not null)
+        {
+            logger?.LogWarning("Compose server-scope resolution skipped: {Fault}", fault);
+            return (scope, null);
+        }
+
+        return ResolveNames(scope, servers);
+    }
+
+    /// <summary>The pure half of <see cref="ResolveNamesAsync"/>: the scope with each name placed in <paramref name="servers"/>, or the
+    /// resolver's refusal for a name that is ambiguous.</summary>
+    internal static (List<string> Scope, string? Refusal) ResolveNames(
+        IReadOnlyList<string> scope, IReadOnlyList<DarlingServerResolver.RegisteredServer> servers)
+    {
+        var resolvedNames = new List<string>(scope.Count);
+        foreach (var name in scope)
+        {
+            if (servers.Any(s => string.Equals(s.ServerName, name, StringComparison.Ordinal)))
+            {
+                resolvedNames.Add(name);
+                continue;
+            }
+
+            var (resolved, error) = DarlingServerResolver.ResolveOrError(servers, name);
+            if (error is null)
+            {
+                resolvedNames.Add(resolved.ServerName);
+            }
+            else if (McpHelpers.ErrorMessageOf(error).StartsWith("Could not resolve server", StringComparison.Ordinal))
+            {
+                resolvedNames.Add(name);
+            }
+            else
+            {
+                return (resolvedNames, error);
+            }
+        }
+
+        return (resolvedNames.Distinct(StringComparer.Ordinal).ToList(), null);
+    }
+
     /// <summary>The scoped names that no <c>collect.servers</c> row carries (exact, case-sensitive: the match the SQL scope uses).
     /// $1 is the distinct scoped names.</summary>
     internal const string FindUnregisteredSql =

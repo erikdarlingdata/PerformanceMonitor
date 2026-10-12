@@ -94,6 +94,8 @@ public class PlanStatement
     public string? QueryPlanHash { get; set; }
     public long CachedPlanSizeKB { get; set; }
     public int DegreeOfParallelism { get; set; }
+    /// <summary>#5633 item 21: whether the QueryPlan element carried a DegreeOfParallelism attribute at all. Cache and Query Store plans do not, so <see cref="DegreeOfParallelism"/> 0 means unknown there, not serial.</summary>
+    public bool HasDegreeOfParallelism { get; set; }
     public bool RetrievedFromCache { get; set; }
 
     // Additional StmtSimple attributes

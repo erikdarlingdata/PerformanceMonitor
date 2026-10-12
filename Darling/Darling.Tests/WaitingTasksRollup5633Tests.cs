@@ -1,0 +1,106 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Linq;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #5633 item 18: <c>get_waiting_tasks</c> returned one row per waiting TASK, so a parallel query's exchange waits looked like thirty
+/// duplicates of one session, 29 of them with <c>blocking_session_id</c> equal to the session itself (session 97, CXCONSUMER, blocked by 97).
+/// The read now rolls the threads of one session and wait type up within a capture: <c>thread_count</c> says how many, and a blocker equal
+/// to the session is flagged <c>intra_query_parallelism</c> and never reported as a blocker.
+/// </summary>
+public sealed class WaitingTasksRollup5633Tests
+{
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public void WaitingTasksSql_RollsUpPerSessionAndWaitType_AndNeverReportsSelfBlocking()
+    {
+        var sql = DarlingSessionReader.WaitingTasksSql;
+        Assert.Contains("GROUP BY collection_time, session_id, wait_type", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS thread_count", sql, StringComparison.Ordinal);
+        Assert.Contains("FILTER (WHERE blocking_session_id <> session_id)", sql, StringComparison.Ordinal);
+        Assert.Contains("BOOL_OR(blocking_session_id = session_id)", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ParallelQueryThreads_AreOneRow_WithAThreadCount_AndNoSelfBlocker()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the waiting-tasks rollup live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        var serverName = "wt5633_" + Guid.NewGuid().ToString("N");
+        var serverId = ServerIdHelper.GetDeterministicHashCode(serverName);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            var capture = DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-5), DateTimeKind.Unspecified);
+            await using (var seed = new NpgsqlConnection(cs))
+            {
+                await seed.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(seed, ct);
+                await DarlingMcpTestData.RegisterServerAsync(seed, serverId, serverName, ct);
+
+                /* Session 97: a parallel query, thirty exchange-wait threads, 29 of them waiting on 97 itself (the audit's shape) and
+                   one on nothing. Session 55: one lock wait blocked by another session. */
+                for (var thread = 0; thread < 30; thread++)
+                {
+                    await InsertAsync(seed, serverId, serverName, capture, 97, "CXCONSUMER", 100 + thread, thread < 29 ? 97 : (int?)null, ct);
+                }
+
+                await InsertAsync(seed, serverId, serverName, capture, 55, "LCK_M_S", 5000, 60, ct);
+            }
+
+            using var doc = JsonDocument.Parse(await DarlingMcpSessionTools.GetWaitingTasks(postgres, serverName, 1, 30, cancellationToken: ct));
+            var tasks = doc.RootElement.GetProperty("tasks").EnumerateArray().ToList();
+            Assert.Equal(2, tasks.Count);
+
+            var parallel = tasks.Single(t => t.GetProperty("session_id").GetInt32() == 97);
+            Assert.Equal(30, parallel.GetProperty("thread_count").GetInt32());
+            Assert.True(parallel.GetProperty("intra_query_parallelism").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, parallel.GetProperty("blocking_session_id").ValueKind);
+            Assert.Equal(129, parallel.GetProperty("wait_duration_ms").GetInt64());
+
+            var locked = tasks.Single(t => t.GetProperty("session_id").GetInt32() == 55);
+            Assert.Equal(1, locked.GetProperty("thread_count").GetInt32());
+            Assert.False(locked.GetProperty("intra_query_parallelism").GetBoolean());
+            Assert.Equal(60, locked.GetProperty("blocking_session_id").GetInt32());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM collect.waiting_tasks WHERE server_id = $1", serverId);
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM collect.servers WHERE server_id = $1", serverId);
+            });
+        }
+    }
+
+    private static Task InsertAsync(NpgsqlConnection connection, int serverId, string serverName, DateTime capture, int session, string waitType,
+        long waitMs, int? blocker, CancellationToken ct) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO waiting_tasks (collection_id, collection_time, server_id, server_name, session_id, wait_type, wait_duration_ms, blocking_session_id, resource_description, database_name)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+            CollectionIdGenerator.Next(), capture, serverId, serverName, session, waitType, waitMs, blocker, null, "db");
+}
