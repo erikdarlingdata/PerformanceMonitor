@@ -86,9 +86,11 @@ public sealed class SliceRepairRewriteShapeTests : IClassFixture<SharedDuckDbFix
     /// join's order can differ from the file's in a few rows (2 of 2.4 million in the measurement on a 272 MiB file;
     /// the sort that would remove them took 87.6 s and 2.5 GiB of spill against 38.2 s and none, so it was dropped).
     /// An adjacent inversion is a row whose collection_time is earlier than the row before it. The allowance is
-    /// <c>max(2, rows / 10,000)</c>: the measured rate is about 1 in 1.2 million, so 1 in 10,000 is far above any
-    /// real displacement, and the floor of 2 covers a small file. A rewrite that loses the order, as the hash
-    /// aggregate did, steps backwards at thousands of places and fails by orders of magnitude.</para>
+    /// <c>max(2, rows / 100)</c>, 1% of the rows: the count depends on the join's output order at the shipped
+    /// thread count, which differs by machine, and the measured rate on the large file was about 1 in 1.2 million,
+    /// so 1% leaves room for any real displacement, and the floor of 2 covers a small file. A rewrite that loses
+    /// the order, as the hash aggregate did, steps backwards at thousands of places on this fixture (a shuffled
+    /// order steps back on about half of its rows) and fails the 1% bound by a wide margin.</para>
     /// </summary>
     [Fact]
     public async Task Rewrite_KeepsTheRowsInTheirOriginalOrder()
@@ -96,7 +98,7 @@ public sealed class SliceRepairRewriteShapeTests : IClassFixture<SharedDuckDbFix
         var r = await RewriteAsync();
 
         Assert.Equal(Queries * Intervals, r.RowsAfter);
-        var allowed = Math.Max(2, r.RowsAfter / 10_000);
+        var allowed = Math.Max(2, r.RowsAfter / 100);
         Assert.True(
             r.TimeInversionsAfter <= allowed,
             $"{r.TimeInversionsAfter:N0} rows came out earlier than the row before them in {r.RowsAfter:N0} rows; at most {allowed:N0} are allowed");

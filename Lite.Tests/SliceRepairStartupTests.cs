@@ -52,7 +52,7 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
 
     public void Dispose()
     {
-        _duckDb.AvailableFreeBytesProvider = _originalFreeBytesProvider;
+        _duckDb.AvailableFreeBytesProvider = _ => 1L << 40;
         try
         {
             if (Directory.Exists(_archivePath))
@@ -208,6 +208,44 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
         Assert.Contains("free up disk space", last, StringComparison.Ordinal);
         Assert.Contains(QueryStoreSliceRepairService.AttemptTable, last, StringComparison.Ordinal);
         Assert.DoesNotContain("will be retried on the next start", last, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5653: a start that fails before it records its attempt row was not counted, and the next start runs the
+    /// repair again. The log must not call it the last attempt or tell the user to drop the attempt table, which
+    /// would reset a cap this start never used. One attempt is already recorded here, so attempt number 2 is the
+    /// number this start would have had.
+    /// </summary>
+    [Fact]
+    public async Task StartThatFailsBeforeRecordingItsAttempt_IsNotCalledTheLastOne_AndTheNextStartRunsTheRepair()
+    {
+        await WriteSplitArchiveAsync(Path.Combine(_archivePath, "202605_query_store_stats.parquet"));
+        _duckDb.AvailableFreeBytesProvider = _ => 1024 * 1024;
+
+        var log = new List<(LogLevel Level, string Message)>();
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath, new CapturingLogger(log));
+
+        await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(1, await service.AttemptCountAsync(TestContext.Current.CancellationToken));
+
+        log.Clear();
+        service.BeforeSurveyHook = () => throw new InvalidOperationException("the survey ran out of memory");
+        await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
+
+        var failed = log.Single(l => l.Level == LogLevel.Error && l.Message.Contains("could not run", StringComparison.Ordinal)).Message;
+        Assert.DoesNotContain("the last one", failed, StringComparison.Ordinal);
+        Assert.DoesNotContain("NOT run again", failed, StringComparison.Ordinal);
+        Assert.DoesNotContain(QueryStoreSliceRepairService.AttemptTable, failed, StringComparison.Ordinal);
+        Assert.Contains("not counted", failed, StringComparison.Ordinal);
+        Assert.Contains("will run again on the next start", failed, StringComparison.Ordinal);
+        Assert.Equal(1, await service.AttemptCountAsync(TestContext.Current.CancellationToken));
+
+        /* The next start, with the survey healthy and the disk roomy, does the repair. */
+        service.BeforeSurveyHook = null;
+        _duckDb.AvailableFreeBytesProvider = _ => 1L << 40;
+        await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
+        Assert.True(await service.AlreadyRepairedAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(2, await service.AttemptCountAsync(TestContext.Current.CancellationToken));
     }
 
     /// <summary>An unreadable volume (null) counts as enough, as it does for compaction: the repair goes ahead.</summary>

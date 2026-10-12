@@ -334,6 +334,10 @@ SELECT
     {
         /* Which attempt this start is, once known. Zero until the attempt table has been read. */
         long attemptNumber = 0;
+        /* False until RecordAttemptAsync has written this start's row. attemptNumber is only the number this start
+           WILL be; until the row exists the next start runs the very same attempt again, so a failure before it
+           must not claim the attempt was used or that it was the last one. */
+        var attemptRecorded = false;
         try
         {
             if (await AlreadyRepairedAsync(cancellationToken))
@@ -404,6 +408,7 @@ SELECT
                 archiveFiles);
 
             await RecordAttemptAsync(survey.HotGroups, archiveFiles, survey.Unreadable.Count);
+            attemptRecorded = true;
 
             var result = await RepairAsync(
                 new Progress<string>(message => _logger?.LogInformation("#1912 {Message}", message)),
@@ -452,9 +457,21 @@ SELECT
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "#1912 Query Store repair could not run. {Outlook}", RetryOutlook(attemptNumber));
+            _logger?.LogError(
+                ex,
+                "#1912 Query Store repair could not run. {Outlook}",
+                attemptRecorded ? RetryOutlook(attemptNumber) : UncountedAttemptOutlook);
         }
     }
+
+    /// <summary>
+    /// The outlook when a start failed before it wrote its attempt row (#5653): the failure happened in the read-only
+    /// part (checking the marker, reading the attempt table, or the survey), so this start was not counted against
+    /// <see cref="MaxStartupAttempts"/> and the next start runs the repair again.
+    /// </summary>
+    internal const string UncountedAttemptOutlook =
+        "This start did not get as far as recording a repair attempt, so it was not counted against the limit " +
+        "and the repair will run again on the next start.";
 
     /// <summary>
     /// What happens to a repair that did not finish (#5653). The old text said "will be retried on the next
@@ -480,6 +497,11 @@ SELECT
     public async Task<Survey> SurveyAsync(CancellationToken cancellationToken = default)
     {
         Interlocked.Increment(ref _surveysRun);
+        if (BeforeSurveyHook is { } beforeSurvey)
+        {
+            await beforeSurvey();
+        }
+
         long groups = 0;
         long rows = 0;
 
@@ -809,6 +831,9 @@ HAVING COUNT(*) > 1";
             || text.Contains("offload data block", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>Test seam only, null in production: runs first in <see cref="SurveyAsync"/>, so a test can make the survey throw.</summary>
+    internal Func<Task>? BeforeSurveyHook { get; set; }
+
     /// <summary>Test seam only: the smallest spill cap a rewrite will start with. A test lowers it; production keeps <see cref="RewriteSpillFloorBytes"/>.</summary>
     internal long SpillFloorBytes { get; set; } = RewriteSpillFloorBytes;
 
@@ -899,7 +924,13 @@ HAVING COUNT(*) > 1";
            under the floor, so a nearly full disk is not asked for more than it has, and a roomy one is not turned
            away by a guess about how much this file will spill. If the rewrite then runs out of its cap, DuckDB
            fails the statement and the catch around the COPY below turns it into a failure that names temp space.
-           The reader is the one compaction uses (#5377); an unreadable volume (null) counts as enough. */
+           The reader is the one compaction uses (#5377); an unreadable volume (null) counts as enough.
+
+           One volume: the archive folder. The file being rewritten (file.Path) is listed from _archivePath, the
+           .repair-tmp output sits beside it, and the spill folder (slice_repair_tmp) is created under _archivePath
+           below, so free space on _archivePath is the right number for the spill and the output alike. The
+           reserve is read from the database's own volume, which is compaction's #5377 rule; when the database
+           lives on another volume it keeps more free than this rewrite needs, which only errs toward skipping. */
         var freeBytes = _duckDb.AvailableFreeBytesProvider(_archivePath);
         var reserveBytes = DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath);
         var copyBytes = RewriteCopyBytes(beforeBytes);
