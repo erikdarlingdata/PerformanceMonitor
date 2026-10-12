@@ -905,12 +905,17 @@ WHERE NOT is_compressed";
     /// (<see cref="DarlingManagedPostgres.QuantizeRam"/>: "v3/v5/v7 keep deriving from the raw reading"), and the
     /// v8 block never re-states it. <see cref="BuildDerivedTargets"/> derives from the QUANTIZED reading, so on a
     /// host whose OS reports a little under the nominal size (about 4092 MB on a 4 GB host) the stored 1023 MB
-    /// read stale against 1024 MB, forever, with no hardware change. When the stored value equals the derivation
-    /// from the raw reading, the derived figure reported is the stored one (so it reads Matches and the text
-    /// never says "1023 in force, 1024 derived, Matches"). A real resize still reads stale: a 2 GB host moved to
-    /// 4 GB keeps v5's 512 MB, which equals neither derivation. Same shape as
-    /// <see cref="ApplyWalDriftTolerance"/>; both derivations go through
-    /// <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>, never a second copy of the formula.</summary>
+    /// read stale against 1024 MB, forever, with no hardware change. The reading also drifts with no resize on a
+    /// balloon guest, so an exact match against today's raw reading would flip back to stale on a 4 MB wobble
+    /// (1023 MB written from 4092 MB, now 4088 MB). The tolerance is therefore a band, defined as v8's fingerprint
+    /// defines "no hardware change": the same quantized RAM. When the stored value lies between the derivation of
+    /// the lowest and of the highest raw reading that quantizes to this host's size
+    /// (<see cref="DarlingManagedPostgres.QuantizedRamBucket"/>), the derived figure reported is the stored one,
+    /// so it reads Matches and the text never says "1023 in force, 1024 derived, Matches". A real resize still
+    /// reads stale: a 2 GB host moved to 4 GB keeps v5's 512 MB and a 3 GB host moved to 4 GB keeps 768 MB; both
+    /// lie below the 4 GB bucket's lowest derivation. Same shape as <see cref="ApplyWalDriftTolerance"/>; both
+    /// ends go through <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>, never a second copy of the
+    /// formula.</summary>
     internal static long ApplySharedBuffersRawReadingTolerance(
         string settingName, long derivedValueMb, long? currentValueMb, long ramBytesForDerivation)
     {
@@ -919,9 +924,11 @@ WHERE NOT is_compressed";
             return derivedValueMb;
         }
 
-        return DarlingManagedPostgres.DeriveMemorySettings(ramBytesForDerivation).SharedBuffersMb == current
-            ? current
-            : derivedValueMb;
+        var (lowestBytes, highestBytes) = DarlingManagedPostgres.QuantizedRamBucket(ramBytesForDerivation);
+        var lowestMb = DarlingManagedPostgres.DeriveMemorySettings(lowestBytes).SharedBuffersMb;
+        var highestMb = DarlingManagedPostgres.DeriveMemorySettings(highestBytes).SharedBuffersMb;
+
+        return current >= lowestMb && current <= highestMb ? current : derivedValueMb;
     }
 
     /// <summary>The eight settings ruling 4 names, each with its unit and the <c>Derive*</c>/constant that
