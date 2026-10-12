@@ -26,7 +26,7 @@ internal static class McpInstructions
 
         ## Tools
 
-        90 tools: discovery/health, waits, CPU, contention, plan cache, query performance, blocking/deadlocks, memory, I/O, tempdb, storage/index, perfmon, alerts, jobs, configuration, system-health parse-on-read + Default Trace, server info, sessions/active queries, and execution-plan + diagnostic analysis. Tool names and parameters are self-describing in each tool's own description.
+        90 tools (88 by default; `mcp_allow_writes` adds `mute_analysis_finding` and `unmute_analysis_finding`): discovery/health, waits, CPU, contention, plan cache, query performance, blocking/deadlocks, memory, I/O, tempdb, storage/index, perfmon, alerts, jobs, configuration, system-health parse-on-read + Default Trace, server info, sessions/active queries, and execution-plan + diagnostic analysis. Tool names and parameters are self-describing in each tool's own description.
 
         ### Reading an empty result
 

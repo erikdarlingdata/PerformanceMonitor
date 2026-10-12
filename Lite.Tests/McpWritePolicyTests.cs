@@ -211,6 +211,28 @@ public sealed class McpWritePolicyTests
         Assert.Contains("analyze_server", names);
     }
 
+    /* #5719: Lite's instructions said "90 tools" while tools/list returned 88 with mcp_allow_writes off (the default).
+       The sentence now carries the registered total, the default count and the two tools the setting adds; this pins
+       them to the registered tools and the policy's write set. Lite has no bearer token, so the setting is the whole
+       condition (unlike Darling's "with a token"). */
+    [Fact]
+    public void Instructions_ToolCounts_MatchTheRegisteredTools_UnderEachSwitchState()
+    {
+        var all = RegisteredTools();
+        var defaultServed = McpWritePolicy.FilterToolCollection(all, allowWrites: false);
+        var writesServed = McpWritePolicy.FilterToolCollection(all, allowWrites: true);
+
+        Assert.Equal(all.Count, writesServed.Count);
+        Assert.Equal(McpWritePolicy.WriteTools.Count, all.Count - defaultServed.Count);
+
+        var text = McpInstructions.Text;
+        Assert.Contains($"{all.Count} tools ({defaultServed.Count} by default; `{McpWritePolicy.WritesSetting}` adds ", text, StringComparison.Ordinal);
+        foreach (var name in McpWritePolicy.WriteTools)
+        {
+            Assert.Contains($"`{name}`", text, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void WritesOn_ServesTheMuteAndItsUndo()
     {
