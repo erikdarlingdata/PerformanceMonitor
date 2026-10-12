@@ -2603,15 +2603,16 @@ public sealed class PgLogEventsRungTests
         Assert.Contains("return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";", viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 
-    /// <summary>The CI cluster workflows carry the product's formula for the new hypertable count — the pin CiClusterWorkerSizingTests holds, restated as the two numbers this rung moved.</summary>
+    /// <summary>The runbook carries the product's worker formula for the current hypertable count; the CI cluster workflows keep their own (smaller) floor, held by CiClusterWorkerSizingTests.</summary>
     [Fact]
     public void TheWorkflowsAndTheRunbook_CarryTheNewHypertableCount()
     {
-        var workers = TimescaleSupport.HypertableCount + 2;
+        /* The runbook states the MANAGED formula (2 x hypertables + 16, #5633 item 14), not the CI workflows' floor. */
+        var workers = 2 * TimescaleSupport.HypertableCount + 16;
         var processes = 3 + workers + 8;
-        /* 74 / 85 since V136 (#3691) added pg_database_size_stats; this rung's own move was 72 → 73 / 83 → 84. */
-        Assert.Equal(74, workers);
-        Assert.Equal(85, processes);
+        /* 160 / 171 at 72 hypertables (74 / 85 under the pre-#5633 hypertables + 2 formula). */
+        Assert.Equal(160, workers);
+        Assert.Equal(171, processes);
 
         var runbook = RepoFile.ReadRepoFile("docs", "postgres-first-target-runbook.md");
         Assert.Contains($"today the numbers are {workers} and {processes} for {TimescaleSupport.HypertableCount} hypertables", runbook, StringComparison.Ordinal);

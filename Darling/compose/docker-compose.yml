@@ -57,9 +57,10 @@ services:
     # which is exactly what the managed Windows store exists to avoid (build.yml ~936-952: TimescaleDB's
     # per-hypertable compression/retention/CAGG policy jobs launch background workers, and at 16 slots most
     # policy runs never happen). The values below are the SAME formula the managed store writes
-    # (BuildWorkerSizingConfAppend): max_background_workers = HypertableCount + 2, max_worker_processes =
-    # 3 + max_background_workers + 8. HypertableCount is 72 today (TimescaleSupport.HypertableCount) — 74
-    # and 85. CiComposeWorkerSizingTests pins these two numbers against that same live formula, so an added
+    # (BuildWorkerSizingConfAppend): max_background_workers = 2 x HypertableCount + 16 (#5633 item 14: a
+    # migrated store carries 142 policy jobs, all overdue at any restart, which 74 slots could not launch),
+    # max_worker_processes = 3 + max_background_workers + 8. HypertableCount is 72 today
+    # (TimescaleSupport.HypertableCount) — 160 and 171. CiComposeWorkerSizingTests pins these two numbers against that same live formula, so an added
     # collector fails this file's test instead of drifting silently.
     #
     # work_mem: tune measured 4 MB at 2/4 GB and ~3.9 MB at 8 GB (#4322 lane-4322m) — below the managed
@@ -73,7 +74,7 @@ services:
     # a worker's ~3 concurrent sort/hash nodes at once, the same bound DeriveMemorySettings documents) is
     # 25 x 3 x 16 MB = 1200 MB, plus shared_buffers' 512 MB = 1712 MB — under the 2 GB limit with headroom
     # for the rest of the server. cc #4310.
-    command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off", "-c", "timescaledb.max_background_workers=74", "-c", "max_worker_processes=85", "-c", "work_mem=16MB"]
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off", "-c", "timescaledb.max_background_workers=160", "-c", "max_worker_processes=171", "-c", "work_mem=16MB"]
     # Uncomment and set to the host's own budget if this container should be capped — left commented
     # because a host's memory varies and a wrong default could starve a big store (#4322). Example for an
     # 8 GB host:

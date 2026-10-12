@@ -208,6 +208,15 @@ public sealed class DarlingAnalysisService
     public int LastCollectionFamilyCount { get; private set; }
 
     /// <summary>
+    /// True when the last pass tried to save its collection caveats to
+    /// <c>collect.analysis_collection_caveats</c> and that write failed (#5633 item 13) -- a role without the
+    /// table grant (42501) is the case that surfaced it. The failure never fails the pass and is logged, so
+    /// without this the MCP <c>analyze_server</c> response could not tell its caller the caveats were not saved.
+    /// False on a pass whose write landed and on one that never reached collection.
+    /// </summary>
+    public bool LastCollectionCaveatWriteFailed { get; private set; }
+
+    /// <summary>
     /// How many facts the last pass handed to the scorer — the collector's plus the anomaly detector's
     /// (#3691) — and how many of those came out with a non-zero severity. Both null when the pass never
     /// reached scoring (the data-span gate, the unobserved window, a fault). They exist so an <c>empty</c>
@@ -404,6 +413,7 @@ public sealed class DarlingAnalysisService
         LastWindowCoverage = null;
         LastCollectionFailures = [];
         LastCollectionFamilyCount = 0;
+        LastCollectionCaveatWriteFailed = false;
         LastFactCount = null;
         LastFactsScored = null;
         EndedEarlyAs = null;
@@ -483,7 +493,7 @@ public sealed class DarlingAnalysisService
                 .Select(g => new CollectionCaveatStore.UnreadFamily(g.Key, CollectionFailure.Label(g.Last().Outcome)))
                 .ToArray();
 
-            await CollectionCaveatStore.ApplyPassAsync(
+            LastCollectionCaveatWriteFailed = !await CollectionCaveatStore.ApplyPassAsync(
                 _postgres, context.ServerId, unreadFamilies, DateTime.UtcNow, _logger, context.CancellationToken);
 
             if (context.CollectionFailures.Count > 0)

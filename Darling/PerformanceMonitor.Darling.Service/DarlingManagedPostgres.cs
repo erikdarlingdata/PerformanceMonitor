@@ -937,11 +937,13 @@ public sealed class DarlingManagedPostgres
     /// "failed to launch job ... failed to start a background worker" storms and most policy runs
     /// fail (caught live: 21 failures vs 7 successes in timescaledb_information.job_stats on a
     /// fresh managed instance). Sizing follows the TimescaleDB guidance
-    /// (max_worker_processes = 3 + timescaledb.max_background_workers + max_parallel_workers,
-    /// background workers sized to hypertables + 2): DERIVED from the live hypertable count
+    /// (max_worker_processes = 3 + timescaledb.max_background_workers + max_parallel_workers).
+    /// Background workers were hypertables + 2 until #5633 item 14 measured 142 policy jobs against 74
+    /// slots on a restart; they are now <see cref="PolicyJobsPerHypertable"/> per hypertable plus
+    /// <see cref="WorkerSlotHeadroom"/> (see <see cref="DeriveWorkerSettings"/>). DERIVED from the live hypertable count
     /// (<see cref="TimescaleSupport.HypertableCount"/> = the collector catalog PLUS collection_log, the V23
     /// non-catalog hypertable) so it never goes stale as collectors are added and is not under-sized by the
-    /// collection_log compression policy (27 hypertables -> 29/40, 33 -> 35/46). Idle background workers
+    /// collection_log compression policy (72 hypertables -> 160/171). Idle background workers
     /// cost a few MB each and no CPU. Both settings need a PostgreSQL restart, so an existing
     /// cluster picks this up on its next service-owned start — an adopted (not-started-by-us)
     /// server heals the conf now and applies it whenever its operator next restarts it.
@@ -963,8 +965,10 @@ public sealed class DarlingManagedPostgres
     /// <summary>
     /// Derives the worker sizing from the hypertable count — extracted from
     /// <see cref="BuildWorkerSizingConfAppend"/> (#2845) so the v2 block and the v8 hardware re-derivation
-    /// share ONE formula and cannot drift apart. One background worker per per-hypertable compression
-    /// policy that can run concurrently + the scheduler + slack; max_worker_processes = 3 (other bg
+    /// share ONE formula and cannot drift apart. One background worker per policy job that can be due at
+    /// once (#5633 item 14: after any downtime EVERY job is overdue at the next start, 142 of them against the
+    /// old 74 slots logged 61 "out of background workers" launch failures that each retried later), plus the
+    /// scheduler and slack; max_worker_processes = 3 (other bg
     /// workers) + bg workers + 8 (the PostgreSQL default max_parallel_workers, which this class does not
     /// set — see the v8 block for why raising it is deliberately NOT bundled here).
     ///
@@ -975,9 +979,30 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     internal static WorkerSettings DeriveWorkerSettings(int hypertableCount)
     {
-        var maxBackgroundWorkers = hypertableCount + 2;
+        var maxBackgroundWorkers = PolicyJobsPerHypertable * hypertableCount + WorkerSlotHeadroom;
         return new WorkerSettings(maxBackgroundWorkers, 3 + maxBackgroundWorkers + 8);
     }
+
+    /// <summary>
+    /// TimescaleDB policy jobs a migrated store carries per hypertable (#5633 item 14). MEASURED, not guessed:
+    /// the real migrations plus every startup convergence step against a 72-hypertable store give 142 jobs
+    /// (94 compression, 23 continuous-aggregate refresh, 23 retention, job-history retention, telemetry),
+    /// which is 1.97 per hypertable — 72 raw-table compression jobs plus about three policies for each of the
+    /// 29 rollup aggregates. The count is fixed by the SCHEMA (hypertables and aggregates), never by stored
+    /// data: chunks do not add jobs, a compression or retention job walks its own chunks. It does multiply by
+    /// the number of databases that load the extension in one cluster, each with its own scheduler; the
+    /// managed cluster has one. Two per hypertable covers the measured 142 with the rest as
+    /// <see cref="WorkerSlotHeadroom"/>.
+    /// </summary>
+    internal const int PolicyJobsPerHypertable = 2;
+
+    /// <summary>
+    /// Worker slots beyond <see cref="PolicyJobsPerHypertable"/> per hypertable: the one scheduler per
+    /// database, the handful of jobs that are not per-hypertable, and slack for a manual job or a
+    /// retention purge started while the policies run. An unused slot is a few bytes of shared memory and no
+    /// process, so generous headroom is cheap (#5633 item 14).
+    /// </summary>
+    internal const int WorkerSlotHeadroom = 16;
 
     /// <summary>
     /// The v4 write-throughput block. Two fixed settings, deliberately not derived:

@@ -1241,11 +1241,11 @@ Every TimescaleDB policy — compression, retention, continuous-aggregate refres
 Managed mode derives the two settings from the live hypertable count, and an unmanaged store wants the same numbers:
 
 ```
-timescaledb.max_background_workers = <hypertables> + 2
+timescaledb.max_background_workers = 2 * <hypertables> + 16
 max_worker_processes               = 3 + timescaledb.max_background_workers + 8
 ```
 
-Today that is **74** and **85** for 72 hypertables (the 71 collector tables plus `collection_log`). The `+ 2` is not slack — it is exactly TimescaleDB's own two built-in jobs, `policy_telemetry` and `policy_job_stat_history_retention`, so a fully migrated store holds precisely one job per worker:
+Today that is **160** and **171** for 72 hypertables (the 71 collector tables plus `collection_log`). A fully migrated store carries **142 policy jobs** (measured, #5633 item 14): 94 compression, 23 continuous-aggregate refresh, 23 retention, plus TimescaleDB's own `policy_telemetry` and `policy_job_stat_history_retention`. That is about two per hypertable, and it depends on the schema (hypertables and aggregates), not on how much data is stored. After any downtime every job is overdue at the next start, so they all ask for a worker at once; with the older `<hypertables> + 2` (74) the postmaster log showed 61 `out of background workers` launch failures on one store at a restart (each job was retried later and ran, but the first pass is noisy and late). The `16` covers the scheduler and slack.
 
 ```sql
 SELECT proc_name, count(*) FROM timescaledb_information.jobs GROUP BY proc_name;

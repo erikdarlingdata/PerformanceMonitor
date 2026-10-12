@@ -346,7 +346,7 @@ internal static class ManagedConfMigration
     /// hypertable counts, not RAM. <c>timescaledb.max_background_workers = N</c> is ours only if N is an integer
     /// &gt;= 2 (<c>hypertableCount + 2</c> for a non-negative hypertable count) read from the SAME block, and
     /// <c>max_worker_processes = M</c> is ours only if M == N + 11 (<see cref="DarlingManagedPostgres.DeriveWorkerSettings"/>
-    /// with N-2 hypertables reproduces the same M) AND M is read from the same block as its N. Anything else —
+    /// reproduces the same M under the current or the pre-#5633 legacy formula) AND M is read from the same block as its N. Anything else —
     /// N &lt; 2, a non-integer, a mismatched M, or a value the builder's exact form never emits (a unit suffix,
     /// different spacing) — is a hand edit.
     /// </summary>
@@ -367,8 +367,15 @@ internal static class ManagedConfMigration
             return (false, HandEditReason.RebuildMismatch);
         }
 
-        var rebuilt = DarlingManagedPostgres.DeriveWorkerSettings(backgroundWorkers - 2);
-        if (rebuilt.MaxBackgroundWorkers != backgroundWorkers || rebuilt.MaxWorkerProcesses != workerProcesses)
+        /* Two formulas ever wrote this block, and a store keeps whichever its release wrote until the every-start
+           v8 heal rewrites it, so BOTH are ours (#5633 item 14 changed the formula): the legacy
+           N = hypertables + 2, which any N >= 2 satisfies, and the current N = 2 x hypertables + 16. */
+        var currentHypertables = (backgroundWorkers - DarlingManagedPostgres.WorkerSlotHeadroom) / DarlingManagedPostgres.PolicyJobsPerHypertable;
+        var rebuiltCurrent = backgroundWorkers >= DarlingManagedPostgres.WorkerSlotHeadroom
+            && (backgroundWorkers - DarlingManagedPostgres.WorkerSlotHeadroom) % DarlingManagedPostgres.PolicyJobsPerHypertable == 0
+            && DarlingManagedPostgres.DeriveWorkerSettings(currentHypertables) == new DarlingManagedPostgres.WorkerSettings(backgroundWorkers, workerProcesses);
+        var rebuiltLegacy = 3 + backgroundWorkers + 8 == workerProcesses;
+        if (!rebuiltCurrent && !rebuiltLegacy)
         {
             return (false, HandEditReason.RebuildMismatch);
         }
@@ -609,7 +616,29 @@ internal static class ManagedConfMigration
         }
 
         var rebuilt = DarlingManagedPostgres.BuildHardwareSizingConfAppend(ramMb * 1024L * 1024L, hypertables);
-        return ClassifyAgainstRebuiltBlock(key, text, rebuilt);
+        var verdict = ClassifyAgainstRebuiltBlock(key, text, rebuilt);
+        if (verdict.IsOurs)
+        {
+            return verdict;
+        }
+
+        /* #5633 item 14 raised the worker formula (2 x hypertables + 16). A v8 block an earlier release wrote
+           holds the legacy values for its recorded hypertable count (N = hypertables + 2, M = 3 + N + 8) and is
+           still ours until the every-start heal rewrites it, not a hand edit. */
+        var legacyWorkers = hypertables + 2;
+        if (string.Equals(key, "timescaledb.max_background_workers", StringComparison.OrdinalIgnoreCase))
+        {
+            return ClassifyFixedLine(key, text, "timescaledb.max_background_workers",
+                FormattableString.Invariant($"timescaledb.max_background_workers = {legacyWorkers}"));
+        }
+
+        if (string.Equals(key, "max_worker_processes", StringComparison.OrdinalIgnoreCase))
+        {
+            return ClassifyFixedLine(key, text, "max_worker_processes",
+                FormattableString.Invariant($"max_worker_processes = {3 + legacyWorkers + 8}"));
+        }
+
+        return verdict;
     }
 
     /// <summary>
