@@ -310,8 +310,8 @@ public sealed class PlanRegressionDailyRungTests
         Assert.Contains("bool_or(l.is_forced_plan)", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(l.force_failure_count)", sql, StringComparison.Ordinal);
 
-        /* #5631: rows per call, summed like the others, and NULL when any interval of the day had no avg_rowcount. */
-        Assert.Contains("CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN SUM(l.avg_rowcount::numeric * l.execution_count) END", sql, StringComparison.Ordinal);
+        /* #5631: rows per call, summed like the others, NULL when any interval of the day had no avg_rowcount, and 0 when every execution count of the day is NULL. */
+        Assert.Contains("CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN COALESCE(SUM(l.avg_rowcount::numeric * l.execution_count), 0) END", sql, StringComparison.Ordinal);
 
         /* Four parameters, each cast where it is used, so each has one type. */
         Assert.Equal(new[] { "$1", "$2", "$3", "$4" }, Regex.Matches(sql, @"\$\d").Select(m => m.Value).Distinct().OrderBy(v => v).ToArray());

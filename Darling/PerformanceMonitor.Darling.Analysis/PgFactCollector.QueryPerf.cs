@@ -522,7 +522,7 @@ WITH plan_agg AS
             SUM(l.execution_count),
             SUM(l.avg_cpu_time_us::numeric * l.execution_count),
             SUM(l.avg_duration_us::numeric * l.execution_count),
-            CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN SUM(l.avg_rowcount::numeric * l.execution_count) END,
+            CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN COALESCE(SUM(l.avg_rowcount::numeric * l.execution_count), 0) END, -- #5631: COALESCE as in BuildDaySql, so a group whose execution counts are all NULL is 0 rows, not NULL.
             MAX(l.last_execution_time),
             bool_or(l.is_forced_plan),
             MAX(l.force_failure_count)

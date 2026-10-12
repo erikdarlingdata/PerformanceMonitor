@@ -90,8 +90,8 @@ WITH built AS
         MAX(l.last_execution_time),
         bool_or(l.is_forced_plan),
         MAX(l.force_failure_count),
-        -- #5631: NULL when any interval of the day has no avg_rowcount, so a missing count never reads as a small one.
-        CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN SUM(l.avg_rowcount::numeric * l.execution_count) END
+        -- #5631: NULL when any interval of the day has no avg_rowcount, so a missing count never reads as a small one. COALESCE: a day whose execution counts are all NULL is 0, not NULL, so the daily read's COUNT(rowcount_sum) guard does not blank the whole plan.
+        CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN COALESCE(SUM(l.avg_rowcount::numeric * l.execution_count), 0) END
     FROM collect.query_store_interval_latest AS l
     WHERE l.server_id = $1::integer
     AND   l.first_execution_time >= $4::timestamp
