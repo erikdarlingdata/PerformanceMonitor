@@ -206,6 +206,27 @@ public sealed class DarlingMcpWritePolicyTests
                 < text.IndexOf("This server exposes", StringComparison.Ordinal));
     }
 
+    /* #5719: the instructions said "exposes 181 tools" while tools/list returned 159 with the write switches off
+       (the default). The Tools paragraph now carries the total, the default count and what each switch adds; this pins the
+       three figures to the registered tools and the policy sets, so a new tool moves them or fails here. */
+    [Fact]
+    public void Instructions_ToolCounts_MatchTheRegisteredTools_UnderEachSwitchState()
+    {
+        var all = ServedTools();
+        var total = all.Count;
+        var defaultCount = DarlingMcpWritePolicy.FilterToolCollection(all, DarlingMcpWritePolicy.Effective.Off).Count;
+        var writesCount = DarlingMcpWritePolicy.FilterToolCollection(all, new DarlingMcpWritePolicy.Effective(true, false)).Count;
+        var adminCount = DarlingMcpWritePolicy.FilterToolCollection(all, new DarlingMcpWritePolicy.Effective(true, true)).Count;
+
+        Assert.Equal(total, adminCount);
+
+        var text = DarlingMcpInstructions.Text;
+        Assert.Contains($"This server exposes {total} tools.", text, StringComparison.Ordinal);
+        Assert.Contains($" Default {defaultCount}; ", text, StringComparison.Ordinal);
+        Assert.Contains($"+{writesCount - defaultCount} `{DarlingMcpWritePolicy.WritesSetting}`", text, StringComparison.Ordinal);
+        Assert.Contains($"+{adminCount - writesCount} `{DarlingMcpWritePolicy.ServerAdminSetting}`", text, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Loopback_Default_NoToken_ToolsListSucceeds_ServesNoWriteTool_WithReadOnlyHints()
     {
