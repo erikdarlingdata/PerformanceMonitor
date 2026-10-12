@@ -69,7 +69,13 @@ public sealed class DarlingMcpStoreHostTools
         + "any_stale is true when one or more settings verdict is stale_after_hardware_change, so a caller can "
         + "act on the summary without walking the whole table. gathered_at (UTC) is when this snapshot was "
         + "taken; the store/settings facts are cached for up to 5 minutes and shared across callers, so a burst "
-        + "of calls costs one live read. This tool never writes a setting or a conf file.")]
+        + "of calls costs one live read. store.size_bytes is the hourly sweep's recorded figure, not a live read: "
+        + "size_as_of is when the sweep recorded it and size_age_seconds how old it is as of this response. Before "
+        + "the first sweep, or when the stored figure cannot be read, size_bytes, size_as_of and size_age_seconds "
+        + "are null and size_unavailable_reason says why. The uncompressed_chunk_* figures are read live on every "
+        + "call; if that read times out they are null and uncompressed_unavailable_reason says why, and the rest "
+        + "of the profile still returns (a slow fact fails alone). --check-settings reads the size live. This "
+        + "tool never writes a setting or a conf file.")]
     public static async Task<string> GetStoreHost(
         NpgsqlDataSource postgres, PostgresConfig? postgresConfig, StoreHostProfileCache cache,
         CancellationToken cancellationToken = default)
