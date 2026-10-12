@@ -174,6 +174,7 @@ public static class IncidentDeliveryFilter
             AttachmentXml = attachment?.Xml,
             AttachmentFileName = attachment?.FileName,
             AgReplicaIdentity = context.AgReplicaIdentity,
+            NewestSample = context.NewestSample,
             Incidents = kept
         };
 
@@ -209,7 +210,10 @@ public static class IncidentDeliveryFilter
         }
 
         if (prose is not null &&
-            string.Equals(prose, AlertDetailText.Flatten(rendered)?.Trim(), StringComparison.Ordinal))
+            string.Equals(
+                AlertDetailText.StripSampleAge(prose),
+                AlertDetailText.StripSampleAge(AlertDetailText.Flatten(rendered) ?? string.Empty),
+                StringComparison.Ordinal))
         {
             return new Render(WithRoster(context, aggregateRoster), prose, 0);
         }
@@ -243,6 +247,7 @@ public static class IncidentDeliveryFilter
             AttachmentXml = context?.AttachmentXml,
             AttachmentFileName = context?.AttachmentFileName,
             AgReplicaIdentity = context?.AgReplicaIdentity,
+            NewestSample = context?.NewestSample,
             Incidents = context?.Incidents
         };
 

@@ -203,6 +203,7 @@ public class DarlingInstallLocationTests
         };
 
         var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingCanonicalPath"));
         probe.AppendLine(ExtractFunction(InstallScript, "Test-PathIsAtOrUnder"));
         foreach (var (candidate, parent, _) in cases)
         {
@@ -446,6 +447,7 @@ function Get-CimInstance {
 }");
 
         probe.AppendLine(ExtractFunction(script, "Convert-ExtendedLengthPath"));
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
         probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
         probe.AppendLine(ExtractFunction(script, "Get-NetworkPathKind"));
 
@@ -4020,6 +4022,571 @@ function Get-CimInstance {
             Assert.DoesNotContain("GetFullPath", ExtractFunction(script, name), StringComparison.Ordinal);
         }
         Assert.Contains("Get-DarlingSegmentsBelowRoot $root $candidate", ExtractFunction(script, "Test-DarlingServiceWrittenPath"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5673: the same-folder test and the at-or-under test put both paths in the canonical long spelling
+    /// (Get-DarlingCanonicalPath) before comparing, so one folder gives one answer however it is typed. This test gives each
+    /// helper an install folder in its long form, as a short 8.3 path, as a short path with a trailing backslash, in upper
+    /// case, in lower case and with a trailing backslash, and requires the same answer for every form, for a folder below it
+    /// (also one that does not exist yet) and for a sibling whose name only starts the same. The short-path forms need 8.3
+    /// names on the volume; without them those forms are left out and the test is skipped at the end, after the trailing
+    /// backslash and case forms have been checked.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheSameFolderTestAndTheAtOrUnderTest_AnswerTheSameForAFolderInShortFormWithATrailingBackslashOrInOtherCase(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSamePath"));
+        probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $parent = Join-Path $env:TEMP ('pm5673-short-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            # CreateDirectory, not New-Item: Windows PowerShell 5.1's New-Item refuses a new folder chain whose parent is typed as a short path.
+            foreach ($made in @("$parent\install-root-with-a-long-name", "$parent\install-root-with-a-long-name-sibling")) { [void][IO.Directory]::CreateDirectory($made) }
+            $long = (Get-Item -LiteralPath "$parent\install-root-with-a-long-name" -Force).FullName
+            $sibling = (Get-Item -LiteralPath "$parent\install-root-with-a-long-name-sibling" -Force).FullName
+            $short = ((cmd /c "for %I in (""$long"") do @echo %~sI") | Select-Object -First 1).Trim()
+            try {
+                $forms = [ordered]@{ long = $long; longSlash = $long + '\'; upper = $long.ToUpperInvariant(); lower = $long.ToLowerInvariant() }
+                if ($short.IndexOf('~') -lt 0 -or $short -ieq $long) { 'noShortNames=True' }
+                else {
+                    'shortForm=' + $short
+                    'longForm=' + $long
+                    $forms['short'] = $short
+                    $forms['shortSlash'] = $short + '\'
+                    $forms['shortUpper'] = $short.ToUpperInvariant()
+                }
+                foreach ($tag in $forms.Keys) {
+                    $form = $forms[$tag]
+                    foreach ($other in $forms.Keys) {
+                        'same[' + $tag + '/' + $other + ']=' + (Test-DarlingSamePath $form $forms[$other])
+                        'atOrUnderSelf[' + $tag + '/' + $other + ']=' + (Test-PathIsAtOrUnder $form $forms[$other])
+                    }
+                    'sameSibling[' + $tag + ']=' + (Test-DarlingSamePath $form $sibling)
+                    'sameChild[' + $tag + ']=' + (Test-DarlingSamePath $form "$long\child")
+                    'childUnder[' + $tag + ']=' + (Test-PathIsAtOrUnder "$long\child" $form)
+                    'childOfFormUnder[' + $tag + ']=' + (Test-PathIsAtOrUnder (Join-Path $form 'not-there\deeper') $long)
+                    'siblingUnder[' + $tag + ']=' + (Test-PathIsAtOrUnder $sibling $form)
+                    'parentUnder[' + $tag + ']=' + (Test-PathIsAtOrUnder $form (Split-Path -Parent $long))
+                    'rootUnderChild[' + $tag + ']=' + (Test-PathIsAtOrUnder $form "$long\child")
+                }
+                # A path that cannot be worked out is not the same as anything and is not under anything.
+                'sameEmpty=' + (Test-DarlingSamePath $long '')
+                'underEmpty=' + (Test-PathIsAtOrUnder $long '')
+            }
+            finally {
+                Remove-Item -LiteralPath $parent -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        var tags = new List<string> { "long", "longSlash", "upper", "lower" };
+        var hasShortNames = !answers.Contains("noShortNames=True");
+        if (hasShortNames)
+        {
+            tags.AddRange(new[] { "short", "shortSlash", "shortUpper" });
+            var longForm = answers.Single(a => a.StartsWith("longForm=", StringComparison.Ordinal))["longForm=".Length..];
+            var shortForm = answers.Single(a => a.StartsWith("shortForm=", StringComparison.Ordinal))["shortForm=".Length..];
+            Assert.Contains("~", shortForm, StringComparison.Ordinal);
+            Assert.NotEqual(longForm, shortForm, StringComparer.OrdinalIgnoreCase);
+        }
+
+        foreach (var tag in tags)
+        {
+            foreach (var other in tags)
+            {
+                Assert.Contains($"same[{tag}/{other}]=True", answers);
+                Assert.Contains($"atOrUnderSelf[{tag}/{other}]=True", answers);
+            }
+            Assert.Contains($"sameSibling[{tag}]=False", answers);
+            Assert.Contains($"sameChild[{tag}]=False", answers);
+            Assert.Contains($"childUnder[{tag}]=True", answers);
+            Assert.Contains($"childOfFormUnder[{tag}]=True", answers);
+            Assert.Contains($"siblingUnder[{tag}]=False", answers);
+            Assert.Contains($"parentUnder[{tag}]=True", answers);
+            Assert.Contains($"rootUnderChild[{tag}]=False", answers);
+        }
+        Assert.Contains("sameEmpty=False", answers);
+        Assert.Contains("underEmpty=False", answers);
+
+        if (!hasShortNames)
+        {
+            Assert.Skip("8.3 short names are not created on the volume the temp folder is on, so there is no short spelling to test; the trailing backslash and case forms above passed.");
+        }
+    }
+
+    /// <summary>
+    /// #5673: a path value in darling.json that names a network share or a device (it starts with two slashes or two
+    /// backslashes) is not looked up and counts as Incomplete, so the refusal advice never waits on a remote host. A
+    /// value inside the folder is still listed. Both scripts, both shells.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheConfiguredPaths_DoNotLookUpAValueThatNamesANetworkShare_AndMarkTheListIncomplete(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
+        probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingConfiguredPathsUnder"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $old = Join-Path $env:TEMP ('pm5673-unc-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $old -Force | Out-Null
+            $json = $old -replace '\\', '\\'
+            try {
+                Set-Content -LiteralPath (Join-Path $old 'darling.json') -Value (@(
+                    '{',
+                    '  "tls": { "pfxPath": "\\\\192.0.2.1\\share\\dir~1\\x.pfx",',
+                    '            "certPath": "@@\\good\\x.pem" },',
+                    '  "smtp": { "password": "file:\\\\192.0.2.1\\share\\dir~1\\p.txt" },',
+                    '  "other": { "token": "file://192.0.2.1/share/dir~1/t.txt" }',
+                    '}') -join "`n").Replace('@@', $json)
+                $watch = [Diagnostics.Stopwatch]::StartNew()
+                $r = Get-DarlingConfiguredPathsUnder $old
+                $watch.Stop()
+                'lines=' + @($r.Lines).Count
+                'incomplete=' + $r.Incomplete
+                'quick=' + ($watch.ElapsedMilliseconds -lt 5000)
+                'good=' + (@($r.Lines | Where-Object { $_ -like '*good\x.pem*' }).Count)
+            }
+            finally {
+                Remove-Item -LiteralPath $old -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.Contains("lines=1", answers);
+        Assert.Contains("good=1", answers);
+        Assert.Contains("incomplete=True", answers);
+        Assert.Contains("quick=True", answers);
+    }
+
+    /// <summary>
+    /// #5673: the upgrade puts -InstallRoot and -Source in their ordinary spelling (the extended-length
+    /// <c>\\?\C:\dir</c> and device <c>\\.\C:\dir</c> forms lose their prefix) on the lines that resolve them, so the
+    /// running-from-the-install-folder refusal and the source-is-the-install-folder refusal see the same folder
+    /// however the operator typed it. This runs the two resolving lines as shipped and then asks
+    /// <c>Test-DarlingSamePath</c> the way those refusals do.
+    /// </summary>
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh")]
+    public void TheUpgrade_ReadsAnExtendedLengthOrDeviceSpellingOfTheInstallRootAndSourceAsTheSameFolder(string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var probe = new StringBuilder();
+        foreach (var name in new[] { "Get-DarlingCanonicalPath", "Test-DarlingSamePath", "Convert-ExtendedLengthPath", "Get-DarlingOrdinaryPath" })
+        {
+            probe.AppendLine(ExtractFunction(script, name));
+        }
+        var installLine = ExtractLine(script, "try { $InstallRoot = [IO.Path]::GetFullPath(").Trim();
+        var sourceLine = ExtractLine(script, "try { $Source = [IO.Path]::GetFullPath(").Trim();
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            function Fail([string]$message) { throw $message }
+            $dir = Join-Path $env:TEMP ('pm5673-ext-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            [void][IO.Directory]::CreateDirectory($dir)
+            $dir = (Get-Item -LiteralPath $dir -Force).FullName
+            try {
+                $spellings = [ordered]@{
+                    plain    = $dir
+                    extended = '\\?\' + $dir
+                    device   = '\\.\' + $dir
+                    slash    = '\\?\' + $dir + '\'
+                    lower    = '\\?\' + $dir.ToLowerInvariant()
+                }
+                foreach ($tag in $spellings.Keys) {
+                    $InstallRoot = $spellings[$tag]
+                    @@INSTALL@@
+                    catch { 'resolveFailed' }
+                    'installRoot[' + $tag + ']=' + (Test-DarlingSamePath $dir $InstallRoot)
+                    $Source = $spellings[$tag]
+                    @@SOURCE@@
+                    catch { 'resolveFailed' }
+                    'source[' + $tag + ']=' + (Test-DarlingSamePath $dir $Source)
+                }
+                # A different folder still reads as different.
+                $InstallRoot = '\\?\' + $dir + '-other'
+                @@INSTALL@@
+                catch { 'resolveFailed' }
+                'other=' + (Test-DarlingSamePath $dir $InstallRoot)
+            }
+            finally {
+                Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """.Replace("@@INSTALL@@", installLine, StringComparison.Ordinal).Replace("@@SOURCE@@", sourceLine, StringComparison.Ordinal));
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.DoesNotContain("resolveFailed", answers);
+        foreach (var tag in new[] { "plain", "extended", "device", "slash", "lower" })
+        {
+            Assert.Contains($"installRoot[{tag}]=True", answers);
+            Assert.Contains($"source[{tag}]=True", answers);
+        }
+        Assert.Contains("other=False", answers);
+    }
+
+    /// <summary>
+    /// #5673: when <c>Get-DarlingCanonicalPath</c> cannot work out either path (the drive is not mounted, so no part of
+    /// the path can be looked up), both helpers fall back to the <c>GetFullPath</c> spelling on both sides and answer as
+    /// they did before the canonical form existed: the same text in another case, or with a trailing backslash, is the
+    /// same folder; a child is under its parent; a sibling and a different folder are not.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheSameFolderTestAndTheAtOrUnderTest_KeepTheirAnswerWhenNeitherPathCanBeWorkedOut(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSamePath"));
+        probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $mounted = [IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1).ToUpperInvariant() }
+            $letter = [char[]]'QRSTUVWXYZ' | Where-Object { $mounted -notcontains [string]$_ } | Select-Object -First 1
+            'nullBothSides=' + ($null -eq (Get-DarlingCanonicalPath "${letter}:\ABCDEF~1\x"))
+            'same=' + (Test-DarlingSamePath "${letter}:\ABCDEF~1\x" ("${letter}:\abcdef~1\x".ToLowerInvariant() + '\'))
+            'sameOther=' + (Test-DarlingSamePath "${letter}:\ABCDEF~1\x" "${letter}:\ABCDEF~1\y")
+            'under=' + (Test-PathIsAtOrUnder "${letter}:\ABCDEF~1\x\y" "${letter}:\ABCDEF~1\x")
+            'underSelf=' + (Test-PathIsAtOrUnder "${letter}:\ABCDEF~1\x" "${letter}:\ABCDEF~1\x\")
+            'underSibling=' + (Test-PathIsAtOrUnder "${letter}:\ABCDEF~1\xy" "${letter}:\ABCDEF~1\x")
+            'underParent=' + (Test-PathIsAtOrUnder "${letter}:\ABCDEF~1" "${letter}:\ABCDEF~1\x")
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.Contains("nullBothSides=True", answers);
+        Assert.Contains("same=True", answers);
+        Assert.Contains("sameOther=False", answers);
+        Assert.Contains("under=True", answers);
+        Assert.Contains("underSelf=True", answers);
+        Assert.Contains("underSibling=False", answers);
+        Assert.Contains("underParent=False", answers);
+    }
+
+    /// <summary>
+    /// #5673: the upgrade's self-overwrite and source-is-install refusals also ask whether the two folders are the same
+    /// folder on disk (volume serial number and file index), so a junction to the install folder reads as the install
+    /// folder. A folder that does not exist, or another folder, is not the same.
+    /// </summary>
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh")]
+    public void TheUpgrade_ReadsAJunctionToTheInstallFolderAsTheInstallFolder(string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var probe = new StringBuilder();
+        Assert.Contains("if (Test-DarlingSameFolderIdentity $runningFrom $InstallRoot) {", script, StringComparison.Ordinal);
+        Assert.Contains("if (-not $sourceIsZip -and (Test-DarlingSameFolderIdentity $sourceRoot $InstallRoot)) {", script, StringComparison.Ordinal);
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSameFolderIdentity"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $base = Join-Path $env:TEMP ('pm5673-id-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            [void][IO.Directory]::CreateDirectory("$base\real")
+            [void][IO.Directory]::CreateDirectory("$base\other")
+            try {
+                [void](New-Item -ItemType Junction -Path "$base\link" -Target "$base\real")
+                'junctionMade=' + (Test-Path -LiteralPath "$base\link")
+                'selfSame=' + (Test-DarlingSameFolderIdentity "$base\real" "$base\real")
+                'junctionSame=' + (Test-DarlingSameFolderIdentity "$base\real" "$base\link")
+                'otherSame=' + (Test-DarlingSameFolderIdentity "$base\real" "$base\other")
+                'missingSame=' + (Test-DarlingSameFolderIdentity "$base\real" "$base\missing")
+                'emptySame=' + (Test-DarlingSameFolderIdentity "$base\real" '')
+            }
+            finally {
+                if (Test-Path -LiteralPath "$base\link") { [IO.Directory]::Delete("$base\link") }
+                Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.Contains("junctionMade=True", answers);
+        Assert.Contains("selfSame=True", answers);
+        Assert.Contains("junctionSame=True", answers);
+        Assert.Contains("otherSame=False", answers);
+        Assert.Contains("missingSame=False", answers);
+        Assert.Contains("emptySame=False", answers);
+    }
+
+    /// <summary>
+    /// #5673: the two refusals themselves, run the way the script has them. A folder reached through a junction to the install
+    /// folder has a different spelling, so the text comparison alone lets it through; the volume-and-file-index check after
+    /// each refusal is what stops it. The block is cut out of the script (from the self-overwrite refusal up to the zip
+    /// handling) and run with a stand-in <c>Fail</c> that records which message was raised.
+    /// </summary>
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh")]
+    public void TheUpgrade_RefusesARunningScriptAndASourceThatReachTheInstallFolderThroughAJunction(string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var start = script.IndexOf("if (Test-DarlingSamePath $runningFrom $InstallRoot) {", StringComparison.Ordinal);
+        Assert.True(start >= 0, "upgrade-darling.ps1 no longer has the self-overwrite refusal (#5673)");
+        var end = script.IndexOf("\nif ($sourceIsZip) {", start, StringComparison.Ordinal);
+        Assert.True(end > start, "upgrade-darling.ps1 no longer has the zip handling after the refusals (#5673)");
+        var refusals = script.Substring(start, end - start);
+
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSamePath"));
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSameFolderIdentity"));
+        probe.AppendLine("function Fail([string]$message) { 'refused: ' + $message }");
+        probe.AppendLine("$refusals = {");
+        probe.AppendLine(refusals);
+        probe.AppendLine("}");
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $base = Join-Path $env:TEMP ('pm5673-ref-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            [void][IO.Directory]::CreateDirectory("$base\real")
+            [void][IO.Directory]::CreateDirectory("$base\other")
+            try {
+                [void](New-Item -ItemType Junction -Path "$base\link" -Target "$base\real")
+                $InstallRoot = "$base\real"
+                $sourceIsZip = $false
+
+                $runningFrom = "$base\link"; $sourceRoot = "$base\other"
+                'running=' + (@(& $refusals | Where-Object { $_ -like '*script is running from the install directory*' }).Count)
+
+                $runningFrom = "$base\other"; $sourceRoot = "$base\link"
+                'source=' + (@(& $refusals | Where-Object { $_ -like '*source folder is the install directory*' }).Count)
+
+                $runningFrom = "$base\other"; $sourceRoot = "$base\other"
+                'neither=' + (@(& $refusals).Count)
+            }
+            finally {
+                if (Test-Path -LiteralPath "$base\link") { [IO.Directory]::Delete("$base\link") }
+                Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.Contains("running=1", answers);
+        Assert.Contains("source=1", answers);
+        Assert.Contains("neither=0", answers);
+    }
+
+    /// <summary>
+    /// #5673: the installer's user-profile check also runs on the install folder's final path, so a junction that leads into
+    /// a profile folder reads as under the profile, a folder that is only named like one does not, and a folder that does not
+    /// exist yet is resolved through the part of its path that does. The check is cut out of the script, after the typed-path
+    /// check, and run with a profile root of its own.
+    /// </summary>
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh")]
+    public void TheInstaller_ReadsAJunctionIntoAProfileFolderAsUnderTheProfile(string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
+        var start = script.IndexOf("$resolvedRoot = Get-DarlingResolvedFolder $classifyRoot", StringComparison.Ordinal);
+        Assert.True(start >= 0, "install-darling.ps1 no longer resolves the install folder before the profile check (#5673)");
+        var end = script.IndexOf("\n}", start, StringComparison.Ordinal) + 2;
+        var profileCheck = script.Substring(start, end - start);
+
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Convert-ExtendedLengthPath"));
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
+        probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingResolvedFolder"));
+        probe.AppendLine("function Get-ProfilesDirectory { $script:profiles }");
+        probe.AppendLine("function Test-Under([string]$typed) { $classifyRoot = $typed; $underProfile = $false; " + "\n" + profileCheck + "\n" + " $underProfile }");
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $base = Join-Path $env:TEMP ('pm5673-prof-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            [void][IO.Directory]::CreateDirectory("$base\profiles\me\data")
+            [void][IO.Directory]::CreateDirectory("$base\elsewhere\data")
+            try {
+                $script:profiles = "$base\profiles"
+                $env:USERPROFILE = "$base\profiles\me"
+                [void](New-Item -ItemType Junction -Path "$base\link" -Target "$base\profiles\me\data")
+                [void](New-Item -ItemType Junction -Path "$base\plain" -Target "$base\elsewhere\data")
+                'resolved=' + (Get-DarlingResolvedFolder "$base\link").EndsWith('\profiles\me\data')
+                'resolvedMissing=' + (Get-DarlingResolvedFolder "$base\link\not\there").EndsWith('\profiles\me\data\not\there')
+                'junction=' + (Test-Under "$base\link")
+                'junctionNew=' + (Test-Under "$base\link\Darling")
+                'typedProfile=' + (Test-Under "$base\profiles\me\x")
+                'plainJunction=' + (Test-Under "$base\plain")
+                'plainNew=' + (Test-Under "$base\plain\Darling")
+                'elsewhere=' + (Test-Under "$base\elsewhere\x")
+            }
+            finally {
+                foreach ($name in 'link', 'plain') { if (Test-Path -LiteralPath "$base\$name") { [IO.Directory]::Delete("$base\$name") } }
+                Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.Contains("resolved=True", answers);
+        Assert.Contains("resolvedMissing=True", answers);
+        Assert.Contains("junction=True", answers);
+        Assert.Contains("junctionNew=True", answers);
+        Assert.Contains("typedProfile=True", answers);
+        Assert.Contains("plainJunction=False", answers);
+        Assert.Contains("plainNew=False", answers);
+        Assert.Contains("elsewhere=False", answers);
+    }
+
+    /// <summary>
+    /// #5673: the check that the service runs from the folder being upgraded compares the folders on disk as well as their
+    /// spelling, so an install folder typed as a junction to the registered folder is the registered folder, while another
+    /// folder is still refused. The check is cut out of the script and run with a stand-in <c>Fail</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh")]
+    public void TheUpgrade_ReadsAJunctionToTheRegisteredFolderAsTheRegisteredFolder(string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var start = script.IndexOf("elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot)", StringComparison.Ordinal);
+        Assert.True(start >= 0, "upgrade-darling.ps1 no longer has the registered-folder refusal (#5673)");
+        var end = script.IndexOf("\n}", start, StringComparison.Ordinal) + 2;
+        var check = "if (" + script.Substring(start + "elseif (".Length, end - start - "elseif (".Length);
+
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSamePath"));
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSameFolderIdentity"));
+        probe.AppendLine("function Fail([string]$message) { 'refused' }");
+        probe.AppendLine("$serviceName = 'DarlingTest'");
+        probe.AppendLine("function Check { " + check.Replace("\r", "") + " }");
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $base = Join-Path $env:TEMP ('pm5673-reg-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            [void][IO.Directory]::CreateDirectory("$base\real")
+            [void][IO.Directory]::CreateDirectory("$base\other")
+            try {
+                [void](New-Item -ItemType Junction -Path "$base\link" -Target "$base\real")
+                $registeredRoot = "$base\real"
+                $InstallRoot = "$base\link"
+                'junction=' + (@(Check).Count)
+                $InstallRoot = "$base\real"
+                'same=' + (@(Check).Count)
+                $InstallRoot = "$base\other"
+                'other=' + (@(Check).Count)
+            }
+            finally {
+                if (Test-Path -LiteralPath "$base\link") { [IO.Directory]::Delete("$base\link") }
+                Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.Contains("junction=0", answers);
+        Assert.Contains("same=0", answers);
+        Assert.Contains("other=1", answers);
+    }
+
+    /// <summary>
+    /// #5673: the canonical spelling trims and joins with the runtime's directory separator and not a literal backslash, so a
+    /// backslash that is part of a name on another platform (<c>/opt/a\</c>) is not dropped as if it were a separator. The
+    /// separator is the same character on Windows, so nothing changes there; this pins the text because the rule cannot be
+    /// run with another separator from a Windows run.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1")]
+    [InlineData("upgrade-darling.ps1")]
+    public void TheCanonicalPath_TrimsAndJoinsWithTheRuntimesSeparator(string scriptName)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var body = ExtractFunction(script, "Get-DarlingCanonicalPath");
+
+        Assert.DoesNotContain("TrimEnd('\\')", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("-join '\\'", body, StringComparison.Ordinal);
+        Assert.Contains("$full.TrimEnd([IO.Path]::DirectorySeparatorChar)", body, StringComparison.Ordinal);
+        Assert.Contains("-join [IO.Path]::DirectorySeparatorChar", body, StringComparison.Ordinal);
     }
 
     /// <summary>The two path helpers the walk, the lock and the path test call (#5649), the way the scripts define them.</summary>

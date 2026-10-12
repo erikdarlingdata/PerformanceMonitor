@@ -38,8 +38,11 @@ $ErrorActionPreference = 'Stop'
 # The cut and the run must agree (#5459): the listing every shard cuts from leaves the Guard classes out exactly
 # when the Guard job ran them, so each remaining class still lands in exactly one shard. No artifact: all classes.
 $guardFilter = @(if ($GuardBuildUsed -eq 'true') { '-trait-'; 'Stage=Guard' })
-$scopeFilter = @($ScopeFilter -split ' ' | Where-Object { $_ })
-$lines = @(dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json @guardFilter @scopeFilter)
+# Not named $scopeFilter: PowerShell variable names are case-insensitive, so that name is the typed [string] $ScopeFilter
+# parameter, which turns the array back into one string, and splatting a string hands the runner its characters as
+# separate arguments (exit 3 on every pull request that changes only Lite files).
+$scopeArgs = @($ScopeFilter -split ' ' | Where-Object { $_ })
+$lines = @(dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json @guardFilter @scopeArgs)
 if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
 # Only the runner's one-line JSON array is parsed: the dotnet CLI can print its own notice on stdout,
 # and a line starting "W" after the array failed a shard's ConvertFrom-Json on 2026-09-23.

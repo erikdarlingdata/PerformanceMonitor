@@ -25,6 +25,8 @@ namespace PerformanceMonitor.Alerting;
 /// came from. 0 means no window data was supplied, which <see cref="XidFreezingIsKeepingUp"/> treats
 /// conservatively as "not recovering" rather than silently assuming health (see #2689).</param>
 /// <param name="WindowPeakMultiXactAge">The same for MultiXact age.</param>
+/// <param name="NewestSampleUtc">#5642: the collection time (UTC) of the row this reading came from, so the alert
+/// can say how old its evidence was when it fired. Null when the reader did not supply one.</param>
 public sealed record PostgresWraparoundAlertInfo(
     string DatabaseName,
     long XidAge,
@@ -32,7 +34,8 @@ public sealed record PostgresWraparoundAlertInfo(
     long AutovacuumFreezeMaxAge,
     long AutovacuumMultixactFreezeMaxAge,
     long WindowPeakXidAge = 0,
-    long WindowPeakMultiXactAge = 0)
+    long WindowPeakMultiXactAge = 0,
+    DateTime? NewestSampleUtc = null)
 {
     /* WorstAge/WorstCounter used to pick by raw age and the evaluator graded the winner against
        autovacuum_freeze_max_age whichever counter it was. That is wrong: the two counters have DIFFERENT
@@ -103,6 +106,7 @@ public sealed record PostgresWraparoundAlertInfo(
 /// the horizon arm's denominator, sourced from the collection log rather than from the holder table, so
 /// quiet (zero-row, healthy) captures count. 0 (the default) reads as "no capture count supplied" and
 /// floors the horizon arm out rather than firing.</param>
+/// <param name="NewestSampleUtc">#5642: the collection time (UTC) of the winning row this reading came from.</param>
 public sealed record PostgresXminHorizonAlertInfo(
     string Source,
     string? Identifier,
@@ -111,7 +115,8 @@ public sealed record PostgresXminHorizonAlertInfo(
     int ObservationsTotal,
     string? Detail,
     int ObservationsAboveThreshold = 0,
-    int CapturesInWindow = 0);
+    int CapturesInWindow = 0,
+    DateTime? NewestSampleUtc = null);
 
 /// <summary>
 /// Accumulated pressure for one poison wait event over the alert's evaluation window (#2711).
@@ -192,10 +197,12 @@ public sealed record PostgresPoisonWaitWindow(
 /// <param name="RetainedWalGrowthBytes">Change across the window. Growth is what turns a large figure into
 /// an emergency; a flat figure is a consumer that is behind but keeping pace.</param>
 /// <param name="InactiveSince">When it went quiet, when the server reports it (PG17+).</param>
+/// <param name="NewestSampleUtc">#5642: the collection time (UTC) of this slot's latest row.</param>
 public sealed record PostgresSlotAlertInfo(
     string SlotName,
     string? WalStatus,
     bool IsActive,
     long RetainedWalBytes,
     long RetainedWalGrowthBytes,
-    DateTime? InactiveSince);
+    DateTime? InactiveSince,
+    DateTime? NewestSampleUtc = null);

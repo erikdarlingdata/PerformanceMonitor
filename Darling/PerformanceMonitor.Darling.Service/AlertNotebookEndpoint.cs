@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -1295,7 +1296,7 @@ internal static partial class AlertNotebookEndpoint
     /// <summary>One alert-history row plus its dedup-matched incident's facts, in the SAME wire shape
     /// <see cref="DarlingTriageEndpoint"/>'s own row node uses, extended with the incident facts the spec
     /// requires (Incident Since, Involved Objects, Database, Total Occurrences).</summary>
-    private static JsonObject AlertRowNode(DarlingAlertReader.AlertHistoryReadRow row, AlertIncident? incident)
+    internal static JsonObject AlertRowNode(DarlingAlertReader.AlertHistoryReadRow row, AlertIncident? incident)
     {
         var node = new JsonObject
         {
@@ -1306,6 +1307,8 @@ internal static partial class AlertNotebookEndpoint
             ["current_value"] = row.CurrentValue,
             ["threshold_value"] = row.ThresholdValue,
             ["detail_text"] = row.DetailText,
+            /* #5642: the fire-time age of the newest sample, read from the persisted context. */
+            ["newest_sample"] = NewestSampleNode(row.ContextJson),
         };
 
         if (incident is not null)
@@ -1318,6 +1321,13 @@ internal static partial class AlertNotebookEndpoint
 
         return node;
     }
+
+    /// <summary>The <c>newest_sample</c> node of an alert row (#5642), shared by the notebook and the triage
+    /// page so both publish the shape <c>get_alert_history</c> does: null when the row carries no sample age.</summary>
+    internal static JsonNode? NewestSampleNode(string? contextJson) =>
+        AlertNewestSampleWire.FromContextJson(contextJson) is AlertNewestSampleWire wire
+            ? JsonSerializer.SerializeToNode(wire)
+            : null;
 
     /// <summary>The first non-empty value for a query key, or null — the read surface's binding rule, which this
     /// calls rather than restates (#5245: a repeated key is its first value, not the values joined by a comma).</summary>

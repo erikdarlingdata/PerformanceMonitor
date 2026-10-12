@@ -875,7 +875,7 @@ internal static class DarlingTriageEndpoint
 
     /// <summary>One alert-history row in the SAME wire shape <c>get_alert_history</c> serves, so the page and
     /// any automation parse one shape whichever surface they read.</summary>
-    private static JsonObject AlertRowNode(DarlingAlertReader.AlertHistoryReadRow row) => new()
+    internal static JsonObject AlertRowNode(DarlingAlertReader.AlertHistoryReadRow row) => new()
     {
         ["alert_time"] = row.AlertTime.ToString("o", CultureInfo.InvariantCulture),
         ["server_id"] = row.ServerId,
@@ -888,6 +888,8 @@ internal static class DarlingTriageEndpoint
         ["send_error"] = row.SendError,
         ["muted"] = row.Muted,
         ["detail_text"] = row.DetailText,
+        /* #5642: the fire-time age of the newest sample, read from the persisted context. */
+        ["newest_sample"] = AlertNotebookEndpoint.NewestSampleNode(row.ContextJson),
     };
 
     /// <summary>The first non-empty value for a query key, or null — the read surface's binding rule, which this

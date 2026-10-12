@@ -42,4 +42,10 @@ public sealed class DatabaseStateInfo
     /// never chosen, so they keep re-firing on the cooldown and ignore this field.</para>
     /// </summary>
     public string LastAlertedState { get; set; } = "";
+
+    /// <summary>The instant this row's source data was last collected (UTC), or null when the host does not
+    /// have a UTC instant for it (#5642). Feeds the alert's newest-sample age line
+    /// (<c>AlertContext.NewestSample</c>). Read from the same <c>MAX(collection_time)</c> the check already
+    /// reads; a pre-UTC local stamp is never put here, so null means "no age line", not "unknown age".</summary>
+    public System.DateTime? NewestSampleUtc { get; set; }
 }

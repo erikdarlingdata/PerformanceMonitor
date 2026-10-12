@@ -41,7 +41,10 @@ public enum ActualPlanSource
 /// SQL text, any writer of <c>config.config_command</c> could make the service run arbitrary SQL against every
 /// monitored target — a privilege escalation through the command plane. Carrying only a key means the worst a
 /// command writer can do is ask the service to re-run a query the collector ALREADY captured (and only a
-/// read-write seat can enqueue at all). Property names are camelCase to match the viewer's serialization
+/// read-write seat can enqueue at all). A <c>query_stats</c> request (the one source where the service picks the
+/// LATEST stored text for a hash + database) also carries <see cref="ConfirmedSha256"/>, the SHA-256 digest of the
+/// full text the operator confirmed. It is a digest, not SQL, and the service refuses to run text that does not
+/// match it (#5639). Property names are camelCase to match the viewer's serialization
 /// (parsed case-insensitively). Pure args model + validation (<see cref="TryParse"/>); never throws.</para>
 /// </summary>
 public sealed record ActualPlanRequest(
@@ -49,7 +52,8 @@ public sealed record ActualPlanRequest(
     long? QueryId,
     DateTime? SnapshotCollectionTime,
     int? SnapshotSessionId,
-    string? DatabaseName)
+    string? DatabaseName,
+    string? ConfirmedSha256 = null)
 {
     /// <summary>Which store table the identifier resolves from (the first populated kind wins — deterministic).</summary>
     public ActualPlanSource Source =>
@@ -100,7 +104,8 @@ public sealed record ActualPlanRequest(
             dto.QueryId,
             dto.SnapshotCollectionTime,
             dto.SnapshotSessionId,
-            NullIfBlank(dto.DatabaseName));
+            NullIfBlank(dto.DatabaseName),
+            NullIfBlank(dto.ConfirmedSha256));
 
         if (!parsed.HasIdentifier)
         {
@@ -121,5 +126,6 @@ public sealed record ActualPlanRequest(
         public DateTime? SnapshotCollectionTime { get; set; }
         public int? SnapshotSessionId { get; set; }
         public string? DatabaseName { get; set; }
+        public string? ConfirmedSha256 { get; set; }
     }
 }

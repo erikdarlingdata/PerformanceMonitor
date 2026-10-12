@@ -106,6 +106,10 @@ public partial class MainWindow : Window
     /// engine. The decisions themselves are the shared PerformanceMonitor.Common.AgAlertPolicy, so both apps
     /// fire on identical rules under identical metric names.</summary>
     private readonly Services.AgAlertEvaluator _agAlertEvaluator = new();
+
+    /// <summary>#5642: when the current connection to each server began collecting, the alert snapshot's
+    /// <c>WatchingSinceUtc</c>. Keyed by the connection's id, the key <see cref="_previousConnectionStates"/> uses.</summary>
+    private readonly Services.WatchingSinceTracker _watchingSince = new();
     private McpHostService? _mcpService;
     private readonly AlertStateService _alertStateService = new();
     private readonly IAlertSettings _alertSettings = new AppAlertSettings();
@@ -2033,6 +2037,7 @@ public partial class MainWindow : Window
            state that had just been dropped. */
         _collectorService?.ClearHealthForServer(removedServerId);
         _agAlertEvaluator.Forget(removedServerId);
+        _watchingSince.Forget(server.Id);
         /* #4795: the connection alert keeps its own per-server state, keyed by the connection's id rather than the
            storage-name hash. The pending retry goes with the server, and so do the two marks a send still in
            flight would read when its answer arrives: without the previous-state mark, that answer would find the
@@ -2181,6 +2186,8 @@ public partial class MainWindow : Window
                 if (status?.IsOnline == null) continue;
 
                 bool isOnline = status.IsOnline == true;
+                /* #5642: an offline reading ends the connection, so the next online one is a new "watching since". */
+                _watchingSince.Observe(server.Id, isOnline, DateTime.UtcNow);
                 var healthSummary = _collectorService != null && isOnline
                     ? _collectorService.GetHealthSummary(server)
                     : null;

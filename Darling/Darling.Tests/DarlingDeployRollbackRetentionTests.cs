@@ -575,7 +575,7 @@ public sealed class DarlingDeployRollbackRetentionTests
 
         var crossCheck = script.IndexOf("$registeredRoot = Get-DarlingInstallRootFromService $serviceName", StringComparison.Ordinal);
         Assert.True(crossCheck >= 0, "upgrade-darling.ps1 no longer cross-checks -InstallRoot against the registered ImagePath (#2525)");
-        Assert.Contains("elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot)) {", script, StringComparison.Ordinal);
+        Assert.Contains("elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot) -and -not (Test-DarlingSameFolderIdentity $registeredRoot $InstallRoot)) {", script, StringComparison.Ordinal);
 
         /* Unconditional. A `if ($PSBoundParameters.ContainsKey('InstallRoot'))` around this would make it
            absent for the caller it exists to protect. */
@@ -604,6 +604,7 @@ public sealed class DarlingDeployRollbackRetentionTests
     public void TheDeployScript_ComparesPathsOneWay_AndToleratesTheWaysPeopleTypeThem()
     {
         var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(DeployScript, "Get-DarlingCanonicalPath"));
         probe.AppendLine(ExtractFunction(DeployScript, "Test-DarlingSamePath"));
         probe.AppendLine("$sep = [IO.Path]::DirectorySeparatorChar");
         probe.AppendLine("$root = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'PerformanceMonitorDarling')).TrimEnd($sep)");

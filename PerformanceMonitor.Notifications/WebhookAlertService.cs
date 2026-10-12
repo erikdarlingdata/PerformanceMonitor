@@ -874,6 +874,13 @@ public class WebhookAlertService
             }
         }
 
+        /* #5642: the newest-sample age, once, after the details: the fire-time age persisted with the alert. */
+        var ageLine = AlertDetailText.SampleAgeLineFor(context, prose);
+        if (ageLine is not null)
+        {
+            itemSections.Add(new { text = ageLine, markdown = true });
+        }
+
         var title = isTest
             ? $"{emoji} TEST — {metricName}"
             : $"{emoji} {badgeText} — {titleName}";
@@ -1866,6 +1873,18 @@ public class WebhookAlertService
            unchanged: head, prose, details, footer — exactly where each has always rendered. */
         var footerBlocks = new List<object>();
 
+        /* #5642: the newest-sample age, one small context block ahead of the triage button; it counts
+           against the budget below with the rest of the footer. */
+        var slackAgeLine = AlertDetailText.SampleAgeLineFor(context, prose);
+        if (slackAgeLine is not null)
+        {
+            footerBlocks.Add(new
+            {
+                type = "context",
+                elements = new object[] { new { type = "mrkdwn", text = slackAgeLine } }
+            });
+        }
+
         /* #2710: the triage-page link button, above the footer so it reads as part of the alert rather than
            the boilerplate. A url button opens the link directly with no Slack app interactivity required. */
         if (triageUrl is not null)
@@ -2220,6 +2239,13 @@ public class WebhookAlertService
             parts.Add(prose.Replace("\r\n", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal));
         }
 
+        /* #5642: the newest-sample age, once, when the prose does not already carry it. */
+        var ageLine = AlertDetailText.SampleAgeLineFor(context, prose);
+        if (ageLine is not null)
+        {
+            parts.Add(ageLine);
+        }
+
         if (context?.Details is not { Count: > 0 })
         {
             return parts.Count == 0 ? $"Sent by {branding.EditionName}" : string.Join(" | ", parts);
@@ -2263,7 +2289,7 @@ public class WebhookAlertService
     /// </summary>
     private static AlertContext RedactForWebhook(AlertContext context)
     {
-        var redacted = new AlertContext { Incidents = context.Incidents };
+        var redacted = new AlertContext { Incidents = context.Incidents, NewestSample = context.NewestSample };
         foreach (var detail in context.Details)
         {
             if (detail.IsCodeBlock)
@@ -2740,6 +2766,11 @@ public class WebhookAlertService
            prose-only self-alert takes — the branch that used to reduce the whole alert to "Sent by". */
         if (prose is not null)
             details["Details"] = prose;
+
+        /* #5642: the newest-sample age, once, when the prose does not already carry it. */
+        var pdAgeLine = AlertDetailText.SampleAgeLineFor(context, prose);
+        if (pdAgeLine is not null)
+            details["Sample age"] = pdAgeLine;
 
         if (context?.Details is null || context.Details.Count == 0)
         {

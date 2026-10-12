@@ -180,6 +180,11 @@ public sealed class DarlingMcpAlertTools
                        analysis row written before the gate existed; a null here is not evidence of anything. */
                     routing = routing?.Route,
                     routing_reason = routing?.Reason,
+                    /* #5642: how old the newest sample behind the alert was WHEN IT FIRED (source, instant UTC, age,
+                       and the one-line sentence the notification carried), read from the persisted context and
+                       never measured against this read's clock. Null on an alert with no UTC sample instant and on
+                       every row written before the member existed; a null here is not evidence of anything. */
+                    newest_sample = AlertNewestSampleWire.FromContextJson(r.ContextJson),
                     detail_text = r.DetailText,
                 };
             });

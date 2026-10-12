@@ -36,6 +36,12 @@ public class PvsPressureInfo
     /// that shape as "cleanup is ongoing on this database".</summary>
     public bool AbortedCleanupOngoing { get; set; }
 
+    /// <summary>The instant this row's source data was last collected (UTC), or null when the host does not
+    /// have a UTC instant for it (#5642). Feeds the alert's newest-sample age line
+    /// (<c>AlertContext.NewestSample</c>). Read from the same <c>MAX(collection_time)</c> the check already
+    /// reads; a pre-UTC local stamp is never put here, so null means "no age line", not "unknown age".</summary>
+    public System.DateTime? NewestSampleUtc { get; set; }
+
     /// <summary>
     /// PVS as a share of the database's online data files — the ratio MS's troubleshooting guide
     /// reads first ("close to 50% of the database size" = large). Same guarded formula as both

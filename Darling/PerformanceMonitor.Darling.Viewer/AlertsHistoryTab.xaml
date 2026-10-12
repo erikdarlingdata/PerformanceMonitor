@@ -166,6 +166,15 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
+                    <!-- #5642: the age of the newest sample the alert judged, as it was when the alert fired (Lite's twin column). -->
+                    <DataGridTextColumn Binding="{Binding NewestSampleDisplay}" Width="270">
+                        <DataGridTextColumn.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NewestSampleDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <TextBlock Text="Newest Sample" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </DataGridTextColumn.Header>
+                    </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding StatusDisplay}" Width="100">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
