@@ -929,8 +929,9 @@ HAVING COUNT(*) > 1";
            One volume: the archive folder. The file being rewritten (file.Path) is listed from _archivePath, the
            .repair-tmp output sits beside it, and the spill folder (slice_repair_tmp) is created under _archivePath
            below, so free space on _archivePath is the right number for the spill and the output alike. The
-           reserve is read from the database's own volume, which is compaction's #5377 rule; when the database
-           lives on another volume it keeps more free than this rewrite needs, which only errs toward skipping. */
+           reserve is compaction's #5377 rule, sized from the database file: the larger of the flat headroom and
+           the file's length. When the database lives on another volume, holding that much back on this one keeps
+           more free than this rewrite needs, which only errs toward skipping. */
         var freeBytes = _duckDb.AvailableFreeBytesProvider(_archivePath);
         var reserveBytes = DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath);
         var copyBytes = RewriteCopyBytes(beforeBytes);
