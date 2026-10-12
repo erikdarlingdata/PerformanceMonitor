@@ -1003,6 +1003,31 @@ public static class DarlingRetention
             {
                 tablesFailed++;
             }
+            /* collect.procedure_stats_totals (#5638, V176): the per-collection totals of procedure_stats. NOT in CollectorCatalog.All
+               (the collector runner's COPY transaction writes it), so the loop above skips it. It ages with the raw collector it
+               summarises: the same resolved days as procedure_stats (EffectivePurgeRetentionDays, so a per-collector override moves both),
+               and a row is never purged before the procedure_stats rows of its age (ProcedureStatsTotals.PrunePredicate also keeps every
+               totals row at or after the oldest raw row, because on TimescaleDB the raw chunks leave through the gated purge, which can
+               hold them past the horizon). A plain table with a plain time-sliced DELETE on both store kinds; about one row per database
+               per collection, so a slice is a small fraction of a raw slice. Failure-isolated like every sibling. */
+            var procedureTotalsDays = EffectivePurgeRetentionDays(
+                "procedure_stats",
+                retentionDaysFor?.Invoke("procedure_stats")
+                    ?? (CollectorScheduleDefaults.All.TryGetValue("procedure_stats", out var procedureSchedule) ? procedureSchedule.RetentionDays : DataRetentionBaseDays));
+            var procedureTotalsDeleted = await PurgeOneAsync(
+                postgres, ProcedureStatsTotals.Table,
+                TimeSlicedDeleteSql(ProcedureStatsTotals.Table, "collection_time", ProcedureStatsTotals.PrunePredicate),
+                utcNow.AddDays(-procedureTotalsDays), logger, cancellationToken,
+                pacer: walPacer);
+            if (procedureTotalsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += procedureTotalsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
             /* collect.oversized_plan_backlog (#3392) purges on last_seen_at at
                OversizedPlanBacklogRetentionDays. NOT in CollectorCatalog.All (it is written by the collector
                runner's post-write hook and by the backlog sweep, not by a collector definition), so the loop
