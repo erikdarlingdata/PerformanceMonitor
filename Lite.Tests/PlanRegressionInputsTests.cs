@@ -25,10 +25,10 @@ using Xunit;
 namespace Lite.Tests;
 
 /// <summary>
-/// #5630, Lite's side: PLAN_REGRESSION must not compare two plans that were compiled for different inputs.
-/// A query with OPTION (RECOMPILE), or a parameter-sensitive query whose plans were compiled for different
-/// parameter values, looks like a plan flip when its "latest" plan serves a bigger input than its "best" one,
-/// and forcing the "best" plan makes the big case slower.
+/// #5630/#5631, Lite's side: PLAN_REGRESSION judges each candidate by its output, its compiled values and its
+/// statistics. A statement with OPTION (RECOMPILE), a newer plan that only returns far more rows, and a plan that
+/// differs from the best one in compiled values alone look like a plan flip but are not; a plan compiled for the same
+/// values, or for different values after a statistics update, is kept.
 ///
 /// <para>Lite stores no Query Store plan XML, so the detector takes the two plans from a plan source it is
 /// given. These tests seed Query Store rows in DuckDB and feed small ShowPlan fixtures through a fixture
@@ -83,8 +83,12 @@ public sealed class PlanRegressionInputsTests : IClassFixture<SharedDuckDbFixtur
         /// </summary>
         public bool AppliesStatementFilter { get; set; }
 
+        /// <summary>One parameter compiled for <paramref name="compiledValue"/> (none when null), over the default statistics.</summary>
         public void Add(long planId, string? compiledValue, string statementText = "SELECT 1") =>
-            _plans[planId] = Plan(compiledValue, statementText);
+            _plans[planId] = Plan(
+                compiledValue is null ? [] : [("@location_id", compiledValue)], DefaultStatistics, statementText);
+
+        public void AddXml(long planId, string planXml) => _plans[planId] = planXml;
 
         public async Task<string?> FetchQueryStorePlanXmlAsync(
             int serverId, string databaseName, long planId, CancellationToken cancellationToken)
@@ -96,80 +100,307 @@ public sealed class PlanRegressionInputsTests : IClassFixture<SharedDuckDbFixtur
         }
     }
 
-    /// <summary>A small ShowPlan carrying the compiled value of one parameter (none when null).</summary>
-    private static string Plan(string? compiledValue, string statementText = "SELECT 1") =>
-        "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.564\" Build=\"16.0.1000.6\">" +
-        "<BatchSequence><Batch><Statements><StmtSimple StatementText=\"" + statementText + "\" StatementType=\"SELECT\">" +
-        "<QueryPlan CachedPlanSize=\"16\">" +
-        (compiledValue is null
-            ? string.Empty
-            : $"<ParameterList><ColumnReference Column=\"@location_id\" ParameterDataType=\"int\" ParameterCompiledValue=\"({compiledValue})\" /></ParameterList>") +
-        "</QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>";
+    /// <summary>The statistics every plan carries unless a fixture says otherwise: one, updated on one fixed date.</summary>
+    private static readonly (string Statistics, string LastUpdate)[] DefaultStatistics = [("[ix_location]", "2026-01-01T00:00:00.00")];
+
+    /// <summary>
+    /// A small ShowPlan: the compiled values of its parameters (a null value is a parameter with no compiled value),
+    /// the statistics it used (null: no <c>OptimizerStatsUsage</c> at all), and the estimator version when given.
+    /// </summary>
+    private static string Plan(
+        IReadOnlyList<(string Name, string? Value)> parameters,
+        IReadOnlyList<(string Statistics, string LastUpdate)>? statistics,
+        string statementText = "SELECT 1", string? estimatorVersion = null)
+    {
+        var xml = new System.Text.StringBuilder();
+        xml.Append("<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.564\" Build=\"16.0.1000.6\">");
+        xml.Append("<BatchSequence><Batch><Statements><StmtSimple StatementText=\"").Append(statementText).Append("\" StatementType=\"SELECT\"");
+        if (estimatorVersion is not null) xml.Append(" CardinalityEstimationModelVersion=\"").Append(estimatorVersion).Append('"');
+        xml.Append("><QueryPlan CachedPlanSize=\"16\">");
+        if (statistics is not null)
+        {
+            xml.Append("<OptimizerStatsUsage>");
+            foreach (var (name, lastUpdate) in statistics)
+                xml.Append("<StatisticsInfo Database=\"[RegrInputsDb]\" Schema=\"[dbo]\" Table=\"[manifest]\" Statistics=\"")
+                   .Append(name).Append("\" ModificationCount=\"5\" SamplingPercent=\"100\" LastUpdate=\"").Append(lastUpdate).Append("\" />");
+            xml.Append("</OptimizerStatsUsage>");
+        }
+
+        if (parameters.Count > 0)
+        {
+            xml.Append("<ParameterList>");
+            foreach (var (name, value) in parameters)
+            {
+                xml.Append("<ColumnReference Column=\"").Append(name).Append("\" ParameterDataType=\"int\"");
+                if (value is not null) xml.Append(" ParameterCompiledValue=\"(").Append(value).Append(")\"");
+                xml.Append(" />");
+            }
+
+            xml.Append("</ParameterList>");
+        }
+
+        xml.Append("</QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>");
+        return xml.ToString();
+    }
 
     private static long CheapPlanId(long queryId) => (queryId * 10) + 1;
     private static long CostlyPlanId(long queryId) => (queryId * 10) + 2;
 
-    /// <summary>The six queries of the issue's reproduction, then the controls.</summary>
-    private const long RecompileQuery = 1;      // lookup_items: OPTION (RECOMPILE), a plan per call
-    private const long ManifestsB = 2;          // two hashes, compiled for different @location_id
-    private const long ManifestsA = 3;          // the same, covering index
-    private const long ManifestsC = 4;          // one hash: no regression to report at all
-    private const long RealRegression = 5;      // two hashes, SAME compiled values, latest 3x the best
+    /// <summary>
+    /// The five invented fixtures. Two are false alarms the old rule kept (a statement that recompiles, and a plan that
+    /// only returns far more rows), one is a false alarm the compiled values alone expose (different values over the same
+    /// statistics), and two are real flips (the same values; different values after a statistics update).
+    /// </summary>
+    private const long RecompileQuery = 1;      // OPTION (RECOMPILE): a plan per call
+    private const long OutputGrewQuery = 2;     // the newer plan returns 26,000 rows per call, the older one 50
+    private const long ValuesOnlyQuery = 3;     // one compiled value differs, the statistics are the same
+    private const long StatisticsFlipQuery = 4; // three compiled values differ, 14 statistics were all updated, no rows either side
+    private const long SameValuesQuery = 5;     // the same three compiled values, 996 rows either side
+    private const long SingleHashQuery = 6;     // one hash: no regression to report at all
 
+    /// <summary>The names the plan-source, replica and cut tests below use: a query to drop, and a query that stays.</summary>
+    private const long ManifestsB = ValuesOnlyQuery;
+    private const long RealRegression = SameValuesQuery;
+
+    private static readonly (string Name, string? Value)[] ThreeValuesA = [("@a", "1"), ("@b", "2"), ("@c", "3")];
+    private static readonly (string Name, string? Value)[] ThreeValuesB = [("@a", "1"), ("@b", "9"), ("@c", "3")];
+
+    private static (string Statistics, string LastUpdate)[] FourteenStatistics(string lastUpdate) =>
+        [.. Enumerable.Range(1, 14).Select(n => ($"[st_{n}]", lastUpdate))];
+
+    private static long?[] Rows(long? rows) => [rows, rows];
+
+    /// <summary>Highest factor first, so the dropped rows head the detector's ranking: were the checks skipped, the worst offender would be one of them.</summary>
     private async Task SeedIssueCasesAsync(FixturePlanSource source)
     {
-        /* Highest factor first, so the excluded rows head the detector's ranking: if the checks were skipped
-           the worst offender would be one of them. */
+        await SeedOutputGrewAsync(source, factor: 187);
         await SeedRegressionAsync(RecompileQuery, RecompileText, factor: 40);
-        source.Add(CheapPlanId(RecompileQuery), "1");
-        source.Add(CostlyPlanId(RecompileQuery), "1");
+        await SeedValuesOnlyAsync(source, factor: 30);
+        await SeedStatisticsFlipAsync(source, factor: 6);
+        await SeedSameValuesAsync(source, factor: 3);
 
-        await SeedRegressionAsync(ManifestsB, PlainText, factor: 30);
-        source.Add(CheapPlanId(ManifestsB), "7");
-        source.Add(CostlyPlanId(ManifestsB), "1");
-
-        await SeedRegressionAsync(ManifestsA, PlainText, factor: 20);
-        source.Add(CheapPlanId(ManifestsA), "7");
-        source.Add(CostlyPlanId(ManifestsA), "1");
-
-        await SeedPlanAsync(ManifestsC, CheapPlanId(ManifestsC), "0xONE" + ManifestsC, PlainText,
+        await SeedPlanAsync(SingleHashQuery, CheapPlanId(SingleHashQuery), "0xONE" + SingleHashQuery, PlainText,
             cpuUs: 100_000, firstIntervalId: 1, lastExec: PeriodEnd);
+    }
 
-        await SeedRegressionAsync(RealRegression, PlainText, factor: 3);
-        source.Add(CheapPlanId(RealRegression), "7");
-        source.Add(CostlyPlanId(RealRegression), "7");
+    private async Task SeedOutputGrewAsync(FixturePlanSource source, double factor)
+    {
+        await SeedRegressionAsync(OutputGrewQuery, PlainText, factor, cheapRows: Rows(50), costlyRows: Rows(26_000));
+        source.Add(CheapPlanId(OutputGrewQuery), "7");
+        source.Add(CostlyPlanId(OutputGrewQuery), "1");
+    }
+
+    private async Task SeedValuesOnlyAsync(FixturePlanSource source, double factor)
+    {
+        await SeedRegressionAsync(ValuesOnlyQuery, PlainText, factor, cheapRows: Rows(10), costlyRows: Rows(10));
+        source.Add(CheapPlanId(ValuesOnlyQuery), "7");
+        source.Add(CostlyPlanId(ValuesOnlyQuery), "1");
+    }
+
+    private async Task SeedStatisticsFlipAsync(FixturePlanSource source, double factor)
+    {
+        await SeedRegressionAsync(StatisticsFlipQuery, PlainText, factor, cheapRows: Rows(0), costlyRows: Rows(0));
+        source.AddXml(CheapPlanId(StatisticsFlipQuery), Plan(ThreeValuesA, FourteenStatistics("2026-01-01T00:00:00.00")));
+        source.AddXml(CostlyPlanId(StatisticsFlipQuery), Plan(ThreeValuesB, FourteenStatistics("2026-02-01T00:00:00.00")));
+    }
+
+    private async Task SeedSameValuesAsync(FixturePlanSource source, double factor)
+    {
+        await SeedRegressionAsync(SameValuesQuery, PlainText, factor, cheapRows: Rows(996), costlyRows: Rows(996));
+        source.AddXml(CheapPlanId(SameValuesQuery), Plan(ThreeValuesA, FourteenStatistics("2026-01-01T00:00:00.00")));
+        source.AddXml(CostlyPlanId(SameValuesQuery), Plan(ThreeValuesA, FourteenStatistics("2026-02-01T00:00:00.00")));
+    }
+
+    private async Task<(Fact Fact, AnalysisContext Pass)> RunAsync(FixturePlanSource? source)
+    {
+        var pass = NewContext();
+        var fact = (await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source).CollectFactsAsync(pass))
+            .Single(f => f.Key == "PLAN_REGRESSION");
+        return (fact, pass);
     }
 
     [Fact]
-    public async Task TheIssueCases_AreDropped_AndARealRegressionStillReports_AllReadersAgree()
+    public async Task TheFalseAlarms_AreDropped_TheTwoRealFlips_Stay_AllReadersAgree()
     {
         var source = new FixturePlanSource();
         await SeedIssueCasesAsync(source);
 
-        var pass = NewContext();
-        var fact = (await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source).CollectFactsAsync(pass))
-            .Single(f => f.Key == "PLAN_REGRESSION");
+        var (fact, pass) = await RunAsync(source);
 
-        Assert.Equal(1, fact.Metadata["offender_count"]);
-        Assert.Equal(RealRegression, (long)fact.Metadata["worst_query_id"]);
-        Assert.Equal(3, fact.Metadata["worst_regression_factor"], precision: 6);
+        /* The statistics flip is the worst of the two that stay (factor 6 against 3), and its basis is 2. */
+        Assert.Equal(2, fact.Metadata["offender_count"]);
+        Assert.Equal(StatisticsFlipQuery, (long)fact.Metadata["worst_query_id"]);
+        Assert.Equal(6, fact.Metadata["worst_regression_factor"], precision: 6);
         Assert.Equal(3, fact.Metadata["cross_input_excluded_count"]);
         Assert.Equal(0, fact.Metadata["inputs_unverified_count"]);
+        Assert.Equal(2, fact.Metadata["worst_input_basis"]);
 
         /* Reader two: the offenders the drill-down follows. */
-        Assert.Equal([new PlanRegressionOffender(Database, RealRegression)], pass.PlanRegressionOffenders);
+        Assert.Equal(
+            [new PlanRegressionOffender(Database, StatisticsFlipQuery), new PlanRegressionOffender(Database, SameValuesQuery)],
+            pass.PlanRegressionOffenders);
 
         /* Reader three: the regressed-queries drill-down, which also feeds the force-plan targets. */
         var rows = await DrillDownRowsAsync(pass);
-        Assert.Equal([RealRegression], rows.Select(r => r.GetProperty("query_id").GetInt64()));
+        Assert.Equal([StatisticsFlipQuery, SameValuesQuery], rows.Select(r => r.GetProperty("query_id").GetInt64()));
 
-        /* The OPTION (RECOMPILE) statement is dropped on its text alone: neither of its plans was fetched. */
+        /* The recompile statement and the plan that only returns more are dropped from the read alone: no plan of either
+           was fetched. The other three were compared, the newer plan first. */
+        Assert.Equal(
+            [CostlyPlanId(ValuesOnlyQuery), CheapPlanId(ValuesOnlyQuery),
+             CostlyPlanId(StatisticsFlipQuery), CheapPlanId(StatisticsFlipQuery),
+             CostlyPlanId(SameValuesQuery), CheapPlanId(SameValuesQuery)],
+            source.Fetched.ToArray());
+    }
+
+    [Fact]
+    public async Task ARecompileStatement_IsDroppedWithoutAFetch()
+    {
+        var source = new FixturePlanSource();
+        await SeedRegressionAsync(RecompileQuery, RecompileText, factor: 40);
+        await SeedSameValuesAsync(source, factor: 3);
+
+        var (fact, _) = await RunAsync(source);
+
+        Assert.Equal(1, fact.Metadata["cross_input_excluded_count"]);
         Assert.DoesNotContain(CheapPlanId(RecompileQuery), source.Fetched);
         Assert.DoesNotContain(CostlyPlanId(RecompileQuery), source.Fetched);
-        Assert.Equal(
-            [CostlyPlanId(ManifestsB), CheapPlanId(ManifestsB), CostlyPlanId(ManifestsA), CheapPlanId(ManifestsA),
-             CostlyPlanId(RealRegression), CheapPlanId(RealRegression)],
-            source.Fetched.ToArray());
+    }
+
+    [Fact]
+    public async Task APlanThatOnlyReturnsMoreRows_IsDroppedWithZeroFetches()
+    {
+        /* Factor 187 with 26,000 rows against 50: the cost per row went down. The plans are not even in the source. */
+        var source = new FixturePlanSource();
+        await SeedRegressionAsync(OutputGrewQuery, PlainText, factor: 187, cheapRows: Rows(50), costlyRows: Rows(26_000));
+        await SeedSameValuesAsync(source, factor: 3);
+
+        var (fact, pass) = await RunAsync(source);
+
+        Assert.Equal(1, fact.Metadata["offender_count"]);
+        Assert.Equal(SameValuesQuery, (long)fact.Metadata["worst_query_id"]);
+        Assert.Equal(1, fact.Metadata["cross_input_excluded_count"]);
+        Assert.DoesNotContain(CheapPlanId(OutputGrewQuery), source.Fetched);
+        Assert.DoesNotContain(CostlyPlanId(OutputGrewQuery), source.Fetched);
+        Assert.DoesNotContain(pass.PlanRegressionOffenders!, o => o.QueryId == OutputGrewQuery);
+    }
+
+    [Fact]
+    public async Task DifferentValuesOverTheSameStatistics_AreDropped()
+    {
+        var source = new FixturePlanSource();
+        await SeedValuesOnlyAsync(source, factor: 30);
+        await SeedSameValuesAsync(source, factor: 3);
+
+        var (fact, _) = await RunAsync(source);
+
+        Assert.Equal(1, fact.Metadata["offender_count"]);
+        Assert.Equal(SameValuesQuery, (long)fact.Metadata["worst_query_id"]);
+        Assert.Equal(1, fact.Metadata["cross_input_excluded_count"]);
+    }
+
+    [Fact]
+    public async Task ADifferentValueAfterAStatisticsUpdate_Stays_WithBasisTwo()
+    {
+        var source = new FixturePlanSource();
+        await SeedStatisticsFlipAsync(source, factor: 6);
+
+        var (fact, _) = await RunAsync(source);
+
+        Assert.Equal(1, fact.Metadata["offender_count"]);
+        Assert.Equal(StatisticsFlipQuery, (long)fact.Metadata["worst_query_id"]);
+        Assert.Equal(0, fact.Metadata["cross_input_excluded_count"]);
+        Assert.Equal(0, fact.Metadata["inputs_unverified_count"]);
+        Assert.Equal(2, fact.Metadata["worst_input_basis"]);
+    }
+
+    [Fact]
+    public async Task TheSameCompiledValues_Stay_WithBasisOne()
+    {
+        var source = new FixturePlanSource();
+        await SeedSameValuesAsync(source, factor: 3);
+
+        var (fact, _) = await RunAsync(source);
+
+        Assert.Equal(1, fact.Metadata["offender_count"]);
+        Assert.Equal(0, fact.Metadata["cross_input_excluded_count"]);
+        Assert.Equal(0, fact.Metadata["inputs_unverified_count"]);
+        Assert.Equal(1, fact.Metadata["worst_input_basis"]);
+    }
+
+    [Fact]
+    public async Task APlanTheSourceCannotRead_Stays_Unverified_WithBasisZero()
+    {
+        var source = new FixturePlanSource();
+        await SeedRegressionAsync(ValuesOnlyQuery, PlainText, factor: 30, cheapRows: Rows(10), costlyRows: Rows(10));
+        source.AddXml(CheapPlanId(ValuesOnlyQuery), "<ShowPlanXML><not closed");
+        source.AddXml(CostlyPlanId(ValuesOnlyQuery), Plan([("@a", "1")], DefaultStatistics));
+
+        var (fact, _) = await RunAsync(source);
+
+        Assert.Equal(1, fact.Metadata["offender_count"]);
+        Assert.Equal(0, fact.Metadata["cross_input_excluded_count"]);
+        Assert.Equal(1, fact.Metadata["inputs_unverified_count"]);
+        Assert.Equal(0, fact.Metadata["worst_input_basis"]);
+    }
+
+    [Fact]
+    public async Task DifferentValuesWithNoStatisticsInEitherPlan_Stay_Unverified()
+    {
+        var source = new FixturePlanSource();
+        await SeedRegressionAsync(ValuesOnlyQuery, PlainText, factor: 30, cheapRows: Rows(10), costlyRows: Rows(10));
+        source.AddXml(CheapPlanId(ValuesOnlyQuery), Plan([("@a", "1")], null));
+        source.AddXml(CostlyPlanId(ValuesOnlyQuery), Plan([("@a", "2")], null));
+
+        var (fact, _) = await RunAsync(source);
+
+        Assert.Equal(1, fact.Metadata["offender_count"]);
+        Assert.Equal(1, fact.Metadata["inputs_unverified_count"]);
+        Assert.Equal(0, fact.Metadata["worst_input_basis"]);
+    }
+
+    [Theory]
+    [InlineData(6_000L, 18_000L, true)]
+    [InlineData(6_000L, 10_000L, false)]
+    [InlineData(null, 18_000L, false)]
+    public async Task RowsPerCall_AreTheExecutionWeightedAverageOfTheIntervals_AndNullWhenAnyIntervalHasNone(
+        long? firstInterval, long? secondInterval, bool dropped)
+    {
+        /* The older plan returns 1,000 rows per call. The newer plan's two intervals run the same number of executions,
+           so its rows per call are their mean: 12,000 (12x, dropped) or 8,000 (8x, plans needed). An interval with no
+           avg_rowcount makes the whole figure NULL, so the output rule cannot fire and the plans are fetched. */
+        var source = new FixturePlanSource();
+        await SeedRegressionAsync(ValuesOnlyQuery, PlainText, factor: 3, cheapRows: Rows(1_000), costlyRows: [firstInterval, secondInterval]);
+        source.Add(CheapPlanId(ValuesOnlyQuery), "7");
+        source.Add(CostlyPlanId(ValuesOnlyQuery), "7");
+
+        var facts = await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source).CollectFactsAsync(NewContext());
+
+        Assert.Equal(dropped, facts.All(f => f.Key != "PLAN_REGRESSION"));
+        Assert.Equal(dropped ? 0 : 2, source.Fetched.Count);
+    }
+
+    [Theory]
+    [InlineData(4_000L, true)]
+    [InlineData(null, false)]
+    public async Task APlanGroupOfTwoPlanIds_AveragesTheirRows_AndIsNullWhenEitherHasNone(long? secondPlanRows, bool dropped)
+    {
+        /* Two plan_ids share one query_plan_hash, so they are one plan group: 20,000 and 4,000 rows over equal executions
+           is 12,000 against the older plan's 1,000. */
+        var source = new FixturePlanSource();
+        await SeedPlanAsync(ValuesOnlyQuery, 11, "0xCHEAP", PlainText, cpuUs: 100_000, firstIntervalId: 1,
+            lastExec: PeriodStart.AddDays(-5), rowsByInterval: Rows(1_000));
+        await SeedPlanAsync(ValuesOnlyQuery, 91, "0xGROUP", PlainText, cpuUs: 300_000, firstIntervalId: 11,
+            lastExec: PeriodEnd, rowsByInterval: Rows(20_000));
+        await SeedPlanAsync(ValuesOnlyQuery, 92, "0xGROUP", PlainText, cpuUs: 300_000, firstIntervalId: 11,
+            lastExec: PeriodEnd.AddMinutes(-1), rowsByInterval: Rows(secondPlanRows));
+        source.Add(11, "7");
+        source.Add(91, "7");
+
+        var facts = await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source).CollectFactsAsync(NewContext());
+
+        Assert.Equal(dropped, facts.All(f => f.Key != "PLAN_REGRESSION"));
+        Assert.Equal(dropped ? 0 : 2, source.Fetched.Count);
     }
 
     [Fact]
@@ -204,6 +435,7 @@ public sealed class PlanRegressionInputsTests : IClassFixture<SharedDuckDbFixtur
         Assert.Equal(1, fact.Metadata["offender_count"]);
         Assert.Equal(0, fact.Metadata["cross_input_excluded_count"]);
         Assert.Equal(1, fact.Metadata["inputs_unverified_count"]);
+        Assert.Equal(0, fact.Metadata["worst_input_basis"]);
         Assert.Equal([new PlanRegressionOffender(Database, ManifestsB)], pass.PlanRegressionOffenders);
     }
 
@@ -465,19 +697,20 @@ public sealed class PlanRegressionInputsTests : IClassFixture<SharedDuckDbFixtur
 
     /// <summary>A cheap plan that ran five days back and a costlier one still running at the window's end.</summary>
     private async Task SeedRegressionAsync(
-        long queryId, string? text, double factor, string? replicaRole = null, long? cheapPlanId = null, long? costlyPlanId = null)
+        long queryId, string? text, double factor, string? replicaRole = null, long? cheapPlanId = null, long? costlyPlanId = null,
+        long?[]? cheapRows = null, long?[]? costlyRows = null)
     {
         var cheap = cheapPlanId ?? CheapPlanId(queryId);
         var costly = costlyPlanId ?? CostlyPlanId(queryId);
         await SeedPlanAsync(queryId, cheap, "0xCHEAP" + cheap, text, cpuUs: 100_000,
-            firstIntervalId: 1, lastExec: PeriodStart.AddDays(-5), replicaRole);
+            firstIntervalId: 1, lastExec: PeriodStart.AddDays(-5), replicaRole, rowsByInterval: cheapRows);
         await SeedPlanAsync(queryId, costly, "0xCOSTLY" + costly, text, cpuUs: 100_000 * factor,
-            firstIntervalId: 11, lastExec: PeriodEnd, replicaRole);
+            firstIntervalId: 11, lastExec: PeriodEnd, replicaRole, rowsByInterval: costlyRows);
     }
 
     private async Task SeedPlanAsync(
         long queryId, long planId, string planHash, string? text, double cpuUs, long firstIntervalId, DateTime lastExec,
-        string? replicaRole = null)
+        string? replicaRole = null, long?[]? rowsByInterval = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         if (_seedConn is null)
@@ -498,8 +731,8 @@ INSERT INTO query_store_stats
      query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
      query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
      query_plan_hash, is_forced_plan, force_failure_count,
-     runtime_stats_interval_id, interval_start_time_utc, replica_role, query_text)
-VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, false, 0, $15, $16, $18, $17)";
+     runtime_stats_interval_id, interval_start_time_utc, replica_role, query_text, avg_rowcount)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, false, 0, $15, $16, $18, $17, $19)";
                 cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
                 cmd.Parameters.Add(new DuckDBParameter { Value = PeriodEnd.AddMinutes(-10 + collection) });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
@@ -518,6 +751,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
                 cmd.Parameters.Add(new DuckDBParameter { Value = firstExec });
                 cmd.Parameters.Add(new DuckDBParameter { Value = (object?)text ?? DBNull.Value });
                 cmd.Parameters.Add(new DuckDBParameter { Value = (object?)replicaRole ?? DBNull.Value });
+                cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rowsByInterval?[interval] ?? DBNull.Value });
                 await cmd.ExecuteNonQueryAsync();
             }
         }
