@@ -4683,21 +4683,24 @@ public sealed class DarlingCollectorRunner
 
                 /* #5638: the collection's per-database totals, read back from the rows the store now holds for this
                    collection_time and upserted, on THIS transaction after the COPY and before the commit, so rows and totals
-                   commit together or not at all. No savepoint and no catch, like the ledger above: a fault throws out of the
-                   batch, the transaction rolls back and the rows are not stored, because rows the totals never saw would make a
-                   read of the totals disagree with the rows. Recomputed, never added, so a second batch at this collection_time or
-                   a re-attempt is exact. A batch of 0 rows writes nothing: the read keeps its collection_log axis for an idle run. */
+                   commit together or not at all. No savepoint and no catch HERE, like the ledger above: a fault in the upsert
+                   throws out of the batch, the transaction rolls back and the rows are not stored, because rows the totals never
+                   saw would make a read of the totals disagree with the rows. The one exception is inside the writer: the gap
+                   fill of collections an older binary left behind runs behind its own savepoint and statement_timeout, and its
+                   failure is logged and skipped, so it can never stop a server's collection. Recomputed, never added, so a
+                   second batch at this collection_time or a re-attempt is exact. A batch of 0 rows writes nothing: the read
+                   keeps its collection_log axis for an idle run. */
                 if (totalsBatch)
                 {
                     await ProcedureStatsTotalsWriter.UpsertBatchAsync(
                         pgConnection, transaction, server.ServerId, storedCollectionTime,
                         rowsWritten, ServiceCommandDeadlines.CollectionSweepSeconds,
                         /* The databases THIS batch holds (one per batch on Azure SQL Database): the read-back is limited to them. Null
-                           (rows of another type, an import) reads the whole collection. */
-                        (object)rows is List<ProcedureStatsCollector.Row> procedureRows
-                            ? procedureRows.Select(static row => (string?)row.DatabaseName).Distinct().ToList()
-                            : null,
-                        cancellationToken);
+                           (rows of another type, an import) reads the whole collection. DatabaseNamesOf matches any
+                           IEnumerable<ProcedureStatsCollector.Row>. */
+                        ProcedureStatsTotalsWriter.DatabaseNamesOf(rows),
+                        cancellationToken,
+                        _logger, server.StorageName);
                 }
 
                 /* #3953: after the COPY and the dimension flush, in the unstamped region (#3095): a fault here is not

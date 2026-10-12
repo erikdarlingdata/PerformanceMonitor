@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -136,6 +138,73 @@ public sealed class ProcedureStatsTotalsTests
             var text = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", file);
             Assert.DoesNotContain("INSERT INTO collect.procedure_stats ", text, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// The read-back limit's type check (seat review of #5706). Every write goes through <c>CopyBatchOnceAsync&lt;TRow&gt;(... List&lt;TRow&gt; rows ...)</c>
+    /// and the catalog's only procedure_stats definition is a <c>CollectorDefinitionBase&lt;Row&gt;</c>, so the server, Azure
+    /// per-database and import paths all hand the writer a <c>List&lt;Row&gt;</c>; the helper accepts any <c>IEnumerable&lt;Row&gt;</c>.
+    /// </summary>
+    [Fact]
+    public void TheReadBackLimit_MatchesEveryRowCollectionShape_AndEveryProcedureStatsPathCarriesRows()
+    {
+        var rows = new List<ProcedureStatsCollector.Row> { Named("A"), Named("B"), Named("A"), Named(null!) };
+        var expected = new string?[] { "A", "B", null };
+
+        Assert.Equal(expected, ProcedureStatsTotalsWriter.DatabaseNamesOf(rows));
+        Assert.Equal(expected, ProcedureStatsTotalsWriter.DatabaseNamesOf(rows.ToArray()));
+        Assert.Equal(expected, ProcedureStatsTotalsWriter.DatabaseNamesOf(rows.AsEnumerable()));
+        Assert.Equal(expected, ProcedureStatsTotalsWriter.DatabaseNamesOf(new System.Collections.ObjectModel.ReadOnlyCollection<ProcedureStatsCollector.Row>(rows)));
+        Assert.Empty(ProcedureStatsTotalsWriter.DatabaseNamesOf(new List<ProcedureStatsCollector.Row>())!);
+
+        /* Rows of another type (or none) read the whole collection. */
+        Assert.Null(ProcedureStatsTotalsWriter.DatabaseNamesOf(new List<string> { "A" }));
+        Assert.Null(ProcedureStatsTotalsWriter.DatabaseNamesOf(null));
+
+        /* The call-site trace: one writer call, fed by the helper, from the one generic COPY whose rows are a List<TRow>... */
+        var runner = Normalize(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
+        var start = runner.IndexOf("private async Task<int> CopyBatchOnceAsync<TRow>(", StringComparison.Ordinal);
+        Assert.True(start > 0);
+        var signature = runner[start..(start + 400)];
+        Assert.Contains("List<TRow> rows,", signature, StringComparison.Ordinal);
+        Assert.Contains("ProcedureStatsTotalsWriter.DatabaseNamesOf(rows)", runner[start..], StringComparison.Ordinal);
+        Assert.DoesNotContain("procedureRows", runner[start..], StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(runner, "ProcedureStatsTotalsWriter\\.UpsertBatchAsync\\("));
+
+        /* ...and every catalog definition that writes procedure_stats carries Row (so TRow = Row on every path that totals). */
+        var writers = PerformanceMonitor.Collectors.CollectorCatalog.All
+            .Where(c => string.Equals(c.TargetTable, ProcedureStatsCollector.Instance.TargetTable, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        Assert.NotEmpty(writers);
+        Assert.All(writers, c => Assert.IsAssignableFrom<PerformanceMonitor.Collectors.ICollectorDefinition<ProcedureStatsCollector.Row>>(c));
+    }
+
+    private static ProcedureStatsCollector.Row Named(string database) => new(
+        database, "dbo", "p", "P ", null, null, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null, null, null, null);
+
+    /// <summary>
+    /// The gap fill runs behind a savepoint and a server-side statement_timeout, restores the timeout on success, and rolls back to the
+    /// savepoint on a fault; the runner's call site stays free of any catch (the batch's own upsert is still fatal to it).
+    /// </summary>
+    [Fact]
+    public void TheGapFill_RunsBehindASavepointAndAServerSideTimeout_AndNeverFailsTheBatch()
+    {
+        var writer = Normalize(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "ProcedureStatsTotalsWriter.cs"));
+        var gap = writer[writer.IndexOf("private static async Task TryGapFillAsync(", StringComparison.Ordinal)..];
+
+        var save = gap.IndexOf("transaction.SaveAsync(GapSavepointName", StringComparison.Ordinal);
+        var setTimeout = gap.IndexOf("SetStatementTimeoutAsync(", StringComparison.Ordinal);
+        var run = gap.IndexOf("ProcedureStatsTotals.GapFillSql", StringComparison.Ordinal);
+        var restore = gap.IndexOf("SetStatementTimeoutAsync(connection, transaction, previousTimeout", StringComparison.Ordinal);
+        var release = gap.IndexOf("transaction.ReleaseAsync(GapSavepointName", StringComparison.Ordinal);
+        var rollback = gap.IndexOf("transaction.RollbackAsync(GapSavepointName", StringComparison.Ordinal);
+        Assert.True(save > 0 && setTimeout > save && run > setTimeout && restore > run && release > restore && rollback > release, "save, bound, run, restore, release, then the rollback arm");
+        Assert.Contains("catch (Exception ex) when (!cancellationToken.IsCancellationRequested)", gap, StringComparison.Ordinal);
+        Assert.Contains("set_config('statement_timeout', $1, true)", gap, StringComparison.Ordinal);
+
+        /* The gap fill is the only statement behind the savepoint: the batch's own upsert stays outside it. */
+        var upsert = writer.IndexOf("ProcedureStatsTotals.UpsertSql", StringComparison.Ordinal);
+        Assert.True(upsert > 0 && upsert < writer.IndexOf("private static async Task TryGapFillAsync(", StringComparison.Ordinal));
     }
 
     [Fact]

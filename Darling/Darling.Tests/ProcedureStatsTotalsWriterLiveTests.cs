@@ -555,4 +555,231 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
             await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
         }
     }
+
+    /* ---- the gap fill never fails the batch (seat review of #5706) ---- */
+
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public List<(Microsoft.Extensions.Logging.LogLevel Level, string Message)> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception)));
+    }
+
+    /// <summary>
+    /// Plants the gap a rollback to a pre-V176 binary leaves: a collection at <paramref name="gapAt"/> with raw rows (database
+    /// <paramref name="gapDatabase"/>) and no totals row, above an anchor collection at <paramref name="anchorAt"/> that has both.
+    /// </summary>
+    private static async Task PlantGapAsync(Rig rig, int serverId, DateTime anchorAt, DateTime gapAt, string gapDatabase, CancellationToken ct, DateTime? batchAt = null)
+    {
+        Assert.Equal(1, await rig.WriteAsync(anchorAt, new List<ProcedureStatsCollector.Row> { Row("Anchor", "p0", 10, 1, 60) }, ct));
+        if (batchAt is not null)
+        {
+            /* The batch's own raw row, for a direct UpsertBatchAsync call to total; written before the gap row so the product's own gap fill finds nothing. */
+            Assert.Equal(1, await rig.WriteAsync(batchAt.Value, new List<ProcedureStatsCollector.Row> { Row("DbA", "p2", 5, 1, 60) }, ct));
+        }
+
+        Assert.Equal(1, await rig.WriteAsync(gapAt, new List<ProcedureStatsCollector.Row> { Row(gapDatabase, "p1", 100, 2, 60) }, ct));
+        var where = "server_id = " + serverId.ToString(CultureInfo.InvariantCulture) + " AND collection_time IN (" + Stamp(gapAt) + (batchAt is null ? "" : ", " + Stamp(batchAt.Value)) + ")";
+        await ExecAsync(rig.Connection, "DELETE FROM collect.procedure_stats_totals WHERE " + where, ct);
+    }
+
+    private static async Task<long> TotalsRowsAsync(Rig rig, int serverId, DateTime at, CancellationToken ct) =>
+        Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals WHERE server_id = " + serverId.ToString(CultureInfo.InvariantCulture) + " AND collection_time = " + Stamp(at), ct));
+
+    private static async Task<long> RawRowsAsync(Rig rig, int serverId, DateTime at, CancellationToken ct) =>
+        Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats WHERE server_id = " + serverId.ToString(CultureInfo.InvariantCulture) + " AND collection_time = " + Stamp(at), ct));
+
+    private static async Task<object?> ScalarTxAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        return await command.ExecuteScalarAsync(ct);
+    }
+
+    /// <summary>
+    /// The normal gap: a collection with rows and no totals above the server's newest totals row is totalled by the next batch, a
+    /// healthy gap fill logs nothing, and its statement_timeout does not outlive it (the batch's own upsert and the rest of the
+    /// transaction run under the connection's original setting). The batch after it has an empty gap and takes the normal path.
+    /// </summary>
+    [Fact]
+    public async Task TheGapFill_TotalsARealGap_LogsNothing_AndRestoresTheStatementTimeout()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945310;
+
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsGapOk", ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var gapAt = T0.AddMinutes(1);
+            var batchAt = T0.AddMinutes(2);
+            await PlantGapAsync(rig, serverId, T0, gapAt, "GapDb", ct, batchAt);
+            Assert.Equal(0L, await TotalsRowsAsync(rig, serverId, gapAt, ct));
+
+            var logger = new CapturingLogger();
+            await using (var tx = await rig.Connection.BeginTransactionAsync(ct))
+            {
+                var before = (string)(await ScalarTxAsync(rig.Connection, tx, "SHOW statement_timeout", ct))!;
+                Assert.Equal(1, await ProcedureStatsTotalsWriter.UpsertBatchAsync(rig.Connection, tx, serverId, batchAt, 1, 30, null, ct, logger, "ProcTotalsGapOk"));
+                Assert.Equal(before, (string)(await ScalarTxAsync(rig.Connection, tx, "SHOW statement_timeout", ct))!);
+                await tx.CommitAsync(ct);
+            }
+
+            Assert.Equal(1L, await TotalsRowsAsync(rig, serverId, gapAt, ct));
+            var (totals, raw) = await CompareAsync(rig.Connection, serverId, gapAt, ct);
+            Assert.Equal(raw, totals);
+            Assert.Empty(logger.Entries);
+
+            /* The next batch's gap (after the batch above, before this one) is empty: the normal path, through the product's write path. */
+            Assert.Equal(1, await rig.WriteAsync(T0.AddMinutes(3), new List<ProcedureStatsCollector.Row> { Row("DbA", "p2", 5, 1, 60) }, ct));
+            Assert.Equal(1L, await TotalsRowsAsync(rig, serverId, T0.AddMinutes(3), ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// A gap fill that FAILS (a trigger refusing the gap database's totals row stands in for the fault) does not fail the batch
+    /// (seat review of #5706): through the product's own write path the batch's rows and its own totals commit, the failure is skipped,
+    /// and because the batch's totals row is now the server's newest the NEXT batch does not retry the gap, even once the fault clears.
+    /// Before the fix the first batch threw, rolled back, and every later batch found the same anchor and threw again.
+    /// </summary>
+    [Fact]
+    public async Task AFailedGapFill_DoesNotFailTheBatch_AndTheNextBatchDoesNotRetryIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945311;
+
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsGapFail", ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var gapAt = T0.AddMinutes(1);
+            await PlantGapAsync(rig, serverId, T0, gapAt, "gapfail", ct);
+
+            /* Only the gap database's totals row is refused; the batch's own database is not. */
+            await ExecAsync(rig.Connection, "CREATE FUNCTION public.refuse_gap() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.database_name = 'gapfail' THEN RAISE EXCEPTION 'planted gap failure'; END IF; RETURN NEW; END $$", ct);
+            await ExecAsync(rig.Connection, "CREATE TRIGGER refuse_gap BEFORE INSERT OR UPDATE ON collect.procedure_stats_totals FOR EACH ROW EXECUTE FUNCTION public.refuse_gap()", ct);
+
+            var batchAt = T0.AddMinutes(2);
+            Assert.Equal(1, await rig.WriteAsync(batchAt, new List<ProcedureStatsCollector.Row> { Row("DbA", "p2", 5, 1, 60) }, ct));
+
+            /* The batch committed: its rows and its own totals are stored; the gap was skipped. */
+            Assert.Equal(1L, await RawRowsAsync(rig, serverId, batchAt, ct));
+            Assert.Equal(1L, await TotalsRowsAsync(rig, serverId, batchAt, ct));
+            Assert.Equal(0L, await TotalsRowsAsync(rig, serverId, gapAt, ct));
+            var (totals, raw) = await CompareAsync(rig.Connection, serverId, batchAt, ct);
+            Assert.Equal(raw, totals);
+
+            /* The fault clears; the next batch's anchor is the batch above, so the gap (an older collection) is not attempted again. */
+            await ExecAsync(rig.Connection, "DROP TRIGGER refuse_gap ON collect.procedure_stats_totals", ct);
+            var nextAt = T0.AddMinutes(3);
+            Assert.Equal(1, await rig.WriteAsync(nextAt, new List<ProcedureStatsCollector.Row> { Row("DbA", "p2", 7, 1, 60) }, ct));
+            Assert.Equal(1L, await TotalsRowsAsync(rig, serverId, nextAt, ct));
+            Assert.Equal(0L, await TotalsRowsAsync(rig, serverId, gapAt, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// A gap fill that exceeds its server-side bound (a trigger sleeping on the gap database's totals row, under a 300 ms
+    /// <c>statement_timeout</c>) is cancelled by the server, not by Npgsql's client timer, so the connection stays usable: the
+    /// transaction rolls back to the savepoint, the batch's own upsert runs under the connection's ORIGINAL timeout, a warning names
+    /// the server and the gap's range, and the commit lands.
+    /// </summary>
+    [Fact]
+    public async Task AGapFillThatTimesOut_IsCancelledByTheServer_LogsTheRange_AndTheBatchStillCommits()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945312;
+
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsGapSlow", ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var gapAt = T0.AddMinutes(1);
+            var batchAt = T0.AddMinutes(2);
+            await PlantGapAsync(rig, serverId, T0, gapAt, "gapslow", ct, batchAt);
+            await ExecAsync(rig.Connection, "CREATE FUNCTION public.slow_gap() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.database_name = 'gapslow' THEN PERFORM pg_sleep(30); END IF; RETURN NEW; END $$", ct);
+            await ExecAsync(rig.Connection, "CREATE TRIGGER slow_gap BEFORE INSERT OR UPDATE ON collect.procedure_stats_totals FOR EACH ROW EXECUTE FUNCTION public.slow_gap()", ct);
+
+            var logger = new CapturingLogger();
+            await using (var tx = await rig.Connection.BeginTransactionAsync(ct))
+            {
+                var before = (string)(await ScalarTxAsync(rig.Connection, tx, "SHOW statement_timeout", ct))!;
+                Assert.Equal(1, await ProcedureStatsTotalsWriter.UpsertBatchAsync(
+                    rig.Connection, tx, serverId, batchAt, 1, 30, null, ct, logger, "ProcTotalsGapSlow", gapStatementTimeoutMilliseconds: 300));
+
+                /* Rolled back to the savepoint, so the SET LOCAL is gone and the connection answers inside the same transaction. */
+                Assert.Equal(before, (string)(await ScalarTxAsync(rig.Connection, tx, "SHOW statement_timeout", ct))!);
+                await tx.CommitAsync(ct);
+            }
+
+            Assert.Equal(1L, await TotalsRowsAsync(rig, serverId, batchAt, ct));
+            Assert.Equal(0L, await TotalsRowsAsync(rig, serverId, gapAt, ct));
+            var warning = Assert.Single(logger.Entries);
+            Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Warning, warning.Level);
+            Assert.Contains("ProcTotalsGapSlow", warning.Message, StringComparison.Ordinal);
+            Assert.Contains(T0.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture), warning.Message, StringComparison.Ordinal);
+            Assert.Contains(batchAt.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture), warning.Message, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// The read-back limit reaches the writer on the product's own path (seat review of #5706): the runner's <c>List&lt;TRow&gt;</c>
+    /// with TRow = Row arrives as the typed collection, so a second batch at the same collection_time that holds only DbA does not
+    /// recompute the first batch's DbB totals row (a null collection would read the whole collection and recreate it).
+    /// </summary>
+    [Fact]
+    public async Task TheReadBackLimit_ReachesTheWriter_OnTheRunnersOwnPath()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945313;
+
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsLimit", ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var at = T0.AddMinutes(5);
+            Assert.Equal(2, await rig.WriteAsync(at, new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 100, 1, 60), Row("DbB", "p1", 200, 2, 60) }, ct));
+            await ExecAsync(rig.Connection, "DELETE FROM collect.procedure_stats_totals WHERE database_name = 'DbB'", ct);
+            Assert.Equal(1, await rig.WriteAsync(at, new List<ProcedureStatsCollector.Row> { Row("DbA", "p2", 300, 3, 60) }, ct));
+
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals WHERE database_name = 'DbB'", ct)));
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals WHERE database_name = 'DbA'", ct)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
 }
