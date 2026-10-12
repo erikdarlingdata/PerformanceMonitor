@@ -1967,10 +1967,10 @@ public sealed class AlertEngine
     /// <see cref="RunnableQueueEvaluator"/>.
     ///
     /// <para><b>The window rule</b> is <see cref="RunnableQueueEvaluator.Read"/>'s: 3 or more collections in the last
-    /// 5 minutes, else the newest 3 if all are inside 10 minutes (4 times the collection gap when that is longer: the Low-Impact preset collects every 5 minutes). Anything else is not an observation. The check does
+    /// 5 minutes, else the newest 3 if all are inside the cadence-scaled fallback window (10 minutes, or 4 times the median of the newest 5 collection gaps when that is longer: the Low-Impact preset collects every 5 minutes, and the cadence is read from the newest gaps so a switch to it registers within three collections). Anything else is not an observation. The check does
     /// not evaluate: it fires nothing and clears nothing, so a collection gap cannot page on one busy sample and
     /// cannot announce "Cleared" on silence (the #3282 rule Poison Wait applies to an empty read). A standing alert
-    /// clears only when an evaluated reading sits under the Warning bar, or after 30 minutes with no evaluation, when it resolves with that reason stated.</para>
+    /// clears only when an evaluated reading sits under the Warning bar, or after 30 minutes with no evaluation, when it resolves with that reason stated. The 30-minute clock runs from the last evaluated reading (a null reading never restarts it), not from the last fire or from the first null.</para>
     ///
     /// <para>Cooldown, mute, the fresh-sample guard and the resolution notice are Poison Wait's, with one addition:
     /// a Warning that worsens to Critical is delivered at once, past the cooldown (<see cref="TierEscalation"/>,
@@ -2031,7 +2031,7 @@ public sealed class AlertEngine
 
                 /* The reading is a rolling average, so a cooldown-elapsed re-ask against an unrefreshed store hands
                    back the SAME newest collection (Poison Wait's guard, same reasoning): a fire waits for a
-                   collection newer than the one last fired on. The 10-minute fallback keeps the guard right: a late
+                   collection newer than the one last fired on. The cadence-scaled fallback window keeps the guard right: a late
                    collector holds the same newest collection for minutes, and the standing alert stays standing
                    without re-firing until a new collection arrives. */
                 bool hasFreshCollection = !_lastRunnableQueueCollectionTime.TryGetValue(key, out var lastCollectionTime)
@@ -2059,13 +2059,17 @@ public sealed class AlertEngine
                         SeverityOverride = finding.Severity,
                         EscalationBypassesCooldown = escalation,
                     };
+                    /* The tier is recorded before the send (the history row of a muted fire must not be late), and put
+                       back below when every channel failed: a fire nobody received has not delivered this tier. */
+                    var priorTier = _runnableQueueEscalation.Highest(key);
                     _runnableQueueEscalation.Record(key, finding.Severity);
                     AlertSampleAge.Stamp(queueContext, "scheduler stats", finding.NewestCollectionTime, now);
 
                     /* #5641: the card's detail, in AlertContext.Details so every channel that renders another
                        alert's details (both email bodies, the webhook, the toast text, the history row) renders
                        it. CPU percent for the same minutes comes from the samples the snapshot already holds (the
-                       5-minute window, or the longer span when the 10-minute fallback judged the queue);
+                       5-minute window, or the longer span when the fallback window judged the queue, clamped to the 15 minutes
+                       the CPU samples cover);
                        the top requests come from the newest query snapshot, through the same unfiltered
                        threshold-zero read the High CPU card's maintenance probe uses. ANNOTATION, NEVER
                        SUPPRESSION: the fire is decided before this read, a failed read costs the card its
@@ -2101,6 +2105,12 @@ public sealed class AlertEngine
                     if (EveryChannelFailed(delivery))
                     {
                         _lastRunnableQueueCollectionTime.TryRemove(key, out _);
+
+                        /* Round 2 of #5709: the tier goes back too (AfterFire's note: a second "already reported" marker
+                           is put back at the call site). Left at Critical, the retry a minute later would not be an
+                           escalation, would go out without the bypass flag, and the email and webhook cooldowns the
+                           Warning stamped would hold the Critical for the rest of their window. */
+                        _runnableQueueEscalation.Restore(key, priorTier);
                     }
                     readClock.Restart();
                 }

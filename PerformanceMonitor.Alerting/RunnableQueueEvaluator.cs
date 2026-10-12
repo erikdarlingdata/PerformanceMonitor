@@ -133,11 +133,18 @@ public static class RunnableQueueEvaluator
         return (w, c);
     }
 
+    /// <summary>How many of the newest gaps the cadence is the median of (6 samples). Round 2 of #5709: a median over
+    /// the whole 60-minute read took about 50 minutes to register a switch from 1-minute to 5-minute collection, so the
+    /// alert was blind for that long and an open incident was falsely resolved as stale. Five gaps register the switch
+    /// after three slower ones, and a single outage gap is still one of five and cannot move the median.</summary>
+    public const int CadenceGapCount = 5;
+
     /// <summary>
-    /// The collector's cadence as the samples show it: the median gap between consecutive collections, in minutes
-    /// (the lower of the two middle gaps when the count is even, so with only two gaps one outage cannot double the
-    /// cadence). Null with fewer than 3 samples (two gaps). The median ignores one outage gap or a few late
-    /// collections, so a busy host does not widen the window.
+    /// The collector's cadence as the samples show it: the median of the newest <see cref="CadenceGapCount"/> gaps
+    /// between consecutive collections, in minutes (fewer when fewer exist; the lower of the two middle gaps when the
+    /// count is even, so with only two gaps one outage cannot double the cadence). Null with fewer than 3 samples
+    /// (two gaps). The median ignores one outage gap or a few late collections, so a busy host does not widen the
+    /// window, and only the newest gaps count, so a changed cadence is picked up within three collections.
     /// </summary>
     public static double? MedianGapMinutes(IReadOnlyList<RunnableQueueSample>? samples)
     {
@@ -146,11 +153,11 @@ public static class RunnableQueueEvaluator
             return null;
         }
 
-        var times = samples.Select(s => s.CollectionTime).OrderBy(t => t).ToList();
+        var times = samples.Select(s => s.CollectionTime).OrderByDescending(t => t).Take(CadenceGapCount + 1).ToList();
         var gaps = new List<double>(times.Count - 1);
         for (var i = 1; i < times.Count; i++)
         {
-            gaps.Add((times[i] - times[i - 1]).TotalMinutes);
+            gaps.Add((times[i - 1] - times[i]).TotalMinutes);
         }
 
         gaps.Sort();

@@ -826,7 +826,8 @@ ORDER BY accumulated_wait_ms DESC";
     /// <c>numeric</c> first because both columns are integers and PostgreSQL would divide them as integers. A row whose
     /// average is NULL is not a row. No ORDER BY tiebreaker: after the GROUP BY there is no tie.</para>
     ///
-    /// <para><b>Cost.</b> One server, a ten-minute floor on <c>collection_time</c>: about ten collections at the
+    /// <para><b>Cost.</b> One server, a <c>collection_time</c> floor of the engine's 60-minute read
+    /// (<c>RunnableQueueEvaluator.ReadLookbackMinutes</c>, which the cadence is derived from): about 60 collections at the
     /// 1-minute cadence, all in the newest chunk, the same predicate shape as the poison-wait read beside it.</para>
     /// </summary>
     public const string RunnableQueueSql = @"

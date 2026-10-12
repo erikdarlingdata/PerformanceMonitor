@@ -625,6 +625,11 @@ public static class AlertContextBuilders
     /// card, so one card never lists more sessions than the other.</summary>
     public const int RunnableQueueRequestDisplayCap = LongRunningQueryDisplayCap;
 
+    /// <summary>How far back the CPU samples on the engine's snapshot reach, in minutes: Lite's
+    /// <c>LocalDataService.AlertCpuSampleLookback</c> and Darling's <c>DarlingWorker.RecentCpuLookback</c>, both 15. The
+    /// Runnable Queue card's CPU window never claims more (a test pins the three to each other).</summary>
+    public const int RunnableQueueCpuSampleLookbackMinutes = 15;
+
     /// <summary>
     /// The Runnable Queue card's CPU item (#5641): CPU percent for the same minutes the queue average covers.
     /// A queue of runnable tasks is a CPU symptom, so the first question on the page is whether the cores are
@@ -633,6 +638,11 @@ public static class AlertContextBuilders
     /// a peak with the sample count. When the window holds no sample the item falls back to the snapshot's single
     /// newest reading and says so in its heading, because a number from another minute must not read as this
     /// window's. Returns null when there is no CPU reading at all (the card then simply has no CPU item).
+    /// <para>Round 2 of #5709: the window is clamped to <see cref="RunnableQueueCpuSampleLookbackMinutes"/> (15), the
+    /// lookback both stores read the CPU samples with, because the queue's span reaches 20 minutes at the Low-Impact
+    /// preset and up to 60 at a slower cadence while the samples never reach back that far. The heading names the
+    /// window the samples actually cover, so a longer queue span cannot claim a longer CPU window than the data
+    /// holds.</para>
     /// </summary>
     public static AlertDetailItem? BuildRunnableQueueCpuItem(
         IReadOnlyList<AlertCpuSample>? recentSamples,
@@ -641,6 +651,7 @@ public static class AlertContextBuilders
         DateTime nowUtc,
         int windowMinutes)
     {
+        windowMinutes = Math.Min(windowMinutes, RunnableQueueCpuSampleLookbackMinutes);
         var floor = nowUtc - TimeSpan.FromMinutes(windowMinutes);
         var inWindow = (recentSamples ?? Array.Empty<AlertCpuSample>())
             .Where(s => s.SampleTimeUtc >= floor && s.SampleTimeUtc <= nowUtc)

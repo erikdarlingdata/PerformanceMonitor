@@ -24,6 +24,17 @@ namespace PerformanceMonitor.Alerting;
 /// evaluations follow the normal cooldown, and Critical going back to Warning delivers nothing new (the highest
 /// tier stays Critical until the incident closes). <see cref="Close"/> ends the incident.</para>
 ///
+/// <para><b>Failed sends.</b> A fire whose every channel failed delivered nothing, so the fire site puts the tier
+/// back (<see cref="Restore"/>); the retry is still the escalation.</para>
+///
+/// <para><b>Restart gap (round 2 of #5709, deliberate).</b> The tier lives in memory only. After a restart in the
+/// middle of an incident the engine does not know a Warning was delivered, so the first Critical is an ordinary first
+/// fire, while the email and webhook cooldowns are seeded from the alert history and may hold it for the rest of
+/// their window. The seed seam (<c>IAlertHistoryStore.GetLastEmailSentUtcAsync</c> and
+/// <c>GetLastWebhookSentUtcAsync</c>) returns a timestamp only, never a severity, lives in the delivery layer (the
+/// engine holds no history store), and every store implements it; carrying a tier through it would be a new
+/// persistence path in both apps, so the gap is accepted and the cooldown is the fallback.</para>
+///
 /// <para><b>Opt-in.</b> One instance per alert family, held by the engine; the fire site calls
 /// <see cref="IsEscalation"/> before its cooldown test, <see cref="Record"/> when it fires and <see cref="Close"/>
 /// when the incident clears. <see cref="IsOptedIn"/> names the metrics that do so, for the one downstream reader
@@ -54,9 +65,32 @@ public sealed class TierEscalation
     public bool IsEscalation(string key, AlertSeverityLevel tier) =>
         _highestDelivered.TryGetValue(key, out var highest) && tier > highest;
 
+    /// <summary>The highest tier recorded for the open incident at <paramref name="key"/>, or null when none.</summary>
+    public AlertSeverityLevel? Highest(string key) =>
+        _highestDelivered.TryGetValue(key, out var highest) ? highest : null;
+
     /// <summary>Records a fire at <paramref name="tier"/> for the open incident; the highest tier wins.</summary>
     public void Record(string key, AlertSeverityLevel tier) =>
         _highestDelivered.AddOrUpdate(key, tier, (_, highest) => tier > highest ? tier : highest);
+
+    /// <summary>
+    /// Puts the tier back to <paramref name="prior"/> (the value <see cref="Highest"/> returned before the fire) after
+    /// a fire whose every channel failed (round 2 of #5709, the way the worsening gates' <c>RestoreAlertedLevel</c>
+    /// does): nothing was delivered, so the retry a minute later must still be the escalation and carry the bypass
+    /// flag. Without it the retry reads as an ordinary Critical and the email and webhook cooldowns, stamped by the
+    /// Warning, hold it for the rest of their window. A null <paramref name="prior"/> removes the entry.
+    /// </summary>
+    public void Restore(string key, AlertSeverityLevel? prior)
+    {
+        if (prior is { } tier)
+        {
+            _highestDelivered[key] = tier;
+        }
+        else
+        {
+            _highestDelivered.TryRemove(key, out _);
+        }
+    }
 
     /// <summary>Ends the incident at <paramref name="key"/>: the next fire starts from nothing delivered.</summary>
     public void Close(string key) => _highestDelivered.TryRemove(key, out _);
