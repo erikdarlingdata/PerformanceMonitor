@@ -45,7 +45,7 @@ public static class CurrentDatabaseScope
     /// Never throws except for cancellation: a failed read is "unknown", so a monitoring read never fails on this lookup.
     /// </summary>
     public static async Task<IReadOnlySet<string>?> ReadAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default, DateTime? nowUtc = null)
+        NpgsqlDataSource postgres, int serverId, DateTime? nowUtc = null, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -88,7 +88,7 @@ public static class CurrentDatabaseScope
     /// <summary><see cref="Narrow(DatabaseFilter, IReadOnlySet{string})"/> after reading the server's set.</summary>
     public static async Task<DatabaseFilter> NarrowAsync(
         NpgsqlDataSource postgres, int serverId, DatabaseFilter filter, CancellationToken cancellationToken = default)
-        => filter.IsAll ? Narrow(filter, await ReadAsync(postgres, serverId, cancellationToken)) : filter;
+        => filter.IsAll ? Narrow(filter, await ReadAsync(postgres, serverId, cancellationToken: cancellationToken)) : filter;
 
     /// <summary>
     /// <paramref name="rows"/> without the rows of a database its server no longer has, for a read that lists per-database
@@ -111,7 +111,7 @@ public static class CurrentDatabaseScope
             var serverId = serverOf(row);
             if (!sets.ContainsKey(serverId))
             {
-                sets[serverId] = await ReadAsync(postgres, serverId, cancellationToken);
+                sets[serverId] = await ReadAsync(postgres, serverId, cancellationToken: cancellationToken);
             }
         }
 

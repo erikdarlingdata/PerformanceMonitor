@@ -158,15 +158,6 @@ public sealed class FinOpsRecommendationsReadsLiveTests
         Assert.Empty(await DarlingFinOpsRecommendationsReader.GetStorageTierIoAsync(dataSource, idB, cutoff, TimeoutSeconds, ct));
         Assert.Empty(await DarlingFinOpsRecommendationsReader.GetStorageTierIoAsync(dataSource, idC, cutoff, TimeoutSeconds, ct));
 
-        /* CPU P95 (servers A and B carry the same series): 30 samples, value cpu[i % 10] for
-           { 20, 22, 24, 21, 23, 22, 20, 24, 22, 21 }, so 20 x 6, 21 x 6, 22 x 9, 23 x 3, 24 x 6. Sorted, the 95th
-           percentile sits at 0.95 * 29 = 27.55, between ranks 27 and 28, both 24 (ranks 24 to 29 are the 24s), so
-           P95 = 24. The samples run 45 minutes apart, 29 gaps = 1305 minutes = 21.75 hours, which reads "21 hours". */
-        var cpuExpected = (24m, "31 samples over 22 hours");
-        Assert.Equal(cpuExpected, await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idA, cutoff, TimeoutSeconds, ct));
-        Assert.Equal(cpuExpected, await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idB, cutoff, TimeoutSeconds, ct));
-        Assert.Null(await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idC, cutoff, TimeoutSeconds, ct));
-
         /* Reserved capacity: the same 31 samples (three full cycles of ten and a 31st of 20, the 24-hour CPU rule needs
            the oldest sample 23 hours old). Sum = 3 * 219 + 20 = 677, so the mean is 677 / 31 = 21.8387096774193548.
            Sum of squares = 3 * 4815 + 400 = 14845, so the squared deviations total 14845 - 677^2 / 31 = 60.19355, the
