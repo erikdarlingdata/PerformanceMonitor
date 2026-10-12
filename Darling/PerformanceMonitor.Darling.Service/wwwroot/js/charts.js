@@ -562,8 +562,10 @@ export function renderLineChart(spec) {
           if (v == null) continue;
           plottable.push(i);
         }
-        /* One run per stretch with samples (#5644 W7): a collection gap ends a run, so no line or fill crosses it. */
-        for (const run of splitAtGaps(plottable, rowTimes, gapMs)) {
+        /* One run per stretch with samples (#5644 W7): a collection gap ends a run, so no line or fill crosses it. The
+           threshold comes from THIS series' own spacing: a 15-minute series on a chart of 1-minute buckets is not a
+           run of gaps. */
+        for (const run of splitAtGaps(plottable, rowTimes, gapThresholdMs(plottable.map((i) => rowTimes[i])))) {
           const linePts = run.map((i) => xs[i] + "," + plotY(readVal(rows[i].r, s.key)));
           /* A lone plottable point has no segment to stroke, so draw it as a dot — one bucket still shows its
              reading. (Its resting marker matches the hover dot; static class so it does not vanish on mouseout.) */
@@ -599,8 +601,9 @@ export function renderLineChart(spec) {
         if (v == null || isNaN(v)) continue;
         plottable2.push(i);
       }
-      /* Broken at collection gaps like a primary line (#5644 W7). */
-      for (const run of splitAtGaps(plottable2, rowTimes, gapMs)) {
+      /* Broken at collection gaps like a primary line (#5644 W7), by its own spacing (a 15-minute overlay over
+         1-minute buckets draws one line, not a dot per sample). */
+      for (const run of splitAtGaps(plottable2, rowTimes, gapThresholdMs(plottable2.map((i) => rowTimes[i])))) {
         const pts2 = run.map((i) => xs[i] + "," + Math.max(M.t, Math.min(M.t + PLOT_H, scaleY2(Number(rows[i].r[series2.key])))));
         if (pts2.length === 1) {
           /* Same single-bucket rule as the primary series: a lone overlay reading draws as a dot, not a dropped

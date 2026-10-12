@@ -147,6 +147,21 @@ public sealed class WebChartGapBehaviourTests
     }
 
     [Fact]
+    public void TheGapThreshold_IsPerSeries_ACoarseSeriesOverFineBucketsIsOneLineUnlessItHasAGapOfItsOwn()
+    {
+        // 1-minute buckets, a series sampled every 15 minutes: the rows' median interval is 1 minute (threshold 5 minutes), which
+        // used to cut the 15-minute series into a dot per sample. Its own spacing makes the threshold 45 minutes.
+        var r = Run();
+        Assert.Equal(1, N(r, "coarseOverlayNoGap", "overlays"));
+        Assert.Equal(0, N(r, "coarseOverlayNoGap", "dots"));
+        Assert.Equal(1, N(r, "coarseOverlayNoGap", "lines"));
+        Assert.Equal(2, N(r, "coarseOverlayGap", "overlays"));    // a real 7 hour silence still breaks it
+        Assert.Equal(0, N(r, "coarseOverlayGap", "dots"));
+        Assert.Equal(2, N(r, "coarsePrimary", "lines"));
+        Assert.Equal(0, N(r, "coarsePrimary", "dots"));
+    }
+
+    [Fact]
     public void TheThreshold_HasNothingToCompareUnderThreeBuckets_AndNeverFallsUnderTheFloor()
     {
         var r = Run().GetProperty("threshold");
