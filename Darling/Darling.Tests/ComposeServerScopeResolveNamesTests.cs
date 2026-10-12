@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// the registry resolver every other server-scoped tool uses. Before it, a spec naming a server by its display name matched nothing
 /// (the scope matched only the stored <c>server_name</c>) and the run answered 0 rows.
 /// </summary>
+/* #1776 own-store: the live test seeds its own scratch database (ScratchPostgres), so it shares no rows with another class. */
 public sealed class ComposeServerScopeResolveNamesTests
 {
     private static readonly IReadOnlyList<DarlingServerResolver.RegisteredServer> Servers = new[]
