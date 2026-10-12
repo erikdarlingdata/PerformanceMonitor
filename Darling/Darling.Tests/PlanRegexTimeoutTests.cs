@@ -303,6 +303,26 @@ public sealed class PlanRegexTimeoutTests
         Assert.DoesNotContain(normal.PlanWarnings, w => w.WarningType == PlanAnalyzer.SkippedChecksWarningType);
     }
 
+    [Fact]
+    public void Analyze_WithAnEmptyBudget_AddsNoSkippedChecksNote_WhenRule40IsDisabled()
+    {
+        const string cursor = "DECLARE c CURSOR FAST_FORWARD FOR SELECT 1";
+        var disabled = new AnalyzerConfig { Rules = new RulesConfig { Disabled = [40] } };
+
+        var off = new PlanStatement { StatementText = cursor };
+        PlanAnalyzer.Analyze(
+            new ParsedPlan { Batches = [new PlanBatch { Statements = [off] }] },
+            disabled, null, TimeSpan.Zero, CancellationToken.None);
+
+        // Rule 40 is switched off, so the skipped-checks note is not added.
+        Assert.DoesNotContain(off.PlanWarnings, w => w.WarningType == PlanAnalyzer.SkippedChecksWarningType);
+        Assert.DoesNotContain(off.PlanWarnings, w => w.RuleNumber == 40);
+
+        // The same statement and budget with the default config (rule 40 enabled) does get the note.
+        var on = Analyze(cursor, TimeSpan.Zero);
+        Assert.Single(on.PlanWarnings, w => w.WarningType == PlanAnalyzer.SkippedChecksWarningType);
+    }
+
     private static PlanStatement SerialStatement(string text) => new()
     {
         StatementText = text,

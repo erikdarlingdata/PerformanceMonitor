@@ -122,7 +122,9 @@ public sealed class GridFilterBehaviourTests
         var r = Run("exportFiltered");
         Assert.Equal(new[] { "Alpha", "ALPHA two" }, Arr(r, "shown"));
         Assert.Equal("Name\tA\tB\tTags\nAlpha\t3\t30\tred; hot\nALPHA two\t2\t20\tblue; hot", Str(r, "copy"));
-        Assert.Equal("Name,A,B,Tags\r\nAlpha,3,30,red; hot\r\nALPHA two,2,20,blue; hot", Str(r, "csv"));
+        // The Tags values hold a semicolon, so the CSV quotes them whatever the separator is: a spreadsheet whose
+        // list separator is a semicolon would otherwise split "red; hot" into two cells.
+        Assert.Equal("Name,A,B,Tags\r\nAlpha,3,30,\"red; hot\"\r\nALPHA two,2,20,\"blue; hot\"", Str(r, "csv"));
         Assert.Equal("Exported 2 rows.", Str(r, "status"));
     }
 

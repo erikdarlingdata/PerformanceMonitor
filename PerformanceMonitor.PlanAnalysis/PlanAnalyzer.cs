@@ -139,7 +139,7 @@ public static partial class PlanAnalyzer
 
             cancellationToken.ThrowIfCancellationRequested();
             MarkLegacyWarnings(stmt);
-            NoteSkippedChecks(stmt);
+            NoteSkippedChecks(stmt, cfg);
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -152,10 +152,11 @@ public static partial class PlanAnalyzer
     /// timeout or because the plan's regex time budget was spent. Without it, a skipped check reads as a clean
     /// result. It is rule 40, so every analyzer warning keeps carrying a rule number.
     /// </summary>
-    private static void NoteSkippedChecks(PlanStatement stmt)
+    private static void NoteSkippedChecks(PlanStatement stmt, AnalyzerConfig cfg)
     {
+        // The record is drained even when rule 40 is disabled, so it cannot carry into the next statement.
         var skipped = PlanRegex.TakeSkipped();
-        if (skipped.Count == 0)
+        if (skipped.Count == 0 || cfg.IsRuleDisabled(40))
             return;
 
         stmt.PlanWarnings.Add(new PlanWarning
