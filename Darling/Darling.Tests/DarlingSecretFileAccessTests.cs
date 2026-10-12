@@ -21,7 +21,12 @@ namespace Darling.Tests;
 /// The secret files the service and the CLI write or read beyond the credential ACLs themselves: the store folder a
 /// first initdb runs under, the files <c>--harden-files</c> covers, the files created with their ACL rather than
 /// hardened after, and the two secret reads that warn when ordinary users can read the file.
+///
+/// <para>In the <c>darling-config-env</c> collection (it runs alone) because these tests set the operator-group
+/// stand-in (<c>DarlingFileSecurity.UseOperatorGroupForTests</c>) and the file-access sink
+/// (<c>DarlingSecretSource.ReportFileAccessTo</c>), statics the whole test process shares.</para>
 /// </summary>
+[Collection("darling-config-env")]
 public sealed class DarlingSecretFileAccessTests
 {
     private static readonly SecurityIdentifier s_builtinUsers = new(WellKnownSidType.BuiltinUsersSid, null);

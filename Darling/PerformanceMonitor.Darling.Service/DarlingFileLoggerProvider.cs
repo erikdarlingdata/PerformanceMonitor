@@ -96,6 +96,7 @@ public sealed class DarlingFileLoggerProvider : ILoggerProvider
         try
         {
             Directory.CreateDirectory(_logDirectory);
+            RestrictLogDirectory(_logDirectory);
             SweepOldFiles();
             _enabled = true;
         }
@@ -106,10 +107,26 @@ public sealed class DarlingFileLoggerProvider : ILoggerProvider
                discovering it only when they tail an empty log directory. */
             _enabled = false;
             ReportFailureOnce(
-                $"File logging is disabled - cannot create log directory '{_logDirectory}': {ex.GetType().Name}: {ex.Message}");
+                $"File logging is disabled - cannot create or restrict log directory '{_logDirectory}': {ex.GetType().Name}: {ex.Message}");
         }
 
         _flushTimer = new Timer(_ => Flush(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    /// <summary>
+    /// Limits the log folder to SYSTEM, Administrators and the service account on Windows, whatever the layout: the
+    /// logs name hosts, logins and error text, and the folder otherwise takes the access its parent under
+    /// ProgramData hands down, which includes ordinary users' read. The store folder's own lock covers the logs only
+    /// when they happen to sit under it, so this does not depend on where <c>postgres.dataDirectory</c> points or on
+    /// whether the store is managed. A folder whose ACL cannot be set is not written to: the caller treats the throw
+    /// as a logging failure and reports it once.
+    /// </summary>
+    private static void RestrictLogDirectory(string logDirectory)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            DarlingFileSecurity.HardenDirectory(logDirectory, allowInteractiveTraverse: false);
+        }
     }
 
     /// <summary>%ProgramData%\PerformanceMonitorDarling\logs — the service's machine-level log directory.</summary>

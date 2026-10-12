@@ -25,7 +25,11 @@ namespace Darling.Tests;
 /// no world-readable ACE (Everyone / Authenticated Users / Users), SYSTEM + Administrators + the
 /// service account granted, INTERACTIVE granted only where the operator's Viewer must read
 /// (admin/viewer credentials), and the trusted-owner guard accepting a file this process created.
+///
+/// <para>In the <c>darling-config-env</c> collection (it runs alone) because the operator-group tests set
+/// <see cref="DarlingFileSecurity.UseOperatorGroupForTests"/>, a static the whole test process shares.</para>
 /// </summary>
+[Collection("darling-config-env")]
 public sealed class DarlingFileSecurityTests
 {
     private static readonly SecurityIdentifier s_system = new(WellKnownSidType.LocalSystemSid, null);

@@ -836,7 +836,7 @@ public static class DarlingCliCommands
                 var lines = new List<string> { DiagnosticsBundle.AliasMapWarning };
                 lines.AddRange(outcome.Aliaser.AliasMapLines());
                 /* The same writer as the bundle: a random temp name created with CreateNew, then moved, so a planted link is replaced and never written through. */
-                var mapProblem2 = DiagnosticsBundle.WriteAtomically(options.AliasMapPath, string.Join(Environment.NewLine, lines) + Environment.NewLine, options.Force);
+                var mapProblem2 = DiagnosticsBundle.WriteAtomically(options.AliasMapPath, string.Join(Environment.NewLine, lines) + Environment.NewLine, options.Force, restricted: true);
                 if (mapProblem2 is null)
                 {
                     output.WriteLine("Alias map written (DO NOT ATTACH it): " + options.AliasMapPath);

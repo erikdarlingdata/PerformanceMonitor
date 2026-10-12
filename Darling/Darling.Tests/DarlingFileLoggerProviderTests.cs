@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Concurrent;
 using System.IO;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -71,6 +73,50 @@ public sealed class DarlingFileLoggerProviderTests : IDisposable
         Assert.Empty(reports);
         /* Sanity: the flushes actually wrote — otherwise "never surfaced" would be a vacuous pass. */
         Assert.True(File.Exists(provider.CurrentLogFile()), "a healthy provider must have written its log file");
+    }
+
+    /// <summary>
+    /// The log folder is limited to SYSTEM, Administrators and the service account wherever it is: a folder that
+    /// already exists with an ordinary users' entry (one created beforehand, or one that inherits ProgramData's
+    /// users' read) comes out with a protected DACL carrying none of the broad groups.
+    /// </summary>
+    [Fact]
+    public void LogDirectory_IsRestrictedToTheServiceIdentities_WhateverItHeldBefore()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var logDir = Path.Combine(_tempRoot, "logs");
+        var directory = Directory.CreateDirectory(logDir);
+        var before = directory.GetAccessControl();
+        before.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+            FileSystemRights.ReadAndExecute,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        directory.SetAccessControl(before);
+
+        var reports = new ConcurrentQueue<string>();
+        using var provider = new DarlingFileLoggerProvider(logDir, reports.Enqueue);
+        provider.CreateLogger("Test").LogInformation("a line");
+        provider.Flush();
+
+        Assert.Empty(reports);
+        var after = new DirectoryInfo(logDir).GetAccessControl();
+        Assert.True(after.AreAccessRulesProtected, "the log folder must not inherit access from its parent");
+        var broad = new[]
+        {
+            new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+            new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null),
+            new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+            new SecurityIdentifier(WellKnownSidType.InteractiveSid, null),
+        };
+        foreach (FileSystemAccessRule rule in after.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+        {
+            Assert.DoesNotContain((SecurityIdentifier)rule.IdentityReference, broad);
+        }
+
+        Assert.True(File.Exists(provider.CurrentLogFile()), "the provider still writes its log");
     }
 
     /// <summary>
