@@ -3035,6 +3035,10 @@ public sealed class DarlingManagedPostgres
         Directory.CreateDirectory(ParentOf(_dataDirectory));
         var storeFolderLocked = TryHardenDirectory(ParentOf(_dataDirectory));
 
+        /* The data directory, pg.log, server.key and the log folder are the names the service writes into and opens
+           again on every start: refuse ones another user made first, before initdb or the server touches them. */
+        RefuseUntrustedStoreContents(ParentOf(_dataDirectory));
+
         /* Age out any pre-upgrade rollback copy BEFORE this start's own upgrade can create a new one.
            Running it afterwards would bump the brand-new copy's counter on the very start that produced
            it, costing it one of the two starts it is supposed to survive. Once per instance, for the same
@@ -5271,10 +5275,140 @@ public sealed class DarlingManagedPostgres
             $"Refusing to initialize a new store under {storeFolder}: {reason}" +
             $"{DarlingFileSecurity.DescribeOwnerAndExposure(storeFolder)}. A data directory created there would inherit " +
             "that access, and it holds query text, plans and every monitored server's encrypted password. If you did not " +
-            "create the folder, find out who did and remove it. Otherwise, from an ELEVATED prompt:   " +
-            $"takeown /f \"{storeFolder}\" /a   then   icacls \"{storeFolder}\" /inheritance:r /grant \"SYSTEM:(OI)(CI)F\" " +
-            $"\"Administrators:(OI)(CI)F\" \"{DarlingFileSecurity.ServiceAccountDisplayName}:(OI)(CI)F\"   and start the " +
-            "service again. install-darling.ps1 creates this folder with that owner and ACL before the first start.");
+            "create the folder, find out who did and delete it, then run install-darling.ps1, which creates the folder " +
+            "with that owner and ACL before the first start. If you did create it, delete it and run install-darling.ps1 " +
+            $"the same way, or, to keep the folder, from an ELEVATED prompt:   takeown /f \"{storeFolder}\" /a   then   " +
+            $"icacls \"{storeFolder}\" /inheritance:r /grant \"SYSTEM:(OI)(CI)F\" \"Administrators:(OI)(CI)F\" " +
+            $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(OI)(CI)F\"   and start the service again. Either way " +
+            "the service then checks the data directory, pg.log, server.key and the logs folder before it uses them.");
+    }
+
+    /// <summary>
+    /// Why the managed store must not be initialized or started under <paramref name="storeFolder"/>, or null when it
+    /// may. Judges what the service writes into the store folder and opens again on every start: the data directory,
+    /// <c>pg.log</c>, <c>server.key</c>, <c>server.crt</c> and the service log folder. Each one that exists must not be
+    /// a junction or link, must be owned by SYSTEM, Administrators or the service account, and must not be readable by
+    /// Users, Authenticated Users, Everyone or INTERACTIVE; the data directory and the log folder must also grant no
+    /// write or permission change to anyone else; and the data directory's own entries (<c>postgresql.conf</c>,
+    /// <c>postgresql.auto.conf</c>, <c>pg_hba.conf</c> and the rest) must be owned the same way. initdb, pg_ctl and the
+    /// key writers open these names without asking who made them, and PostgreSQL does not check who owns a data
+    /// directory on Windows, so something another user made first would be used as it is. An item or folder that
+    /// cannot be listed or read is reported, never skipped as if it were empty. Unlike <see cref="StoreFolderProblem"/>
+    /// this judges an existing store too: its files are the ones a start would run.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string? StoreContentsProblem(string storeFolder, string dataDirectory, string serverLogPath, string logFolder)
+    {
+        var items = new List<(string Path, bool IsDirectory)>
+        {
+            (dataDirectory, true),
+            (serverLogPath, false),
+            (Path.Combine(storeFolder, ServerKeyFileName), false),
+            (Path.Combine(storeFolder, ServerCertFileName), false),
+        };
+
+        /* The service log folder is judged where it sits in the store folder, which is where the default layout puts it. */
+        var logFolderFull = Path.TrimEndingDirectorySeparator(Path.GetFullPath(logFolder));
+        if (string.Equals(
+                Path.GetDirectoryName(logFolderFull),
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(storeFolder)),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            items.Add((logFolderFull, true));
+        }
+
+        foreach (var (path, isDirectory) in items)
+        {
+            if (StoreItemProblem(path, isDirectory) is { } problem)
+            {
+                return problem;
+            }
+        }
+
+        try
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(dataDirectory))
+            {
+                /* A data directory's own entries are the ones PostgreSQL reads on start. A link among them is the
+                   operator's own relocation (pg_wal), so only the owner is judged here. */
+                if (!DarlingFileSecurity.IsTrustedOwner(entry))
+                {
+                    return $"{entry} is not owned by SYSTEM, Administrators or the service account{DarlingFileSecurity.DescribeOwnerAndExposure(entry)}";
+                }
+            }
+        }
+        catch (DirectoryNotFoundException)
+        {
+            /* No data directory yet: a first start makes it. */
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return $"{dataDirectory} could not be listed ({ex.Message}), so what is in it is not known";
+        }
+
+        return null;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static string? StoreItemProblem(string path, bool isDirectory)
+    {
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(path);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return $"{path} could not be read ({ex.Message})";
+        }
+
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            return $"{path} is a junction or symbolic link";
+        }
+
+        if (!DarlingFileSecurity.IsTrustedOwner(path))
+        {
+            return $"{path} is not owned by SYSTEM, Administrators or the service account{DarlingFileSecurity.DescribeOwnerAndExposure(path)}";
+        }
+
+        if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
+        {
+            return $"{path} is readable by Users, Authenticated Users, Everyone or INTERACTIVE";
+        }
+
+        if (isDirectory && DarlingFileSecurity.WriteAccessBeyondTrusted(path) is { } others)
+        {
+            return $"{path} can be changed by {others}";
+        }
+
+        return null;
+    }
+
+    /// <summary>The gate on <see cref="StoreContentsProblem"/>, before initdb on a new store and before the server is
+    /// started on an existing one: a startup error that names the item and both fixes. The worker logs it critical and
+    /// exits, like every other failure of the managed start.</summary>
+    [SupportedOSPlatform("windows")]
+    private void RefuseUntrustedStoreContents(string storeFolder)
+    {
+        if (StoreContentsProblem(storeFolder, _dataDirectory, _serverLogPath, DarlingFileLoggerProvider.DefaultLogDirectory()) is not { } problem)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"Refusing to initialize or start the managed store under {storeFolder}: {problem}. The data directory holds query " +
+            "text, plans and every monitored server's encrypted password, PostgreSQL does not check who owns its data " +
+            "directory on Windows, and the service runs what it finds in these files, so it will not use ones it cannot " +
+            "tell are its own. If you changed the service's Log On account, the previous account still owns them: from an " +
+            $"ELEVATED prompt run   icacls \"{storeFolder}\" /setowner \"*S-1-5-32-544\" /T /C /L   and start the service " +
+            "again. If you did not, another user may have made them first: do not keep them. Stop the service, delete the " +
+            $"item named above (deleting {_dataDirectory} destroys the collected history), and run install-darling.ps1 " +
+            "again, which creates the store folder with the right owner and ACL before the first start.");
     }
 
     /// <summary>

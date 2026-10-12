@@ -165,14 +165,16 @@ public class DarlingInstallLocationTests
         targets.Sort(StringComparer.Ordinal);
         var found = string.Join(", ", targets);
         Assert.True(
-            found == "$folder, $secretFile, $secretFile",
-            $"expected Set-Acl on the store folder once and on the credential file twice (the hardened DACL and the owner), found: {found}");
+            found == "$secretFile, $secretFile",
+            $"expected Set-Acl on the credential file twice (the hardened DACL and the owner) and nowhere else, found: {found}");
 
-        /* The one $folder call belongs to the store folder and to nothing else: it is inside the function that
-           locks the store folder, that function has one caller, and the caller passes $storeFolder, which is
-           assigned once, from Get-DarlingStoreFolder. Neither the install root nor the script's own folder
-           reaches it. */
-        Assert.Contains("Set-Acl -LiteralPath $folder", ExtractFunction(script, "Initialize-DarlingStoreFolder"), StringComparison.Ordinal);
+        /* The store folder's DACL is written through the handle the function opened on the folder itself (never by
+           name, so a link put at the name cannot redirect it), inside the function that locks the store folder.
+           That function has one caller, and the caller passes $storeFolder, which is assigned once, from
+           Get-DarlingStoreFolder. Neither the install root nor the script's own folder reaches it. */
+        var storeFolderFunction = ExtractFunction(script, "Initialize-DarlingStoreFolder");
+        Assert.Contains("$lock.WriteDacl(", storeFolderFunction, StringComparison.Ordinal);
+        Assert.DoesNotContain("Set-Acl", storeFolderFunction, StringComparison.Ordinal);
 
         var callers = Regex.Matches(script, @"(?<!function )Initialize-DarlingStoreFolder (\S+)");
         Assert.True(
