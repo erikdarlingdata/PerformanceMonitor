@@ -153,7 +153,12 @@ public sealed class CollectorTimestampFrameTests
         var code = QueryTextOf("CpuUtilizationCollector.cs");
 
         Assert.Contains("var stampInWatermarkFrame = context.WatermarkFromUtcColumn ? sampleTimeUtc : sampleTime;", code, StringComparison.Ordinal);
-        Assert.Contains("&& stampInWatermarkFrame <= context.Watermark.Value)", code, StringComparison.Ordinal);
+        /* #5644 W3: the watermark bound carries the ring-buffer resample tolerance (the record is re-read a few
+           milliseconds later); the compared column is still the one in the watermark's frame. The behaviour (8 ms
+           drift dropped, the next record 60 s later kept) is Lite.Tests CpuUtilizationCollectorDefinitionTests
+           ReadAsync_RingBuffer_AlreadyStoredRecordWithDriftedStamp_IsNotStoredAgain. */
+        Assert.Contains("&& stampInWatermarkFrame <= WithRingBufferTolerance(context.Watermark.Value))", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("stampInWatermarkFrame <= context.Watermark.Value", code, StringComparison.Ordinal);
         Assert.DoesNotContain("sampleTime <= context.Watermark.Value", code, StringComparison.Ordinal);
         Assert.Equal("sample_time_utc", PerformanceMonitor.Collectors.CpuUtilizationCollector.Instance.UtcWatermarkColumn);
         Assert.Equal("sample_time", PerformanceMonitor.Collectors.CpuUtilizationCollector.Instance.WatermarkColumn);
