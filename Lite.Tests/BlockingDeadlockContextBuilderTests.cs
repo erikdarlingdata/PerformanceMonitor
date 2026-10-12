@@ -47,11 +47,10 @@ public class BlockingDeadlockContextBuilderTests
         string db = "StackOverflow", string obj = "", string blockedSql = "", string blockingSql = "",
         long waitMs = 5000, string lockMode = "", string xml = "", DateTime? eventTime = null, int spid = 0) => new()
     {
-        /* #5644 W1: rows with one blocked spid, blocker and start are ONE wait; a test that wants separate
-           waits gives each its own spid. */
-        BlockedSpid = spid,
+        /* #5644 W1: rows with one blocked spid, blocker and start are ONE wait. A test that names a spid gets it
+           (rows given the same spid are one wait); otherwise each row gets a unique spid and is its own wait. */
+        BlockedSpid = spid != 0 ? spid : System.Threading.Interlocked.Increment(ref s_nextBlockedSpid),
         EventTime = eventTime ?? new DateTime(2026, 6, 19, 12, 0, 0),
-        BlockedSpid = System.Threading.Interlocked.Increment(ref s_nextBlockedSpid),
         BlockingSpid = 50,
         DatabaseName = db,
         ContentiousObject = obj,
