@@ -375,10 +375,21 @@ public static class PgLogTextRedactor
                of that value. */
             var tab = lines[i].StartsWith('\t') ? "\t" : string.Empty;
             var body = tab.Length == 0 ? lines[i] : lines[i][1..];
-            if (context.Length <= MaxSqlFieldLength && MaskValues(body, s_contextForms) is { } maskedLine)
+            if (context.Length <= MaxSqlFieldLength && MaskValues(body, s_contextForms, out var carriesValue) is { } maskedLine)
             {
                 output.Add(tab + maskedLine);
                 i++;
+
+                /* A COPY value in CSV mode, or a JSON input, can hold a newline: its first physical line then ends
+                   in a quote or is cut where the value goes on, and the form above reads that line whole. What
+                   follows a value-bearing frame is another frame, or nothing. Any other line is the rest of the
+                   value, and is withheld with everything after it. */
+                if (carriesValue && i < lines.Length && !s_contextFrameStart.IsMatch(lines[i]))
+                {
+                    output.Add((lines[i].StartsWith('\t') ? "\t" : string.Empty) + WithheldValues);
+                    return string.Join('\n', output);
+                }
+
                 continue;
             }
 
@@ -640,6 +651,13 @@ public static class PgLogTextRedactor
         "(%s)=(%s) anahtarı \"%s\" tablosundan hala referans edilmektedir.", // tr
         "На ключ (%s)=(%s) все ще є посилання в таблиці \"%s\".", // uk
         "键值对(%s)=(%s)仍然是从表\"%s\"引用的.", // zh_CN
+        "Key (%s)=(%s) is referenced from table \"%s\".",
+        "Auf Schlüssel (%s)=(%s) wird aus Tabelle »%s« verwiesen.", // de
+        "キー(%s)=(%s)はテーブル\"%s\"から参照されています。", // ja
+        "გასაღებს (%s)=(%s) მიმართავენ ცხრილიდან \"%s\".", // ka
+        "На ключ (%s)=(%s) есть ссылки в таблице \"%s\".", // ru
+        "Nyckeln (%s)=(%s) refereras från tabell \"%s\".", // sv
+        "Ключ (%s)=(%s) посилається з таблиці \"%s\".", // uk
     ];
 
     /// <summary>Every catalogue's <c>Key is not present in table "%s".</c> and <c>Key is still referenced from table "%s".</c>: the foreign-key DETAIL written when the role may not read the key's columns, which carries no value.</summary>
@@ -672,6 +690,13 @@ public static class PgLogTextRedactor
         "Nyckel refereras fortfarande till från tabell \"%s\".", // sv
         "На ключ все ще є посилання в таблиці \"%s\".", // uk
         "表\"%s\"中仍然有对键的引用。", // zh_CN
+        "Key is referenced from table \"%s\".",
+        "Auf den Schlüssel wird aus Tabelle »%s« verwiesen.", // de
+        "キーがテーブル\"%s\"から参照されています。", // ja
+        "გასაღებს მიმართავენ ცხრილიდან \"%s\".", // ka
+        "На ключ есть ссылки в таблице \"%s\".", // ru
+        "Nyckel refereras från tabell \"%s\".", // sv
+        "Ключ посилається з таблиці \"%s\".", // uk
     ];
 
     /// <summary>Every catalogue's <c>Failing row contains %s.</c>: a NOT NULL or CHECK failure's DETAIL, its slot the whole row's <c>(values)</c>.</summary>
@@ -721,6 +746,10 @@ public static class PgLogTextRedactor
         "COPY %s, ligne %llu : « %s »", // fr
         "COPY %s, riga %llu: \"%s\"", // it
         "COPY %s, linha %llu: \"%s\"", // pt_BR
+        "%sのCOPY、行 %llu: \"%s\"", // ja
+        "%sのCOPY、行 %s: \"%s\"", // ja
+        "%s 복사, %llu번째 줄: \"%s\"", // ko
+        "%s 복사, %s번째 줄: \"%s\"", // ko
     ];
 
     /// <summary>Every catalogue's <c>COPY %s, line %llu, column %s: "%s"</c>: a COPY frame quoting one column's input.</summary>
@@ -730,6 +759,10 @@ public static class PgLogTextRedactor
         "COPY %s, ligne %llu, colonne %s : « %s »", // fr
         "COPY %s, riga %llu, colonna %s: \"%s\"", // it
         "COPY %s, linha %llu, coluna %s: \"%s\"", // pt_BR
+        "%sのCOPY、行 %llu、列 %s: \"%s\"", // ja
+        "%sのCOPY、行 %s、列 %s: \"%s\"", // ja
+        "%s 복사, %llu번째 줄, %s 열: \"%s\"", // ko
+        "%s 복사, %s번째 줄, %s 열: \"%s\"", // ko
     ];
 
     /// <summary>Every catalogue's COPY frames that quote no input: the relation alone, the line, the column, and a null input.</summary>
@@ -749,6 +782,16 @@ public static class PgLogTextRedactor
         "COPY %s, ligne %llu, colonne %s : NULL en entrée", // fr
         "COPY %s, riga %llu, colonna %s: input nullo", // it
         "COPY %s, linha %llu, coluna %s: entrada nula", // pt_BR
+        "%sのCOPY、行 %llu、列 %s", // ja
+        "%sのCOPY、行 %llu", // ja
+        "%sのCOPY、行 %llu、列 %s: null が入力されました", // ja
+        "%sのCOPY、行 %s、列 %s", // ja
+        "%sのCOPY、行 %s", // ja
+        "%sのCOPY、行 %s、列 %s: null が入力されました", // ja
+        "%s 복사, %llu번째 줄, %s 열", // ko
+        "%s 복사, %llu번째 줄", // ko
+        "%s 복사, %s번째 줄, %s 열", // ko
+        "%s 복사, %s번째 줄", // ko
     ];
 
     /// <summary>Every catalogue's <c>JSON data, line %d: %s%s%s</c>: the JSON parser's frame, everything after the line number the input around the error.</summary>
@@ -790,6 +833,7 @@ public static class PgLogTextRedactor
         "%s tipi için geçersiz giriş sözdizimi: \"%s\"", // tr
         "неприпустимий синтаксис для типу %s: \"%s\"", // uk
         "无效的类型 %s 输入语法: \"%s\"", // zh_CN
+        "%s型の入力構文が不正です: \"%s\"", // ja
     ];
 
     /// <summary>Every catalogue's <c>invalid input syntax for type %s</c>: the JSON parser's message, which carries no value (its DETAIL and CONTEXT do).</summary>
@@ -812,6 +856,388 @@ public static class PgLogTextRedactor
         "类型%s的输入语法无效", // zh_CN
     ];
 
+    /// <summary>Every catalogue's message that quotes the value an input function or a range check rejected, the first
+    /// slot the value: <c>malformed array literal: "%s"</c> (and the record, range and multirange forms),
+    /// <c>value "%s" is out of range for type %s</c>, <c>"%s" is out of range for type double precision</c> (and
+    /// <c>real</c>), and the date and time range checks (<c>date/time field value out of range: "%s"</c>,
+    /// <c>interval field value out of range: "%s"</c>, <c>time zone displacement out of range: "%s"</c>,
+    /// <c>date out of range: "%s"</c>, <c>timestamp out of range: "%s"</c>). Each major version's wording is listed.</summary>
+    public static readonly IReadOnlyList<string> QuotedValueMessageFormats =
+    [
+        "malformed array literal: \"%s\"",
+        "malformed record literal: \"%s\"",
+        "malformed range literal: \"%s\"",
+        "malformed multirange literal: \"%s\"",
+        "value \"%s\" is out of range for type %s",
+        "\"%s\" is out of range for type double precision",
+        "\"%s\" is out of range for type real",
+        "date/time field value out of range: \"%s\"",
+        "interval field value out of range: \"%s\"",
+        "time zone displacement out of range: \"%s\"",
+        "date out of range: \"%s\"",
+        "timestamp out of range: \"%s\"",
+        "fehlerhafte Arraykonstante: »%s«", // de
+        "Wert »%s« ist außerhalb des gültigen Bereichs für Typ %s", // de
+        "date ist außerhalb des gültigen Bereichs: »%s«", // de
+        "Datum/Zeit-Feldwert ist außerhalb des gültigen Bereichs: »%s«", // de
+        "»interval«-Feldwert ist außerhalb des gültigen Bereichs: »%s«", // de
+        "Zeitzonenunterschied ist außerhalb des gültigen Bereichs: »%s«", // de
+        "»%s« ist außerhalb des gültigen Bereichs für Typ real", // de
+        "»%s« ist außerhalb des gültigen Bereichs für Typ double precision", // de
+        "fehlerhafte Multirange-Konstante: »%s«", // de
+        "fehlerhafte Bereichskonstante: »%s«", // de
+        "fehlerhafte Record-Konstante: »%s«", // de
+        "timestamp ist außerhalb des gültigen Bereichs: »%s«", // de
+        "literal de array mal formado: «%s»", // es
+        "el valor «%s» está fuera de rango para el tipo %s", // es
+        "fecha fuera de rango: «%s»", // es
+        "valor de hora/fecha fuera de rango: «%s»", // es
+        "valor de interval fuera de rango: «%s»", // es
+        "desplazamiento de huso horario fuera de rango: «%s»", // es
+        "«%s» está fuera de rango para el tipo real", // es
+        "«%s» está fuera de rango para el tipo double precision", // es
+        "literal de multirango mal formado: «%s»", // es
+        "literal de rango mal formado: «%s»", // es
+        "literal de record mal formado: «%s»", // es
+        "timestamp fuera de rango: «%s»", // es
+        "timestamp en dehors de limites : « %s »", // fr
+        "tableau litéral mal formé : « %s »", // fr
+        "la valeur « %s » est en dehors des limites pour le type %s", // fr
+        "date en dehors des limites : « %s »", // fr
+        "valeur du champ date/time en dehors des limites : « %s »", // fr
+        "valeur du champ interval en dehors des limites : « %s »", // fr
+        "déplacement du fuseau horaire en dehors des limites : « %s »", // fr
+        "« %s » est en dehors des limites du type real", // fr
+        "« %s » est en dehors des limites du type double precision", // fr
+        "litéral multirange mal formé : « %s »", // fr
+        "intervalle litéral mal formé : « %s »", // fr
+        "enregistrement litéral invalide : « %s »", // fr
+        "tableau littéral mal formé : « %s »", // fr
+        "littéral multirange mal formé : « %s »", // fr
+        "intervalle littéral mal formé : « %s »", // fr
+        "enregistrement littéral invalide : « %s »", // fr
+        "literal array salah bentuk: « %s »", // id
+        "tanggal diluar jangkauan: « %s »", // id
+        "nilai field date/time melebihi jangkauan : « %s »", // id
+        "nilai field interval melebihi jangkauan : « %s »", // id
+        "pemindahan zona waktu melebihi jangkauan : « %s »", // id
+        "« %s » diluar jangkauan untuk tipe real", // id
+        "« %s » diluar jangkauan untuk tipe presisi ganda", // id
+        "literal rentang tidak benar: « %s »", // id
+        "literal record cacad: « %s »", // id
+        "timestamp di luar jangkauan: « %s »", // id
+        "il letterale array non è definito in modo corretto: \"%s\"", // it
+        "valore \"%s\" fuori dall'intervallo consentito per il tipo %s", // it
+        "data fuori dall'intervallo consentito: \"%s\"", // it
+        "valore del campo date/time fuori dall'intervallo consentito: \"%s\"", // it
+        "valore del campo interval fuori dall'intervallo consentito: \"%s\"", // it
+        "la differenza di fuso orario è fuori dall'intervallo consentito: \"%s\"", // it
+        "\"%s\" è fuori dall'intervallo consentito per il tipo real", // it
+        "\"%s\" è fuori dall'intervallo consentito per il tipo double precision", // it
+        "letterale multirange non corretto: \"%s\"", // it
+        "letterale di intervallo non definito correttamente: \"%s\"", // it
+        "letterale record non corretto: \"%s\"", // it
+        "timestamp fuori dall'intervallo consentito: \"%s\"", // it
+        "配列リテラルの書式が誤っています: \"%s\"", // ja
+        "値\"%s\"は型%sの範囲外です", // ja
+        "日付が範囲外です: \"%s\"", // ja
+        "日付時刻のフィールドが範囲外です: \"%s\"", // ja
+        "intervalフィールドの値が範囲外です: \"%s\"", // ja
+        "タイムゾーンの置換が範囲外です: \"%s\"", // ja
+        "型realでは\"%s\"は範囲外です", // ja
+        "型double precisionでは\"%s\"は範囲外です", // ja
+        "不正な複範囲リテラル: \"%s\"", // ja
+        "不正な範囲リテラル: \"%s\"", // ja
+        "おかしなレコードリテラルです: \"%s\"", // ja
+        "timestampが範囲外です: \"%s\"", // ja
+        "値\"%s\"は%s型の範囲外です", // ja
+        "\"%s\"はreal型の範囲外です", // ja
+        "\"%s\"はdouble precision型の範囲外です", // ja
+        "不正な複範囲型リテラル: \"%s\"", // ja
+        "不正な形式のレコードリテラル: \"%s\"", // ja
+        "თარიღი დიაპაზონს გარეთაა: \"%s\"", // ka
+        "დროის/თარიღის ველის მნიშვნელობა დიაპაზონს გარეთაა: \"%s\"", // ka
+        "ინტერვალის ველის მნიშვნელობა დიაპაზონს გარეთაა: \"%s\"", // ka
+        "%s დიაპაზონს გარეთაა ტიპისთვის: real", // ka
+        "%s დიაპაზონს გარეთაა ტიპისთვის: double precision", // ka
+        "დიაპაზონის არასწორი სტრიქონი: %s", // ka
+        "ჩანაწერის არასწორი სტრიქონი: %s", // ka
+        "დროის შტამპი დიაპაზონს გარეთაა: \"%s\"", // ka
+        "비정상적인 배열 문자: \"%s\"", // ko
+        "입력한 \"%s\" 값은 %s 자료형 범위를 초과했습니다", // ko
+        "날짜 범위가 벗어났음: \"%s\"", // ko
+        "날짜/시간 필드의 값이 범위를 벗어남: \"%s\"", // ko
+        "interval 필드의 값이 범위를 벗어남: \"%s\"", // ko
+        "표준시간대 범위를 벗어남: \"%s\"", // ko
+        "\"%s\"는 real 자료형의 범위를 벗어납니다.", // ko
+        "\"%s\"는 double precision 자료형의 범위를 벗어납니다.", // ko
+        "비정상적인 multirange 문자열: \"%s\"", // ko
+        "비정상적인 range 문자: \"%s\"", // ko
+        "비정상적인 레코드 문자: \"%s\"", // ko
+        "타임스탬프 값이 범위를 벗어났음: \"%s\"", // ko
+        "nieprawidłowy literał tablicy: \"%s\"", // pl
+        "wartość \"%s\" jest poza zakresem dla typu %s", // pl
+        "data poza zakresem: \"%s\"", // pl
+        "wartość pola daty/czasu poza zakresem: \"%s\"", // pl
+        "wartość pola interwału poza zakresem: \"%s\"", // pl
+        "przesunięcie strefy czasowej poza zakresem: \"%s\"", // pl
+        "\"%s\" jest poza zakresem dla typu liczb rzeczywistych", // pl
+        "\"%s\" jest poza zakresem dla typu liczb podwójnej precyzji", // pl
+        "nieprawidłowy literał przedziału: \"%s\"", // pl
+        "nieprawidłowy literał rekordu: \"%s\"", // pl
+        "znacznik czasu poza zakresem: \"%s\"", // pl
+        "timestamp fora do intervalo: \"%s\"", // pt_BR
+        "matriz mal formada: \"%s\"", // pt_BR
+        "o valor \"%s\" está fora do intervalo para o tipo de dados %s", // pt_BR
+        "date fora do intervalo: \"%s\"", // pt_BR
+        "valor do campo date/time está fora do intervalo: \"%s\"", // pt_BR
+        "valor do campo interval fora do intervalo: \"%s\"", // pt_BR
+        "deslocamento de zona horária fora do intervalo: \"%s\"", // pt_BR
+        "\"%s\" está fora do intervalo para tipo real", // pt_BR
+        "\"%s\" está fora do intervalo para tipo double precision", // pt_BR
+        "literal multi-intervalo malformado: \"%s\"", // pt_BR
+        "range mal formado: \"%s\"", // pt_BR
+        "ошибочный литерал массива: \"%s\"", // ru
+        "значение \"%s\" вне диапазона для типа %s", // ru
+        "дата вне диапазона: \"%s\"", // ru
+        "значение поля типа date/time вне диапазона: \"%s\"", // ru
+        "значение поля interval вне диапазона: \"%s\"", // ru
+        "смещение часового пояса вне диапазона: \"%s\"", // ru
+        "\"%s\" вне диапазона для типа real", // ru
+        "\"%s\" вне диапазона для типа double precision", // ru
+        "ошибочный литерал мультидиапазона: \"%s\"", // ru
+        "ошибочный литерал диапазона: \"%s\"", // ru
+        "ошибка в литерале записи: \"%s\"", // ru
+        "timestamp вне диапазона: \"%s\"", // ru
+        "felaktig array-literal: \"%s\"", // sv
+        "värdet \"%s\" är utanför giltigt intervall för typen %s", // sv
+        "datum utanför giltigt intervall \"%s\"", // sv
+        "datum/tid-värde utanför giltigt område: \"%s\"", // sv
+        "intervall-värde utanför giltigt område: \"%s\"", // sv
+        "tidszonförskjutning itanför sitt intervall: \"%s\"", // sv
+        "\"%s\" är utanför giltigt intervall för typen real", // sv
+        "\"%s\" är utanför giltigt intervall för typen double precision", // sv
+        "trasig multirange-litteral: \"%s\"", // sv
+        "trasig range-litteral: \"%s\"", // sv
+        "felaktig postliteral: \"%s\"", // sv
+        "timestamp utanför giltigt intervall: \"%s\"", // sv
+        "array literal bozuk: \"%s\"", // tr
+        "date kapsam dışıdır: \"%s\"", // tr
+        "date/time alan değieri kapsam dışıdır: \"%s\"", // tr
+        "interval alan değeri kapsam dışında: \"%s\"", // tr
+        "yer değiştirme değeri kapsam dışında: \"%s\"", // tr
+        "real tipi için kapsam dışı bir değer \"%s\"", // tr
+        "double precision tipi için kapsam dışı bir değer \"%s\"", // tr
+        "aralık (range) literali bozuk: \"%s\"", // tr
+        "hatalı değer: \"%s\"", // tr
+        "timestamp kapsam dışıdır: \"%s\"", // tr
+        "неправильний літерал масиву: \"%s\"", // uk
+        "значення \"%s\" поза діапазоном для типу %s", // uk
+        "дата поза діапазоном: \"%s\"", // uk
+        "значення поля типу дата/час поза діапазоном: \"%s\"", // uk
+        "значення поля типу інтервал, поза діапазоном: \"%s\"", // uk
+        "зміщення часового поясу, поза діапазоном: \"%s\"", // uk
+        "\"%s\" поза діапазоном для дійсного типу", // uk
+        "\"%s\" поза діапазоном для типу double precision", // uk
+        "неправильний багатодіапазонний літерал: \"%s\"", // uk
+        "неправильний літерал діапазону: \"%s\"", // uk
+        "невірно сформований літерал запису: \"%s\"", // uk
+        "позначка часу поза діапазоном: \"%s\"", // uk
+        "有缺陷的数组常量:\"%s\"", // zh_CN
+        "值 \"%s\" 超出类型 %s 的范围", // zh_CN
+        "时间戳超出范围: \"%s\"", // zh_CN
+        "日期/时间值超出范围: \"%s\"", // zh_CN
+        "间隔字段超出范围: \"%s\"", // zh_CN
+        "时间区域置换超出范围: \"%s\"", // zh_CN
+        "\"%s\" 超出实数类型的范围", // zh_CN
+        "\"%s\" 超出双精度类型的范围", // zh_CN
+        "有缺陷的范围字串:\"%s\"", // zh_CN
+        "有缺陷的记录常量: \"%s\"", // zh_CN
+    ];
+
+    /// <summary>Every catalogue's <c>invalid input value for enum %s: "%s"</c>: the enum's name, then the rejected value.</summary>
+    public static readonly IReadOnlyList<string> EnumInputMessageFormats =
+    [
+        "invalid input value for enum %s: \"%s\"",
+        "ungültiger Eingabewert für Enum %s: »%s«", // de
+        "la sintaxis de entrada no es válida para el enum %s: «%s»", // es
+        "valeur en entrée invalide pour le enum %s : « %s »", // fr
+        "nilai masukan tidak valid untuk enum %s : « %s »", // id
+        "la sintassi per l'enumerazione %s non è valida: \"%s\"", // it
+        "列挙型%sの不正な入力構文: \"%s\"", // ja
+        "არასწორი შეყვანილი მნიშვნელობა ჩამონათვალისთვის %s: \"%s\"", // ka
+        "%s 열거형의 입력 값이 잘못됨: \"%s\"", // ko
+        "nieprawidłowa wartość wejścia dla enumeracji %s: \"%s\"", // pl
+        "valor de entrada é inválido para enum %s: \"%s\"", // pt_BR
+        "неверное значение для перечисления %s: \"%s\"", // ru
+        "ogiltigt indata-värde för enum %s: \"%s\"", // sv
+        "%s enum tipi için geçersiz değer: \"%s\"", // tr
+        "неприпустиме вхідне значення для переліку %s: \"%s\"", // uk
+        "对于枚举%s的输入值无效: \"%s\"", // zh_CN
+    ];
+
+    /// <summary>Every catalogue's DETAIL for a JSON parser error that quotes the token it stopped at (<c>Token "%s" is
+    /// invalid.</c>, <c>Expected JSON value, but found "%s".</c> and its siblings, <c>Escape sequence "\%s" is
+    /// invalid.</c>), the one slot the token. Each major version's wording is listed (the token's placeholder is
+    /// <c>%s</c> in 13 through 16 and <c>%.*s</c> in 17 and 18; both write the same text).</summary>
+    public static readonly IReadOnlyList<string> JsonTokenDetailFormats =
+    [
+        "Token \"%s\" is invalid.",
+        "Expected end of input, but found \"%s\".",
+        "Expected array element or \"]\", but found \"%s\".",
+        "Expected \",\" or \"]\", but found \"%s\".",
+        "Expected \":\", but found \"%s\".",
+        "Expected JSON value, but found \"%s\".",
+        "Expected string, but found \"%s\".",
+        "Expected string or \"}\", but found \"%s\".",
+        "Expected \",\" or \"}\", but found \"%s\".",
+        "Escape sequence \"\\%s\" is invalid.",
+        "Escape-Sequenz »\\%s« ist nicht gültig.", // de
+        "Ende der Eingabe erwartet, aber »%s« gefunden.", // de
+        "Array-Element oder »]« erwartet, aber »%s« gefunden.", // de
+        "»,« oder »]« erwartet, aber »%s« gefunden.", // de
+        "»:« erwartet, aber »%s« gefunden.", // de
+        "JSON-Wert erwartet, aber »%s« gefunden.", // de
+        "Zeichenkette oder »}« erwartet, aber »%s« gefunden.", // de
+        "»,« oder »}« erwartet, aber »%s« gefunden.", // de
+        "Zeichenkette erwartet, aber »%s« gefunden.", // de
+        "Token »%s« ist ungültig.", // de
+        "La secuencia de escape «\\%s» no es válida.", // es
+        "Se esperaba el fin de la entrada, se encontró «%s».", // es
+        "Se esperaba un elemento de array o «]», se encontró «%s».", // es
+        "Se esperaba «,» o «]», se encontró «%s».", // es
+        "Se esperaba «:», se encontró «%s».", // es
+        "Se esperaba un valor JSON, se encontró «%s».", // es
+        "Se esperaba una cadena o «}», se encontró «%s».", // es
+        "Se esperaba «,» o «}», se encontró «%s».", // es
+        "Se esperaba una cadena, se encontró «%s».", // es
+        "La secuencia de escape «%s» no es válida.", // es
+        "El elemento «%s» no es válido.", // es
+        "La séquence d'échappement « \\%s » est invalide.", // fr
+        "Attendait une fin de l'entrée, mais a trouvé « %s ».", // fr
+        "Élément de tableau ou « ] » attendu, mais « %s » trouvé.", // fr
+        "« , » ou « ] » attendu, mais « %s » trouvé.", // fr
+        "« : » attendu, mais « %s » trouvé.", // fr
+        "Valeur JSON attendue, mais « %s » trouvé.", // fr
+        "Chaîne ou « } » attendu, mais « %s » trouvé.", // fr
+        "« , » ou « } » attendu, mais « %s » trouvé.", // fr
+        "Chaîne attendue, mais « %s » trouvé.", // fr
+        "Le jeton « %s » n'est pas valide.", // fr
+        "Chaîne ou « } » attendu, mais « %s » trouvé", // fr
+        "urutan escape « \\%s » tidak valid.", // id
+        "Diharapkan akhir masukan, tapi mendapatkan « %s ».", // id
+        "Diharapkan nilai JSON, tapi mendapatkan « %s ».", // id
+        "Diharapkan string, tapi didapatkan « %s ».", // id
+        "Diharapkan elemen array atau « ] », namun menemukan « %s »", // id
+        "« , » ou « ] » diharapkan, namun menemukan « %s »", // id
+        "String « } » diharapkan, namun menemukan « %s »", // id
+        "« : » diharapkan, namun menemukan « %s »", // id
+        "« , » atau « } » diharapkan, namun menemukan « %s » trouvé", // id
+        "Token « %s » tidak valid", // id
+        "La sequenza di escape \"\\%s\" non è valida.", // it
+        "Era prevista la fine dell'input, trovato \"%s\" invece.", // it
+        "Era previsto un elemento di array oppure \"]\", trovato \"%s\" invece.", // it
+        "Era previsto \",\" oppure \"]\", trovato \"%s\" invece.", // it
+        "Era previsto \":\", trovato \"%s\" invece.", // it
+        "Era previsto un valore JSON, trovato \"%s\" invece.", // it
+        "Era prevista una stringa oppure \"}\", trovato \"%s\" invece.", // it
+        "Era previsto \",\" oppure \"}\", trovato \"%s\" invece.", // it
+        "Era prevista una stringa, trovato \"%s\" invece.", // it
+        "Il token \"%s\" non è valido.", // it
+        "エスケープシーケンス\"\\%s\"は不正です。", // ja
+        "入力の終端を想定していましたが、\"%s\"でした。", // ja
+        "配列要素または\"]\"を想定していましたが、\"%s\"でした。", // ja
+        "\",\"または\"]\"を想定していましたが、\"%s\"でした。", // ja
+        "\":\"を想定していましたが、\"%s\"でした。", // ja
+        "JSON値を想定していましたが、\"%s\"でした。", // ja
+        "文字列または\"}\"を想定していましたが、\"%s\"でした。", // ja
+        "\",\"または\"}\"を想定していましたが、\"%s\"でした。", // ja
+        "文字列を想定していましたが、\"%s\"でした。", // ja
+        "トークン\"%s\"は不正です。", // ja
+        "სპეციალური მიმდევრობა \"\\%s\" არასწორია.", // ka
+        "მოველოდი შეყვანის დასასრულს, მაგრამ მივიღე \"%s\".", // ka
+        "მოველოდი მასივის ელემენტს ან \"]\", მაგრამ მივიღე \"%s\".", // ka
+        "მოველოდი \",\" ან \"]\", მაგრამ მივიღე \"%s\".", // ka
+        "მოველოდი \":\", მაგრამ მივიღე \"%s\".", // ka
+        "მოველოდი JSON მნიშვნელობას. მივიღე \"%s\".", // ka
+        "მოველოდი სტრიქონს ან \"}\", მაგრამ მივიღე \"%s\".", // ka
+        "მოველოდი \",\", ან \"}\", მაგრამ მივიღე \"%s\".", // ka
+        "მოველოდი სტრიქონს, მაგრამ მივიღე \"%s\".", // ka
+        "კოდი არასწორია: %s.", // ka
+        "잘못된 이스케이프 조합: \"\\%s\"", // ko
+        "입력 자료의 끝을 기대했는데, \"%s\" 값이 더 있음.", // ko
+        "배열 요소나 \"]\" 가 필요한데 \"%s\"이(가) 있음", // ko
+        "\",\" 또는 \"]\"가 필요한데 \"%s\"이(가) 있음", // ko
+        "\":\"가 필요한데 \"%s\"이(가) 있음", // ko
+        "JSON 값을 기대했는데, \"%s\" 값임", // ko
+        "문자열이나 \"}\"가 필요한데 \"%s\"이(가) 있음", // ko
+        "\",\" 또는 \"}\"가 필요한데 \"%s\"이(가) 있음", // ko
+        "문자열 값을 기대했는데, \"%s\" 값임", // ko
+        "\"]\" 가 필요한데 \"%s\"이(가) 있음", // ko
+        "\"}\"가 필요한데 \"%s\"이(가) 있음", // ko
+        "잘못된 토큰: \"%s\"", // ko
+        "Sekwencja ucieczki \"\\%s\" nie jest poprawna.", // pl
+        "Oczekiwano zakończenia na wejściu, znaleziono \"%s\".", // pl
+        "Oczekiwano wartości JSON, znaleziono \"%s\".", // pl
+        "Oczekiwano ciągu znaków, znaleziono \"%s\".", // pl
+        "Oczekiwano elementu tablicy lub \"]\", znaleziono \"%s\".", // pl
+        "Oczekiwano \",\" lub \"]\", znaleziono \"%s\".", // pl
+        "Oczekiwano ciągu znaków lub \"}\", znaleziono \"%s\".", // pl
+        "Oczekiwano \":\", znaleziono \"%s\".", // pl
+        "Oczekiwano \",\" lub \"}\", znaleziono \"%s\".", // pl
+        "Token \"%s\" jest niepoprawny.", // pl
+        "A sequência de escape \"\\%s\" não é válida.", // pt_BR
+        "Esperado o fim da entrada, mas encontrado \"%s\".", // pt_BR
+        "Esperado elemento da matriz ou \"]\", mas encontrado \"%s\".", // pt_BR
+        "Esperado \",\" ou \"]\", mas encontrado \"%s\".", // pt_BR
+        "Esperado \":\", mas encontrado \"%s\".", // pt_BR
+        "Esperado valor JSON, mas encontrado \"%s\".", // pt_BR
+        "Esperada uma cadeia de caracteres ou \"}\", mas encontrado \"%s\".", // pt_BR
+        "Esperado \",\" ou \"}\", mas encontrado \"%s\".", // pt_BR
+        "Esperada uma cadeia de caracteres, mas encontrado \"%s\".", // pt_BR
+        "O elemento \"%s\" não é válido.", // pt_BR
+        "Неверная спецпоследовательность: \"\\%s\".", // ru
+        "Ожидался конец текста, но обнаружено продолжение \"%s\".", // ru
+        "Ожидался элемент массива или \"]\", но обнаружено \"%s\".", // ru
+        "Ожидалась \",\" или \"]\", но обнаружено \"%s\".", // ru
+        "Ожидалось \":\", но обнаружено \"%s\".", // ru
+        "Ожидалось значение JSON, но обнаружено \"%s\".", // ru
+        "Ожидалась строка или \"}\", но обнаружено \"%s\".", // ru
+        "Ожидалась \",\" или \"}\", но обнаружено \"%s\".", // ru
+        "Ожидалась строка, но обнаружено \"%s\".", // ru
+        "Ошибочный элемент \"%s\".", // ru
+        "Escape-sekvens \"\\%s\" är ogiltig.", // sv
+        "Förväntade slut på indata, men hittade \"%s\".", // sv
+        "Färväntade array-element eller \"]\", men hittade \"%s\".", // sv
+        "Förväntade \",\" eller \"]\", men hittade \"%s\".", // sv
+        "Förväntade sig \":\" men hittade \"%s\".", // sv
+        "Förväntade JSON-värde, men hittade \"%s\".", // sv
+        "Färväntade sträng eller \"}\", men hittade \"%s\".", // sv
+        "Förväntade sig \",\" eller \"}\" men hittade \"%s\".", // sv
+        "Förväntade sträng, men hittade \"%s\".", // sv
+        "Token \"%s\" är ogiltig.", // sv
+        "Неприпустима спеціальна послідовність \"\\%s\".", // uk
+        "Очікувався кінець введення, але знайдено \"%s\".", // uk
+        "Очікувався елемент масиву або \"]\", але знайдено \"%s\".", // uk
+        "Очікувалось \",\" або \"]\", але знайдено \"%s\".", // uk
+        "Очікувалось \":\", але знайдено \"%s\".", // uk
+        "Очікувалось значення JSON, але знайдено \"%s\".", // uk
+        "Очікувався рядок або \"}\", але знайдено \"%s\".", // uk
+        "Очікувалось \",\" або \"}\", але знайдено \"%s\".", // uk
+        "Очікувався рядок, але знайдено \"%s\".", // uk
+        "Неприпустимий маркер \"%s\".", // uk
+        "转义序列 \"\\%s\" 无效.", // zh_CN
+        "期望输入结束，结果发现是\"%s\".", // zh_CN
+        "期望 是JSON值, 但结果发现是\"%s\".", // zh_CN
+        "期望是字符串, 但发现结果是\"%s\".", // zh_CN
+        "期望为数组元素或者\"]\"，但发现结果是\"%s\".", // zh_CN
+        "期望是\",\" 或 \"]\"，但发现结果是\"%s\".", // zh_CN
+        "期望是字符串或\"}\"，但发现结果是\"%s\".", // zh_CN
+        "期望得到 \":\"，但发现结果是\"%s\".", // zh_CN
+        "期望是 \",\" 或 \"}\"，但发现结果是\"%s\".", // zh_CN
+        "令牌 \"%s\" 无效.", // zh_CN
+    ];
+
     /* ── Row values in PostgreSQL's own fixed formats: the one exception to #3944 (see the type's summary). ── */
 
     /// <summary>What a field becomes when PostgreSQL writes row values into fields of its kind and this build reads no
@@ -827,8 +1253,11 @@ public static class PgLogTextRedactor
     public static readonly IReadOnlyList<string> ValueDetailStates = ["23502", "23503", "23505", "23514", "23P01", "22P02"];
 
     /// <summary>The SQLSTATE whose message PostgreSQL writes the rejected value into: invalid_text_representation
-    /// (<c>invalid input syntax for type %s: "%s"</c>, and the <c>malformed ... literal: "%s"</c> family, which is not
-    /// read and so is withheld).</summary>
+    /// (<c>invalid input syntax for type %s: "%s"</c>, the <c>malformed ... literal: "%s"</c> family, and
+    /// <c>invalid input value for enum</c>). A message under it that matches no form is withheld. The messages that
+    /// carry a value under other SQLSTATEs (<see cref="QuotedValueMessageFormats"/>) are read by their text alone,
+    /// so a log prefix with no <c>%e</c> keeps no more of them than one with it: a message opening like one of those
+    /// forms and matching none whole is withheld too.</summary>
     public static readonly IReadOnlyList<string> ValueMessageStates = ["22P02"];
 
     /* A placeholder in one of the value forms: %s, %d or %llu in order, or %n$s where a catalogue reorders them. */
@@ -865,6 +1294,9 @@ public static class PgLogTextRedactor
         /// <summary>The second slot is the rejected value, the first the type's name.</summary>
         Input,
 
+        /// <summary>The first slot is the value; a later slot, when there is one, is a name (a type's).</summary>
+        Literal,
+
         /// <summary>No slot carries a value: the form is recognized so that it is kept, not withheld.</summary>
         None,
     }
@@ -899,6 +1331,19 @@ public static class PgLogTextRedactor
         /// <summary>The form's last slot: whatever is left of the field, up to the text that ends the form.</summary>
         private static string Rest(string group, string atom = ".") => $"(?<{group}>{atom}*)";
 
+        /// <summary>A slot that ends where <paramref name="separator"/> (a pattern) LAST appears: it takes a
+        /// separator in, atomically, only while another follows.</summary>
+        private static string Greedy(string group, string separator) =>
+            $"(?<{group}>(?>(?:(?!{separator}).)*(?:{separator}(?=.*{separator}))?)*)";
+
+        /// <summary>The form's longest literal that has a letter in it, kept only for a form with no <see cref="Head"/>
+        /// (the catalogues that write a slot first): text holding it is a field of this form in a wording this build
+        /// does not list (another major version's, or a minor release's). Empty when the form has a head.</summary>
+        public required string Tail { get; init; }
+
+        /// <summary>Whether a slot of the form carries a value (false for the forms recognized only to be kept).</summary>
+        public required bool Carries { get; init; }
+
         public static ValueForm Compile(string format, ValueSlot slot, bool message)
         {
             var placeholders = s_valuePlaceholder.Matches(format);
@@ -917,11 +1362,13 @@ public static class PgLogTextRedactor
             string? head = null;
             var keys = 0;
             var valueOpened = false;
+            var tail = string.Empty;
             for (var at = 0; at < placeholders.Count; at++)
             {
                 var placeholder = placeholders[at];
                 var literal = literals[at];
                 head ??= literal;
+                tail = LongerLetteredLiteral(tail, literal);
                 pattern.Append(Regex.Escape(literal));
 
                 /* What the slot ends at, in the text: the literal that follows the placeholder; the form's end when
@@ -943,11 +1390,18 @@ public static class PgLogTextRedactor
                                 .Append(last ? Rest("value") : Until("value", @"\)" + next)).Append(@"\)");
                             keys++;
                             break;
-                        case ValueSlot.KeyPair when argument == 2:
                         case ValueSlot.CopyLine when argument == 3:
                         case ValueSlot.CopyColumn when argument == 4:
                         case ValueSlot.Input when argument == 2:
                             pattern.Append(last ? Rest("value") : Until("value", next));
+                            break;
+                        case ValueSlot.KeyPair when argument == 2:
+                            /* A value with a name slot after it (the table's) runs to the LAST place that text appears:
+                               a value holding it would otherwise leave its tail in the name. */
+                            pattern.Append(last ? Rest("value") : Greedy("value", next));
+                            break;
+                        case ValueSlot.Literal when argument == 1:
+                            pattern.Append(last ? Rest("value") : Greedy("value", next));
                             break;
                         case ValueSlot.Row:
                             pattern.Append(@"\(").Append(last ? Rest("value") : Until("value", @"\)" + next)).Append(@"\)");
@@ -978,14 +1432,21 @@ public static class PgLogTextRedactor
 
             pattern.Append(Regex.Escape(literals[^1])).Append(message ? s_positionPattern : "$");
             head ??= format;
+            tail = LongerLetteredLiteral(tail, literals[^1]);
+            var headed = head.Any(char.IsLetter);
             return new ValueForm
             {
                 Whole = new TimeBoundPattern(pattern.ToString(), RegexOptions.CultureInvariant | RegexOptions.Singleline, s_matchTimeout),
-                Head = head.Any(char.IsLetter) ? head : string.Empty,
+                Head = headed ? head : string.Empty,
                 Message = message,
                 SameNames = keys > 1,
+                Tail = headed ? string.Empty : tail,
+                Carries = slot != ValueSlot.None,
             };
         }
+
+        private static string LongerLetteredLiteral(string longest, string literal) =>
+            literal.Length > longest.Length && literal.Any(char.IsLetter) ? literal : longest;
 
         /// <summary>The text with every value slot replaced by <c>?</c>; <see cref="WithheldValues"/> when its keys
         /// name different columns; null when it is not in this form.</summary>
@@ -1036,27 +1497,36 @@ public static class PgLogTextRedactor
 
     /// <summary>The text in the first form that matches it whole, its values masked (or withheld); null when none
     /// does.</summary>
-    private static string? MaskValues(string text, ValueForm[] forms)
+    private static string? MaskValues(string text, ValueForm[] forms) => MaskValues(text, forms, out _);
+
+    /// <param name="carriesValue">Whether the form that matched has a slot that carries a value.</param>
+    private static string? MaskValues(string text, ValueForm[] forms, out bool carriesValue)
     {
         foreach (var form in forms)
         {
             if (form.Apply(text) is { } masked)
             {
+                carriesValue = form.Carries;
                 return masked;
             }
         }
 
+        carriesValue = false;
         return null;
     }
 
     /// <summary>Whether the text opens with one of the forms' heads (after a verbose log's SQLSTATE, for a message)
-    /// without matching any of them whole: a form this build reads, in a shape it does not.</summary>
+    /// without matching any of them whole: a form this build reads, in a shape it does not. A form with no head (its
+    /// catalogue writes a slot first) is recognized by its longest lettered literal anywhere in the text instead, so
+    /// another major version's wording of it is withheld, not kept.</summary>
     private static bool OpensValueForm(string text, ValueForm[] forms, bool message)
     {
         var span = text.AsSpan(message ? StatePrefixLength(text) : 0);
         foreach (var form in forms)
         {
-            if (form.Head.Length > 0 && span.StartsWith(form.Head, StringComparison.Ordinal))
+            if (form.Head.Length > 0
+                ? span.StartsWith(form.Head, StringComparison.Ordinal)
+                : form.Tail.Length > 0 && span.Contains(form.Tail, StringComparison.Ordinal))
             {
                 return true;
             }
@@ -1330,6 +1800,7 @@ public static class PgLogTextRedactor
     /* Compiled after s_positionPattern, which the message forms end in: static fields initialize in order. */
     private static readonly ValueForm[] s_detailForms =
     [
+        .. JsonTokenDetailFormats.Select(f => ValueForm.Compile(f, ValueSlot.Literal, message: false)),
         .. KeyExistsDetailFormats.Select(f => ValueForm.Compile(f, ValueSlot.Key, message: false)),
         .. KeyConflictDetailFormats.Select(f => ValueForm.Compile(f, ValueSlot.Key, message: false)),
         .. KeyReferenceDetailFormats.Select(f => ValueForm.Compile(f, ValueSlot.KeyPair, message: false)),
@@ -1348,6 +1819,8 @@ public static class PgLogTextRedactor
 
     private static readonly ValueForm[] s_messageForms =
     [
+        .. QuotedValueMessageFormats.Select(f => ValueForm.Compile(f, ValueSlot.Literal, message: true)),
+        .. EnumInputMessageFormats.Select(f => ValueForm.Compile(f, ValueSlot.Input, message: true)),
         .. InputSyntaxMessageFormats.Select(f => ValueForm.Compile(f, ValueSlot.Input, message: true)),
         .. InputSyntaxBareMessageFormats.Select(f => ValueForm.Compile(f, ValueSlot.None, message: true)),
     ];
@@ -1469,9 +1942,16 @@ public static class PgLogTextRedactor
             return kept;
         }
 
-        /* The rejected value an input function writes into its message, masked in its slot (the one exception to
-           #3944). A message whose SQLSTATE is invalid_text_representation, or that opens like the form, and matches
-           none whole is withheld. */
+        /* A verbose log (log_error_verbosity) writes the SQLSTATE ahead of the message, which tells the class when the
+           log's prefix gave none. */
+        if (sqlState is null && StatePrefixLength(kept) > 0)
+        {
+            sqlState = kept[..5];
+        }
+
+        /* The rejected value an input function or a range check writes into its message, masked in its slot (the one
+           exception to #3944). A message whose SQLSTATE is invalid_text_representation, or that opens like one of the
+           forms, and matches none whole is withheld. */
         if (kept.Length <= MaxSqlFieldLength && MaskValues(kept, s_messageForms) is { } maskedValues)
         {
             return maskedValues;
