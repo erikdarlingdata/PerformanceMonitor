@@ -201,7 +201,11 @@ public sealed class RepeatDeliveryBudget
                 state.LastCarrierUtc = cooldown.EvaluatedAtUtc;
             }
 
+            /* #5641: a tier escalation (Warning to Critical) is new information, not a repeat of the card the window
+               already carried, so it is never folded; it still takes the carrier slot below, which restarts the
+               window. */
             if (repeat &&
+                !cooldown.Bypassed &&
                 state.LastCarrierUtc is DateTime last &&
                 cooldown.EvaluatedAtUtc - last < window)
             {

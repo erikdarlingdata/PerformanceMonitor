@@ -223,7 +223,8 @@ public partial class App : Application
     public static int AlertDeadlockThreshold { get; set; } = 1;
     public static bool AlertPoisonWaitEnabled { get; set; } = true;
     public static int AlertPoisonWaitThresholdMs { get; set; } = 500;
-    /* #5641: the Runnable Queue alert - runnable tasks per visible online scheduler, 5-minute average. The pair is
+    /* #5641: the Runnable Queue alert - runnable tasks per visible online scheduler, averaged over the last 5 minutes' collections
+       (at least 3, else the newest 3 inside 10 minutes). The pair is
        clamped on read by RunnableQueueEvaluator.ClampBars (Warning at least 1, Critical never below Warning). */
     public static bool AlertRunnableQueueEnabled { get; set; } = true;
     public static int AlertRunnableQueueWarningPerScheduler { get; set; } = PerformanceMonitor.Alerting.RunnableQueueEvaluator.DefaultWarningPerScheduler;

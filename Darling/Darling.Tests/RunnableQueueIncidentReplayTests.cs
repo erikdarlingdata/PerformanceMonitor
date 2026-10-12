@@ -191,13 +191,14 @@ public sealed class RunnableQueueIncidentReplayTests
     /* ---------------- the same replay through the engine ---------------- */
 
     [Fact]
-    public async Task TheEngine_WarnsOnceTheOldZeroFallsOut_HoldsThroughTheSparseStretch_AndClearsOnce()
+    public async Task TheEngine_WarnsOnceTheOldZeroFallsOut_DeliversTheCriticalAtOnce_HoldsThroughTheSparseStretch_AndClearsOnce()
     {
         var h = new AlertEngineTests.Harness();
         h.Settings.RunnableQueueEnabled = true;
         var engine = h.Build();
 
         var warningFiredAt = default(DateTime);
+        var criticalFiredAt = default(DateTime);
         var cleared = new List<DateTime>();
         var seenResolutions = 0;
 
@@ -214,6 +215,12 @@ public sealed class RunnableQueueIncidentReplayTests
                 Assert.Equal(AlertSeverityLevel.Warning, h.Deliverer.Outcomes[^1].Severity);
             }
 
+            if (h.Deliverer.Outcomes.Count > firedBefore && criticalFiredAt == default
+                && h.Deliverer.Outcomes[^1].Severity == AlertSeverityLevel.Critical)
+            {
+                criticalFiredAt = t;
+            }
+
             if (h.Resolutions.Count > seenResolutions)
             {
                 seenResolutions = h.Resolutions.Count;
@@ -222,6 +229,17 @@ public sealed class RunnableQueueIncidentReplayTests
         }
 
         Assert.Equal(At("15:43:45.000"), warningFiredAt);
+
+        /* #5641 (seat decision): the Warning is delivered at 15:43:45 and the Critical on the FIRST evaluation at or
+           after the 15:45:00.871 collection that took the average to 17.94, not four to five minutes later when the
+           Warning's cooldown ran out (the 10-09 replay delivered it about 15:48:45, 4 seconds before High CPU). */
+        Assert.Equal(At("15:45:15.000"), criticalFiredAt);
+        Assert.True(criticalFiredAt - warningFiredAt < TimeSpan.FromMinutes(5));
+        Assert.Equal(
+            new[] { AlertSeverityLevel.Warning, AlertSeverityLevel.Critical },
+            h.Deliverer.Outcomes.Take(2).Select(o => o.Severity!.Value).ToArray());
+        Assert.True(h.Deliverer.Outcomes[1].Context!.EscalationBypassesCooldown);
+        Assert.False(h.Deliverer.Outcomes[0].Context!.EscalationBypassesCooldown);
         Assert.Equal(new[] { At("15:55:45.000") }, cleared);
         Assert.All(h.Deliverer.Outcomes, o => Assert.Equal("Runnable Queue", o.MetricName));
         Assert.Contains(h.Deliverer.Outcomes, o => o.Severity == AlertSeverityLevel.Critical);

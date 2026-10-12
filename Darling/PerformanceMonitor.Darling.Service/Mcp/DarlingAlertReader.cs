@@ -410,8 +410,8 @@ LIMIT 1";
            homes decided (DarlingAlertSettings.ResolveUncorroboratedRoute takes this beside the published file
            value) and so a store whose CHECK was dropped reports the same fall-through the service applied. */
         string? AnalysisUncorroboratedRoute,
-        /* #5641 (V177): the Runnable Queue alert's switch and its two bars (runnable tasks per scheduler, 5-minute
-           average), NOT NULL in the store. APPENDED, same reason. Carried as stored: the payload reports them
+        /* #5641 (V177): the Runnable Queue alert's switch and its two bars (runnable tasks per scheduler, averaged over the
+           last 5 minutes' collections, or the newest 3 inside 10 minutes), NOT NULL in the store. APPENDED, same reason. Carried as stored: the payload reports them
            through RunnableQueueEvaluator.ClampBars, the way the engine reads them. */
         bool RunnableQueueEnabled,
         int RunnableQueueWarningPerScheduler,

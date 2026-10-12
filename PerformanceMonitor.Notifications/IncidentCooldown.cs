@@ -91,9 +91,16 @@ public sealed class IncidentCooldown
     /// delivered the recovery, PagerDuty returned an error), the seed skips and the next outage posts, where
     /// without a restart it would stay throttled. That is one extra notice, never a swallowed one.
     /// </param>
+    /// <param name="bypassCooldown">
+    /// #5641: the firing is a tier escalation (a Warning incident just graded Critical), delivered at once whatever
+    /// the window says. <see cref="Decision.ShouldSend"/> is then true even when every key is inside its window,
+    /// and the caller's stamp after a successful send restarts the window. The keys are still read, seeded and
+    /// reported as usual, so <see cref="Decision.AnyFirstNotice"/> stays truthful. False (every caller but the
+    /// engine's opted-in two-level alerts) leaves the evaluation byte-identical.
+    /// </param>
     public async Task<Decision> EvaluateAsync(
         string serverId, string metricName, IReadOnlyList<AlertIncident>? incidents, TimeSpan window,
-        string? scope = null, string? pairedEdge = null)
+        string? scope = null, string? pairedEdge = null, bool bypassCooldown = false)
     {
         var now = DateTime.UtcNow;
         Evict(now, window);
@@ -171,7 +178,8 @@ public sealed class IncidentCooldown
            "every one of its fingerprints is in cooldown" are different answers, and the render has to be
            able to tell them apart (an empty list would read as "show nothing"). */
         return new Decision(
-            anyFresh, keys.Select(k => k.Key).ToList(), now, fingerprinted ? deliverable : null, anyFirstNotice);
+            anyFresh || bypassCooldown, keys.Select(k => k.Key).ToList(), now, fingerprinted ? deliverable : null,
+            anyFirstNotice, bypassCooldown);
     }
 
     /// <summary>
@@ -302,10 +310,17 @@ public sealed class IncidentCooldown
     /// lets the aggregate ceiling drop something. The compiler finding a second producer is cheaper than
     /// that.</para>
     /// </param>
+    /// <param name="Bypassed">
+    /// #5641: the caller asked for the window to be ignored (<c>bypassCooldown</c>) because this firing is a tier
+    /// escalation, so <see cref="ShouldSend"/> is true whether or not a key was fresh. The stamp after a send is
+    /// unchanged, which restarts the window; <see cref="RepeatDeliveryBudget"/> reads this to let the escalation
+    /// past its repeat ceiling too.
+    /// </param>
     public sealed record Decision(
         bool ShouldSend,
         IReadOnlyList<string> Keys,
         DateTime EvaluatedAtUtc,
         IReadOnlyList<string>? DeliverableDedupKeys,
-        bool AnyFirstNotice);
+        bool AnyFirstNotice,
+        bool Bypassed = false);
 }

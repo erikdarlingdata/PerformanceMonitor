@@ -996,7 +996,8 @@ $$;";
     /// V177 (#5641) - the Runnable Queue alert's three settings on <c>config.config_alert_settings</c>:
     /// <c>runnable_queue_enabled</c> (<c>boolean NOT NULL DEFAULT TRUE</c>, like <c>poison_wait_enabled</c>) and the two bars,
     /// <c>runnable_queue_warning_per_scheduler</c> (default 8) and <c>runnable_queue_critical_per_scheduler</c> (default 16),
-    /// runnable tasks per visible online scheduler averaged over five minutes. The defaults are
+    /// runnable tasks per visible online scheduler, averaged over the collections of the last 5 minutes when there are at least 3, otherwise over
+    /// the newest 3 if all fall in the last 10 minutes (the rule as shipped; the migration's SQL text says nothing of the window). The defaults are
     /// <c>RunnableQueueEvaluator.DefaultWarningPerScheduler</c> / <c>DefaultCriticalPerScheduler</c>, written as literals here
     /// because a migration's text is frozen at the version it ships in; the defaults pin in the rung's test holds them equal.
     ///

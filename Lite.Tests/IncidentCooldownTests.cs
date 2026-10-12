@@ -30,6 +30,29 @@ public class IncidentCooldownTests
         new(keyPrefix: "", seedLastSentUtc: (_, _, _) => Task.FromResult<DateTime?>(null));
 
     [Fact]
+    public async Task BypassCooldown_SendsInsideTheWindow_AndTheStampRestartsTheWindow()
+    {
+        // #5641: a Warning-to-Critical escalation of the opted-in alert is delivered at once.
+        var cd = NoSeed();
+
+        var warning = await cd.EvaluateAsync("1", "Runnable Queue", null, Window);
+        Assert.True(warning.ShouldSend);
+        Assert.False(warning.Bypassed);
+        cd.Stamp(warning);
+        Assert.False((await cd.EvaluateAsync("1", "Runnable Queue", null, Window)).ShouldSend);
+
+        var escalation = await cd.EvaluateAsync("1", "Runnable Queue", null, Window, bypassCooldown: true);
+        Assert.True(escalation.ShouldSend);
+        Assert.True(escalation.Bypassed);
+        Assert.False(escalation.AnyFirstNotice);
+        cd.Stamp(escalation);
+
+        Assert.False((await cd.EvaluateAsync("1", "Runnable Queue", null, Window)).ShouldSend);
+        // another metric's window is untouched by the flag
+        Assert.True((await cd.EvaluateAsync("1", "High CPU", null, Window)).ShouldSend);
+    }
+
+    [Fact]
     public async Task DistinctFingerprints_BothFresh_SendsWithOneKeyPerFingerprint()
     {
         var cd = NoSeed();

@@ -370,16 +370,16 @@
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
-                    <!-- #5641: the Runnable Queue alert grades the 5-minute AVERAGE of runnable tasks per scheduler (at least 3
-                         samples). Warning and Critical are runnable tasks per scheduler; Critical never sits below Warning. -->
-                    <CheckBox x:Name="AlertRunnableQueueCheckBox" Content="Runnable queue (runnable tasks per scheduler, 5-minute average) — Warning at" VerticalAlignment="Center"
+                    <!-- #5641: the Runnable Queue alert grades the AVERAGE of runnable tasks per scheduler over the collections of the last 5 minutes
+                         (at least 3; otherwise the newest 3 if all fall in the last 10 minutes). Warning and Critical are runnable tasks per scheduler; Critical never sits below Warning. -->
+                    <CheckBox x:Name="AlertRunnableQueueCheckBox" Content="Runnable queue (runnable tasks per scheduler, windowed average) — Warning at" ToolTip="The average of the collections in the last 5 minutes when there are at least 3, otherwise of the newest 3 if all fall in the last 10 minutes. A Warning that worsens to Critical is delivered at once." VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertRunnableQueueWarningBox" Width="45" Text="8" Margin="6,0,0,0" VerticalAlignment="Center"
-                             ToolTip="Warning bar: average runnable tasks per scheduler over 5 minutes (at least 1). Default 8."/>
+                             ToolTip="Warning bar: average runnable tasks per scheduler (the last 5 minutes' collections when there are at least 3, otherwise the newest 3 inside 10 minutes). At least 1. Default 8."/>
                     <TextBlock Text="Critical at" VerticalAlignment="Center" Margin="8,0,0,0"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                     <TextBox x:Name="AlertRunnableQueueCriticalBox" Width="45" Text="16" Margin="6,0,0,0" VerticalAlignment="Center"
-                             ToolTip="Critical bar: average runnable tasks per scheduler over 5 minutes. Never below the Warning bar. Default 16."/>
+                             ToolTip="Critical bar: average runnable tasks per scheduler (same window as the Warning bar). Never below the Warning bar. Default 16."/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertLongRunningQueryCheckBox" Content="Long-running queries over" VerticalAlignment="Center"

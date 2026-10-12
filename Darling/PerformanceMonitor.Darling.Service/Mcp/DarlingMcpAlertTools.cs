@@ -435,7 +435,8 @@ public sealed class DarlingMcpAlertTools
             threshold_ms = s.PoisonWaitThresholdMs,
             threshold_ms_note = PoisonWaitThresholdMsNote
         },
-        /* #5641 (V177): the Runnable Queue alert. The 5-minute AVERAGE of runnable tasks per scheduler against two
+        /* #5641 (V177): the Runnable Queue alert. The AVERAGE of runnable tasks per scheduler (the last 5 minutes' collections when
+           there are 3 or more, else the newest 3 inside 10 minutes) against two
            bars. Reported through RunnableQueueEvaluator.ClampBars, the way the engine reads them, so the payload
            never shows a pair (Warning below 1, Critical below Warning) the engine would rewrite. */
         runnable_queue = new
@@ -866,7 +867,7 @@ public sealed class DarlingMcpAlertTools
         "so this value is accepted and stored for round-trip compatibility but consulted by nothing — setting it returns " +
         "status updated with a warnings entry saying so, and does not change when the alert fires. poison_wait.enabled still governs the alert. " +
         "runnable_queue.enabled switches the Runnable Queue alert; runnable_queue.warning_per_scheduler (at least 1, default 8) and " +
-        "runnable_queue.critical_per_scheduler (default 16) are runnable tasks per scheduler averaged over five minutes, and Critical may never sit below Warning: " +
+        "runnable_queue.critical_per_scheduler (default 16) are runnable tasks per scheduler, averaged over the collections of the last 5 minutes when there are at least 3, otherwise over the newest 3 if all fall in the last 10 minutes, and Critical may never sit below Warning: " +
         "a body that sends both bars in the wrong order, or one bar that would cross the stored other, writes nothing and returns status invalid. " +
         "analysis.uncorroborated_route is WRITABLE since V137: 'digest' or 'page' (case-insensitive; stored lower-case) writes " +
         "config_alert_settings.analysis_uncorroborated_route, which the running service reads OVER darling.json's analysis.uncorroboratedRoute " +

@@ -257,7 +257,8 @@ public class WebhookAlertService
             }
 
             var decision = await _cooldown.EvaluateAsync(
-                serverId, metricName, context?.Incidents, window, cooldownScope, pairedEdge);
+                serverId, metricName, context?.Incidents, window, cooldownScope, pairedEdge,
+                bypassCooldown: context?.EscalationBypassesCooldown == true /* #5641 */);
 
             if (!decision.ShouldSend)
             {

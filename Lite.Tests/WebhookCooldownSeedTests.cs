@@ -84,6 +84,27 @@ public class WebhookCooldownSeedTests : IDisposable
     }
 
     [Fact]
+    public async Task RunnableQueueEscalation_PostsInsideTheSeededWindow_WhereTheUnflaggedControlIsThrottled()
+    {
+        /* #5641: a Warning went out "just now" (the seed stands in for that Warning's stamp). The same alert
+           graded Critical and flagged as an escalation is not held by the window; the unflagged control is. */
+        var history = new FakeHistoryStore { LastWebhookSent = DateTime.UtcNow };
+        var svc = MakeService(history, EnabledTeamsSettings());
+
+        var control = await svc.TrySendWebhookAlertsAsync(
+            "Runnable Queue", "Srv", "20", "16", "1",
+            new AlertContext { SeverityOverride = AlertSeverityLevel.Critical });
+        Assert.Equal(AlertChannelOutcome.Throttled, control.Outcome);
+        Assert.Equal(0, svc.GetTeamsHealth().ConsecutiveFailures);
+
+        var escalation = await svc.TrySendWebhookAlertsAsync(
+            "Runnable Queue", "Srv", "20", "16", "1",
+            new AlertContext { SeverityOverride = AlertSeverityLevel.Critical, EscalationBypassesCooldown = true });
+        Assert.Equal(AlertChannelOutcome.Failed, escalation.Outcome); // attempted; the endpoint refuses it
+        Assert.Equal(1, svc.GetTeamsHealth().ConsecutiveFailures);
+    }
+
+    [Fact]
     public async Task NullHistoryStore_NoSeed_AttemptsPost()
     {
         // The legacy/test path passes no history store: pre-#1145 in-memory-only cooldown, so a

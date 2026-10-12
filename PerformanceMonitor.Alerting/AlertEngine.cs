@@ -131,6 +131,9 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueCollectionTime = new();
     private readonly ConcurrentDictionary<string, bool> _activeRunnableQueueAlert = new();
+    /* #5641: the highest tier delivered for the open Runnable Queue incident, so a Warning that worsens to Critical
+       is delivered at once instead of waiting out the cooldown. Runnable Queue is the only opted-in alert. */
+    private readonly TierEscalation _runnableQueueEscalation = new();
 
     /* The collection_time of the newest wait_stats row inside the window last actually fired on. Read
        adapters answer "how much poison wait accumulated over the last 10 minutes, and when was the
@@ -1966,7 +1969,9 @@ public sealed class AlertEngine
     /// cannot announce "Cleared" on silence (the #3282 rule Poison Wait applies to an empty read). A standing alert
     /// clears only when an evaluated reading sits under the Warning bar.</para>
     ///
-    /// <para>Cooldown, mute, the fresh-sample guard and the resolution notice are Poison Wait's, unchanged. The alert
+    /// <para>Cooldown, mute, the fresh-sample guard and the resolution notice are Poison Wait's, with one addition:
+    /// a Warning that worsens to Critical is delivered at once, past the cooldown (<see cref="TierEscalation"/>,
+    /// this alert's opt-in; the email and webhook cooldowns let it through on the context's flag). The alert
     /// is one per server; its mute context carries no wait type.</para>
     /// </summary>
     private async Task CheckRunnableQueueAsync(
@@ -2006,7 +2011,14 @@ public sealed class AlertEngine
                 bool hasFreshCollection = !_lastRunnableQueueCollectionTime.TryGetValue(key, out var lastCollectionTime)
                     || finding.NewestCollectionTime > lastCollectionTime;
 
-                if (!suppressed && hasFreshCollection && CooldownElapsed(_lastRunnableQueueAlert, key, now, alertCooldown))
+                /* #5641: a Warning incident that is now graded Critical is delivered at once. The cooldown stamp it
+                   leaves (set below, like any fire) restarts the clock, and queueContext carries the flag so the
+                   email and webhook cooldowns let it through as well. A fresh collection is still required: the
+                   escalation must rest on a reading newer than the one the Warning was delivered on. */
+                var escalation = _runnableQueueEscalation.IsEscalation(key, finding.Severity);
+
+                if (!suppressed && hasFreshCollection
+                    && (escalation || CooldownElapsed(_lastRunnableQueueAlert, key, now, alertCooldown)))
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = RunnableQueueEvaluator.MetricName };
                     bool isMuted = _isAlertMuted(muteCtx);
@@ -2016,7 +2028,12 @@ public sealed class AlertEngine
                     /* Severity rides on the context override as well as the outcome, for the reason the Poison Wait
                        site gives (the channel builders read the context; Darling's deliverer folds the outcome's in
                        only when the context has none). */
-                    var queueContext = new AlertContext { SeverityOverride = finding.Severity };
+                    var queueContext = new AlertContext
+                    {
+                        SeverityOverride = finding.Severity,
+                        EscalationBypassesCooldown = escalation,
+                    };
+                    _runnableQueueEscalation.Record(key, finding.Severity);
                     AlertSampleAge.Stamp(queueContext, "scheduler stats", finding.NewestCollectionTime, now);
 
                     /* #5641: the card's detail, in AlertContext.Details so every channel that renders another
@@ -2065,6 +2082,7 @@ public sealed class AlertEngine
             else if (_activeRunnableQueueAlert.TryGetValue(key, out var wasActive) && wasActive)
             {
                 _activeRunnableQueueAlert[key] = false;
+                _runnableQueueEscalation.Close(key);
                 if (!suppressed)
                 {
                     await NotifyResolutionAsync(new AlertResolution(

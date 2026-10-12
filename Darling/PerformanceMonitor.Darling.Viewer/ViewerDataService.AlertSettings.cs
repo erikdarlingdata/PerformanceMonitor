@@ -517,7 +517,7 @@ public sealed class AlertSettingsRow
     public int PoisonWaitThresholdMs { get; set; } = 500;
     /// <summary>#5641 (V177): the Runnable Queue alert's switch (default on, like Poison Wait).</summary>
     public bool RunnableQueueEnabled { get; set; } = true;
-    /// <summary>#5641 (V177): Warning bar, runnable tasks per scheduler (5-minute average). Default 8.</summary>
+    /// <summary>#5641 (V177): Warning bar, runnable tasks per scheduler (average of the last 5 minutes' collections, or the newest 3 inside 10 minutes). Default 8.</summary>
     public int RunnableQueueWarningPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultWarningPerScheduler;
     /// <summary>#5641 (V177): Critical bar, runnable tasks per scheduler. Default 16; never below the Warning bar.</summary>
     public int RunnableQueueCriticalPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultCriticalPerScheduler;
