@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -208,9 +209,11 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// The Job History tab's Server choices that do not depend on the runs it read (#5703): every SQL Server the viewer manages (the
-    /// sidebar's set, <see cref="GetManagedServersAsync"/>), by the name the grid's Server column speaks. A PostgreSQL target has no SQL
-    /// Agent and is left out. The runs alone would leave a quiet server out of the drop-down whenever a busier server's newest runs fill
+    /// The Job History tab's Server choices that do not depend on the runs it read (#5703): every managed server the job history
+    /// collector runs on (the sidebar's set, <see cref="GetManagedServersAsync"/>, narrowed by <see cref="JobHistoryCollector.CollectsOn"/>:
+    /// not a disabled server, a PostgreSQL target or an Azure SQL Database, none of which can have job history; Amazon RDS and Azure SQL
+    /// Managed Instance run SQL Agent and stay), by the name the grid's Server column speaks. A server with runs in the window is still
+    /// offered, from the rows. The runs alone would leave a quiet server out of the drop-down whenever a busier server's newest runs fill
     /// the row cap.
     /// </summary>
     public async Task<List<JobHistoryFilterChoices.ServerChoice>> GetJobHistoryServerChoicesAsync(CancellationToken cancellationToken = default)
@@ -219,10 +222,10 @@ public sealed partial class ViewerDataService
         return ServerChoicesOf(servers);
     }
 
-    /// <summary>Maps the managed servers to Server choices: the SQL Server targets, by display name.</summary>
+    /// <summary>Maps the managed servers to Server choices: those the job history collector runs on, by display name.</summary>
     internal static List<JobHistoryFilterChoices.ServerChoice> ServerChoicesOf(IEnumerable<DarlingServer> servers) =>
         servers
-            .Where(s => !s.IsPostgres)
+            .Where(s => JobHistoryCollector.CollectsOn(s.IsEnabled, s.EngineKind, s.EngineEdition))
             .Select(s => new JobHistoryFilterChoices.ServerChoice(s.ServerId, string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName))
             .ToList();
 

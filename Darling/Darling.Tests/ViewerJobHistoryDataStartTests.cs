@@ -143,11 +143,50 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
     }
 
     [Fact]
+    public void TheRowsBind_WithNoAwaitAfterTheLastSupersedeCheck_AndTheGridNeverWaitsOnTheChoices()
+    {
+        var file = ViewerFile("JobHistoryTab.xaml.cs");
+        var load = MethodBody(file, @"private async Task LoadJobsAsync\(");
+        var bindRows = MethodBody(file, @"private void BindRows\(");
+
+        /* The check and the bind are one helper call, and the bind is a plain (non-async) method. */
+        Assert.Equal(1, Matches(load, @"JobHistoryLoadSteps\.BindWhenCurrentAsync\(readTask,\s*\(\) => _loads\.Superseded\(nameof\(LoadJobsAsync\),\s*gen\),\s*BindRows\)"));
+        Assert.DoesNotContain("await", bindRows, StringComparison.Ordinal);
+
+        /* The choices start before the read and are applied after the bind, un-awaited until the end of the load: the bind never waits on them. */
+        var bind = load.IndexOf("JobHistoryLoadSteps.BindWhenCurrentAsync(readTask", StringComparison.Ordinal);
+        var apply = load.IndexOf("var choicesApplied = ApplyKnownChoicesAsync(", StringComparison.Ordinal);
+        Assert.True(bind >= 0 && apply > bind, "the choices must be applied after the grid is bound");
+        Assert.Equal(0, Matches(load, @"await ApplyKnownChoicesAsync"));
+        Assert.Equal(1, Matches(load, @"await choicesApplied;"));
+        Assert.Equal(1, Matches(MethodBody(file, @"private Task<bool> ApplyKnownChoicesAsync\("), @"JobHistoryLoadSteps\.ApplyWhenCurrentAsync\("));
+    }
+
+    [Fact]
+    public void TheTwoChoicesReads_RunTogether_AndAFailureIsLoggedThroughTheViewersLog_OncePerWindow()
+    {
+        var file = ViewerFile("JobHistoryTab.xaml.cs");
+        var load = MethodBody(file, @"private async Task LoadJobsAsync\(");
+        var half = MethodBody(file, @"private async Task<T\?> ReadHalfAsync<T>\(");
+
+        /* Both reads are started (un-awaited) in the load, under its declared width, before the grid's read is awaited. */
+        var servers = load.IndexOf("var serversTask = ", StringComparison.Ordinal);
+        var categories = load.IndexOf("var categoriesTask = ", StringComparison.Ordinal);
+        Assert.True(servers >= 0 && categories > servers, "both choices reads must start in the load");
+        Assert.True(categories < load.IndexOf("await ViewerServerTab.AwaitReadWatchingProbeAsync(", StringComparison.Ordinal), "the choices reads must start beside the grid's read");
+        Assert.Contains("ViewerReadFanOut.Of(4)", load, StringComparison.Ordinal);
+        Assert.Contains("ViewerLogger.Error(\"JobHistory\"", half, StringComparison.Ordinal);
+        Assert.Contains("_choicesFailures.ShouldLog(", half, StringComparison.Ordinal);
+        Assert.Contains("StatusChanged?.Invoke(", half, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheNote_ComesAfterTheRowsAreBound_FromTheRead_AndAfterASupersedeCheck()
     {
         var load = MethodBody(ViewerFile("JobHistoryTab.xaml.cs"), @"private async Task LoadJobsAsync\(");
 
-        var bind = load.IndexOf("_filterManager.UpdateData(all)", StringComparison.Ordinal);
+        /* #5703 (round 2): the bind is BindRows, run by JobHistoryLoadSteps.BindWhenCurrentAsync right after the last supersede check. */
+        var bind = load.IndexOf("JobHistoryLoadSteps.BindWhenCurrentAsync(readTask", StringComparison.Ordinal);
         var settle = load.IndexOf("await ((Task)dataStartTask).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);", StringComparison.Ordinal);
         Assert.DoesNotContain("Task.WhenAny", load, StringComparison.Ordinal);
         var loadingDown = load.LastIndexOf("LoadingMessage.Visibility = Visibility.Collapsed;", settle, StringComparison.Ordinal);

@@ -7,7 +7,10 @@
  */
 
 using System.Linq;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Models;
+using PerformanceMonitorLite.Services;
 using Xunit;
 using Choice = PerformanceMonitor.Common.JobHistoryFilterChoices.ServerChoice;
 
@@ -53,12 +56,13 @@ public sealed class JobHistoryFilterChoicesTests
     }
 
     [Fact]
-    public void Categories_KeepWhatIsOffered_AddTheKnownOnes_AndMergeSpellingsIgnoringCase()
+    public void Categories_KeepWhatIsOffered_AddTheKnownOnes_AndTheRowsSpellingWinsIgnoringCase()
     {
         var merged = JobHistoryFilterChoices.MergeCategories(
             ["Maintenance", "", null], ["maintenance", "Replication", "Backup"], ["REPLICATION", null, "Quiet category"]);
 
-        Assert.Equal(new[] { "Backup", "Maintenance", "Quiet category", "Replication" }, merged.ToArray());
+        /* The rows' spelling wins over the known one, which wins over one already on offer (the tab rebuilt the list from the rows before). */
+        Assert.Equal(new[] { "Backup", "maintenance", "Quiet category", "REPLICATION" }, merged.ToArray());
     }
 
     [Fact]
@@ -83,4 +87,52 @@ public sealed class JobHistoryFilterChoicesTests
         Assert.Null(JobHistoryFilterChoices.CategoryFilter(2, ""));
         Assert.Equal("Backup", JobHistoryFilterChoices.CategoryFilter(2, "Backup"));
     }
+
+    [Fact]
+    public void Servers_AreOrderedByName_WithTheDefaultComparerTheOldCodeUsed()
+    {
+        string[] names = ["beta", "Alpha", "gamma", "a_b", "AB", "ab", "Zed"];
+        var merged = JobHistoryFilterChoices.MergeServers([], names.Select((n, i) => new Choice(i + 1, n)), []);
+
+        /* The old tab sorted OrderBy(ServerName) with the default string comparer, not OrdinalIgnoreCase: same names, same order. */
+        Assert.Equal(names.OrderBy(n => n).ToArray(), merged.Select(c => c.ServerName).ToArray());
+    }
+
+    [Fact]
+    public void TheKnownServers_AreExactlyTheServersTheJobHistoryCollectorRunsOn()
+    {
+        static ServerConnection Server(string name, bool enabled = true) => new() { ServerName = name, DisplayName = "Alias " + name, IsEnabled = enabled };
+        var box = Server("box");
+        var disabled = Server("off", enabled: false);
+        var azureDb = Server("azure-db");
+        var managedInstance = Server("mi");
+        var notConnected = Server("new");
+        var editions = new System.Collections.Generic.Dictionary<string, int>
+        {
+            ["box"] = 3,
+            ["off"] = 3,
+            ["azure-db"] = CollectorEngineCapability.AzureSqlDatabaseEngineEdition,
+            ["mi"] = 8,
+            ["new"] = CollectorEngineCapability.UnknownEngineEdition,
+        };
+
+        var map = LocalDataService.BuildJobHistoryChoiceMap([box, disabled, azureDb, managedInstance, notConnected], s => editions[s.ServerName]);
+
+        /* No SQL Agent (Azure SQL Database) or never collected (disabled): not offered. SQL Agent runs on a box server, Azure SQL Managed
+           Instance and Amazon RDS (a box edition), and an unconnected server claims nothing, so it is offered. */
+        Assert.Equal(
+            new[] { "Alias box", "Alias mi", "Alias new" },
+            map.Values.OrderBy(v => v).ToArray());
+        Assert.DoesNotContain("Alias off", map.Values);
+        Assert.DoesNotContain("Alias azure-db", map.Values);
+    }
+
+    [Theory]
+    [InlineData(true, null, 3, true)]
+    [InlineData(true, null, 0, true)]
+    [InlineData(true, null, 8, true)]
+    [InlineData(true, null, 5, false)]
+    [InlineData(false, null, 3, false)]
+    public void TheCollectorsOwnRule_DecidesWhichServersAreOffered(bool enabled, string? engineKind, int edition, bool offered) =>
+        Assert.Equal(offered, JobHistoryCollector.CollectsOn(enabled, engineKind, edition));
 }

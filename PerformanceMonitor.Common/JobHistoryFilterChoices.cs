@@ -21,7 +21,10 @@ namespace PerformanceMonitor.Common;
 /// could not pick it back. Each refresh therefore merges three sources: the choices already on offer, the choices known without
 /// reading the runs (every monitored server; every category with a run in the window, from a read the row cap does not touch),
 /// and the rows just read. A name in the rows wins over an older name, because the rows speak the names the grid shows (a renamed
-/// server). The selected choice is always kept, so a refresh never drops what the operator picked.</para>
+/// server), and a Category spelling in the rows wins over one already on offer, as it did before the choices grew (the tab used to
+/// rebuild both lists from the rows alone). Servers sort as they did then, by <c>OrderBy(ServerName)</c> with the default string
+/// comparer (not ignoring case); Categories sort ignoring case. The selected choice is always kept, so a refresh never drops what
+/// the operator picked.</para>
 /// </summary>
 public static class JobHistoryFilterChoices
 {
@@ -56,15 +59,16 @@ public static class JobHistoryFilterChoices
 
         return byId
             .Select(p => new ServerChoice(p.Key, p.Value))
-            .OrderBy(c => c.ServerName, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(c => c.ServerName)
             .ThenBy(c => c.ServerId)
             .ToList();
     }
 
     /// <summary>
     /// The Category choices, ordered ignoring case and distinct ignoring case (the filter matches exactly, ignoring case, so two
-    /// spellings are one choice). The first spelling seen wins, in the order offered, known, rows, so a choice already on offer keeps
-    /// its text. Empty names are ignored; <paramref name="selected"/> is kept even when no source names it.
+    /// spellings are one choice). The first spelling seen wins, in the order rows, known, offered, so the rows' spelling beats one
+    /// already on offer, as it did when the tab rebuilt the list from the rows each load. Empty names are ignored;
+    /// <paramref name="selected"/> is kept even when no source names it.
     /// </summary>
     public static List<string> MergeCategories(
         IEnumerable<string?> offered, IEnumerable<string?> known, IEnumerable<string?> rows, string? selected = null)
@@ -73,7 +77,7 @@ public static class JobHistoryFilterChoices
         ArgumentNullException.ThrowIfNull(known);
         ArgumentNullException.ThrowIfNull(rows);
 
-        return offered.Concat(known).Concat(rows).Append(selected)
+        return rows.Concat(known).Concat(offered).Append(selected)
             .Where(c => !string.IsNullOrEmpty(c))
             .Select(c => c!)
             .Distinct(StringComparer.OrdinalIgnoreCase)

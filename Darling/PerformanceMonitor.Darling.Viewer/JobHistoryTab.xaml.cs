@@ -104,6 +104,28 @@ public partial class JobHistoryTab : UserControl
         }
     }
 
+    /// <summary>
+    /// Puts one load's rows on the grid. Synchronous on purpose: <see cref="JobHistoryLoadSteps.BindWhenCurrentAsync{T}"/> runs it
+    /// straight after the last supersede check, with nothing awaited between (#5703).
+    /// </summary>
+    private void BindRows(List<ViewerJobHistoryRow> all)
+    {
+        /* The Server / Category combos grow and never shrink: they hold what is already on offer, every monitored server the collector
+           runs on and every category with a run in the window (read beside the grid, #5703, and added by ApplyKnownChoicesAsync when
+           that read arrives), and what the rows add. The per-column filter popups still layer on top. */
+        PopulateServerFilter(all);
+        PopulateCategoryFilter(all);
+
+        if (_filterManager != null)
+        {
+            _filterManager.UpdateData(all);
+        }
+        else
+        {
+            JobHistoryDataGrid.ItemsSource = all;
+        }
+    }
+
     private async Task LoadJobsAsync()
     {
         if (_dataService == null)
@@ -126,10 +148,11 @@ public partial class JobHistoryTab : UserControl
                never the grid. */
             var nowUtc = windowEndUtc;
             var sinceUtc = windowStartUtc;
-            /* The read, the data-start probe and (on a load that refreshes them) the choices read run together: priced as three. */
+            /* The read, the data-start probe and (on a load that refreshes them) the two choices reads (servers, categories) run together:
+               priced as four. */
             var choicesKey = (Span: windowEndUtc - windowStartUtc, FixedEnd: windowIsLive ? (DateTime?)null : windowEndUtc);
             var refreshChoices = choicesKey != _choicesKey || DateTime.UtcNow - _choicesReadAtUtc > ChoicesLifetime;
-            using var readFanOut = ViewerReadFanOut.Of(3);
+            using var readFanOut = ViewerReadFanOut.Of(4);
             var dataStartTask = _dataService.GetJobHistoryDataStartAsync(serverId, sinceUtc, nowUtc);
 
             /* #5562 R6: a range that ended in the past sends its end to the read, so the end bound is applied before the row cap.
@@ -140,28 +163,27 @@ public partial class JobHistoryTab : UserControl
             var categoryFilter = GetSelectedCategory();
             /* #5703: the Server and Category choices that do not depend on the runs read: read once per window and every few minutes after,
                beside the grid's read; a failure costs the extra choices and never the grid. */
-            var choicesTask = refreshChoices ? ReadKnownChoicesAsync(windowStartUtc, windowIsLive ? null : windowEndUtc) : null;
+            var service = _dataService;
+            /* The two reads start side by side, here, where the width is declared; JoinChoicesAsync only waits for both. */
+            var serversTask = refreshChoices ? ReadHalfAsync("servers", "server", () => service.GetJobHistoryServerChoicesAsync(), choicesKey) : null;
+            var categoriesTask = refreshChoices
+                ? ReadHalfAsync("categories", "category", () => service.GetJobHistoryCategoriesAsync(windowStartUtc, windowIsLive ? null : windowEndUtc), choicesKey)
+                : null;
+            var choicesTask = serversTask is null || categoriesTask is null ? null : JoinChoicesAsync(serversTask, categoriesTask);
             var readTask = _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap, untilUtc: windowIsLive ? null : windowEndUtc, runStatus: statusFilter, category: categoryFilter);
             await ViewerServerTab.AwaitReadWatchingProbeAsync(readTask, dataStartTask, "Job History");
             var all = await readTask;
             readFanOut.Release();
-            if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
-            /* The Server / Category combos grow and never shrink: they offer every monitored server and every category with a run in the
-               window (read beside the grid, #5703), so a quiet server the newest runs of a busy one pushed past the cap can be picked at
-               All Servers, and what the rows add. The per-column filter popups still layer on top. */
-            await ApplyKnownChoicesAsync(choicesTask, choicesKey);
-            PopulateServerFilter(all);
-            PopulateCategoryFilter(all);
+            /* The last supersede check and the bind sit in one synchronous run (JobHistoryLoadSteps.BindWhenCurrentAsync): a load that
+               was current at the check cannot be superseded before it binds, so an older load never binds over a newer one. The
+               choices are applied after the bind, by a load that is still current; the grid never waits on their read. */
+            if (!await JobHistoryLoadSteps.BindWhenCurrentAsync(readTask, () => _loads.Superseded(nameof(LoadJobsAsync), gen), BindRows))
+            {
+                return;
+            }
 
-            if (_filterManager != null)
-            {
-                _filterManager.UpdateData(all);
-            }
-            else
-            {
-                JobHistoryDataGrid.ItemsSource = all;
-            }
+            var choicesApplied = ApplyKnownChoicesAsync(choicesTask, choicesKey, gen, all);
 
             var displayCount = JobHistoryDataGrid.Items.Count;
             NoJobsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -189,6 +211,7 @@ public partial class JobHistoryTab : UserControl
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             await ShowJobHistoryDataStartAsync(JobHistoryTruncationBanner, dataStartTask, sinceUtc, all);
+            await choicesApplied;
         }
         catch (Exception ex)
         {
@@ -258,60 +281,68 @@ public partial class JobHistoryTab : UserControl
     private (TimeSpan Span, DateTime? FixedEnd)? _choicesKey;
     private DateTime _choicesReadAtUtc = DateTime.MinValue;
 
-    /// <summary>Reads the monitored servers and the window's categories. Never throws: a failed read returns null for its half and says so on the status line.</summary>
-    private async Task<(List<JobHistoryFilterChoices.ServerChoice>? Servers, List<string>? Categories)> ReadKnownChoicesAsync(DateTime sinceUtc, DateTime? untilUtc)
+    /// <summary>Failed choices reads, logged once per window (the next refresh still reads again).</summary>
+    private readonly ChoicesFailureLogGate<(TimeSpan Span, DateTime? FixedEnd)> _choicesFailures = new();
+
+    /// <summary>Waits for the two choices reads the load started (null when this load did not start them). Neither throws: a failed
+    /// read is null for its half (see <see cref="ReadHalfAsync{T}"/>).</summary>
+    private static async Task<(List<JobHistoryFilterChoices.ServerChoice>? Servers, List<string>? Categories)> JoinChoicesAsync(
+        Task<List<JobHistoryFilterChoices.ServerChoice>?> serversTask, Task<List<string>?> categoriesTask)
     {
-        var service = _dataService!;
-        List<JobHistoryFilterChoices.ServerChoice>? servers = null;
-        List<string>? categories = null;
-        try
-        {
-            servers = await service.GetJobHistoryServerChoicesAsync();
-        }
-        catch (Exception ex)
-        {
-            StatusChanged?.Invoke($"failed to load the job history server choices: {ex.Message}");
-        }
-
-        try
-        {
-            categories = await service.GetJobHistoryCategoriesAsync(sinceUtc, untilUtc);
-        }
-        catch (Exception ex)
-        {
-            StatusChanged?.Invoke($"failed to load the job history category choices: {ex.Message}");
-        }
-
+        var servers = await serversTask;
+        var categories = await categoriesTask;
         return (servers, categories);
     }
 
-    /// <summary>Takes the choices read beside the grid (null when this load did not read them). A half that failed keeps the last one, and
-    /// the choices are read again on the next load until both halves have succeeded for this window.</summary>
-    private async Task ApplyKnownChoicesAsync(
-        Task<(List<JobHistoryFilterChoices.ServerChoice>? Servers, List<string>? Categories)>? choicesTask, (TimeSpan Span, DateTime? FixedEnd) key)
+    /// <summary>One half of the choices read. Never throws: a failed read returns null, says so on the status line, and is written to the
+    /// viewer's log once per window (the next refresh still reads again).</summary>
+    private async Task<T?> ReadHalfAsync<T>(string source, string noun, Func<Task<T>> read, (TimeSpan Span, DateTime? FixedEnd) key) where T : class
     {
-        if (choicesTask is null)
+        try
         {
-            return;
+            var result = await read();
+            _choicesFailures.Succeeded(source);
+            return result;
         }
-
-        var (servers, categories) = await choicesTask;
-        if (servers is not null)
+        catch (Exception ex)
         {
-            _knownServers = servers;
-        }
+            StatusChanged?.Invoke($"failed to load the job history {noun} choices: {ex.Message}");
+            if (_choicesFailures.ShouldLog(source, key))
+            {
+                ViewerLogger.Error("JobHistory", $"failed to load the job history {noun} choices; the drop-down keeps what it had and the read is tried again on the next refresh", ex);
+            }
 
-        if (categories is not null)
-        {
-            _knownCategories = categories;
-        }
-
-        if (servers is not null && categories is not null)
-        {
-            _choicesKey = key;
-            _choicesReadAtUtc = DateTime.UtcNow;
+            return null;
         }
     }
+
+    /// <summary>Takes the choices read beside the grid once they arrive, and only if this load is still the current one (null when this
+    /// load did not read them). A half that failed keeps the last one, and the choices are read again on the next load until both halves
+    /// have succeeded for this window. The grid is already bound: it never waits on this read.</summary>
+    private Task<bool> ApplyKnownChoicesAsync(
+        Task<(List<JobHistoryFilterChoices.ServerChoice>? Servers, List<string>? Categories)>? choicesTask,
+        (TimeSpan Span, DateTime? FixedEnd) key, int gen, List<ViewerJobHistoryRow> rows) =>
+        JobHistoryLoadSteps.ApplyWhenCurrentAsync(choicesTask, () => _loads.Superseded(nameof(LoadJobsAsync), gen), choices =>
+        {
+            if (choices.Servers is not null)
+            {
+                _knownServers = choices.Servers;
+            }
+
+            if (choices.Categories is not null)
+            {
+                _knownCategories = choices.Categories;
+            }
+
+            if (choices.Servers is not null && choices.Categories is not null)
+            {
+                _choicesKey = key;
+                _choicesReadAtUtc = DateTime.UtcNow;
+            }
+
+            PopulateServerFilter(rows);
+            PopulateCategoryFilter(rows);
+        });
 
     private void PopulateServerFilter(List<ViewerJobHistoryRow> rows)
     {

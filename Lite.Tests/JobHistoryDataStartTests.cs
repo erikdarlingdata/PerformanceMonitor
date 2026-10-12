@@ -681,12 +681,44 @@ VALUES
     {
         var load = LoadJobsBody(TabSource());
 
-        var bind = load.IndexOf("_filterManager.UpdateData(all)", StringComparison.Ordinal);
+        /* #5703 (round 2): the bind is BindRows, run by JobHistoryLoadSteps.BindWhenCurrentAsync right after the last supersede check. */
+        var bind = load.IndexOf("JobHistoryLoadSteps.BindWhenCurrentAsync(readTask", StringComparison.Ordinal);
         var loadingDown = load.IndexOf("LoadingMessage.Visibility = Visibility.Collapsed;", Math.Max(bind, 0), StringComparison.Ordinal);
         var note = load.IndexOf("await ShowDataStartNoteAsync(", StringComparison.Ordinal);
         Assert.True(bind >= 0 && loadingDown > bind && note > loadingDown, "the note must come after the rows and the loading note");
         Assert.DoesNotContain("ShowDataStartNoteAsync(serverId, readClocks, startUtc, nowUtc, filtered", load, StringComparison.Ordinal);
         Assert.Matches(@"JobCountIndicator\.Text = JobHistoryCap\.CountText\(displayCount, all\.Count, RowCap\);", load);
+    }
+
+    /// <summary>#5703 (round 2): the rows bind with no await after the last supersede check, and the grid never waits on the Category choices.</summary>
+    [Fact]
+    public void TheRowsBind_WithNoAwaitAfterTheLastSupersedeCheck_AndTheGridNeverWaitsOnTheChoices()
+    {
+        var tab = TabSource();
+        var load = LoadJobsBody(tab);
+
+        Assert.Matches(@"JobHistoryLoadSteps\.BindWhenCurrentAsync\(readTask, \(\) => _loads\.Superseded\(nameof\(LoadJobsAsync\), gen\), read => BindRows\(read\.Rows, read\.Clocks\)\)", load);
+        var bindRows = Regex.Match(tab, @"private void BindRows\(.*?\n    \}\n", RegexOptions.Singleline);
+        Assert.True(bindRows.Success, "BindRows is not in the tab");
+        Assert.DoesNotContain("await", bindRows.Value, StringComparison.Ordinal);
+
+        var bind = load.IndexOf("JobHistoryLoadSteps.BindWhenCurrentAsync(readTask", StringComparison.Ordinal);
+        var apply = load.IndexOf("var choicesApplied = ApplyKnownCategoriesAsync(", StringComparison.Ordinal);
+        Assert.True(bind >= 0 && apply > bind, "the choices must be applied after the grid is bound");
+        Assert.DoesNotContain("await ApplyKnownCategoriesAsync", load, StringComparison.Ordinal);
+        Assert.Contains("await choicesApplied;", load, StringComparison.Ordinal);
+        Assert.Contains("JobHistoryLoadSteps.ApplyWhenCurrentAsync(", tab, StringComparison.Ordinal);
+        /* A failed choices read is logged once per window, not on every refresh. */
+        Assert.Contains("_choicesFailures.ShouldLog(\"categories\", key)", tab, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5703 (round 2): the shell hands the tab the servers the collector runs on, resolved through the same engine editions the alert sweep uses.</summary>
+    [Fact]
+    public void TheShell_OffersTheTabOnlyTheServersTheCollectorRunsOn()
+    {
+        var shell = StripComments(File.ReadAllText(RepoFile("Lite", "MainWindow.AlertEngine.cs")).Replace("\r\n", "\n")).Replace("\n", " ");
+        Assert.Matches(@"JobHistoryContent\.OfferedServers = \(\) => LocalDataService\.BuildJobHistoryChoiceMap\(\s*_serverManager\.GetAllServers\(\),\s*s => _engineEditions\.Resolve\(", shell);
+        Assert.Contains("OfferedServers?.Invoke()", StripComments(TabSource()), StringComparison.Ordinal);
     }
 
     /// <summary>The tab's step goes through the shared steps (the cap-aware decision, the guarded probe, the event-time rule and the two

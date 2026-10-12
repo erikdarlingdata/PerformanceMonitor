@@ -13,6 +13,7 @@ using System.Linq;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -120,6 +121,30 @@ ORDER BY server_id";
             ids.Add((int)ToInt64(reader.GetValue(0)));
 
         return ids;
+    }
+
+    /// <summary>
+    /// The Job History tab's known Server choices (#5703): the configured servers the job history collector runs on, by the name the
+    /// grid's Server column speaks (the same <see cref="ServerConnection.DisplayNameWithIntent"/> the tab's display-name map holds),
+    /// keyed by the server id the collector stores its rows under. The collector's own rule decides
+    /// (<see cref="PerformanceMonitor.Collectors.JobHistoryCollector.CollectsOn"/>): a disabled server is not collected and an Azure SQL
+    /// Database has no SQL Agent, so neither can have job history; Amazon RDS and Azure SQL Managed Instance run SQL Agent and stay. A
+    /// server with runs in the window is still offered, from the rows. Lite monitors SQL Server only, so there is no engine kind.
+    /// </summary>
+    /// <param name="servers">The configured servers.</param>
+    /// <param name="engineEditionOf">A server's engine edition (the live status, else the remembered one), or unknown (0).</param>
+    internal static Dictionary<int, string> BuildJobHistoryChoiceMap(IEnumerable<ServerConnection> servers, Func<ServerConnection, int> engineEditionOf)
+    {
+        var map = new Dictionary<int, string>();
+        foreach (var server in servers)
+        {
+            if (PerformanceMonitor.Collectors.JobHistoryCollector.CollectsOn(server.IsEnabled, null, engineEditionOf(server)))
+            {
+                map[RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server))] = server.DisplayNameWithIntent;
+            }
+        }
+
+        return map;
     }
 
     /// <summary>
