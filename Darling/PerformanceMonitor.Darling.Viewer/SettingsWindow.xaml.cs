@@ -919,7 +919,9 @@ public partial class SettingsWindow : Window
             row.PoisonWaitThresholdMs = poisonWait;
         /* #5641: the Runnable Queue bars, the engine's own rule (RunnableQueueEvaluator.ClampBars): Warning at least 1 and
            Critical never below Warning. An invalid entry is reported here rather than silently clamped, so what is saved is
-           what the operator typed. */
+           what the operator typed. A bad pair is refused whatever the checkbox says (as Lite does, round 1 of #5709): the row
+           is built fresh with the 8/16 defaults, so letting an unchecked alert skip the error would save 8/16 over the
+           operator's stored bars. */
         var warningOk = int.TryParse(AlertRunnableQueueWarningBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rqWarning) && rqWarning >= 1;
         var criticalOk = int.TryParse(AlertRunnableQueueCriticalBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rqCritical) && rqCritical >= 1;
         if (warningOk && criticalOk && rqCritical >= rqWarning)
@@ -927,7 +929,7 @@ public partial class SettingsWindow : Window
             row.RunnableQueueWarningPerScheduler = rqWarning;
             row.RunnableQueueCriticalPerScheduler = rqCritical;
         }
-        else if (AlertRunnableQueueCheckBox.IsChecked == true)
+        else
         {
             errors.Add(!warningOk
                 ? "Runnable queue Warning must be a whole number of at least 1 runnable task per scheduler."

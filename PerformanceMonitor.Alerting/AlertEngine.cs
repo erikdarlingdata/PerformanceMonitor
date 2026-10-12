@@ -131,6 +131,9 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueCollectionTime = new();
     private readonly ConcurrentDictionary<string, bool> _activeRunnableQueueAlert = new();
+    /* The sweep time of the last EVALUATED Runnable Queue reading per server (round 1 of #5709): a standing alert
+       with no evaluation for RunnableQueueEvaluator.StaleIncidentMinutes is resolved, with the reason stated. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueEvaluation = new();
     /* #5641: the highest tier delivered for the open Runnable Queue incident, so a Warning that worsens to Critical
        is delivered at once instead of waiting out the cooldown. Runnable Queue is the only opted-in alert. */
     private readonly TierEscalation _runnableQueueEscalation = new();
@@ -1007,7 +1010,7 @@ public sealed class AlertEngine
                     excludeCdc: false,
                     Array.Empty<string>(),
                     LongRunningQueryExclusions.None,
-                    ct);
+                    cancellationToken: ct);
                 maintenanceDetail = AlertContextBuilders.BuildActiveMaintenanceDetail(activeSessions.Sessions);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1964,10 +1967,10 @@ public sealed class AlertEngine
     /// <see cref="RunnableQueueEvaluator"/>.
     ///
     /// <para><b>The window rule</b> is <see cref="RunnableQueueEvaluator.Read"/>'s: 3 or more collections in the last
-    /// 5 minutes, else the newest 3 if all are inside 10 minutes. Anything else is not an observation. The check does
+    /// 5 minutes, else the newest 3 if all are inside 10 minutes (4 times the collection gap when that is longer: the Low-Impact preset collects every 5 minutes). Anything else is not an observation. The check does
     /// not evaluate: it fires nothing and clears nothing, so a collection gap cannot page on one busy sample and
     /// cannot announce "Cleared" on silence (the #3282 rule Poison Wait applies to an empty read). A standing alert
-    /// clears only when an evaluated reading sits under the Warning bar.</para>
+    /// clears only when an evaluated reading sits under the Warning bar, or after 30 minutes with no evaluation, when it resolves with that reason stated.</para>
     ///
     /// <para>Cooldown, mute, the fresh-sample guard and the resolution notice are Poison Wait's, with one addition:
     /// a Warning that worsens to Critical is delivered at once, past the cooldown (<see cref="TierEscalation"/>,
@@ -1985,16 +1988,39 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var samples = await _readAdapter.GetRunnableQueueSamplesAsync(key, RunnableQueueEvaluator.FallbackMinutes, ct);
+            var samples = await _readAdapter.GetRunnableQueueSamplesAsync(key, RunnableQueueEvaluator.ReadLookbackMinutes, ct);
             readClock.Restart();
 
-            /* Neither 3 collections in 5 minutes nor the newest 3 inside 10: not an observation, so neither a fire
-               nor a clear. */
+            /* Neither 3 collections in 5 minutes nor the newest 3 inside the fallback window (10 minutes, or 4 times
+               the collection cadence when longer): not an observation, so neither a fire nor a clear. The one
+               exception is a standing alert that has gone unevaluated for 30 minutes (below). */
             var reading = RunnableQueueEvaluator.Read(samples, now);
             if (reading is null)
             {
+                if (_activeRunnableQueueAlert.TryGetValue(key, out var standing) && standing
+                    && _lastRunnableQueueEvaluation.TryGetValue(key, out var lastEvaluated)
+                    && now - lastEvaluated >= TimeSpan.FromMinutes(RunnableQueueEvaluator.StaleIncidentMinutes))
+                {
+                    /* Round 1 of #5709: the collector was disabled, slowed past the window, or keeps failing while the
+                       alert stood, so no reading can ever clear it. It resolves through the normal resolve path with
+                       the reason in the text; never a silent clear. */
+                    _activeRunnableQueueAlert[key] = false;
+                    _runnableQueueEscalation.Close(key);
+                    _lastRunnableQueueEvaluation.TryRemove(key, out _);
+                    if (!suppressed)
+                    {
+                        await NotifyResolutionAsync(new AlertResolution(
+                            key, serverName, RunnableQueueEvaluator.MetricName,
+                            "Runnable Queue Cleared",
+                            string.Create(CultureInfo.InvariantCulture,
+                                $"{serverName}: Runnable Queue alert resolved - no fresh scheduler data for {RunnableQueueEvaluator.StaleIncidentMinutes} minutes, so the queue could not be re-checked (the cpu_scheduler_stats collector may be disabled, slow or failing)")), ct);
+                        readClock.Restart();
+                    }
+                }
                 return;
             }
+
+            _lastRunnableQueueEvaluation[key] = now;
 
             var finding = RunnableQueueEvaluator.Evaluate(
                 reading, _settings.RunnableQueueWarningPerScheduler, _settings.RunnableQueueCriticalPerScheduler);
@@ -2132,8 +2158,12 @@ public sealed class AlertEngine
                 excludeCdc: false,
                 Array.Empty<string>(),
                 LongRunningQueryExclusions.None,
-                ct);
-            foreach (var requestItem in AlertContextBuilders.BuildRunnableQueueRequestItems(activeRequests.Sessions))
+                orderByCpu: true,
+                cancellationToken: ct);
+            /* The read is CPU-ranked ahead of its cap (round 1 of #5709), so the top 3 are the top 3 of the whole
+               snapshot. A full page means rows beyond it exist, so the trailer says "at least N more". */
+            foreach (var requestItem in AlertContextBuilders.BuildRunnableQueueRequestItems(
+                activeRequests.Sessions, readHitCap: activeRequests.Sessions.Count >= ActiveMaintenanceProbeMaxRows))
             {
                 queueContext.Details.Add(requestItem);
             }
@@ -2183,7 +2213,7 @@ public sealed class AlertEngine
                 _settings.LongRunningQueryExcludeCdc,
                 _settings.ExcludedDatabases,
                 exclusions,
-                ct);
+                cancellationToken: ct);
             var longRunning = read.Sessions;
             readClock.Restart();
 

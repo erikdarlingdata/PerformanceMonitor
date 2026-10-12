@@ -977,6 +977,13 @@ WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login OR r.excluded_by_
 ORDER BY r.total_elapsed_time_ms DESC
 LIMIT $3";
 
+    /// <summary>The template's long-running order, the one clause <see cref="CpuRankedOrderBy"/> replaces.</summary>
+    private const string LongRunningOrderBy = "ORDER BY r.total_elapsed_time_ms DESC";
+
+    /// <summary>#5641: the CPU-first order for a caller that wants the heaviest CPU consumers (the Runnable Queue
+    /// card). PostgreSQL sorts NULL first on DESC, so NULLS LAST is spelled; ties fall to elapsed, then session id.</summary>
+    private const string CpuRankedOrderBy = "ORDER BY r.cpu_time_ms DESC NULLS LAST, r.total_elapsed_time_ms DESC, r.session_id";
+
     /// <summary>The five opt-out noise filters — Lite's clauses with the N'' prefixes dropped.</summary>
     /* sp_server_diagnostics (the AG/FCI health-check session) usually sits in SP_SERVER_DIAGNOSTICS_SLEEP, but it
        also does Extended Events work, so it can be captured in a different wait (e.g. PREEMPTIVE_XE_GETTARGETSTATE)
@@ -1000,6 +1007,7 @@ LIMIT $3";
         bool excludeCdc,
         IReadOnlyList<string> excludedDatabases,
         LongRunningQueryExclusions exclusions,
+        bool orderByCpu = false,
         CancellationToken cancellationToken = default)
     {
         /* #3848: every read in this type goes out through the one retry seam, which re-asks
@@ -1009,7 +1017,7 @@ LIMIT $3";
            same one the engine's own catch arm records a failure under, so one read has one name
            across both counts. */
         return ExecuteWithOneRetryAsync(
-            ct => GetLongRunningQueriesCoreAsync(serverKey, thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits, excludeCdc, excludedDatabases, exclusions, ct),
+            ct => GetLongRunningQueriesCoreAsync(serverKey, thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits, excludeCdc, excludedDatabases, exclusions, orderByCpu, ct),
             serverKey,
             "long-running queries",
             cancellationToken);
@@ -1026,6 +1034,7 @@ LIMIT $3";
         bool excludeCdc,
         IReadOnlyList<string> excludedDatabases,
         LongRunningQueryExclusions exclusions,
+        bool orderByCpu,
         CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
@@ -1052,6 +1061,10 @@ LIMIT $3";
             .Replace("{1}", exclusionSql.ProgramPrefixPredicate)
             .Replace("{2}", exclusionSql.LoginPredicate)
             .Replace("{3}", exclusionSql.DatabasePredicate);
+        if (orderByCpu)
+        {
+            sql = sql.Replace(LongRunningOrderBy, CpuRankedOrderBy, StringComparison.Ordinal);
+        }
 
         var items = new List<LongRunningQueryInfo>();
         int excludedByProgramPrefix = 0;

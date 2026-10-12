@@ -277,10 +277,10 @@
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <!-- #5641: Runnable Queue grades the AVERAGE runnable tasks per scheduler over the collections of the last 5 minutes
-                         (at least 3; otherwise the newest 3 if all fall in the last 10 minutes). The two bars are whole numbers; Critical never below Warning. -->
+                         (at least 3; otherwise the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates)). The two bars are whole numbers; Critical never below Warning. -->
                     <CheckBox x:Name="AlertRunnableQueueCheckBox" Content="Runnable queue (tasks per scheduler) warn at" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"
-                              ToolTip="The Runnable Queue alert averages runnable tasks per scheduler over the collections in the last 5 minutes when there are at least 3, otherwise over the newest 3 if all fall in the last 10 minutes. It fires WARNING at the first bar and CRITICAL at the second; a Warning that worsens to Critical is delivered at once."/>
+                              ToolTip="The Runnable Queue alert averages runnable tasks per scheduler over the collections in the last 5 minutes when there are at least 3, otherwise over the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates). It fires WARNING at the first bar and CRITICAL at the second; a Warning that worsens to Critical is delivered at once."/>
                     <TextBox x:Name="AlertRunnableQueueWarningBox" Width="45" Text="8" Margin="6,0,0,0" VerticalAlignment="Center"/>
                     <TextBlock Text="critical at" VerticalAlignment="Center" Margin="6,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>

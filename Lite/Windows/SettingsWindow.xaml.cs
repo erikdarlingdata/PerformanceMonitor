@@ -1061,7 +1061,7 @@ public partial class SettingsWindow : Window
         if (AlertRunnableQueueCheckBox.IsChecked == true)
             parts.Add($"runnable tasks per scheduler >= {AlertRunnableQueueWarningBox.Text} (critical {AlertRunnableQueueCriticalBox.Text}) over {RunnableQueueEvaluator.WindowMinutes}min");
         if (AlertLongRunningQueryCheckBox.IsChecked == true)
-            parts.Add($"queries >{AlertLongRunningQueryThresholdBox.Text}min");
+            parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
             parts.Add($"tempdb > {AlertTempDbSpaceThresholdBox.Text}%");
         if (AlertLowDiskCheckBox.IsChecked == true)

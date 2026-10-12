@@ -5591,7 +5591,7 @@ public sealed class DarlingSelfAlertTests
         public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
             string serverKey, int thresholdMinutes, int maxResults,
             bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc,
-            IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default) =>
+            IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, bool orderByCpu = false, CancellationToken cancellationToken = default) =>
             Task.FromResult(LongRunningQueryReadResult.Empty);
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<VolumeFreeSpaceInfo>());

@@ -40,7 +40,7 @@ public sealed class DarlingRunnableQueueReadLiveTests
     private const int ServerId = -5641001;
     private const int OtherServerId = -5641002;
     private static readonly string ServerKey = ServerId.ToString(CultureInfo.InvariantCulture);
-    private const int LookbackMinutes = RunnableQueueEvaluator.FallbackMinutes;
+    private const int LookbackMinutes = RunnableQueueEvaluator.FallbackMinutes; // the read takes any lookback; these cases pin its boundary at 10
 
     /* ---------------- ungated pins ---------------- */
 

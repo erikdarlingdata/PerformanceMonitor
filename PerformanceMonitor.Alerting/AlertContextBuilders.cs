@@ -694,9 +694,10 @@ public static class AlertContextBuilders
     /// High CPU card's maintenance probe reads; shows at most <see cref="RunnableQueueRequestDisplayCap"/> and
     /// states the omission as a final item rather than cutting silently. Fields are the Long-Running Query
     /// card's session fields, so a reader sees the same facts under both alerts. Returns an empty list when the
-    /// snapshot holds no request.
+    /// snapshot holds no request. <paramref name="readHitCap"/> says the read returned a full page, so the count of
+    /// omitted requests is a floor and the trailer reads "at least N more request(s)".
     /// </summary>
-    public static IReadOnlyList<AlertDetailItem> BuildRunnableQueueRequestItems(IReadOnlyList<LongRunningQueryInfo> sessions)
+    public static IReadOnlyList<AlertDetailItem> BuildRunnableQueueRequestItems(IReadOnlyList<LongRunningQueryInfo> sessions, bool readHitCap = false)
     {
         if (sessions.Count == 0) return Array.Empty<AlertDetailItem>();
 
@@ -739,7 +740,7 @@ public static class AlertContextBuilders
                 Fields = new()
                 {
                     ("Not shown", string.Create(CultureInfo.InvariantCulture,
-                        $"{ranked.Count - RunnableQueueRequestDisplayCap} more request(s) in the newest query snapshot"))
+                        $"{(readHitCap ? "at least " : "")}{ranked.Count - RunnableQueueRequestDisplayCap} more request(s) in the newest query snapshot"))
                 }
             });
         }

@@ -867,7 +867,7 @@ public sealed class DarlingMcpAlertTools
         "so this value is accepted and stored for round-trip compatibility but consulted by nothing — setting it returns " +
         "status updated with a warnings entry saying so, and does not change when the alert fires. poison_wait.enabled still governs the alert. " +
         "runnable_queue.enabled switches the Runnable Queue alert; runnable_queue.warning_per_scheduler (at least 1, default 8) and " +
-        "runnable_queue.critical_per_scheduler (default 16) are runnable tasks per scheduler, averaged over the collections of the last 5 minutes when there are at least 3, otherwise over the newest 3 if all fall in the last 10 minutes, and Critical may never sit below Warning: " +
+        "runnable_queue.critical_per_scheduler (default 16) are runnable tasks per scheduler, averaged over the collections of the last 5 minutes when there are at least 3, otherwise over the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates), and Critical may never sit below Warning: " +
         "a body that sends both bars in the wrong order, or one bar that would cross the stored other, writes nothing and returns status invalid. " +
         "analysis.uncorroborated_route is WRITABLE since V137: 'digest' or 'page' (case-insensitive; stored lower-case) writes " +
         "config_alert_settings.analysis_uncorroborated_route, which the running service reads OVER darling.json's analysis.uncorroboratedRoute " +

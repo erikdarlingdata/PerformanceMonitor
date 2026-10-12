@@ -248,14 +248,15 @@ public sealed class RunnableQueueAlertTests
     }
 
     [Fact]
-    public async Task BelowTheWarningBar_Stays_Silent_AndAsksForTheTenMinuteLookback()
+    public async Task BelowTheWarningBar_Stays_Silent_AndAsksForTheSixtyMinuteLookback()
     {
         var h = Armed();
         h.Adapter.RunnableQueue = Samples(7.9, h.Now.AddSeconds(-10));
 
         await h.Build().EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
 
-        Assert.Equal(RunnableQueueEvaluator.FallbackMinutes, h.Adapter.RunnableQueueLookbackMinutesAsked);
+        Assert.Equal(RunnableQueueEvaluator.ReadLookbackMinutes, h.Adapter.RunnableQueueLookbackMinutesAsked);
+        Assert.Equal(60, RunnableQueueEvaluator.ReadLookbackMinutes);
         Assert.Empty(h.Deliverer.Outcomes);
     }
 
@@ -383,9 +384,10 @@ public sealed class RunnableQueueAlertTests
         await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
         Assert.Empty(h.Resolutions);
 
-        /* Three collections, but the oldest of them is outside even the 10-minute fallback: still no observation. */
+        /* Three collections, but the oldest of them is outside even the 10-minute fallback (the 1-minute cadence the
+           first gap shows keeps the window at 10): still no observation. */
         h.Now = h.Now.AddMinutes(6);
-        h.Adapter.RunnableQueue = SamplesAt(0.0, h.Now.AddSeconds(-10), h.Now.AddMinutes(-5), h.Now.AddMinutes(-11));
+        h.Adapter.RunnableQueue = SamplesAt(0.0, h.Now.AddSeconds(-10), h.Now.AddMinutes(-2), h.Now.AddMinutes(-11));
         await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
         Assert.Empty(h.Resolutions);
 

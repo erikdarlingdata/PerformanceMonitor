@@ -72,10 +72,10 @@ public sealed class RunnableQueueIncidentReplayTests
         IncidentRows.Select(r => Fold(r.Time, r.Rows)).ToList();
 
     /// <summary>What the read hands the engine at <paramref name="t"/>: collections already written and inside the
-    /// 10-minute lookback, newest first.</summary>
+    /// 60-minute lookback, newest first.</summary>
     private static List<RunnableQueueSample> ReadAt(DateTime t) =>
         AllCollections()
-            .Where(s => s.CollectionTime <= t && s.CollectionTime >= t.AddMinutes(-RunnableQueueEvaluator.FallbackMinutes))
+            .Where(s => s.CollectionTime <= t && s.CollectionTime >= t.AddMinutes(-RunnableQueueEvaluator.ReadLookbackMinutes))
             .OrderByDescending(s => s.CollectionTime)
             .ToList();
 

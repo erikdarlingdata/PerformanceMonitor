@@ -115,7 +115,7 @@ public interface IAlertReadAdapter
     /// No samples comes back as an empty list, never null. The read is bounded below on <c>collection_time</c> with
     /// the same naive-UTC parameter style the poison-wait read uses; both stores keep microseconds.
     /// <paramref name="lookbackMinutes"/> is passed so the read's cutoff and the evaluator's fallback are one number
-    /// by construction (<see cref="RunnableQueueEvaluator.FallbackMinutes"/>).
+    /// by construction (<see cref="RunnableQueueEvaluator.ReadLookbackMinutes"/>: long enough to hold the cadence-scaled fallback window and to show the cadence).
     /// </para>
     /// </summary>
     Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(
@@ -139,6 +139,12 @@ public interface IAlertReadAdapter
     /// payload can show what the page does not. <see cref="LongRunningQueryExclusions.None"/> with an empty
     /// database list reads exactly as the pre-knob read did.
     /// </para>
+    /// <para>
+    /// <b><paramref name="orderByCpu"/> (#5641, after review).</b> False (the default) is the long-running order,
+    /// longest elapsed first. True ranks the same rows by CPU time first (NULL last), then elapsed, then session id,
+    /// ahead of the cap, so a caller that wants the heaviest CPU consumers (the Runnable Queue card) gets them even when
+    /// longer-elapsed blocked requests would fill the cap. It sits ahead of the token (CA1068); callers that pass the token positionally name it.
+    /// </para>
     /// </summary>
     Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         string serverKey,
@@ -151,6 +157,7 @@ public interface IAlertReadAdapter
         bool excludeCdc,
         IReadOnlyList<string> excludedDatabases,
         LongRunningQueryExclusions exclusions,
+        bool orderByCpu = false,
         CancellationToken cancellationToken = default);
 
     /// <summary>

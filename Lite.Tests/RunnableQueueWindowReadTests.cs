@@ -37,7 +37,7 @@ public sealed class RunnableQueueWindowReadTests : IClassFixture<SharedDuckDbFix
 {
     private const int ServerId = 5641;
     private const int OtherServerId = 5642;
-    private const int LookbackMinutes = RunnableQueueEvaluator.FallbackMinutes;
+    private const int LookbackMinutes = RunnableQueueEvaluator.FallbackMinutes; // the read takes any lookback; these cases pin its boundary at 10
 
     private readonly DuckDbInitializer _duckDb;
 

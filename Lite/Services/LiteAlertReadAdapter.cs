@@ -136,6 +136,7 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         bool excludeCdc,
         IReadOnlyList<string> excludedDatabases,
         LongRunningQueryExclusions exclusions,
+        bool orderByCpu = false,
         CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
@@ -147,7 +148,7 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
            as its third CTE flag and counts what it removed; nothing is filtered on this side of the seam. */
         return await Task.Run(() => _dataService.GetLongRunningQueriesAsync(
             serverId, thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor,
-            excludeBackups, excludeMiscWaits, excludeCdc, exclusions, excludedDatabases), cancellationToken);
+            excludeBackups, excludeMiscWaits, excludeCdc, exclusions, excludedDatabases, orderByCpu), cancellationToken);
     }
 
     public async Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(

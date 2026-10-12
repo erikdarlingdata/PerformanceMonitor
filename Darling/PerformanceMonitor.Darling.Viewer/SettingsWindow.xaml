@@ -371,8 +371,8 @@
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <!-- #5641: the Runnable Queue alert grades the AVERAGE of runnable tasks per scheduler over the collections of the last 5 minutes
-                         (at least 3; otherwise the newest 3 if all fall in the last 10 minutes). Warning and Critical are runnable tasks per scheduler; Critical never sits below Warning. -->
-                    <CheckBox x:Name="AlertRunnableQueueCheckBox" Content="Runnable queue (runnable tasks per scheduler, windowed average) — Warning at" ToolTip="The average of the collections in the last 5 minutes when there are at least 3, otherwise of the newest 3 if all fall in the last 10 minutes. A Warning that worsens to Critical is delivered at once." VerticalAlignment="Center"
+                         (at least 3; otherwise the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates)). Warning and Critical are runnable tasks per scheduler; Critical never sits below Warning. -->
+                    <CheckBox x:Name="AlertRunnableQueueCheckBox" Content="Runnable queue (runnable tasks per scheduler, windowed average) — Warning at" ToolTip="The average of the collections in the last 5 minutes when there are at least 3, otherwise of the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates). A Warning that worsens to Critical is delivered at once." VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertRunnableQueueWarningBox" Width="45" Text="8" Margin="6,0,0,0" VerticalAlignment="Center"
                              ToolTip="Warning bar: average runnable tasks per scheduler (the last 5 minutes' collections when there are at least 3, otherwise the newest 3 inside 10 minutes). At least 1. Default 8."/>
