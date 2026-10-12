@@ -113,6 +113,49 @@ public sealed class PgLogTextRedactorBoundTests
         Assert.True(elapsed < TimeSpan.FromSeconds(4), $"two reads took {elapsed}");
     }
 
+    /// <summary>The value slots that run to the LAST place their separator appears (a foreign key's value before its
+    /// table, a quoted value before its type) are one scan back from the field's end, not a retry per separator. The
+    /// bound here is 250 ms, short of the time the old shape took on this field, so a slot that is not linear shows as
+    /// a withheld field where a masked one is expected.</summary>
+    [Fact]
+    public void ARepeatedGreedySlotSeparator_IsReadInOnePass_UnderAShortBound()
+    {
+        var keySeparator = ") is not present in table \"";
+        var literalSeparator = "\" is out of range for type ";
+        var key = "Key (c)=(" + string.Concat(Enumerable.Repeat(keySeparator, 2_000)) + "t\".";
+        var keyOpen = "Key (c)=(" + string.Concat(Enumerable.Repeat(keySeparator, 2_000)) + "t";
+        var literal = "value \"" + string.Concat(Enumerable.Repeat(literalSeparator, 2_000)) + "integer";
+        var repeatedQuote = "Key (c)=(" + string.Concat(Enumerable.Repeat(")\"x", 20_000));
+
+        var prior = PgSettingRedactor.MatchTimeoutForTest;
+        PgSettingRedactor.MatchTimeoutForTest = TimeSpan.FromMilliseconds(250);
+        string? maskedKey = null;
+        string? withheldKey = null;
+        string? maskedLiteral = null;
+        string? withheldQuote = null;
+        try
+        {
+            var elapsed = Time(() =>
+            {
+                maskedKey = PgLogTextRedactor.RedactDetail(key, sqlState: "23503");
+                withheldKey = PgLogTextRedactor.RedactDetail(keyOpen, sqlState: "23503");
+                maskedLiteral = PgLogTextRedactor.RedactMessage(literal, sqlState: "22003");
+                withheldQuote = PgLogTextRedactor.RedactDetail(repeatedQuote, sqlState: "23503");
+            });
+            Assert.True(elapsed < TimeSpan.FromSeconds(4), $"four reads took {elapsed}");
+        }
+        finally
+        {
+            PgSettingRedactor.MatchTimeoutForTest = prior;
+        }
+
+        // Masked, not timed out: the value runs to the LAST separator and the name after it is kept.
+        Assert.Equal("Key (c)=(?) is not present in table \"t\".", maskedKey);
+        Assert.Equal("value \"?\" is out of range for type integer", maskedLiteral);
+        Assert.Equal(W, withheldKey);
+        Assert.Equal(W, withheldQuote);
+    }
+
     [Fact]
     public void AFieldLongerThanTheCap_IsWithheldWithoutBeingMatched()
     {

@@ -69,7 +69,7 @@ public static class PgSettingRedactor
     /// <summary>A sample that reaches every pattern's match step (#4348), used only to warm each compiled
     /// pattern's JIT ahead of the first real <see cref="Redact"/> call. Holds placeholder values only.</summary>
     private const string WarmupSample =
-        "password=x sslpassword=y postgresql://u:p@h/?password=z&sig=s&X-Amz-Signature=t \"password\" = \"q\" --password w sshpass -p v curl -u a:b -H \"Authorization: Bearer c\"";
+        "password=x sslpassword=y postgresql://u:p@h/?password=z&sig=s&X-Amz-Signature=t \"password\" = \"q\" --password w sshpass -p v curl -u a:b -H \"Authorization: Bearer c\" -b s=d -H 'Cookie: k=\"v\"'";
 
     /// <summary>An unquoted libpq or shell value: a run of non-whitespace in which a backslash escapes the next
     /// character, so an escaped space (<c>abc\ def</c>) is part of the value rather than its end. Earlier rules
@@ -238,6 +238,25 @@ public static class PgSettingRedactor
         @"(?<=^|[\s""'{,;(])(?<hdr>[\w-]*(?:Authorization|Token|Key|Secret|Auth|Cookie))(?<nq>[""']?)[ \t]*:[ \t]*(?<q>[""']?)(?:(?<scheme>(?:Bearer|Basic|Token|Negotiate|NTLM)[ \t]+)(?<val>[^""'\r\n]+)|(?<scheme>Digest[ \t]+)(?<val>[^\r\n]+)|(?<val>[^""'\r\n]+))",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /// <summary>A <c>Cookie</c> or <c>Set-Cookie</c> header whose value is not opened by a quote of its own, and so
+    /// can hold quoted cookie values (<c>Cookie: a="secret"</c>, <c>-H 'Cookie: theme="dark"; sid=x'</c>), which
+    /// <see cref="HeaderSecret"/>'s value class stops at. The value is masked to the closing quote of the argument
+    /// that holds the header (the quote just before the header's name, a backslash-escaped one inside it not
+    /// ending it), or to the end of the line when the header is not inside a quoted argument. A value opened by its
+    /// own quote (<c>{"Cookie": "a=1"}</c>) is <see cref="HeaderSecret"/>'s.</summary>
+    private static readonly TimeBoundPattern CookieHeader = new(
+        @"(?<=(?<open>[""'])|^|[\s{,;(])(?<hdr>[\w-]*Cookie)(?<nq>[""']?)[ \t]*:[ \t]*(?![""'])(?<val>(?(open)(?:\\.|(?!\k<open>)[^\r\n])+|[^\r\n]+))",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>curl's cookie option, <c>curl -b sid=x</c> or <c>--cookie "sid=x"</c> (<c>-b</c> also names a cookie
+    /// file, which is masked as well). Scoped to the literal <c>curl</c> command name, as <see cref="SshpassOption"/>
+    /// is, because <c>-b</c> alone is another command's flag (<c>pg_dump -b</c> takes no value). <c>--cookie-jar</c>
+    /// and <c>-c</c> write a file and are not matched. The value is a run of quoted segments and bare characters, so a
+    /// quoted cookie holding a space is masked whole.</summary>
+    private static readonly TimeBoundPattern CurlCookieOption = new(
+        @"(?<prefix>(?:^|(?<=/|\s))curl(?:\.exe)?(?:\s+\S+)*?\s+)(?<flag>-b|--cookie)(?:\s+|\s*=\s*)(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)|'[^']*(?:'|$)|[^\s""'])+",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     /// <summary>A <c>password</c> query parameter in a URI's query string. A quoted value
     /// (<c>?password="a b"</c>) is masked in full — quotes and all — via the same quote-aware value
     /// alternation the other rules use, rather than stopping at the first quote character and leaving the
@@ -402,6 +421,8 @@ public static class PgSettingRedactor
         CurlUserColon,
         SshpassOption,
         HeaderSecret,
+        CookieHeader,
+        CurlCookieOption,
     };
 
     static PgSettingRedactor()
@@ -557,6 +578,8 @@ public static class PgSettingRedactor
             redacted = OptionSecretSpaced.Replace(redacted, static m => m.Groups["opt"].Value + " " + Mask);
             redacted = CurlUserColon.Replace(redacted, static m => m.Groups["flag"].Value + " " + m.Groups["user"].Value + ":" + Mask);
             redacted = SshpassOption.Replace(redacted, static m => m.Groups["prefix"].Value + "-p " + Mask);
+            redacted = CurlCookieOption.Replace(redacted, static m => m.Groups["prefix"].Value + m.Groups["flag"].Value + " " + Mask);
+            redacted = CookieHeader.Replace(redacted, static m => m.Groups["hdr"].Value + m.Groups["nq"].Value + ": " + Mask);
             redacted = HeaderSecret.Replace(
                 redacted,
                 static m => m.Groups["hdr"].Value + m.Groups["nq"].Value + ": " + m.Groups["q"].Value + m.Groups["scheme"].Value + Mask);

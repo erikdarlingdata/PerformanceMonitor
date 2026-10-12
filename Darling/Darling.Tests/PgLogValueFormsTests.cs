@@ -31,7 +31,7 @@ public sealed class PgLogValueFormsTests
     }
 
     /// <summary>A CSV value holding a newline runs onto the next physical line of the CONTEXT: the first line ends in a
-    /// quote and reads as a whole frame, and what follows it that is not a frame is the rest of the value.</summary>
+    /// quote and reads as a whole frame, and what follows it that does not read whole as a frame PostgreSQL writes (beginning with a frame word is not enough) is the rest of the value.</summary>
     [Fact]
     public void ACopyValueRunningOntoFollowingLines_IsWithheldFromWhereItContinues()
     {
@@ -47,6 +47,66 @@ public sealed class PgLogValueFormsTests
             "COPY t, line 1, column a: \"?\"\n\tPL/pgSQL function f() line 3 at SQL statement",
             PgLogTextRedactor.RedactContext("COPY t, line 1, column a: \"x\"\n\tPL/pgSQL function f() line 3 at SQL statement"));
         Assert.Equal("COPY t, line 1\nsome other line", PgLogTextRedactor.RedactContext("COPY t, line 1\nsome other line"));
+    }
+
+    /// <summary>After a value-bearing frame, a following line is another frame only when ALL of it reads as one, as
+    /// PostgreSQL writes it. A line that merely begins with a frame word is the rest of the value: it and everything
+    /// after it are withheld.</summary>
+    [Theory]
+    [InlineData("while home: SSN 123-45-6789\"")]
+    [InlineData("while updating tuple SSN 123-45-6789")]
+    [InlineData("parallel worker SSN 123-45-6789\"")]
+    [InlineData("PL/pgSQL function notes: SSN 123-45-6789\"")]
+    [InlineData("PL/pgSQL function f() line 3 at RETURN: SSN 123-45-6789\"")]
+    [InlineData("SQL function notes: SSN 123-45-6789\"")]
+    [InlineData("SQL function \"f\" statement one SSN 123-45-6789")]
+    [InlineData("unnamed portal of SSN 123-45-6789\"")]
+    [InlineData("portal \"x\" of SSN 123-45-6789\"")]
+    [InlineData("COPY of SSN 123-45-6789\"")]
+    [InlineData("JSON data of SSN 123-45-6789\"")]
+    public void ALineThatOnlyBeginsWithAFrameWord_AfterAValueBearingFrame_IsWithheldWithTheRest(string fake)
+    {
+        var copy = PgLogTextRedactor.RedactContext("COPY t, line 1, column note: \"He said \"hi\"\n" + fake + "\n\tSQL statement \"SELECT 1\"");
+        Assert.Equal("COPY t, line 1, column note: \"?\"\n" + W, copy);
+
+        var tabbed = PgLogTextRedactor.RedactContext("COPY t, line 1, column note: \"He said \"hi\"\n\t" + fake);
+        Assert.Equal("COPY t, line 1, column note: \"?\"\n\t" + W, tabbed);
+
+        var json = PgLogTextRedactor.RedactContext("JSON data, line 1: {\"a\": 1,\n" + fake);
+        Assert.StartsWith("JSON data, line 1: ?\n", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("SSN", json, StringComparison.Ordinal);
+        Assert.EndsWith("\n" + W, json, StringComparison.Ordinal);
+    }
+
+    /// <summary>The same frames, written whole as PostgreSQL writes them, follow the value kept as they are written
+    /// (the portal frames with their bound values masked).</summary>
+    [Theory]
+    [InlineData("while updating tuple (0,7) in relation \"orders\"", "while updating tuple (0,7) in relation \"orders\"")]
+    [InlineData("while locking updated version (0,7) of tuple in relation \"orders\"", "while locking updated version (0,7) of tuple in relation \"orders\"")]
+    [InlineData("while scanning block 12 offset 3 of relation \"public.orders\"", "while scanning block 12 offset 3 of relation \"public.orders\"")]
+    [InlineData("while vacuuming index \"orders_pkey\" of relation \"public.orders\"", "while vacuuming index \"orders_pkey\" of relation \"public.orders\"")]
+    [InlineData("parallel worker", "parallel worker")]
+    [InlineData("PL/pgSQL function f(integer) line 3 at RETURN", "PL/pgSQL function f(integer) line 3 at RETURN")]
+    [InlineData("PL/pgSQL function public.\"My Fn\"(character varying, integer[]) line 9 at SQL statement", "PL/pgSQL function public.\"My Fn\"(character varying, integer[]) line 9 at SQL statement")]
+    [InlineData("PL/pgSQL function inline_code_block line 2 at EXECUTE", "PL/pgSQL function inline_code_block line 2 at EXECUTE")]
+    [InlineData("PL/pgSQL function f() line 1 during statement block local variable initialization", "PL/pgSQL function f() line 1 during statement block local variable initialization")]
+    [InlineData("PL/pgSQL function f()", "PL/pgSQL function f()")]
+    [InlineData("SQL function \"f\" statement 1", "SQL function \"f\" statement 1")]
+    [InlineData("SQL function \"f\" during startup", "SQL function \"f\" during startup")]
+    [InlineData("unnamed portal with parameters: $1 = '42'", "unnamed portal with parameters: $1 = '?'")]
+    [InlineData("portal \"p1\" parameter $1 = '42'", "portal \"p1\" parameter $1 = '?'")]
+    [InlineData("SQL statement \"SELECT 1\"", "SQL statement \"SELECT ?\"")]
+    public void AFrameWrittenWhole_AfterAValueBearingFrame_IsKept(string frame, string kept)
+    {
+        Assert.Equal(
+            "COPY t, line 1, column note: \"?\"\n" + kept,
+            PgLogTextRedactor.RedactContext("COPY t, line 1, column note: \"He said \"hi\"\n" + frame));
+        Assert.Equal(
+            "COPY t, line 1, column note: \"?\"\n\t" + kept + "\n\tPL/pgSQL function f() line 3 at RETURN",
+            PgLogTextRedactor.RedactContext("COPY t, line 1, column note: \"He said \"hi\"\n\t" + frame + "\n\tPL/pgSQL function f() line 3 at RETURN"));
+        Assert.Equal(
+            "JSON data, line 1: ?\n" + kept,
+            PgLogTextRedactor.RedactContext("JSON data, line 1: {\"a\": 1,\n" + frame));
     }
 
     [Fact]

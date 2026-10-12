@@ -179,6 +179,32 @@ public sealed class PgSettingRedactorTests
         yield return new object[] { "archive_command",
             "Set-Cookie: session=Kept4348s",
             "Set-Cookie: ********" };
+
+        // A quoted cookie value, and curl's own cookie options.
+        yield return new object[] { "archive_command",
+            "curl -H 'Cookie: theme=\"dark\"; sid=Kept5698a' https://b/x",
+            "curl -H 'Cookie: ********' https://b/x" };
+        yield return new object[] { "archive_command",
+            "Cookie: a=\"Kept5698b\"",
+            "Cookie: ********" };
+        yield return new object[] { "archive_command",
+            "Set-Cookie: a=\"Kept5698c\"; Path=/",
+            "Set-Cookie: ********" };
+        yield return new object[] { "archive_command",
+            "curl -H \"Cookie: a=\\\"Kept5698d\\\"\" https://b/x",
+            "curl -H \"Cookie: ********\" https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl -b sid=Kept5698e https://b/x",
+            "curl -b ******** https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl -s --cookie \"sid=Kept5698 f\" https://b/x",
+            "curl -s --cookie ******** https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl --cookie=sid=Kept5698g https://b/x",
+            "curl --cookie ******** https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl -H 'X: y' -b 'sid=\"Kept5698h\"' https://b/x",
+            "curl -H 'X: y' -b ******** https://b/x" };
         yield return new object[] { "archive_command",
             "a=1;Authorization: Basic Kept4348z",
             "a=1;Authorization: Basic ********" };
@@ -484,6 +510,18 @@ public sealed class PgSettingRedactorTests
 
         // f(f(x)) == f(x): re-running the redactor over its own output changes nothing further.
         Assert.Equal(actual, RedactUnderGenerousTimeout(name, actual));
+    }
+
+    /// <summary>curl's cookie option is read only as curl's: a cookie file the command writes, and another command's
+    /// <c>-b</c>, are not cookie values.</summary>
+    [Theory]
+    [InlineData("curl --cookie-jar jar.txt https://b/x")]
+    [InlineData("curl -c jar.txt https://b/x")]
+    [InlineData("pg_dump -b -Fc db")]
+    [InlineData("Cookie-Policy: none")]
+    public void ACookieOptionOfAnotherCommand_IsKept(string value)
+    {
+        Assert.Equal(value, RedactUnderGenerousTimeout("archive_command", value));
     }
 
     /// <summary>

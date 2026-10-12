@@ -320,8 +320,11 @@ public static class PgPlanLogParser
        an apostrophe ("owner's count", "c'") read by the literal pattern alone opens a literal that closes at
        the next real quote, which leaves the literal after it standing in the stored text. Each quote kind
        doubles its own quote to embed it, so neither alternative can run past its closing quote. The fingerprint
-       pattern is left as it is on purpose: every stored fingerprint was hashed with it, and this one decides
-       only what the stored text keeps. */
+       pattern is left as it is, for the statement fingerprint the log-event pipeline takes. This one runs BEFORE
+       ShapeHash, which is taken over the redacted root: so it decides what the stored text keeps AND what the plan
+       hash reads. The hash of a plan whose text held a quoted name with an apostrophe in it, or a literal the
+       fingerprint pattern left standing, therefore changes once, when the plan is next parsed; every other plan
+       keeps its hash. The hash is never taken over a raw value. */
     private static readonly Regex s_storedPlanLiteral = new(
         @"""(?:[^""]|"""")*""|'(?:[^']|'')*'", RegexOptions.Compiled);
 

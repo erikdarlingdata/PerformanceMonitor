@@ -133,6 +133,29 @@ public static class PgLogTextRedactor
         RegexOptions.Compiled | RegexOptions.CultureInvariant,
         s_matchTimeout);
 
+    /* The CONTEXT frames that quote no input and no statement, each in the whole of its grammar as PostgreSQL writes it
+       (English; another catalogue's wording is not trusted here and is withheld where trust is required). A line is
+       trusted as one of these only when all of it fits: the frame word alone does not (`while home: ...` begins like
+       a lock wait's frame and is not one). The free parts are names, which PostgreSQL writes unescaped: a relation
+       or function name, and a function's argument types; a relation or SQL function name holding a double quote is not trusted, so a line with one is withheld. Locks and vacuum: heapam's XactLockTableWaitErrorCb and
+       vacuumlazy's vacuum_error_callback. PL/pgSQL: plpgsql_exec_error_callback, whose statement types are
+       plpgsql_stmt_typename's, and whose other tails are its err_text phrases. SQL functions: sql_exec_error_callback
+       and the inliner's. */
+    private static readonly TimeBoundPattern s_contextPlainFrame = new(
+        @"^\t?(?:"
+        + @"parallel worker"
+        + @"|while (?:(?:updating tuple|deleting tuple|locking tuple|inserting index tuple|checking uniqueness of tuple|rechecking updated tuple|checking exclusion constraint on tuple) \([0-9]+,[0-9]+\)|locking updated version \([0-9]+,[0-9]+\) of tuple) in relation ""[^""]+"""
+        + @"|while (?:scanning block [0-9]+(?: offset [0-9]+)? of relation ""[^""]+""|scanning relation ""[^""]+""|vacuuming block [0-9]+ of relation ""[^""]+""|vacuuming relation ""[^""]+"""
+        + @"|vacuuming index ""[^""]+"" of relation ""[^""]+""|cleaning up index ""[^""]+"" of relation ""[^""]+""|truncating relation ""[^""]+"" to [0-9]+ blocks)"
+        + @"|SQL function ""[^""]+"" (?:statement [0-9]+|during (?:startup|inlining))"
+        + @"|PL/pgSQL function (?:inline_code_block|(?>""(?:[^""]|"""")+""|[A-Za-z0-9_$.\u0080-\uFFFF])+\([A-Za-z0-9_$.,\[\] \u0080-\uFFFF""]*\))"
+        + @"(?: line [0-9]+ (?:at (?:statement block|assignment|FOR with integer loop variable|FOR over SELECT rows|FOR over cursor|FOR over EXECUTE statement|FOREACH over array|EXIT|CONTINUE|RETURN|RETURN NEXT|RETURN QUERY|RAISE|ASSERT|EXECUTE|IF|CASE|LOOP|WHILE|SQL statement|GET DIAGNOSTICS|OPEN|FETCH|CLOSE|PERFORM|CALL|COMMIT|ROLLBACK|unknown)"
+        + @"|during (?:statement block local variable initialization|function entry|function exit|statement block entry|statement block exit|exception cleanup)"
+        + @"|while (?:storing call arguments into local variables|casting return value to function's return type)))?"
+        + @")\r?$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
+
     /// <summary>What a statement becomes when it cannot be read to its end (cut inside a literal, a quoted
     /// identifier or a block comment, or written two ways at once): no mask can be trusted to have covered what
     /// the cut hid, so no statement is kept at all.</summary>
@@ -382,9 +405,11 @@ public static class PgLogTextRedactor
 
                 /* A COPY value in CSV mode, or a JSON input, can hold a newline: its first physical line then ends
                    in a quote or is cut where the value goes on, and the form above reads that line whole. What
-                   follows a value-bearing frame is another frame, or nothing. Any other line is the rest of the
-                   value, and is withheld with everything after it. */
-                if (carriesValue && i < lines.Length && !s_contextFrameStart.IsMatch(lines[i]))
+                   follows a value-bearing frame is another frame, or nothing. A line is another frame only when ALL
+                   of it reads as one (ReadsAsFrame): beginning with a frame word is not enough, since a value's next
+                   line can begin with any of them. Any other line is the rest of the value, and is withheld with
+                   everything after it. */
+                if (carriesValue && i < lines.Length && !ReadsAsFrame(lines[i]))
                 {
                     output.Add((lines[i].StartsWith('\t') ? "\t" : string.Empty) + WithheldValues);
                     return string.Join('\n', output);
@@ -434,6 +459,21 @@ public static class PgLogTextRedactor
         }
 
         return string.Join('\n', output);
+    }
+
+    /// <summary>Whether a CONTEXT line, the one after a frame that quoted a value, reads whole as a frame
+    /// PostgreSQL writes: a COPY or JSON value form (<see cref="MaskValues(string, ValueForm[])"/>), an SQL frame that
+    /// <see cref="CloseSqlFrame"/> then reads to its close or withholds, or a frame with no input in it that fits its
+    /// grammar to the end of the line (<see cref="s_contextPlainFrame"/>). A line that only begins with a frame word
+    /// (<c>while </c>, <c>parallel worker</c>, <c>PL/pgSQL function </c>, <c>SQL function </c>, <c>unnamed portal </c>,
+    /// <c>portal "</c>) is not one.</summary>
+    private static bool ReadsAsFrame(string line)
+    {
+        var body = line.StartsWith('\t') ? line[1..] : line;
+        return s_contextSqlFrame.IsMatch(line)
+            || s_contextSqlLine.IsMatch(line)
+            || s_contextPlainFrame.IsMatch(line)
+            || MaskValues(body, s_contextForms) is not null;
     }
 
     /// <summary>Where the SQL frame opening on <paramref name="start"/> ends: its statement masked and the line of
@@ -1297,7 +1337,9 @@ public static class PgLogTextRedactor
     /// <para><b>No slot backtracks into another.</b> Each slot before the last ends at the FIRST place the text that
     /// follows it begins (a tempered, atomic run: <c>(?&gt;(?:(?!separator).)*)</c>), and the last slot, which
     /// <c>$</c> pins to the field's end, takes the rest. A slot can therefore be read in one pass whatever the
-    /// text holds, where lazy slots tried every split of every separator the text repeated. Text that repeats a
+    /// text holds, where lazy slots tried every split of every separator the text repeated. The two value slots that
+    /// run to the LAST place their separator appears (<see cref="ValueSlot.KeyPair"/>, <see cref="ValueSlot.Literal"/>)
+    /// are one atomic scan back from the field's end, linear for the same reason. Text that repeats a
     /// separator and so does not read as the form whole matches nothing, and is withheld (<see cref="OpensValueForm"/>,
     /// <see cref="InValueClass"/>) rather than read some other way.</para></summary>
     private sealed class ValueForm
@@ -1322,14 +1364,27 @@ public static class PgLogTextRedactor
         /// <summary>The form's last slot: whatever is left of the field, up to the text that ends the form.</summary>
         private static string Rest(string group, string atom = ".") => $"(?<{group}>{atom}*)";
 
-        /// <summary>A slot that ends where <paramref name="separator"/> (a pattern) LAST appears: it takes a
-        /// separator in, atomically, only while another follows.</summary>
+        /// <summary>A slot that ends where <paramref name="separator"/> (a pattern) LAST appears: one atomic run
+        /// that takes everything to the end of the field and gives back only as far as the last place the separator
+        /// begins (<c>(?&gt;.*(?=separator))</c>). The scan back is a single pass, O(field length x separator length),
+        /// whatever the text repeats, and being atomic it never offers an earlier separator to the slots after it:
+        /// a field that does not read as the form with its last separator does not read as it at all, and is withheld.
+        /// The separator itself is matched by the literal that follows the slot.</summary>
         private static string Greedy(string group, string separator) =>
-            $"(?<{group}>(?>(?:(?!{separator}).)*(?:{separator}(?=.*{separator}))?)*)";
+            $"(?<{group}>(?>.*(?={separator})))";
 
         /// <summary>The form's longest literal that has a letter in it, kept only for a form with no <see cref="Head"/>
         /// (the catalogues that write a slot first): text holding it is a field of this form in a wording this build
-        /// does not list (another major version's, or a minor release's). Empty when the form has a head.</summary>
+        /// does not list (another major version's, or a minor release's). Empty when the form has a head.
+        ///
+        /// <para><b>A fallback that can only add withholding.</b> It is tried after the forms have all failed to match
+        /// whole, and what it adds is a form's text withheld, never a form's text kept: it cannot make a field that
+        /// was withheld read as kept. Its coverage is the one literal, verbatim, wherever it appears. A wording of another
+        /// major version that changes any character inside that literal, or a value-first message cut inside its value,
+        /// does not contain it and is kept when no SQLSTATE puts the field in the class. A literal short in letters
+        /// (the ko COPY form's five characters) is found in unrelated text too, and a CONTEXT line holding it is
+        /// withheld with everything after it: the fallback may withhold more than the form's text, and does not
+        /// cover every wording.</para></summary>
         public required string Tail { get; init; }
 
         /// <summary>Whether a slot of the form carries a value (false for the forms recognized only to be kept).</summary>
