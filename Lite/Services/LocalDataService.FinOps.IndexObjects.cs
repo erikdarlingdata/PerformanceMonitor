@@ -69,6 +69,7 @@ latest AS (
         COUNT(*) AS index_count
     FROM v_index_object_stats
     WHERE server_id = $1 AND collection_time = (SELECT latest_time FROM boundaries){dbClause}
+    AND   LEFT(table_name, 1) IS DISTINCT FROM '#'
     GROUP BY database_name, schema_name, table_name
 ),
 past_7d AS (
@@ -110,7 +111,7 @@ CROSS JOIN boundaries b
 LEFT JOIN past_7d p7 ON p7.database_name = l.database_name AND p7.schema_name = l.schema_name AND p7.table_name = l.table_name
 LEFT JOIN past_30d p30 ON p30.database_name = l.database_name AND p30.schema_name = l.schema_name AND p30.table_name = l.table_name
 LEFT JOIN oldest o ON o.database_name = l.database_name AND o.schema_name = l.schema_name AND o.table_name = l.table_name
-ORDER BY l.current_reserved_mb DESC
+ORDER BY l.current_reserved_mb DESC NULLS LAST, l.database_name, l.schema_name, l.table_name
 LIMIT {topN}";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -128,8 +129,9 @@ LIMIT {topN}";
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 SchemaName = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 TableName = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                CurrentReservedMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
-                CurrentUsedMb = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                /* #5633 item 15: a table with no measured size stays null, never 0. */
+                CurrentReservedMb = reader.IsDBNull(3) ? null : Convert.ToDecimal(reader.GetValue(3)),
+                CurrentUsedMb = reader.IsDBNull(4) ? null : Convert.ToDecimal(reader.GetValue(4)),
                 TotalRows = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
                 IndexCount = reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
                 /* The baselines stay NULL when the store has none — a missing baseline is not a 0 baseline. */
@@ -178,6 +180,10 @@ SELECT
     COALESCE(user_updates, 0) AS user_updates,
     GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,
     CASE
+        /* #5633 item 16: a heap or a clustered index IS the table, not a drop candidate: with no reads it is
+           'Table not read' whatever its update count, and with reads it falls through to 'Active'. */
+        WHEN (index_type_desc = 'HEAP' OR index_type_desc LIKE 'CLUSTERED%')
+             AND COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 'Table not read'
         WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
              AND COALESCE(user_updates, 0) = 0 THEN 'Unused'
         WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
@@ -188,7 +194,8 @@ FROM v_index_object_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1){dbFilter}
 ORDER BY
-    CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 0 ELSE 1 END,
+    CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
+         AND index_type_desc IS DISTINCT FROM 'HEAP' AND COALESCE(index_type_desc, '') NOT LIKE 'CLUSTERED%' THEN 0 ELSE 1 END,
     reserved_mb DESC NULLS LAST,
     database_name,
     schema_name,
@@ -619,6 +626,10 @@ SELECT
     COALESCE(user_updates, 0) AS user_updates,
     GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,
     CASE
+        /* #5633 item 16: a heap or a clustered index IS the table, not a drop candidate: with no reads it is
+           'Table not read' whatever its update count, and with reads it falls through to 'Active'. */
+        WHEN (index_type_desc = 'HEAP' OR index_type_desc LIKE 'CLUSTERED%')
+             AND COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 'Table not read'
         WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
              AND COALESCE(user_updates, 0) = 0 THEN 'Unused'
         WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
@@ -697,8 +708,9 @@ public class ObjectSizeGrowthBaselineRow
     public string DatabaseName { get; set; } = "";
     public string SchemaName { get; set; } = "";
     public string TableName { get; set; } = "";
-    public decimal CurrentReservedMb { get; set; }
-    public decimal CurrentUsedMb { get; set; }
+    /// <summary>Null when the store holds no size for the table; it is not 0 MB.</summary>
+    public decimal? CurrentReservedMb { get; set; }
+    public decimal? CurrentUsedMb { get; set; }
     public long TotalRows { get; set; }
     public int IndexCount { get; set; }
 

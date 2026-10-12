@@ -153,7 +153,7 @@ LIMIT 1";
 SELECT database_name, file_name, file_type_desc, physical_name,
        total_size_mb, used_size_mb, auto_growth_mb, max_size_mb,
        volume_mount_point, volume_total_mb, volume_free_mb,
-       collection_time, file_id
+       collection_time, file_id, is_percent_growth, growth_pct
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1){dbClause}
@@ -186,7 +186,10 @@ ORDER BY database_name, file_type_desc, file_name";
                 VolumeFreeMb = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
                 CollectionTime = reader.GetDateTime(11),
                 /* NULL is the one row another database on an Azure SQL Database server gets: it has no file id. */
-                FileId = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12))
+                FileId = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)),
+                /* #5633 item 6: a percent-growth file stores its step as a percentage, so auto_growth_mb alone read as null. */
+                IsPercentGrowth = reader.IsDBNull(13) ? null : reader.GetBoolean(13),
+                GrowthPct = reader.IsDBNull(14) ? null : ToDouble(reader.GetValue(14))
             });
         }
 
@@ -287,6 +290,10 @@ public class DatabaseSizeStatsRow
     public DateTime CollectionTime { get; set; }
     /// <summary>The file id; null for the one row another database on an Azure SQL Database server gets.</summary>
     public int? FileId { get; set; }
+    /// <summary>True when the file grows by a percentage (<see cref="GrowthPct"/>) rather than a fixed MB step; null when the store does not say.</summary>
+    public bool? IsPercentGrowth { get; set; }
+    /// <summary>The percent step of a percent-growth file; null for a fixed-step file or when the store does not say.</summary>
+    public double? GrowthPct { get; set; }
 
     /// <summary>True for the one row another database on an Azure SQL Database server gets: it holds the database's
     /// data size, and its log size is not reported. See <see cref="PerformanceMonitor.Common.AzureSiblingDatabaseSize"/>.</summary>
