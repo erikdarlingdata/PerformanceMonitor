@@ -143,6 +143,12 @@ public static class DarlingStoreConnection
     {
         try
         {
+            /* A string with no Host is not a quoting mistake, so it gets its own sentence. It names no text of the string. */
+            if (string.IsNullOrWhiteSpace(new NpgsqlConnectionStringBuilder(connectionString).Host))
+            {
+                return MissingHostHint;
+            }
+
             using var dataSource = NpgsqlDataSource.Create(
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
                     DarlingStoreConnection.WithApplicationName(connectionString, ProofApplicationName)));
@@ -228,6 +234,8 @@ public static class DarlingStoreConnection
     /// <summary>The application name on the data source <see cref="TryDescribeParseFailure"/> builds and disposes. It
     /// is never used, because nothing is opened.</summary>
     private const string ProofApplicationName = "darling-connection-string-proof";
+
+    private const string MissingHostHint = "The connection string has no Host. Add Host=<server name or address> to postgres.connectionString.";
 
     private const string ParseErrorNotShown = "The parse error is left out on purpose, because it can quote part of a secret.";
 }

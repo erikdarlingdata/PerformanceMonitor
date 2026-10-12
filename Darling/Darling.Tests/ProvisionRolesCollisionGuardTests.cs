@@ -612,6 +612,13 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.Contains("THEN setting IN ('ddl', 'mod', 'all')", block, StringComparison.Ordinal);
         /* The numeric cast sits in a CASE arm, so it is only evaluated for the row it belongs to. */
         Assert.Contains("WHEN 'log_min_duration_statement' THEN setting::bigint >= 0", block, StringComparison.Ordinal);
+        /* The sampling settings and pgaudit's role class write the same lines, so each is named too, with its cast in its arm. */
+        Assert.Contains("WHEN 'log_transaction_sample_rate' THEN setting::numeric > 0", block, StringComparison.Ordinal);
+        Assert.Contains("WHEN 'log_min_duration_sample' THEN setting::bigint >= 0", block, StringComparison.Ordinal);
+        Assert.Contains("sample.setting::numeric FROM pg_settings AS sample WHERE sample.name = 'log_statement_sample_rate') > 0", block, StringComparison.Ordinal);
+        Assert.Contains("WHEN 'pgaudit.log' THEN (SELECT statement.setting FROM pg_settings AS statement WHERE statement.name = 'pgaudit.log_statement') = 'on'", block, StringComparison.Ordinal);
+        Assert.Contains("&& ARRAY['role', 'all']", block, StringComparison.Ordinal);
+        Assert.Contains("NOT ('-role' = ANY (", block, StringComparison.Ordinal);
     }
 
     /// <summary>A role that is not a superuser stops at the guard, before any password, when one of the three roles is
@@ -641,6 +648,10 @@ public sealed class ProvisionRolesCollisionGuardTests
 
         /* The 16 test sits under the version CASE, so a server below 16 never evaluates the option string. */
         Assert.True(query.IndexOf("server_version_num", StringComparison.Ordinal) < query.IndexOf("'MEMBER WITH ADMIN OPTION'", StringComparison.Ordinal));
+
+        /* From 16 a revoke removes only the row recorded with the grantor it names, so the runner must be able to act as it. */
+        Assert.Contains("AND pg_has_role(current_user, membership.grantor, 'USAGE')", query, StringComparison.Ordinal);
+        Assert.True(query.IndexOf("'USAGE'", StringComparison.Ordinal) < query.IndexOf("ELSE NOT granted.rolsuper", StringComparison.Ordinal), "the grantor term belongs to the 16 arm.");
 
         var line = RaiseLine(checks, "These roles are members of roles whose privileges outrank the grants below");
         Assert.Contains("The script created and changed nothing.", line, StringComparison.Ordinal);
@@ -681,5 +692,59 @@ public sealed class ProvisionRolesCollisionGuardTests
         /* Only the privilege refusal is caught, in both blocks; no catch-all arm. */
         Assert.DoesNotContain("WHEN OTHERS", region, StringComparison.Ordinal);
         Assert.Equal(2, Regex.Matches(region, @"EXCEPTION WHEN insufficient_privilege THEN").Count);
+    }
+
+    /// <summary>From PostgreSQL 16 a revoke names the recorded grantor, for a runner that is not a superuser too, and the
+    /// block that revokes reads the memberships again afterwards: a voiding one still there stops the run with an error
+    /// before any grant, because the revoke itself only warns when it finds no row for the grantor it names. Before 16 the
+    /// non-superuser statement is unchanged.</summary>
+    [Fact]
+    public void TheMembershipRevoke_NamesTheGrantorFrom16_AndStopsTheRun_WhenAVoidingMembershipIsLeft()
+    {
+        var sql = Script();
+        var stops = Regex.Matches(sql, @"(?m)^\\set ON_ERROR_STOP (on|:darling_saved_stop)[ \t]*\r?$").Cast<Match>().ToArray();
+        var region = sql[stops[2].Index..stops[3].Index];
+        var memberships = region[(region.IndexOf("END $$;", StringComparison.Ordinal) + 1)..];
+
+        Assert.Contains("CASE WHEN (as_superuser OR current_setting('server_version_num')::int >= 160000) AND item.grantor IS NOT NULL", memberships, StringComparison.Ordinal);
+        Assert.Contains("THEN format(' GRANTED BY %I', item.grantor) ELSE '' END", memberships, StringComparison.Ordinal);
+
+        var loopEnd = memberships.IndexOf("END LOOP;", StringComparison.Ordinal);
+        var after = memberships[loopEnd..];
+        Assert.Contains("FROM pg_auth_members AS membership", after, StringComparison.Ordinal);
+        Assert.Contains("WHERE member.rolname IN ('admin', 'viewer', 'mcp')", after, StringComparison.Ordinal);
+        Assert.Contains("pg_has_role(granted.oid, voiding.oid, 'MEMBER')", after, StringComparison.Ordinal);
+        Assert.DoesNotContain("MEMBER WITH ADMIN OPTION", after, StringComparison.Ordinal);
+        Assert.DoesNotContain("'USAGE'", after, StringComparison.Ordinal);
+        var raise = after.IndexOf("RAISE EXCEPTION 'These roles are still members of roles whose privileges outrank the grants below: %.", StringComparison.Ordinal);
+        Assert.True(raise > after.IndexOf("IF remaining IS NOT NULL THEN", StringComparison.Ordinal), "the check raises an exception, not a warning.");
+        Assert.DoesNotContain("CHANGE_ME_", after, StringComparison.Ordinal);
+    }
+
+    /// <summary>An error other than a privilege refusal in the attribute or membership blocks (a <c>lock_not_available</c>
+    /// from <c>lock_timeout</c>, a <c>query_canceled</c> from <c>statement_timeout</c>) is not caught: with the stop on, psql
+    /// ends the run there, before step 1a and every grant. Nothing before the block is in a transaction, so the run leaves
+    /// the passwords set and the take-backs unfinished, and running the script again (which does each of them every run)
+    /// finishes them.</summary>
+    [Fact]
+    public void AnErrorThatIsNotAPrivilegeRefusal_InTheTakeBackBlocks_EndsTheRunBeforeStep1a_AndAReRunRedoesThem()
+    {
+        var sql = Script();
+        var stops = Regex.Matches(sql, @"(?m)^\\set ON_ERROR_STOP (on|:darling_saved_stop)[ \t]*\r?$").Cast<Match>().ToArray();
+        var region = sql[stops[2].Index..stops[3].Index];
+
+        Assert.True(stops[3].Index < sql.IndexOf("-- 1a. statement_timeout backstop", StringComparison.Ordinal), "the stop covers the blocks and ends before step 1a.");
+        Assert.DoesNotContain("WHEN OTHERS", region, StringComparison.Ordinal);
+        Assert.DoesNotContain("lock_not_available", region, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_canceled", region, StringComparison.Ordinal);
+        Assert.DoesNotContain("BEGIN;", region, StringComparison.Ordinal);
+
+        /* The only arm in each block names the privilege refusal, so any other SQLSTATE leaves the block. */
+        var arms = Regex.Matches(region, @"EXCEPTION WHEN [^\r\n]* THEN");
+        Assert.Equal(2, arms.Count);
+        foreach (Match arm in arms)
+        {
+            Assert.Equal("EXCEPTION WHEN insufficient_privilege THEN", arm.Value);
+        }
     }
 }

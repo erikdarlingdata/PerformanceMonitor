@@ -1055,6 +1055,77 @@ public sealed class ComposeStoreRolesLiveTests
     }
 
     /// <summary>
+    /// From PostgreSQL 16 a revoke removes only the membership row recorded with the grantor it names, and warns, without an
+    /// error, when it finds none. The owner holds ADMIN OPTION on a role it created, but a membership in that role that a
+    /// superuser granted is recorded with the superuser as grantor, so a plain revoke by the owner left it in place and a
+    /// role that reads every table survived the run. The guard now also asks that the owner can act as the recorded grantor.
+    /// (1) The owner cannot: exit 3 at the guard, no password sent, the membership still there. (2) The owner can (it is a
+    /// member of the grantor): the run revokes the membership GRANTED BY that grantor, and the roles keep none.
+    /// </summary>
+    [Fact]
+    public async Task ARunnerWithAdminOption_ButNotTheRecordedGrantor_StopsAtTheGuard_AndRevokesOnceItCanActAsTheGrantor_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-roles-grantor-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory },
+            NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+            Assert.SkipUnless(await OwnerScalarAsync<int>(owner, "SELECT current_setting('server_version_num')::int", ct) >= 160000,
+                "Before PostgreSQL 16 a revoke ignores the grantor, so a membership cannot outlast it.");
+            const string HashSql = "SELECT coalesce(rolpassword, '') FROM pg_catalog.pg_authid WHERE rolname = 'viewer'";
+            const string MembershipSql = "SELECT count(*) FROM pg_catalog.pg_auth_members AS a JOIN pg_catalog.pg_roles m ON m.oid = a.member WHERE m.rolname IN ('admin', 'viewer', 'mcp')";
+
+            /* 1. The owner makes the three roles (so it holds ADMIN OPTION on them) and a role of its own, G. A superuser
+                  then puts G in pg_read_all_data and viewer in G: both rows are recorded with the superuser as grantor. */
+            var byo = await MakeNonSuperuserOwnerAsync(owner, ct);
+            await ExecAsync(owner, "ALTER ROLE byo SET pg_stat_statements.track_utility = off", ct);
+            var first = new[] { "AdminPwGrantorR2a", "ViewerPwGrantorR2a", "McpPwGrantorR2a" };
+            var created = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, first, ct);
+            Assert.True(created.ExitCode == 0, $"psql exited {created.ExitCode} for the owner's first run.{Environment.NewLine}{created.Error}");
+            var firstHash = await OwnerScalarAsync<string>(owner, HashSql, ct);
+            await ExecAsync(byo, "CREATE ROLE g_grantor_r2 NOLOGIN", ct);
+            await ExecAsync(owner, "GRANT pg_read_all_data TO g_grantor_r2; GRANT g_grantor_r2 TO viewer;", ct);
+            Assert.True(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.pg_has_role('byo', 'g_grantor_r2', 'MEMBER WITH ADMIN OPTION')", ct),
+                "the owner does not hold ADMIN OPTION on the role it created, so the scenario proves nothing.");
+            Assert.Equal("darling", await OwnerScalarAsync<string>(owner,
+                "SELECT b.rolname FROM pg_catalog.pg_auth_members a JOIN pg_catalog.pg_roles g ON g.oid = a.roleid JOIN pg_catalog.pg_roles m ON m.oid = a.member JOIN pg_catalog.pg_roles b ON b.oid = a.grantor WHERE g.rolname = 'g_grantor_r2' AND m.rolname = 'viewer'", ct));
+            Assert.False(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.pg_has_role('byo', 'darling', 'USAGE')", ct));
+            Assert.True(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.pg_has_role('viewer', 'pg_read_all_data', 'MEMBER')", ct));
+
+            /* 2. The owner cannot act as the grantor: the run stops at the guard, sends no password, and the membership stays. */
+            var second = new[] { "AdminPwGrantorR2b", "ViewerPwGrantorR2b", "McpPwGrantorR2b" };
+            var stopped = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, second, ct);
+            Assert.True(stopped.ExitCode == 3, $"psql exited {stopped.ExitCode}, not 3: the run got past a membership it cannot revoke.{Environment.NewLine}{stopped.Error}");
+            Assert.Contains("These roles are members of roles whose privileges outrank the grants below: viewer in g_grantor_r2", stopped.Error, StringComparison.Ordinal);
+            Assert.Equal(firstHash, await OwnerScalarAsync<string>(owner, HashSql, ct));
+            Assert.Equal("viewer", await CurrentUserAsync(Login(owner, "viewer", first[1]), ct));
+            Assert.Equal(1L, await OwnerScalarAsync<long>(owner, MembershipSql, ct));
+
+            /* 3. Once the owner can act as the grantor, the guard passes, the revoke names the grantor, and no membership is left. */
+            await ExecAsync(owner, "GRANT darling TO byo", ct);
+            var third = new[] { "AdminPwGrantorR2c", "ViewerPwGrantorR2c", "McpPwGrantorR2c" };
+            var revoked = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, third, ct);
+            Assert.True(revoked.ExitCode == 0, $"psql exited {revoked.ExitCode} for an owner that can act as the grantor.{Environment.NewLine}{revoked.Error}");
+            Assert.NotEqual(firstHash, await OwnerScalarAsync<string>(owner, HashSql, ct));
+            Assert.Equal(0L, await OwnerScalarAsync<long>(owner, MembershipSql, ct));
+            Assert.False(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.pg_has_role('viewer', 'pg_read_all_data', 'MEMBER')", ct));
+            Assert.Equal("viewer", await CurrentUserAsync(Login(owner, "viewer", third[1]), ct));
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
     /// The other reasons a role that is not a superuser cannot change the roles, on any PostgreSQL version: it has no
     /// <c>CREATEROLE</c>, or one of the three roles is a superuser. Each used to fail at the <c>ALTER ROLE ... PASSWORD</c>
     /// lines and write the passwords to the server log while psql exited 0. Each now stops at the guard (exit 3), changes

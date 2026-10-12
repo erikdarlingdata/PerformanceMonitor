@@ -549,10 +549,63 @@ public sealed class DarlingStoreConnectionParseFailureTests
             Assert.Contains("DarlingStoreConnection.TryDescribeParseFailure(", text, StringComparison.Ordinal);
         }
 
+        /* The viewer's connection summary prints the host, so it asks the formatter first. */
+        var diagnostics = Read("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerConfigDiagnostics.cs");
+        Assert.Contains("DarlingStoreConnection.TryDescribeParseFailure(connectionString)", diagnostics, StringComparison.Ordinal);
+        Assert.True(
+            diagnostics.IndexOf("DarlingStoreConnection.TryDescribeParseFailure(", StringComparison.Ordinal)
+                < diagnostics.IndexOf("Line(\"Host\"", StringComparison.Ordinal),
+            "the summary must ask the formatter before it prints the Host.");
+
         var selfTest = Read("Darling", "PerformanceMonitor.Darling.Storage", "StoreConnectionSelfTest.cs");
         Assert.Contains("connection string did not parse: {DarlingStoreConnection.DescribeParseFailure(ex)}", selfTest, StringComparison.Ordinal);
         Assert.DoesNotContain("connection string did not parse: {ex.Message}", selfTest, StringComparison.Ordinal);
         Assert.Contains("DarlingStoreConnection.TryDescribeParseFailure(connectionString)", selfTest, StringComparison.Ordinal);
         Assert.Contains("connection string parsed but cannot be used: {unusable}", selfTest, StringComparison.Ordinal);
+    }
+
+    /// <summary>The viewer's connection summary (the log and the failure overlay) prints the Host of a string that
+    /// parses. For each fixture, whether it fails at the parse or later at construction, neither the summary nor the
+    /// whole block carries a fragment of the password.</summary>
+    [Theory]
+    [InlineData(StoreParseFailureFixtures.SemicolonInPassword)]
+    [InlineData(StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    [InlineData(StoreParseFailureFixtures.PortTailInHost)]
+    [InlineData(StoreParseFailureFixtures.NegativePortInHost)]
+    public void TheViewerConnectionSummary_CarriesNoFragmentOfTheString(string connectionString)
+    {
+        var summary = string.Join(Environment.NewLine, ViewerConfigDiagnostics.DescribeConnection(connectionString, managed: false));
+        StoreParseFailureFixtures.AssertNoFragment(summary, "the viewer's connection summary");
+
+        var location = ViewerSettings.ResolveConfigLocation(@"C:\Darling\darling.json");
+        var details = ViewerConfigDiagnostics.BuildDetails(location, connectionString, managed: false);
+        StoreParseFailureFixtures.AssertNoFragment(details, "the viewer's connection details");
+    }
+
+    /// <summary>A string that parses and fails at construction prints the formatter's text in the summary, and no Host line.</summary>
+    [Fact]
+    public void TheViewerConnectionSummary_SaysThePortTailStringCannotBeUsed_WithoutAHostLine()
+    {
+        var lines = ViewerConfigDiagnostics.DescribeConnection(StoreParseFailureFixtures.PortTailInHost, managed: false);
+        var summary = string.Join(Environment.NewLine, lines);
+
+        Assert.Contains("COULD NOT BE USED", summary, StringComparison.Ordinal);
+        Assert.DoesNotContain(lines, line => line.TrimStart().StartsWith("Host", StringComparison.Ordinal));
+    }
+
+    /// <summary>A string with no Host gets its own sentence, not the quoting hint, and the sentence holds no text of the string.</summary>
+    [Theory]
+    [InlineData("Username=darling;Password=Zq7Pw;Database=darlingtest")]
+    [InlineData("Host=;Username=darling;Password=Zq7Pw;Database=darlingtest")]
+    public void AStringWithNoHost_GetsItsOwnSentence_NotTheQuotingHint(string connectionString)
+    {
+        var text = DarlingStoreConnection.TryDescribeParseFailure(connectionString);
+
+        Assert.NotNull(text);
+        Assert.Contains("has no Host", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("must be quoted", text, StringComparison.Ordinal);
+        StoreParseFailureFixtures.AssertNoFragment(text!, "the missing-Host sentence");
+        Assert.DoesNotContain("Zq7Pw", text!, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("darlingtest", text!, StringComparison.OrdinalIgnoreCase);
     }
 }

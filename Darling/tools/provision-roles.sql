@@ -123,10 +123,11 @@
 --     BYPASSRLS), and a role membership the owner is not allowed to revoke stays. Step 1 prints a WARNING for
 --     each of those, so read psql's output.
 --   * Step 0 cannot turn off log_statement, log_min_duration_statement or log_min_error_statement for this session
---     unless the owner was granted SET on them (PostgreSQL 15 and later). Where log_statement is ddl, mod or all, or
---     log_min_duration_statement is 0 or more, the run's password lines are written to the server log: the script
---     prints a WARNING after step 0 when it sees either, and you should keep the passwords out of the lines, as in
---     BEFORE RUNNING above.
+--     unless the owner was granted SET on them (PostgreSQL 15 and later). Where log_statement is ddl, mod or all,
+--     log_min_duration_statement is 0 or more, log_transaction_sample_rate is above 0, log_min_duration_sample is 0 or
+--     more with log_statement_sample_rate above 0, or pgaudit.log covers the role class while pgaudit.log_statement is
+--     on, the run's password lines are written to the server log: the script prints a WARNING after step 0 when it
+--     sees any of them, and you should keep the passwords out of the lines, as in BEFORE RUNNING above.
 -- ============================================================================================
 
 -- 0. Keep this script's own role DDL out of pg_stat_statements (#3899). Step 1 sends each password as an
@@ -174,17 +175,33 @@ BEGIN
 END $$;
 
 --    What step 0 could not turn off is said here, before any password is sent: the role running the script was not
---    allowed to change the setting, so the run's password lines are written to the server log. This is a WARNING and
---    the run goes on, because the passwords may already be SCRAM-SHA-256 verifiers.
+--    allowed to change the setting, so the run's password lines are written to the server log. The settings are
+--    log_statement at ddl, mod or all, log_min_duration_statement at 0 or more, log_transaction_sample_rate above 0
+--    (every statement of a sampled transaction is logged), log_min_duration_sample at 0 or more with
+--    log_statement_sample_rate above 0, and pgaudit.log covering the role class (role or all, and not -role) while
+--    pgaudit.log_statement is on. This is a WARNING and the run goes on, because the passwords may already be
+--    SCRAM-SHA-256 verifiers.
 DO $$
 DECLARE
    logging_on text;
 BEGIN
-   SELECT string_agg(name || ' = ' || setting, ', ' ORDER BY name) INTO logging_on
+   SELECT string_agg(name || ' = ' || setting
+                     || CASE name
+                           WHEN 'log_min_duration_sample' THEN ' with log_statement_sample_rate = '
+                              || (SELECT sample.setting FROM pg_settings AS sample WHERE sample.name = 'log_statement_sample_rate')
+                           WHEN 'pgaudit.log' THEN ' with pgaudit.log_statement = on'
+                           ELSE ''
+                        END, ', ' ORDER BY name) INTO logging_on
    FROM pg_settings
    WHERE CASE name
             WHEN 'log_statement' THEN setting IN ('ddl', 'mod', 'all')
             WHEN 'log_min_duration_statement' THEN setting::bigint >= 0
+            WHEN 'log_transaction_sample_rate' THEN setting::numeric > 0
+            WHEN 'log_min_duration_sample' THEN setting::bigint >= 0
+               AND (SELECT sample.setting::numeric FROM pg_settings AS sample WHERE sample.name = 'log_statement_sample_rate') > 0
+            WHEN 'pgaudit.log' THEN (SELECT statement.setting FROM pg_settings AS statement WHERE statement.name = 'pgaudit.log_statement') = 'on'
+               AND (string_to_array(replace(lower(setting), ' ', ''), ',') && ARRAY['role', 'all'])
+               AND NOT ('-role' = ANY (string_to_array(replace(lower(setting), ' ', ''), ',')))
             ELSE false
          END;
    IF logging_on IS NOT NULL THEN
@@ -295,7 +312,9 @@ BEGIN
       -- or programs) is revoked after the passwords, and the block that revokes it can only warn when the role running
       -- this script lacks the right to. So the run stops here, before a password is sent, as it does when it cannot change
       -- the roles at all. From PostgreSQL 16 revoking needs ADMIN OPTION on the role the membership is in, and no role
-      -- holds that on itself; before 16 CREATEROLE is enough, except for a superuser role.
+      -- holds that on itself; it also removes only the row recorded with the grantor it names (the block that revokes
+      -- names the recorded one), so the role running this script must be able to act as that grantor, which it can
+      -- when it is, or inherits the privileges of, that role. Before 16 CREATEROLE is enough, except for a superuser role.
       SELECT string_agg(format('%I in %I', member.rolname, granted.rolname), ', ' ORDER BY member.rolname, granted.rolname)
       INTO unchangeable
       FROM pg_auth_members AS membership
@@ -312,6 +331,7 @@ BEGIN
              AND pg_has_role(granted.oid, voiding.oid, 'MEMBER'))
         AND NOT CASE WHEN current_setting('server_version_num')::int >= 160000
                      THEN pg_has_role(current_user, granted.oid, 'MEMBER WITH ADMIN OPTION')
+                          AND pg_has_role(current_user, membership.grantor, 'USAGE')
                      ELSE NOT granted.rolsuper END;
       IF unchangeable IS NOT NULL THEN
          RAISE EXCEPTION 'These roles are members of roles whose privileges outrank the grants below: %. The role running this script, %, cannot revoke those memberships. The script created and changed nothing. It stopped here before a password is sent, so that no role keeps privileges the carve does not hold back. Run this script again as a superuser, or have a superuser revoke those memberships first (from PostgreSQL 16 with GRANTED BY the grantor that recorded each one).', unchangeable, quote_ident(current_user);
@@ -380,6 +400,7 @@ DO $$
 DECLARE
    as_superuser boolean := (SELECT rolsuper FROM pg_roles WHERE rolname = current_user);
    item record;
+   remaining text;
 BEGIN
    FOR item IN
       SELECT granted.rolname AS granted, member.rolname AS member, grantor.rolname AS grantor
@@ -391,12 +412,33 @@ BEGIN
    LOOP
       BEGIN
          EXECUTE format('REVOKE %I FROM %I', item.granted, item.member)
-            || CASE WHEN as_superuser AND item.grantor IS NOT NULL THEN format(' GRANTED BY %I', item.grantor) ELSE '' END
+            || CASE WHEN (as_superuser OR current_setting('server_version_num')::int >= 160000) AND item.grantor IS NOT NULL
+                    THEN format(' GRANTED BY %I', item.grantor) ELSE '' END
             || ' CASCADE';
       EXCEPTION WHEN insufficient_privilege THEN
-         RAISE WARNING 'Role "%" is still a member of "%": revoking that needs a superuser, or ADMIN OPTION on "%".', item.member, item.granted, item.granted;
+         RAISE WARNING 'Role "%" is still a member of "%": revoking that needs a superuser, or ADMIN OPTION on "%" and the right to act as "%", the role that granted it.', item.member, item.granted, item.granted, item.grantor;
       END;
    END LOOP;
+   -- Nothing that outranks the grants below may be left. From PostgreSQL 16 a revoke removes only the row recorded
+   -- with the grantor it names and warns, without an error, when it finds none, so the memberships are read again
+   -- here and a voiding one that is still there stops the run (exit 3 under the stop above) before any grant.
+   SELECT string_agg(format('%I in %I', member.rolname, granted.rolname), ', ' ORDER BY member.rolname, granted.rolname)
+   INTO remaining
+   FROM pg_auth_members AS membership
+   JOIN pg_roles AS granted ON granted.oid = membership.roleid
+   JOIN pg_roles AS member ON member.oid = membership.member
+   WHERE member.rolname IN ('admin', 'viewer', 'mcp')
+     AND EXISTS (
+        SELECT 1
+        FROM pg_roles AS voiding
+        WHERE (voiding.rolsuper
+               OR voiding.rolbypassrls
+               OR voiding.oid IN ((SELECT oid FROM pg_roles WHERE rolname = current_user), (SELECT datdba FROM pg_database WHERE datname = current_database()))
+               OR voiding.rolname IN ('pg_read_all_data', 'pg_write_all_data', 'pg_read_server_files', 'pg_write_server_files', 'pg_execute_server_program'))
+          AND pg_has_role(granted.oid, voiding.oid, 'MEMBER'));
+   IF remaining IS NOT NULL THEN
+      RAISE EXCEPTION 'These roles are still members of roles whose privileges outrank the grants below: %. The run revoked every membership it could, and these remain, so it stopped before any grant. The passwords above were already set. Revoke them as a superuser (REVOKE <role> FROM <member> GRANTED BY <grantor>, as recorded in pg_auth_members), then run this script again.', remaining;
+   END IF;
 END $$;
 \set ON_ERROR_STOP :darling_saved_stop
 
