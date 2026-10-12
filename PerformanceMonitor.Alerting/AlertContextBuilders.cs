@@ -470,7 +470,9 @@ public static class AlertContextBuilders
     /// #5644 W1/W2: THE set of blocking events a blocking alert is made of, so the alert's value and its detail
     /// cannot disagree. Excluded databases drop their rows, the reports of one wait collapse to one row carrying
     /// the longest wait time (<see cref="BlockingWaits"/>), and the count is XE-preferred as Lite's overview has
-    /// always been: the blocked-process-report waits when there are any, else the DMV-snapshot waits. The alert
+    /// always been: the blocked-process-report waits when there are any, else the DMV-snapshot waits. "When there
+    /// are any" is judged on the rows BEFORE the excluded-database filter, so XE reports that exist only in
+    /// excluded databases yield an empty set rather than a fall back to DMV waits. The alert
     /// value is this set's <c>Count</c>; the card's "Blocking chain (xN)" groups are drawn from the same list, so
     /// the chain counts add up to the value.
     /// </summary>
@@ -478,6 +480,8 @@ public static class AlertContextBuilders
         IReadOnlyList<BlockedProcessAlertRow>? events, IReadOnlyList<string> excludedDatabases)
     {
         if (events == null || events.Count == 0) return Array.Empty<BlockedProcessAlertRow>();
+
+        var hasXeReports = events.Any(r => r.Source == BlockedProcessAlertRow.XeReportSource);
 
         var waits = BlockingWaits.Collapse(
             FilterBlocking(events, excludedDatabases),
@@ -487,8 +491,13 @@ public static class AlertContextBuilders
             r => r.EventTime,
             r => r.WaitTimeMs);
 
-        var xeWaits = waits.Where(r => r.Source == BlockedProcessAlertRow.XeReportSource).ToList();
-        return xeWaits.Count > 0 ? xeWaits : waits;
+        /* XE-or-DMV is decided on the UNFILTERED rows, as Lite's overview and the fleet tile do: if blocked-process
+           reports exist at all, they are the source, and when every one sits in an excluded database the answer
+           is empty. Deciding after the filter would fall back to the DMV snapshots there and fire an alert the
+           excluded-database rule means to suppress. */
+        return hasXeReports
+            ? waits.Where(r => r.Source == BlockedProcessAlertRow.XeReportSource).ToList()
+            : waits;
     }
 
     /* Excluded databases drop their rows; rows with no database always pass. Shared by the render path and

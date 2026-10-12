@@ -1205,9 +1205,11 @@ public sealed class AlertEngine
                    carries Lite's overview semantics (LocalDataService.Overview.cs:74-77): the XE
                    blocked-process-report waits when there are any, else the DMV-snapshot waits (AWS RDS /
                    unset blocked-process threshold), and the excluded-database filter (:118-127), whose rows
-                   with no database always pass. The old shape counted every row, then recounted outside the
-                   excluded set only once the raw count reached the threshold; filtering before counting
-                   gives the same fire decision and a watermark that tracks the filtered count throughout. */
+                   with no database always pass. The XE-or-DMV choice is made on the rows BEFORE the excluded
+                   filter, as before: XE reports that sit only in excluded databases count zero and
+                   do not fall back to DMV waits. The old shape counted every row, then recounted outside
+                   the excluded set only once the raw count reached the threshold; filtering before counting
+                   keeps that fire decision and gives a watermark that tracks the filtered count throughout. */
                 effectiveBlockingCount = AlertContextBuilders.BlockingWaitRows(blockingRows, excludedDatabases).Count;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
