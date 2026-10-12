@@ -351,9 +351,139 @@ public sealed class QueryStoreWatermarkReaderLiveTests
             var twin = await reader.ReadAsync(rig.Connection, serverId, "dbA", floor, RawSql, 60, ct);
             Assert.Equal((tied, T0.AddMinutes(10)), twin);
 
-            /* Every side row gone: nothing, never above raw. */
+            /* Every side row gone: the read is the raw read, NOT an empty answer (#5707). The caller maps null to now-60min and
+               records no backfill gap, so an empty answer where raw holds a value loses the rows between silently. */
             await ExecAsync(rig.Connection, "DELETE FROM collect.query_store_watermarks WHERE server_id = " + serverId.ToString(CultureInfo.InvariantCulture), ct);
-            Assert.Equal((null, null), await reader.ReadAsync(rig.Connection, serverId, "dbA", floor, RawSql, 60, ct));
+            Assert.Equal((T0.AddMinutes(45), T0.AddMinutes(30)), await reader.ReadAsync(rig.Connection, serverId, "dbA", floor, RawSql, 60, ct));
+            Assert.Equal(await RawAsync(rig.Connection, serverId, "dbA", floor, ct), await reader.ReadAsync(rig.Connection, serverId, "dbA", floor, RawSql, 60, ct));
+            Assert.Equal(2, reader.EmptySideReads);
+            Assert.Equal(0, reader.Fallbacks);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// The H1 variant (#5707, review round 1): pairs with raw rows but NO side row above the floor, after coverage (a downgrade to a
+    /// build that does not write them, an old instance still collecting, repeated savepoint faults, a manual cleanup). An empty
+    /// answer is not "lower": the caller turns null into now-60min and records no backfill gap. So at every floor a pair with no side
+    /// row equals the raw read, and a pair with only SOME side rows may be lower but is never above raw and is null only where raw
+    /// is null.
+    /// </summary>
+    [Fact]
+    public async Task APairWithRawRowsButNoSideRowsAfterCoverage_ReadsRaw_AndNeverAnswersEmptyWhereRawHasAValue()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -568471;
+
+        await using var rig = await Rig.OpenAsync(serverId, "qswm-5684-r7", ct);
+        var bodySucceeded = false;
+        try
+        {
+            var random = new Random(56841);
+            long id = 1;
+            var databases = new[] { "dbA", "dbB", "dbC" };
+            var values = Enumerable.Range(0, 6).Select(i => T0.AddMinutes(i * 7).AddTicks(10 * i)).ToArray();
+            for (var batch = 0; batch < 40; batch++)
+            {
+                var stamp = T0.AddMinutes(random.Next(0, 30) * 10);
+                var rows = new List<QueryStoreCollector.Row>();
+                foreach (var database in databases.Where(_ => random.Next(4) != 0))
+                {
+                    for (var n = random.Next(1, 5); n > 0; n--)
+                    {
+                        DateTime? last = random.Next(4) == 0 ? null : values[random.Next(values.Length)];
+                        rows.Add(Row(database, id, id + 1000, last));
+                        id++;
+                    }
+                }
+
+                await rig.WriteAsync(stamp, rows);
+            }
+
+            /* Every batch is after coverage. dbB has no side row at all; dbC lost every other 10-minute batch's. */
+            await SetCoverageAsync(rig.Connection, T0.AddMinutes(-120), ct);
+            await ExecAsync(rig.Connection, "DELETE FROM collect.query_store_watermarks WHERE database_name = 'dbB'", ct);
+            await ExecAsync(
+                rig.Connection,
+                "DELETE FROM collect.query_store_watermarks WHERE database_name = 'dbC' AND (extract(minute from collection_time)::int / 10) % 2 = 0", ct);
+
+            var reader = new QueryStoreWatermarkReader(null);
+            var floors = new List<DateTime> { T0.AddMinutes(-1), T0.AddMinutes(300) };
+            floors.AddRange(Enumerable.Range(0, 30).Select(i => T0.AddMinutes(i * 10)));
+            var rawHadValueWithoutSide = 0;
+            foreach (var database in databases.Append("dbMissing"))
+            {
+                foreach (var floor in floors)
+                {
+                    var expected = await RawAsync(rig.Connection, serverId, database, floor, ct);
+                    var actual = await reader.ReadAsync(rig.Connection, serverId, database, floor, RawSql, 60, ct);
+                    if (database != "dbC")
+                    {
+                        Assert.True(expected == actual, $"{database} floor {floor:o}: raw {Show(expected)} vs stitched {Show(actual)}");
+                    }
+
+                    Assert.True(actual.Value is null || (expected.Value is { } rawValue && actual.Value <= rawValue), $"{database} floor {floor:o}: raw {Show(expected)} vs stitched {Show(actual)}");
+                    Assert.True(actual.Value is not null || expected.Value is null, $"{database} floor {floor:o}: an empty answer where raw has {Show(expected)}");
+                    if (database == "dbB" && expected.Value is not null)
+                    {
+                        rawHadValueWithoutSide++;
+                    }
+                }
+            }
+
+            Assert.True(rawHadValueWithoutSide > 0);
+            Assert.True(reader.EmptySideReads >= rawHadValueWithoutSide);
+            Assert.Equal(0, reader.Fallbacks);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// An idle pair (no rows in side or raw) is normal, so the empty-side read is never a Warning; a pair whose side row is missing
+    /// but whose raw rows exist logs the throttled Warning once per hour (the data really is missing its side row).
+    /// </summary>
+    [Fact]
+    public async Task TheEmptySideRead_NeverWarnsForAnIdlePair_AndWarnsOncePerHourWhenRawHoldsRows()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -568472;
+
+        await using var rig = await Rig.OpenAsync(serverId, "qswm-5684-r8", ct);
+        var bodySucceeded = false;
+        try
+        {
+            await rig.WriteAsync(T0.AddMinutes(10), [Row("dbA", 1, 11, T0.AddMinutes(5))]);
+            await SetCoverageAsync(rig.Connection, T0.AddMinutes(-120), ct);
+            await ExecAsync(rig.Connection, "DELETE FROM collect.query_store_watermarks WHERE server_id = " + serverId.ToString(CultureInfo.InvariantCulture), ct);
+            var now = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+            var logger = new CapturingLogger();
+            var reader = new QueryStoreWatermarkReader(logger, () => now);
+            var floor = T0.AddMinutes(-60);
+
+            for (var i = 0; i < 3; i++)
+            {
+                Assert.Equal((null, null), await reader.ReadAsync(rig.Connection, serverId, "dbIdle", floor, RawSql, 60, ct));
+            }
+
+            Assert.Empty(logger.Warnings);
+            Assert.Equal(3, reader.EmptySideReads);
+
+            Assert.Equal((T0.AddMinutes(5), T0.AddMinutes(10)), await reader.ReadAsync(rig.Connection, serverId, "dbA", floor, RawSql, 60, ct));
+            Assert.Equal((T0.AddMinutes(5), T0.AddMinutes(10)), await reader.ReadAsync(rig.Connection, serverId, "dbA", floor, RawSql, 60, ct));
+            Assert.Single(logger.Warnings);
+            now = now.AddHours(1).AddSeconds(1);
+            await reader.ReadAsync(rig.Connection, serverId, "dbA", floor, RawSql, 60, ct);
+            Assert.Equal(2, logger.Warnings.Count);
             Assert.Equal(0, reader.Fallbacks);
             bodySucceeded = true;
         }
@@ -505,14 +635,30 @@ public sealed class QueryStoreWatermarkReaderLiveTests
     /// <c>idx_query_store_stats_server_db_query_plan_time</c> with no sequential or bitmap scan, and together they touch a small
     /// fraction of the buffers the raw read does.
     /// </summary>
-    [Fact]
-    public async Task AfterCoverage_TheReadTouchesTheSideTableAndOneRawIndexProbe_NoRawRangeScan()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AfterCoverage_TheReadTouchesTheSideTableAndOneRawIndexProbe_NoRawRangeScan(bool hypertable)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        const int serverId = -568461;
+        var serverId = hypertable ? -568462 : -568461;
 
-        await using var rig = await Rig.OpenAsync(serverId, "qswm-5684-r6", ct);
+        await using var rig = await Rig.OpenAsync(serverId, "qswm-5684-r6" + (hypertable ? "h" : "p"), ct);
+        if (hypertable)
+        {
+            /* #5707: the production shape. query_store_stats a TimescaleDB hypertable with a COMPRESSED chunk (an old batch), so the
+               plan names chunk indexes (_hyper_N_M_chunk_idx_...) and the read has to exclude the compressed chunk. */
+            Assert.SkipWhen(!await LiveTimescaleProbe.TryEnableAsync(rig.Scratch.ConnectionString, ct), "TimescaleDB is not available on this server.");
+            await TimescaleSupport.ConvertToHypertablesAsync(rig.Connection, null, ct);
+            await ExecAsync(rig.Connection, TimescaleSupport.EnableCompressionSql("collect.query_store_stats"), ct);
+            await rig.WriteAsync(T0.AddDays(-30), [Row("dbBig", -1, -2, T0.AddDays(-30)), Row("dbBig", -3, -4, T0.AddDays(-30))]);
+            await ExecAsync(rig.Connection, "SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks('collect.query_store_stats', older_than => " + Stamp(T0.AddDays(-10)) + ") AS c", ct);
+            Assert.True(
+                await CountAsync(rig.Connection, "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name = 'query_store_stats' AND is_compressed", ct) > 0,
+                "the old chunk must be compressed");
+        }
+
         var bodySucceeded = false;
         try
         {
@@ -546,7 +692,7 @@ public sealed class QueryStoreWatermarkReaderLiveTests
             await ExecAsync(rig.Connection, "ANALYZE collect.query_store_stats", ct);
             await ExecAsync(rig.Connection, "ANALYZE collect.query_store_watermarks", ct);
             Assert.True(await CountAsync(rig.Connection, "SELECT count(*) FROM collect.query_store_stats WHERE database_name = 'dbBig'", ct) >= 30000);
-            Assert.Equal(36L, await CountAsync(rig.Connection, "SELECT count(*) FROM collect.query_store_watermarks WHERE database_name = 'dbBig'", ct));
+            Assert.Equal(hypertable ? 37L : 36L, await CountAsync(rig.Connection, "SELECT count(*) FROM collect.query_store_watermarks WHERE database_name = 'dbBig'", ct));
 
             var floor = T0.AddMinutes(-30);
             var rawPlan = await ExplainAsync(rig.Connection, Literal(RawSql, serverId, "dbBig", floor), ct);
@@ -573,10 +719,13 @@ public sealed class QueryStoreWatermarkReaderLiveTests
 
             Assert.DoesNotContain("query_store_stats", sidePlan, StringComparison.Ordinal);
             Assert.Contains("query_store_watermarks", sidePlan, StringComparison.Ordinal);
-            Assert.True(verifyPlan.Contains("idx_query_store_stats_server_db_query_plan_time", StringComparison.Ordinal), verifyPlan);
+            /* The index's name up to "_ti": a hypertable chunk's index is _hyper_N_M_chunk_ + the name, cut to PostgreSQL's 63 bytes, which
+               loses the tail of "_time" (#5707). The prefix is unique to this index and matches both the plain and the chunk name. */
+            const string IndexPrefix = "idx_query_store_stats_server_db_query_plan_ti";
+            Assert.True(verifyPlan.Contains(IndexPrefix, StringComparison.Ordinal), verifyPlan);
             Assert.DoesNotContain("Seq Scan", verifyPlan, StringComparison.Ordinal);
             Assert.DoesNotContain("Bitmap", verifyPlan, StringComparison.Ordinal);
-            Assert.Single(Regex.Matches(verifyPlan, @"Index (Only )?Scan using idx_query_store_stats_server_db_query_plan_time"));
+            Assert.Single(Regex.Matches(verifyPlan, @"Index (Only )?Scan using \S*" + IndexPrefix));
             Assert.Matches(@"rows=1\b", verifyPlan);
 
             var rawBuffers = TopBuffers(rawPlan);
@@ -587,6 +736,20 @@ public sealed class QueryStoreWatermarkReaderLiveTests
             Assert.Equal((maxValue, maxStamp), await reader.ReadAsync(rig.Connection, serverId, "dbBig", floor, RawSql, 60, ct));
             Assert.Equal(await RawAsync(rig.Connection, serverId, "dbBig", floor, ct), (maxValue, maxStamp));
             Assert.Equal(0, reader.PreCoverageReads);
+
+            /* The empty-side read (#5707): a database with no side row above the floor runs the full raw read. For an INACTIVE
+               database that must stay cheap: an index range read of that pair (an index condition on server_id and database_name),
+               no sequential or bitmap scan, and a small fraction of the busy pair's buffers. */
+            var idlePlan = await ExplainAsync(rig.Connection, Literal(RawSql, serverId, "dbIdle", floor), ct);
+            Assert.Matches(@"Index (Only )?Scan (Backward )?using \S*idx_query_store_stats_\S+", idlePlan);
+            Assert.DoesNotContain("Seq Scan", idlePlan, StringComparison.Ordinal);
+            Assert.DoesNotContain("Bitmap", idlePlan, StringComparison.Ordinal);
+            Assert.True(idlePlan.Contains("database_name = 'dbIdle'", StringComparison.Ordinal), idlePlan);
+            Assert.Matches(@"rows=0\b", idlePlan);
+            Assert.True(TopBuffers(idlePlan) * 20 < rawBuffers, $"idle raw read {TopBuffers(idlePlan)} buffers vs busy raw {rawBuffers}\n{idlePlan}");
+            Assert.Equal((null, null), await reader.ReadAsync(rig.Connection, serverId, "dbIdle", floor, RawSql, 60, ct));
+            Assert.Equal(1, reader.EmptySideReads);
+            Assert.Equal(0, reader.Fallbacks);
             bodySucceeded = true;
         }
         finally

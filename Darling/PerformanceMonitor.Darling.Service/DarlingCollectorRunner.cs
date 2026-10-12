@@ -4721,12 +4721,15 @@ public sealed class DarlingCollectorRunner
 
                 /* #5684: the batch's per-database watermark rows, after the COPY and the interval applies, on THIS transaction behind
                    QueryStoreWatermarks.SavepointName. A fault rolls back to the savepoint and is logged; raw commits either way, and
-                   the missing side row can only lower a reader's answer (the reader treats a pair with no recent side rows as having
-                   no watermark to trust, never a higher one). A batch of 0 rows reads back nothing and writes nothing. */
+                   the missing side row can only lower a reader's answer (a pair with no side row above the floor reads raw). The rows
+                   are summarised in memory per database: the COPY above is a straight binary import, so every row of the batch is in
+                   raw once this transaction commits, and no read-back of the shared collection_time is needed (#5707). A batch of 0
+                   rows writes nothing. */
                 if (watermarkBatch && rowsWritten > 0)
                 {
                     await QueryStoreWatermarks.TryUpsertBatchAsync(
                         pgConnection, transaction, server.ServerId, storedCollectionTime,
+                        rows.OfType<QueryStoreCollector.Row>().Select(static r => new QueryStoreWatermarks.BatchRow(r.DatabaseName, r.QueryId, r.PlanId, r.LastExecutionTime)),
                         ServiceCommandDeadlines.CollectionSweepSeconds, _logger, cancellationToken);
                 }
 
@@ -4866,9 +4869,6 @@ public sealed class DarlingCollectorRunner
             ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3"
             : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2";
 
-    /// <summary>The leading comment of the Query Store seed read (#5684): the tests that count seed reads match on it.</summary>
-    internal const string QueryStoreWatermarkSeedMarker = "/* pm:qs-watermark-seed */";
-
     /// <summary>
     /// The per-database watermark SQL for the Query Store cache's seed read (#4749): the bounded value, plus its
     /// witness, which is the newest <c>collection_time</c> among the rows AT that value inside the bound. Same
@@ -4880,11 +4880,11 @@ public sealed class DarlingCollectorRunner
     /// <c>MAX</c> ignoring NULLs (PostgreSQL sorts NULLs FIRST in a descending sort, so without it a NULL row would
     /// win). An empty window and an all-NULL window return NO row where the old text returned one row of NULLs;
     /// <see cref="ReadLastCollectedTimeAndWitnessForDatabaseAsync"/> reads both as (null, null, succeeded). The
-    /// leading <see cref="QueryStoreWatermarkSeedMarker"/> is what the read-counting tests match. Exposed for the
+    /// leading <see cref="QueryStoreWatermarkReader.SeedMarker"/> (the one copy of the marker, #5707) is what the read-counting tests match. Exposed for the
     /// same reason as its siblings, so a pin asserts the SHIPPED string.</para>
     /// </summary>
     internal static string BuildServerWatermarkWithWitnessForDatabaseSql(string tableName, string columnName, string databaseColumnName) =>
-        $"{QueryStoreWatermarkSeedMarker} SELECT {columnName}, collection_time FROM {tableName} "
+        $"{QueryStoreWatermarkReader.SeedMarker} SELECT {columnName}, collection_time FROM {tableName} "
         + $"WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3 "
         + $"AND {columnName} IS NOT NULL "
         + $"ORDER BY {columnName} DESC, collection_time DESC LIMIT 1";

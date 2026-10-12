@@ -839,7 +839,8 @@ public class ServerWatermarkReadFloorTests
             + "AND last_execution_time IS NOT NULL "
             + "ORDER BY last_execution_time DESC, collection_time DESC LIMIT 1",
             sql);
-        Assert.Equal("/* pm:qs-watermark-seed */", DarlingCollectorRunner.QueryStoreWatermarkSeedMarker);
+        Assert.Equal("/* pm:qs-watermark-seed */", QueryStoreWatermarkReader.SeedMarker);
+        Assert.StartsWith(QueryStoreWatermarkReader.SeedMarker, sql, StringComparison.Ordinal);
         /* One scan: no MAX, and the predicates appear once. */
         Assert.DoesNotContain("MAX(", sql, StringComparison.Ordinal);
         Assert.Equal(1, sql.Split("server_id = $1").Length - 1);

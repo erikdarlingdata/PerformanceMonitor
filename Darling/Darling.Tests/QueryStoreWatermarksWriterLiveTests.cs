@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -401,10 +402,16 @@ public sealed class QueryStoreWatermarksWriterLiveTests
                 + " VALUES ((SELECT coalesce(max(collection_id), 0) + 1 FROM collect.query_store_stats), " + serverId.ToString(CultureInfo.InvariantCulture) + ", 'qswm-5684-f', " + Stamp(T0.AddMinutes(1)) + ", NULL, 5, 6, " + Stamp(T0.AddDays(1)) + ")",
                 ct);
 
-            await using var upsert = new NpgsqlCommand(QueryStoreWatermarks.UpsertSql, rig.Connection);
-            upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = serverId });
-            upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = T0.AddMinutes(1) });
-            await upsert.ExecuteNonQueryAsync(ct);
+            /* The statement is fed from the batch's own rows now: a row with a NULL database name is dropped by Summarize, and the
+               statement's own IS NOT NULL guard is the second line. */
+            await using (var transaction = await rig.Connection.BeginTransactionAsync(ct))
+            {
+                Assert.True(await QueryStoreWatermarks.TryUpsertBatchAsync(
+                    rig.Connection, transaction, serverId, T0.AddMinutes(1),
+                    [new QueryStoreWatermarks.BatchRow("dbA", 1, 11, T0), new QueryStoreWatermarks.BatchRow(null, 5, 6, T0.AddDays(1))],
+                    30, null, ct));
+                await transaction.CommitAsync(ct);
+            }
 
             Assert.Equal("dbA|" + At(T0) + "|1|11\n", await SideRowsAsync(rig.Connection, serverId, T0.AddMinutes(1), ct));
             Assert.Equal(1L, await CountAsync(rig.Connection, "SELECT count(*) FROM collect.query_store_watermarks WHERE server_id = " + serverId.ToString(CultureInfo.InvariantCulture), ct));
@@ -501,12 +508,15 @@ public sealed class QueryStoreWatermarksWriterLiveTests
     }
 
     /// <summary>
-    /// The read-back is served by an index of query_store_stats on server_id and collection_time (functional check with seq scans off;
-    /// no timing is claimed) - the same shape pin the procedure totals writer carries - and the statement's whole plan reads the raw table
-    /// only through an index, never by scanning it.
+    /// The write reads NOTHING from the raw table (#5707, review round 1): the first version re-read every raw row at the shared
+    /// (server_id, collection_time), so database k's upsert cost grew with k and the fan-out's total with its square. The statement
+    /// that remains is an unnest of the batch's own arrays inserted into the side table. This pin runs EXPLAIN with the planner's
+    /// defaults on a side table of a realistic size (a day of 40 databases every minute, analyzed) and asserts the raw table does
+    /// not appear in the plan at all and the conflict is arbitrated by the primary key. It fails the day someone puts a read of
+    /// <c>query_store_stats</c> back, whichever scan the planner would pick for it.
     /// </summary>
     [Fact]
-    public async Task TheReadBack_IsServedByAnIndexOfTheRawTable()
+    public async Task TheUpsert_ReadsNoRawRows_AndArbitratesItsConflictOnThePrimaryKey()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
@@ -516,12 +526,20 @@ public sealed class QueryStoreWatermarksWriterLiveTests
         var bodySucceeded = false;
         try
         {
-            await rig.WriteAsync(T0.AddMinutes(1), Row("dbA", 1, 11, T0), Row("dbB", 2, 22, T0.AddMinutes(1)));
+            await ExecAsync(
+                rig.Connection,
+                "INSERT INTO collect.query_store_watermarks (server_id, database_name, collection_time, batch_max, max_query_id, max_plan_id)"
+                + " SELECT " + serverId.ToString(CultureInfo.InvariantCulture) + ", 'db' || d, " + Stamp(T0) + " + make_interval(mins => m), " + Stamp(T0) + ", 1, 1"
+                + " FROM generate_series(1, 40) AS d, generate_series(1, 1440) AS m; ANALYZE collect.query_store_watermarks; ANALYZE collect.query_store_stats;",
+                ct);
 
-            await ExecAsync(rig.Connection, "SET enable_seqscan = off", ct);
             var statement = QueryStoreWatermarks.UpsertSql
                 .Replace("$1::integer", serverId.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
-                .Replace("$2::timestamp", Stamp(T0.AddMinutes(1)), StringComparison.Ordinal);
+                .Replace("$2::timestamp", Stamp(T0.AddMinutes(2000)), StringComparison.Ordinal)
+                .Replace("$3::text[]", "ARRAY['db1','db2']", StringComparison.Ordinal)
+                .Replace("$4::timestamp[]", "ARRAY[" + Stamp(T0) + "," + Stamp(T0) + "]", StringComparison.Ordinal)
+                .Replace("$5::bigint[]", "ARRAY[1,2]::bigint[]", StringComparison.Ordinal)
+                .Replace("$6::bigint[]", "ARRAY[1,2]::bigint[]", StringComparison.Ordinal);
             var plan = new StringBuilder();
             await using (var explain = new NpgsqlCommand("EXPLAIN " + statement, rig.Connection))
             await using (var reader = await explain.ExecuteReaderAsync(ct))
@@ -532,11 +550,9 @@ public sealed class QueryStoreWatermarksWriterLiveTests
                 }
             }
 
-            await ExecAsync(rig.Connection, "RESET enable_seqscan", ct);
-
             var text = plan.ToString();
-            Assert.Contains("Index", text, StringComparison.Ordinal);
-            Assert.DoesNotContain("Seq Scan on", text.Replace("Seq Scan on query_store_watermarks", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
+            Assert.DoesNotContain("query_store_stats", text, StringComparison.Ordinal);
+            Assert.Contains("Conflict Arbiter Indexes: " + QueryStoreWatermarks.KeyConstraintName, text, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
@@ -544,5 +560,144 @@ public sealed class QueryStoreWatermarksWriterLiveTests
         {
             await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
         }
+    }
+
+    /// <summary>
+    /// The fan-out shape (#5707): k databases, k batches, ONE shared collection_time, as the enumerated and Azure paths write them.
+    /// Each batch touches only its own database's side row. The proof is the row lock: <c>ON CONFLICT DO UPDATE</c> stamps xmax on a
+    /// conflicting row even when its WHERE is false, so the first version (which re-upserted every earlier database at the stamp)
+    /// left a non-zero xmax on database 1 once database 2 was written. Here every side row keeps xmax 0 after all k batches.
+    /// The values still equal the raw GROUP BY oracle, sub-microsecond ticks included (the in-memory maximum is floored like the
+    /// stored one).
+    /// </summary>
+    [Fact]
+    public async Task KDatabasesInKBatchesAtOneStamp_EachBatchTouchesOnlyItsOwnSideRow()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -568410;
+
+        await using var rig = await Rig.OpenAsync(serverId, "qswm-5684-j", ct);
+        var bodySucceeded = false;
+        try
+        {
+            var stamp = T0.AddMinutes(10);
+            const int databases = 6;
+            for (var i = 1; i <= databases; i++)
+            {
+                var last = T0.AddMinutes(i).AddTicks(1237);
+                await rig.WriteAsync(stamp, Row("db" + i.ToString(CultureInfo.InvariantCulture), i, i * 10, last), Row("db" + i.ToString(CultureInfo.InvariantCulture), i + 100, i * 10 + 1, T0));
+            }
+
+            Assert.Equal(databases, await CountAsync(rig.Connection, "SELECT count(*) FROM collect.query_store_watermarks WHERE server_id = " + serverId.ToString(CultureInfo.InvariantCulture), ct));
+            Assert.Equal(0L, await CountAsync(
+                rig.Connection,
+                "SELECT count(*) FROM collect.query_store_watermarks WHERE server_id = " + serverId.ToString(CultureInfo.InvariantCulture) + " AND xmax::text <> '0'", ct));
+
+            /* The oracle: the side value is the raw GROUP BY maximum per database, and the ids name a raw row that holds it. */
+            Assert.Equal(0L, await CountAsync(
+                rig.Connection,
+                "SELECT count(*) FROM (SELECT database_name, max(last_execution_time) m FROM collect.query_store_stats WHERE server_id = " + serverId.ToString(CultureInfo.InvariantCulture)
+                + " GROUP BY database_name) r FULL JOIN collect.query_store_watermarks w ON w.database_name = r.database_name AND w.server_id = " + serverId.ToString(CultureInfo.InvariantCulture)
+                + " WHERE r.m IS DISTINCT FROM w.batch_max", ct));
+            Assert.Equal(0L, await CountAsync(
+                rig.Connection,
+                "SELECT count(*) FROM collect.query_store_watermarks w WHERE w.batch_max IS NOT NULL AND NOT EXISTS (SELECT 1 FROM collect.query_store_stats s"
+                + " WHERE s.server_id = w.server_id AND s.database_name = w.database_name AND s.collection_time = w.collection_time AND s.query_id = w.max_query_id"
+                + " AND s.plan_id = w.max_plan_id AND s.last_execution_time = w.batch_max)", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// A persistent side-write fault warns once per server per hour, not once per batch (#5707): a refusing trigger makes every batch
+    /// fail its side write; three batches in a minute log ONE Warning (the rest Debug), a batch of another server warns on its own,
+    /// and a batch an hour later warns again. The raw rows commit every time.
+    /// </summary>
+    [Fact]
+    public async Task APersistentSideWriteFault_WarnsOncePerServerPerHour()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -568411;
+        const int otherServerId = -568412;
+
+        await using var rig = await Rig.OpenAsync(serverId, "qswm-5684-k", ct);
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(
+                rig.Connection,
+                "CREATE FUNCTION collect.qswm_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'side write refused' USING ERRCODE = 'P0001'; END $$;"
+                + "CREATE TRIGGER trg_qswm_refuse BEFORE INSERT OR UPDATE ON collect.query_store_watermarks FOR EACH ROW EXECUTE FUNCTION collect.qswm_refuse();",
+                ct);
+
+            var logger = new CapturingTestLogger();
+            var clock = new DateTime(2026, 3, 1, 12, 0, 0, DateTimeKind.Utc);
+            var rows = new[] { new QueryStoreWatermarks.BatchRow("dbA", 1, 11, T0) };
+
+            async Task<bool> WriteOneAsync(int server)
+            {
+                await using var transaction = await rig.Connection.BeginTransactionAsync(ct);
+                var ran = await QueryStoreWatermarks.TryUpsertBatchAsync(
+                    rig.Connection, transaction, server, T0.AddMinutes(1), rows, 30, logger, ct, () => clock);
+                await transaction.CommitAsync(ct);
+                return ran;
+            }
+
+            Assert.False(await WriteOneAsync(serverId));
+            clock = clock.AddSeconds(20);
+            Assert.False(await WriteOneAsync(serverId));
+            clock = clock.AddSeconds(20);
+            Assert.False(await WriteOneAsync(serverId));
+            Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+            Assert.Equal(2, logger.CountAtLevel(LogLevel.Debug));
+
+            Assert.False(await WriteOneAsync(otherServerId));
+            Assert.Equal(2, logger.CountAtLevel(LogLevel.Warning));
+
+            clock = clock.AddMinutes(61);
+            Assert.False(await WriteOneAsync(serverId));
+            Assert.Equal(3, logger.CountAtLevel(LogLevel.Warning));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// Summarize is the whole of the write's arithmetic now, so it is pinned without a database: the highest value per database
+    /// (floored to the microsecond), the lowest (query_id, plan_id) among rows at it, a NULL never beating a value, an all-NULL
+    /// database kept with NULL ids, a NULL database dropped, and the result in database order.
+    /// </summary>
+    [Fact]
+    public void Summarize_TakesEachDatabasesMaximum_FlooredToTheMicrosecond_WithTheLowestIdsAtIt()
+    {
+        var high = T0.AddMinutes(5).AddTicks(1237);
+        var summary = QueryStoreWatermarks.Summarize(
+        [
+            new QueryStoreWatermarks.BatchRow("dbB", 9, 91, high),
+            new QueryStoreWatermarks.BatchRow("dbA", 1, 11, T0.AddMinutes(1)),
+            new QueryStoreWatermarks.BatchRow("dbA", 2, 22, null),
+            new QueryStoreWatermarks.BatchRow("dbB", 8, 82, high.AddTicks(-17)),
+            new QueryStoreWatermarks.BatchRow("dbB", 7, 99, high.AddTicks(-1)),
+            new QueryStoreWatermarks.BatchRow("dbC", 5, 55, null),
+            new QueryStoreWatermarks.BatchRow(null, 6, 66, high),
+            new QueryStoreWatermarks.BatchRow("dbA", 3, 30, T0.AddMinutes(1)),
+        ]);
+
+        var flooredHigh = T0.AddMinutes(5).AddTicks(1230);
+        Assert.Equal(3, summary.Count);
+        Assert.Equal(new QueryStoreWatermarks.DatabaseMax("dbA", T0.AddMinutes(1), 1, 11), summary[0]);
+        Assert.Equal(new QueryStoreWatermarks.DatabaseMax("dbB", flooredHigh, 7, 99), summary[1]);
+        Assert.Equal(new QueryStoreWatermarks.DatabaseMax("dbC", null, null, null), summary[2]);
     }
 }

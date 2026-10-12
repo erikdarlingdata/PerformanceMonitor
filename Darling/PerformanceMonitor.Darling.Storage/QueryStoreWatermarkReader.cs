@@ -35,8 +35,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>(floor, covered_since)</c>. Once the floor passes the coverage start it never runs. The two arms combine by the larger value,
 /// then the larger <c>collection_time</c>; an overlap is harmless because both come from stored rows.</item>
 /// </list>
-/// A missing side row (a savepoint fault, a build that did not write one) only lowers the answer. A store with no side tables
-/// (SQLSTATE 42P01) reads raw.
+/// A missing side row (a savepoint fault, a build that did not write one) only lowers the answer, with ONE exception: a read
+/// that comes back EMPTY. The caller maps a null watermark to "now minus 60 minutes" AND records no backfill gap (the gap is
+/// recorded only when a non-null watermark is clamped), so an empty answer where raw holds a value loses the rows in between
+/// silently. A pair with no side row above the floor therefore runs the full raw read (#5707, review round 1). A store with no
+/// side tables (SQLSTATE 42P01) reads raw.
 /// </summary>
 public sealed class QueryStoreWatermarkReader
 {
@@ -51,6 +54,13 @@ public sealed class QueryStoreWatermarkReader
 
     /// <summary>The leading comment of the full raw read the verification falls back to.</summary>
     public const string FallbackMarker = "/* pm:qs-watermark-fallback */";
+
+    /// <summary>
+    /// The leading comment of the full raw read an EMPTY side answer runs (#5707): the pair has no side row above the floor (an
+    /// idle database, a build that did not write one, a downgrade). Its own marker, so it counts neither as a seed read nor as a
+    /// verification fallback.
+    /// </summary>
+    public const string EmptySideMarker = "/* pm:qs-watermark-empty-side */";
 
     /// <summary>How often a pair's fallback is logged: once in this window per (server, database).</summary>
     public static readonly TimeSpan FallbackLogInterval = TimeSpan.FromHours(1);
@@ -89,6 +99,7 @@ public sealed class QueryStoreWatermarkReader
     private readonly ConcurrentDictionary<(int ServerId, string Database), DateTime> _fallbackLoggedAt = new();
     private long _fallbacks;
     private long _preCoverageReads;
+    private long _emptySideReads;
 
     /// <summary>Creates the reader. <paramref name="utcNow"/> is the clock the fallback log throttle uses (tests pass their own).</summary>
     public QueryStoreWatermarkReader(ILogger? logger, Func<DateTime>? utcNow = null)
@@ -102,6 +113,12 @@ public sealed class QueryStoreWatermarkReader
 
     /// <summary>How many times the raw arm over the window before <c>covered_since</c> ran.</summary>
     public long PreCoverageReads => Interlocked.Read(ref _preCoverageReads);
+
+    /// <summary>
+    /// How many reads found NO side row above the floor and ran the full raw read instead of answering empty (#5707). An idle
+    /// database lands here once per seed, which is normal; it is counted apart from <see cref="Fallbacks"/>.
+    /// </summary>
+    public long EmptySideReads => Interlocked.Read(ref _emptySideReads);
 
     /// <summary>
     /// Reads the (value, witness) pair. <paramref name="fullRawSql"/> is the full raw read (<c>$1</c> server, <c>$2</c> database,
@@ -186,7 +203,36 @@ public sealed class QueryStoreWatermarkReader
             }
         }
 
+        if (best.Value is null)
+        {
+            /* An empty answer is NOT "lower": the caller turns null into now-60min and records no backfill gap, so rows between
+               the pair's real maximum and that instant would never be collected (#5707). Ask raw. For a truly idle pair this
+               is an index range read of the pair's last three hours, which holds no rows. */
+            return await EmptySideAsync(connection, serverId, database, naiveFloor, fullRawSql, commandTimeoutSeconds, cancellationToken);
+        }
+
         return best;
+    }
+
+    private async Task<(DateTime? Value, DateTime? Witness)> EmptySideAsync(
+        NpgsqlConnection connection, int serverId, string database, DateTime floor, string fullRawSql,
+        int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _emptySideReads);
+        var result = await RunRawAsync(connection, serverId, database, floor, fullRawSql, EmptySideMarker, commandTimeoutSeconds, cancellationToken);
+        if (result.Value is null)
+        {
+            /* An idle database: nothing in side, nothing in raw. Normal, so never a Warning. */
+            _logger?.LogDebug(
+                "Query Store watermark side table (#5684): server {ServerId} database {Database} has no rows after the floor in side or raw",
+                serverId, database);
+        }
+        else
+        {
+            LogFallbackOncePerHour(serverId, database, "no side row above the floor, but raw holds rows");
+        }
+
+        return result;
     }
 
     private static async Task<bool> IsVerifiedAsync(
@@ -213,6 +259,14 @@ public sealed class QueryStoreWatermarkReader
         int commandTimeoutSeconds, string reason, CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _fallbacks);
+        LogFallbackOncePerHour(serverId, database, reason);
+
+        /* The fallback carries its own marker so a seed read counts once. */
+        return await RunRawAsync(connection, serverId, database, floor, fullRawSql, FallbackMarker, commandTimeoutSeconds, cancellationToken);
+    }
+
+    private void LogFallbackOncePerHour(int serverId, string database, string reason)
+    {
         var now = _utcNow();
         var key = (serverId, database);
         var due = !_fallbackLoggedAt.TryGetValue(key, out var last) || now - last >= FallbackLogInterval;
@@ -223,9 +277,13 @@ public sealed class QueryStoreWatermarkReader
                 "Query Store watermark side table (#5684): the read for server {ServerId} database {Database} fell back to the full raw read ({Reason}); logged once per pair per hour",
                 serverId, database, reason);
         }
+    }
 
-        /* The fallback carries its own marker so a seed read counts once. */
-        var sql = fullRawSql.Replace(SeedMarker, FallbackMarker, StringComparison.Ordinal);
+    private static async Task<(DateTime? Value, DateTime? Witness)> RunRawAsync(
+        NpgsqlConnection connection, int serverId, string database, DateTime floor, string fullRawSql, string marker,
+        int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var sql = fullRawSql.Replace(SeedMarker, marker, StringComparison.Ordinal);
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = commandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(database);

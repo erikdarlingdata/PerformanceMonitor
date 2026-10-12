@@ -46,7 +46,8 @@ public sealed class QueryStoreWatermarkReaderSqlPinTests
     {
         Assert.Contains("AND batch_max IS NOT NULL ORDER BY batch_max DESC, collection_time DESC LIMIT 1", QueryStoreWatermarkReader.SideSql, StringComparison.Ordinal);
         Assert.StartsWith("/* pm:qs-watermark-seed */", QueryStoreWatermarkReader.SideSql, StringComparison.Ordinal);
-        Assert.Equal(DarlingCollectorRunner.QueryStoreWatermarkSeedMarker, QueryStoreWatermarkReader.SeedMarker);
+        /* #5707: the marker has ONE definition (QueryStoreWatermarkReader.SeedMarker); the runner builds its raw read from it. */
+        Assert.StartsWith(QueryStoreWatermarkReader.SeedMarker, DarlingCollectorRunner.BuildServerWatermarkWithWitnessForDatabaseSql("t", "c", "d"), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -69,6 +70,7 @@ public sealed class QueryStoreWatermarkReaderSqlPinTests
         {
             QueryStoreWatermarkReader.SeedMarker, QueryStoreWatermarkReader.VerifyMarker,
             QueryStoreWatermarkReader.PreCoverageMarker, QueryStoreWatermarkReader.FallbackMarker,
+            QueryStoreWatermarkReader.EmptySideMarker,
         };
         Assert.Equal(markers.Length, new HashSet<string>(markers).Count);
 
@@ -76,6 +78,7 @@ public sealed class QueryStoreWatermarkReaderSqlPinTests
         Assert.DoesNotContain("pm:qs-watermark-seed", QueryStoreWatermarkReader.PreCoverageSql, StringComparison.Ordinal);
         Assert.DoesNotContain("pm:qs-watermark-seed", QueryStoreWatermarkReader.VerifySql, StringComparison.Ordinal);
         Assert.DoesNotContain("pm:qs-watermark-seed", QueryStoreWatermarkReader.FallbackMarker, StringComparison.Ordinal);
+        Assert.DoesNotContain("pm:qs-watermark-seed", QueryStoreWatermarkReader.EmptySideMarker, StringComparison.Ordinal);
     }
 
     [Fact]
