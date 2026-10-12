@@ -299,8 +299,9 @@ ORDER BY worker_ratio DESC";
     /// no fact when Query Store is not enabled on the monitored databases.
     /// Unlike other collectors this windows on last_execution_time (14-day comparison
     /// window), NOT collection_time — see plan note.
-    /// #5630: a candidate whose statement carries OPTION (RECOMPILE), or whose two plans were compiled for
-    /// different parameter values, is dropped before the fact (<see cref="VerifyPlanRegressionInputsAsync"/>).
+    /// #5630/#5631: a candidate whose statement carries OPTION (RECOMPILE), whose newer plan only returns more rows,
+    /// or whose two plans differ in compiled values alone, is dropped before the fact
+    /// (<see cref="VerifyPlanRegressionInputsAsync"/>).
     /// </summary>
     private async Task CollectPlanRegressionFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -341,6 +342,8 @@ WITH deduped AS
         execution_count,
         avg_cpu_time_us,
         avg_duration_us,
+        -- #5631: appended to the dedup's columns; feeds rows per call below.
+        avg_rowcount,
         last_execution_time,
         is_forced_plan,
         force_failure_count,
@@ -374,7 +377,13 @@ plan_agg AS
         MAX(last_execution_time) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count,
-        any_value(query_text) AS query_text
+        any_value(query_text) AS query_text,
+        -- #5631: rows returned per call, weighted by executions over the same deduplicated intervals as
+        -- cpu_per_exec. NULL when any interval has no avg_rowcount: a partial average would understate the
+        -- output, and the output rule must not fire on it.
+        CASE WHEN COUNT(avg_rowcount) < COUNT(*) THEN NULL
+             ELSE SUM(avg_rowcount * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0)
+        END AS rows_per_exec
     FROM deduped
     WHERE rn = 1
     GROUP BY database_name, query_id, plan_id, replica_role
@@ -401,7 +410,11 @@ plan_dedup AS
         -- same on every pass and in both products.
         arg_max(plan_id, (last_exec, plan_id)) AS newest_plan_id,
         arg_max(plan_id, (execs, plan_id)) AS busiest_plan_id,
-        any_value(query_text) AS query_text
+        any_value(query_text) AS query_text,
+        -- #5631: NULL when any plan_id of the group has none.
+        CASE WHEN COUNT(rows_per_exec) < COUNT(*) THEN NULL
+             ELSE SUM(rows_per_exec * execs) / NULLIF(SUM(execs), 0)
+        END AS rows_per_exec
     FROM plan_agg
     GROUP BY database_name, query_id, replica_role, query_plan_hash
     HAVING SUM(execs) >= 25
@@ -455,7 +468,10 @@ compared AS
         -- compiled-inputs checks the C# side makes before it reports.
         l.query_text AS query_text,
         l.newest_plan_id AS latest_plan_id,
-        b.busiest_plan_id AS best_plan_id
+        b.busiest_plan_id AS best_plan_id,
+        -- #5631: rows per call of the two plans, for the output rule (a newer plan that returns far more rows).
+        l.rows_per_exec AS latest_rows,
+        b.rows_per_exec AS best_rows
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -482,7 +498,10 @@ SELECT
     -- #5630: appended for the same reason.
     query_text,
     latest_plan_id,
-    best_plan_id
+    best_plan_id,
+    -- #5631: appended for the same reason.
+    latest_rows,
+    best_rows
 FROM compared
 WHERE regression_factor >= 2
 -- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
@@ -490,9 +509,9 @@ WHERE regression_factor >= 2
 -- regression_factor and the scorer.
 AND   latest_total_cpu_us >= 10000000
 ORDER BY regression_factor DESC
--- #5630: more rows than the fact keeps. The C# side drops the rows whose two plans were compiled for different
--- inputs and keeps the first MaxPlanRegressionOffenders (20) of what is left, so a dropped row does not leave
--- the fact one offender short.
+-- #5630: more rows than the fact keeps. The C# side drops the rows the shared input rule rules out and keeps
+-- the first MaxPlanRegressionOffenders (20) of what is left, so a dropped row does not leave the fact one
+-- offender short.
 LIMIT 100";
 
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -515,7 +534,9 @@ LIMIT 100";
                         BestLastExec: reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9)),
                         QueryText: reader.IsDBNull(10) ? null : reader.GetString(10),
                         LatestPlanId: reader.IsDBNull(11) ? null : ToInt64(reader.GetValue(11)),
-                        BestPlanId: reader.IsDBNull(12) ? null : ToInt64(reader.GetValue(12))));
+                        BestPlanId: reader.IsDBNull(12) ? null : ToInt64(reader.GetValue(12)),
+                        LatestRows: reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
+                        BestRows: reader.IsDBNull(14) ? null : Convert.ToDouble(reader.GetValue(14))));
                 }
             }
 
@@ -585,12 +606,17 @@ LIMIT 100";
                     ["force_failure_count"] = worstForceFailures,
                     /* #3953 parity: Lite reads its raw slice (0); Darling's 1 is the interval table. */
                     ["plan_regression_source"] = 0,
-                    /* #5630, the names Darling's fact carries: candidates dropped because the two plans were
-                       compiled for different inputs (or the statement carries OPTION (RECOMPILE)), and kept
+                    /* #5630, the names Darling's fact carries: candidates dropped for any of the three reasons (the
+                       statement carries OPTION (RECOMPILE), the newer plan returns far more rows, or the plans differ
+                       in compiled values over the same statistics), and kept
                        candidates whose inputs could not be compared (no plan fetched, or the plans carry no
                        compiled values). Only counts leave the comparison, never a plan or a value. */
                     ["cross_input_excluded_count"] = verification.CrossInputExcluded,
                     ["inputs_unverified_count"] = verification.InputsUnverified,
+                    /* #5631: how the worst kept offender's inputs were judged: 1 same compiled values, 2 statistics
+                       changed between the compiles, 0 not checked. The advice reads it so it claims no cause the
+                       data does not show. */
+                    ["worst_input_basis"] = kept[0].InputBasis,
                 }
             };
 
