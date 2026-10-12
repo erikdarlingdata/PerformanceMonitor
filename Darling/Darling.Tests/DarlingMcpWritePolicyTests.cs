@@ -29,7 +29,7 @@ namespace Darling.Tests;
 /// <summary>
 /// The MCP write switch (<see cref="DarlingMcpWritePolicy"/>): with the default settings no tool that changes
 /// monitoring configuration is served, <c>mcp.allowWrites</c> serves them behind the bearer token on every
-/// request (loopback included), <c>mcp.allowServerAdmin</c> additionally serves the server-registry pair, and
+/// request (loopback included), <c>mcp.allowServerAdmin</c> additionally serves the server-registry tools, and
 /// every served tool carries the read-only or destructive annotation hint. The pure cases run over the REAL
 /// served tool set; the wired cases drive the real pipeline through a <see cref="TestServer"/>.
 /// </summary>
@@ -39,6 +39,10 @@ public sealed class DarlingMcpWritePolicyTests
 
     private static readonly DarlingMcpWritePolicy.Effective WritesOnly = new(Writes: true, ServerAdmin: false);
     private static readonly DarlingMcpWritePolicy.Effective Everything = new(Writes: true, ServerAdmin: true);
+
+    private static readonly McpConfig NoWrites = new();
+    private static readonly McpConfig WritesConfig = new() { AllowWrites = true };
+    private static readonly McpConfig EverythingConfig = new() { AllowWrites = true, AllowServerAdmin = true };
 
     private static McpServerPrimitiveCollection<McpServerTool> ServedTools()
     {
@@ -53,22 +57,44 @@ public sealed class DarlingMcpWritePolicyTests
         => tools.Select(t => t.ProtocolTool.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
 
     [Fact]
-    public void WriteToolSet_IsExactlyTheRegisteredToolsWithAWriteVerb()
+    public void EveryRegisteredTool_IsEitherOnTheReadOnlyList_OrInTheWriteSet()
     {
         var registered = Names(ServedTools());
         Assert.True(registered.Length > 100, "the served tool set should be the full Darling surface");
 
-        var byVerb = registered
-            .Where(n => DarlingMcpWritePolicy.WriteVerbPrefixes.Any(p => n.StartsWith(p, StringComparison.Ordinal)))
-            .ToHashSet(StringComparer.Ordinal);
+        var readOnly = DarlingMcpToolClassification.ReadOnlyTools;
+        var writes = DarlingMcpWritePolicy.WriteTools;
+
+        var unclassified = registered.Where(n => !readOnly.Contains(n) && !writes.Contains(n)).ToArray();
+        var both = readOnly.Intersect(writes).ToArray();
+        var stale = readOnly.Concat(writes).Except(registered).ToArray();
 
         Assert.True(
-            byVerb.SetEquals(DarlingMcpWritePolicy.WriteTools),
-            "every registered tool whose name starts with a write verb must be in WriteTools, and every WriteTools name must be registered; "
-            + $"by verb but unlisted: [{string.Join(", ", byVerb.Except(DarlingMcpWritePolicy.WriteTools))}], "
-            + $"listed but not registered by verb: [{string.Join(", ", DarlingMcpWritePolicy.WriteTools.Except(byVerb))}]");
-        Assert.Equal(21, DarlingMcpWritePolicy.WriteTools.Count);
-        Assert.True(DarlingMcpWritePolicy.ServerAdminTools.IsSubsetOf(DarlingMcpWritePolicy.WriteTools));
+            unclassified.Length == 0,
+            "a registered tool is on neither the read-only list (DarlingMcpToolClassification) nor DarlingMcpWritePolicy.WriteTools; "
+            + $"decide which it is and add it: [{string.Join(", ", unclassified)}]");
+        Assert.True(both.Length == 0, $"a tool is on the read-only list AND in the write set: [{string.Join(", ", both)}]");
+        Assert.True(stale.Length == 0, $"a classified name is not a registered tool: [{string.Join(", ", stale)}]");
+        Assert.True(DarlingMcpWritePolicy.ServerAdminTools.IsSubsetOf(writes));
+        Assert.Contains("edit_server", writes);
+        Assert.Contains("edit_server", DarlingMcpWritePolicy.ServerAdminTools);
+    }
+
+    [Fact]
+    public void EveryWriteTool_IsStampedNotReadOnly_AndDestructive_AndEveryOtherToolReadOnly()
+    {
+        var all = ServedTools();
+        DarlingMcpWritePolicy.Apply(all, Everything);
+
+        foreach (var tool in all)
+        {
+            var name = tool.ProtocolTool.Name;
+            var hints = tool.ProtocolTool.Annotations;
+            Assert.NotNull(hints);
+            var isWrite = DarlingMcpWritePolicy.IsWrite(name);
+            Assert.Equal(!isWrite, hints!.ReadOnlyHint);
+            Assert.Equal(isWrite, hints.DestructiveHint);
+        }
     }
 
     [Fact]
@@ -183,7 +209,7 @@ public sealed class DarlingMcpWritePolicyTests
     [Fact]
     public async Task Loopback_Default_NoToken_ToolsListSucceeds_ServesNoWriteTool_WithReadOnlyHints()
     {
-        using var server = await BuildServer(default);
+        using var server = await BuildServer(NoWrites, "");
 
         var (statusCode, body) = await ToolsListAsync(server, bearer: null);
 
@@ -197,7 +223,7 @@ public sealed class DarlingMcpWritePolicyTests
     [Fact]
     public async Task Loopback_WritesOn_NoToken_IsRefused()
     {
-        using var server = await BuildServer(WritesOnly);
+        using var server = await BuildServer(WritesConfig, Token);
 
         var (statusCode, _) = await ToolsListAsync(server, bearer: null);
 
@@ -207,7 +233,7 @@ public sealed class DarlingMcpWritePolicyTests
     [Fact]
     public async Task Loopback_WritesOn_WithToken_ServesWrites_WithDestructiveHint_ButNotTheRegistryPair()
     {
-        using var server = await BuildServer(WritesOnly);
+        using var server = await BuildServer(WritesConfig, Token);
 
         var (statusCode, body) = await ToolsListAsync(server, bearer: Token);
 
@@ -223,7 +249,7 @@ public sealed class DarlingMcpWritePolicyTests
     [Fact]
     public async Task Loopback_BothOn_WithToken_ServesTheRegistryPair()
     {
-        using var server = await BuildServer(Everything);
+        using var server = await BuildServer(EverythingConfig, Token);
 
         var (statusCode, body) = await ToolsListAsync(server, bearer: Token);
 
@@ -245,7 +271,7 @@ public sealed class DarlingMcpWritePolicyTests
         /* Every entry is refused before the store is read, so the pool stays closed. It points at a port nothing
            listens on all the same. The call runs the real dispatch: the SDK has to resolve the caller policy from
            DI when it invokes the tool. */
-        using var server = await BuildServer(Everything, "Host=127.0.0.1;Port=1;Username=none;Password=none;Database=none;Timeout=1");
+        using var server = await BuildServer(EverythingConfig, Token, "Host=127.0.0.1;Port=1;Username=none;Password=none;Database=none;Timeout=1");
         var arguments = JsonSerializer.Serialize(new
         {
             servers_json = "[{\"host\":\"sql01\",\"auth\":\"Windows\",\"trust_server_certificate\":true}]",
@@ -264,16 +290,90 @@ public sealed class DarlingMcpWritePolicyTests
         Assert.Contains("mcp.allowWindowsAuthOverUnverifiedTls", row.GetProperty("detail").GetString(), StringComparison.Ordinal);
     }
 
-    /// <summary>The same wiring production runs, on the loopback bind: <c>ConfigureMcpServices</c> with the
-    /// policy, then <c>ConfigurePipeline</c> with the token required exactly when writes are served.</summary>
-    private static async Task<TestServer> BuildServer(
-        DarlingMcpWritePolicy.Effective writes, string postgresConnection = "Host=localhost;Database=postgres;Username=darling")
+    [Theory]
+    [InlineData("/", "create_mute_rule", "{}")]
+    [InlineData("/", "edit_server", "{\"server_name\":\"alpha\",\"changes_json\":\"{}\"}")]
+    [InlineData("/", "add_servers", "{\"servers_json\":\"[]\"}")]
+    [InlineData("/core", "create_mute_rule", "{}")]
+    [InlineData("/core", "edit_server", "{\"server_name\":\"alpha\",\"changes_json\":\"{}\"}")]
+    public async Task WritesOff_CallingAWriteTool_IsRefusedAsAnUnknownTool(string path, string tool, string arguments)
     {
-        var builder = WebApplication.CreateBuilder();
+        using var server = await BuildServer(NoWrites, "");
+
+        var (_, body) = await ToolsCallAsync(server, tool, arguments, bearer: null, path);
+
+        Assert.Contains("Unknown tool", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"status\"", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task WritesRequested_WithAWeakToken_StayOff_AndTheCallIsRefused_WithoutNamingTheTokenLength()
+    {
+        var token = "short-token";
+        var writes = DarlingMcpWritePolicy.ResolveForStart(WritesConfig, token, out var problem);
+        Assert.False(writes.Writes);
+        Assert.NotNull(problem);
+        Assert.DoesNotContain(token.Length.ToString() + " characters", problem, StringComparison.Ordinal);
+
+        using var server = await BuildServer(WritesConfig, token);
+        var (_, body) = await ToolsCallAsync(server, "create_mute_rule", "{}", bearer: token);
+
+        Assert.Contains("Unknown tool", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task WritesRequested_WithNoToken_StayOff_AndTheLoopbackListenerStaysOpenForReads()
+    {
+        using var server = await BuildServer(WritesConfig, "");
+
+        var (listStatus, listBody) = await ToolsListAsync(server, bearer: null);
+        var (_, callBody) = await ToolsCallAsync(server, "create_mute_rule", "{}", bearer: null);
+
+        Assert.Equal(StatusCodes.Status200OK, listStatus);
+        Assert.DoesNotContain(ToolsOf(listBody).Keys, DarlingMcpWritePolicy.IsWrite);
+        Assert.Contains("Unknown tool", callBody, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task WritesOnWithAToken_ServerAdminOff_EditServerIsRefusedAsUnknown_ButAnotherWriteIsServed()
+    {
+        using var server = await BuildServer(WritesConfig, Token);
+
+        var (_, editBody) = await ToolsCallAsync(
+            server, "edit_server", "{\"server_name\":\"alpha\",\"changes_json\":\"{}\"}", bearer: Token);
+        Assert.Contains("Unknown tool", editBody, StringComparison.OrdinalIgnoreCase);
+
+        var (_, listBody) = await ToolsListAsync(server, bearer: Token);
+        Assert.True(ToolsOf(listBody).ContainsKey("create_mute_rule"));
+    }
+
+    [Fact]
+    public async Task BothOn_EditServerIsServed_WithTheDestructiveHint()
+    {
+        using var server = await BuildServer(EverythingConfig, Token);
+
+        var (_, body) = await ToolsListAsync(server, bearer: Token);
+
+        var tool = ToolsOf(body)["edit_server"];
+        Assert.True(tool.GetProperty("annotations").GetProperty("destructiveHint").GetBoolean());
+        Assert.False(tool.GetProperty("annotations").GetProperty("readOnlyHint").GetBoolean());
+        Assert.DoesNotContain(
+            tool.GetProperty("inputSchema").GetProperty("properties").EnumerateObject().Select(p => p.Name), n => n == "policy");
+    }
+
+    /// <summary>The wiring production runs, on the loopback bind: the host's own builder
+    /// (<see cref="DarlingMcpHostService.CreateHostBuilder"/>), the writes <see cref="DarlingMcpWritePolicy.ResolveForStart"/>
+    /// decides from the settings and the token, <c>ConfigureMcpServices</c>, then <c>ConfigurePipeline</c> with
+    /// <see cref="DarlingMcpHostService.RequireTokenWhenLoopbackOnly"/>: the start path calls the same members,
+    /// so no value here is computed a second way.</summary>
+    private static async Task<TestServer> BuildServer(
+        McpConfig mcp, string bearerToken, string postgresConnection = "Host=localhost;Database=postgres;Username=darling")
+    {
+        var builder = DarlingMcpHostService.CreateHostBuilder();
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
 
-        // A pool no test here opens: every case stops at the gate or at tools/list, before any tool body runs.
+        // A pool no test here opens: every case stops at the gate, at tools/list or at the refusal, before any tool body runs.
         var postgres = NpgsqlDataSource.Create(postgresConnection);
         builder.Services.AddSingleton(postgres);
         builder.Services.AddSingleton(new PerformanceMonitor.Darling.Analysis.DarlingAnalysisService(
@@ -281,7 +381,10 @@ public sealed class DarlingMcpWritePolicyTests
             baselineCache: new PerformanceMonitor.Darling.Analysis.BaselineCache()));
         builder.Services.AddSingleton<ILogger>(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
 
-        DarlingMcpHostService.ConfigureMcpServices(builder.Services, DarlingPeerDirectory.Snapshot.Empty, writes: writes);
+        var writes = DarlingMcpWritePolicy.ResolveForStart(mcp, bearerToken, out _);
+        DarlingMcpHostService.ConfigureMcpServices(
+            builder.Services, DarlingPeerDirectory.Snapshot.Empty, writes: writes,
+            addServers: new DarlingMcpAddServersPolicy(mcp.AllowWindowsAuthOverUnverifiedTls));
 
         var app = builder.Build();
 
@@ -295,8 +398,8 @@ public sealed class DarlingMcpWritePolicyTests
             networkMode: false,
             networkListenIp: null,
             allowedCidr: IPNetwork.Parse("192.168.1.0/24"),
-            bearerToken: Token,
-            requireTokenWhenLoopbackOnly: writes.Writes);
+            bearerToken: bearerToken,
+            requireTokenWhenLoopbackOnly: DarlingMcpHostService.RequireTokenWhenLoopbackOnly(false, bearerToken));
 
         await app.StartAsync();
         return app.GetTestServer();
@@ -324,12 +427,12 @@ public sealed class DarlingMcpWritePolicyTests
         return (ctx.Response.StatusCode, body);
     }
 
-    private static async Task<(int StatusCode, string Body)> ToolsCallAsync(TestServer server, string tool, string argumentsJson, string? bearer)
+    private static async Task<(int StatusCode, string Body)> ToolsCallAsync(TestServer server, string tool, string argumentsJson, string? bearer, string path = "/")
     {
         var ctx = await server.SendAsync(c =>
         {
             c.Request.Method = "POST";
-            c.Request.Path = "/";
+            c.Request.Path = path;
             c.Request.Headers.Host = "localhost";
             c.Request.Headers.Accept = "application/json, text/event-stream";
             c.Request.ContentType = "application/json";

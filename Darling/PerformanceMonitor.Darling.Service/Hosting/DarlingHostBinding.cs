@@ -246,7 +246,8 @@ internal static class DarlingHostBinding
     /// <summary>
     /// PURE: why a resolved token cannot gate an exposed surface, or null when it can. Empty (nothing to
     /// compare against) and too short (see <see cref="MinimumTokenLength"/>) both fail closed; the caller logs
-    /// the text at Critical and binds loopback-only. Says nothing about the token's value beyond its length.
+    /// the text at Critical and binds loopback-only. Says nothing about the token's value, and does not give
+    /// its length either: a short token is "shorter than" the floor, never "N characters long".
     /// </summary>
     internal static string? DescribeTokenProblem(string? token)
     {
@@ -257,11 +258,27 @@ internal static class DarlingHostBinding
 
         if (token.Length < MinimumTokenLength)
         {
-            return $"is {token.Length} characters long, and at least {MinimumTokenLength} are required for an exposed surface "
-                + "(--configure-network generates 32; set a longer value in the token's file/env/encrypted slot)";
+            return $"is shorter than {MinimumTokenLength} characters, and at least {MinimumTokenLength} are required for an exposed surface "
+                + "(--configure-network generates 32; to make one yourself, see the token note in the README)";
         }
 
         return null;
+    }
+
+    /// <summary>What the floor decided for one resolved token: whether the network bind stays on, and the
+    /// <see cref="DescribeTokenProblem"/> text when it does not (null when the token clears the floor).</summary>
+    internal readonly record struct TokenFloorOutcome(bool NetworkMode, string? Problem);
+
+    /// <summary>
+    /// PURE: applies the floor to the token a start resolved. A token under it turns the network bind OFF (the
+    /// host logs <see cref="TokenFloorOutcome.Problem"/> at Critical and binds loopback-only, still gating the
+    /// loopback listener on the token); a token that clears it leaves <paramref name="networkMode"/> as it was.
+    /// Both hosts' start paths call this, so the decision is one function a test drives directly.
+    /// </summary>
+    internal static TokenFloorOutcome ApplyTokenFloor(string token, bool networkMode)
+    {
+        var problem = DescribeTokenProblem(token);
+        return new TokenFloorOutcome(problem is null && networkMode, problem);
     }
 
     /// <summary>

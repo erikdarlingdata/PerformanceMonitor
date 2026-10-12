@@ -23,7 +23,9 @@ namespace PerformanceMonitorLite.Mcp;
 /// by themselves, which is why they come with the setting and not instead of it.</para>
 ///
 /// <para>Unlike Darling, Lite adds no bearer token: its endpoint is loopback-only behind the shared Host-header
-/// guard, and it has no token to resolve. The setting is the whole switch.</para>
+/// guard, and it has no token or caller check to gate on. The setting is the whole switch, so with it on ANY program
+/// on this computer that can reach the port can mute and unmute analysis findings; the setting's tooltip, the sample
+/// settings and the Lite MCP docs say so.</para>
 /// </summary>
 internal static class McpWritePolicy
 {
@@ -33,23 +35,15 @@ internal static class McpWritePolicy
     /// <summary>
     /// Every registered tool that writes to what Lite stores: the analysis mute and its undo. The other 88 tools
     /// only read. <c>analyze_server</c> persists the findings it derives but changes no setting of the
-    /// operator's, and it is a read here, as it is on Darling. <c>McpWritePolicyTests</c> pins this set against
-    /// the registered tool names by verb, so a new <c>create_</c>/<c>update_</c>/<c>delete_</c>/<c>set_</c>/
-    /// <c>add_</c>/<c>remove_</c>/<c>mute_</c>/<c>unmute_</c> tool that is not listed here fails the tests
-    /// instead of shipping unswitched.
+    /// operator's, and it is a read here, as it is on Darling. <c>McpWritePolicyTests</c> lists every
+    /// registered tool and fails unless each one is in this set or on that test's explicit read-only list, so a new
+    /// tool fails the tests until someone classifies it, instead of shipping unswitched.
     /// </summary>
     internal static readonly IReadOnlySet<string> WriteTools = new HashSet<string>(StringComparer.Ordinal)
     {
         "mute_analysis_finding",
         "unmute_analysis_finding",
     };
-
-    /// <summary>The verb prefixes that mark a tool name as a write. The census test classifies every registered
-    /// tool by these, so the set above cannot silently fall behind the registrations.</summary>
-    internal static readonly string[] WriteVerbPrefixes =
-    [
-        "add_", "remove_", "create_", "update_", "delete_", "set_", "mute_", "unmute_",
-    ];
 
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);
 

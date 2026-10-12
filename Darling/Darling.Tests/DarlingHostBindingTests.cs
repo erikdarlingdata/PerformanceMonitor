@@ -681,13 +681,13 @@ public sealed class DarlingHostBindingTests
     }
 
     [Fact]
-    public void DescribeTokenProblem_ShortToken_NamesTheFloor_WithoutTheValue()
+    public void DescribeTokenProblem_ShortToken_NamesTheFloor_WithoutTheValueOrTheLength()
     {
         var problem = DarlingHostBinding.DescribeTokenProblem("hunter2");
 
         Assert.NotNull(problem);
-        Assert.Contains("7 characters", problem, StringComparison.Ordinal);
-        Assert.Contains(DarlingHostBinding.MinimumTokenLength.ToString(), problem, StringComparison.Ordinal);
+        Assert.Contains("shorter than " + DarlingHostBinding.MinimumTokenLength, problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("7 characters", problem, StringComparison.Ordinal);
         Assert.DoesNotContain("hunter2", problem, StringComparison.Ordinal);
     }
 
@@ -699,19 +699,19 @@ public sealed class DarlingHostBindingTests
     }
 
     [Fact]
-    public void TheWebHost_FailsClosedOnATokenProblem()
+    public void TheWebHostsTokenFloor_TurnsTheNetworkBindOff_AndLeavesALoopbackStartAlone()
     {
-        /* The floor has to reach the bind decision, not just exist as a function: the token block in the
-           web host's start path routes every resolved token through DescribeTokenProblem and degrades to
-           loopback-only on a problem, exactly like the empty-token case it replaced. */
-        var path = System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "DarlingWebHostService.cs");
-        var source = System.IO.File.ReadAllText(path);
-        var call = source.IndexOf("var tokenProblem = DarlingHostBinding.DescribeTokenProblem(token);", StringComparison.Ordinal);
-        Assert.True(call >= 0, "the web host no longer routes the resolved token through DescribeTokenProblem");
+        /* Both hosts' start paths apply the floor through ApplyTokenFloor to the token they resolved: a short one drops
+           the bind to loopback-only (the token is still kept to gate the loopback listener); one at the floor leaves it. */
+        var weak = DarlingHostBinding.ApplyTokenFloor("hunter2", networkMode: true);
+        Assert.False(weak.NetworkMode);
+        Assert.NotNull(weak.Problem);
 
-        var block = source.Substring(call, 700);
-        Assert.Contains("_logger.LogCritical(", block, StringComparison.Ordinal);
-        Assert.Contains("networkMode = false;", block, StringComparison.Ordinal);
+        var strong = DarlingHostBinding.ApplyTokenFloor(new string('x', 32), networkMode: true);
+        Assert.True(strong.NetworkMode);
+        Assert.Null(strong.Problem);
+
+        Assert.False(DarlingHostBinding.ApplyTokenFloor("hunter2", networkMode: false).NetworkMode);
     }
 
     /* ---- trustedProxies: IPs and CIDRs, nothing else, none by default ---- */

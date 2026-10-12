@@ -367,79 +367,80 @@ public sealed class DarlingMcpBearerThrottleTests
         }
     }
 
-    /* ------------------------ the token floor at start, by source ------------------------ */
+    /* ------------------------ the token floor at start, by behavior ------------------------ */
 
-    private static string StartPathBody(out string code)
+    [Theory]
+    [InlineData("hunter2")]
+    [InlineData("aaaaaaaaaaaaaaa")]
+    public void ANetworkTokenUnderTheFloor_TurnsTheNetworkBindOff_ButStillGatesTheLoopbackListener(string token)
     {
-        code = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs");
-        var start = code.IndexOf("private async Task<bool> TryStartServerAsync(", StringComparison.Ordinal);
-        Assert.True(start >= 0, "TryStartServerAsync is gone, so this pin proves nothing");
+        /* The decision the start path applies to the token it resolved (ApplyTokenFloor): the bind drops to loopback-only. */
+        var floor = DarlingHostBinding.ApplyTokenFloor(token, networkMode: true);
+        Assert.False(floor.NetworkMode);
+        Assert.NotNull(floor.Problem);
 
-        var end = code.IndexOf("internal static void ConfigureMcpServices(", start, StringComparison.Ordinal);
-        Assert.True(end > start, "ConfigureMcpServices no longer follows TryStartServerAsync, so the slice is wrong");
-        return code[start..end];
+        /* The token is kept as the bearer token, so the loopback listener the start falls back to requires it. */
+        Assert.True(DarlingMcpHostService.RequireTokenWhenLoopbackOnly(floor.NetworkMode, token));
     }
 
     [Fact]
-    public void TheStartPath_RoutesEveryResolvedToken_ThroughTheFloor_BeforeItGatesAnything()
+    public void ANetworkTokenAtTheFloor_KeepsTheNetworkBind()
     {
-        var body = StartPathBody(out _);
+        var floor = DarlingHostBinding.ApplyTokenFloor(new string('x', DarlingHostBinding.MinimumTokenLength), networkMode: true);
 
-        /* The network bind resolves the MCP token here; the loopback bind resolves its own through
-           ResolveLoopbackOnlyToken, and the write tools check that one against the floor separately (see the next
-           test). A third resolution would need its own floor, so this fails until it is added on purpose. */
-        var resolutions = Regex.Matches(body, @"\.ResolveToken\(out var usedPlaintext\)");
-        Assert.Single(resolutions);
+        Assert.True(floor.NetworkMode);
+        Assert.Null(floor.Problem);
+    }
 
-        foreach (Match resolution in resolutions)
+    [Fact]
+    public void ALoopbackOnlyStart_IsNeverMovedToTheNetworkByTheFloor()
+    {
+        Assert.False(DarlingHostBinding.ApplyTokenFloor(new string('x', 32), networkMode: false).NetworkMode);
+    }
+
+    [Fact]
+    public void TheTokenProblemText_NamesTheFloor_NotTheLengthOrTheValue()
+    {
+        var problem = DarlingHostBinding.DescribeTokenProblem("hunter2");
+
+        Assert.NotNull(problem);
+        Assert.Contains("shorter than " + DarlingHostBinding.MinimumTokenLength, problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("7", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("hunter2", problem, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("", false, null)]
+    [InlineData("short", true, "shorter")]
+    [InlineData("0123456789abcdef", true, null)]
+    public void WriteToolsFollowTheToken_AndOnlyWhenWritesAreRequested(string token, bool expectToken, string? expectProblem)
+    {
+        var on = new PerformanceMonitor.Darling.Service.McpConfig { AllowWrites = true };
+        var off = new PerformanceMonitor.Darling.Service.McpConfig();
+
+        var requested = DarlingMcpWritePolicy.ResolveForStart(on, token, out var problem);
+        Assert.Equal(expectToken && expectProblem is null, requested.Writes);
+        if (expectProblem is null)
         {
-            var tail = body[resolution.Index..];
-
-            /* A token under the floor turns the network bind off and keeps the token for the loopback gate; a token
-               that clears it is adopted for the network bind. */
-            Assert.Matches(
-                new Regex(
-                    @"DarlingHostBinding\.DescribeTokenProblem\(token\);\s*if \(tokenProblem is not null\)\s*\{.*?networkMode = false;\s*bearerToken = token!?;\s*\}\s*else\s*\{\s*bearerToken = token!?;",
-                    RegexOptions.Singleline),
-                tail.Length > 2500 ? tail[..2500] : tail);
+            Assert.Null(problem);
         }
+        else
+        {
+            Assert.Contains(expectProblem, problem, StringComparison.Ordinal);
+        }
+
+        /* Writes not requested: the token is not looked at, so a short one raises no problem. */
+        var notRequested = DarlingMcpWritePolicy.ResolveForStart(off, token, out var quiet);
+        Assert.False(notRequested.Writes);
+        Assert.Null(quiet);
     }
 
-    [Fact]
-    public void ANetworkTokenUnderTheFloor_FailsClosedToLoopbackOnly_NamingTheSetting()
+    [Theory]
+    [InlineData(false, "tok", true)]
+    [InlineData(false, "", false)]
+    [InlineData(true, "tok", false)]
+    public void TheLoopbackGate_IsRequiredExactlyWhenLoopbackOnlyWithAToken(bool network, string token, bool expected)
     {
-        var body = StartPathBody(out _);
-
-        var floor = body.IndexOf("DarlingHostBinding.DescribeTokenProblem(token);", StringComparison.Ordinal);
-        Assert.True(floor >= 0, "the network bind no longer routes its token through the floor");
-
-        var block = body.Substring(floor, 700);
-        Assert.Contains("_logger.LogCritical(", block, StringComparison.Ordinal);
-        Assert.Contains("mcp.network.token / mcp.network.encryptedToken", block, StringComparison.Ordinal);
-        Assert.Contains("binding loopback-only", block, StringComparison.Ordinal);
-        Assert.Contains("networkMode = false;", block, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void AWriteToolTokenUnderTheFloor_KeepsTheWriteToolsOff_NamingTheSetting_AndOnlyWhenWritesAreRequested()
-    {
-        var body = StartPathBody(out _);
-
-        var writesRequested = body.IndexOf("if (config.Mcp.AllowWrites)", StringComparison.Ordinal);
-        Assert.True(writesRequested >= 0, "the write-tool token path is gone, so this pin proves nothing");
-
-        /* Inside the writes-requested branch, so a short token with the write tools off is never looked at:
-           loopback with writes off stays the tokenless bind it was. */
-        var floor = body.IndexOf("DarlingHostBinding.DescribeTokenProblem(bearerToken)", writesRequested, StringComparison.Ordinal);
-        Assert.True(floor > writesRequested, "the floor must sit inside the writes-requested branch");
-
-        var block = body.Substring(floor, 700);
-        Assert.Contains("_logger.LogCritical(", block, StringComparison.Ordinal);
-        Assert.Contains("mcp.network.token / mcp.network.encryptedToken", block, StringComparison.Ordinal);
-        Assert.Contains("the MCP write tools stay off", block, StringComparison.Ordinal);
-        Assert.DoesNotContain("networkMode = false;", block, StringComparison.Ordinal);
-
-        /* No token adopted means tokenPresent is false, and the policy serves no write. */
-        Assert.Contains("DarlingMcpWritePolicy.Resolve(config.Mcp, tokenPresent: bearerToken.Length > 0 && writeTokenProblem is null)", body, StringComparison.Ordinal);
+        Assert.Equal(expected, DarlingMcpHostService.RequireTokenWhenLoopbackOnly(network, token));
     }
 }

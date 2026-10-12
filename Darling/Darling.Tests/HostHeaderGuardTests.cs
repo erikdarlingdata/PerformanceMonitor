@@ -219,15 +219,14 @@ public sealed class HostHeaderGuardTests
     /// the TLS decision, and is handed to the pipeline.
     /// </summary>
     [Theory]
-    [InlineData("DarlingMcpHostService.cs", "bearerToken")]
-    [InlineData("DarlingWebHostService.cs", "accessToken")]
-    public void TlsRefusal_TheHostHandsThePipelineTheTokenFlag_DerivedFromTheFinalMode(string fileName, string tokenLocal)
+    [InlineData("DarlingMcpHostService.cs", "var requireTokenWhenLoopbackOnly = RequireTokenWhenLoopbackOnly(networkMode, bearerToken);")]
+    [InlineData("DarlingWebHostService.cs", "var requireTokenWhenLoopbackOnly = !networkMode && accessToken.Length > 0;")]
+    public void TlsRefusal_TheHostHandsThePipelineTheTokenFlag_DerivedFromTheFinalMode(string fileName, string flagLine)
     {
         var source = ReadHostSource(fileName);
 
         var tlsDecision = source.IndexOf("networkMode = tlsOutcome.Expose;", StringComparison.Ordinal);
-        var flag = source.IndexOf(
-            $"var requireTokenWhenLoopbackOnly = !networkMode && {tokenLocal}.Length > 0;", StringComparison.Ordinal);
+        var flag = source.IndexOf(flagLine, StringComparison.Ordinal);
         var call = source.IndexOf("ConfigurePipeline(_app,", StringComparison.Ordinal);
 
         Assert.True(

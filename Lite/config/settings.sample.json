@@ -247,6 +247,8 @@
   // NO UI. Off by default. The MCP write tools (mute_analysis_finding and unmute_analysis_finding) are served only
   // when this is true; with it off a call to one fails as an unknown tool. Change it, then restart Lite. Mutes that
   // already exist stay in force while it is off; turn it on to remove one with unmute_analysis_finding.
+  // Lite's MCP endpoint has no token or caller check: with this on, ANY program on this computer that can reach
+  // the port can mute or unmute analysis findings. Leave it off unless you trust every program that runs here.
   "mcp_allow_writes": false,
 
   // ---- Plan analysis (#4535) ------------------------------------------------------------------------------

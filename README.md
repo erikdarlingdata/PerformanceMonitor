@@ -503,7 +503,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 **Lite** exposes 90 tools; **Darling** exposes 181 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
 
-By default Lite serves its 88 read tools only. Its two write tools, `mute_analysis_finding` and `unmute_analysis_finding`, are served when `mcp_allow_writes` is `true` in `settings.json`. Restart Lite after you change it. While the setting is off, a call to a write tool fails as an unknown tool. Mutes that already exist stay in force.
+By default Lite serves its 88 read tools only. Its two write tools, `mute_analysis_finding` and `unmute_analysis_finding`, are served when `mcp_allow_writes` is `true` in `settings.json`. Restart Lite after you change it. While the setting is off, a call to a write tool fails as an unknown tool. Mutes that already exist stay in force. Lite's MCP endpoint has no token or caller check, so with the setting on, any program on this computer that can reach the port can mute or unmute findings. Leave it off unless you trust every program that runs on this computer.
 
 | Category | Tools |
 |---|---|

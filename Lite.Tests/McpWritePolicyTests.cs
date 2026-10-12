@@ -15,6 +15,9 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Lite.Tests;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Server;
@@ -79,21 +82,118 @@ public sealed class McpWritePolicyTests
     }
 
     [Fact]
-    public void WriteToolSet_IsExactlyTheRegisteredToolsWithAWriteVerb()
+    public void EveryRegisteredTool_IsEitherOnTheReadOnlyList_OrInTheWriteSet()
     {
         var registered = Names(RegisteredTools());
         Assert.True(registered.Length > 80, "the registered tool set should be the full Lite surface");
 
-        var byVerb = registered
-            .Where(n => McpWritePolicy.WriteVerbPrefixes.Any(p => n.StartsWith(p, StringComparison.Ordinal)))
-            .ToHashSet(StringComparer.Ordinal);
+        var readOnly = McpToolClassification.ReadOnlyTools;
+        var writes = McpWritePolicy.WriteTools;
+
+        var unclassified = registered.Where(n => !readOnly.Contains(n) && !writes.Contains(n)).ToArray();
+        var both = readOnly.Intersect(writes).ToArray();
+        var stale = readOnly.Concat(writes).Except(registered).ToArray();
 
         Assert.True(
-            byVerb.SetEquals(McpWritePolicy.WriteTools),
-            "every registered tool whose name starts with a write verb must be in WriteTools, and every WriteTools name must be registered; "
-            + $"by verb but unlisted: [{string.Join(", ", byVerb.Except(McpWritePolicy.WriteTools))}], "
-            + $"listed but not registered by verb: [{string.Join(", ", McpWritePolicy.WriteTools.Except(byVerb))}]");
-        Assert.Equal(2, McpWritePolicy.WriteTools.Count);
+            unclassified.Length == 0,
+            "a registered tool is on neither the read-only list (McpToolClassification) nor McpWritePolicy.WriteTools; "
+            + $"decide which it is and add it: [{string.Join(", ", unclassified)}]");
+        Assert.True(both.Length == 0, $"a tool is on the read-only list AND in the write set: [{string.Join(", ", both)}]");
+        Assert.True(stale.Length == 0, $"a classified name is not a registered tool: [{string.Join(", ", stale)}]");
+    }
+
+    [Fact]
+    public void EveryTool_IsStampedByTheWriteSet_ReadOnlyForReads_NotReadOnlyAndDestructiveForWrites()
+    {
+        var all = RegisteredTools();
+        McpWritePolicy.Apply(all, allowWrites: true);
+
+        foreach (var tool in all)
+        {
+            var isWrite = McpWritePolicy.IsWrite(tool.ProtocolTool.Name);
+            Assert.NotNull(tool.ProtocolTool.Annotations);
+            Assert.Equal(!isWrite, tool.ProtocolTool.Annotations!.ReadOnlyHint);
+            Assert.Equal(isWrite, tool.ProtocolTool.Annotations.DestructiveHint);
+        }
+    }
+
+    /// <summary>The host's own registration (<see cref="McpHostService.RegisterMcpServer"/>) and JSON guard behind a
+    /// test web server: what a client reaches when it calls a tool on the real endpoint.</summary>
+    private static async Task<TestServer> BuildServer(bool allowWrites)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+
+        foreach (var serviceType in typeof(McpAnalysisTools)
+            .Assembly.GetTypes()
+            .Where(t => t.Name.StartsWith("Mcp", StringComparison.Ordinal) && t.Name.EndsWith("Tools", StringComparison.Ordinal))
+            .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
+            .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null)
+            .SelectMany(m => m.GetParameters())
+            .Select(p => p.ParameterType)
+            .Where(McpServedSchema.IsServiceParameter)
+            .Where(t => t != typeof(McpToolGuideCatalog))
+            .Distinct())
+        {
+            builder.Services.AddSingleton(serviceType, _ => null!);
+        }
+
+        McpHostService.RegisterMcpServer(builder.Services, allowWrites);
+
+        var app = builder.Build();
+        McpHostService.UseJsonPostGuard(app);
+        app.MapMcp();
+        await app.StartAsync();
+        return app.GetTestServer();
+    }
+
+    private static async Task<string> PostAsync(TestServer server, string json)
+    {
+        var ctx = await server.SendAsync(c =>
+        {
+            c.Request.Method = "POST";
+            c.Request.Path = "/";
+            c.Request.Headers.Host = "localhost";
+            c.Request.Headers.Accept = "application/json, text/event-stream";
+            c.Request.ContentType = "application/json";
+            var bytes = System.Text.Encoding.UTF8.GetBytes(json);
+            c.Request.Body = new MemoryStream(bytes);
+            c.Request.ContentLength = bytes.Length;
+            c.Connection.RemoteIpAddress = System.Net.IPAddress.Loopback;
+        });
+
+        using var reader = new StreamReader(ctx.Response.Body);
+        return await reader.ReadToEndAsync();
+    }
+
+    [Theory]
+    [InlineData("mute_analysis_finding", "{\"finding_hash\":\"abc\"}")]
+    [InlineData("unmute_analysis_finding", "{\"finding_hash\":\"abc\"}")]
+    public async Task WritesOff_CallingAWriteTool_IsRefusedAsAnUnknownTool(string tool, string arguments)
+    {
+        using var server = await BuildServer(allowWrites: false);
+
+        var body = await PostAsync(server,
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"" + tool + "\",\"arguments\":" + arguments + "}}");
+
+        Assert.Contains("Unknown tool", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task WritesOn_TheWriteToolsAreListed_WithTheDestructiveHint()
+    {
+        using var server = await BuildServer(allowWrites: true);
+
+        var body = await PostAsync(server, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}");
+
+        var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+        using var document = JsonDocument.Parse(dataLine is null ? body : dataLine["data:".Length..].Trim());
+        var tools = document.RootElement.GetProperty("result").GetProperty("tools").EnumerateArray()
+            .ToDictionary(t => t.GetProperty("name").GetString() ?? "", t => t.Clone(), StringComparer.Ordinal);
+        Assert.True(tools["mute_analysis_finding"].GetProperty("annotations").GetProperty("destructiveHint").GetBoolean());
+        Assert.False(tools["mute_analysis_finding"].GetProperty("annotations").GetProperty("readOnlyHint").GetBoolean());
+        Assert.True(tools["analyze_server"].GetProperty("annotations").GetProperty("readOnlyHint").GetBoolean());
     }
 
     [Fact]
@@ -168,7 +268,7 @@ public sealed class McpWritePolicyTests
     public void Host_RegistersThePolicyWithTheSetting_AndTheMainWindowPassesTheSetting()
     {
         var host = ParitySource.ReadFile("Lite/Mcp/McpHostService.cs");
-        Assert.Contains("builder.Services.AddMcpWritePolicy(_allowWrites);", host, StringComparison.Ordinal);
+        Assert.Contains("RegisterMcpServer(builder.Services, _allowWrites);", host, StringComparison.Ordinal);
         Assert.Contains("_allowWrites = allowWrites;", host, StringComparison.Ordinal);
         Assert.Contains("bool allowWrites = false", host, StringComparison.Ordinal);
 

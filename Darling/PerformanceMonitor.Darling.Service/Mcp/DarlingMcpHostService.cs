@@ -438,13 +438,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                        file:/env: reference or a plaintext "token"). It is not used to gate the network: Critical,
                        then loopback-only, with the token still resolved so it keeps gating the loopback listener,
                        the way a refused TLS certificate degrades. */
-                    var tokenProblem = DarlingHostBinding.DescribeTokenProblem(token);
-                    if (tokenProblem is not null)
+                    var floor = DarlingHostBinding.ApplyTokenFloor(token, networkMode);
+                    if (floor.Problem is not null)
                     {
                         _logger.LogCritical(
                             "MCP network token (mcp.network.token / mcp.network.encryptedToken) {Problem} — refusing to expose; binding loopback-only.",
-                            tokenProblem);
-                        networkMode = false;
+                            floor.Problem);
+                        networkMode = floor.NetworkMode;
                         bearerToken = token;
                     }
                     else
@@ -532,11 +532,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                front of them. The token must also clear the same floor as the network bind: one typed by hand and
                shorter than it gates the write tools no better than none, so they stay off.
                No usable token, no writes: the tools stay absent and the log names the setting. */
-            var writes = DarlingMcpWritePolicy.Effective.Off;
+            var writes = DarlingMcpWritePolicy.ResolveForStart(config.Mcp, bearerToken, out var writeTokenProblem);
             if (config.Mcp.AllowWrites)
             {
-                var writeTokenProblem = bearerToken.Length > 0 ? DarlingHostBinding.DescribeTokenProblem(bearerToken) : null;
-                writes = DarlingMcpWritePolicy.Resolve(config.Mcp, tokenPresent: bearerToken.Length > 0 && writeTokenProblem is null);
                 if (!writes.Writes && writeTokenProblem is not null)
                 {
                     _logger.LogCritical(
@@ -555,7 +553,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                 else
                 {
                     _logger.LogWarning(
-                        "MCP write tools are ON ({Setting}; add_servers/remove_server {ServerAdmin}) — every MCP request, " +
+                        "MCP write tools are ON ({Setting}; add_servers/edit_server/remove_server {ServerAdmin}) — every MCP request, " +
                         "loopback included, must present the bearer token.",
                         DarlingMcpWritePolicy.WritesSetting,
                         writes.ServerAdmin ? "on via " + DarlingMcpWritePolicy.ServerAdminSetting : "off");
@@ -576,7 +574,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                 _logger.LogInformation(
                     "MCP write tools are off (the default): tools that change monitoring configuration are not served. " +
                     "To serve them set {Setting}=true in darling.json plus a bearer token (mcp.network.encryptedToken or " +
-                    "mcp.network.token); add_servers/remove_server also need {ServerAdminSetting}=true.",
+                    "mcp.network.token); add_servers/edit_server/remove_server also need {ServerAdminSetting}=true.",
                     DarlingMcpWritePolicy.WritesSetting,
                     DarlingMcpWritePolicy.ServerAdminSetting);
             }
@@ -700,14 +698,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                exception page ahead of the Host guard and the bearer check -- a throw that escapes then answers
                with the exception message and stack trace on the loopback bind, which has no token. Same pin as
                the web host (DarlingWebHostService, #4281 review finding 4). */
-            var builder = WebApplication.CreateBuilder(new WebApplicationOptions
-            {
-                EnvironmentName = Environments.Production,
-            });
-
-            /* #5288: the same kind of pin for the framework's forwarded-headers switch, on the very next line so no
-               service is registered between the builder and the pin. See PinForwardedHeadersOff. */
-            PinForwardedHeadersOff(builder.Services);
+            var builder = CreateHostBuilder();
 
             /* The listener layout lives in ConfigureListeners (#5288), so a live-HTTP test binds the SAME listeners
                production does: the network listener carries the certificate, the loopback ones stay plain. */
@@ -819,7 +810,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                covers that state and a loopback-only start whose configured token resolved. A start with no token
                configured leaves it empty and stays tokenless; a configured token that cannot be used never gets here,
                the start stops in every mode. */
-            var requireTokenWhenLoopbackOnly = !networkMode && bearerToken.Length > 0;
+            var requireTokenWhenLoopbackOnly = RequireTokenWhenLoopbackOnly(networkMode, bearerToken);
 
             /* #5288: the Host guard admits the listen address only while the server is exposed on it. networkListenIp
                was parsed before any degrade and still holds it afterwards, so it goes through
@@ -888,6 +879,29 @@ public sealed class DarlingMcpHostService : BackgroundService
             return false;
         }
     }
+
+    /// <summary>
+    /// The MCP host's web application builder: production environment (so a stray ASPNETCORE_ENVIRONMENT adds no
+    /// developer exception page ahead of the gates), and forwarded-header handling pinned off before any service is
+    /// registered (#5288, <see cref="PinForwardedHeadersOff"/>). The start path and the tests that drive the host's
+    /// pipeline both build through this.
+    /// </summary>
+    internal static WebApplicationBuilder CreateHostBuilder()
+    {
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            EnvironmentName = Environments.Production,
+        });
+        PinForwardedHeadersOff(builder.Services);
+        return builder;
+    }
+
+    /// <summary>
+    /// Whether the loopback listener requires the bearer token (#5288): in loopback-only mode with a resolved
+    /// token. One decision for the start path and the tests, so what gates the write tools is one computation.
+    /// </summary>
+    internal static bool RequireTokenWhenLoopbackOnly(bool networkMode, string bearerToken)
+        => !networkMode && bearerToken.Length > 0;
 
     /// <summary>
     /// Pins forwarded-header handling OFF on a host's builder (#5288), so the peer address the gates judge is always the

@@ -514,13 +514,13 @@ public sealed class DarlingWebHostService : BackgroundService
                        "token"). It is not used to gate the network: Critical, then loopback-only, with the token
                        still resolved so it keeps gating the loopback listener, the way a refused TLS
                        certificate degrades. */
-                    var tokenProblem = DarlingHostBinding.DescribeTokenProblem(token);
-                    if (tokenProblem is not null)
+                    var floor = DarlingHostBinding.ApplyTokenFloor(token, networkMode);
+                    if (floor.Problem is not null)
                     {
                         _logger.LogCritical(
                             "Web dashboard token {Problem} — refusing to expose; binding loopback-only.",
-                            tokenProblem);
-                        networkMode = false;
+                            floor.Problem);
+                        networkMode = floor.NetworkMode;
                         accessToken = token;
                     }
                     else
