@@ -368,6 +368,15 @@ peak AS
         collection_time AS peak_waiters_at
     FROM windowed
     ORDER BY resource_semaphore_id, pool_id, waiter_count DESC, collection_time DESC
+),
+peak_grant AS
+(
+    SELECT DISTINCT ON (resource_semaphore_id, pool_id)
+        resource_semaphore_id,
+        pool_id,
+        collection_time AS peak_granted_at
+    FROM windowed
+    ORDER BY resource_semaphore_id, pool_id, granted_memory_mb DESC NULLS LAST, collection_time DESC
 )
 SELECT
     a.resource_semaphore_id,
@@ -380,11 +389,15 @@ SELECT
     a.peak_granted_memory_mb,
     a.min_available_memory_mb,
     a.timeout_errors_in_window,
-    a.forced_grants_in_window
+    a.forced_grants_in_window,
+    pg.peak_granted_at
 FROM agg AS a
 JOIN peak AS p
   ON p.resource_semaphore_id = a.resource_semaphore_id
  AND p.pool_id = a.pool_id
+JOIN peak_grant AS pg
+  ON pg.resource_semaphore_id = a.resource_semaphore_id
+ AND pg.pool_id = a.pool_id
 ORDER BY a.pool_id, a.resource_semaphore_id";
 
     /// <summary>
@@ -393,7 +406,7 @@ ORDER BY a.pool_id, a.resource_semaphore_id";
     /// <see cref="GetMemoryGrantChartDataAsync"/> serves), THEN the window's peak / floor / total is taken over
     /// those per-snapshot pool figures, so peak waiters is the most sessions waiting on the pool at one instant,
     /// not the largest single semaphore's count. <c>resource_semaphore_id</c> is a typed NULL so both reads
-    /// project the same eleven columns. $1 server_id, $2 window start, $3 window end.
+    /// project the same twelve columns. $1 server_id, $2 window start, $3 window end.
     /// </summary>
     public const string MemoryGrantsWindowSql = @"
 WITH per_snapshot AS
@@ -434,6 +447,14 @@ peak AS
         collection_time AS peak_waiters_at
     FROM per_snapshot
     ORDER BY pool_id, waiter_count DESC, collection_time DESC
+),
+peak_grant AS
+(
+    SELECT DISTINCT ON (pool_id)
+        pool_id,
+        collection_time AS peak_granted_at
+    FROM per_snapshot
+    ORDER BY pool_id, granted_memory_mb DESC NULLS LAST, collection_time DESC
 )
 SELECT
     CAST(NULL AS INTEGER) AS resource_semaphore_id,
@@ -446,9 +467,11 @@ SELECT
     a.peak_granted_memory_mb,
     a.min_available_memory_mb,
     a.timeout_errors_in_window,
-    a.forced_grants_in_window
+    a.forced_grants_in_window,
+    pg.peak_granted_at
 FROM agg AS a
 JOIN peak AS p ON p.pool_id = a.pool_id
+JOIN peak_grant AS pg ON pg.pool_id = a.pool_id
 ORDER BY a.pool_id";
 
     /// <summary>Every snapshot in the window aggregated per (resource_semaphore_id, pool_id) — the window half
@@ -463,7 +486,7 @@ ORDER BY a.pool_id";
     public Task<List<MemoryGrantWindowRow>> GetMemoryGrantsWindowAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null) =>
         ReadMemoryGrantWindowAsync(MemoryGrantsWindowSql, "GetMemoryGrantsWindowAsync", serverId, hoursBack, fromDate, toDate, asOfUtc);
 
-    /// <summary>The two window reads project the SAME eleven columns in the same order, so one materialiser
+    /// <summary>The two window reads project the SAME twelve columns in the same order, so one materialiser
     /// serves both. DuckDB widens SUM(INTEGER) to HUGEINT and COUNT(*) to BIGINT, so every count goes through
     /// <c>ToInt64</c> and every MB figure through <c>ToDouble</c>, like the readers above.</summary>
     private async Task<List<MemoryGrantWindowRow>> ReadMemoryGrantWindowAsync(
@@ -496,7 +519,8 @@ ORDER BY a.pool_id";
                 PeakGrantedMemoryMb = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
                 MinAvailableMemoryMb = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
                 TimeoutErrorsInWindow = reader.IsDBNull(9) ? 0 : ToInt64(reader.GetValue(9)),
-                ForcedGrantsInWindow = reader.IsDBNull(10) ? 0 : ToInt64(reader.GetValue(10))
+                ForcedGrantsInWindow = reader.IsDBNull(10) ? 0 : ToInt64(reader.GetValue(10)),
+                PeakGrantedAt = reader.GetDateTime(11)
             });
         }
         return items;
@@ -521,6 +545,8 @@ public class MemoryGrantWindowRow
     public long PeakWaiterCount { get; set; }
     public DateTime PeakWaitersAt { get; set; }
     public double PeakGrantedMemoryMb { get; set; }
+    /// <summary>The snapshot of the largest granted memory (#5644 W9) - not the time of peak waiters.</summary>
+    public DateTime PeakGrantedAt { get; set; }
     public double MinAvailableMemoryMb { get; set; }
     public long TimeoutErrorsInWindow { get; set; }
     public long ForcedGrantsInWindow { get; set; }

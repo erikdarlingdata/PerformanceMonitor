@@ -725,10 +725,15 @@ export function metricBands(c) {
       : c.available_threads != null
       ? fmtInt(c.available_threads) + " free"
       : "ok";
-  const threadsDetail =
+  /* W19 (#5644): the tile value reads "N free", so the line under it must not repeat N over the total (that read as
+     N in use). It says how many are in use, of the total. */
+  const threadsInUse =
     c.total_threads != null
-      ? fmtInt(c.available_threads ?? c.total_threads - (c.current_workers ?? 0)) + " / " + fmtInt(c.total_threads) + " threads"
+      ? c.available_threads != null
+        ? c.total_threads - c.available_threads
+        : c.current_workers ?? 0
       : null;
+  const threadsDetail = c.total_threads != null ? fmtInt(threadsInUse) + " in use / " + fmtInt(c.total_threads) + " threads" : null;
 
   const cpuValue =
     c.total_cpu_percent != null || c.cpu_percent != null ? fmtPct(c.total_cpu_percent ?? c.cpu_percent) : "n/a";
@@ -804,7 +809,9 @@ export function metricBands(c) {
   }
 
   return el("div", { class: "metric-bands" }, [
-    chip("CPU", cpuValue, c.cpu_severity, cpuDetail),
+    /* W19 (#5644): total_cpu_percent is the whole box (SQL Server plus other processes); FinOps reads the SQL Server
+       process alone, so this chip says which one it shows. The cpu_percent fallback (a PostgreSQL target) stays "CPU". */
+    chip(c.total_cpu_percent != null ? "Total CPU" : "CPU", cpuValue, c.cpu_severity, cpuDetail),
     chip("Threads", threadsValue, c.threads_severity, threadsDetail),
     chip("Memory", memValue, c.memory_severity, memDetail),
     chip("Blocking", fmtInt(c.blocking_count), c.blocking_severity, blockingDetail),

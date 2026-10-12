@@ -1322,11 +1322,11 @@ export const SERVER_TABS = [
         sourceKey: "source",
         emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
-      line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
+      line("Deadlock trend", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
         format: "int",
         atTimeItem: "deadlocks",
-        emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
+        emptyText: DEADLOCKS_EMPTY_TEXT,
       }),
       table(
         "Blocking",
@@ -1348,7 +1348,7 @@ export const SERVER_TABS = [
         "deadlocks",
         [...DEADLOCK_COLUMNS, deadlockPlanColumn(server)],
         ctx.label,
-        "No deadlocks in this window.",
+        DEADLOCKS_EMPTY_TEXT,
         2,
         "separately_monitored_note"
       ),
@@ -2956,7 +2956,7 @@ const PROPERTY_STATS = [
   { key: "cpu_count", label: "Logical CPUs", format: "int" },
   { key: "socket_count", label: "Sockets", format: "int", hideWhen: AZURE_SQL_DATABASE },
   { key: "cores_per_socket", label: "Cores/socket", format: "int", hideWhen: AZURE_SQL_DATABASE },
-  { key: "hyperthread_ratio", label: "HT ratio", format: "int", hideWhen: AZURE_SQL_DATABASE },
+  { key: "hyperthread_ratio", label: "Logical CPUs per socket", format: "int", hideWhen: AZURE_SQL_DATABASE },
   { key: "physical_memory_mb", label: "Physical memory", format: "mb", hideWhen: AZURE_SQL_DATABASE },
   { key: "is_clustered", label: "Clustered", format: "bool" },
   { key: "is_hadr_enabled", label: "Always On", format: "bool" },
@@ -3033,17 +3033,20 @@ const MEMORY_STATS = [
   { key: "total_server_memory_mb", label: "Total server", format: "mb" },
   { key: "target_server_memory_mb", label: "Target server", format: "mb" },
   { key: "buffer_pool_mb", label: "Buffer pool", format: "mb" },
-  { key: "plan_cache_mb", label: "Plan cache", format: "mb" },
+  { key: "plan_cache_mb", label: "Plan cache (memory clerk)", format: "mb" },
   { key: "system_memory_state", label: "System state", format: "text", small: true, nullKey: "system_memory_state_note" },
   { key: "sql_memory_model", label: "Memory model", format: "text", small: true },
 ];
+
+/* W16 (#5644): the Blocking tab's Deadlock trend chart and Deadlocks table say the same thing when empty. */
+const DEADLOCKS_EMPTY_TEXT = "No deadlocks in this window.";
 
 const PLAN_CACHE_STATS = [
   { key: "summary.bloat_level", label: "Bloat", format: "text", small: true },
   { key: "summary.total_plans", label: "Plans", format: "int" },
   { key: "summary.single_use_plans", label: "Single-use", format: "int" },
   { key: "summary.single_use_percent", label: "Single-use %", format: "num1" },
-  { key: "summary.total_size_mb", label: "Cache size", format: "mb" },
+  { key: "summary.total_size_mb", label: "Cached plans size", format: "mb" },
   { key: "summary.single_use_size_mb", label: "Single-use size", format: "mb" },
   { key: "summary.wasted_percent", label: "Wasted %", format: "num1" },
   { key: "summary.bloat_recommendation", label: "Recommendation", format: "text", small: true },
@@ -3898,8 +3901,9 @@ const GRANT_WINDOW_COLUMNS = [
   { key: "pool_id", label: "Pool", format: "int" },
   { key: "snapshots_in_window", label: "Snapshots", format: "int" },
   { key: "peak_waiter_count", label: "Peak waiters", format: "int" },
-  { key: "peak_waiters_at", label: "Peak at", format: "time" },
+  { key: "peak_waiters_at", label: "Peak waiters at", format: "time" },
   { key: "peak_granted_memory_mb", label: "Peak granted", format: "mb" },
+  { key: "peak_granted_at", label: "Peak granted at", format: "time" },
   { key: "min_available_memory_mb", label: "Min available", format: "mb" },
   { key: "timeout_errors_in_window", label: "Timeouts", format: "int" },
   { key: "forced_grants_in_window", label: "Forced grants", format: "int" },
@@ -4712,8 +4716,8 @@ const MEMORY_BROKER_COLUMNS = [
 const SIGNIFICANT_WAIT_COLUMNS = [
   { key: "event_time", label: "Event Time", format: "time" },
   { key: "wait_type", label: "Wait Type" },
-  { key: "duration_ms", label: "Duration ms", format: "ms" },
-  { key: "signal_duration_ms", label: "Signal ms", format: "ms" },
+  { key: "duration_ms", label: "Duration", format: "ms" },
+  { key: "signal_duration_ms", label: "Signal duration", format: "ms" },
   { key: "wait_resource", label: "Wait Resource", wrap: true },
   { key: "session_id", label: "Session", format: "int" },
   { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
@@ -4926,7 +4930,7 @@ const HEAVIEST_COLUMNS = [
      row has one, so a server with no run times shows no column of dashes. */
   { key: "run_at", label: "Run at", hideWhenEmpty: true },
   { key: "amortized_ms_per_minute", label: "ms/min", format: "num1" },
-  { key: "pct_of_sweep_budget_per_run", label: "% of sweep", format: "num1" },
+  { key: "pct_of_sweep_budget_per_run", label: "% of run budget", format: "num1" },
 ];
 
 /* ─────────────────────────── PostgreSQL stat descriptors ─────────────────────────── */

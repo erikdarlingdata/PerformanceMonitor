@@ -106,7 +106,7 @@ public sealed class FinOpsTabUtilizationPageTests
         var tab = Tab();
         Assert.Contains("const SUMMARY_SUBTITLE = \"Last 24 hours\";", tab);
         Assert.Contains("el(\"span\", { class: \"panel-sub\", text: \" \" + SUMMARY_SUBTITLE })", tab);
-        Assert.Contains("{ key: \"cpu.max_cpu_pct\", label: \"Max CPU %\", format: \"int\" }", tab);
+        Assert.Contains("{ key: \"cpu.max_cpu_pct\", label: \"Max SQL Server CPU %\", format: \"int\" }", tab);
         Assert.True(tab.IndexOf("SUMMARY_SUBTITLE })", System.StringComparison.Ordinal) < tab.IndexOf("VIZ.stat(view", System.StringComparison.Ordinal));
     }
 

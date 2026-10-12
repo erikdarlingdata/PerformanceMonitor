@@ -153,8 +153,23 @@ public sealed class PvsStatsCollectorDefinitionTests
         var query = PvsStatsCollector.Instance.BuildQuery(MakeContext());
 
         Assert.Contains("sys.master_files", query.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("sys.database_files", query.Text, StringComparison.Ordinal);
+        /* Only the tempdb-qualified form (#5644 W5, below) may appear; the unqualified view is the Azure path's. */
+        Assert.DoesNotContain("sys.database_files", query.Text.Replace("tempdb.sys.database_files", "", StringComparison.Ordinal), StringComparison.Ordinal);
         Assert.DoesNotContain("DB_ID()", query.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OnPrem_SizesTempdbFromItsLiveFiles_NotTheStartupSizeInMasterFiles()
+    {
+        /* #5644 W5: sys.master_files carries tempdb's size at startup (32 GB against a live 44 GB), so the
+           denominator for database_id 2 comes from tempdb.sys.database_files. */
+        var text = PvsStatsCollector.Instance.BuildQuery(MakeContext()).Text;
+
+        Assert.Contains("FROM tempdb.sys.database_files AS tdbf", text, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(text, "OUTER APPLY"));
+        Assert.Contains("AND   mf.database_id <> 2", text, StringComparison.Ordinal);
+        Assert.Contains("WHERE pvss.database_id = 2", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("tempdb.sys.database_files", PvsStatsCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true)).Text, StringComparison.Ordinal);
     }
 
     [Fact]
