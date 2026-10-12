@@ -19,6 +19,7 @@ namespace Darling.Tests;
 /// invariants that make a value too HIGH impossible from being edited away: strict floor in every arm, the side arm's order, the
 /// verification's full key, a distinct marker per statement so the seed-read counters count one seed once.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class QueryStoreWatermarkReaderSqlPinTests
 {
     private static readonly string[] AllStatements =
