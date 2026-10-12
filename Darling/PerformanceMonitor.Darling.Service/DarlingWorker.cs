@@ -52,7 +52,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// A server that fails to connect is retried every sweep; a collector that errors is logged and
 /// retried on its next due time — the loop never dies for one bad cycle. Dispatch mirrors Lite's:
 /// the deadlock/blocked-process readers tolerate a missing XE session as zero rows, and
-/// trace_flags tolerates denied DBCC as zero rows with a warning. Every successful connect
+/// trace_flags has no tolerance of its own (#5633 item 19: a denied DBCC is a PERMISSIONS run, never a 0-row SUCCESS). Every successful connect
 /// upserts the servers registry and every collector run writes a collection_log row — both
 /// failure-isolated (<see cref="DarlingObservability"/>). On top of collection the loop runs
 /// the shared alert engine per server every 30 seconds and, since AN3, the analysis pipeline
@@ -16271,8 +16271,8 @@ LIMIT 1";
     /// <summary>
     /// Collector-name dispatch — the Darling twin of Lite's RunCollectorAsync switch, one typed
     /// entry per shared definition, with Lite's forwarder tolerances mirrored: the XE readers
-    /// treat a missing/inaccessible session as zero rows, trace_flags treats denied DBCC as zero
-    /// rows with a warning.
+    /// treat a missing/inaccessible session as zero rows. trace_flags has no tolerance (#5633 item 19):
+    /// a failed DBCC TRACESTATUS is a PERMISSIONS or ERROR run, because a SUCCESS run with 0 rows reads as "no flag is enabled".
     /// </summary>
     private static readonly IReadOnlyDictionary<string, DispatchEntry> s_dispatch = new Dictionary<string, DispatchEntry>(StringComparer.OrdinalIgnoreCase)
     {
@@ -16292,7 +16292,7 @@ LIMIT 1";
         ["server_config"] = (r, s, ct) => r.RunAsync(ServerConfigCollector.Instance, s, ct),
         ["database_config"] = (r, s, ct) => r.RunAsync(DatabaseConfigCollector.Instance, s, ct),
         ["database_states"] = (r, s, ct) => r.RunAsync(DatabaseStateCollector.Instance, s, ct),
-        ["trace_flags"] = RunTraceFlagsTolerantAsync,
+        ["trace_flags"] = (r, s, ct) => r.RunAsync(TraceFlagsCollector.Instance, s, ct),
         ["database_scoped_config"] = (r, s, ct) => r.RunAsync(DatabaseScopedConfigCollector.Instance, s, ct),
         ["query_store_health"] = (r, s, ct) => r.RunAsync(QueryStoreHealthCollector.Instance, s, ct),
         ["session_stats"] = (r, s, ct) => r.RunAsync(SessionStatsCollector.Instance, s, ct),
@@ -16427,20 +16427,6 @@ LIMIT 1";
                deadlock capture is non-functional. RunOneAsync catches this and continues the sweep, so
                collection is still tolerant — only the logged status differs from a real zero-row success. */
             throw new DarlingXeSessionMissingException(ex.Message, ex);
-        }
-    }
-
-    private static async Task<CollectorRunResult> RunTraceFlagsTolerantAsync(
-        DarlingCollectorRunner runner, ServerRuntime server, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await runner.RunAsync(TraceFlagsCollector.Instance, server, cancellationToken);
-        }
-        catch (SqlException)
-        {
-            /* DBCC may be denied — degrade to zero rows, mirrors Lite's warning path. */
-            return new CollectorRunResult(0, 0, 0, CollectorContext.NoMeasurements);
         }
     }
 }

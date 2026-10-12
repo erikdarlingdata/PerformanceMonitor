@@ -1081,6 +1081,11 @@ GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO mcp;
 --     destination column: a route IS a destination); add_servers / remove_server edit the monitored-server
 --     registry (whose credential column stays carved, so mcp can WRITE a password blob and never READ one).
 GRANT INSERT ON collect.analysis_findings TO mcp;
+-- #5633 item 13: analyze_server also records the families it could not read (CollectionCaveatStore). Exactly what
+--     its upsert and its clear need on this ONE table: INSERT, the upsert's UPDATE on just the two columns it sets
+--     (reason, last_seen_utc), and DELETE. The SELECT its WHERE clauses read is the schema-wide collect SELECT.
+GRANT INSERT, DELETE ON collect.analysis_collection_caveats TO mcp;
+GRANT UPDATE (reason, last_seen_utc) ON collect.analysis_collection_caveats TO mcp;
 GRANT INSERT ON config.analysis_muted TO mcp;
 GRANT UPDATE ON config.config_alert_settings TO mcp;
 GRANT UPDATE (email_cooldown_minutes) ON config.config_notification TO mcp;

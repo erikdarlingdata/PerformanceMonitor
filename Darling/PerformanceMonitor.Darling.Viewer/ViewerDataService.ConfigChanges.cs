@@ -131,10 +131,11 @@ public sealed partial class ViewerDataService
 
     /// <summary>The successful trace_flags runs that stored ZERO rows (#5633 item 19): the empty snapshots the diff needs, since a run
     /// that finds no flag stores nothing and the last flag being turned off would never show. Bounded like the change read: the runs in
-    /// the window plus the newest one before it (the baseline for a change on the window's first capture). SUCCESS only, and
+    /// the window plus the newest one before it (the baseline for a change on the window's first capture), no older than the window
+    /// start minus the trace_flags retention (<see cref="DarlingRetentionHorizons.TraceFlagsBaselineFloorSql"/>). SUCCESS only, and
     /// <c>rows_collected = 0</c> only (NULL is not recorded). Twin of <c>DarlingCollectorRunFactsReader.EmptyTraceFlagRunsSql</c>.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).</summary>
-    public const string EmptyTraceFlagRunsSql = """
+    public static readonly string EmptyTraceFlagRunsSql = $"""
         (SELECT collection_time
          FROM v_collection_log
          WHERE server_id = $1
@@ -151,6 +152,7 @@ public sealed partial class ViewerDataService
          AND   status = 'SUCCESS'
          AND   rows_collected = 0
          AND   collection_time < $2
+         AND   collection_time >= {DarlingRetentionHorizons.TraceFlagsBaselineFloorSql("$2")}
          ORDER BY collection_time DESC
          LIMIT 1)
         """;

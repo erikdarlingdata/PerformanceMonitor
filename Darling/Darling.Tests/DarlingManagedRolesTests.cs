@@ -456,12 +456,23 @@ public sealed class DarlingManagedRolesTests
         Assert.DoesNotContain("TO admin, viewer, mcp", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT SELECT ON ALL TABLES IN SCHEMA collect TO admin, viewer;", sql, StringComparison.Ordinal);
 
-        /* Exactly the two narrow ANALYSIS writes (Round 4 #1: INSERT-only). The mcp role's ONE other write —
+        /* The narrow ANALYSIS writes (Round 4 #1: INSERT-only on the two findings/mute targets; #5633 adds the caveat table below). The mcp role's ONE other write —
            INSERT/UPDATE/DELETE on config.custom_views (#1599, the custom-view tools) — is a single-table grant
            pinned separately by BuildProvisioningSql_McpRole_GrantsCustomViewsWrite_LikeViewer; it does not widen
            either schema-wide claim below. */
         Assert.Contains("GRANT INSERT ON collect.analysis_findings TO mcp;", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT ON config.analysis_muted TO mcp;", sql, StringComparison.Ordinal);
+
+        /* #5633 item 13: analyze_server's collection-caveat bookkeeping (CollectionCaveatStore.ApplyPassAsync: an
+           upsert that sets reason + last_seen_utc, then a DELETE) writes ONE more table as mcp. Exactly those
+           privileges and nothing wider: INSERT + DELETE, and UPDATE on just the two columns the upsert sets (so
+           first_seen_utc, server_id and family stay immutable to mcp). No table-level UPDATE, no TRUNCATE, and the
+           SELECT its WHERE clauses read is the schema-wide collect SELECT above. Without these grants every
+           MCP analyze_server call failed the write with 42501. */
+        Assert.Contains("GRANT INSERT, DELETE ON collect.analysis_collection_caveats TO mcp;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT UPDATE (reason, last_seen_utc) ON collect.analysis_collection_caveats TO mcp;", sql, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"GRANT [A-Z, ]*UPDATE[A-Z, ]* ON collect\.analysis_collection_caveats TO mcp", sql);
+        Assert.DoesNotMatch(@"TRUNCATE[A-Z, ]* ON collect\.analysis_collection_caveats", sql);
 
         /* No DELETE on analysis_muted (no MCP unmute tool) and no schema-wide write for mcp. */
         Assert.DoesNotContain("DELETE ON config.analysis_muted TO mcp", sql, StringComparison.Ordinal);
