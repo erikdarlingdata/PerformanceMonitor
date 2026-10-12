@@ -206,7 +206,7 @@ public sealed class McpWaitTools
         }
     }
 
-    [McpServerTool(Name = "get_waiting_tasks"), Description("Gets recently captured waiting tasks — queries that were actively waiting on a resource at collection time — NEWEST CAPTURE FIRST, longest wait first within a capture. Shows session ID, wait type, duration, blocking session, and database. Complements get_wait_stats by showing individual waiting queries rather than aggregated stats. <<GUIDE>> THE PAGE IS BOUNDED BY limit, NOT BY hours_back: tasks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, and one busy capture can fill the whole page by itself. Raise limit or narrow hours_back when truncated is true. When the store did not cover the whole window, effective_start, window_truncated and truncation_note say where its data starts.")]
+    [McpServerTool(Name = "get_waiting_tasks"), Description("Gets recently captured waiting tasks — queries that were actively waiting on a resource at collection time — NEWEST CAPTURE FIRST, longest wait first within a capture. Shows session ID, wait type, duration, blocking session, and database. Complements get_wait_stats by showing individual waiting queries rather than aggregated stats. <<GUIDE>> ONE ROW PER SESSION AND WAIT TYPE in each capture: thread_count is the parallel threads rolled into it, and intra_query_parallelism true means some of those threads wait on their own query's other threads (a parallel query's exchange waits), which is not a blocker; blocking_session_id is only ever ANOTHER session. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: tasks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, and one busy capture can fill the whole page by itself. Raise limit or narrow hours_back when truncated is true. When the store did not cover the whole window, effective_start, window_truncated and truncation_note say where its data starts.")]
     public static async Task<string> GetWaitingTasks(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -270,6 +270,10 @@ public sealed class McpWaitTools
                 session_id = r.SessionId,
                 wait_type = r.WaitType,
                 wait_duration_ms = r.WaitDurationMs,
+                /* #5633 item 18: one row per session and wait type per snapshot; the parallel threads of a query waiting on
+                   their own query are flagged, never reported as the session blocking itself. */
+                thread_count = r.ThreadCount,
+                intra_query_parallelism = r.IntraQueryParallelism,
                 blocking_session_id = r.BlockingSessionId,
                 database_name = r.DatabaseName,
                 resource_description = r.ResourceDescription,

@@ -2837,6 +2837,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            many names => a bound server_name = ANY filter. */
         var serverScope = ParseServerScope(body, values);
 
+        /* #5633 item 17: a spec that names a server by its display name (or in another case) is placed through the shared
+           server-name resolver, the one every other server-scoped tool uses, before anything reads by name. A name matching
+           several servers is refused with the resolver's own sentence. */
+        var (resolvedScope, scopeRefusal) = await ComposeServerScope.ResolveNamesAsync(postgres, serverScope, cancellationToken, logger);
+        if (scopeRefusal is not null)
+        {
+            return ComposeRunOutcome.BadRequest(McpHelpers.ErrorMessageOf(scopeRefusal));
+        }
+
+        serverScope = resolvedScope;
+
         /* The run window (#1606): an explicit absolute pair (windowStart/windowEnd — the zoom/brush and
            historical-analysis path) takes precedence over the relative `hours` (which the frontend keeps
            sending alongside); both-or-neither, start < end, span capped at the same MaxWindowHours ceiling.

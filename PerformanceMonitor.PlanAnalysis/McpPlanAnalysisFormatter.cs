@@ -193,7 +193,11 @@ public static class McpPlanAnalysisFormatter
                     statement_text = McpHelpers.Truncate(s.StatementText, 2000),
                     statement_type = s.StatementType,
                     estimated_cost = Math.Round(s.StatementSubTreeCost, 4),
-                    dop = s.DegreeOfParallelism,
+                    /* #5633 item 21: cache and Query Store plans carry no QueryPlan DegreeOfParallelism, so
+                       a missing attribute is null (unknown), never 0; "parallel" is read off the operators
+                       (Parallel="1"), which every plan source does carry. */
+                    dop = s.HasDegreeOfParallelism ? s.DegreeOfParallelism : (int?)null,
+                    parallel = allNodes.Any(n => n.Parallel),
                     serial_reason = s.NonParallelPlanReason,
                     compile_cpu_ms = s.CompileCPUMs,
                     compile_memory_kb = s.CompileMemoryKB,
