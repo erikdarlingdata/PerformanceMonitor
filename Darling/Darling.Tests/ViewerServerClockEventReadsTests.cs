@@ -96,6 +96,29 @@ public sealed class ViewerDefaultTraceServerClockTests
         Assert.Equal(Naive(2026, 11, 2, 13), byLabel["after-fall"]);
     }
 
+    /// <summary>
+    /// #5644 W6: the store holds copies of one event (a DDL's Begin and Commit rows from an older build, an event
+    /// re-stored by the datetime watermark round trip) that match on every column the viewer reads. The grid shows
+    /// each once, in reader order; an event that differs in any column stays.
+    /// </summary>
+    [Fact]
+    public async Task StoredCopiesOfOneDefaultTraceEvent_ComeBackOnce_AndNearCopiesStay()
+    {
+        var table = NewTable();
+        AddEvent(table, Naive(2026, 3, 9, 8), "same-event");
+        AddEvent(table, Naive(2026, 3, 9, 8), "same-event");
+        AddEvent(table, Naive(2026, 3, 9, 8), "same-event");
+        AddEvent(table, Naive(2026, 3, 9, 8, 1), "same-event");   /* a minute later: another event */
+        AddEvent(table, Naive(2026, 3, 9, 8), "other-database");  /* same instant, another database */
+
+        var rows = await ReadAsync(table, Eastern(), Naive(2026, 1, 1, 0), Naive(2026, 12, 31, 0));
+
+        Assert.Equal(3, rows.Count);
+        Assert.Single(rows, r => r.DatabaseName == "same-event" && r.EventTimeUtc == Naive(2026, 3, 9, 12));
+        Assert.Single(rows, r => r.DatabaseName == "same-event" && r.EventTimeUtc == Naive(2026, 3, 9, 12, 1));
+        Assert.Single(rows, r => r.DatabaseName == "other-database");
+    }
+
     [Fact]
     public async Task ADefaultTraceEventInASkippedOrRepeatedLocalHour_DoesNotThrow()
     {

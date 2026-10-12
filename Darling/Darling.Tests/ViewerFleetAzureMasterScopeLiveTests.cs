@@ -372,8 +372,12 @@ public sealed class ViewerFleetAzureMasterScopeLiveTests
 
     private static Task BprAsync(NpgsqlConnection connection, int serverId, string? db, DateTime at, System.Threading.CancellationToken ct) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
-            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, database_name) VALUES ($1,$2,$3,'s',$2,5000,$4)",
-            CollectionIdGenerator.Next(), at, serverId, (object?)db ?? DBNull.Value);
+            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, database_name, blocked_spid, blocking_spid) VALUES ($1,$2,$3,'s',$2,5000,$4,$5,50)",
+            CollectionIdGenerator.Next(), at, serverId, (object?)db ?? DBNull.Value, System.Threading.Interlocked.Increment(ref s_nextBlockedSpid));
+
+    /* #5644 W1: reports of one blocked session, blocker and wait start are ONE wait, so each seeded report gets a
+       blocked session of its own and counts as a wait of its own. */
+    private static int s_nextBlockedSpid = 100;
 
     private static Task DeadlockAsync(NpgsqlConnection connection, int serverId, string db, DateTime at, System.Threading.CancellationToken ct) =>
         DarlingMcpTestData.ExecAsync(connection, ct,

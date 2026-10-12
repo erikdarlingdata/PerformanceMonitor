@@ -47,7 +47,8 @@ public static class BlockingWaits
     /// <summary>
     /// Collapses reports to one row per wait: the report with the longest wait time (the latest one on a tie).
     /// <paramref name="partition"/> keeps rows that must never merge apart (the report source, for one). A row with
-    /// no event time cannot be placed in a wait, so it stays a wait of its own. The result is ordered by the
+    /// no event time or no wait time has no derived start and cannot be placed in a wait, so it stays a wait of
+    /// its own (the SQL form does the same). The result is ordered by the
     /// representative's event time, newest first, as the alert reads are.
     /// </summary>
     public static List<T> Collapse<T>(
@@ -56,20 +57,21 @@ public static class BlockingWaits
         Func<T, int> blockedSpid,
         Func<T, int> blockingSpid,
         Func<T, DateTime?> eventTime,
-        Func<T, long> waitTimeMs)
+        Func<T, long?> waitTimeMs)
     {
         var result = new List<T>();
         var placeable = new List<(T Row, double Start, DateTime Time, long Wait)>();
         foreach (var row in reports)
         {
             var time = eventTime(row);
-            if (time is null)
+            var wait = waitTimeMs(row);
+            if (time is null || wait is null)
             {
                 result.Add(row);
                 continue;
             }
 
-            placeable.Add((row, WaitStartEpochMs(time.Value, waitTimeMs(row)), time.Value, waitTimeMs(row)));
+            placeable.Add((row, WaitStartEpochMs(time.Value, wait.Value), time.Value, wait.Value));
         }
 
         foreach (var pair in placeable.GroupBy(p => (partition(p.Row), blockedSpid(p.Row), blockingSpid(p.Row))))
@@ -127,7 +129,7 @@ public static class BlockingWaits
         var partition = string.Join(
             ", ", (partitionColumns ?? Array.Empty<string>()).Concat(new[] { "blocked_spid", "blocking_spid" }));
         var epochMs = dialect == SqlDialect.DuckDb
-            ? "CAST(epoch_ms(s.event_time) AS DOUBLE)"
+            ? "(CAST(epoch_us(s.event_time) AS DOUBLE) / 1000.0)"
             : "(date_part('epoch', s.event_time) * 1000.0)";
         var tolerance = WaitStartToleranceMs.ToString(System.Globalization.CultureInfo.InvariantCulture);
         return $@"
@@ -138,20 +140,21 @@ public static class BlockingWaits
 {name}_gapped AS (
     SELECT m.*,
         CASE
-            WHEN LAG(m.wait_start_ms) OVER (PARTITION BY {partition} ORDER BY m.wait_start_ms, m.event_time) IS NULL
-              OR m.wait_start_ms - LAG(m.wait_start_ms) OVER (PARTITION BY {partition} ORDER BY m.wait_start_ms, m.event_time) > {tolerance}
+            WHEN m.wait_start_ms IS NULL THEN 1
+            WHEN LAG(m.wait_start_ms) OVER (PARTITION BY {partition} ORDER BY m.wait_start_ms NULLS LAST, m.event_time NULLS LAST) IS NULL
+              OR m.wait_start_ms - LAG(m.wait_start_ms) OVER (PARTITION BY {partition} ORDER BY m.wait_start_ms NULLS LAST, m.event_time NULLS LAST) > {tolerance}
             THEN 1 ELSE 0
         END AS starts_wait
     FROM {name}_marked AS m
 ),
 {name}_numbered AS (
     SELECT g.*,
-        SUM(g.starts_wait) OVER (PARTITION BY {partition} ORDER BY g.wait_start_ms, g.event_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS wait_no
+        SUM(g.starts_wait) OVER (PARTITION BY {partition} ORDER BY g.wait_start_ms NULLS LAST, g.event_time NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS wait_no
     FROM {name}_gapped AS g
 ),
 {name}_ranked AS (
     SELECT n.*,
-        ROW_NUMBER() OVER (PARTITION BY {partition}, n.wait_no ORDER BY n.wait_time_ms DESC, n.event_time DESC) AS wait_rank
+        ROW_NUMBER() OVER (PARTITION BY {partition}, n.wait_no ORDER BY n.wait_time_ms DESC NULLS LAST, n.event_time DESC NULLS LAST) AS wait_rank
     FROM {name}_numbered AS n
 ),
 {name} AS (

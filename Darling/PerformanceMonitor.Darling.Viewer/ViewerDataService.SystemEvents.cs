@@ -695,6 +695,7 @@ public sealed partial class ViewerDataService
         DbDataReader reader, ServerClock clock, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
     {
         var rows = new List<DefaultTraceEventRow>();
+        var seen = new HashSet<(DateTime?, string?, string?, string?, string?, string?, string?, int?, long?, long?, int?, int?, string?)>();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -708,21 +709,41 @@ public sealed partial class ViewerDataService
             if (!SystemEventSignificance.IsSignificantDefaultTraceEvent(eventName, severity))
                 continue;
 
+            var databaseName = reader.IsDBNull(2) ? null : reader.GetString(2);
+            var objectName = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var loginName = reader.IsDBNull(4) ? null : reader.GetString(4);
+            var hostName = reader.IsDBNull(5) ? null : reader.GetString(5);
+            var applicationName = reader.IsDBNull(6) ? null : reader.GetString(6);
+            var spid = reader.IsDBNull(7) ? (int?)null : reader.GetInt32(7);
+            var durationUs = reader.IsDBNull(8) ? (long?)null : reader.GetInt64(8);
+            var integerData = reader.IsDBNull(9) ? (long?)null : reader.GetInt64(9);
+            var errorNumber = reader.IsDBNull(11) ? (int?)null : reader.GetInt32(11);
+            var textData = reader.IsDBNull(12) ? null : reader.GetString(12);
+
+            /* #5644 W6: the store holds rows that are the same event twice (an older build kept both the Begin and
+               the Commit of every DDL, and re-stored an event whose datetime StartTime did not round-trip through
+               the watermark parameter). They match on every column read here and only the event_sequence the
+               collector stores tells them apart, so the first of each in reader order is kept, as the MCP reader
+               and Lite's do, and the copies stop filling the grid and the page limit. */
+            if (!seen.Add((eventTimeUtc, eventName, databaseName, objectName, loginName, hostName, applicationName,
+                    spid, durationUs, integerData, severity, errorNumber, textData)))
+                continue;
+
             rows.Add(new DefaultTraceEventRow(
                 eventTimeUtc,
                 SystemEventSignificance.ClassifyDefaultTraceEvent(eventName),
                 eventName,
-                reader.IsDBNull(2) ? null : reader.GetString(2),   /* database_name */
-                reader.IsDBNull(3) ? null : reader.GetString(3),   /* object_name */
-                reader.IsDBNull(4) ? null : reader.GetString(4),   /* login_name */
-                reader.IsDBNull(5) ? null : reader.GetString(5),   /* host_name */
-                reader.IsDBNull(6) ? null : reader.GetString(6),   /* application_name */
-                reader.IsDBNull(7) ? (int?)null : reader.GetInt32(7),   /* spid */
-                reader.IsDBNull(8) ? (long?)null : reader.GetInt64(8),  /* duration_us */
-                reader.IsDBNull(9) ? (long?)null : reader.GetInt64(9),  /* integer_data */
+                databaseName,
+                objectName,
+                loginName,
+                hostName,
+                applicationName,
+                spid,
+                durationUs,
+                integerData,
                 severity,
-                reader.IsDBNull(11) ? (int?)null : reader.GetInt32(11), /* error_number */
-                reader.IsDBNull(12) ? null : reader.GetString(12)));    /* text_data */
+                errorNumber,
+                textData));
         }
 
         /* OrderByDescending is a stable sort (List.Sort is not), so ties keep the reader's order. */

@@ -217,4 +217,83 @@ public sealed class BlockingWaitCountTests
         Assert.Equal(6, expected.Count);
         Assert.Equal(expected.Max(w => w.WaitTimeMs), Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture));
     }
+
+    /* ── #5644 wave-1 review: sub-millisecond starts and NULL times, in C# and in the store's SQL ── */
+
+    internal sealed record NullableReport(int Blocked, int Blocker, DateTime? Time, long? Wait);
+
+    /// <summary>
+    /// The edge cases both stores must agree with the C# rule on. Event times are offsets from <c>T0</c> in 100 ns
+    /// ticks so a 2000.4 ms difference survives (a DateTime keeps it; PostgreSQL and DuckDB timestamps keep
+    /// microseconds). Expected waits: pair 1/2 two (derived starts 2000.4 ms apart split), pair 3/4 one (exactly
+    /// 2000.0 ms merges), pair 5/6 four (one dated report, then a NULL event time, a NULL wait time and both NULL,
+    /// each a wait of its own), pair 7/8 one (a tie on wait time keeps the LATER report).
+    /// </summary>
+    internal static List<NullableReport> EdgeCaseReports()
+    {
+        DateTime At(long ticks) => T0.AddTicks(ticks);
+        const long Second = TimeSpan.TicksPerSecond;
+        return new List<NullableReport>
+        {
+            new(1, 2, At(10 * Second), 10000), new(1, 2, At(12 * Second + 4000), 10000),
+            new(3, 4, At(10 * Second), 10000), new(3, 4, At(12 * Second), 10000),
+            new(5, 6, At(10 * Second), 10000), new(5, 6, null, 5000), new(5, 6, At(20 * Second), null), new(5, 6, null, null),
+            new(7, 8, At(10 * Second), 10000), new(7, 8, At(10 * Second + 4000000), 10000),
+        };
+    }
+
+    internal static List<NullableReport> CollapseEdgeCases(IEnumerable<NullableReport> rows) =>
+        BlockingWaits.Collapse(rows, _ => "xe", r => r.Blocked, r => r.Blocker, r => r.Time, r => r.Wait);
+
+    internal static string EdgeKey(int blocked, int blocker, DateTime? time, long? wait) =>
+        string.Format(CultureInfo.InvariantCulture, "{0}|{1}|{2:yyyy-MM-dd HH:mm:ss.ffffff}|{3}", blocked, blocker, time, wait);
+
+    internal static string EdgeValuesSource(IEnumerable<NullableReport> rows) =>
+        "SELECT v.blocked_spid, v.blocking_spid, v.event_time, v.wait_time_ms FROM (VALUES "
+        + string.Join(",", rows.Select(r => string.Format(
+            CultureInfo.InvariantCulture, "({0},{1},CAST({2} AS TIMESTAMP),CAST({3} AS BIGINT))",
+            r.Blocked, r.Blocker,
+            r.Time is null ? "NULL" : $"'{r.Time:yyyy-MM-dd HH:mm:ss.ffffff}'",
+            r.Wait is null ? "NULL" : r.Wait.Value.ToString(CultureInfo.InvariantCulture))))
+        + ") AS v(blocked_spid, blocking_spid, event_time, wait_time_ms)";
+
+    [Fact]
+    public void EdgeCases_SubMillisecondStartsAndNullTimes_GiveTheDocumentedWaits()
+    {
+        var waits = CollapseEdgeCases(EdgeCaseReports());
+
+        Assert.Equal(2, waits.Count(w => w.Blocked == 1));
+        Assert.Single(waits, w => w.Blocked == 3);
+        Assert.Equal(4, waits.Count(w => w.Blocked == 5));
+        var tie = Assert.Single(waits, w => w.Blocked == 7);
+        Assert.Equal(T0.AddTicks((10 * TimeSpan.TicksPerSecond) + 4000000), tie.Time);
+    }
+
+    [Fact]
+    public async Task PostgresSql_AgreesWithTheCSharpRule_OnSubMillisecondStartsAndNullTimes()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString), "Set DARLING_TEST_PG to run the live wait-count SQL test.");
+
+        var sql = "WITH " + BlockingWaits.WaitsCteSql(BlockingWaits.SqlDialect.Postgres, "waits", EdgeValuesSource(EdgeCaseReports()))
+            + " SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM waits";
+        var fromSql = new List<string>();
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = new NpgsqlCommand(sql, connection);
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                fromSql.Add(EdgeKey(
+                    reader.GetInt32(0), reader.GetInt32(1),
+                    reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+                    reader.IsDBNull(3) ? null : reader.GetInt64(3)));
+            }
+        }
+
+        var fromCSharp = CollapseEdgeCases(EdgeCaseReports()).Select(w => EdgeKey(w.Blocked, w.Blocker, w.Time, w.Wait));
+        Assert.Equal(fromCSharp.OrderBy(k => k, StringComparer.Ordinal), fromSql.OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal(8, fromSql.Count);
+    }
 }

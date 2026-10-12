@@ -182,4 +182,62 @@ public class BlockingWaitDuckDbTests : IClassFixture<SharedDuckDbFixture>, IDisp
         Assert.Equal(2, CSharpWaitCount());
         Assert.Equal(2, await OverviewCountAsync());
     }
+
+    /* ── #5644 wave-1 review: sub-millisecond starts and NULL times ── */
+
+    private sealed record Edge(int Blocked, int Blocker, DateTime? Time, long? Wait);
+
+    /* The same edge cases Darling.Tests BlockingWaitCountTests.EdgeCaseReports runs on PostgreSQL: pair 1/2 two waits
+       (derived starts 2000.4 ms apart), 3/4 one (exactly 2000.0 ms), 5/6 four (NULL event time, NULL wait time and
+       both NULL are waits of their own), 7/8 one (a tie on wait time keeps the later report). */
+    private static List<Edge> EdgeReports()
+    {
+        var t0 = new DateTime(2026, 10, 9, 9, 0, 0, DateTimeKind.Unspecified);
+        DateTime At(long ticks) => t0.AddTicks(ticks);
+        const long Second = TimeSpan.TicksPerSecond;
+        return new List<Edge>
+        {
+            new(1, 2, At(10 * Second), 10000), new(1, 2, At((12 * Second) + 4000), 10000),
+            new(3, 4, At(10 * Second), 10000), new(3, 4, At(12 * Second), 10000),
+            new(5, 6, At(10 * Second), 10000), new(5, 6, null, 5000), new(5, 6, At(20 * Second), null), new(5, 6, null, null),
+            new(7, 8, At(10 * Second), 10000), new(7, 8, At((10 * Second) + 4000000), 10000),
+        };
+    }
+
+    private static string EdgeKey(int blocked, int blocker, DateTime? time, long? wait) =>
+        string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0}|{1}|{2:yyyy-MM-dd HH:mm:ss.ffffff}|{3}", blocked, blocker, time, wait);
+
+    [Fact]
+    public async Task DuckDbSql_AgreesWithTheCSharpRule_OnSubMillisecondStartsAndNullTimes()
+    {
+        var rows = EdgeReports();
+        var source = "SELECT v.blocked_spid, v.blocking_spid, v.event_time, v.wait_time_ms FROM (VALUES "
+            + string.Join(",", rows.Select(r => string.Format(
+                System.Globalization.CultureInfo.InvariantCulture, "({0},{1},CAST({2} AS TIMESTAMP),CAST({3} AS BIGINT))",
+                r.Blocked, r.Blocker,
+                r.Time is null ? "NULL" : $"'{r.Time:yyyy-MM-dd HH:mm:ss.ffffff}'",
+                r.Wait is null ? "NULL" : r.Wait.Value.ToString(System.Globalization.CultureInfo.InvariantCulture))))
+            + ") AS v(blocked_spid, blocking_spid, event_time, wait_time_ms)";
+
+        var fromSql = new List<string>();
+        using (var readLock = _duckDb.AcquireReadLock())
+        {
+            _conn ??= _duckDb.CreateConnection();
+            if (_conn.State != System.Data.ConnectionState.Open) await _conn.OpenAsync();
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "WITH " + BlockingWaits.WaitsCteSql(BlockingWaits.SqlDialect.DuckDb, "waits", source)
+                + " SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM waits";
+            using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                fromSql.Add(EdgeKey(
+                    Convert.ToInt32(reader.GetValue(0)), Convert.ToInt32(reader.GetValue(1)),
+                    reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+                    reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3))));
+        }
+
+        var fromCSharp = BlockingWaits.Collapse(rows, _ => "xe", r => r.Blocked, r => r.Blocker, r => r.Time, r => r.Wait)
+            .Select(w => EdgeKey(w.Blocked, w.Blocker, w.Time, w.Wait));
+        Assert.Equal(fromCSharp.OrderBy(k => k, StringComparer.Ordinal), fromSql.OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal(8, fromSql.Count);
+    }
 }
