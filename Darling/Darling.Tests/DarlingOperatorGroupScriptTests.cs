@@ -179,7 +179,7 @@ public sealed class DarlingOperatorGroupScriptTests
 
         var window = script.Substring(firstLock, serviceLock - firstLock);
         Assert.DoesNotContain(refusalText, window, StringComparison.Ordinal);
-        Assert.Equal(1, Regex.Matches(script, Regex.Escape(refusalText)).Count);
+        Assert.Single(Regex.Matches(script, Regex.Escape(refusalText)));
         Assert.Contains("Fail @\"", script.Substring(refusal - 40, 40), StringComparison.Ordinal);
     }
 
