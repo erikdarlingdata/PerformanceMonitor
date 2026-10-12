@@ -758,7 +758,14 @@ HAVING COUNT(*) > 1";
     /// <summary>The most DuckDB may spill to its temp folder while one archive file is rewritten (#5653).</summary>
     internal const long RewriteSpillCeilingBytes = 4L * 1024 * 1024 * 1024;
 
-    /// <summary>The folder next to the archive where the rewrite's own DuckDB instance spills (#5653). Emptied and removed after each file.</summary>
+    /// <summary>
+    /// The folder next to the archive where the rewrite's own DuckDB instance spills (#5653). Emptied and removed after each file.
+    ///
+    /// <para>The name is fixed, not per file or per run. That is safe only because the files are rewritten one at a
+    /// time (the <c>foreach</c> over the survey in <c>RepairAsync</c> awaits each rewrite before it starts the next),
+    /// so no two rewrites ever share the folder, and each one clears it before it starts. Rewriting files in parallel
+    /// would need a folder per rewrite.</para>
+    /// </summary>
     internal const string RewriteSpillFolderName = "slice_repair_tmp";
 
     /// <summary>Below this much temp room the rewrite is not started: it would only fail part way through.</summary>
@@ -818,9 +825,15 @@ HAVING COUNT(*) > 1";
     /// instance would hold every other query to it (as low as 256 MiB) for as long as a rewrite runs, and a
     /// concurrent archive read that needs more temp room than that would fail. The rewrite reads one parquet file and
     /// writes one parquet file, so it needs nothing from the store's tables and loses nothing by running apart.</para>
+    ///
+    /// <para>If opening or configuring the instance fails, the connection is disposed before the error leaves, so
+    /// a failed setup never strands an open in-memory instance. <paramref name="afterOpen"/> is a test seam only
+    /// (null in production): it runs right after the open, inside that guard, so a test can make the setup fail and
+    /// then check the connection it was handed.</para>
     /// </summary>
     internal static async Task<DuckDBConnection> OpenRewriteInstanceAsync(
-        string spillDirectory, long capBytes, CancellationToken cancellationToken)
+        string spillDirectory, long capBytes, CancellationToken cancellationToken,
+        Func<DuckDBConnection, Task>? afterOpen = null)
     {
         var capMiB = Math.Max(1, capBytes / (1024 * 1024));
         Directory.CreateDirectory(spillDirectory);
@@ -828,6 +841,11 @@ HAVING COUNT(*) > 1";
         try
         {
             await connection.OpenAsync(cancellationToken);
+            if (afterOpen is not null)
+            {
+                await afterOpen(connection);
+            }
+
             using var settings = connection.CreateCommand();
             settings.CommandText =
                 $"SET memory_limit = '{ArchiveService.MainConnectionCopyMemoryLimit}'; " +

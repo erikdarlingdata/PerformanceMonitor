@@ -715,8 +715,10 @@ COPY (
     /// (#933). memory_limit is instance-level; concurrent operations briefly
     /// see the raised cap.
     ///
-    /// <para><b>internal rather than private</b> so the #1912 archive repair reuses this exact raise/restore
-    /// instead of carrying its own copy of the number. The floor is a KNOWN-BROKEN-BELOW-2GB constraint, not a
+    /// <para><b>internal rather than private</b> so the tests can reach this exact raise/restore. The #1912 / #5653
+    /// slice repair does NOT call it: it rewrites on its own DuckDB instance and reads only
+    /// <see cref="MainConnectionCopyMemoryLimit"/> for that instance's memory_limit, so it never raises or restores
+    /// the store connection's limit. The floor is a KNOWN-BROKEN-BELOW-2GB constraint, not a
     /// tuning preference — DuckDB pre-reserves ~99% of memory_limit the moment a parquet COPY begins, so a
     /// second literal drifting downward is precisely how it gets re-broken (#942 lowered it to 1GB on sound-
     /// looking reasoning and broke compaction; #952 put it back).</para>

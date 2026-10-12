@@ -363,6 +363,36 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
         Assert.True(Directory.Exists(spill));
     }
 
+    /// <summary>
+    /// A setup step that fails after the connection opened: the error reaches the caller and the connection is
+    /// disposed, not left open with nobody holding it.
+    /// </summary>
+    [Fact]
+    public async Task RewriteInstance_WhenSetupFails_DisposesTheConnection_AndTheErrorSurfaces()
+    {
+        DuckDBConnection? handedOut = null;
+        var openWhenHandedOut = false;
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            using var instance = await QueryStoreSliceRepairService.OpenRewriteInstanceAsync(
+                Path.Combine(_archivePath, "failing_spill"),
+                700L * 1024 * 1024,
+                TestContext.Current.CancellationToken,
+                afterOpen: connection =>
+                {
+                    handedOut = connection;
+                    openWhenHandedOut = connection.State == System.Data.ConnectionState.Open;
+                    throw new InvalidOperationException("setup failed on purpose");
+                });
+        });
+
+        Assert.Equal("setup failed on purpose", ex.Message);
+        Assert.NotNull(handedOut);
+        Assert.True(openWhenHandedOut);
+        Assert.Equal(System.Data.ConnectionState.Closed, handedOut.State);
+    }
+
     private static async Task<string> ScalarAsync(DuckDBConnection connection, string expression)
     {
         using var cmd = connection.CreateCommand();
