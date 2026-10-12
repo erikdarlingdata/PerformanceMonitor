@@ -498,11 +498,12 @@ public sealed class QueryModificationDetectorTests
     }
 
     [Fact]
-    public void BuildConsentQueryText_ShowsAShortQueryWhole()
+    public void BuildConsentQueryText_ShowsAShortQueryWhole_WithItsLengthInTheHeader()
     {
         var shown = QueryModificationDetector.BuildConsentQueryText("SELECT 1");
 
-        Assert.Contains("SELECT 1", shown, StringComparison.Ordinal);
+        Assert.StartsWith("Query text that will run (8 characters):", shown, StringComparison.Ordinal);
+        Assert.Contains("| SELECT 1", shown, StringComparison.Ordinal);
         Assert.DoesNotContain("more characters not shown", shown, StringComparison.Ordinal);
     }
 
@@ -513,9 +514,82 @@ public sealed class QueryModificationDetectorTests
 
         var shown = QueryModificationDetector.BuildConsentQueryText(text);
 
-        Assert.Contains(new string('a', 1000), shown, StringComparison.Ordinal);
+        Assert.StartsWith("Query text that will run (first 1,000 of 1,234 characters):", shown, StringComparison.Ordinal);
+        Assert.Contains("| " + new string('a', 1000), shown, StringComparison.Ordinal);
         Assert.DoesNotContain("b", shown, StringComparison.Ordinal);
         Assert.Contains("(234 more characters not shown)", shown, StringComparison.Ordinal);
+    }
+
+    /// <summary>The lines of a display copy after its header, up to the "more characters" line when there is one.</summary>
+    private static string[] ConsentBodyLines(string shown)
+        => shown.Replace("\r\n", "\n", StringComparison.Ordinal).TrimEnd('\n').Split('\n').Skip(1)
+            .TakeWhile(l => !l.EndsWith("more characters not shown)", StringComparison.Ordinal)).ToArray();
+
+    [Fact]
+    public void BuildConsentQueryText_PrefixesEveryShownLine_SoTextCannotPassForPromptWording()
+    {
+        var shown = QueryModificationDetector.BuildConsentQueryText(
+            "SELECT 1\r\n------ Verified read-only ------\nNo data will be modified.\rSELECT 2");
+
+        Assert.Equal(
+            new[] { "| SELECT 1", "| ------ Verified read-only ------", "| No data will be modified.", "| SELECT 2" },
+            ConsentBodyLines(shown));
+    }
+
+    [Fact]
+    public void BuildConsentQueryText_CollapsesRunsOfBlankLinesToOne()
+    {
+        var shown = QueryModificationDetector.BuildConsentQueryText("a\n\n\n   \n\t\n\nb\n\n\nc");
+
+        Assert.Equal(new[] { "| a", "| ", "| b", "| ", "| c" }, ConsentBodyLines(shown));
+    }
+
+    [Fact]
+    public void BuildConsentQueryText_ReplacesControlAndBidiCharactersWithAVisibleMarker_ButKeepsTabs()
+    {
+        /* Right-to-left override (202E), isolate (2066), left-to-right mark (200E), Arabic letter mark (061C),
+           zero-width space (200B), bell (0007), NUL (0000), next line (0085), line separator (2028). */
+        var bad = new[] { 0x202E, 0x2066, 0x200E, 0x061C, 0x200B, 0x0007, 0x0000, 0x0085, 0x2028 }.Select(c => ((char)c).ToString()).ToArray();
+        var text = "a" + bad[0] + "b" + bad[1] + "c" + bad[2] + "d" + bad[3] + "e" + bad[4] + "f" + bad[5] + "g" + bad[6] + "h" + bad[7]
+            + "i" + bad[8] + "j\tk";
+
+        var shown = QueryModificationDetector.BuildConsentQueryText(text);
+
+        foreach (var c in bad)
+        {
+            Assert.DoesNotContain(c, shown, StringComparison.Ordinal);
+        }
+
+        var dot = ((char)0x00B7).ToString();
+        Assert.Equal(new[] { "| a" + dot + "b" + dot + "c" + dot + "d" + dot + "e" + dot + "f" + dot + "g" + dot + "h" + dot + "i" + dot + "j\tk" },
+            ConsentBodyLines(shown));
+    }
+
+    [Fact]
+    public void BuildConsentQueryText_ShowsAtMost40Lines_AndTheCountOfWhatIsNotShownCountsTheLinesToo()
+    {
+        var lines = Enumerable.Range(1, 100).Select(i => $"line{i}").ToArray();
+        var text = string.Join("\n", lines);
+
+        var shown = QueryModificationDetector.BuildConsentQueryText(text);
+
+        var body = ConsentBodyLines(shown);
+        Assert.Equal(40, body.Length);
+        Assert.Equal("| line40", body[^1]);
+        Assert.DoesNotContain("line41", shown, StringComparison.Ordinal);
+        var notShown = text.Length - (string.Join("\n", lines.Take(40)).Length + 1); /* the 40th line's newline counts as shown */
+        Assert.Contains($"({notShown} more characters not shown)", shown, StringComparison.Ordinal);
+        Assert.StartsWith($"Query text that will run ({text.Length:N0} characters):", shown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildConsentQueryText_ManyNewlines_CollapseToOneBlankLine()
+    {
+        var text = "SELECT 1" + new string('\n', 970) + "SELECT 2";
+
+        var shown = QueryModificationDetector.BuildConsentQueryText(text);
+
+        Assert.Equal(new[] { "| SELECT 1", "| ", "| SELECT 2" }, ConsentBodyLines(shown));
     }
 
     [Theory]

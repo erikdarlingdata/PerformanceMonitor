@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -210,9 +211,24 @@ public static partial class QueryModificationDetector
         return $"server {server}, database {database}";
     }
 
+    /// <summary>The most lines of query text a consent prompt shows (#5639), so a text of many lines cannot grow the box past the screen.</summary>
+    public const int ConsentQueryTextLineLimit = 40;
+
     /// <summary>
-    /// The query text a confirmation shows, so the operator reads what will run: the first
-    /// <see cref="ConsentQueryTextLimit"/> characters, then "(N more characters not shown)" when it is longer.
+    /// What stands in for a character the prompt will not draw as itself. U+00B7 (a middle dot) is visible in every
+    /// font the message box uses and is not a character query text normally holds; "?" would read as SQL.
+    /// </summary>
+    private const char ConsentUnprintableMarker = (char)0x00B7;
+
+    /// <summary>
+    /// The query text a confirmation shows, so the operator reads what will run. This is a DISPLAY copy only: the
+    /// text that runs, and the text the data-modification check reads, are the full original.
+    /// The header gives the full length BEFORE the text ("first 1,000 of N characters" when it is cut), each shown
+    /// line starts with "| " so a line of the text cannot pass for prompt wording, a run of blank lines shows as one,
+    /// control characters (tab excepted) and Unicode format characters (bidi controls U+202A-U+202E and
+    /// U+2066-U+2069, U+200E, U+200F, U+061C, zero-width characters) show as a middle dot, and at most
+    /// <see cref="ConsentQueryTextLineLimit"/> lines show. Whatever is not shown, because of the character limit or
+    /// the line limit, is counted in "(N more characters not shown)".
     /// </summary>
     public static string BuildConsentQueryText(string? queryText)
     {
@@ -223,12 +239,92 @@ public static partial class QueryModificationDetector
             shown = shown[..^1];
         }
 
+        var lines = new List<string>();
+        var consumed = 0;
+        var lastWasBlank = false;
+        var position = 0;
+        while (position < shown.Length)
+        {
+            var end = shown.IndexOfAny(['\r', '\n'], position);
+            var lineEnd = end < 0 ? shown.Length : end;
+            var next = lineEnd;
+            if (end >= 0)
+            {
+                next = shown[end] == '\r' && end + 1 < shown.Length && shown[end + 1] == '\n' ? end + 2 : end + 1;
+            }
+
+            var line = MakeVisible(shown.Substring(position, lineEnd - position));
+            var blank = string.IsNullOrWhiteSpace(line);
+            if (!(blank && lastWasBlank))
+            {
+                if (lines.Count == ConsentQueryTextLineLimit)
+                {
+                    break;
+                }
+
+                lines.Add("| " + line);
+            }
+
+            lastWasBlank = blank;
+            consumed = next;
+            position = next;
+        }
+
         var sb = new StringBuilder();
-        sb.AppendLine("Query text that will run:");
-        sb.AppendLine(shown);
+        sb.Append("Query text that will run (");
         if (shown.Length < text.Length)
         {
-            sb.AppendLine($"({text.Length - shown.Length} more characters not shown)");
+            sb.Append("first ").Append(ConsentQueryTextLimit.ToString("N0", CultureInfo.InvariantCulture)).Append(" of ");
+        }
+
+        sb.Append(text.Length.ToString("N0", CultureInfo.InvariantCulture)).AppendLine(" characters):");
+        foreach (var line in lines)
+        {
+            sb.AppendLine(line);
+        }
+
+        if (consumed < text.Length)
+        {
+            sb.AppendLine($"({(text.Length - consumed).ToString("N0", CultureInfo.InvariantCulture)} more characters not shown)");
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>One line of query text with each control character (tab excepted), format character (bidi controls, zero-width characters), line or paragraph separator and unpaired surrogate replaced by <see cref="ConsentUnprintableMarker"/>.</summary>
+    private static string MakeVisible(string line)
+    {
+        var sb = new StringBuilder(line.Length);
+        for (var i = 0; i < line.Length; i++)
+        {
+            var c = line[i];
+            var category = CharUnicodeInfo.GetUnicodeCategory(line, i);
+            if (char.IsHighSurrogate(c) && i + 1 < line.Length && char.IsLowSurrogate(line[i + 1]))
+            {
+                if (category == UnicodeCategory.Format || category == UnicodeCategory.Control)
+                {
+                    sb.Append(ConsentUnprintableMarker);
+                }
+                else
+                {
+                    sb.Append(c).Append(line[i + 1]);
+                }
+
+                i++;
+            }
+            else if (c == '\t')
+            {
+                sb.Append(c);
+            }
+            else if (char.IsControl(c) || char.IsSurrogate(c) || category is UnicodeCategory.Format
+                or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator)
+            {
+                sb.Append(ConsentUnprintableMarker);
+            }
+            else
+            {
+                sb.Append(c);
+            }
         }
 
         return sb.ToString();
