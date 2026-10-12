@@ -385,19 +385,6 @@ public sealed class ActualPlanRequestTests
         Assert.DoesNotContain("var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(", source, StringComparison.Ordinal);
     }
 
-    /// <summary>Lite parity: its actual-plan re-run runs the row's own in-process text, so the text the plan host gets is
-    /// the text that ran. The same variable feeds the prompt, the run and the plan host; nothing resolves a second text.</summary>
-    [Fact]
-    public void LitePlanActions_HandThePlanHostTheTextThatRan()
-    {
-        var controller = File.ReadAllText(Path.Combine(RepoRoot(), "PerformanceMonitor.Ui", "PlanNavigationController.cs"));
-        Assert.Contains("executeActual(databaseName ?? \"\", queryText, estimatedPlanXml, isolationLevel,", controller, StringComparison.Ordinal);
-        Assert.Contains("_showPlan(actualPlanXml, label, queryText)", controller, StringComparison.Ordinal);
-
-        var serverTab = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Controls", "ServerTab.Plans.cs"));
-        Assert.Contains("OpenPlanTab(actualPlanXml, label, queryText)", serverTab, StringComparison.Ordinal);
-    }
-
     private static ActualPlanRequest QueryStatsRequest(string? digest, string hash = "0xABCD")
         => new(hash, null, null, null, "master", digest);
 
@@ -631,7 +618,7 @@ public sealed class ActualPlanResultParseTests
     public void Parse_NullPoll_IsTimedOut()
     {
         var result = ViewerDataService.ParseActualPlanResult(null);
-        Assert.Equal(ActualPlanStatus.NoPlanCaptured, result.Status);
+        Assert.Equal(ActualPlanStatus.TimedOut, result.Status);
         Assert.Null(result.PlanXml);
     }
 

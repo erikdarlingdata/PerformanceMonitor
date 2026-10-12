@@ -291,6 +291,19 @@ public sealed class StatementScrubLivePlanDisplayTests
             "GetActualPlan_Click must reset the cursor in a finally");
     }
 
+    /// <summary>#5639 Lite parity: its actual-plan re-run runs the row's own in-process text, so the text the plan host gets is
+    /// the text that ran. The same variable feeds the prompt, the run and the plan host; nothing resolves a second text.</summary>
+    [Fact]
+    public void LitePlanActions_HandThePlanHostTheTextThatRan()
+    {
+        var controller = File.ReadAllText(Path.Combine(RepoRoot(), "PerformanceMonitor.Ui", "PlanNavigationController.cs"));
+        Assert.Contains("executeActual(databaseName ?? \"\", queryText, estimatedPlanXml, isolationLevel,", controller, StringComparison.Ordinal);
+        Assert.Contains("_showPlan(actualPlanXml, label, queryText)", controller, StringComparison.Ordinal);
+
+        var serverTab = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Controls", "ServerTab.Plans.cs"));
+        Assert.Contains("OpenPlanTab(actualPlanXml, label, queryText)", serverTab, StringComparison.Ordinal);
+    }
+
     private static string RepoRoot([CallerFilePath] string thisFile = "")
         => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, ".."));
 }
