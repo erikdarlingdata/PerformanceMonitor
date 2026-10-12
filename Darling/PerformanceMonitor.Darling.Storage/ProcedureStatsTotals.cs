@@ -13,7 +13,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// holding what the raw procedure duration trend sums from every row of that collection. Since #5463 a collection stores
 /// about 560 to 1,060 rows per server, and the trend's per-collection CTE read all of them (about 60 K heap pages for one
 /// 24 h read). The collector now writes the totals in the same transaction as the rows (<see cref="ProcedureStatsTotalsWriter"/>)
-/// and the read (a later part of #5638) reads them in place of the rows. This class is the storage half: the table, the upsert
+/// and the raw trend's per-collection CTE (<c>DurationTrendRouting.BuildBucketedRawTrendSql</c>) reads them in place of the rows. This class is the storage half: the table, the upsert
 /// and the retention predicate.
 ///
 /// <para><b>Grain and measures.</b> <c>(server_id, collection_time, database_name)</c>. Per database because the Viewer's
