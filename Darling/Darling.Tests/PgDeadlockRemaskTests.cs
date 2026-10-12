@@ -418,7 +418,7 @@ public sealed class PgDeadlockRemaskTests
         /* A: raw, seen twice, a day apart. B: raw, cut before its victim's statement, so it has none. D: raw, then seen
            again by this build. C: this build's. */
         var graphB = LegacyGraph.Replace("3101", "4101", StringComparison.Ordinal).Replace("3102", "4102", StringComparison.Ordinal)
-            .Replace("Process 4101: UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111\n", "", StringComparison.Ordinal);
+            .Replace("Process 4101: UPDATE accounts SET pin = '47Q1' WHERE card = 4111111111111111\n", "", StringComparison.Ordinal);
         Assert.DoesNotContain("Process 4101:", graphB, StringComparison.Ordinal);
         var graphD = LegacyGraph.Replace("3101", "5101", StringComparison.Ordinal).Replace("3102", "5102", StringComparison.Ordinal);
         await PlantAsync(connection, atA.AddMinutes(1), atA, 3101, "A", PgDeadlockLogParser.HashOf(LegacyGraph), LegacyVictimStatement, LegacyGraph, ct);
@@ -544,7 +544,10 @@ public sealed class PgDeadlockRemaskTests
         Assert.Contains((Marked(AlertContextSerializer.Serialize(livePerEvent), 0), AlertContextBuilders.ContextToDetailText(livePerEvent)), alertsAfter);
         Assert.Contains((AlertContextSerializer.Serialize(sinceC), (string?)null), alertsAfter);
         Assert.Contains((sqlServerJson, (string?)null), alertsAfter);
-        Assert.Contains(alertsAfter, a => a.Context.Contains(s_key.DeadlockAlertKey(goneHash), StringComparison.Ordinal) && a.Context.Contains("WHERE id = ?", StringComparison.Ordinal));
+        /* The alert whose report is gone keeps its (keyed) incident, and its statement text is withheld whole. */
+        Assert.Contains(alertsAfter, a => a.Context.Contains(s_key.DeadlockAlertKey(goneHash), StringComparison.Ordinal)
+            && AlertContextSerializer.TryDeserialize(a.Context, out var gone)
+            && gone.Incidents!.Any(i => i.InvolvedObjects.SequenceEqual(new[] { PgLogTextRedactor.WithheldStatement })));
         Assert.DoesNotContain(goneHash, alertDump, StringComparison.Ordinal);
 
         /* The finding reads as every read showed it before; the one with no deadlock section is as planted. */
@@ -1142,7 +1145,9 @@ VALUES ('{now.AddDays(-1):yyyy-MM-dd HH:mm:ss}', 1, 'first', '{AlertEngine.Deadl
         Assert.Equal(2, progress.Alerts.Walks);
         var dump = await DumpAsync(connection, "SELECT context_json FROM config_alert_log WHERE server_id = 1", ct);
         AssertNoSecret(dump);
-        Assert.Contains("WHERE id = ?", dump, StringComparison.Ordinal);
+        /* The report is gone, so the statement text is withheld whole: nothing can be re-derived from it. */
+        Assert.True(AlertContextSerializer.TryDeserialize(dump, out var context));
+        Assert.Equal(PgLogTextRedactor.WithheldStatement, Assert.Single(Assert.Single(context.Incidents!).InvolvedObjects));
     }
 
     /* The expected context of a rewritten alert: its incidents at the given positions carry the rebuilt marker,
@@ -1434,7 +1439,8 @@ WHERE victim_pid = 10004", ct);
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         var at = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2);
-        var other = LegacyGraph.Replace("UPDATE accounts SET pin = '4721'", "UPDATE ledgers SET pin = '4721'", StringComparison.Ordinal);
+        var other = LegacyGraph.Replace("UPDATE accounts SET pin = '47Q1'", "UPDATE ledgers SET pin = '47Q1'", StringComparison.Ordinal);
+        Assert.NotEqual(LegacyGraph, other);
         var graphs = new[] { ("T1", LegacyGraph), ("T2", other) };
         foreach (var (shape, graph) in graphs)
         {

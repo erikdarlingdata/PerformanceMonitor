@@ -380,9 +380,15 @@ public sealed class PgTargetDeadlockDrillDownTests
 
             /* Shape B: a three-way chain with a statement past the text cap and a graph past the line cap, stored
                twice under ONE hash (the overlapping tail re-read). */
-            var longStatement = "SELECT " + string.Join(", ", Enumerable.Range(1, 400).Select(i => $"c{i}")) + " FROM wide_table WHERE id = $1";
+            var longStatement = "SELECT " + string.Join(", ", Enumerable.Range(1, 360).Select(i => $"c{i}")) + " FROM wide_table WHERE id = $1";
             Assert.True(longStatement.Length > PgTargetDrillDownCollector.StatementTextCap);
-            var thirtyLineGraph = string.Join('\n', Enumerable.Range(1, 30).Select(i => $"Process {i} waits for ShareLock on transaction {1000 + i}; blocked by process {i + 1}."));
+            /* The victim shown is the graph's own victim line (the masking rules are applied to the graph), so the thirty
+               lines are a report as the server writes one: fifteen wait-for lines, then each participant's own query in
+               the same order, the victim's (pid 4242) first with the long statement. */
+            var pids = new[] { 4242 }.Concat(Enumerable.Range(1, 14)).ToArray();
+            var thirtyLineGraph = string.Join('\n', pids.Select((pid, k) => $"Process {pid} waits for ShareLock on transaction {1000 + k}; blocked by process {pids[(k + 1) % pids.Length]}.")
+                .Concat(pids.Select(pid => pid == 4242 ? $"Process 4242: {longStatement}" : $"Process {pid}: SELECT 1")));
+            Assert.Equal(30, thirtyLineGraph.Split('\n').Length);
             await PlantDeadlockAsync(connection, windowStart.AddMinutes(20), "hash-b1", 3, "ShareLock", "transaction", longStatement, thirtyLineGraph, ct);
             await PlantDeadlockAsync(connection, windowStart.AddMinutes(25), "hash-b1", 3, "ShareLock", "transaction", longStatement, thirtyLineGraph, ct);
 
