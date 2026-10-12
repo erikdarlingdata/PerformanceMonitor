@@ -117,6 +117,8 @@ public sealed class WebPartialWindowBehaviourTests
         // G1a: plainText (lane C, W8) and localizeIsoText (lane E, W20) both run in the strips.
         Assert.Equal("TRUNCATED: since " + b + ": 9 indexes match and 5 were returned. Rows are ordered by total wait time descending.", S(r, "bothEmpty"));
         Assert.Equal(S(r, "bothEmpty"), S(r, "bothNotice"));
+        // The restart banner's start-time pair is the server's own clock (not UTC): the strip leaves it as written, never shifted.
+        Assert.Equal(S(r, "bannerText"), S(r, "bannerNotice"));
         Assert.Equal("nothing to change 10/9/2026, 10:36:32 AM", S(r, "noStamp"));
         Assert.Equal("null", S(r, "nonString"));
         Assert.DoesNotContain("T", a);

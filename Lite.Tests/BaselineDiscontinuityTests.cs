@@ -127,7 +127,7 @@ public sealed class BaselineDiscontinuityTests
         var rows = new[] { Marker(T0, "wait_stats", "identity_epoch_changes=1") };
 
         var restart = Assert.Single(BaselineDiscontinuities.Compose(rows, Pair("wait_stats", T0, new(oldStart, "AG1"), new(newStart, "ag1")))).Detail;
-        Assert.Contains("start time 2026-10-08 00:10:55 → 2026-10-09 00:10:55", restart, StringComparison.Ordinal);
+        Assert.Contains("start time 2026-10-08 00:10:55 → 2026-10-09 00:10:55 (server clock)", restart, StringComparison.Ordinal);
         Assert.DoesNotContain("server name", restart, StringComparison.Ordinal);
 
         var rename = Assert.Single(BaselineDiscontinuities.Compose(rows, Pair("wait_stats", T0, new(oldStart, "OLD"), new(oldStart, "NEW")))).Detail;
@@ -135,7 +135,11 @@ public sealed class BaselineDiscontinuityTests
         Assert.DoesNotContain("start time", rename, StringComparison.Ordinal);
 
         var failover = Assert.Single(BaselineDiscontinuities.Compose(rows, Pair("wait_stats", T0, new(oldStart, "OLD"), new(newStart, "NEW")))).Detail;
-        Assert.Contains("start time 2026-10-08 00:10:55 → 2026-10-09 00:10:55, server name OLD → NEW", failover, StringComparison.Ordinal);
+        Assert.Contains("start time 2026-10-08 00:10:55 → 2026-10-09 00:10:55 (server clock), server name OLD → NEW", failover, StringComparison.Ordinal);
+        // #5644 W20: the pair is the target's local clock, so the banner names it and never writes an ISO instant with a "Z"
+        // (the web would shift a "Z" stamp into the browser's zone and show a start time that never happened).
+        Assert.DoesNotMatch(@"\d{4}-\d\d-\d\dT|\dZ", restart);
+        Assert.DoesNotMatch(@"\d{4}-\d\d-\d\dT|\dZ", failover);
     }
 
     [Fact]
