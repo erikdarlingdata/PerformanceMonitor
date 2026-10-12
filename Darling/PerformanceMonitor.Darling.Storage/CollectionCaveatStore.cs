@@ -81,9 +81,12 @@ public static class CollectionCaveatStore
     /// clean pass on a server with standing rows still opens a connection, to clear them.</para>
     ///
     /// <para>Never throws. Logged once at Warning and swallowed: a store write that failed loses this pass's
-    /// update to the table, not the pass itself, and the next pass tries again.</para>
+    /// update to the table, not the pass itself, and the next pass tries again. <b>Returns whether the write
+    /// landed</b> (#5633 item 13): <c>false</c> after a swallowed failure, so a caller that can tell its own
+    /// user (the MCP <c>analyze_server</c> tool's <c>persistence_note</c>) says the caveats were not saved
+    /// instead of failing silently. A role without the table grant (42501) is one such failure.</para>
     /// </summary>
-    public static async Task ApplyPassAsync(
+    public static async Task<bool> ApplyPassAsync(
         NpgsqlDataSource postgres,
         int serverId,
         IReadOnlyCollection<UnreadFamily> unread,
@@ -132,12 +135,14 @@ public static class CollectionCaveatStore
             }
 
             await clear.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(
                 "[CollectionCaveatStore] Failed to persist collection caveats for server {ServerId}: {Message}",
                 serverId, ex.Message);
+            return false;
         }
     }
 

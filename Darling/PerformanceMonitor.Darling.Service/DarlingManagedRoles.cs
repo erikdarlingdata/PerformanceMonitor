@@ -1241,9 +1241,10 @@ GRANT CONNECT ON DATABASE {database} TO {admin}, {viewer};
 --    token) from the optional network MCP surface, so it is deliberately NOT admin. It gets viewer's exact
 --    READ surface (SELECT on collect + config-minus-secret-columns) as SEPARATE 'TO mcp' statements -- the
 --    'TO admin, viewer' grant lines above are pinned verbatim by tests, so mcp is never appended to them --
---    PLUS exactly two narrow analysis INSERTs HERE: what analyze_server persists (collect.analysis_findings)
+--    PLUS two narrow analysis INSERTs HERE: what analyze_server persists (collect.analysis_findings)
 --    and what the mute tool writes (config.analysis_muted) -- no UPDATE/DELETE on EITHER analysis target (no
---    MCP unmute tool exists; DELETE/unmute is viewer/admin only). The mcp role ALSO gets the narrow
+--    MCP unmute tool exists; DELETE/unmute is viewer/admin only) -- and, since #5633, the narrow write analyze_server's
+--    collection-caveat bookkeeping needs on collect.analysis_collection_caveats (see the grant below). The mcp role ALSO gets the narrow
 --    config.custom_views write in section 7 (for the MCP custom-view tools) -- likewise a single non-secret
 --    config table, never the config_command pivot or the carved secret columns. EXPLICIT single-table WRITE grants
 --    with NO ALTER DEFAULT PRIVILEGES: ADP has no per-table
@@ -1263,6 +1264,15 @@ ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA {collect}
    GRANT SELECT ON TABLES TO {mcp};
 {mcpColumnAcl}
 GRANT INSERT ON {collect}.analysis_findings TO {mcp};
+-- #5633 item 13: analyze_server (run through MCP) also records the families it could not read, through
+--    CollectionCaveatStore.ApplyPassAsync, which wrote with only the INSERT above and so failed 42501 on every
+--    call. Exactly what that store's two statements need on this ONE table, and nothing wider: INSERT and the
+--    upsert's UPDATE (column-level, JUST the two columns its ON CONFLICT DO UPDATE sets -- reason and
+--    last_seen_utc -- so first_seen_utc, server_id and family stay immutable to mcp), plus DELETE for the
+--    clear of a family the pass read successfully. The SELECT its WHERE clauses read is the schema-wide collect
+--    SELECT above. PruneAsync (the 7-day sweep) runs on the owner pool in DarlingRetention, so it needs no grant.
+GRANT INSERT, DELETE ON {collect}.analysis_collection_caveats TO {mcp};
+GRANT UPDATE (reason, last_seen_utc) ON {collect}.analysis_collection_caveats TO {mcp};
 GRANT INSERT ON {config}.analysis_muted TO {mcp};
 -- NOT granted (Round 4 #9): collect.analysis_state. MCP analyze_server calls AnalyzeAsync directly and never
 -- writes the analysis_state marker -- only the worker's RunAnalysisPassAsync wrapper does, as the owner
@@ -1270,7 +1280,7 @@ GRANT INSERT ON {config}.analysis_muted TO {mcp};
 GRANT CONNECT ON DATABASE {database} TO {mcp};
 
 -- 7. Custom views (#1563): the SINGLE exception to viewer-writes-nothing, and the mcp role's ONLY write outside
---    the two section-6 analysis INSERTs. Both the web dashboard (as the viewer role) and the optional network MCP
+--    the section-6 analysis writes (two INSERTs and the caveat-bookkeeping grant). Both the web dashboard (as the viewer role) and the optional network MCP
 --    surface (as the mcp role) CRUD rows in exactly this one config table (non-secret dashboard/notebook JSON --
 --    no ViewerRestrictedConfigTables carve). The web composer and the MCP custom-view tools share ONE store
 --    (CustomViewStore) + ONE validator (DarlingWebEndpoints.ValidateDefinition), so the two write identities need
