@@ -155,20 +155,34 @@ public sealed class StoreLockHolderTests
     {
         var lines = global::Lite.Tests.ParitySource.ReadFile("Lite/Database/DuckDbInitializer.cs").Split('\n');
         var acquisition = new Regex(@"s_dbLock\.(Try)?Enter(Read|Write)Lock\(");
-        var checkedCount = 0;
+        var matched = new List<string>();
         var unregistered = new List<string>();
         for (var i = 0; i < lines.Length; i++)
         {
             if (!acquisition.IsMatch(lines[i]) || lines[i].Contains("DisposeWriteLockTimeout", StringComparison.Ordinal))
                 continue;
 
-            checkedCount++;
+            matched.Add(lines[i].Trim());
             var window = string.Join("\n", lines.Skip(i + 1).Take(RegisterWindowLines));
             if (!window.Contains("StoreLockHolders.Register(", StringComparison.Ordinal))
                 unregistered.Add($"line {i + 1}: {lines[i].Trim()}");
         }
 
-        Assert.True(checkedCount >= 5, $"Found {checkedCount} acquisitions; the pattern no longer matches the source.");
+        /* The exact set, not a floor: a rename or refactor that makes the pattern miss one acquisition fails here
+           instead of leaving that site unchecked. Adding a real acquisition means adding it to this list. */
+        var expected = new[]
+        {
+            "s_dbLock.EnterReadLock();",
+            "while (!s_dbLock.TryEnterReadLock(ReadLockPollInterval))",
+            "if (!s_dbLock.TryEnterReadLock(timeout))",
+            "if (!s_dbLock.TryEnterWriteLock(timeout.Value))",
+            "s_dbLock.EnterWriteLock();",
+            "if (!s_dbLock.TryEnterReadLock(0))",
+            "if (!s_dbLock.TryEnterWriteLock(0))",
+        };
+        Assert.True(expected.SequenceEqual(matched),
+            "The matched acquisitions changed. Expected: " + string.Join(" | ", expected)
+            + " -- found: " + string.Join(" | ", matched));
         Assert.True(unregistered.Count == 0,
             "No StoreLockHolders.Register( within " + RegisterWindowLines + " lines of: " + string.Join(" | ", unregistered));
     }

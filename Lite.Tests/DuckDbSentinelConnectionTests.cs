@@ -326,6 +326,49 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     }
 
     /// <summary>
+    /// #5650: a trim cycle that skips because the lock is busy leaves nothing in the holder registry. With another thread
+    /// holding the read lock and the threshold at 0, the cycle takes its own short read hold (registers, then unregisters
+    /// in the <c>finally</c>) and then skips at the write lock, which is registered only after it is won. A skip that
+    /// left an entry behind would be named as a lock holder in every later timeout message.
+    /// </summary>
+    [Fact]
+    public async Task BusyTrimCycle_LeavesNoHolderInTheRegistry()
+    {
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        const string trimHolder = "DuckDbInitializer." + nameof(DuckDbInitializer.RunMemoryTrimCycle);
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 0;
+        var readerReady = new ManualResetEventSlim();
+        var releaseReader = new ManualResetEventSlim();
+        try
+        {
+            var readerTask = Task.Run(() =>
+            {
+                using var readLock = initializer.AcquireReadLock();
+                readerReady.Set();
+                releaseReader.Wait(TimeSpan.FromSeconds(5));
+            });
+            Assert.True(readerReady.Wait(TimeSpan.FromSeconds(5)));
+
+            var completedBefore = initializer.CompletedTrimCycleCount;
+            initializer.RunMemoryTrimCycle();
+
+            Assert.Equal(completedBefore, initializer.CompletedTrimCycleCount); // skipped at the busy write lock
+            Assert.DoesNotContain(StoreLockHolders.Snapshot(), h => h.Name == trimHolder);
+
+            releaseReader.Set();
+            await readerTask;
+        }
+        finally
+        {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+            initializer.Dispose();
+        }
+    }
+
+    /// <summary>
     /// #4262 round 3, my ruling. The tests above assert side effects that hold whether or not the cycle's
     /// SET statements ever ran (<c>memory_limit</c> round-trips either way if nothing touched it) — this
     /// asserts the run itself, through <see cref="DuckDbInitializer.CompletedTrimCycleCount"/>, which only
