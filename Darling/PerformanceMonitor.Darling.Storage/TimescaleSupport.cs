@@ -174,6 +174,22 @@ public static partial class TimescaleSupport
     public static int HypertableCount => HypertableTables.Count + 1;
 
     /// <summary>
+    /// The number of continuous aggregates <see cref="EnsureContinuousAggregatesAsync"/> creates: the hourly,
+    /// daily, baseline, off-grid and frozen tiers (distinct views). Worker sizing counts these next to
+    /// <see cref="HypertableCount"/> because each carries up to three policy jobs (compression, refresh,
+    /// retention), 70 of the 142 jobs of a migrated store (#5633 item 14). Pinned against a migrated store's
+    /// real aggregate count by a live test.
+    /// </summary>
+    public static int ContinuousAggregateCount =>
+        HourlyAggregates.Select(a => a.View)
+            .Concat(DailyAggregates.Select(a => a.View))
+            .Concat(BaselineAggregates.Select(a => a.View))
+            .Concat(OffGridAggregates.Select(a => a.View))
+            .Concat(FrozenRollupAggregates.Select(a => a.View))
+            .Distinct(StringComparer.Ordinal)
+            .Count();
+
+    /// <summary>
     /// Is the timescaledb extension installed AND created in this database (extensions are
     /// per-database, so pg_extension is the authoritative check)? Callers cache the answer per
     /// data source — the worker detects once at startup and passes the flag around.

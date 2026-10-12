@@ -231,8 +231,9 @@ public sealed class DarlingManagedPostgres
     /// version marker heals "we changed our mind about the formula", this heals "the machine changed
     /// underneath it". Precedence is therefore never ambiguous even though both write the same file:
     /// v8 re-states the SAME formulas (it calls <see cref="DeriveMemorySettings"/> and
-    /// <see cref="DeriveWorkerSettings"/>, the same helpers the version blocks use), so it can only ever
-    /// differ from them by being FRESHER, never by disagreeing.</para>
+    /// <see cref="DeriveWorkerSettings(int, long)"/>, the same helpers the version blocks use), so it can only ever
+    /// differ from them by being FRESHER, never by disagreeing. The one deliberate exception is the worker
+    /// pair: v2 writes the floor and v8 raises it with RAM, so v8 is the larger and wins (it comes later).</para>
     /// </summary>
     public const string ConfMarkerV8 = "# Managed by PerformanceMonitor Darling (v8 hardware sizing) -- do not remove this block";
 
@@ -938,19 +939,20 @@ public sealed class DarlingManagedPostgres
     /// fail (caught live: 21 failures vs 7 successes in timescaledb_information.job_stats on a
     /// fresh managed instance). Sizing follows the TimescaleDB guidance
     /// (max_worker_processes = 3 + timescaledb.max_background_workers + max_parallel_workers).
-    /// Background workers were hypertables + 2 until #5633 item 14 measured 142 policy jobs against 74
-    /// slots on a restart; they are now <see cref="PolicyJobsPerHypertable"/> per hypertable plus
-    /// <see cref="WorkerSlotHeadroom"/> (see <see cref="DeriveWorkerSettings"/>). DERIVED from the live hypertable count
+    /// This block keeps the FLOOR, hypertables + 2 (<see cref="DeriveWorkerFloor"/>; 74/85 at 72 hypertables):
+    /// it has no RAM input. The v8 hardware block, later in the file, raises it by host RAM up to every policy job
+    /// the schema carries (#5633 item 14: 142 jobs are all overdue at a restart; see
+    /// <see cref="DeriveWorkerSettings(int, long)"/>). DERIVED from the live hypertable count
     /// (<see cref="TimescaleSupport.HypertableCount"/> = the collector catalog PLUS collection_log, the V23
     /// non-catalog hypertable) so it never goes stale as collectors are added and is not under-sized by the
-    /// collection_log compression policy (72 hypertables -> 160/171). Idle background workers
-    /// cost a few MB each and no CPU. Both settings need a PostgreSQL restart, so an existing
+    /// collection_log compression policy. An idle slot is about 25-40 KB of shared memory and no process; a
+    /// slot a restart FILLS is a backend. Both settings need a PostgreSQL restart, so an existing
     /// cluster picks this up on its next service-owned start — an adopted (not-started-by-us)
     /// server heals the conf now and applies it whenever its operator next restarts it.
     /// </summary>
     public static string BuildWorkerSizingConfAppend()
     {
-        var workers = DeriveWorkerSettings(TimescaleSupport.HypertableCount);
+        var workers = DeriveWorkerFloor(TimescaleSupport.HypertableCount);
         var builder = new StringBuilder();
         builder.Append('\n');
         builder.Append(ConfMarkerV2).Append('\n');
@@ -959,48 +961,92 @@ public sealed class DarlingManagedPostgres
         return builder.ToString();
     }
 
-    /// <summary>The two worker settings derived from the live hypertable count, both restart-only.</summary>
+    /// <summary>The two worker settings, both restart-only.</summary>
     internal readonly record struct WorkerSettings(int MaxBackgroundWorkers, int MaxWorkerProcesses);
 
     /// <summary>
-    /// Derives the worker sizing from the hypertable count — extracted from
-    /// <see cref="BuildWorkerSizingConfAppend"/> (#2845) so the v2 block and the v8 hardware re-derivation
-    /// share ONE formula and cannot drift apart. One background worker per policy job that can be due at
-    /// once (#5633 item 14: after any downtime EVERY job is overdue at the next start, 142 of them against the
-    /// old 74 slots logged 61 "out of background workers" launch failures that each retried later), plus the
-    /// scheduler and slack; max_worker_processes = 3 (other bg
-    /// workers) + bg workers + 8 (the PostgreSQL default max_parallel_workers, which this class does not
-    /// set — see the v8 block for why raising it is deliberately NOT bundled here).
+    /// The FLOOR of the worker sizing: <c>hypertables + 2</c> background workers and <c>3 + workers + 8</c>
+    /// worker processes, the shape every release up to 3.10.0 wrote and the one the v2 block still writes
+    /// (it has no RAM input; the v8 block is later in the file and wins, #5633 item 14). 74 / 85 at 72
+    /// hypertables. 3 = launcher, logical-replication launcher and slack; 8 = the PostgreSQL default
+    /// <c>max_parallel_workers</c>, which this class does not set — see the v8 block for why raising it is
+    /// deliberately NOT bundled here.
+    /// </summary>
+    internal static WorkerSettings DeriveWorkerFloor(int hypertableCount)
+        => WithWorkerProcesses(hypertableCount + 2);
+
+    /// <summary>
+    /// Derives the v8 worker sizing from the host's RAM (#5633 item 14, extracted from
+    /// <see cref="BuildWorkerSizingConfAppend"/> in #2845 so every caller shares ONE formula):
+    /// <c>workers = clamp(WorkerSlotsPerGb x RAM GB, floor, ceiling)</c>, <c>max_worker_processes = 3 + workers + 8</c>.
+    /// The floor is <see cref="DeriveWorkerFloor"/> (74 at 72 hypertables). The ceiling is
+    /// <see cref="DeriveWorkerCeiling"/>: every policy job the schema can create plus headroom (177 at 72
+    /// hypertables and 29 aggregates).
+    ///
+    /// <para>Why RAM bounds it. After any downtime EVERY policy job is overdue at the next start (a migrated
+    /// store holds 142), and each one asks for its own background worker at once: with the old 74 slots the
+    /// restart logged 61-68 "out of background workers" launch failures that each retried later, with 160
+    /// none. Every extra slot a restart actually fills is a postgres backend (measured on an empty migrated
+    /// store: about 4-6 MB private each; one that loaded a big chunk or sorts at maintenance_work_mem costs far
+    /// more). 16 slots per GB keeps a full burst of backends near 100-250 MB per GB of RAM even at the
+    /// review's 15 MB per backend, under a quarter of the host; the floor keeps a small host at the old
+    /// sizing, whose retried launches are slow, not lost.</para>
     ///
     /// <para>The v2 doc comment claims this "never goes stale as collectors are added". That was true of
     /// the FORMULA and false of its application: v2 is marker-keyed, so an existing store computed these
     /// once and kept the answer no matter how many collectors arrived afterwards. The v8 block is what
     /// makes the claim true, by re-deriving whenever the hypertable count changes.</para>
     /// </summary>
-    internal static WorkerSettings DeriveWorkerSettings(int hypertableCount)
+    /// <param name="quantizedRamBytes">The whole-GB RAM figure the v8 fingerprint records (<see cref="QuantizeRam"/>).</param>
+    internal static WorkerSettings DeriveWorkerSettings(int hypertableCount, long quantizedRamBytes)
+        => DeriveWorkerSettings(hypertableCount, TimescaleSupport.ContinuousAggregateCount, quantizedRamBytes);
+
+    /// <inheritdoc cref="DeriveWorkerSettings(int, long)"/>
+    internal static WorkerSettings DeriveWorkerSettings(int hypertableCount, int continuousAggregateCount, long quantizedRamBytes)
     {
-        var maxBackgroundWorkers = PolicyJobsPerHypertable * hypertableCount + WorkerSlotHeadroom;
-        return new WorkerSettings(maxBackgroundWorkers, 3 + maxBackgroundWorkers + 8);
+        var ramGb = quantizedRamBytes / (1024L * 1024L * 1024L);
+        var floor = hypertableCount + 2;
+        var ceiling = Math.Max(floor, DeriveWorkerCeiling(hypertableCount, continuousAggregateCount));
+        var byRam = (int)Math.Min(ceiling, ramGb * WorkerSlotsPerGb);
+        return WithWorkerProcesses(Math.Clamp(byRam, floor, ceiling));
     }
 
     /// <summary>
-    /// TimescaleDB policy jobs a migrated store carries per hypertable (#5633 item 14). MEASURED, not guessed:
-    /// the real migrations plus every startup convergence step against a 72-hypertable store give 142 jobs
-    /// (94 compression, 23 continuous-aggregate refresh, 23 retention, job-history retention, telemetry),
-    /// which is 1.97 per hypertable — 72 raw-table compression jobs plus about three policies for each of the
-    /// 29 rollup aggregates. The count is fixed by the SCHEMA (hypertables and aggregates), never by stored
-    /// data: chunks do not add jobs, a compression or retention job walks its own chunks. It does multiply by
-    /// the number of databases that load the extension in one cluster, each with its own scheduler; the
-    /// managed cluster has one. Two per hypertable covers the measured 142 with the rest as
-    /// <see cref="WorkerSlotHeadroom"/>.
+    /// The most background workers worth granting: the policy jobs the SCHEMA can create (one compression
+    /// policy per hypertable, up to <see cref="PolicyJobsPerContinuousAggregate"/> per continuous aggregate,
+    /// <see cref="NonObjectPolicyJobs"/> store-wide) plus <see cref="WorkerSlotHeadroom"/>. Counts hypertables
+    /// AND aggregates and every policy kind; keying it on hypertables alone missed 70 of the 142 measured jobs
+    /// (#5633 item 14). Each new aggregate adds up to 3 jobs, and the live test fails the day the real count
+    /// outgrows this.
     /// </summary>
-    internal const int PolicyJobsPerHypertable = 2;
+    internal static int DeriveWorkerCeiling(int hypertableCount, int continuousAggregateCount)
+        => hypertableCount + PolicyJobsPerContinuousAggregate * continuousAggregateCount + NonObjectPolicyJobs + WorkerSlotHeadroom;
+
+    private static WorkerSettings WithWorkerProcesses(int maxBackgroundWorkers)
+        => new(maxBackgroundWorkers, 3 + maxBackgroundWorkers + 8);
 
     /// <summary>
-    /// Worker slots beyond <see cref="PolicyJobsPerHypertable"/> per hypertable: the one scheduler per
-    /// database, the handful of jobs that are not per-hypertable, and slack for a manual job or a
-    /// retention purge started while the policies run. An unused slot is a few bytes of shared memory and no
-    /// process, so generous headroom is cheap (#5633 item 14).
+    /// Background-worker slots granted per GB of host RAM (#5633 item 14). Measured on a rig with every job of a
+    /// migrated store overdue at a restart: a job backend costs about 4-6 MB private on an empty store, so 16
+    /// per GB is about 64-100 MB per GB at the measured cost and 240 MB per GB at the review's 15 MB, under a
+    /// quarter of RAM either way. 4 GB -> 74 (floor), 8 GB -> 128, 16 GB and up -> 177 (ceiling).
+    /// </summary>
+    internal const int WorkerSlotsPerGb = 16;
+
+    /// <summary>The most policy jobs one continuous aggregate carries: compression, refresh and retention
+    /// (the six frozen rollups carry fewer). Measured 3 x 29 aggregates = 87, 70 of the 142 jobs of a migrated
+    /// store of 72 hypertables (#5633 item 14).</summary>
+    internal const int PolicyJobsPerContinuousAggregate = 3;
+
+    /// <summary>Policy jobs that belong to no hypertable or aggregate: the job-history retention policy and
+    /// the telemetry policy (#5633 item 14).</summary>
+    internal const int NonObjectPolicyJobs = 2;
+
+    /// <summary>
+    /// Worker slots beyond the policy jobs themselves: the one scheduler per database, and slack for a manual
+    /// job or a retention purge started while the policies run. An unused slot costs about 25-40 KB of shared
+    /// memory (its PGPROC, worker slot, lock-table and status entries) and no process, so headroom is cheap;
+    /// a slot that is FILLED is a backend (#5633 item 14).
     /// </summary>
     internal const int WorkerSlotHeadroom = 16;
 
@@ -1591,7 +1637,7 @@ public sealed class DarlingManagedPostgres
     {
         /* The SAME quantized value the fingerprint records, so the block is exactly reproducible from it. */
         var settings = DeriveMemorySettings(QuantizeRam(totalPhysicalMemoryBytes));
-        var workers = DeriveWorkerSettings(hypertableCount);
+        var workers = DeriveWorkerSettings(hypertableCount, QuantizeRam(totalPhysicalMemoryBytes));
         var builder = new StringBuilder();
         builder.Append('\n');
         builder.Append(ConfMarkerV8).Append('\n');
@@ -3992,7 +4038,7 @@ public sealed class DarlingManagedPostgres
                 File.WriteAllText(confPath, ReplaceOrAppendHardwareSizingBlock(v8CurrentConf, v8Append));
 
                 var v8Settings = DeriveMemorySettings(v8QuantizedRam);
-                var v8Workers = DeriveWorkerSettings(hypertableCount);
+                var v8Workers = DeriveWorkerSettings(hypertableCount, v8QuantizedRam);
                 _logger.LogInformation(
                     "{Action} v8 hardware sizing in postgresql.conf ({Reason}; host RAM {RamMb} MB, {Hypertables} hypertables -> effective_cache_size {EffectiveCache}MB, maintenance_work_mem {Maintenance}MB, work_mem {WorkMem}MB, timescaledb.max_background_workers {BgWorkers}, max_worker_processes {WorkerProcesses}; shared_buffers deliberately NOT re-derived, see #2845){CollapseNote}",
                     v8PriorCopies == 0 ? "Appended" : "Rewrote", v8Reason, v8QuantizedRam / (1024L * 1024L), hypertableCount,

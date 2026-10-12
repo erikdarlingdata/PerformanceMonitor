@@ -43,7 +43,9 @@ public sealed class CiComposeWorkerSizingTests
     /* The product's formula, restated ONCE — same as CiClusterWorkerSizingTests. Both this test and the
        compose file are re-derived from the live catalog count on every run, so neither can be right about
        a stale hypertable count. */
-    private static int ExpectedBackgroundWorkers => 2 * TimescaleSupport.HypertableCount + 16;
+    /* The compose file keeps the FLOOR (hypertables + 2): a container has no host-RAM figure to size from, and
+       a 2 GB container is at the floor of the managed RAM rule anyway (#5633 item 14). */
+    private static int ExpectedBackgroundWorkers => TimescaleSupport.HypertableCount + 2;
 
     private static int ExpectedWorkerProcesses => 3 + ExpectedBackgroundWorkers + 8;
 

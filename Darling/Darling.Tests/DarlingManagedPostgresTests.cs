@@ -107,7 +107,7 @@ public sealed class DarlingManagedPostgresTests
     /// PostgreSQL's default max_worker_processes = 8 cannot launch the per-hypertable compression
     /// policy jobs (live smoke: "failed to start a background worker" storms). Pins the
     /// TimescaleDB-guidance sizing, DERIVED from the hypertable count so it never goes stale as
-    /// collectors are added: background workers = 2 x hypertables + 16 (#5633 item 14); max_worker_processes = 3 + that + 8.
+    /// collectors are added: the v2 block keeps the FLOOR, background workers = hypertables + 2 (the v8 block raises it with RAM, #5633 item 14); max_worker_processes = 3 + that + 8.
     /// The count is <see cref="TimescaleSupport.HypertableCount"/> = the collector catalog PLUS collection_log
     /// (the V23 hypertable outside the catalog), so the collection_log compression policy is not under-provisioned.
     /// </summary>
@@ -119,7 +119,7 @@ public sealed class DarlingManagedPostgresTests
         Assert.Equal(TimescaleSupport.HypertableTables.Count + 1, TimescaleSupport.HypertableCount);
 
         var block = DarlingManagedPostgres.BuildWorkerSizingConfAppend();
-        var expectedBackgroundWorkers = 2 * TimescaleSupport.HypertableCount + 16;
+        var expectedBackgroundWorkers = TimescaleSupport.HypertableCount + 2;
         var expectedWorkerProcesses = 3 + expectedBackgroundWorkers + 8;
 
         Assert.Contains(DarlingManagedPostgres.ConfMarkerV2, block, StringComparison.Ordinal);
@@ -1903,8 +1903,8 @@ public sealed class DarlingManagedPostgresTests
         Assert.Contains("effective_cache_size = 24576MB", block, StringComparison.Ordinal);  /* 75% of 32 GB (was 11.86 GB = 75% of 16 GB) */
         Assert.Contains("maintenance_work_mem = 1638MB", block, StringComparison.Ordinal);   /* 5% of 32 GB, past the 1536 floor, under the 2 GB cap */
         Assert.Contains("work_mem = 64MB", block, StringComparison.Ordinal);                 /* RAM/512 = 64 MB, exactly the ceiling */
-        Assert.Contains("timescaledb.max_background_workers = 96", block, StringComparison.Ordinal);  /* 2 x 40 hypertables + 16, #5633 item 14 */
-        Assert.Contains("max_worker_processes = 107", block, StringComparison.Ordinal);      /* 3 + 96 + 8 */
+        Assert.Contains("timescaledb.max_background_workers = 145", block, StringComparison.Ordinal);  /* 32 GB x 16 = 512, clamped to the ceiling 40 + 3 x 29 aggregates + 2 + 16, #5633 item 14 */
+        Assert.Contains("max_worker_processes = 156", block, StringComparison.Ordinal);      /* 3 + 145 + 8 */
     }
 
     /// <summary>
@@ -1913,17 +1913,29 @@ public sealed class DarlingManagedPostgresTests
     /// block that established it.
     /// </summary>
     [Fact]
-    public void HardwareSizingConfAppend_WorkerCountsMatchV2Formula()
+    public void HardwareSizingConfAppend_WorkerCountsAreTheRamSizedPair_NeverBelowTheV2Floor()
     {
+        /* v2 writes the floor (hypertables + 2); v8 comes later in the file and raises it with host RAM (#5633
+           item 14), so v8 is the larger of the two at every size and equals DeriveWorkerSettings. */
         var v2 = DarlingManagedPostgres.BuildWorkerSizingConfAppend();
-        var v8 = DarlingManagedPostgres.BuildHardwareSizingConfAppend(
-            32L * 1024 * 1024 * 1024, TimescaleSupport.HypertableCount);
-
-        foreach (var setting in new[] { "timescaledb.max_background_workers = ", "max_worker_processes = " })
+        foreach (var gb in new[] { 4L, 8L, 16L, 32L })
         {
-            var fromV2 = ExtractSettingLine(v2, setting);
-            var fromV8 = ExtractSettingLine(v8, setting);
-            Assert.Equal(fromV2, fromV8);
+            var ram = gb * 1024 * 1024 * 1024;
+            var v8 = DarlingManagedPostgres.BuildHardwareSizingConfAppend(ram, TimescaleSupport.HypertableCount);
+            var expected = DarlingManagedPostgres.DeriveWorkerSettings(TimescaleSupport.HypertableCount, ram);
+
+            foreach (var (setting, expectedValue, floorValue) in new[]
+            {
+                ("timescaledb.max_background_workers = ", expected.MaxBackgroundWorkers,
+                    DarlingManagedPostgres.DeriveWorkerFloor(TimescaleSupport.HypertableCount).MaxBackgroundWorkers),
+                ("max_worker_processes = ", expected.MaxWorkerProcesses,
+                    DarlingManagedPostgres.DeriveWorkerFloor(TimescaleSupport.HypertableCount).MaxWorkerProcesses),
+            })
+            {
+                Assert.Equal(setting + floorValue, ExtractSettingLine(v2, setting));
+                Assert.Equal(setting + expectedValue, ExtractSettingLine(v8, setting));
+                Assert.True(expectedValue >= floorValue, $"{setting} at {gb} GB must not fall below the v2 floor");
+            }
         }
 
         static string ExtractSettingLine(string block, string setting)
@@ -3701,7 +3713,13 @@ public sealed class DarlingManagedPostgresTests
                 /* Derived, not hard-pinned (a "40" pin from the 27-hypertable era went stale when
                    collectors were added): the same HypertableCount formula BuildWorkerSizingConfAppend
                    writes into the conf, proven LIVE here. */
-                Assert.Equal((3 + (2 * TimescaleSupport.HypertableCount + 16) + 8).ToString(CultureInfo.InvariantCulture), reader.GetString(2));
+                /* RAM-bounded since #5633 item 14: the live value is the v8 pair for THIS host's RAM, which lies
+                   between the v2 floor and the ceiling at any RAM (the exact figure is pinned per size in
+                   HardwareSizingConfAppend_WorkerCountsAreTheRamSizedPair_NeverBelowTheV2Floor). */
+                Assert.InRange(
+                    int.Parse(reader.GetString(2), CultureInfo.InvariantCulture),
+                    DarlingManagedPostgres.DeriveWorkerFloor(TimescaleSupport.HypertableCount).MaxWorkerProcesses,
+                    DarlingManagedPostgres.DeriveWorkerSettings(TimescaleSupport.HypertableCount, 1024L * 1024 * 1024 * 1024).MaxWorkerProcesses);
                 /* The v3 memory block is LIVE, not merely written: work_mem and shared_buffers hold our
                    derived values (>= the 16 MB work_mem floor / 25%-of-RAM shared_buffers on any real host),
                    never the stock 4 MB / 128 MB defaults. */

@@ -2607,21 +2607,23 @@ public sealed class PgLogEventsRungTests
     [Fact]
     public void TheWorkflowsAndTheRunbook_CarryTheNewHypertableCount()
     {
-        /* The runbook states the MANAGED formula (2 x hypertables + 16, #5633 item 14), not the CI workflows' floor. */
-        var workers = 2 * TimescaleSupport.HypertableCount + 16;
-        var processes = 3 + workers + 8;
-        /* 160 / 171 at 72 hypertables (74 / 85 under the pre-#5633 hypertables + 2 formula). */
-        Assert.Equal(160, workers);
-        Assert.Equal(171, processes);
+        /* The runbook and README state the MANAGED RAM rule (#5633 item 14) through an 8 GB example, not the CI
+           workflows' floor: 128 / 139 at 72 hypertables and 29 aggregates (74 / 85 at 4 GB, 177 / 188 at 12 GB). */
+        var example = DarlingManagedPostgres.DeriveWorkerSettings(
+            TimescaleSupport.HypertableCount, 8L * 1024 * 1024 * 1024);
+        var workers = example.MaxBackgroundWorkers;
+        var processes = example.MaxWorkerProcesses;
+        Assert.Equal(128, workers);
+        Assert.Equal(139, processes);
 
         var runbook = RepoFile.ReadRepoFile("docs", "postgres-first-target-runbook.md");
-        Assert.Contains($"today the numbers are {workers} and {processes} for {TimescaleSupport.HypertableCount} hypertables", runbook, StringComparison.Ordinal);
+        Assert.Contains($"for an 8 GB host the numbers are {workers} and {processes} for {TimescaleSupport.HypertableCount} hypertables", runbook, StringComparison.Ordinal);
         Assert.Contains($"all {TimescaleSupport.HypertableTables.Count} of them, {CollectorCatalog.All.Count(c => c.TargetEngine == CollectorTargetEngine.PostgreSql)} PostgreSQL", runbook, StringComparison.Ordinal);
         Assert.Contains("| `get_pg_log_events` |", runbook, StringComparison.Ordinal);
         Assert.Contains("| `pg_log_events` | 5 min | 5 min |", runbook, StringComparison.Ordinal);
 
         var readme = RepoFile.ReadRepoFile("Darling", "README.md");
-        Assert.Contains($"Today that is **{workers}** and **{processes}** for {TimescaleSupport.HypertableCount} hypertables", readme, StringComparison.Ordinal);
+        Assert.Contains($"For an 8 GB host that is **{workers}** and **{processes}** for {TimescaleSupport.HypertableCount} hypertables", readme, StringComparison.Ordinal);
         Assert.Contains("| **V129** — PostgreSQL log events |", readme, StringComparison.Ordinal);
     }
 }

@@ -53,15 +53,19 @@ services:
     # dropped — see the PR body's closing note.
     #
     # timescaledb.max_background_workers / max_worker_processes: tune sizes these from CPU count, not from
-    # the hypertable count, and measured at 2 GB / 8 GB it gives 16 / 34 — PostgreSQL's own default shape,
+    # the hypertable count, and measured at 2 GB / 8 GB it gives 16 / 34 - PostgreSQL's own default shape,
     # which is exactly what the managed Windows store exists to avoid (build.yml ~936-952: TimescaleDB's
     # per-hypertable compression/retention/CAGG policy jobs launch background workers, and at 16 slots most
-    # policy runs never happen). The values below are the SAME formula the managed store writes
-    # (BuildWorkerSizingConfAppend): max_background_workers = 2 x HypertableCount + 16 (#5633 item 14: a
-    # migrated store carries 142 policy jobs, all overdue at any restart, which 74 slots could not launch),
-    # max_worker_processes = 3 + max_background_workers + 8. HypertableCount is 72 today
-    # (TimescaleSupport.HypertableCount) — 160 and 171. CiComposeWorkerSizingTests pins these two numbers against that same live formula, so an added
-    # collector fails this file's test instead of drifting silently.
+    # policy runs never happen). The values below are the FLOOR of the formula the managed store writes
+    # (DeriveWorkerFloor): max_background_workers = HypertableCount + 2, max_worker_processes = 3 + that + 8.
+    # HypertableCount is 72 today (TimescaleSupport.HypertableCount) - 74 and 85. The managed store raises the
+    # pair with host RAM (16 slots per GB, up to every policy job the schema carries, 177 / 188 at 12 GB or
+    # more; DeriveWorkerSettings); a compose container has no host-RAM figure to read, and a 2 GB container
+    # is at the floor under that rule anyway. A container with a mem_limit of 12 GB or more may raise the two
+    # flags to those numbers: a migrated store has 142 policy jobs, all overdue at a restart, and 74 slots
+    # launch them in retried waves (61-68 "out of background workers" lines measured, none lost).
+    # CiComposeWorkerSizingTests pins these two numbers against the live floor, so an added collector fails
+    # this file's test instead of drifting silently.
     #
     # work_mem: tune measured 4 MB at 2/4 GB and ~3.9 MB at 8 GB (#4322 lane-4322m) — below the managed
     # store's own floor at EVERY size in this range: DeriveMemorySettings' clamp(RAM/512, 16 MB, 64 MB)
@@ -72,9 +76,14 @@ services:
     # deriving a second one to make tune's OWN work_mem come out right). Safety at the smallest supported
     # container: tune gives max_connections = 25 at 2 GB (measured), so worst case (all connections running
     # a worker's ~3 concurrent sort/hash nodes at once, the same bound DeriveMemorySettings documents) is
-    # 25 x 3 x 16 MB = 1200 MB, plus shared_buffers' 512 MB = 1712 MB — under the 2 GB limit with headroom
-    # for the rest of the server. cc #4310.
-    command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off", "-c", "timescaledb.max_background_workers=160", "-c", "max_worker_processes=171", "-c", "work_mem=16MB"]
+    # 25 x 3 x 16 MB = 1200 MB, plus shared_buffers' 512 MB = 1712 MB. That counts CLIENT connections only:
+    # background workers do not count against max_connections, and each slot a restart fills is a backend of
+    # its own (74 slots = up to 73 job backends at about 4-6 MB private each, measured on an empty store, so
+    # about 0.4 GB, plus the sort/hash memory of the refresh jobs that run together: 23 x 3 x 16 MB = 1.1 GB if
+    # all 23 overlap). The connection worst case and the restart burst do not coincide in practice (the
+    # service's pools are idle while the store restarts), but a mem_limit under about 4 GB has no headroom for
+    # both: give a store with real data 4 GB or more. cc #4310.
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off", "-c", "timescaledb.max_background_workers=74", "-c", "max_worker_processes=85", "-c", "work_mem=16MB"]
     # Uncomment and set to the host's own budget if this container should be capped — left commented
     # because a host's memory varies and a wrong default could starve a big store (#4322). Example for an
     # 8 GB host:
