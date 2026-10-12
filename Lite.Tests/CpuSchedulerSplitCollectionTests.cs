@@ -1,0 +1,197 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor Lite.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Linq;
+using System.Threading.Tasks;
+using DuckDB.NET.Data;
+using PerformanceMonitorLite.Analysis;
+using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
+using PerformanceMonitorLite.Tests;
+using Xunit;
+
+namespace Lite.Tests;
+
+/// <summary>
+/// #5710: a collection written before the collector fix can be split across several cpu_scheduler_stats rows that
+/// share one collection_time and each cover some of the schedulers (4 schedulers stored as 3 + 1, 1 + 2 + 1, even
+/// 1 + 1 + 1 + 1 at idle; every row still says scheduler_count = 4). Lite's readers combine them: the runnable total
+/// is the SUM, the per-scheduler average is that total over scheduler_count (a one-row collection keeps its stored
+/// average), the two sum-based warning flags are recomputed from the combined counts, and the single-row DMV
+/// columns take their MAX. Run against a real DuckDB file: the snapshot (behind the CPU Scheduler tab and the
+/// get_cpu_scheduler_pressure MCP tool), the trend chart, and the analysis RUNNABLE_TASKS read. This replaces the
+/// #3936 same-instant tiebreak test: two rows under one collection_time are now ONE collection, not two competing
+/// snapshots (the stored collection_id is per row, so a split collection cannot be told from a collision).
+/// </summary>
+public sealed class CpuSchedulerSplitCollectionTests : IClassFixture<SharedDuckDbFixture>
+{
+    private const int ServerId = 42;
+    private const string ServerName = "test-server";
+    private readonly DuckDbInitializer _duckDb;
+
+    public CpuSchedulerSplitCollectionTests(SharedDuckDbFixture fixture)
+    {
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
+    }
+
+    private const string InsertSql = @"
+INSERT INTO cpu_scheduler_stats
+    (collection_id, collection_time, server_id, server_name, max_workers_count, scheduler_count, cpu_count,
+     total_runnable_tasks_count, total_work_queue_count, total_current_workers_count, avg_runnable_tasks_count,
+     total_active_request_count, total_queued_request_count, total_blocked_task_count,
+     total_active_parallel_thread_count, runnable_request_count, total_request_count, runnable_percent,
+     worker_thread_exhaustion_warning, runnable_tasks_warning, blocked_tasks_warning, queued_requests_warning,
+     total_physical_memory_kb, available_physical_memory_kb, system_memory_state_desc,
+     physical_memory_pressure_warning, total_node_count, nodes_online_count, offline_cpu_count, offline_cpu_warning)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)";
+
+    /// <summary>One piece of a collection: 4 schedulers, 4 CPUs, 100 workers ceiling; only the numbers a test varies.</summary>
+    private async Task InsertPieceAsync(
+        long collectionId, DateTime collectionTime, int runnable, decimal avg, int currentWorkers,
+        int activeRequests, decimal runnablePercent, long availableMemoryKb)
+    {
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = InsertSql;
+        object?[] values =
+        {
+            collectionId, collectionTime, ServerId, ServerName, 100, 4, 4,
+            runnable, 0L, currentWorkers, avg,
+            activeRequests, 0, 0,
+            3L, 1, activeRequests, runnablePercent,
+            false, false, false, false,
+            65536000L, availableMemoryKb, "Available physical memory is high",
+            false, 1, 1, 0, false
+        };
+        foreach (var value in values)
+        {
+            cmd.Parameters.Add(new DuckDBParameter { Value = value ?? DBNull.Value });
+        }
+
+        await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Snapshot_OneRowCollection_KeepsItsStoredAverage()
+    {
+        var time = DateTime.UtcNow.AddMinutes(-2);
+        await InsertPieceAsync(9001L, time, runnable: 21, avg: 5.25m, currentWorkers: 60, activeRequests: 7, runnablePercent: 12.5m, availableMemoryKb: 32768000L);
+
+        var snapshot = await new LocalDataService(_duckDb).GetCpuSchedulerSnapshotAsync(ServerId, hoursBack: 24);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(21, snapshot!.TotalRunnableTasksCount);
+        Assert.Equal(5.25, snapshot.AvgRunnableTasksCount, 2);
+        Assert.Equal(60, snapshot.TotalCurrentWorkersCount);
+    }
+
+    [Fact]
+    public async Task Snapshot_SplitCollection_SumsTheRunnableTasks_AndDividesByTheSchedulerCount()
+    {
+        var time = DateTime.UtcNow.AddMinutes(-2);
+
+        /* A 3 + 1 split of 4 schedulers: 83 + 18 runnable tasks, 50 + 45 workers. The higher collection_id is
+           inserted FIRST, and each piece alone looks like a smaller, different server (27.67 and 18.00 per
+           scheduler). The pieces' request and memory columns differ, as the old collector's re-read per scheduler
+           row made them; the read takes the MAX. The stored flags on every piece are FALSE (test data), so a TRUE flag
+           proves the read recomputed it from the sums: 101 runnable >= 4 CPUs and 95 workers >= 90% of 100. */
+        await InsertPieceAsync(9102L, time, runnable: 18, avg: 18.00m, currentWorkers: 45, activeRequests: 9, runnablePercent: 20.0m, availableMemoryKb: 30000000L);
+        await InsertPieceAsync(9101L, time, runnable: 83, avg: 27.67m, currentWorkers: 50, activeRequests: 8, runnablePercent: 10.0m, availableMemoryKb: 31000000L);
+
+        var snapshot = await new LocalDataService(_duckDb).GetCpuSchedulerSnapshotAsync(ServerId, hoursBack: 24);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(4, snapshot!.SchedulerCount);
+        Assert.Equal(101, snapshot.TotalRunnableTasksCount);
+        Assert.Equal(25.25, snapshot.AvgRunnableTasksCount, 2);
+        Assert.Equal(95, snapshot.TotalCurrentWorkersCount);
+        Assert.Equal(100, snapshot.MaxWorkersCount);
+        Assert.Equal(9, snapshot.TotalActiveRequestCount);
+        Assert.Equal(20.0, snapshot.RunnablePercent!.Value, 2);
+        Assert.Equal(31000000L, snapshot.AvailablePhysicalMemoryKb);
+        Assert.True(snapshot.RunnableTasksWarning);
+        Assert.True(snapshot.WorkerThreadExhaustionWarning);
+    }
+
+    [Fact]
+    public async Task Snapshot_AllZeroSplit_IsZeroNotNull()
+    {
+        var time = DateTime.UtcNow.AddMinutes(-2);
+        for (var i = 0; i < 4; i++)
+        {
+            await InsertPieceAsync(9200L + i, time, runnable: 0, avg: 0.00m, currentWorkers: 10, activeRequests: 0, runnablePercent: 0m, availableMemoryKb: 60000000L);
+        }
+
+        var snapshot = await new LocalDataService(_duckDb).GetCpuSchedulerSnapshotAsync(ServerId, hoursBack: 24);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(0, snapshot!.TotalRunnableTasksCount);
+        Assert.Equal(0.0, snapshot.AvgRunnableTasksCount, 2);
+        Assert.Equal(40, snapshot.TotalCurrentWorkersCount);
+        Assert.False(snapshot.RunnableTasksWarning);
+    }
+
+    [Fact]
+    public async Task Snapshot_ReadsTheNewestCollection_WholeNotItsLatestPiece()
+    {
+        var older = DateTime.UtcNow.AddMinutes(-20);
+        var newer = DateTime.UtcNow.AddMinutes(-2);
+        await InsertPieceAsync(9301L, older, runnable: 500, avg: 125.00m, currentWorkers: 90, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 30000000L);
+        await InsertPieceAsync(9303L, newer, runnable: 2, avg: 2.00m, currentWorkers: 20, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 30000000L);
+        await InsertPieceAsync(9302L, newer, runnable: 3, avg: 3.00m, currentWorkers: 20, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 30000000L);
+
+        var snapshot = await new LocalDataService(_duckDb).GetCpuSchedulerSnapshotAsync(ServerId, hoursBack: 24);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(5, snapshot!.TotalRunnableTasksCount);
+        Assert.Equal(1.25, snapshot.AvgRunnableTasksCount, 2);
+    }
+
+    [Fact]
+    public async Task Trend_SplitCollection_PlotsOnePointWithTheSummedRunnableTasks()
+    {
+        var start = DateTime.UtcNow.AddMinutes(-30);
+        var oneRow = start.AddMinutes(5);
+        var split = start.AddMinutes(15);
+        await InsertPieceAsync(9401L, oneRow, runnable: 2, avg: 2.00m, currentWorkers: 20, activeRequests: 0, runnablePercent: 0m, availableMemoryKb: 30000000L);
+        await InsertPieceAsync(9403L, split, runnable: 2, avg: 2.00m, currentWorkers: 20, activeRequests: 0, runnablePercent: 0m, availableMemoryKb: 30000000L);
+        await InsertPieceAsync(9402L, split, runnable: 3, avg: 3.00m, currentWorkers: 20, activeRequests: 0, runnablePercent: 0m, availableMemoryKb: 30000000L);
+
+        var trend = await new LocalDataService(_duckDb).GetCpuSchedulerTrendAsync(
+            ServerId, fromDate: start, toDate: DateTime.UtcNow);
+
+        Assert.Equal(2, trend.Count);
+        Assert.Equal(new[] { 2, 5 }, trend.Select(p => p.RunnableTasks));
+    }
+
+    [Fact]
+    public async Task RunnableTaskFact_ReadsTheCombinedNewestCollection()
+    {
+        var time = DateTime.UtcNow.AddMinutes(-2);
+        await InsertPieceAsync(9502L, time, runnable: 2, avg: 2.00m, currentWorkers: 20, activeRequests: 0, runnablePercent: 0m, availableMemoryKb: 30000000L);
+        await InsertPieceAsync(9501L, time, runnable: 3, avg: 3.00m, currentWorkers: 20, activeRequests: 0, runnablePercent: 0m, availableMemoryKb: 30000000L);
+
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = DuckDbFactCollector.RunnableTaskStatsSql;
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
+
+        using var reader = await cmd.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+        Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(5.0, Convert.ToDouble(reader.GetValue(0)));
+        /* 2 and 3 are each below the 4 CPUs; the whole server's 5 is not. */
+        Assert.True(reader.GetBoolean(1));
+        Assert.False(await reader.ReadAsync(TestContext.Current.CancellationToken));
+    }
+}

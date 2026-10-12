@@ -27,10 +27,8 @@ public partial class LocalDataService
     /// The CPU Scheduler pressure trend: the runnable / blocked / queued task counts per collection over
     /// the window, bucketed to <see cref="TrendBudget.Chart"/>'s point budget (#4234; a gauge, so a
     /// bucket's value is the plain average of its collections — no delta math, matching the pre-bucket
-    /// point-in-time read). #3936: <c>collection_id</c> is a secondary sort inside <c>raw</c>, not a
-    /// filter — a same-instant collision (rare, see
-    /// <see cref="PerformanceMonitor.Collectors.CollectionTimeClock"/>) still plots both real snapshots
-    /// into the same bucket, just in a deterministic left-to-right order. A bucket holding exactly one
+    /// point-in-time read). #5710: <c>raw</c> is ONE row per <c>collection_time</c> (a collection written before the collector fix can be split across
+    /// several rows; see <see cref="CpuSchedulerCollectionSql"/>), so <c>collection_count</c> counts collections. A bucket holding exactly one
     /// physical collection is stamped at that collection's own raw time rather than the bucket grid when
     /// EVERY bucket this call returned is such a singleton (ruling item 3).
     /// </summary>
@@ -98,16 +96,19 @@ public partial class LocalDataService
     internal static string CpuSchedulerTrendSql => $@"
 WITH raw AS
 (
+    /* #5710: ONE row per collection_time. A collection written before the collector fix can be split across several
+       rows that each cover some of the schedulers: the runnable total is their SUM; the blocked and queued counts are
+       workload-group sums every piece repeats, so one deterministic value is their MAX. */
     SELECT
         collection_time,
-        collection_id,
-        total_runnable_tasks_count,
-        total_blocked_task_count,
-        total_queued_request_count
+        SUM(total_runnable_tasks_count) AS total_runnable_tasks_count,
+        MAX(total_blocked_task_count) AS total_blocked_task_count,
+        MAX(total_queued_request_count) AS total_queued_request_count
     FROM v_cpu_scheduler_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
+    GROUP BY collection_time
 )
 SELECT
     GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
@@ -121,25 +122,17 @@ GROUP BY 1
 ORDER BY 1";
 
     /// <summary>
-    /// The CPU Scheduler latest-snapshot: the single most recent cpu_scheduler_stats row in the window
-    /// (every scheduler / worker / NUMA / OS-memory pressure column + the collector's CASE-computed
-    /// warning flags), feeding the metric grid. Returns null when the window holds no snapshot.
-    /// #3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A run-overlap
-    /// or clock-resolution collision can store two DIFFERENT snapshots under one <c>collection_time</c> —
-    /// <c>collection_id</c> is the per-process monotonic counter every row already carries, so it orders two
-    /// same-instant rows the same way on every read instead of a bare <c>LIMIT 1</c> returning either one
-    /// depending on physical row order. This is also Lite's <c>get_cpu_scheduler_pressure</c> MCP tool's
-    /// read (McpPlanCacheSchedulerTools), so the fix covers both surfaces.
+    /// The CPU Scheduler latest-snapshot statement (#5710): the newest <c>collection_time</c> in the window is found
+    /// first, then ALL of its rows are combined into one (<see cref="CpuSchedulerCollectionSql"/>), because a
+    /// collection written before the collector fix can be split across several rows that each cover some of the
+    /// schedulers. Sums are added, the average is the summed total over <c>scheduler_count</c>, the single-row DMV
+    /// columns take their MAX. $1 server_id, $2/$3 the UTC window.
     /// </summary>
-    public async Task<CpuSchedulerSnapshot?> GetCpuSchedulerSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
-    {
-        using var _q = TimeQuery("GetCpuSchedulerSnapshotAsync", "v_cpu_scheduler_stats latest snapshot");
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
-
-        command.CommandText = @"
+    internal static string CpuSchedulerSnapshotSql => $@"
+WITH newest AS
+(
+    {CpuSchedulerCollectionSql.PerCollection("v_cpu_scheduler_stats", "server_id = $1 AND collection_time >= $2 AND collection_time <= $3", newestOnly: true)}
+)
 SELECT
     collection_time,
     max_workers_count,
@@ -168,12 +161,28 @@ SELECT
     nodes_online_count,
     offline_cpu_count,
     offline_cpu_warning
-FROM v_cpu_scheduler_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-ORDER BY collection_time DESC, collection_id DESC
-LIMIT 1";
+FROM newest";
+
+    /// <summary>
+    /// The CPU Scheduler latest-snapshot: the single most recent cpu_scheduler_stats row in the window
+    /// (every scheduler / worker / NUMA / OS-memory pressure column + the collector's CASE-computed
+    /// warning flags), feeding the metric grid. Returns null when the window holds no snapshot.
+    /// #3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A run-overlap
+    /// or clock-resolution collision can store two DIFFERENT snapshots under one <c>collection_time</c> —
+    /// <c>collection_id</c> is the per-process monotonic counter every row already carries, so it orders two
+    /// same-instant rows the same way on every read instead of a bare <c>LIMIT 1</c> returning either one
+    /// depending on physical row order. This is also Lite's <c>get_cpu_scheduler_pressure</c> MCP tool's
+    /// read (McpPlanCacheSchedulerTools), so the fix covers both surfaces.
+    /// </summary>
+    public async Task<CpuSchedulerSnapshot?> GetCpuSchedulerSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    {
+        using var _q = TimeQuery("GetCpuSchedulerSnapshotAsync", "v_cpu_scheduler_stats latest snapshot");
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        command.CommandText = CpuSchedulerSnapshotSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });

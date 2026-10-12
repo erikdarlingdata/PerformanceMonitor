@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -144,13 +145,17 @@ internal static class DarlingPlanCacheSchedulerReader
     /// that — and the anchor makes "what did the scheduler look like at 03:00 Tuesday" answerable.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     ///
-    /// <para>#3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A
-    /// run-overlap or clock-resolution collision can store two DIFFERENT snapshots under one
-    /// <c>collection_time</c> — <c>collection_id</c> is the per-process monotonic counter every row already
-    /// carries, so it orders two same-instant rows the same way on every read instead of a bare
-    /// <c>LIMIT 1</c> returning either one depending on physical row order.</para>
+    /// <para>#5710: the newest <c>collection_time</c> is found first, then ALL of its rows are combined into one
+    /// (<see cref="CpuSchedulerCollectionSql"/>). A collection written before the collector fix can be split across
+    /// several rows that each cover some of the schedulers; the runnable total is their SUM and the per-scheduler
+    /// average is that total over <c>scheduler_count</c>. This replaces the #3936 <c>collection_id DESC</c> tiebreak:
+    /// with every same-instant row folded into one, no physical row order can change the answer.</para>
     /// </summary>
-    public const string CpuSchedulerPressureSql = """
+    public static readonly string CpuSchedulerPressureSql = $"""
+        WITH newest AS
+        (
+            {CpuSchedulerCollectionSql.PerCollection("v_cpu_scheduler_stats", "server_id = $1 AND collection_time >= $2 AND collection_time <= $3", newestOnly: true)}
+        )
         SELECT
             collection_time,
             scheduler_count,
@@ -166,12 +171,7 @@ internal static class DarlingPlanCacheSchedulerReader
             blocked_tasks_warning,
             queued_requests_warning,
             physical_memory_pressure_warning
-        FROM v_cpu_scheduler_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        ORDER BY collection_time DESC, collection_id DESC
-        LIMIT 1
+        FROM newest
         """;
 
     public static async Task<CpuSchedulerRow?> GetCpuSchedulerPressureAsync(

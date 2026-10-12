@@ -70,6 +70,15 @@ LIMIT 1";
         }
     }
 
+    /// <summary>The runnable-task fact's read (#5710): the newest snapshot of the window, its rows combined.</summary>
+    internal static readonly string RunnableTaskStatsSql = $@"
+WITH newest AS
+(
+    {PerformanceMonitor.Common.CpuSchedulerCollectionSql.PerCollection("v_cpu_scheduler_stats", "server_id = $1 AND collection_time >= $2 AND collection_time <= $3", newestOnly: true)}
+)
+SELECT total_runnable_tasks_count, runnable_tasks_warning
+FROM newest";
+
     /// <summary>
     /// Collects the runnable-task-queue pressure signal from the EXISTING cpu_scheduler_stats snapshot
     /// (its total_runnable_tasks_count = SUM(runnable_tasks_count) and its runnable_tasks_warning =
@@ -82,10 +91,12 @@ LIMIT 1";
     /// absent and the amplifier no-ops). The read is window-bounded to [TimeRangeStart, TimeRangeEnd]
     /// (a lower bound, not just &lt;= end, matching CpuUtilizationSql) so a lapsed collection surfaces
     /// no stale snapshot from outside the window — the fact is then absent and the amplifier no-ops.
-    /// #3936: the query's tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c> — see
-    /// Darling's twin (PgFactCollector.Resources.RunnableTaskStatsSql) for why a same-instant collision
-    /// needs a deterministic tiebreak here too.
+    /// #5710: the newest <c>collection_time</c> is found first, then ALL of its rows are combined into one
+    /// (<see cref="PerformanceMonitor.Common.CpuSchedulerCollectionSql"/>), because a collection written before the
+    /// collector fix can be split across several rows that each cover some of the schedulers. This replaces the #3936
+    /// <c>collection_id DESC</c> tiebreak; see Darling's twin (PgFactCollector.Resources.RunnableTaskStatsSql).
     /// </summary>
+
     private async Task CollectRunnableTaskFactsAsync(AnalysisContext context, List<Fact> facts)
     {
         try
@@ -95,14 +106,7 @@ LIMIT 1";
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
-SELECT total_runnable_tasks_count, runnable_tasks_warning
-FROM v_cpu_scheduler_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-ORDER BY collection_time DESC, collection_id DESC
-LIMIT 1";
+            cmd.CommandText = RunnableTaskStatsSql;
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });

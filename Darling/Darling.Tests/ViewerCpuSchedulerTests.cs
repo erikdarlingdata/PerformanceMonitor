@@ -58,8 +58,13 @@ public sealed class ViewerCpuSchedulerSqlTests
         var sql = ViewerDataService.CpuSchedulerSnapshotSql;
 
         Assert.Contains("FROM v_cpu_scheduler_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        /* #5710: the newest collection_time in the window is found first and ALL of its rows are combined into one
+           (a collection written before the collector fix can be split across rows), so there is no ORDER BY ... LIMIT 1
+           row pick any more. */
+        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(total_runnable_tasks_count) AS integer) AS total_runnable_tasks_count", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
 
         /* The warning flags + NUMA / OS-memory columns the metric grid renders. */
         foreach (var column in new[]
@@ -353,6 +358,65 @@ public sealed class ViewerCpuSchedulerLivePostgresTests
             Assert.Equal(t2.Ticks, snapshot!.CollectionTime.Ticks);
             Assert.Equal(9, snapshot.TotalRunnableTasksCount);
             Assert.True(snapshot.WorkerThreadExhaustionWarning);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, ServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #5710: the rows of ONE collection_time are one collection. A split collection (two rows that each cover some of
+    /// the 8 schedulers) plots ONE trend point with the SUMmed runnable tasks (the blocked and queued counts are
+    /// repeats of one workload-group read, so their MAX), and the latest snapshot reads the SUM and the summed total
+    /// over scheduler_count, not whichever piece sorts first. The SUM test passes only when both rows count: 3 + 2.
+    /// </summary>
+    [Fact]
+    public async Task SplitCollection_PlotsOnePoint_AndTheSnapshotCombinesItsRows_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live cpu-scheduler test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteAsync(connection, ServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
+            var t2 = t1.AddMinutes(5);
+
+            /* t1: one exact row. t2: split in two, the higher collection_id inserted first. */
+            await InsertAsync(connection, 10, t1, runnable: 2, blocked: 0, queued: 0, workerWarn: false);
+            await InsertAsync(connection, 22, t2, runnable: 2, blocked: 4, queued: 1, workerWarn: false);
+            await InsertAsync(connection, 21, t2, runnable: 3, blocked: 4, queued: 1, workerWarn: false);
+
+            var trend = await viewer.GetCpuSchedulerTrendAsync(ServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
+            Assert.Equal(2, trend.Count);
+            Assert.Equal(new[] { 2, 5 }, trend.Select(p => p.RunnableTasks));
+            Assert.Equal(new[] { 0, 4 }, trend.Select(p => p.BlockedTasks));
+
+            var snapshot = await viewer.GetCpuSchedulerSnapshotAsync(ServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
+            Assert.NotNull(snapshot);
+            Assert.Equal(t2.Ticks, snapshot!.CollectionTime.Ticks);
+            Assert.Equal(8, snapshot.SchedulerCount);
+            Assert.Equal(5, snapshot.TotalRunnableTasksCount);
+            Assert.Equal(0.63m, snapshot.AvgRunnableTasksCount);
+            Assert.Equal(256, snapshot.TotalCurrentWorkersCount);
+
+            /* A one-row collection keeps its stored average (the helper's rule when COUNT(*) = 1). */
+            var single = await viewer.GetCpuSchedulerSnapshotAsync(ServerId, t1.AddMinutes(-1), t1.AddMinutes(1));
+            Assert.NotNull(single);
+            Assert.Equal(2, single!.TotalRunnableTasksCount);
+            Assert.Equal(0.5m, single.AvgRunnableTasksCount);
 
             bodySucceeded = true;
         }

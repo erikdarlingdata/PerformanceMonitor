@@ -105,8 +105,10 @@ public sealed class DarlingMcpPlanCacheSchedulerToolsSurfaceAndSqlTests
         Assert.Contains("total_runnable_tasks_count", sql, StringComparison.Ordinal);
         Assert.Contains("max_workers_count", sql, StringComparison.Ordinal);
         Assert.Contains("worker_thread_exhaustion_warning", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        /* #5710: the newest collection_time is found first and ALL of its rows are combined into one. */
+        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
         /* #3541 A10: the newest row IN THE WINDOW, as Lite reads it — not the newest row the store ever held. */
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
@@ -290,15 +292,17 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
     }
 
     /// <summary>
-    /// #3936 regression: two cpu_scheduler_stats snapshots planted under ONE collection_time (a run-overlap or
-    /// clock-resolution collision, reproduced live in the field on DARLING01 — see the issue) must still read
-    /// deterministically as the NEWER of the two, not whichever the plan happens to return first. The lower
-    /// collection_id row (NORMAL) is inserted AFTER the higher one (CRITICAL) specifically so a physical/
-    /// insertion-order coincidence cannot make this pass without the collection_id DESC tiebreak actually
-    /// doing the work — reverting CpuSchedulerPressureSql's tiebreak turns this CRITICAL assertion into NORMAL.
+    /// #5710: a collection written before the collector fix can be split across several cpu_scheduler_stats rows that
+    /// share one collection_time and each cover some of the schedulers (every row still says scheduler_count = 4). The
+    /// pressure read combines them: the runnable total is the SUM, the per-scheduler average is that total over
+    /// scheduler_count (a one-row collection keeps its stored average), the two sum-based warning flags are recomputed
+    /// from the combined counts, and the single-row DMV columns take their MAX. Three collections, each read through its
+    /// own window: one exact row, a split, and an all-zero split. The higher collection_id goes in FIRST so a
+    /// physical-order coincidence cannot pass this. This replaces the #3936 same-instant tiebreak test: two rows under one
+    /// collection_time are now ONE collection, not two competing snapshots.
     /// </summary>
     [Fact]
-    public async Task GetCpuSchedulerPressure_TwoSnapshotsShareOneCollectionTime_ReadsTheNewerByCollectionId()
+    public async Task GetCpuSchedulerPressure_RowsOfOneCollectionTime_AreCombinedIntoOneSnapshot()
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live plan-cache/scheduler-tools test.");
@@ -314,25 +318,61 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-            var tiedCollectionTime = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+            var baseTime = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-30);
+            var exactTime = baseTime;
+            var splitTime = baseTime.AddMinutes(10);
+            var zeroTime = baseTime.AddMinutes(20);
 
             const string insertSql = @"INSERT INTO cpu_scheduler_stats (collection_id, collection_time, server_id, server_name, max_workers_count, scheduler_count, cpu_count, total_runnable_tasks_count, total_work_queue_count, total_current_workers_count, avg_runnable_tasks_count, total_active_request_count, total_queued_request_count, total_blocked_task_count, total_active_parallel_thread_count, runnable_percent, worker_thread_exhaustion_warning, runnable_tasks_warning, blocked_tasks_warning, queued_requests_warning, total_physical_memory_kb, available_physical_memory_kb, physical_memory_pressure_warning, total_node_count, nodes_online_count, offline_cpu_count, offline_cpu_warning)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)";
 
-            /* The NEWER snapshot (higher collection_id), inserted FIRST: runnable tasks 60 > 50 -> CRITICAL. */
+            /* ONE row: the stored average (5.25) is kept, not recomputed. */
             await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
-                9002L, tiedCollectionTime, ServerId, ServerName, 512, 8, 8, 60, 5L, 100, 7.5m, 40, 12, 2, 20L, 12.5m, false, true, false, true, 65536000L, 32768000L, false, 1, 1, 0, false);
+                9100L, exactTime, ServerId, ServerName, 100, 4, 4, 21, 2L, 60, 5.25m, 7, 1, 0, 3L, 12.5m, false, true, false, false, 65536000L, 32768000L, false, 1, 1, 0, false);
 
-            /* The OLDER snapshot (lower collection_id) under the SAME collection_time, inserted SECOND (i.e.
-               physically last) so a reader that trusted insertion/scan order instead of collection_id would
-               land on THIS one: runnable tasks 5, no warnings -> NORMAL. */
+            /* A split of 4 schedulers: 3 + 2 runnable tasks, 50 + 45 workers. Each row's own flags are FALSE (3 < 4
+               CPUs, 50 < 90 workers); the whole server's are TRUE (5 >= 4, 95 >= 90). The request columns differ
+               between the two pieces, as the old collector's re-read per scheduler row made them. */
             await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
-                9001L, tiedCollectionTime, ServerId, ServerName, 512, 8, 8, 5, 0L, 10, 0.5m, 0, 0, 0, 0L, 0m, false, false, false, false, 65536000L, 60000000L, false, 1, 1, 0, false);
+                9202L, splitTime, ServerId, ServerName, 100, 4, 4, 2, 0L, 45, 2.00m, 9, 1, 0, 3L, 20.0m, false, false, false, false, 65536000L, 30000000L, false, 1, 1, 0, false);
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9201L, splitTime, ServerId, ServerName, 100, 4, 4, 3, 0L, 50, 3.00m, 8, 1, 0, 3L, 10.0m, false, false, false, false, 65536000L, 31000000L, false, 1, 1, 0, false);
 
-            var cpu = await DarlingMcpPlanCacheSchedulerTools.GetCpuSchedulerPressure(postgres, ServerName);
-            DarlingMcpTestData.AssertEnvelope(cpu, ServerName, "pressure_level");
-            Assert.Contains("CRITICAL - High runnable task queue", cpu, StringComparison.Ordinal);
-            Assert.DoesNotContain("\"NORMAL\"", cpu, StringComparison.Ordinal);
+            /* An all-zero 1 + 1 + 1 + 1 split at idle. */
+            for (var i = 0; i < 4; i++)
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                    9300L + i, zeroTime, ServerId, ServerName, 100, 4, 4, 0, 0L, 10, 0.00m, 0, 0, 0, 0L, 0m, false, false, false, false, 65536000L, 60000000L, false, 1, 1, 0, false);
+            }
+
+            var exact = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(
+                postgres, ServerId, exactTime.AddMinutes(-1), exactTime.AddMinutes(1), ct);
+            Assert.NotNull(exact);
+            Assert.Equal(21, exact!.TotalRunnableTasksCount);
+            Assert.Equal(5.25m, exact.AvgRunnableTasksCount);
+            Assert.True(exact.RunnableTasksWarning);
+
+            var split = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(
+                postgres, ServerId, splitTime.AddMinutes(-1), splitTime.AddMinutes(1), ct);
+            Assert.NotNull(split);
+            Assert.Equal(splitTime, split!.CollectionTime);
+            Assert.Equal(4, split.SchedulerCount);
+            Assert.Equal(5, split.TotalRunnableTasksCount);
+            Assert.Equal(1.25m, split.AvgRunnableTasksCount);
+            Assert.Equal(95, split.TotalCurrentWorkersCount);
+            Assert.Equal(100, split.MaxWorkersCount);
+            Assert.Equal(9, split.TotalActiveRequestCount);
+            Assert.Equal(20.0m, split.RunnablePercent);
+            Assert.True(split.RunnableTasksWarning);
+            Assert.True(split.WorkerThreadExhaustionWarning);
+
+            var zero = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(
+                postgres, ServerId, zeroTime.AddMinutes(-1), zeroTime.AddMinutes(1), ct);
+            Assert.NotNull(zero);
+            Assert.Equal(0, zero!.TotalRunnableTasksCount);
+            Assert.Equal(0.00m, zero.AvgRunnableTasksCount);
+            Assert.Equal(40, zero.TotalCurrentWorkersCount);
+            Assert.False(zero.RunnableTasksWarning);
 
             bodySucceeded = true;
         }
