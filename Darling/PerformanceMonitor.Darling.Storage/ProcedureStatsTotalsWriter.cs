@@ -36,8 +36,15 @@ namespace PerformanceMonitor.Darling.Storage;
 /// stop for that server for good. So it runs behind a savepoint (the #3953 shape), under a server-side <c>statement_timeout</c> (half
 /// the command timeout, so the server cancels first and Npgsql's client-side cancel, which can break the connection, never fires). A
 /// fault rolls back to the savepoint, logs a warning naming the server and the gap range, and lets the batch's own upsert run. The
-/// batch commits, its own totals row becomes the new anchor and the gap is attempted exactly once; those collections stay out of the
-/// trend, as before the fix.</para>
+/// batch commits and its own totals row becomes the new anchor, and the anchor takes rows AT the batch's time too
+/// (<see cref="ProcedureStatsTotals.GapProbeSql"/>), so no later batch of the same cycle (Azure writes one per database at one
+/// <c>collection_time</c>) and no later cycle tries that gap again: a gap is attempted once per committed batch, never once per
+/// batch of a cycle. A batch that rolls back leaves no anchor and so retries. Those collections stay out of the trend, as before
+/// the fix.</para>
+///
+/// <para><b>The normal batch pays one extra statement (round 2, L1).</b> <see cref="ProcedureStatsTotals.GapProbeSql"/> reads the
+/// anchor and probes for a gap in one round trip; the savepoint, the timeout change and the gap statement run only when a gap
+/// exists. The probe is bounded by the index, so it can fail the batch only as the batch's own upsert can.</para>
 ///
 /// <para><b>Exact when a collection spans batches.</b> The statement recomputes from the rows the store holds for the collection
 /// (those of earlier committed batches and this batch's, visible on this transaction), so it never adds, and a second batch at the
@@ -113,11 +120,12 @@ public static class ProcedureStatsTotalsWriter
     }
 
     /// <summary>
-    /// The gap first: a collection an older binary wrote between the server's newest totals row and this batch. Normally an empty
-    /// index-range probe. Not limited to the batch's databases: those collections belong to nobody's batch. Behind
-    /// <see cref="GapSavepointName"/> and a server-side <c>statement_timeout</c> that is restored on success (a <c>SET LOCAL</c>
-    /// would otherwise outlive the savepoint and bound the batch's own upsert). A fault, a timeout included, rolls back to the
-    /// savepoint (which also undoes the <c>SET LOCAL</c>) and is logged; only the caller's cancellation escapes.
+    /// The gap first: a collection an older binary wrote between the server's newest totals row (at or before this batch's time)
+    /// and this batch. One probe statement reads the anchor and whether a gap exists (<see cref="ProcedureStatsTotals.GapProbeSql"/>);
+    /// normally there is none and nothing else runs. Not limited to the batch's databases: those collections belong to nobody's batch.
+    /// A gap runs behind <see cref="GapSavepointName"/> and a server-side <c>statement_timeout</c> that is restored on success (a
+    /// <c>SET LOCAL</c> would otherwise outlive the savepoint and bound the batch's own upsert). A fault, a timeout included, rolls
+    /// back to the savepoint (which also undoes the <c>SET LOCAL</c>) and is logged; only the caller's cancellation escapes.
     /// </summary>
     private static async Task TryGapFillAsync(
         NpgsqlConnection connection,
@@ -130,24 +138,28 @@ public static class ProcedureStatsTotalsWriter
         string? serverName,
         CancellationToken cancellationToken)
     {
-        DateTime? anchor = null;
+        string previousTimeout;
+        DateTime anchor;
+        await using (var probe = new NpgsqlCommand(ProcedureStatsTotals.GapProbeSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds })
+        {
+            probe.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            probe.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = stamp });
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            await reader.ReadAsync(cancellationToken);
+            previousTimeout = reader.GetString(0);
+
+            /* No totals row yet (a server's first batch) or no gap after the anchor: the normal path, nothing more to run. */
+            if (reader.IsDBNull(1) || !reader.GetBoolean(2))
+            {
+                return;
+            }
+
+            anchor = reader.GetDateTime(1);
+        }
+
         await transaction.SaveAsync(GapSavepointName, cancellationToken);
         try
         {
-            /* The previous timeout (to restore) and the gap's start (for the log line), in one round trip. */
-            string previousTimeout;
-            await using (var read = new NpgsqlCommand(
-                "SELECT current_setting('statement_timeout'), (SELECT max(p.collection_time) FROM collect.procedure_stats_totals AS p WHERE p.server_id = $1 AND p.collection_time < $2)",
-                connection, transaction) { CommandTimeout = commandTimeoutSeconds })
-            {
-                read.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
-                read.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = stamp });
-                await using var reader = await read.ExecuteReaderAsync(cancellationToken);
-                await reader.ReadAsync(cancellationToken);
-                previousTimeout = reader.GetString(0);
-                anchor = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
-            }
-
             await SetStatementTimeoutAsync(
                 connection, transaction, statementTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture) + "ms", commandTimeoutSeconds, cancellationToken);
 
@@ -156,6 +168,7 @@ public static class ProcedureStatsTotalsWriter
             {
                 gap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
                 gap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = stamp });
+                gap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = anchor });
                 await gap.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -171,7 +184,8 @@ public static class ProcedureStatsTotalsWriter
             logger?.LogWarning(
                 ex,
                 "Procedure totals gap fill (#5638) failed for server {ServerName} ({ServerId}): the collections after {GapAfter:o} and before {GapBefore:o} " +
-                "were not totalled, so they stay out of the duration trend (as before the fix). The batch continues and its own totals row becomes the new anchor; the gap is not retried.",
+                "were not totalled, so they stay out of the duration trend (as before the fix). The batch continues and its own totals row becomes the new anchor; " +
+                "once this batch commits the gap is not retried, by a later batch of this cycle or of any other.",
                 serverName, serverId, anchor, stamp);
         }
     }

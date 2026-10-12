@@ -607,6 +607,7 @@ VALUES ($1, $2, 'stitch', 'procedure_stats', $3, $4, $5, 0)", Connection);
             {
                 explain.Parameters.AddWithValue(NpgsqlDbType.Integer, serverId);
                 explain.Parameters.AddWithValue(NpgsqlDbType.Timestamp, At(2));
+                explain.Parameters.AddWithValue(NpgsqlDbType.Timestamp, At(0));
                 await using var reader = await explain.ExecuteReaderAsync(ct);
                 while (await reader.ReadAsync(ct))
                 {

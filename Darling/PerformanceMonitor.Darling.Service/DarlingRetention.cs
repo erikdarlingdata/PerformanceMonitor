@@ -1015,33 +1015,24 @@ public static class DarlingRetention
                 "procedure_stats",
                 retentionDaysFor?.Invoke("procedure_stats")
                     ?? (CollectorScheduleDefaults.All.TryGetValue("procedure_stats", out var procedureSchedule) ? procedureSchedule.RetentionDays : DataRetentionBaseDays));
-            /* The raw floor is measured ONCE here and bound as $2 (review of #5706, #1815): the predicate used to carry an unbounded
-               min() over procedure_stats that the slice statement expands three times, a whole-table scan each, and the chunk-catalog
-               form is how the digest floor above survives compressed chunks. A floor that cannot be measured skips this table's
-               purge for the cycle (counted failed): without the floor the guard against deleting totals the raw trend still reads
-               is unknown, and the totals only age out a sweep later. */
-            DateTime? procedureRawFloor = null;
-            var procedureRawFloorMeasured = false;
-            try
-            {
-                await using var floorConnection = await postgres.OpenConnectionAsync(cancellationToken);
-                procedureRawFloor = await ProcedureStatsTotals.MeasureRawFloorAsync(
-                    floorConnection, timescaleAvailable, DeleteTimeoutSeconds, cancellationToken);
-                procedureRawFloorMeasured = true;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger?.LogWarning("Retention purge: could not measure procedure_stats' floor for the totals purge: {Message}", ex.Message);
-            }
-
-            var procedureTotalsDeleted = procedureRawFloorMeasured
-                ? await PurgeOneAsync(
-                    postgres, ProcedureStatsTotals.Table,
-                    TimeSlicedDeleteSql(ProcedureStatsTotals.Table, "collection_time", ProcedureStatsTotals.PrunePredicate),
-                    utcNow.AddDays(-procedureTotalsDays), logger, cancellationToken,
-                    pacer: walPacer,
-                    secondParameter: new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = procedureRawFloor is { } floorValue ? floorValue : DBNull.Value })
-                : null;
+            /* The raw floor is measured ONCE, by PurgeOneAsync itself, and bound as $2 (review of #5706, #1815): the predicate used to
+               carry an unbounded min() over procedure_stats that the slice statement expands three times, a whole-table scan each, and
+               the chunk-catalog form is how the digest floor above survives compressed chunks. The measurement is a callback that runs
+               on the purge's own connection AFTER PurgeOneAsync's #5592 wall-budget gate (round 2, L4), so a pass whose budget is spent
+               opens no connection and runs no probe for this table. A floor that cannot be measured throws out of the callback, so the
+               table counts failed and its purge is skipped for the cycle: without the floor the guard against deleting totals the raw
+               trend still reads is unknown, and the totals only age out a sweep later. */
+            var procedureTotalsDeleted = await PurgeOneAsync(
+                postgres, ProcedureStatsTotals.Table,
+                TimeSlicedDeleteSql(ProcedureStatsTotals.Table, "collection_time", ProcedureStatsTotals.PrunePredicate),
+                utcNow.AddDays(-procedureTotalsDays), logger, cancellationToken,
+                pacer: walPacer,
+                secondParameterFactory: async (floorConnection, ct) =>
+                {
+                    var procedureRawFloor = await ProcedureStatsTotals.MeasureRawFloorAsync(
+                        floorConnection, timescaleAvailable, DeleteTimeoutSeconds, ct);
+                    return new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = procedureRawFloor is { } floorValue ? floorValue : DBNull.Value };
+                });
             if (procedureTotalsDeleted is not null)
             {
                 tablesPurged++;
@@ -1852,6 +1843,10 @@ public static class DarlingRetention
     /// COMMAND-TIMEOUT batch at half its cap instead of failing the table outright — the field failure this
     /// exists for was one 50k-row batch passing the 300 s command timeout under first-start load, on a
     /// store whose steady-state margin was ~2x rather than the cap's designed 5x.</para>
+    ///
+    /// <para><paramref name="secondParameterFactory"/> (the unsliced shape only) builds the statement's <c>$2</c> from the purge's own
+    /// connection once the #5592 budget gate has passed, so a measurement the second parameter needs (the procedure totals' raw
+    /// floor) is never taken for a table the pass will not start. A throw out of it fails the table like any other fault.</para>
     /// </summary>
     private static async Task<int?> PurgeOneAsync(
         NpgsqlDataSource postgres,
@@ -1863,7 +1858,7 @@ public static class DarlingRetention
         int batchSize = 1,
         string? adaptiveRowCapTimeColumn = null,
         RetentionWalPacer? pacer = null,
-        NpgsqlParameter? secondParameter = null)
+        Func<NpgsqlConnection, CancellationToken, Task<NpgsqlParameter>>? secondParameterFactory = null)
     {
         /* #5592: a pass whose wall budget is already spent starts no further table: no connection, no statement.
            Every table's purge comes through here, so this is the one place that skips them. Nothing was deleted,
@@ -1920,9 +1915,9 @@ public static class DarlingRetention
             {
                 using var command = new NpgsqlCommand(deleteSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
                 command.Parameters.AddWithValue(cutoff);
-                if (secondParameter is not null)
+                if (secondParameterFactory is not null)
                 {
-                    command.Parameters.Add(secondParameter);
+                    command.Parameters.Add(await secondParameterFactory(connection, cancellationToken));
                 }
 
                 drained = await DrainBatchesAsync(

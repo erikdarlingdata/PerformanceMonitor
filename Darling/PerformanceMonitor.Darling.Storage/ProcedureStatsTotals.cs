@@ -112,14 +112,49 @@ ON CONFLICT (server_id, collection_time, database_name) DO UPDATE SET
 """;
 
     /// <summary>
-    /// Totals the collections a pre-V176 binary wrote after the floor (review of #5706): <c>$1</c> is the server id and <c>$2</c> the
-    /// batch's <c>collection_time</c>. <c>PgMigrations</c> lets an older binary write to a V176 store (a rollback), and the raw
-    /// trend reads <c>procedure_stats</c> only below the server's floor, so a collection that has rows, no totals and sits above the
-    /// floor would vanish from the trend. This totals every collection of the server that has rows strictly after the server's newest
-    /// totals row before the batch and strictly before the batch. A server with no totals row has nothing to total (its floor is
-    /// infinity and the raw arm reads it). Normally the range is empty and the statement is two index probes: a backward scan of the
-    /// totals key for the newest earlier row, then a range scan of <c>procedure_stats (server_id, collection_time)</c> from it that
-    /// finds no row. Same upsert target and recompute as <see cref="UpsertSql"/>, so it is idempotent and exact.
+    /// The gap probe, run on the COPY's transaction before anything else of the gap fill (round 2 review of #5706, L1): <c>$1</c> is
+    /// the server id and <c>$2</c> the batch's <c>collection_time</c>. One row: the connection's current <c>statement_timeout</c>
+    /// (to restore), the anchor (the server's newest totals row at or before the batch, NULL when it has none), and whether a gap
+    /// exists (a <c>procedure_stats</c> row of the server strictly after the anchor and strictly before the batch). An <c>EXISTS</c>
+    /// on the <c>(server_id, collection_time)</c> index stops at its first row, so it cannot be the "big gap" failure the savepoint
+    /// guards against, and the normal batch pays this one statement and nothing else: no savepoint, no timeout change, no gap
+    /// statement. <b>The anchor is <c>&lt;= $2</c></b> (round 2, M1): on Azure SQL Database every per-database batch of a cycle
+    /// shares one <c>collection_time</c>, so a batch whose gap fill failed has still committed a totals row at that time, and the
+    /// next batch of the cycle must see it as its anchor (its range is then empty) instead of trying the same gap again. A
+    /// re-attempt of a batch that rolled back has no committed totals at that time, so it still tries the gap.
+    /// </summary>
+    public const string GapProbeSql = """
+SELECT
+    current_setting('statement_timeout'),
+    a.anchor,
+    a.anchor IS NOT NULL
+    AND EXISTS
+    (
+        SELECT 1
+        FROM collect.procedure_stats AS s
+        WHERE s.server_id = $1::integer
+        AND   s.collection_time > a.anchor
+        AND   s.collection_time < $2::timestamp
+    )
+FROM
+(
+    SELECT max(p.collection_time) AS anchor
+    FROM collect.procedure_stats_totals AS p
+    WHERE p.server_id = $1::integer
+    AND   p.collection_time <= $2::timestamp
+) AS a;
+""";
+
+    /// <summary>
+    /// Totals the collections a pre-V176 binary wrote after the floor (review of #5706): <c>$1</c> is the server id, <c>$2</c> the
+    /// batch's <c>collection_time</c> and <c>$3</c> the anchor <see cref="GapProbeSql"/> read. <c>PgMigrations</c> lets an older
+    /// binary write to a V176 store (a rollback), and the raw trend reads <c>procedure_stats</c> only below the server's floor, so a
+    /// collection that has rows, no totals and sits above the floor would vanish from the trend. This totals every collection of the
+    /// server that has rows strictly after the anchor and strictly before the batch. The writer runs it only when the probe found
+    /// such a row, so it is never the normal path. <b>The anchor is a parameter, not a subquery (round 2, L2):</b> both bounds are
+    /// then constants at plan time, which lets TimescaleDB exclude every chunk outside <c>(anchor, batch)</c>, compressed ones
+    /// included, instead of keeping each chunk older than the batch. Same upsert target and recompute as <see cref="UpsertSql"/>, so
+    /// it is idempotent and exact.
     /// </summary>
     public const string GapFillSql = """
 INSERT INTO collect.procedure_stats_totals AS t
@@ -135,13 +170,7 @@ SELECT
 FROM collect.procedure_stats AS s
 WHERE s.server_id = $1::integer
 AND   s.collection_time < $2::timestamp
-AND   s.collection_time >
-(
-    SELECT max(p.collection_time)
-    FROM collect.procedure_stats_totals AS p
-    WHERE p.server_id = $1::integer
-    AND   p.collection_time < $2::timestamp
-)
+AND   s.collection_time > $3::timestamp
 GROUP BY s.server_id, s.collection_time, s.database_name
 ON CONFLICT (server_id, collection_time, database_name) DO UPDATE SET
     total_elapsed_time = EXCLUDED.total_elapsed_time,
@@ -165,11 +194,56 @@ ON CONFLICT (server_id, collection_time, database_name) DO UPDATE SET
     public const string PrunePredicate = "collection_time < COALESCE($2::timestamp, $1)";
 
     /// <summary>
+    /// The plain-store floor (round 2 review of #5706, L3): the oldest <c>procedure_stats</c> row of any server that has totals rows,
+    /// as the minimum over those servers of each server's own <c>ORDER BY collection_time LIMIT 1</c>. The table's time index is
+    /// <c>(server_id, collection_time)</c>, so a global <c>min(collection_time)</c> cannot read an index edge: nothing leads with
+    /// <c>collection_time</c> but two partial indexes, and the planner scans the whole table or index once per sweep. Each server's
+    /// own probe is one descent of the server-leading index. The servers come from a loose index scan of the totals key (the
+    /// recursive step is one index descent per server), so the statement is an index probe per server and never a scan. A server
+    /// without totals rows is left out on purpose: it has no totals to protect, and the trend stitch takes its floor per server. The
+    /// minimum across servers is never later than any one server's own floor, so the guard can only keep more totals.
+    /// </summary>
+    public const string PlainRawFloorSql = """
+WITH RECURSIVE servers AS
+(
+    (
+        SELECT t.server_id
+        FROM collect.procedure_stats_totals AS t
+        ORDER BY t.server_id
+        LIMIT 1
+    )
+    UNION ALL
+    SELECT
+    (
+        SELECT t.server_id
+        FROM collect.procedure_stats_totals AS t
+        WHERE t.server_id > servers.server_id
+        ORDER BY t.server_id
+        LIMIT 1
+    )
+    FROM servers
+    WHERE servers.server_id IS NOT NULL
+)
+SELECT min(oldest.collection_time)
+FROM servers
+CROSS JOIN LATERAL
+(
+    SELECT p.collection_time
+    FROM collect.procedure_stats AS p
+    WHERE p.server_id = servers.server_id
+    ORDER BY p.collection_time
+    LIMIT 1
+) AS oldest
+WHERE servers.server_id IS NOT NULL;
+""";
+
+    /// <summary>
     /// The oldest instant <c>collect.procedure_stats</c> can still hold a row at, the <c>$2</c> of <see cref="PrunePredicate"/>; NULL when
-    /// the table is empty. On a hypertable it is the earliest chunk's <c>range_start</c> from the chunk catalog (one metadata row, immune
-    /// to compression, as the digest floor of #1815 reads it); every surviving row sits at or after its chunk's start, so the floor is
-    /// never later than the true minimum and can only keep more totals, never delete too many. On a plain table, or a hypertable with no
-    /// chunks, it is one <c>min(collection_time)</c>, which the table's time index answers at its edge.
+    /// the table holds no row of a server that has totals. On a hypertable it is the earliest chunk's <c>range_start</c> from the chunk
+    /// catalog (one metadata row, immune to compression, as the digest floor of #1815 reads it); every surviving row sits at or after
+    /// its chunk's start, so the floor is never later than the true minimum and can only keep more totals, never delete too many. On a
+    /// plain table, or a hypertable with no chunks, it is <see cref="PlainRawFloorSql"/>: one index probe per server with totals, not
+    /// a scan.
     /// </summary>
     public static async Task<DateTime?> MeasureRawFloorAsync(
         NpgsqlConnection connection,
@@ -193,7 +267,7 @@ ON CONFLICT (server_id, collection_time, database_name) DO UPDATE SET
             }
         }
 
-        await using var probe = new NpgsqlCommand("SELECT min(collection_time) FROM collect.procedure_stats", connection)
+        await using var probe = new NpgsqlCommand(PlainRawFloorSql, connection)
         { CommandTimeout = commandTimeoutSeconds };
         return await probe.ExecuteScalarAsync(cancellationToken) as DateTime?;
     }

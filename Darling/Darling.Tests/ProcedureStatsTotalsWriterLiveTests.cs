@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -92,21 +93,33 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
             };
         }
 
-        /// <summary>One batch through the product's <c>WriteBatchAsync</c>; a fault surfaces as the store's own exception.</summary>
-        public async Task<int> WriteAsync(DateTime collectionTime, List<ProcedureStatsCollector.Row> rows, CancellationToken ct)
+        /// <summary>Another monitored server on the same store, for the tests that need several servers' rows.</summary>
+        public ServerRuntime OtherServer(int serverId, string serverName) => new()
         {
+            Config = new MonitoredServer { Name = serverName, Host = serverName },
+            ConnectionString = "Server=" + serverName,
+            Target = Server.Target,
+            StorageName = serverName,
+            ServerId = serverId,
+            EngineEdition = 3,
+        };
+
+        /// <summary>One batch through the product's <c>WriteBatchAsync</c>; a fault surfaces as the store's own exception.</summary>
+        public async Task<int> WriteAsync(DateTime collectionTime, List<ProcedureStatsCollector.Row> rows, CancellationToken ct, ServerRuntime? server = null)
+        {
+            var target = server ?? Server;
             var context = new CollectorContext
             {
-                ServerId = Server.ServerId,
-                ServerName = Server.StorageName,
+                ServerId = target.ServerId,
+                ServerName = target.StorageName,
                 CollectionTime = collectionTime,
                 Deltas = Deltas,
-                Target = Server.Target,
+                Target = target.Target,
             };
 
             var task = (Task)WriteBatchMethod.MakeGenericMethod(typeof(ProcedureStatsCollector.Row)).Invoke(
                 Runner,
-                new object?[] { Connection, ProcedureStatsCollector.Instance, rows, Server, collectionTime, context, ct })!;
+                new object?[] { Connection, ProcedureStatsCollector.Instance, rows, target, collectionTime, context, ct })!;
             await task;
             return (int)task.GetType().GetProperty("Result")!.GetValue(task)!;
         }
@@ -530,6 +543,31 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
             Assert.True(floor <= T0, "the chunk floor is never later than the oldest raw row");
             Assert.True(floor < T0, "the floor is the chunk's start, not the row's own time: it came from the catalog, not from min(collection_time)");
 
+            /* Round 2 (L2): the gap statement binds its anchor, so both bounds are constants at plan time and only the chunks inside
+               (anchor, batch) are scanned: the compressed oldest chunk (and the newest one) are excluded, no DecompressChunk appears. */
+            var gapAnchor = T0.AddDays(9);
+            var gapBatch = T0.AddDays(11);
+            var inRange = new List<string>();
+            var outOfRange = new List<string>();
+            await using (var chunks = new NpgsqlCommand(
+                "SELECT chunk_name, (range_start AT TIME ZONE 'UTC' < " + Stamp(gapBatch) + " AND range_end AT TIME ZONE 'UTC' > " + Stamp(gapAnchor) + ") " +
+                "FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'procedure_stats'", rig.Connection))
+            await using (var chunkReader = await chunks.ExecuteReaderAsync(ct))
+            {
+                while (await chunkReader.ReadAsync(ct))
+                {
+                    (chunkReader.GetBoolean(1) ? inRange : outOfRange).Add(chunkReader.GetString(0));
+                }
+            }
+
+            Assert.Equal(2, outOfRange.Count);
+            Assert.Single(inRange);
+            var gapPlan = await ExplainAsync(rig.Connection, "EXPLAIN " + ProcedureStatsTotals.GapFillSql, ct,
+                (NpgsqlTypes.NpgsqlDbType.Integer, serverId), (NpgsqlTypes.NpgsqlDbType.Timestamp, gapBatch), (NpgsqlTypes.NpgsqlDbType.Timestamp, gapAnchor));
+            Assert.Contains(inRange[0], gapPlan, StringComparison.Ordinal);
+            Assert.All(outOfRange, name => Assert.DoesNotContain(name, gapPlan, StringComparison.Ordinal));
+            Assert.DoesNotContain("DecompressChunk", gapPlan, StringComparison.Ordinal);
+
             /* A cutoff far past every collection while the raw chunk is still held: nothing at or after the floor may go. */
             Assert.Equal(0, await RetentionDeleteAsync(rig.Connection, true, T0.AddDays(100), ct));
             Assert.Equal(3L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals", ct)));
@@ -774,6 +812,342 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
 
             Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals WHERE database_name = 'DbB'", ct)));
             Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals WHERE database_name = 'DbA'", ct)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /* ---- round 2 of the review of #5706 ---- */
+
+    /// <summary>
+    /// M1: on Azure SQL Database every per-database batch of one cycle shares one <c>collection_time</c>. A gap fill that fails in
+    /// batch 1 must not be retried by batch 2 (same time, another database): the anchor takes the totals row batch 1 committed AT that
+    /// time. A trigger that bumps a sequence counts the gap statement's attempts (a sequence survives the savepoint rollback, a
+    /// counter table would not). A batch that rolled back leaves no anchor, so its re-attempt does try the gap again.
+    /// </summary>
+    [Fact]
+    public async Task TwoBatchesAtOneCollectionTime_TryAFailingGapOnce_AndTheSecondTakesTheNormalPath()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945314;
+
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsGapCycle", ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var gapAt = T0.AddMinutes(1);
+            var batchAt = T0.AddMinutes(2);
+            await PlantGapAsync(rig, serverId, T0, gapAt, "gapfail", ct, batchAt);
+
+            await ExecAsync(rig.Connection, "CREATE SEQUENCE public.gap_attempts", ct);
+            await ExecAsync(rig.Connection, "CREATE FUNCTION public.refuse_gap() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.database_name = 'gapfail' THEN PERFORM nextval('public.gap_attempts'); RAISE EXCEPTION 'planted gap failure'; END IF; RETURN NEW; END $$", ct);
+            await ExecAsync(rig.Connection, "CREATE TRIGGER refuse_gap BEFORE INSERT OR UPDATE ON collect.procedure_stats_totals FOR EACH ROW EXECUTE FUNCTION public.refuse_gap()", ct);
+
+            async Task<long> AttemptsAsync() =>
+                Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM public.gap_attempts", ct));
+
+            var dbA = new List<string?> { "DbA" };
+
+            /* A batch that rolls back leaves no totals row at the batch's time, so it has no anchor there: the gap is tried (attempt 1). */
+            var rolledBack = new CapturingLogger();
+            await using (var tx = await rig.Connection.BeginTransactionAsync(ct))
+            {
+                Assert.Equal(1, await ProcedureStatsTotalsWriter.UpsertBatchAsync(rig.Connection, tx, serverId, batchAt, 1, 30, dbA, ct, rolledBack, "ProcTotalsGapCycle"));
+                await tx.RollbackAsync(ct);
+            }
+
+            Assert.Equal(1L, await AttemptsAsync());
+            Assert.Equal(0L, await TotalsRowsAsync(rig, serverId, batchAt, ct));
+
+            /* Batch 1 of the cycle (DbA at T) commits: the gap is tried again (attempt 2), fails once, and DbA's totals row lands. */
+            var logger = new CapturingLogger();
+            await using (var tx = await rig.Connection.BeginTransactionAsync(ct))
+            {
+                Assert.Equal(1, await ProcedureStatsTotalsWriter.UpsertBatchAsync(rig.Connection, tx, serverId, batchAt, 1, 30, dbA, ct, logger, "ProcTotalsGapCycle"));
+                await tx.CommitAsync(ct);
+            }
+
+            Assert.Equal(2L, await AttemptsAsync());
+            var warning = Assert.Single(logger.Entries);
+            Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Warning, warning.Level);
+            Assert.Equal(1L, await TotalsRowsAsync(rig, serverId, batchAt, ct));
+
+            /* Batch 2 of the same cycle (DbB, the same T), through the product's write path: the anchor is batch 1's row at T, the range
+               (T, T) is empty, and the gap statement does not run (no third attempt). Its own totals are exact. */
+            Assert.Equal(1, await rig.WriteAsync(batchAt, new List<ProcedureStatsCollector.Row> { Row("DbB", "p3", 7, 1, 60) }, ct));
+            Assert.Equal(2L, await AttemptsAsync());
+            Assert.Equal(2L, await TotalsRowsAsync(rig, serverId, batchAt, ct));
+            var (totals, raw) = await CompareAsync(rig.Connection, serverId, batchAt, ct);
+            Assert.Equal(raw, totals);
+            Assert.Equal(0L, await TotalsRowsAsync(rig, serverId, gapAt, ct));
+
+            /* The next cycle's batch finds T as its anchor too: still no further attempt. */
+            Assert.Equal(1, await rig.WriteAsync(T0.AddMinutes(3), new List<ProcedureStatsCollector.Row> { Row("DbA", "p2", 9, 1, 60) }, ct));
+            Assert.Equal(2L, await AttemptsAsync());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// L1: a batch whose gap is empty pays the one probe statement and nothing else: no SAVEPOINT, no <c>set_config</c> and no gap
+    /// statement reach the server. Counted through <c>pg_stat_statements</c> (skipped on a rig that does not preload it), once for
+    /// a server whose first batch has no anchor and once for a later batch with an anchor and an empty range.
+    /// </summary>
+    [Fact]
+    public async Task AnEmptyGap_CostsOneProbeStatement_NoSavepointNoTimeoutNoGapStatement()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945315;
+
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsProbe", ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var preload = (string)(await ScalarAsync(rig.Connection, "SELECT current_setting('shared_preload_libraries')", ct))!;
+            Assert.SkipWhen(!preload.Split(',').Select(static part => part.Trim()).Contains("pg_stat_statements"),
+                "pg_stat_statements is not in shared_preload_libraries ('" + preload + "'): this rig must preload it to count the statements.");
+            await ExecAsync(rig.Connection, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
+
+            async Task<long> CallsAsync(string like) =>
+                Convert.ToInt64(await ScalarAsync(rig.Connection,
+                    "SELECT COALESCE(SUM(calls), 0)::bigint FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query LIKE '" + like + "'", ct));
+
+            await ExecAsync(rig.Connection, "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)", ct);
+
+            /* The server's first batch (no totals row, so no anchor) and a second one (an anchor, an empty range between it and the batch). */
+            Assert.Equal(1, await rig.WriteAsync(T0, new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10, 1, 60) }, ct));
+            Assert.Equal(1, await rig.WriteAsync(T0.AddMinutes(1), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 11, 1, 60) }, ct));
+
+            Assert.Equal(2L, await CallsAsync("%a.anchor IS NOT NULL%"));
+            Assert.Equal(0L, await CallsAsync("%pst_gap%"));
+            Assert.Equal(0L, await CallsAsync("%set_config(%"));
+            Assert.Equal(0L, await CallsAsync("%s.collection_time > $3%"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    private static async Task<string> ExplainAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params (NpgsqlTypes.NpgsqlDbType Type, object Value)[] parameters)
+    {
+        var plan = new System.Text.StringBuilder();
+        await using var explain = new NpgsqlCommand(sql, connection);
+        foreach (var (type, value) in parameters)
+        {
+            explain.Parameters.AddWithValue(type, value);
+        }
+
+        await using var reader = await explain.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            plan.AppendLine(reader.GetString(0));
+        }
+
+        return plan.ToString();
+    }
+
+    /// <summary>
+    /// L3: the plain-store floor is one server-leading index probe per server that has totals, never a scan of the table or the index,
+    /// and it leaves out a server without totals (which has nothing to protect). Three servers with totals plus one with older raw rows
+    /// and no totals; the plan reads <c>idx_procedure_stats_time</c> with <c>server_id = servers.server_id</c> three times.
+    /// </summary>
+    [Fact]
+    public async Task ThePlainFloor_IsAnIndexProbePerServerWithTotals_AndIgnoresAServerWithoutTotals()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945316;
+
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsFloorA", ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var a = rig.Server;
+            var b = rig.OtherServer(serverId - 1, "ProcTotalsFloorB");
+            var c = rig.OtherServer(serverId - 2, "ProcTotalsFloorC");
+            var d = rig.OtherServer(serverId - 3, "ProcTotalsFloorD");
+            await rig.WriteAsync(T0.AddDays(3), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10, 1, 60) }, ct, a);
+            await rig.WriteAsync(T0.AddDays(2), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10, 1, 60) }, ct, b);
+            await rig.WriteAsync(T0.AddDays(4), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10, 1, 60) }, ct, c);
+            await rig.WriteAsync(T0, new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10, 1, 60) }, ct, d);
+            await ExecAsync(rig.Connection, "DELETE FROM collect.procedure_stats_totals WHERE server_id = " + d.ServerId.ToString(CultureInfo.InvariantCulture), ct);
+
+            /* Server D (older raw rows, no totals) does not move the floor; the oldest raw row of a server WITH totals is B's, day 2. */
+            Assert.Equal(T0.AddDays(2), await ProcedureStatsTotals.MeasureRawFloorAsync(rig.Connection, false, 60, ct));
+
+            await ExecAsync(rig.Connection, "SET enable_seqscan = off", ct);
+            var plan = await ExplainAsync(rig.Connection, "EXPLAIN (ANALYZE, BUFFERS) " + ProcedureStatsTotals.PlainRawFloorSql, ct);
+            await ExecAsync(rig.Connection, "RESET enable_seqscan", ct);
+
+            Assert.Matches("Index (Only )?Scan using idx_procedure_stats_time on procedure_stats p", plan);
+            Assert.Contains("Index Cond: (server_id = servers.server_id)", plan, StringComparison.Ordinal);
+            Assert.Contains("loops=3", plan, StringComparison.Ordinal);
+            Assert.DoesNotContain("Seq Scan on procedure_stats p", plan, StringComparison.Ordinal);
+            Assert.DoesNotContain("Seq Scan on procedure_stats ", plan, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>The live clock (#5608): whole seconds and naive, the discipline stored timestamps follow, so an equality lookup by <c>Stamp</c> finds it. Every offset below is whole days with days of margin, so the real clock the sweep reads cannot move a verdict.</summary>
+    private static DateTime NowToTheSecond() => LiveClock.Now();
+
+    private static async Task<(long Totals, DateTime? Oldest)> TotalsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var count = Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.procedure_stats_totals", ct));
+        var oldest = await ScalarAsync(connection, "SELECT min(collection_time) FROM collect.procedure_stats_totals", ct) as DateTime?;
+        return (count, oldest);
+    }
+
+    /// <summary>
+    /// L5, plain store: the REAL retention sweep (<c>DarlingRetention.PurgeAsync</c>, not a copy of its DELETE) ages the totals out with
+    /// the raw rows: the two collections past the horizon go, the recent one stays. A floor that never reached the command (the
+    /// <c>$2</c> unbound) would fail the table and leave all three.
+    /// </summary>
+    [Fact]
+    public async Task TheRealRetentionSweep_OnAPlainStore_PurgesExpiredTotals_AndKeepsTheRecentOnes()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945317;
+
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsPurgePlain", ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = NowToTheSecond();
+            foreach (var age in new[] { 60, 45, 1 })
+            {
+                Assert.Equal(1, await rig.WriteAsync(now.AddDays(-age), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10 + age, 1, 60) }, ct));
+            }
+
+            Assert.Equal(3L, (await TotalsAsync(rig.Connection, ct)).Totals);
+
+            var logger = new CapturingLogger();
+            await DarlingRetention.PurgeAsync(rig.DataSource, false, logger, ct, retentionDaysFor: static _ => 40);
+
+            var (count, oldest) = await TotalsAsync(rig.Connection, ct);
+            Assert.Equal(1L, count);
+            Assert.True(oldest > now.AddDays(-2), "only the recent collection's totals row is left");
+            Assert.DoesNotContain(logger.Entries, static entry => entry.Message.Contains("procedure_stats_totals", StringComparison.Ordinal));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// L5, TimescaleDB store: the real sweep never drops the raw chunks of <c>procedure_stats</c> (the gated purge owns them), so it
+    /// holds every raw row and the floor is the oldest chunk's start: no totals row at or after it may go, though all three are older
+    /// than the horizon. Once the gated purge has dropped the oldest chunk, the next real sweep purges the totals older than the
+    /// new floor and keeps the rest. Without the floor bound as <c>$2</c> the first sweep would delete the old totals.
+    /// </summary>
+    [Fact]
+    public async Task TheRealRetentionSweep_OnTimescaleDb_KeepsTotalsAtOrAfterTheHeldRawChunks()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945318;
+
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsPurgeTsdb", ct, timescale: true);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = NowToTheSecond();
+            foreach (var age in new[] { 60, 45, 1 })
+            {
+                Assert.Equal(1, await rig.WriteAsync(now.AddDays(-age), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10 + age, 1, 60) }, ct));
+            }
+
+            var logger = new CapturingLogger();
+            await DarlingRetention.PurgeAsync(rig.DataSource, true, logger, ct, retentionDaysFor: static _ => 40);
+
+            /* Raw is held, so nothing at or after the oldest chunk's start may go: all three totals rows are older than the 40-day horizon. */
+            Assert.Equal(3L, (await TotalsAsync(rig.Connection, ct)).Totals);
+            Assert.Equal(3L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats", ct)));
+
+            /* The gated raw purge drops the 60-day chunk; the floor moves to the 45-day chunk's start. */
+            await ExecAsync(rig.Connection, "SELECT drop_chunks('collect.procedure_stats', older_than => " + Stamp(now.AddDays(-50)) + ")", ct);
+            await DarlingRetention.PurgeAsync(rig.DataSource, true, logger, ct, retentionDaysFor: static _ => 40);
+
+            Assert.Equal(0L, await TotalsRowsAsync(rig, serverId, now.AddDays(-60), ct));
+            Assert.Equal(1L, await TotalsRowsAsync(rig, serverId, now.AddDays(-45), ct));
+            Assert.Equal(1L, await TotalsRowsAsync(rig, serverId, now.AddDays(-1), ct));
+            Assert.DoesNotContain(logger.Entries, static entry => entry.Message.Contains("procedure_stats_totals", StringComparison.Ordinal));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// L5, the branch that skips the purge when the floor cannot be measured: with <c>procedure_stats</c> unreadable (renamed away) the
+    /// floor probe throws, the real sweep leaves the totals untouched, counts the table failed (a warning names it) and carries on; the
+    /// next sweep, with the table back, catches up.
+    /// </summary>
+    [Fact]
+    public async Task WhenTheFloorCannotBeMeasured_TheSweepSkipsTheTotalsPurge_CountsItFailed_AndCatchesUpNextSweep()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945319;
+
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsPurgeFail", ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = NowToTheSecond();
+            foreach (var age in new[] { 60, 45, 1 })
+            {
+                Assert.Equal(1, await rig.WriteAsync(now.AddDays(-age), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10 + age, 1, 60) }, ct));
+            }
+
+            await ExecAsync(rig.Connection, "ALTER TABLE collect.procedure_stats RENAME TO procedure_stats_hidden", ct);
+
+            var logger = new CapturingLogger();
+            await DarlingRetention.PurgeAsync(rig.DataSource, false, logger, ct, retentionDaysFor: static _ => 40);
+
+            Assert.Equal(3L, (await TotalsAsync(rig.Connection, ct)).Totals);
+            Assert.Contains(logger.Entries, static entry =>
+                entry.Level == Microsoft.Extensions.Logging.LogLevel.Warning
+                && entry.Message.Contains("Retention purge failed for collect.procedure_stats_totals", StringComparison.Ordinal));
+
+            await ExecAsync(rig.Connection, "ALTER TABLE collect.procedure_stats_hidden RENAME TO procedure_stats", ct);
+            await DarlingRetention.PurgeAsync(rig.DataSource, false, new CapturingLogger(), ct, retentionDaysFor: static _ => 40);
+
+            var (count, oldest) = await TotalsAsync(rig.Connection, ct);
+            Assert.Equal(1L, count);
+            Assert.True(oldest > now.AddDays(-2));
 
             bodySucceeded = true;
         }

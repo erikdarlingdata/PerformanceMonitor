@@ -32,7 +32,10 @@ public sealed class ProcedureStatsTotalsTests
     {
         var sql = Normalize(ProcedureStatsTotals.GapFillSql);
 
-        Assert.Contains("FROM collect.procedure_stats AS s\nWHERE s.server_id = $1::integer\nAND   s.collection_time < $2::timestamp\nAND   s.collection_time >\n(\n    SELECT max(p.collection_time)\n    FROM collect.procedure_stats_totals AS p\n    WHERE p.server_id = $1::integer\n    AND   p.collection_time < $2::timestamp\n)", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.procedure_stats AS s\nWHERE s.server_id = $1::integer\nAND   s.collection_time < $2::timestamp\nAND   s.collection_time > $3::timestamp\nGROUP BY", sql, StringComparison.Ordinal);
+
+        /* Round 2 (L2): the anchor is a bound parameter, so chunk exclusion sees both bounds; no subquery recomputes it. */
+        Assert.DoesNotContain("SELECT max(", sql, StringComparison.Ordinal);
         Assert.Contains("ON CONFLICT (server_id, collection_time, database_name) DO UPDATE SET", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("t.row_count +", sql, StringComparison.Ordinal);
     }
@@ -49,10 +52,28 @@ public sealed class ProcedureStatsTotalsTests
         Assert.DoesNotContain("FROM collect.procedure_stats ", delete, StringComparison.Ordinal);
 
         var retention = Normalize(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingRetention.cs"));
-        var floor = retention.IndexOf("ProcedureStatsTotals.MeasureRawFloorAsync(", StringComparison.Ordinal);
-        var purge = retention.IndexOf("TimeSlicedDeleteSql(ProcedureStatsTotals.Table", StringComparison.Ordinal);
-        Assert.True(floor > 0 && purge > floor, "the floor is measured once, before the DELETE that binds it");
-        Assert.Contains("secondParameter: new NpgsqlParameter", retention, StringComparison.Ordinal);
+        Assert.Contains("secondParameterFactory: async (floorConnection, ct) =>", retention, StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(retention, "ProcedureStatsTotals\\.MeasureRawFloorAsync\\("));
+
+        /* Round 2 (L4): the floor is measured inside PurgeOneAsync, after its wall-budget gate and on the purge's own connection. */
+        var purgeOne = retention[retention.IndexOf("private static async Task<int?> PurgeOneAsync(", StringComparison.Ordinal)..];
+        var gate = purgeOne.IndexOf("SkipTableOnBudget(tableName)", StringComparison.Ordinal);
+        var open = purgeOne.IndexOf("postgres.OpenConnectionAsync(", StringComparison.Ordinal);
+        var factory = purgeOne.IndexOf("await secondParameterFactory(connection, cancellationToken)", StringComparison.Ordinal);
+        Assert.True(gate > 0 && open > gate && factory > open, "the budget gate, then the connection, then the floor measured on it");
+    }
+
+    /// <summary>Round 2 (L3): the plain-store floor is one server-leading index probe per server with totals, never a global min().</summary>
+    [Fact]
+    public void ThePlainFloor_IsAnIndexProbePerServerWithTotals_NotAGlobalMin()
+    {
+        var sql = Normalize(ProcedureStatsTotals.PlainRawFloorSql);
+
+        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE p.server_id = servers.server_id\n    ORDER BY p.collection_time\n    LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.procedure_stats_totals AS t", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("min(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("min(oldest.collection_time)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -200,7 +221,21 @@ public sealed class ProcedureStatsTotalsTests
         var rollback = gap.IndexOf("transaction.RollbackAsync(GapSavepointName", StringComparison.Ordinal);
         Assert.True(save > 0 && setTimeout > save && run > setTimeout && restore > run && release > restore && rollback > release, "save, bound, run, restore, release, then the rollback arm");
         Assert.Contains("catch (Exception ex) when (!cancellationToken.IsCancellationRequested)", gap, StringComparison.Ordinal);
-        Assert.Contains("set_config('statement_timeout', $1, true)", gap, StringComparison.Ordinal);
+        Assert.Contains("set_config('statement_timeout', $1, true)", writer, StringComparison.Ordinal);
+
+        /* Round 2 (L1): the anchor and the gap test are ONE statement that runs before the savepoint; with no anchor or no gap the
+           method returns before the savepoint, the timeout change and the gap statement, so the normal batch pays that one statement. */
+        var probe = gap.IndexOf("ProcedureStatsTotals.GapProbeSql", StringComparison.Ordinal);
+        var early = gap.IndexOf("if (reader.IsDBNull(1) || !reader.GetBoolean(2))", StringComparison.Ordinal);
+        Assert.True(probe > 0 && early > probe && save > early, "probe, then the early return, then the savepoint");
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(gap, "ExecuteReaderAsync"));
+        var probeSql = Normalize(ProcedureStatsTotals.GapProbeSql);
+        Assert.Contains("current_setting('statement_timeout')", probeSql, StringComparison.Ordinal);
+        Assert.Contains("p.collection_time <= $2::timestamp", probeSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("p.collection_time < $2", probeSql, StringComparison.Ordinal);
+        Assert.Contains("s.collection_time > a.anchor", probeSql, StringComparison.Ordinal);
+        Assert.Contains("s.collection_time < $2::timestamp", probeSql, StringComparison.Ordinal);
+        Assert.Contains("EXISTS", probeSql, StringComparison.Ordinal);
 
         /* The gap fill is the only statement behind the savepoint: the batch's own upsert stays outside it. */
         var upsert = writer.IndexOf("ProcedureStatsTotals.UpsertSql", StringComparison.Ordinal);
