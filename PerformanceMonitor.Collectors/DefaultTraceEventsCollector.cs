@@ -52,7 +52,12 @@ namespace PerformanceMonitor.Collectors;
 /// the host store) bounds the read at <c>ft.StartTime &gt;= @cutoff_time</c> (at-or-after, #5644 W6: an event in the
 /// watermark's own 3.33 ms tick that the trace flushes after a poll must not be lost), and the rows already
 /// stored for that one tick are dropped by <c>EventSequence</c> (see <see cref="WatermarkTickSequencesStateKey"/>),
-/// so a rollover file re-read across cycles never re-ingests an event. Unlike those XE ring-buffer collectors (whose 10-minute first-run fallback
+/// so a rollover file re-read across cycles never re-ingests an event. <b>A StartTime watermark alone still
+/// loses late-written events (#5644 W6):</b> the curated auto grow/shrink stalls carry the time they BEGAN but
+/// reach the file when they END, after later-starting events were stored and the watermark moved past them. So
+/// the read also takes every event of the running trace whose <c>EventSequence</c> is greater than the last one
+/// recorded (<see cref="TraceSequenceStateKey"/>), keyed to the trace's identity because the sequence restarts
+/// when the trace does; that rule can only add rows to the StartTime floor, never remove one. Unlike those XE ring-buffer collectors (whose 10-minute first-run fallback
 /// fits their tiny recent-only buffers), the FIRST run here collects EVERYTHING still in the trace files
 /// (a far-past cutoff), because the default trace persists hours-to-days of history on disk that would
 /// otherwise be lost — the same first-run-collects-all choice the Dashboard collector makes.</para>
@@ -162,6 +167,35 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
     /// </summary>
     public const string WatermarkTickSequencesStateKey = "watermark_tick_event_sequences";
 
+    /// <summary>
+    /// The <see cref="CollectorContext.State"/> key holding the running trace's identity and the newest
+    /// <c>EventSequence</c> this collector has read from it, as <c>"&lt;start ticks&gt;:&lt;sequence&gt;"</c>
+    /// (#5644 W6). <b>Why a sequence and not a time:</b> the trace stamps an event with the moment it BEGAN
+    /// (<c>StartTime</c>) but writes it when it ENDS, so the curated auto grow/shrink stalls (Duration over one
+    /// second) reach the file seconds after later-starting events were already read and stored. A watermark on
+    /// <c>StartTime</c> has then moved past them and an at-or-after read never sees them. <c>EventSequence</c>
+    /// is assigned when the trace takes the event (it increases in file order, across the rollover files of
+    /// one trace), so "EventSequence greater than the last one stored" reads each event once whenever it is
+    /// written; the query ORs that rule onto the <c>StartTime</c> floor, so it can only add rows.
+    ///
+    /// <para><b>Identity.</b> The sequence restarts at 1 whenever the default trace is started again (SQL Server
+    /// restart, the trace switched off and on), and the rollover set can hold files of the previous trace, so
+    /// a sequence means nothing without the trace it came from. The identity is <c>sys.traces.start_time</c>
+    /// (the first event of a trace carries exactly that <c>StartTime</c>, so a row belongs to the running trace
+    /// when its <c>StartTime</c> is at or after it). A changed identity makes the query read the running trace
+    /// from its first event: the store cannot hold any of it, because the poll that first sees a new trace is the
+    /// first that can read it. The older trace's files, which that read also returns, fall under the
+    /// <c>StartTime</c> floor and the tick dedup as before.</para>
+    ///
+    /// <para><b>Absent, malformed or half-known state</b> (first poll after an upgrade, a reset state table, a
+    /// poll whose state save failed): no identity makes the sequence rule off and the whole rollover set be
+    /// read once, so that poll behaves exactly as the <c>StartTime</c> rule alone did; an identity with no
+    /// sequence (the format <c>"&lt;start ticks&gt;:"</c>, written when a poll read no row of the running
+    /// trace) keeps the sequence rule off until the first row records one. A state that is behind the store
+    /// costs a repeat of the rows since, which both readers collapse; it never costs an event.</para>
+    /// </summary>
+    public const string TraceSequenceStateKey = "trace_event_sequence";
+
     public sealed class Row
     {
         public DateTime? EventTime { get; set; }
@@ -232,13 +266,28 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE
-    @current_trace_path nvarchar(260);
+    @current_trace_path nvarchar(260),
+    @current_trace_start datetime,
+    @trace_continues bit;
 
 SELECT /* PerformanceMonitorLite */
-    @current_trace_path = t.path
+    @current_trace_path = t.path,
+    @current_trace_start = t.start_time
 FROM sys.traces AS t
 WHERE t.is_default = 1
 AND   t.status = 1;
+
+/*#5644 W6: is the running trace the one the stored EventSequence came from? NULL = no stored identity (the
+  sequence rule stays off, and the whole rollover set is read); 1 = the same trace; 0 = a new trace, whose
+  EventSequence restarted at 1.*/
+SET @trace_continues =
+    CASE
+        WHEN @last_trace_start IS NULL
+        THEN NULL
+        WHEN CONVERT(datetime, @last_trace_start) = @current_trace_start
+        THEN 1
+        ELSE 0
+    END;
 
 SELECT /* PerformanceMonitorLite */
     event_time = ft.StartTime,
@@ -266,9 +315,10 @@ FROM sys.traces AS t
 CROSS APPLY sys.fn_trace_gettable
 (
     CASE
-        /*Steady state: the trace has not rolled since the previous cycle, so every post-watermark
-          event is in the file we are already pointed at*/
+        /*Steady state: the trace has not rolled since the previous cycle (and is the same trace), so every
+          post-watermark event is in the file we are already pointed at*/
         WHEN @current_trace_path = @last_trace_path
+        AND  @trace_continues = 1
         THEN @current_trace_path
         WHEN CHARINDEX(N'_', REVERSE(@current_trace_path)) > 0
         AND (CHARINDEX(N'\', REVERSE(@current_trace_path)) = 0 OR CHARINDEX(N'_', REVERSE(@current_trace_path)) < CHARINDEX(N'\', REVERSE(@current_trace_path)))
@@ -278,6 +328,7 @@ CROSS APPLY sys.fn_trace_gettable
     END,
     CASE
         WHEN @current_trace_path = @last_trace_path
+        AND  @trace_continues = 1
         THEN 1
         ELSE t.max_files
     END
@@ -286,7 +337,23 @@ JOIN sys.trace_events AS te
   ON ft.EventClass = te.trace_event_id
 WHERE t.is_default = 1
 AND   t.status = 1
-AND   ft.StartTime >= CONVERT(datetime, {1})
+AND
+(
+    ft.StartTime >= CONVERT(datetime, {1})
+    OR
+    /*#5644 W6: events the trace WROTE after the last one stored, whatever their StartTime. A grow/shrink
+      stall starts at StartTime but reaches the file when it ends, by which time the StartTime watermark
+      has moved past it. Only rows of the running trace count (an earlier trace's files can be in the
+      rollover set, with sequences from a different run); a changed trace is read from its first event.*/
+    (
+        ft.StartTime >= @current_trace_start
+        AND
+        (
+            (@trace_continues = 1 AND ft.EventSequence > @last_event_sequence)
+            OR @trace_continues = 0
+        )
+    )
+)
 AND
 (
     /*The sp_configure line (msg 15457, an ErrorLog write): kept regardless of the session's database
@@ -341,7 +408,8 @@ ORDER BY
 OPTION(RECOMPILE);
 
 SELECT /* PerformanceMonitorLite */
-    current_trace_path = @current_trace_path;";
+    current_trace_path = @current_trace_path,
+    current_trace_start = @current_trace_start;";
 
     public override string Name => "default_trace_events";
 
@@ -354,7 +422,10 @@ SELECT /* PerformanceMonitorLite */
     /// Events at or after the newest already-collected StartTime are fetched and the ones already stored for
     /// that tick are dropped by EventSequence (<see cref="WatermarkTickSequencesStateKey"/>), so re-reading the
     /// rolling trace files across cycles never re-ingests an event (mirrors the deadlock / system_health
-    /// collectors' event_time watermark). First run has no watermark → collect all on-disk history.
+    /// collectors' event_time watermark). Events the trace WROTE after the last recorded EventSequence are
+    /// fetched whatever their StartTime (<see cref="TraceSequenceStateKey"/>, #5644 W6): a stall's StartTime is
+    /// when it began, so a StartTime watermark alone would never see one written late. First run has no
+    /// watermark → collect all on-disk history.
     /// </summary>
     public override string? WatermarkColumn => "event_time";
 
@@ -366,7 +437,7 @@ SELECT /* PerformanceMonitorLite */
     /// before the query is built and persists whatever this cycle observed once the cycle completes.
     /// The only collector that declares state — every other one's dedup is derivable from its rows.
     /// </summary>
-    public override IReadOnlyList<string> StateKeys { get; } = new[] { LastTraceFilePathStateKey, WatermarkTickSequencesStateKey };
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { LastTraceFilePathStateKey, WatermarkTickSequencesStateKey, TraceSequenceStateKey };
 
     /// <summary>
     /// Collects on SQL Server, Azure SQL Managed Instance, and AWS RDS — everywhere the built-in default
@@ -407,10 +478,21 @@ SELECT /* PerformanceMonitorLite */
            knowing you missed nothing (#1962). */
         context.State.TryGetValue(LastTraceFilePathStateKey, out var lastTracePath);
 
-        var parameters = new List<CollectorParameter>(exclusionParameters.Count + 3)
+        /* The trace identity and newest EventSequence from the previous cycle (#5644 W6), or null/null when
+           there is none or it does not parse: the query then leaves the sequence rule off and reads the
+           whole rollover set, which is the StartTime rule alone, as before. */
+        context.State.TryGetValue(TraceSequenceStateKey, out var traceSequenceState);
+        TryParseTraceSequence(traceSequenceState, out var lastTraceStartTicks, out var lastEventSequence);
+        DateTime? lastTraceStart = lastTraceStartTicks is { } startTicks
+            ? new DateTime(startTicks, DateTimeKind.Unspecified)
+            : null;
+
+        var parameters = new List<CollectorParameter>(exclusionParameters.Count + 5)
         {
             new("@cutoff_time", cutoffTime, CollectorParameterType.DateTime2),
             new("@last_trace_path", lastTracePath, CollectorParameterType.NVarChar260),
+            new("@last_trace_start", lastTraceStart, CollectorParameterType.DateTime2),
+            new("@last_event_sequence", lastEventSequence, CollectorParameterType.BigInt),
             /* Operator toggle mirroring the Dashboard proc's @include_object_events: 1 keeps the Object DDL
                slice (today's behavior), 0 drops it so a create/drop-happy workload can't flood the tab. */
             new("@include_object_ddl", context.CollectSchemaChangeEvents ? 1 : 0, CollectorParameterType.Int32),
@@ -512,14 +594,108 @@ SELECT /* PerformanceMonitorLite */
            depend on it hardest are the ones that returned no rows at all — a quiet server still has to
            notice its trace rolled. A missing/NULL path (no running default trace) records nothing, which
            leaves the next cycle on the safe fallback. */
+        DateTime? traceStart = null;
         if (await reader.NextResultAsync(cancellationToken)
             && await reader.ReadAsync(cancellationToken)
             && !reader.IsDBNull(0))
         {
             context.PendingState[LastTraceFilePathStateKey] = reader.GetString(0);
+
+            /* The running trace's identity (sys.traces.start_time), read in the same statement batch as the
+               path and the rows. A trailing set without the column records no identity (#5644 W6). */
+            if (reader.FieldCount > 1 && !reader.IsDBNull(1))
+            {
+                traceStart = reader.GetDateTime(1);
+            }
         }
 
+        RecordTraceSequence(rows, traceStart, context);
         return DropStoredWatermarkTickRows(rows, context);
+    }
+
+    /// <summary>
+    /// #5644 W6: records the running trace's identity and the newest EventSequence read from it, for the next
+    /// cycle's "EventSequence greater than the last one" rule (see <see cref="TraceSequenceStateKey"/>). Only
+    /// rows whose StartTime is at or after the trace's start count: the rollover set can also return an earlier
+    /// trace's files, whose sequences come from a different run and would push the bound past the running
+    /// trace's events. The newest sequence never moves backwards within one trace. A new trace read to the
+    /// end with no curated row in it records sequence 0 (nothing of it can be stored yet); a first record with
+    /// no row to take a sequence from records the identity alone, which keeps the sequence rule off.
+    /// </summary>
+    private static void RecordTraceSequence(List<Row> rows, DateTime? traceStart, CollectorContext context)
+    {
+        if (traceStart is not { } start)
+        {
+            return;
+        }
+
+        long? newest = null;
+        foreach (var row in rows)
+        {
+            if (row.EventTime is { } time && time >= start && row.EventSequence is { } sequence
+                && (newest is null || sequence > newest.Value))
+            {
+                newest = sequence;
+            }
+        }
+
+        context.State.TryGetValue(TraceSequenceStateKey, out var stored);
+        bool haveStored = TryParseTraceSequence(stored, out var storedStartTicks, out var storedSequence)
+            && storedStartTicks.HasValue;
+        bool sameTrace = haveStored && storedStartTicks == start.Ticks;
+
+        long? recorded;
+        if (sameTrace)
+        {
+            recorded = storedSequence is { } known && (newest is null || known > newest.Value) ? known : newest;
+        }
+        else if (haveStored)
+        {
+            /* A different trace than the one the stored sequence came from: its events are read from the
+               first one, so with none curated the bound is 0, not "unknown". */
+            recorded = newest ?? 0;
+        }
+        else
+        {
+            recorded = newest;
+        }
+
+        context.PendingState[TraceSequenceStateKey] =
+            start.Ticks.ToString(CultureInfo.InvariantCulture) + ":"
+            + (recorded is { } value ? value.ToString(CultureInfo.InvariantCulture) : string.Empty);
+    }
+
+    /// <summary>
+    /// Parses <see cref="TraceSequenceStateKey"/> (<c>"ticks:sequence"</c>, sequence optional). False and both
+    /// outputs null for absent or malformed text, which every caller treats as "no stored identity".
+    /// </summary>
+    private static bool TryParseTraceSequence(string? value, out long? startTicks, out long? sequence)
+    {
+        startTicks = null;
+        sequence = null;
+        if (string.IsNullOrEmpty(value))
+        {
+            return false;
+        }
+
+        int colon = value.IndexOf(':', StringComparison.Ordinal);
+        if (colon <= 0
+            || !long.TryParse(value.AsSpan(0, colon), NumberStyles.None, CultureInfo.InvariantCulture, out var ticks)
+            || ticks < DateTime.MinValue.Ticks || ticks > DateTime.MaxValue.Ticks)
+        {
+            return false;
+        }
+
+        var tail = value.AsSpan(colon + 1);
+        long parsedSequence = 0;
+        if (!tail.IsEmpty && !long.TryParse(tail, NumberStyles.None, CultureInfo.InvariantCulture, out parsedSequence))
+        {
+            return false;
+        }
+
+        startTicks = ticks;
+        sequence = tail.IsEmpty ? null : parsedSequence;
+        return true;
     }
 
     /// <summary>

@@ -57,6 +57,10 @@
          brings its Lite.Tests namespace with it and uses only the BCL, xunit and PerformanceMonitor.Alerting,
          which both projects carry. -->
     <Compile Include="..\..\Lite.Tests\CrossSkuSurfaceSourceTests.cs" Link="Linked\CrossSkuSurfaceSourceTests.cs" />
+    <!-- #5644 W6: the default trace EventSequence watermark. The collector is one shared definition, so its
+         behaviour model (a simulated trace driven through the real BuildQuery and ReadAsync) is compiled here
+         from Lite.Tests rather than copied; it uses only the BCL, System.Data, xunit and PerformanceMonitor.Collectors. -->
+    <Compile Include="..\..\Lite.Tests\DefaultTraceEventSequenceWatermarkTests.cs" Link="Linked\DefaultTraceEventSequenceWatermarkTests.cs" />
   </ItemGroup>
 
   <ItemGroup>
