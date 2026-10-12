@@ -76,13 +76,13 @@ public sealed class ViewerWave3SqlTests
         ViewerDataService.MuteRuleDeleteSql,
     };
 
-    /// <summary>The 11 config_mute_rules columns the store round-trips (PgMuteRuleStore's shape).</summary>
+    /// <summary>The 13 config_mute_rules columns the store round-trips (PgMuteRuleStore's shape).</summary>
     private static readonly string[] MuteRuleColumns =
     {
         "id", "enabled", "created_at_utc", "expires_at_utc", "reason",
         "server_name", "metric_name", "database_pattern",
         "query_text_pattern", "wait_type_pattern", "job_name_pattern",
-        "server_id",
+        "server_id", "client_app_pattern",
     };
 
     [Fact]
@@ -96,9 +96,11 @@ public sealed class ViewerWave3SqlTests
 
         /* server_id (V157) is written by the UPDATE too, so an edit cannot drop it. */
         Assert.Contains("server_id = $", ViewerDataService.MuteRuleUpdateSql, StringComparison.Ordinal);
+        /* client_app_pattern (#5640) is written by the UPDATE too. */
+        Assert.Contains("client_app_pattern = $12", ViewerDataService.MuteRuleUpdateSql, StringComparison.Ordinal);
 
-        /* All 12 columns are bound in the insert; newest-first read like PgMuteRuleStore/Lite. */
-        Assert.Contains("$12", ViewerDataService.MuteRuleInsertSql, StringComparison.Ordinal);
+        /* All 13 columns are bound in the insert; newest-first read like PgMuteRuleStore/Lite. */
+        Assert.Contains("$13", ViewerDataService.MuteRuleInsertSql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY created_at_utc DESC", ViewerDataService.MuteRulesSelectSql, StringComparison.Ordinal);
     }
 
@@ -108,7 +110,7 @@ public sealed class ViewerWave3SqlTests
         /* Every column the viewer writes must exist in the migration-owned table. */
         var v3 = PgMigrations.Scripts.Single(m => m.Version == 3).Sql;
         Assert.Contains("CREATE TABLE IF NOT EXISTS config_mute_rules", v3, StringComparison.Ordinal);
-        foreach (var column in MuteRuleColumns.Where(c => c != "server_id"))
+        foreach (var column in MuteRuleColumns.Where(c => c != "server_id" && c != "client_app_pattern"))
         {
             Assert.Contains(column, v3, StringComparison.Ordinal);
         }

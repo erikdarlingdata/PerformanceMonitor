@@ -146,7 +146,8 @@ function noPatterns(rule) {
     && rule.database_pattern == null
     && rule.query_text_pattern == null
     && rule.wait_type_pattern == null
-    && rule.job_name_pattern == null;
+    && rule.job_name_pattern == null
+    && rule.client_app_pattern == null;
 }
 
 /** A whole-server silence keyed on this server's id. Enabled/expiry are not part of the match (as on the desktop). */

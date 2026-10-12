@@ -53,6 +53,8 @@ public partial class MuteRuleDialog : Window
             WaitTypePatternBox.Text = context.WaitType;
         if (!string.IsNullOrEmpty(context.JobName))
             JobNamePatternBox.Text = context.JobName;
+        if (!string.IsNullOrEmpty(context.ClientAppName))
+            ClientAppPatternBox.Text = context.ClientAppName;
     }
 
     private void PopulateFromRule(MuteRule rule)
@@ -63,6 +65,7 @@ public partial class MuteRuleDialog : Window
         QueryTextPatternBox.Text = rule.QueryTextPattern ?? "";
         WaitTypePatternBox.Text = rule.WaitTypePattern ?? "";
         JobNamePatternBox.Text = rule.JobNamePattern ?? "";
+        ClientAppPatternBox.Text = rule.ClientAppPattern ?? "";
 
         if (!string.IsNullOrEmpty(rule.MetricName))
             SelectMetric(rule.MetricName);
@@ -104,6 +107,8 @@ public partial class MuteRuleDialog : Window
             ? WaitTypePatternBox.Text.Trim() : null;
         Rule.JobNamePattern = JobNamePatternBox.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(JobNamePatternBox.Text)
             ? JobNamePatternBox.Text.Trim() : null;
+        Rule.ClientAppPattern = ClientAppPatternBox.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(ClientAppPatternBox.Text)
+            ? ClientAppPatternBox.Text.Trim() : null;
 
         if (MetricCombo.SelectedIndex > 0 && MetricCombo.SelectedItem is ComboBoxItem selected)
             Rule.MetricName = selected.Content?.ToString();
@@ -119,7 +124,8 @@ public partial class MuteRuleDialog : Window
         };
 
         if (Rule.ServerName == null && Rule.MetricName == null && Rule.DatabasePattern == null
-            && Rule.QueryTextPattern == null && Rule.WaitTypePattern == null && Rule.JobNamePattern == null)
+            && Rule.QueryTextPattern == null && Rule.WaitTypePattern == null && Rule.JobNamePattern == null
+            && Rule.ClientAppPattern == null)
         {
             var result = MessageBox.Show(
                 "This rule has no filters and will mute ALL alerts. Are you sure?",
@@ -147,13 +153,15 @@ public partial class MuteRuleDialog : Window
         bool showWaitType = metric is null or "(any)" or "Poison Wait" or "Long-Running Query";
         bool showQueryText = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Long-Running Query";
         bool showJobName = metric is null or "(any)" or "Long-Running Job";
+        bool showClientApp = metric is null or "(any)" or "Client Timeouts";
 
         DatabaseLabel.Visibility = DatabasePatternBox.Visibility = showDatabase ? Visibility.Visible : Visibility.Collapsed;
         WaitTypeLabel.Visibility = WaitTypePatternBox.Visibility = showWaitType ? Visibility.Visible : Visibility.Collapsed;
         QueryTextLabel.Visibility = QueryTextPatternBox.Visibility = showQueryText ? Visibility.Visible : Visibility.Collapsed;
         JobNameLabel.Visibility = JobNamePatternBox.Visibility = showJobName ? Visibility.Visible : Visibility.Collapsed;
+        ClientAppLabel.Visibility = ClientAppPatternBox.Visibility = showClientApp ? Visibility.Visible : Visibility.Collapsed;
 
-        PatternFieldsGrid.Visibility = (showDatabase || showWaitType || showQueryText || showJobName)
+        PatternFieldsGrid.Visibility = (showDatabase || showWaitType || showQueryText || showJobName || showClientApp)
             ? Visibility.Visible : Visibility.Collapsed;
     }
 

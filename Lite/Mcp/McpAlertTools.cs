@@ -467,6 +467,7 @@ public sealed class McpAlertTools
                     query_text_pattern = r.QueryTextPattern,
                     wait_type_pattern = r.WaitTypePattern,
                     job_name_pattern = r.JobNamePattern,
+                    client_app_pattern = r.ClientAppPattern,
                     summary = r.Summary
                 }).ToArray(),
                 total_count = rules.Count

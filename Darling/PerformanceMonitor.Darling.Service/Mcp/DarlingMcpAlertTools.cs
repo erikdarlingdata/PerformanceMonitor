@@ -798,6 +798,7 @@ public sealed class DarlingMcpAlertTools
         query_text_pattern = r.QueryTextPattern,
         wait_type_pattern = r.WaitTypePattern,
         job_name_pattern = r.JobNamePattern,
+        client_app_pattern = r.ClientAppPattern,
         summary = r.Summary
     };
 
@@ -1002,7 +1003,7 @@ public sealed class DarlingMcpAlertTools
         "fields are case-insensitive substring matches. expires_at is an optional ISO-8601 UTC timestamp after " +
         "which the rule stops applying; omit it for a permanent rule. Returns the stored rule, including its " +
         "generated id (for delete_mute_rule). Repeating a call is safe: when an enabled, unexpired rule already " +
-        "holds the same six scope and pattern fields and the same expires_at, nothing is created and the answer is " +
+        "holds the same seven scope and pattern fields and the same expires_at, nothing is created and the answer is " +
         "status already_exists with that rule's id (a disabled or expired rule does not count; a different " +
         "expires_at is a different rule). The running service applies the rule on its next collection " +
         "sweep, when the write's config_version bump makes it reload its mute cache — so a matching alert " +
@@ -1018,11 +1019,12 @@ public sealed class DarlingMcpAlertTools
         [Description("Case-insensitive substring the alert's query text must contain. Omit for any query.")] string? query_text_pattern = null,
         [Description("Case-insensitive substring the alert's wait type must contain. Omit for any wait type.")] string? wait_type_pattern = null,
         [Description("Case-insensitive substring the alert's job name must contain. Omit for any job.")] string? job_name_pattern = null,
+        [Description("Case-insensitive substring of the alert's client application name (e.g. 'Management Studio'). Omit for any.")] string? client_app_pattern = null,
         [Description("Optional human-readable reason, shown in the mute-rule list.")] string? reason = null,
         [Description("Optional ISO-8601 UTC expiry (e.g. 2026-08-01T00:00:00Z); after this the rule no longer mutes. Omit for a permanent rule.")] string? expires_at = null,
         [Description("Optional server_id (from get_fleet_overview) to key the rule on that one server.")] int? server_id = null) =>
         CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
-            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id));
+            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern);
 
     /// <summary>The refusal for a <c>server_id</c> no registered server has: a rule keyed on it would mute
     /// nothing while reading as if it muted something.</summary>
@@ -1064,7 +1066,8 @@ public sealed class DarlingMcpAlertTools
         string? reason,
         string? expires_at,
         int? server_id = null,
-        Func<int, Task<string?>>? serverNameLookup = null)
+        Func<int, Task<string?>>? serverNameLookup = null,
+        string? client_app_pattern = null)
     {
         try
         {
@@ -1107,7 +1110,8 @@ public sealed class DarlingMcpAlertTools
                 DatabasePattern = Trimmed(database_pattern),
                 QueryTextPattern = Trimmed(query_text_pattern),
                 WaitTypePattern = Trimmed(wait_type_pattern),
-                JobNamePattern = Trimmed(job_name_pattern)
+                JobNamePattern = Trimmed(job_name_pattern),
+                ClientAppPattern = Trimmed(client_app_pattern)
             };
 
             var existing = await InsertUnlessDuplicateAsync(store, rule);
@@ -1139,7 +1143,7 @@ public sealed class DarlingMcpAlertTools
     /// in a refusal its MCP twin does not make.
     ///
     /// <para><b>Safe to repeat (#4734).</b> The insert goes through <see cref="InsertUnlessDuplicateAsync"/>, the
-    /// one the MCP tool runs too: a body that repeats an enabled, unexpired rule's six scope and pattern fields and
+    /// one the MCP tool runs too: a body that repeats an enabled, unexpired rule's seven scope and pattern fields and
     /// expiry answers <c>already_exists</c> with that rule and writes nothing. The web route maps that word to HTTP
     /// 409 (<see cref="DarlingWebEndpoints.MuteRuleEnvelopeStatus"/>), its status for a conflict.</para>
     ///
@@ -1375,7 +1379,7 @@ public sealed class DarlingMcpAlertTools
         "send is left exactly as stored, and an EXPLICIT JSON null clears a field — the same clearing the " +
         "Viewer's edit dialog performs by blanking it — so {\"expires_at_utc\":null} makes a rule permanent and " +
         "{\"job_name_pattern\":null} stops constraining that dimension. Editable fields: server_name, server_id, " +
-        "metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, reason, " +
+        "metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, " +
         "expires_at_utc (create_mute_rule's expires_at spelling is accepted as a write-only alias; send only " +
         "one). enabled is NOT editable here — use set_mute_rule_enabled, the dedicated reversible verb. USE THIS " +
         "rather than delete_mute_rule followed by create_mute_rule: a re-created rule is a NEW rule with a new " +
@@ -1622,6 +1626,7 @@ public sealed class DarlingMcpAlertTools
                 case "query_text_pattern": AddText("query_text_pattern", prop.Value, (r, v) => r.QueryTextPattern = v); break;
                 case "wait_type_pattern": AddText("wait_type_pattern", prop.Value, (r, v) => r.WaitTypePattern = v); break;
                 case "job_name_pattern": AddText("job_name_pattern", prop.Value, (r, v) => r.JobNamePattern = v); break;
+                case "client_app_pattern": AddText("client_app_pattern", prop.Value, (r, v) => r.ClientAppPattern = v); break;
                 case "reason": AddText("reason", prop.Value, (r, v) => r.Reason = v); break;
                 case "expires_at_utc": AddExpiry("expires_at_utc", prop.Value); break;
                 /* create_mute_rule's parameter spelling, accepted as a write-only alias so a caller moving
@@ -1642,7 +1647,7 @@ public sealed class DarlingMcpAlertTools
                     error = "'summary' is derived from the scope fields and is not stored — edit the fields it summarizes instead.";
                     break;
                 default:
-                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, server_id, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at_utc.";
+                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, server_id, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, expires_at_utc.";
                     break;
             }
         }
@@ -1670,6 +1675,7 @@ public sealed class DarlingMcpAlertTools
         && string.Equals(a.QueryTextPattern, b.QueryTextPattern, StringComparison.Ordinal)
         && string.Equals(a.WaitTypePattern, b.WaitTypePattern, StringComparison.Ordinal)
         && string.Equals(a.JobNamePattern, b.JobNamePattern, StringComparison.Ordinal)
+        && string.Equals(a.ClientAppPattern, b.ClientAppPattern, StringComparison.Ordinal)
         && string.Equals(a.Reason, b.Reason, StringComparison.Ordinal)
         && a.ExpiresAtUtc == b.ExpiresAtUtc;
 
@@ -1692,7 +1698,7 @@ public sealed class DarlingMcpAlertTools
     /// (<see cref="CreateMuteRuleCore"/>) — so neither can create what the other refuses (#4734). A repeated call
     /// left two identical rules; the sibling write tools are already safe to repeat (custom rules and views answer
     /// <c>conflict</c>, <c>mute_analysis_finding</c> answers <c>already_muted</c>). Reads the store, and inserts
-    /// <paramref name="rule"/> only when it holds no ENABLED, UNEXPIRED rule with the same six scope and pattern
+    /// <paramref name="rule"/> only when it holds no ENABLED, UNEXPIRED rule with the same seven scope and pattern
     /// fields and the same expiry (see <see cref="FindDuplicate"/>). Returns that existing rule and inserts nothing
     /// when it does, or null once it has inserted.
     /// </summary>
@@ -1718,7 +1724,7 @@ public sealed class DarlingMcpAlertTools
 
     /// <summary>
     /// The rule a new <paramref name="candidate"/> would repeat, or null: enabled, not expired as of
-    /// <paramref name="nowUtc"/>, and equal to it on all six scope and pattern fields plus the expiry. A disabled or
+    /// <paramref name="nowUtc"/>, and equal to it on all seven scope and pattern fields plus the expiry. A disabled or
     /// expired rule is not in force, so it does not stand in for a rule the caller asked to have in force. The
     /// reason is not part of the identity — it describes the rule, it does not narrow what the rule mutes. With
     /// several matches (rules that predate this check) the OLDEST answers, so a repeat names the original.
@@ -1739,6 +1745,7 @@ public sealed class DarlingMcpAlertTools
         && string.Equals(a.QueryTextPattern, b.QueryTextPattern, StringComparison.Ordinal)
         && string.Equals(a.WaitTypePattern, b.WaitTypePattern, StringComparison.Ordinal)
         && string.Equals(a.JobNamePattern, b.JobNamePattern, StringComparison.Ordinal)
+        && string.Equals(a.ClientAppPattern, b.ClientAppPattern, StringComparison.Ordinal)
         && SameExpiry(a.ExpiresAtUtc, b.ExpiresAtUtc);
 
     /// <summary>Two expiries are the same instant to the store's precision. Postgres keeps microseconds and a .NET
