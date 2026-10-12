@@ -142,7 +142,10 @@ public sealed class DarlingMcpLongQueryTools
                 client_pid = r.ClientPid,
                 nt_username = r.NtUserName,
                 server_principal_name = r.ServerPrincipalName,
-                query_hash = r.QueryHash
+                /* #5711: query_hash is NULL when the engine gave none (the trace's batch-level events carry 0); query_identity
+                   is the key to group by: the real hash, else a fingerprint of the scrubbed statement text. */
+                query_hash = r.QueryHash,
+                query_identity = r.QueryIdentity
             });
 
             var json = JsonSerializer.Serialize(new

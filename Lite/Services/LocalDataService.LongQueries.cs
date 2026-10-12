@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
@@ -136,7 +137,7 @@ SELECT
                     ClientPid = reader.IsDBNull(6) ? null : reader.GetInt32(6),
                     NtUserName = reader.IsDBNull(7) ? "" : reader.GetString(7),
                     ServerPrincipalName = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                    QueryHash = reader.IsDBNull(9) ? "" : reader.GetString(9),
+                    QueryHash = reader.IsDBNull(9) ? "" : QueryHashIdentity.KnownHash(reader.GetString(9)) ?? "",
                     EventSequence = reader.IsDBNull(10) ? null : reader.GetInt64(10),
                     DurationMicroseconds = reader.IsDBNull(11) ? null : reader.GetInt64(11),
                     CpuTimeMicroseconds = reader.IsDBNull(12) ? null : reader.GetInt64(12),
@@ -171,7 +172,11 @@ public class LongQueryCompletionRow
     public int? ClientPid { get; set; }
     public string NtUserName { get; set; } = "";
     public string ServerPrincipalName { get; set; } = "";
+    /// <summary>The stored <c>query_hash</c>, "" when the engine gave none (#5711: the trace's batch-level events carry 0).</summary>
     public string QueryHash { get; set; } = "";
+    /// <summary>#5711: the key to group, filter or label by: the real hash, else a fingerprint of the scrubbed statement
+    /// text, else "" (such a row joins no group).</summary>
+    public string QueryIdentity => QueryHashIdentity.Identity(QueryHash, StatementText) ?? "";
     public long? EventSequence { get; set; }
     public long? DurationMicroseconds { get; set; }
     public long? CpuTimeMicroseconds { get; set; }
