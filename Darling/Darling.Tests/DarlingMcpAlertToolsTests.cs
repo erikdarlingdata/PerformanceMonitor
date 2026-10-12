@@ -2090,7 +2090,7 @@ internal sealed class SlowInsertMuteRuleStore : IMuteRuleStore
 /// the sibling write tools already answer a repeat (<c>conflict</c> for custom rules and views, <c>already_muted</c>
 /// for an analysis mute). The MCP tool (<c>CreateMuteRuleOver</c>, the body <c>CreateMuteRule</c> hands the
 /// Postgres-backed store) and the web route (<c>CreateMuteRuleCore</c>) share one insert, so a rule either path made
-/// is a repeat to the other. The identity is the six scope and pattern fields plus the expiry, against rules that are
+/// is a repeat to the other. The identity is the seven scope and pattern fields plus the expiry, against rules that are
 /// enabled and unexpired.
 /// </summary>
 public sealed class RepeatedCreateMuteRuleTests

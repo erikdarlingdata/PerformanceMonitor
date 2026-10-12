@@ -66,6 +66,7 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.Contains("m.query_text_pattern IS NULL", sql, StringComparison.Ordinal);
         Assert.Contains("m.wait_type_pattern IS NULL", sql, StringComparison.Ordinal);
         Assert.Contains("m.job_name_pattern IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("m.client_app_pattern IS NULL", sql, StringComparison.Ordinal);
         Assert.Contains("AS is_silenced", sql, StringComparison.Ordinal);
     }
 

@@ -102,6 +102,7 @@ SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.s
            AND   m.query_text_pattern IS NULL
            AND   m.wait_type_pattern IS NULL
            AND   m.job_name_pattern IS NULL
+           AND   m.client_app_pattern IS NULL
        ) AS is_silenced
 FROM servers s
 WHERE s.is_enabled
