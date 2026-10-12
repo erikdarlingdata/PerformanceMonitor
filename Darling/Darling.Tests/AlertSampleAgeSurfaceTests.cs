@@ -241,6 +241,9 @@ public sealed class AlertSampleAgeSurfaceTests
         }
         catch (System.ComponentModel.Win32Exception)
         {
+            // CI (GITHUB_ACTIONS is set there) must have Node: a missing Node fails there instead of quietly retiring the
+            // only pin that runs the shipped page script against the notification's wording.
+            Assert.False(Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true", "Node is not installed on this CI runner, so the page-versus-notification age wording cannot be checked.");
             Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
             throw;
         }
