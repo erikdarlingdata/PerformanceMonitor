@@ -29,11 +29,15 @@ public sealed class RunnableQueueAlertDetailTests
     private static readonly DateTime Collected = new(2026, 10, 9, 14, 0, 0, DateTimeKind.Unspecified);
     private static readonly AlertBranding Branding = new("Test Edition", null);
 
+    /* #5641 Lane 1c: five collections a minute apart, the newest at Collected, every one at the same average. */
+    private static List<RunnableQueueSample> Samples(double average, long total) =>
+        Enumerable.Range(0, 5).Select(i => new RunnableQueueSample(Collected.AddMinutes(-i), average, total, 4)).ToList();
+
     private static AlertEngineTests.Harness Armed()
     {
         var h = new AlertEngineTests.Harness();
         h.Settings.RunnableQueueEnabled = true;
-        h.Adapter.RunnableQueue = new RunnableQueueWindow(5, 20.0, 4, 80, Collected);
+        h.Adapter.RunnableQueue = Samples(20.0, 80);
         return h;
     }
 
@@ -120,7 +124,7 @@ public sealed class RunnableQueueAlertDetailTests
     public async Task BelowTheBar_NoQuerySnapshotIsRead()
     {
         var h = Armed();
-        h.Adapter.RunnableQueue = new RunnableQueueWindow(5, 2.0, 4, 8, Collected);
+        h.Adapter.RunnableQueue = Samples(2.0, 8);
         h.Adapter.LongRunning.Add(Request(51, cpuMs: 1_000));
 
         await h.Build().EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
@@ -159,7 +163,7 @@ public sealed class RunnableQueueAlertDetailTests
         var counter = new AlertReadFailureCounter(() => new DateTime(2026, 10, 12, 8, 0, 0, DateTimeKind.Utc));
         var h = new AlertEngineTests.Harness { ReadFailures = counter };
         h.Settings.RunnableQueueEnabled = true;
-        h.Adapter.RunnableQueue = new RunnableQueueWindow(5, 20.0, 4, 80, Collected);
+        h.Adapter.RunnableQueue = Samples(20.0, 80);
         h.Adapter.ThrowOnLongRunningRead = true;
 
         await h.Build().EvaluateServerAsync(WithCpuSamples(h, (1, 80, 90), (2, 60, 70), (3, 70, 80)));

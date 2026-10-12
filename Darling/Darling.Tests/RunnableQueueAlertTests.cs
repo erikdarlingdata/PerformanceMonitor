@@ -323,6 +323,25 @@ public sealed class RunnableQueueAlertTests
     }
 
     [Fact]
+    public async Task TheCardsCpuItem_CoversTheSpanTheFallbackJudged_NotJustFiveMinutes()
+    {
+        var h = Armed();
+        var newest = h.Now.AddSeconds(-10);
+        h.Adapter.RunnableQueue = SamplesAt(30.0, newest, newest.AddMinutes(-3.5), newest.AddMinutes(-7));
+        /* A CPU sample six minutes old: outside a fixed 5-minute window, inside the 7 minutes the queue average covers. */
+        var snapshot = AlertEngineTests.Harness.Snapshot(sqlCpu: 50, totalCpu: 55) with
+        {
+            RecentCpuSamples = new List<AlertCpuSample> { new(h.Now.AddMinutes(-6), 90, 95) },
+        };
+
+        await h.Build().EvaluateServerAsync(snapshot);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        var cpu = Assert.Single(fired.Context!.Details, d => d.Heading.StartsWith("CPU over the last", StringComparison.Ordinal));
+        Assert.Equal("CPU over the last 7 minutes", cpu.Heading);
+    }
+
+    [Fact]
     public async Task ConfiguredBars_GovernTheGrade()
     {
         var h = Armed();

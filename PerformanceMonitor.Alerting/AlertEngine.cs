@@ -2021,7 +2021,8 @@ public sealed class AlertEngine
 
                     /* #5641: the card's detail, in AlertContext.Details so every channel that renders another
                        alert's details (both email bodies, the webhook, the toast text, the history row) renders
-                       it. CPU percent for the same minutes comes from the samples the snapshot already holds;
+                       it. CPU percent for the same minutes comes from the samples the snapshot already holds (the
+                       5-minute window, or the longer span when the 10-minute fallback judged the queue);
                        the top requests come from the newest query snapshot, through the same unfiltered
                        threshold-zero read the High CPU card's maintenance probe uses. ANNOTATION, NEVER
                        SUPPRESSION: the fire is decided before this read, a failed read costs the card its
@@ -2031,7 +2032,7 @@ public sealed class AlertEngine
                        carries the detail the delivered card would have. */
                     var cpuItem = AlertContextBuilders.BuildRunnableQueueCpuItem(
                         snapshot.RecentCpuSamples, snapshot.SqlCpuPercent, snapshot.TotalCpuPercent,
-                        now, RunnableQueueEvaluator.WindowMinutes);
+                        now, Math.Max(RunnableQueueEvaluator.WindowMinutes, finding.SpanMinutes));
                     if (cpuItem is not null)
                     {
                         queueContext.Details.Add(cpuItem);
