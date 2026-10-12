@@ -1047,6 +1047,54 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         return (targets, error, warnings);
     }
 
+    /// <summary>#5641 (V177): the Runnable Queue switch and its two bars are reported under <c>runnable_queue</c>
+    /// through the engine's own clamp, written under the engine's own floor, and a Critical below Warning is refused
+    /// when both are sent. (A lone bar against the stored other is checked inside the write transaction; that arm is
+    /// in the live test.)</summary>
+    [Fact]
+    public void RunnableQueue_IsReportedThroughTheClamp_AndWrittenWithTheEnginesValidation()
+    {
+        var payload = SerializedSettingsPayload(SampleSettingsRow());
+        var rq = payload["runnable_queue"]!;
+        Assert.False(rq["enabled"]!.GetValue<bool>());
+        Assert.Equal(5, rq["warning_per_scheduler"]!.GetValue<int>());
+        Assert.Equal(11, rq["critical_per_scheduler"]!.GetValue<int>());
+
+        /* A stored pair the engine would rewrite is reported the way the engine reads it. */
+        var crossed = SampleSettingsRow() with { RunnableQueueWarningPerScheduler = 9, RunnableQueueCriticalPerScheduler = 3 };
+        var crossedRq = SerializedSettingsPayload(crossed)["runnable_queue"]!;
+        Assert.Equal(9, crossedRq["warning_per_scheduler"]!.GetValue<int>());
+        Assert.Equal(9, crossedRq["critical_per_scheduler"]!.GetValue<int>());
+
+        var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+            "{\"runnable_queue\":{\"enabled\":true,\"warning_per_scheduler\":6,\"critical_per_scheduler\":6}}")!);
+        Assert.Null(error);
+        Assert.Equal(
+            new[]
+            {
+                (DarlingMcpAlertTools.AlertSettingsTable, "runnable_queue_enabled"),
+                (DarlingMcpAlertTools.AlertSettingsTable, "runnable_queue_warning_per_scheduler"),
+                (DarlingMcpAlertTools.AlertSettingsTable, "runnable_queue_critical_per_scheduler"),
+            },
+            targets.ToArray());
+
+        foreach (var body in new[]
+        {
+            "{\"runnable_queue\":{\"warning_per_scheduler\":0}}",
+            "{\"runnable_queue\":{\"critical_per_scheduler\":0}}",
+            "{\"runnable_queue\":{\"warning_per_scheduler\":\"8\"}}",
+            "{\"runnable_queue\":{\"enabled\":\"yes\"}}",
+            "{\"runnable_queue\":{\"warning_per_scheduler\":10,\"critical_per_scheduler\":9}}",
+            "{\"runnable_queue\":{\"critical_per_scheduler\":9,\"warning_per_scheduler\":10}}",
+            "{\"runnable_queue\":{\"nope\":1}}",
+        })
+        {
+            /* The tool answers "invalid" and writes nothing whenever the error is set, whatever the partial list holds. */
+            var (_, refusedError) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(body)!);
+            Assert.NotNull(refusedError);
+        }
+    }
+
     /// <summary>The columns the parser would write to one table.</summary>
     private static IReadOnlyList<string> ColumnsFor(
         IReadOnlyList<(string Table, string Column)> targets, string table) =>
@@ -1126,7 +1174,11 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
            (the upgrade-day state) — so a payload that dropped the column and fell through to the file or the
            default would read 'digest' / not-'store' and fail rather than match; and a value the writer hands
            back to the same column, which is what the round-trip equality needs to see. */
-        AnalysisUncorroboratedRoute: "page");
+        AnalysisUncorroboratedRoute: "page",
+        /* #5641 (V177): deliberately NOT the shipped true / 8 / 16 -- a sample equal to the DEFAULTs would let a payload that
+           dropped the columns and fell back to the engine defaults still match. Warning is 1 or more and Critical is at
+           least Warning, so the pair is one the writer accepts. */
+        RunnableQueueEnabled: false, RunnableQueueWarningPerScheduler: 5, RunnableQueueCriticalPerScheduler: 11);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()
@@ -2893,6 +2945,71 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
                 await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "UPDATE config_notification SET email_cooldown_minutes = $1 WHERE id = 1", originalDeliveryCooldown);
                 await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM config_mute_rules WHERE reason = $1", muteTag);
             });
+        }
+    }
+
+    /// <summary>
+    /// #5641 (V177) against the real store: <c>update_alert_settings</c> writes the Runnable Queue switch and bars, and a LONE bar
+    /// that would cross the stored other one is refused with nothing written (the transaction's post-write check; two bars in one
+    /// body are checked in the parser and pinned without a store).
+    /// </summary>
+    [Fact]
+    public async Task UpdateAlertSettings_RunnableQueueBars_AreWritten_AndALoneCrossingBarIsRefused_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live Runnable Queue settings test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
+        await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config_alert_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
+        await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config_notification (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
+
+        /* The three columns are singletons the whole store shares: captured here, put back in the cleanup. */
+        var originalEnabled = (bool)(await ScalarAsync(connection, ct, "SELECT runnable_queue_enabled FROM config_alert_settings WHERE id = 1"))!;
+        var originalWarning = Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT runnable_queue_warning_per_scheduler FROM config_alert_settings WHERE id = 1"));
+        var originalCritical = Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT runnable_queue_critical_per_scheduler FROM config_alert_settings WHERE id = 1"));
+
+        var bodySucceeded = false;
+        try
+        {
+            var written = await DarlingMcpAlertTools.UpdateAlertSettings(postgres,
+                "{\"runnable_queue\":{\"enabled\":false,\"warning_per_scheduler\":6,\"critical_per_scheduler\":12}}");
+            Assert.Equal("updated", DarlingMcpTestData.StatusOf(written));
+            using (var doc = JsonDocument.Parse(written))
+            {
+                var rq = doc.RootElement.GetProperty("settings").GetProperty("runnable_queue");
+                Assert.False(rq.GetProperty("enabled").GetBoolean());
+                Assert.Equal(6, rq.GetProperty("warning_per_scheduler").GetInt32());
+                Assert.Equal(12, rq.GetProperty("critical_per_scheduler").GetInt32());
+            }
+
+            Assert.Equal(6, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT runnable_queue_warning_per_scheduler FROM config_alert_settings WHERE id = 1")));
+            Assert.Equal(12, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT runnable_queue_critical_per_scheduler FROM config_alert_settings WHERE id = 1")));
+
+            /* A lone Warning above the stored Critical, and a lone Critical below the stored Warning: both refused, both leave the row alone. */
+            foreach (var body in new[] { "{\"runnable_queue\":{\"warning_per_scheduler\":13}}", "{\"runnable_queue\":{\"critical_per_scheduler\":5}}" })
+            {
+                Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres, body)));
+                Assert.Equal(6, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT runnable_queue_warning_per_scheduler FROM config_alert_settings WHERE id = 1")));
+                Assert.Equal(12, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT runnable_queue_critical_per_scheduler FROM config_alert_settings WHERE id = 1")));
+            }
+
+            /* A lone bar that stays in order is written. */
+            Assert.Equal("updated", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres, "{\"runnable_queue\":{\"warning_per_scheduler\":12}}")));
+            Assert.Equal(12, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT runnable_queue_warning_per_scheduler FROM config_alert_settings WHERE id = 1")));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt,
+                    "UPDATE config_alert_settings SET runnable_queue_enabled = $1, runnable_queue_warning_per_scheduler = $2, runnable_queue_critical_per_scheduler = $3 WHERE id = 1",
+                    originalEnabled, originalWarning, originalCritical));
         }
     }
 
