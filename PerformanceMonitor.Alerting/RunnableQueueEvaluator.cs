@@ -7,44 +7,64 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
 
 /// <summary>
-/// The scheduler run-queue window the Runnable Queue alert (#5641) judges: what
-/// <see cref="IAlertReadAdapter.GetRunnableQueueWindowAsync"/> hands the engine from the
-/// <c>cpu_scheduler_stats</c> rows the collector already stores.
+/// One COLLECTION of the Runnable Queue alert's read (#5641): everything <c>cpu_scheduler_stats</c> holds for one
+/// <c>collection_time</c>, folded to one number. The collector can write SEVERAL rows for one collection_time, each
+/// covering only a subset of the schedulers while every row still says the full <c>scheduler_count</c> (#5710; old
+/// rows stay split), so averaging ROWS is wrong. The read folds them: one row uses its own
+/// <c>avg_runnable_tasks_count</c>; several rows use <c>SUM(total_runnable_tasks_count) / MAX(scheduler_count)</c>.
 /// </summary>
-/// <param name="SampleCount">How many samples with a non-NULL <c>avg_runnable_tasks_count</c> fell inside the
-/// window. Zero means the collector delivered nothing usable in the window.</param>
-/// <param name="AverageRunnableTasksPerScheduler">The AVERAGE of <c>avg_runnable_tasks_count</c> over those samples.
-/// That column is the collector's own <c>AVG(runnable_tasks_count)</c> over <c>sys.dm_os_schedulers WHERE status =
-/// 'VISIBLE ONLINE'</c> (runnable tasks per visible online scheduler), which is the number the bars were measured
-/// on. Never the node or offline-CPU columns (#5656). 0 when <see cref="SampleCount"/> is 0.</param>
-/// <param name="LatestSchedulerCount">The newest sample's <c>scheduler_count</c> (visible online schedulers), for the
-/// summary text. Null when the window is empty or the column was NULL.</param>
-/// <param name="LatestTotalRunnableTasks">The newest sample's <c>total_runnable_tasks_count</c> (the SUM across
-/// schedulers). Null when the window is empty or the column was NULL. Carried for the detail block the alert
-/// context builder adds (Lane 2 of #5641).</param>
-/// <param name="NewestCollectionTime">The newest sample's own <c>collection_time</c> (naive UTC), so the engine can
-/// refuse to re-fire on a window it already reported and stamp the sample age. <see cref="DateTime.MinValue"/> when
-/// the window is empty.</param>
-public sealed record RunnableQueueWindow(
-    long SampleCount,
-    double AverageRunnableTasksPerScheduler,
-    int? LatestSchedulerCount,
-    long? LatestTotalRunnableTasks,
-    DateTime NewestCollectionTime)
-{
-    /// <summary>The window with no usable sample in it.</summary>
-    public static RunnableQueueWindow Empty { get; } = new(0, 0, null, null, DateTime.MinValue);
-}
+/// <param name="CollectionTime">The collection's <c>collection_time</c> (naive UTC, microseconds kept).</param>
+/// <param name="PerScheduler">Runnable tasks per visible online scheduler for the whole collection. The number the
+/// bars were measured on. Never the node or offline-CPU columns (#5656).</param>
+/// <param name="TotalRunnableTasks">The collection's <c>SUM(total_runnable_tasks_count)</c> across its rows. Null when
+/// the column was NULL. Carried for the detail block the alert context builder adds (Lane 2 of #5641).</param>
+/// <param name="SchedulerCount">The collection's <c>MAX(scheduler_count)</c> (visible online schedulers), for the
+/// summary text. Null when the column was NULL.</param>
+public sealed record RunnableQueueSample(
+    DateTime CollectionTime,
+    double PerScheduler,
+    long? TotalRunnableTasks,
+    int? SchedulerCount);
 
 /// <summary>
-/// Grades the Runnable Queue window (#5641): runnable tasks per visible online scheduler, averaged over
-/// <see cref="WindowMinutes"/> minutes of the stored <c>cpu_scheduler_stats</c> samples.
+/// The collections <see cref="RunnableQueueEvaluator.Read"/> judged at one evaluation time: the average, how many
+/// collections it covers and how long they span, plus the newest collection's details for the summary, the
+/// detail block and the engine's fresh-sample guard.
+/// </summary>
+/// <param name="AveragePerScheduler">The average of the covered collections' <see cref="RunnableQueueSample.PerScheduler"/>.</param>
+/// <param name="SampleCount">How many collections the average covers (3 or more in the 5-minute rule, exactly 3 in the fallback).</param>
+/// <param name="SpanMinutes">Whole minutes from the oldest covered collection to the evaluation time (at least 1), for the summary.</param>
+/// <param name="SchedulerCount">The newest collection's scheduler count.</param>
+/// <param name="LatestTotalRunnableTasks">The newest collection's total runnable tasks.</param>
+/// <param name="NewestCollectionTime">The newest collection's time (naive UTC).</param>
+public sealed record RunnableQueueReading(
+    double AveragePerScheduler,
+    int SampleCount,
+    int SpanMinutes,
+    int? SchedulerCount,
+    long? LatestTotalRunnableTasks,
+    DateTime NewestCollectionTime);
+
+/// <summary>
+/// Grades the Runnable Queue alert (#5641): runnable tasks per visible online scheduler, averaged over the stored
+/// <c>cpu_scheduler_stats</c> collections.
+///
+/// <para><b>The rule, at evaluation time t.</b> If <see cref="MinimumSamples"/> (3) or more collections fall at or
+/// after t - <see cref="WindowMinutes"/> (5) minutes, the value is their average. Otherwise, if the newest 3
+/// collections all fall at or after t - <see cref="FallbackMinutes"/> (10) minutes, the value is the average of
+/// those 3. Otherwise there is no evaluation: the alert neither fires nor clears, and its state holds.</para>
+///
+/// <para><b>Why the fallback.</b> Under load the collector ran late (gaps of 2.3, 4 and 5 minutes on the 2026-10-09
+/// incident), so "at least 3 collections in 5 minutes" went blind exactly when the alert mattered. Three collections
+/// that are still fresh within 10 minutes are enough to judge.</para>
 ///
 /// <para><b>Why the bars are 8 and 16.</b> Measured read-only on the production store: 43 healthy servers,
 /// 4 days, 1-minute samples of <c>avg_runnable_tasks_count</c>, 5-minute average. No server reached 16. Two
@@ -53,21 +73,25 @@ public sealed record RunnableQueueWindow(
 /// schedulers), and another server's incident-window peak was about 25. So Warning at 8 is a rare, real queue
 /// and Critical at 16 is a queue no healthy server in the sample ever showed.</para>
 ///
-/// <para><b>Why at least <see cref="MinimumSamples"/> samples.</b> A collection gap must not page on one busy
-/// sample. With fewer samples in the window the check does not evaluate: it neither fires nor clears.</para>
+/// <para><b>Why at least <see cref="MinimumSamples"/> collections.</b> A collection gap must not page on one busy
+/// collection.</para>
 /// </summary>
 public static class RunnableQueueEvaluator
 {
-    /// <summary>The window the average is taken over, in minutes. The read's cutoff and the summary text use it.</summary>
+    /// <summary>The primary window the average is taken over, in minutes.</summary>
     public const int WindowMinutes = 5;
 
-    /// <summary>The fewest samples that make the window evaluable. At the shipped 1-minute cadence a full window holds 5.</summary>
+    /// <summary>The fallback freshness bound, in minutes: the newest <see cref="MinimumSamples"/> collections must all
+    /// fall inside it when the primary window holds too few. Also how far back the read looks.</summary>
+    public const int FallbackMinutes = 10;
+
+    /// <summary>The fewest collections that make an evaluation. At the shipped 1-minute cadence a full primary window holds 5.</summary>
     public const int MinimumSamples = 3;
 
-    /// <summary>Shipped Warning bar: runnable tasks per scheduler, window average.</summary>
+    /// <summary>Shipped Warning bar: runnable tasks per scheduler, collection average.</summary>
     public const int DefaultWarningPerScheduler = 8;
 
-    /// <summary>Shipped Critical bar: runnable tasks per scheduler, window average.</summary>
+    /// <summary>Shipped Critical bar: runnable tasks per scheduler, collection average.</summary>
     public const int DefaultCriticalPerScheduler = 16;
 
     /// <summary>The metric name on the alert row, the mute rule, the cooldown and the history grids.</summary>
@@ -85,27 +109,61 @@ public static class RunnableQueueEvaluator
     }
 
     /// <summary>
-    /// True when the window holds enough samples to judge. False is "not observed": the engine holds a standing
-    /// alert where it is rather than clearing it, and fires nothing.
+    /// Applies the window rule to the collections at evaluation time <paramref name="now"/> (on the same clock as
+    /// the collections' <c>collection_time</c>, naive UTC). Null is "not observed": fewer than 3 collections in the
+    /// primary window and the newest 3 not all inside the fallback. The engine then holds a standing alert where it
+    /// is rather than clearing it, and fires nothing. The samples may arrive in any order.
     /// </summary>
-    public static bool IsEvaluable(RunnableQueueWindow? window) =>
-        window is not null && window.SampleCount >= MinimumSamples;
+    public static RunnableQueueReading? Read(IReadOnlyList<RunnableQueueSample>? samples, DateTime now)
+    {
+        if (samples is null || samples.Count < MinimumSamples)
+        {
+            return null;
+        }
+
+        var newestFirst = samples.OrderByDescending(s => s.CollectionTime).ToList();
+        var primaryFloor = now.AddMinutes(-WindowMinutes);
+        var inPrimary = newestFirst.Where(s => s.CollectionTime >= primaryFloor).ToList();
+
+        List<RunnableQueueSample> used;
+        if (inPrimary.Count >= MinimumSamples)
+        {
+            used = inPrimary;
+        }
+        else
+        {
+            used = newestFirst.Take(MinimumSamples).ToList();
+            if (used[^1].CollectionTime < now.AddMinutes(-FallbackMinutes))
+            {
+                return null;
+            }
+        }
+
+        var newest = used[0];
+        var span = (int)Math.Round((now - used[^1].CollectionTime).TotalMinutes, MidpointRounding.AwayFromZero);
+        return new RunnableQueueReading(
+            used.Average(s => s.PerScheduler),
+            used.Count,
+            Math.Max(1, span),
+            newest.SchedulerCount,
+            newest.TotalRunnableTasks,
+            newest.CollectionTime);
+    }
 
     /// <summary>
-    /// Grades the window's average against the two bars. Null when under the Warning bar or when the window is
-    /// not evaluable (use <see cref="IsEvaluable"/> to tell those apart). The average is compared at the
-    /// collector's own two-decimal precision, so a window that sits exactly at a bar is not lost to floating
-    /// point error.
+    /// Grades the reading's average against the two bars. Null when under the Warning bar or when there is no
+    /// reading (use <see cref="Read"/> to tell those apart). The average is compared at the collector's own
+    /// two-decimal precision, so an average that sits exactly at a bar is not lost to floating point error.
     /// </summary>
-    public static Finding? Evaluate(RunnableQueueWindow? window, int warningPerScheduler, int criticalPerScheduler)
+    public static Finding? Evaluate(RunnableQueueReading? reading, int warningPerScheduler, int criticalPerScheduler)
     {
-        if (!IsEvaluable(window))
+        if (reading is null)
         {
             return null;
         }
 
         var (warning, critical) = ClampBars(warningPerScheduler, criticalPerScheduler);
-        var average = Math.Round(window!.AverageRunnableTasksPerScheduler, 2, MidpointRounding.AwayFromZero);
+        var average = Math.Round(reading.AveragePerScheduler, 2, MidpointRounding.AwayFromZero);
 
         AlertSeverityLevel severity;
         int bar;
@@ -124,39 +182,45 @@ public static class RunnableQueueEvaluator
             return null;
         }
 
-        return new Finding(severity, average, bar, window.LatestSchedulerCount, window.LatestTotalRunnableTasks, window.NewestCollectionTime);
+        return new Finding(severity, average, bar, reading.SampleCount, reading.SpanMinutes,
+            reading.SchedulerCount, reading.LatestTotalRunnableTasks, reading.NewestCollectionTime);
     }
 
     /// <summary>
-    /// The summary sentence, plain and concrete: "Runnable tasks averaged 23.4 per scheduler over 5 minutes (4
-    /// schedulers)." The scheduler clause is left out when the newest sample carried no scheduler count.
+    /// The summary sentence, plain and concrete: "Runnable tasks averaged 23.6 per scheduler over the last 3
+    /// collections (5 minutes, 4 schedulers)." The scheduler clause is left out when the newest collection carried
+    /// no scheduler count.
     /// </summary>
-    public static string Summary(double averagePerScheduler, int? schedulerCount)
+    public static string Summary(double averagePerScheduler, int sampleCount, int spanMinutes, int? schedulerCount)
     {
         var scheduler = schedulerCount is > 0
-            ? string.Create(CultureInfo.InvariantCulture, $" ({schedulerCount} scheduler{(schedulerCount == 1 ? "" : "s")})")
+            ? string.Create(CultureInfo.InvariantCulture, $", {schedulerCount} scheduler{(schedulerCount == 1 ? "" : "s")}")
             : "";
         return string.Create(CultureInfo.InvariantCulture,
-            $"Runnable tasks averaged {averagePerScheduler:N1} per scheduler over {WindowMinutes} minutes{scheduler}.");
+            $"Runnable tasks averaged {averagePerScheduler:N1} per scheduler over the last {sampleCount} collections ({spanMinutes} minute{(spanMinutes == 1 ? "" : "s")}{scheduler}).");
     }
 
-    /// <summary>One window over a bar.</summary>
+    /// <summary>One reading over a bar.</summary>
     /// <param name="Severity">Warning, or Critical when the average reached the Critical bar.</param>
-    /// <param name="AveragePerScheduler">The window average (two decimals).</param>
+    /// <param name="AveragePerScheduler">The collections' average (two decimals).</param>
     /// <param name="BarCrossed">The bar of <paramref name="Severity"/>: the threshold the alert row stores.</param>
-    /// <param name="SchedulerCount">The newest sample's scheduler count.</param>
-    /// <param name="LatestTotalRunnableTasks">The newest sample's total runnable tasks.</param>
-    /// <param name="NewestCollectionTime">The newest sample's collection time (naive UTC).</param>
+    /// <param name="SampleCount">How many collections the average covers.</param>
+    /// <param name="SpanMinutes">Whole minutes from the oldest covered collection to the evaluation.</param>
+    /// <param name="SchedulerCount">The newest collection's scheduler count.</param>
+    /// <param name="LatestTotalRunnableTasks">The newest collection's total runnable tasks.</param>
+    /// <param name="NewestCollectionTime">The newest collection's time (naive UTC).</param>
     public sealed record Finding(
         AlertSeverityLevel Severity,
         double AveragePerScheduler,
         int BarCrossed,
+        int SampleCount,
+        int SpanMinutes,
         int? SchedulerCount,
         long? LatestTotalRunnableTasks,
         DateTime NewestCollectionTime)
     {
         /// <summary>The summary sentence for the alert.</summary>
-        public string Summary => RunnableQueueEvaluator.Summary(AveragePerScheduler, SchedulerCount);
+        public string Summary => RunnableQueueEvaluator.Summary(AveragePerScheduler, SampleCount, SpanMinutes, SchedulerCount);
 
         /// <summary>The "current value" text the alert row shows.</summary>
         public string CurrentValueText =>

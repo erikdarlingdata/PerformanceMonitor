@@ -117,12 +117,12 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return await Task.Run(() => _dataService.GetPoisonWaitAccumulationAsync(serverId, windowMinutes), cancellationToken);
     }
 
-    /// <summary>#5641: the Runnable Queue window, delegated like every other member so the engine stays free of DuckDB.</summary>
-    public async Task<RunnableQueueWindow> GetRunnableQueueWindowAsync(
-        string serverKey, int windowMinutes, CancellationToken cancellationToken = default)
+    /// <summary>#5641: the Runnable Queue samples (one per collection), delegated like every other member so the engine stays free of DuckDB.</summary>
+    public async Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        return await Task.Run(() => _dataService.GetRunnableQueueWindowAsync(serverId, windowMinutes), cancellationToken);
+        return await Task.Run(() => _dataService.GetRunnableQueueSamplesAsync(serverId, lookbackMinutes), cancellationToken);
     }
 
     public async Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(

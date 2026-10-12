@@ -110,9 +110,9 @@ public sealed class AlertEngineTests
            unfiltered — the seam contract is a dumb window sum; the engine does the thresholding. */
         public List<PoisonWaitAccumulation> PoisonWaits { get; } = new();
         public int PoisonWaitWindowMinutesAsked { get; private set; }
-        /* #5641: the window the engine grades; whatever a test puts here comes back as is. */
-        public RunnableQueueWindow RunnableQueue { get; set; } = RunnableQueueWindow.Empty;
-        public int RunnableQueueWindowMinutesAsked { get; private set; }
+        /* #5641: the collections the engine grades; whatever a test puts here comes back as is (newest first). */
+        public List<RunnableQueueSample> RunnableQueue { get; set; } = new();
+        public int RunnableQueueLookbackMinutesAsked { get; private set; }
         public int RunnableQueueReads { get; private set; }
         public List<LongRunningQueryInfo> LongRunning { get; } = new();
         public List<VolumeFreeSpaceInfo> Volumes { get; } = new();
@@ -158,11 +158,11 @@ public sealed class AlertEngineTests
             return Task.FromResult(new List<PoisonWaitAccumulation>(PoisonWaits));
         }
 
-        public Task<RunnableQueueWindow> GetRunnableQueueWindowAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default)
+        public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
         {
-            RunnableQueueWindowMinutesAsked = windowMinutes;
+            RunnableQueueLookbackMinutesAsked = lookbackMinutes;
             RunnableQueueReads++;
-            return Task.FromResult(RunnableQueue);
+            return Task.FromResult<IReadOnlyList<RunnableQueueSample>>(new List<RunnableQueueSample>(RunnableQueue));
         }
 
         /* #3495's degrade arm: the CPU card's fire-time maintenance probe rides this same seam, and the
@@ -4692,7 +4692,7 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
-        public Task<RunnableQueueWindow> GetRunnableQueueWindowAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
+        public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(string serverKey, int thresholdMinutes, int maxResults, bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc, IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");

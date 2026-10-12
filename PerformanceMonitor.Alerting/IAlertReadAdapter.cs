@@ -99,23 +99,27 @@ public interface IAlertReadAdapter
         string serverKey, int windowMinutes, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// The scheduler run-queue window for the Runnable Queue alert (#5641), from the <c>cpu_scheduler_stats</c> rows
-    /// the collector already stores: how many samples fell in the last <paramref name="windowMinutes"/> minutes, the
-    /// AVERAGE of their <c>avg_runnable_tasks_count</c> (runnable tasks per visible online scheduler, the number the
-    /// bars were measured on; never the node or offline-CPU columns, #5656), and the NEWEST sample's
-    /// <c>scheduler_count</c>, <c>total_runnable_tasks_count</c> and <c>collection_time</c>.
+    /// The scheduler run-queue samples for the Runnable Queue alert (#5641), from the <c>cpu_scheduler_stats</c> rows
+    /// the collector already stores: one <see cref="RunnableQueueSample"/> per <c>collection_time</c> in the last
+    /// <paramref name="lookbackMinutes"/> minutes, newest first.
     /// <para>
-    /// <b>Dumb by contract.</b> No threshold and no minimum-sample rule is applied here: the engine grades against
-    /// <see cref="RunnableQueueEvaluator"/>, and it needs the sample count to tell "not enough samples to judge"
-    /// from "judged and quiet". A sample whose <c>avg_runnable_tasks_count</c> is NULL is not counted. An empty
-    /// window comes back as <see cref="RunnableQueueWindow.Empty"/>, never null. The window is bounded below on
-    /// <c>collection_time</c> with the same naive-UTC parameter style the poison-wait read uses; both stores keep
-    /// microseconds. <paramref name="windowMinutes"/> is passed so the read's cutoff and the engine's summary text
-    /// are one number by construction.
+    /// <b>One sample per collection, not per row.</b> The collector can write several rows for one collection_time,
+    /// each covering a subset of the schedulers while every row says the full scheduler count (#5710; old rows stay
+    /// split). A sample with one row uses that row's <c>avg_runnable_tasks_count</c> exactly; a sample with several
+    /// uses <c>SUM(total_runnable_tasks_count) / MAX(scheduler_count)</c>. Runnable tasks per visible online scheduler
+    /// is the number the bars were measured on; never the node or offline-CPU columns (#5656).
+    /// </para>
+    /// <para>
+    /// <b>Dumb by contract.</b> No threshold and no window rule is applied here: the engine grades against
+    /// <see cref="RunnableQueueEvaluator.Read"/>. A row whose <c>avg_runnable_tasks_count</c> is NULL is not counted.
+    /// No samples comes back as an empty list, never null. The read is bounded below on <c>collection_time</c> with
+    /// the same naive-UTC parameter style the poison-wait read uses; both stores keep microseconds.
+    /// <paramref name="lookbackMinutes"/> is passed so the read's cutoff and the evaluator's fallback are one number
+    /// by construction (<see cref="RunnableQueueEvaluator.FallbackMinutes"/>).
     /// </para>
     /// </summary>
-    Task<RunnableQueueWindow> GetRunnableQueueWindowAsync(
-        string serverKey, int windowMinutes, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Currently-running queries over <paramref name="thresholdMinutes"/> elapsed, longest first,

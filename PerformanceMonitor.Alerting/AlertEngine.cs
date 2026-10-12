@@ -1954,17 +1954,17 @@ public sealed class AlertEngine
 
     /// <summary>
     /// The Runnable Queue alert (#5641): runnable tasks per visible online scheduler, the AVERAGE of the stored
-    /// <c>cpu_scheduler_stats.avg_runnable_tasks_count</c> samples over the last
-    /// <see cref="RunnableQueueEvaluator.WindowMinutes"/> minutes, graded like Poison Wait: Warning at or above the
+    /// <c>cpu_scheduler_stats</c> collections, graded like Poison Wait: Warning at or above the
     /// Warning bar (8 by default), Critical at or above the Critical bar (16). No alert read scheduler queue depth
     /// before this one: on 2026-10-09 a 4-vCPU read replica sat at about 57 runnable tasks per scheduler and client
     /// timeouts began about six minutes before the first (High CPU) alert. The bars and their measurement are on
     /// <see cref="RunnableQueueEvaluator"/>.
     ///
-    /// <para><b>Fewer than <see cref="RunnableQueueEvaluator.MinimumSamples"/> samples is not an observation.</b> The
-    /// check does not evaluate: it fires nothing and clears nothing, so a collection gap cannot page on one busy
-    /// sample and cannot announce "Cleared" on silence (the #3282 rule Poison Wait applies to an empty read). A
-    /// standing alert clears only when an evaluable window sits under the Warning bar.</para>
+    /// <para><b>The window rule</b> is <see cref="RunnableQueueEvaluator.Read"/>'s: 3 or more collections in the last
+    /// 5 minutes, else the newest 3 if all are inside 10 minutes. Anything else is not an observation. The check does
+    /// not evaluate: it fires nothing and clears nothing, so a collection gap cannot page on one busy sample and
+    /// cannot announce "Cleared" on silence (the #3282 rule Poison Wait applies to an empty read). A standing alert
+    /// clears only when an evaluated reading sits under the Warning bar.</para>
     ///
     /// <para>Cooldown, mute, the fresh-sample guard and the resolution notice are Poison Wait's, unchanged. The alert
     /// is one per server; its mute context carries no wait type.</para>
@@ -1980,25 +1980,29 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var window = await _readAdapter.GetRunnableQueueWindowAsync(key, RunnableQueueEvaluator.WindowMinutes, ct);
+            var samples = await _readAdapter.GetRunnableQueueSamplesAsync(key, RunnableQueueEvaluator.FallbackMinutes, ct);
             readClock.Restart();
 
-            /* Not enough samples: neither a fire nor a clear. */
-            if (!RunnableQueueEvaluator.IsEvaluable(window))
+            /* Neither 3 collections in 5 minutes nor the newest 3 inside 10: not an observation, so neither a fire
+               nor a clear. */
+            var reading = RunnableQueueEvaluator.Read(samples, now);
+            if (reading is null)
             {
                 return;
             }
 
             var finding = RunnableQueueEvaluator.Evaluate(
-                window, _settings.RunnableQueueWarningPerScheduler, _settings.RunnableQueueCriticalPerScheduler);
+                reading, _settings.RunnableQueueWarningPerScheduler, _settings.RunnableQueueCriticalPerScheduler);
 
             if (finding is not null)
             {
                 _activeRunnableQueueAlert[key] = true;
 
-                /* The window is a rolling average, so a cooldown-elapsed re-ask against an unrefreshed store hands
-                   back the SAME newest sample (Poison Wait's guard, same reasoning): a fire waits for a sample
-                   newer than the one last fired on. */
+                /* The reading is a rolling average, so a cooldown-elapsed re-ask against an unrefreshed store hands
+                   back the SAME newest collection (Poison Wait's guard, same reasoning): a fire waits for a
+                   collection newer than the one last fired on. The 10-minute fallback keeps the guard right: a late
+                   collector holds the same newest collection for minutes, and the standing alert stays standing
+                   without re-firing until a new collection arrives. */
                 bool hasFreshCollection = !_lastRunnableQueueCollectionTime.TryGetValue(key, out var lastCollectionTime)
                     || finding.NewestCollectionTime > lastCollectionTime;
 
@@ -2049,7 +2053,7 @@ public sealed class AlertEngine
                         key, serverName, RunnableQueueEvaluator.MetricName,
                         "Runnable Queue Cleared",
                         string.Create(CultureInfo.InvariantCulture,
-                            $"{serverName}: Runnable tasks per scheduler averaged over the last {RunnableQueueEvaluator.WindowMinutes} minutes are back below threshold")), ct);
+                            $"{serverName}: Runnable tasks per scheduler averaged over the last {reading.SampleCount} collections are back below threshold")), ct);
                     readClock.Restart();
                 }
             }

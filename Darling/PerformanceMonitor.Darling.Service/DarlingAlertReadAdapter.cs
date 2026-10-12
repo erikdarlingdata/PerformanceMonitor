@@ -811,79 +811,82 @@ ORDER BY accumulated_wait_ms DESC";
     /* ---------------- runnable queue (#5641) ---------------- */
 
     /// <summary>
-    /// The Runnable Queue alert's window read (#5641) over <c>cpu_scheduler_stats</c>, the PostgreSQL-store twin of
-    /// <c>LocalDataService.RunnableQueueWindowSql</c>. $1 server_id, $2 the parameterized naive-UTC window floor (now
-    /// minus the engine's window; a bare <c>now()</c> is timestamptz and would compare in the server's time zone against
+    /// The Runnable Queue alert's sample read (#5641) over <c>cpu_scheduler_stats</c>, the PostgreSQL-store twin of
+    /// <c>LocalDataService.RunnableQueueSamplesSql</c>. $1 server_id, $2 the parameterized naive-UTC floor (now minus
+    /// the engine's lookback; a bare <c>now()</c> is timestamptz and would compare in the server's time zone against
     /// these naive-UTC columns, the Poison Wait read's reasoning). PostgreSQL keeps microseconds in
     /// <c>collection_time</c>, so the floor is bound as a full-precision <see cref="DateTime"/>, never truncated.
     ///
-    /// <para>One row: the window's sample count and average of <c>avg_runnable_tasks_count</c> (the collector's
-    /// <c>AVG(runnable_tasks_count)</c> over <c>VISIBLE ONLINE</c> schedulers, runnable tasks per scheduler: the number
-    /// the bars were measured on, never the node or offline-CPU columns, #5656), carried on the NEWEST sample, whose
-    /// <c>scheduler_count</c>, <c>total_runnable_tasks_count</c> and <c>collection_time</c> ride along.
-    /// <c>collection_id DESC</c> breaks a same-instant tie (#3936). A sample whose average is NULL is not a sample. No
-    /// rows when the window is empty. The AVG over the numeric column is exact, then cast to double precision.</para>
+    /// <para>One row per <c>collection_time</c>, newest first. The collector can write several rows for one
+    /// collection_time, each covering a subset of the schedulers while every row says the full
+    /// <c>scheduler_count</c> (#5710; old rows stay split), so rows are folded: a lone row uses its own
+    /// <c>avg_runnable_tasks_count</c> (the collector's <c>AVG(runnable_tasks_count)</c> over <c>VISIBLE ONLINE</c>
+    /// schedulers, runnable tasks per scheduler: the number the bars were measured on, never the node or offline-CPU
+    /// columns, #5656); several use <c>SUM(total_runnable_tasks_count) / MAX(scheduler_count)</c>. The sum is cast to
+    /// <c>numeric</c> first because both columns are integers and PostgreSQL would divide them as integers. A row whose
+    /// average is NULL is not a row. No ORDER BY tiebreaker: after the GROUP BY there is no tie.</para>
     ///
-    /// <para><b>Cost.</b> One server, a five-minute floor on <c>collection_time</c>: about five rows at the 1-minute
-    /// cadence, all in the newest chunk, the same predicate shape as the poison-wait read beside it.</para>
+    /// <para><b>Cost.</b> One server, a ten-minute floor on <c>collection_time</c>: about ten collections at the
+    /// 1-minute cadence, all in the newest chunk, the same predicate shape as the poison-wait read beside it.</para>
     /// </summary>
     public const string RunnableQueueSql = @"
-WITH win AS
-(
-    SELECT
-        collection_time,
-        collection_id,
-        avg_runnable_tasks_count,
-        scheduler_count,
-        total_runnable_tasks_count
-    FROM cpu_scheduler_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   avg_runnable_tasks_count IS NOT NULL
-)
 SELECT
-    COUNT(*) OVER ()::bigint AS sample_count,
-    (AVG(avg_runnable_tasks_count) OVER ())::double precision AS avg_runnable_per_scheduler,
-    scheduler_count::integer AS scheduler_count,
-    total_runnable_tasks_count::bigint AS total_runnable_tasks_count,
-    collection_time
-FROM win
-ORDER BY collection_time DESC, collection_id DESC
-LIMIT 1";
+    collection_time,
+    (
+        CASE
+            WHEN COUNT(*) = 1
+            THEN MAX(avg_runnable_tasks_count)
+            ELSE SUM(total_runnable_tasks_count)::numeric / NULLIF(MAX(scheduler_count), 0)
+        END
+    )::double precision AS per_scheduler,
+    SUM(total_runnable_tasks_count)::bigint AS total_runnable_tasks_count,
+    MAX(scheduler_count)::integer AS scheduler_count
+FROM cpu_scheduler_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   avg_runnable_tasks_count IS NOT NULL
+GROUP BY collection_time
+ORDER BY collection_time DESC";
 
-    public Task<RunnableQueueWindow> GetRunnableQueueWindowAsync(
-        string serverKey, int windowMinutes, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
     {
         /* The one retry seam (#3848), under the name the engine's catch arm records a failure under. */
         return ExecuteWithOneRetryAsync(
-            ct => GetRunnableQueueWindowCoreAsync(serverKey, windowMinutes, ct),
+            ct => GetRunnableQueueSamplesCoreAsync(serverKey, lookbackMinutes, ct),
             serverKey,
             "runnable queue",
             cancellationToken);
     }
 
-    private async Task<RunnableQueueWindow> GetRunnableQueueWindowCoreAsync(
-        string serverKey, int windowMinutes, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesCoreAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
 
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(RunnableQueueSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(NaiveUtcNow().AddMinutes(-windowMinutes));
+        command.Parameters.AddWithValue(NaiveUtcNow().AddMinutes(-lookbackMinutes));
 
+        var samples = new List<RunnableQueueSample>();
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
+        while (await reader.ReadAsync(cancellationToken))
         {
-            return RunnableQueueWindow.Empty;
+            /* A split collection whose scheduler count is NULL has no per-scheduler value: not a sample. */
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
+            samples.Add(new RunnableQueueSample(
+                reader.GetDateTime(0),
+                reader.GetDouble(1),
+                reader.IsDBNull(2) ? null : reader.GetInt64(2),
+                reader.IsDBNull(3) ? null : reader.GetInt32(3)));
         }
 
-        return new RunnableQueueWindow(
-            reader.GetInt64(0),
-            reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
-            reader.IsDBNull(2) ? null : reader.GetInt32(2),
-            reader.IsDBNull(3) ? null : reader.GetInt64(3),
-            reader.GetDateTime(4));
+        return samples;
     }
 
     /* ---------------- long-running queries ---------------- */

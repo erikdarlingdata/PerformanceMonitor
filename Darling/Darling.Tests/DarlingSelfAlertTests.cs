@@ -5586,8 +5586,8 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult(new List<DeadlockAlertRow>());
         public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<PoisonWaitAccumulation>());
-        public Task<RunnableQueueWindow> GetRunnableQueueWindowAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
-            Task.FromResult(RunnableQueueWindow.Empty);
+        public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<RunnableQueueSample>>(new List<RunnableQueueSample>());
         public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
             string serverKey, int thresholdMinutes, int maxResults,
             bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc,
