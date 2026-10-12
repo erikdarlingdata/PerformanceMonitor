@@ -214,6 +214,57 @@ public sealed class ProvisionRolesAclDriftTests
         }
     }
 
+    /// <summary>
+    /// The blanket config grant also gives viewer and mcp SELECT on the password key tables, and the COMMIT makes it
+    /// durable, so the revoke on those tables is in effect at the COMMIT (step 2d), not only in step 3g far below it.
+    /// Managed mode sends the grants and the revoke as one batch; this holds the script to the same result. The V160
+    /// grant is guarded like the V131 pair, so a store below V160 does not abort the transaction.
+    /// </summary>
+    [Fact]
+    public void ProvisionRolesSql_RevokesThePasswordKeyTables_BeforeTheCommit_AndAgainInStep3g_AndGuardsTheV160Grant()
+    {
+        var sql = ReadProvisionRolesSql().Replace("\r\n", "\n", StringComparison.Ordinal);
+        var code = StripComments(sql);
+
+        var begin = code.IndexOf("\nBEGIN;\n", StringComparison.Ordinal);
+        var commit = code.IndexOf("\nCOMMIT;\n", StringComparison.Ordinal);
+        Assert.True(begin >= 0 && commit > begin);
+
+        /* The step 2d block: after the last blanket grant, before the COMMIT, one table at a time. */
+        var revoke = code.IndexOf("REVOKE ALL ON config.%I FROM PUBLIC, admin, viewer, mcp CASCADE", StringComparison.Ordinal);
+        Assert.True(revoke > begin && revoke < commit, "the key tables' revoke must sit between BEGIN and COMMIT.");
+        var lastBlanket = Regex.Matches(code, @"GRANT SELECT ON ALL TABLES IN SCHEMA config\s+TO [a-z_, ]+;").Max(m => m.Index);
+        Assert.True(revoke > lastBlanket, "the revoke must come after the last blanket config grant.");
+
+        var block = code[code.LastIndexOf("DO $do$", revoke, StringComparison.Ordinal)..commit];
+        foreach (var table in new[] { "password_key", "password_key_service", "legacy_secret_pin", "legacy_secret_pin_marker", "legacy_secret_pin_candidate" })
+        {
+            Assert.Contains($"'{table}'", block, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("pg_catalog.to_regclass(pg_catalog.format('config.%I', key_table)) IS NOT NULL", block, StringComparison.Ordinal);
+        Assert.Contains("IF key_table IN ('password_key', 'password_key_service') THEN", block, StringComparison.Ordinal);
+        Assert.Contains("GRANT SELECT ON config.%I TO admin", block, StringComparison.Ordinal);
+
+        /* Step 3g still runs after the COMMIT and after step 3's admin write grant, and keeps its full revoke. */
+        var step3g = code.IndexOf("REVOKE ALL ON config.password_key,", StringComparison.Ordinal);
+        Assert.True(step3g > commit);
+        Assert.True(step3g > code.IndexOf("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", StringComparison.Ordinal));
+
+        /* The V160 grant: only under a to_regclass check, only through EXECUTE, and inside the transaction. */
+        const string V160Grant = "GRANT SELECT ON config.config_collector_run_times TO mcp;";
+        Assert.Single(Regex.Matches(code, Regex.Escape(V160Grant)));
+        var grantAt = code.IndexOf(V160Grant, StringComparison.Ordinal);
+        Assert.True(grantAt > begin && grantAt < commit);
+        var before = code[..grantAt].TrimEnd();
+        Assert.EndsWith("EXECUTE $v160$", before, StringComparison.Ordinal);
+        Assert.EndsWith(
+            "IF to_regclass('config.config_collector_run_times') IS NOT NULL THEN",
+            before[..^"EXECUTE $v160$".Length].TrimEnd(),
+            StringComparison.Ordinal);
+        Assert.StartsWith("$v160$;", code[(grantAt + V160Grant.Length)..].TrimStart(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ProvisionRolesSql_GrantsNoSecretColumn_ToAnyRole()
     {

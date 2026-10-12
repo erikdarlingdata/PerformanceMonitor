@@ -42,7 +42,8 @@ public sealed class ProvisionRolesCollisionGuardTests
         var off = Regex.Match(sql, @"(?m)^\\set ON_ERROR_STOP :darling_saved_stop[ \t]*\r?$");
         Assert.True(on.Success, "provision-roles.sql no longer runs '\\set ON_ERROR_STOP on' before the role-collision guard.");
         Assert.True(off.Success, "provision-roles.sql never puts the caller's ON_ERROR_STOP back after the role-collision guard.");
-        Assert.Equal(2, Regex.Matches(sql, @"(?m)^\\set ON_ERROR_STOP\b").Count);
+        /* Two pairs: the guard's, and the one around the attribute and membership blocks after the passwords. */
+        Assert.Equal(4, Regex.Matches(sql, @"(?m)^\\set ON_ERROR_STOP\b").Count);
 
         var firstRaise = sql.IndexOf(GuardRaise, StringComparison.Ordinal);
         var lastRaise = sql.LastIndexOf(GuardRaise, StringComparison.Ordinal);
@@ -111,7 +112,7 @@ public sealed class ProvisionRolesCollisionGuardTests
     }
 
     /// <summary>The live script test feeds the file to Npgsql, which cannot run psql's meta-commands, so it drops the
-    /// lines that start with a backslash - the three <c>\set</c> lines - and nothing else: comments that mention a
+    /// lines that start with a backslash - the five <c>\set</c> lines - and nothing else: comments that mention a
     /// backslash command further along a line, and lines that only start with white space, stay.</summary>
     [Fact]
     public void TheLiveScriptTest_DropsOnlyTheLinesThatStartWithABackslash()
@@ -121,7 +122,7 @@ public sealed class ProvisionRolesCollisionGuardTests
 
         var before = sql.Split('\n');
         var after = stripped.Split('\n');
-        Assert.Equal(3, before.Length - after.Length);
+        Assert.Equal(5, before.Length - after.Length);
         Assert.Equal(before.Where(line => !line.StartsWith('\\')), after);
         Assert.DoesNotContain(after, line => line.StartsWith('\\'));
 
@@ -131,7 +132,7 @@ public sealed class ProvisionRolesCollisionGuardTests
     }
 
     /// <summary>Both places that show the psql command line run it with <c>-X</c>, so the operator's own psqlrc stays
-    /// out of the run: an <c>\set AUTOCOMMIT off</c> in it leaves every role, grant and setting uncommitted while psql
+    /// out of the run: an <c>\set AUTOCOMMIT off</c> in it leaves steps 3 to 5 uncommitted while psql
     /// still exits 0.</summary>
     [Fact]
     public void TheShownPsqlCommandLines_SkipThePsqlrc()
@@ -530,7 +531,12 @@ public sealed class ProvisionRolesCollisionGuardTests
         var block = sql[sql.IndexOf("DO $$", utilityOff, StringComparison.Ordinal)..];
         block = block[..(block.IndexOf("END $$;", StringComparison.Ordinal) + "END $$;".Length)];
 
-        foreach (var (name, value) in new[] { ("log_statement", "none"), ("log_min_duration_statement", "-1"), ("log_min_duration_sample", "-1"), ("log_transaction_sample_rate", "0") })
+        foreach (var (name, value) in new[]
+        {
+            ("log_statement", "none"), ("log_min_duration_statement", "-1"), ("log_min_duration_sample", "-1"), ("log_transaction_sample_rate", "0"),
+            ("log_min_error_statement", "panic"), ("debug_print_parse", "off"), ("debug_print_rewritten", "off"), ("debug_print_plan", "off"),
+            ("pgaudit.log_statement", "off"),
+        })
         {
             Assert.Contains($"('{name}', '{value}')", block, StringComparison.Ordinal);
         }
@@ -546,13 +552,14 @@ public sealed class ProvisionRolesCollisionGuardTests
 
         var header = sql[..sql.IndexOf("-- 0. Keep this script's own role DDL", StringComparison.Ordinal)];
         Assert.Contains("log_min_duration_statement set to 0 or more", header, StringComparison.Ordinal);
-        Assert.Contains("log_statement set to ddl or all", header, StringComparison.Ordinal);
+        Assert.Contains("log_statement set to ddl, mod or all", header, StringComparison.Ordinal);
 
         var readme = RepoFile.ReadRepoFile("Darling", "README.md");
-        Assert.Contains("Two settings put the passwords in the server log even when the run succeeds: `log_statement` at `ddl` or `all`, and `log_min_duration_statement` at `0` or more.", readme, StringComparison.Ordinal);
+        Assert.Contains("Two settings put the passwords in the server log even when the run succeeds: `log_statement` at `ddl`, `mod` or `all`, and `log_min_duration_statement` at `0` or more.", readme, StringComparison.Ordinal);
         Assert.Contains("Step 0 turns those settings off for the session.", readme, StringComparison.Ordinal);
         Assert.Contains("GRANT SET ON PARAMETER <setting> TO <owner>", readme, StringComparison.Ordinal);
-        Assert.Contains("A run that succeeds also writes all three passwords to the log when `log_statement` is `ddl` or `all`, or when `log_min_duration_statement` is `0` or more.", readme, StringComparison.Ordinal);
+        Assert.Contains("A run that succeeds also writes all three passwords to the log when `log_statement` is `ddl`, `mod` or `all`, or when `log_min_duration_statement` is `0` or more.", readme, StringComparison.Ordinal);
+        Assert.Contains("`log_min_error_statement` to `panic`", readme, StringComparison.Ordinal);
     }
 
     /// <summary>The README describes the new stops in the list of what an owner that is not a superuser can do.</summary>
@@ -565,5 +572,114 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.Contains("If the owner cannot change one of the three roles, the run stops at the guard with exit code 3. The message names the roles and the `GRANT` statements to run.", readme, StringComparison.Ordinal);
         Assert.Contains("The same stop happens when one of the roles is a superuser. Before PostgreSQL 16, it also happens when one of the roles has `REPLICATION`.", readme, StringComparison.Ordinal);
         Assert.Contains("A superuser is never stopped by these checks.", readme, StringComparison.Ordinal);
+    }
+
+    /// <summary>Step 0 also switches off <c>pg_stat_monitor.pgsm_track_utility</c> (any role may), as it does for
+    /// <c>pg_stat_statements</c>, and the guard stops the run when it is still on. It sits after the
+    /// <c>pg_stat_statements</c> check and before the guard creates a role. The README says so.</summary>
+    [Fact]
+    public void TheGuard_StopsWhilePgStatMonitorTrackingIsOn_AndStepZeroSwitchesItOff()
+    {
+        var sql = Script();
+        var guard = GuardBlock(sql);
+
+        var setOff = sql.IndexOf("\nSET pg_stat_monitor.pgsm_track_utility = off;", StringComparison.Ordinal);
+        Assert.True(setOff > sql.IndexOf("\nSET pg_stat_statements.track_utility = off;", StringComparison.Ordinal), "step 0 must switch pg_stat_monitor's tracking off after pg_stat_statements'.");
+        Assert.True(setOff < sql.IndexOf(guard, StringComparison.Ordinal), "step 0's SET must come before the guard.");
+
+        var check = guard.IndexOf("current_setting('pg_stat_monitor.pgsm_track_utility', true)", StringComparison.Ordinal);
+        Assert.True(check > guard.IndexOf("current_setting('pg_stat_statements.track_utility'", StringComparison.Ordinal));
+        Assert.True(check < guard.IndexOf("CREATE ROLE", StringComparison.Ordinal), "the pg_stat_monitor check must come before the guard creates any role.");
+        Assert.Contains("RAISE EXCEPTION 'pg_stat_monitor.pgsm_track_utility is on for this session.", guard, StringComparison.Ordinal);
+
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        Assert.Contains("`pg_stat_monitor.pgsm_track_utility = off`", readme, StringComparison.Ordinal);
+    }
+
+    /// <summary>When step 0 could not turn the statement logging off (the role may not change the setting), the script
+    /// says so with a WARNING before the guard and before any password is sent.</summary>
+    [Fact]
+    public void AfterStepZero_AWarningNamesStatementLoggingThatIsStillOn_BeforeTheGuard()
+    {
+        var sql = Script();
+
+        var warning = sql.IndexOf("RAISE WARNING 'The server log records the statements of this run", StringComparison.Ordinal);
+        Assert.True(warning > sql.IndexOf("PERFORM set_config(log_setting.name", StringComparison.Ordinal));
+        Assert.True(warning < sql.IndexOf(GuardBlock(sql), StringComparison.Ordinal));
+        Assert.True(warning < Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN PASSWORD").Index);
+
+        var block = sql[sql.LastIndexOf("DO $$", warning, StringComparison.Ordinal)..warning];
+        Assert.Contains("THEN setting IN ('ddl', 'mod', 'all')", block, StringComparison.Ordinal);
+        /* The numeric cast sits in a CASE arm, so it is only evaluated for the row it belongs to. */
+        Assert.Contains("WHEN 'log_min_duration_statement' THEN setting::bigint >= 0", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>A role that is not a superuser stops at the guard, before any password, when one of the three roles is
+    /// a member of a role that would outrank the carve (the owner, a superuser or BYPASSRLS role, a predefined role
+    /// that reads or writes everything or the server's files) and the owner cannot revoke the membership. The
+    /// revoke block after the passwords can only warn about it.</summary>
+    [Fact]
+    public void TheGuard_StopsARunner_ThatCannotRevokeAMembershipThatVoidsTheCarve_BeforeAnyPasswordIsSent()
+    {
+        var sql = Script();
+        var checks = NonSuperuserChecks(sql);
+
+        var membership = checks.IndexOf("FROM pg_auth_members AS membership", StringComparison.Ordinal);
+        Assert.True(membership > checks.IndexOf("rolreplication", StringComparison.Ordinal), "the membership check follows the checks for the roles themselves.");
+        var query = checks[membership..];
+        Assert.Contains("WHERE member.rolname IN ('admin', 'viewer', 'mcp')", query, StringComparison.Ordinal);
+        Assert.Contains("voiding.rolsuper", query, StringComparison.Ordinal);
+        Assert.Contains("voiding.rolbypassrls", query, StringComparison.Ordinal);
+        Assert.Contains("rolname = current_user", query, StringComparison.Ordinal);
+        foreach (var predefined in new[] { "pg_read_all_data", "pg_write_all_data", "pg_read_server_files", "pg_write_server_files", "pg_execute_server_program" })
+        {
+            Assert.Contains($"'{predefined}'", query, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("pg_has_role(granted.oid, voiding.oid, 'MEMBER')", query, StringComparison.Ordinal);
+        Assert.Contains("THEN pg_has_role(current_user, granted.oid, 'MEMBER WITH ADMIN OPTION')", query, StringComparison.Ordinal);
+
+        /* The 16 test sits under the version CASE, so a server below 16 never evaluates the option string. */
+        Assert.True(query.IndexOf("server_version_num", StringComparison.Ordinal) < query.IndexOf("'MEMBER WITH ADMIN OPTION'", StringComparison.Ordinal));
+
+        var line = RaiseLine(checks, "These roles are members of roles whose privileges outrank the grants below");
+        Assert.Contains("The script created and changed nothing.", line, StringComparison.Ordinal);
+        Assert.Contains("before a password is sent", line, StringComparison.Ordinal);
+        Assert.Contains("as a superuser", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("CHANGE_ME_", line, StringComparison.Ordinal);
+        Assert.True(sql.IndexOf(line, StringComparison.Ordinal) < Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN PASSWORD").Index);
+
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        Assert.Contains("when one of the three roles is a member of a role that would outrank the grants", readme, StringComparison.Ordinal);
+    }
+
+    /// <summary>The attribute take-backs and the membership revokes are two <c>DO</c> blocks under a stop that only a
+    /// privilege refusal skips. In one block, an error other than a refusal rolled back every take-back
+    /// (<c>NOSUPERUSER</c> included) while psql carried on and exited 0.</summary>
+    [Fact]
+    public void TheAttributesAndTheMemberships_AreTwoBlocks_UnderAStopThatOnlyAPrivilegeRefusalSkips()
+    {
+        var sql = Script();
+
+        var firstPassword = Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN PASSWORD").Index;
+        var stops = Regex.Matches(sql, @"(?m)^\\set ON_ERROR_STOP (on|:darling_saved_stop)[ \t]*\r?$").Cast<Match>().ToArray();
+        Assert.Equal(4, stops.Length);
+        Assert.Contains(" on", stops[2].Value, StringComparison.Ordinal);
+        Assert.Contains(":darling_saved_stop", stops[3].Value, StringComparison.Ordinal);
+        Assert.True(stops[2].Index > firstPassword, "the second stop pair comes after the passwords.");
+
+        var region = sql[stops[2].Index..stops[3].Index];
+        Assert.Equal(2, Regex.Matches(region, @"(?m)^DO \$\$").Count);
+        var split = region.IndexOf("END $$;", StringComparison.Ordinal);
+        var attributes = region[..split];
+        var memberships = region[(split + 1)..];
+        Assert.Contains("ALTER ROLE %I NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS", attributes, StringComparison.Ordinal);
+        Assert.DoesNotContain("REVOKE", attributes, StringComparison.Ordinal);
+        Assert.Contains("REVOKE %I FROM %I", memberships, StringComparison.Ordinal);
+        Assert.DoesNotContain("ALTER ROLE", memberships, StringComparison.Ordinal);
+
+        /* Only the privilege refusal is caught, in both blocks; no catch-all arm. */
+        Assert.DoesNotContain("WHEN OTHERS", region, StringComparison.Ordinal);
+        Assert.Equal(2, Regex.Matches(region, @"EXCEPTION WHEN insufficient_privilege THEN").Count);
     }
 }

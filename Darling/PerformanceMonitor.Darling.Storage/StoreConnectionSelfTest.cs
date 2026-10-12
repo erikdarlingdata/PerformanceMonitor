@@ -120,7 +120,11 @@ public static class StoreConnectionSelfTest
            on its last ':' and range-checks the port, and it rejects setting conflicts), and the exception for that
            can quote part of the string: a password whose unquoted ';' is followed by "host=x:y" makes y the bad port.
            The guard runs that step (it builds and disposes a data source and opens nothing) and gives the formatter's
-           text, so neither the exception's message nor a host built out of a password tail reaches this detail. */
+           text, so the exception's message does not reach this detail, and neither does a host built out of a password
+           tail that has a ':' in it. A tail without one is a different case: a password with an unquoted ';' followed by
+           "Host=x" parses and constructs cleanly, so x is then the Host, and the layers below print it as the endpoint and
+           name it in their own results. The string cannot tell that apart from a Host the operator wrote; a password that
+           contains ';' or '=' has to be quoted. */
         if (DarlingStoreConnection.TryDescribeParseFailure(connectionString) is { } unusable)
         {
             results.Add(new LayerResult(ConfigLayer, LayerOutcome.Failed,
