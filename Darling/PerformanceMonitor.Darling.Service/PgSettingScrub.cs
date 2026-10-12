@@ -193,7 +193,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     [
         "%password%", "%passwd%", "%secret%", "%token%", "%://%@%", "%pass%", "%key%",
         "%credential%", "%pwd%", "%-u %", "%--user%", "%-U %", "%sshpass%", "%sig=%",
-        "%signature=%", "%-u%", "%--proxy-user%",
+        "%signature=%", "%-u%", "%--proxy-user%", "%authorization%", "%bearer%",
     ];
 
     /// <summary>

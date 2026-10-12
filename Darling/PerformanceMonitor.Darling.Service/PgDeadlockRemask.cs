@@ -188,18 +188,53 @@ ORDER BY p.collection_time, p.server_id";
 
     /// <summary>
     /// The raw hash of the report the page read, found in the store by the row's own place rather than sent back
-    /// (#4035): <c>$1</c> server, <c>$2</c> its <c>collection_time</c>, <c>$3</c>/<c>$4</c> what the page read. Still
-    /// raw, or no row; two different raw reports in one place end the statement with <c>21000</c>, which the slice
-    /// counts as a report left for another walk rather than guess which one the page read.
+    /// (#4035): <c>$1</c> server, <c>$2</c> its <c>collection_time</c>, <c>$3</c>/<c>$4</c> what the page read. Two raw
+    /// reports can share a place (one backend the victim of two deadlocks within a second, in a store written before
+    /// the upgrade), so the anchor is the place's raw hashes in order and <c>$8</c> the position of the report's own
+    /// among them, read in the same transaction by <see cref="ReportRawGraphsSql"/>; the write also checks <c>$9</c>,
+    /// how many there were. The set only shrinks, so the same count is the same set and the position names the same
+    /// report; a set changed since writes nothing, and the report waits for the next walk.
     /// </summary>
     private static readonly string ReportAnchorSql = $@"(
-          SELECT DISTINCT a.deadlock_hash
+          SELECT a.deadlock_hash
+          FROM pg_deadlocks AS a
+          WHERE a.server_id = $1
+          AND   a.collection_time = $2
+          AND   a.occurred_at IS NOT DISTINCT FROM $3
+          AND   a.victim_pid IS NOT DISTINCT FROM $4
+          AND   {PgDeadlockLogParser.RawGraphHashSql("a.deadlock_hash", "a.graph_text")}
+          GROUP BY a.deadlock_hash
+          ORDER BY a.deadlock_hash
+          OFFSET $8 LIMIT 1)";
+
+    /// <summary>How many raw reports the place holds, the write's check that the position <see cref="ReportAnchorSql"/>
+    /// names is the one read in the same transaction.</summary>
+    private static readonly string ReportRawCountSql = $@"(
+          SELECT count(DISTINCT a.deadlock_hash)
           FROM pg_deadlocks AS a
           WHERE a.server_id = $1
           AND   a.collection_time = $2
           AND   a.occurred_at IS NOT DISTINCT FROM $3
           AND   a.victim_pid IS NOT DISTINCT FROM $4
           AND   {PgDeadlockLogParser.RawGraphHashSql("a.deadlock_hash", "a.graph_text")})";
+
+    /// <summary>
+    /// The graphs of the raw reports at one place, in the order <see cref="ReportAnchorSql"/> ranks them: read in the
+    /// update's own transaction, so the position of the graph the page read is the one the write names. One graph
+    /// per hash, because a raw hash is over its graph. Not computed by the page: a report at the same place rewritten
+    /// earlier in the walk, through a sighting in an earlier batch, moves the ones ranked after it, and a position the
+    /// page computed would then name another report.
+    /// </summary>
+    public static readonly string ReportRawGraphsSql = $@"
+SELECT a.graph_text
+FROM pg_deadlocks AS a
+WHERE a.server_id = $1
+AND   a.collection_time = $2
+AND   a.occurred_at IS NOT DISTINCT FROM $3
+AND   a.victim_pid IS NOT DISTINCT FROM $4
+AND   {PgDeadlockLogParser.RawGraphHashSql("a.deadlock_hash", "a.graph_text")}
+GROUP BY a.deadlock_hash, a.graph_text
+ORDER BY a.deadlock_hash";
 
     /// <summary>
     /// Rewrites every sighting of one raw report: <c>$1</c> server, <c>$2</c> the sighting the page met (the pager
@@ -225,6 +260,7 @@ AND   d.collection_time >= $2
 AND   d.occurred_at = $3
 AND   d.victim_pid = $4
 AND   d.deadlock_hash = {ReportAnchorSql}
+AND   {ReportRawCountSql} = $9
 AND   {PgDeadlockLogParser.RawGraphHashSql("d.deadlock_hash", "d.graph_text")}";
 
     /// <summary>
@@ -242,6 +278,7 @@ AND   d.collection_time = $2
 AND   d.occurred_at IS NOT DISTINCT FROM $3
 AND   d.victim_pid IS NOT DISTINCT FROM $4
 AND   d.deadlock_hash = {ReportAnchorSql}
+AND   {ReportRawCountSql} = $9
 AND   {PgDeadlockLogParser.RawGraphHashSql("d.deadlock_hash", "d.graph_text")}";
 
     /// <summary>One slice of deadlock alert rows of ONE server (<c>$1</c>) in <c>alert_time</c> order after <c>$2</c>
@@ -358,7 +395,7 @@ AND   xmin = $4::xid";
     /// row out, and a row already in this form is left as it is by the slice's raw test, never by this.
     /// </summary>
     public static (string? VictimStatement, string GraphText, string DeadlockHash) RemaskReport(
-        DateTime? occurredAt, string? victimStatement, string graphText)
+        DateTime? occurredAt, int? victimPid, string graphText)
     {
         ArgumentNullException.ThrowIfNull(graphText);
 
@@ -375,8 +412,12 @@ AND   xmin = $4::xid";
              follow are withheld here where the live read keeps them. Claiming complete for a report that was cut is
              #3996's review's out-of-step read, a literal kept as a word, so it is not claimed. */
         var graph = PgDeadlockLogParser.NormalizeGraph(graphText)!.TrimEnd('\n');
+
+        /* The victim statement is the normalized graph's own for the victim's pid, as the collector takes it from
+           a report it reads live, and not the stored statement normalized on its own: the stored one, read alone,
+           can keep a value the graph withholds (PgDeadlockLogParser.VictimStatementOf). */
         return (
-            PgDeadlockLogParser.NormalizeStatement(victimStatement),
+            PgDeadlockLogParser.VictimStatementOf(graph, victimPid),
             graph,
             PgDeadlockLogParser.IdentityOf(occurredAt ?? default, graph));
     }
@@ -443,14 +484,38 @@ AND   xmin = $4::xid";
                 continue;
             }
 
-            var (victim, graph, hash) = RemaskReport(row.OccurredAt, row.Victim, row.Graph);
+            var (victim, graph, hash) = RemaskReport(row.OccurredAt, row.VictimPid, row.Graph);
             RowOutcome outcome;
             try
             {
                 await using var transaction = await BeginBoundedAsync(connection, cancellationToken);
-                var sql = row.OccurredAt is not null && row.VictimPid is not null ? ReportUpdateSql : ReportUpdateOwnBatchSql;
-                await using (var update = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+
+                /* The place's raw graphs in the anchor's order, read in this transaction (ReportRawGraphsSql): the
+                   position of the graph the page read is what the write names. Not there: the report was rewritten
+                   since the page was read, with an earlier batch's sighting of it, and there is nothing to do. */
+                var rawGraphs = new List<string>();
+                await using (var place = new NpgsqlCommand(ReportRawGraphsSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
                 {
+                    place.Parameters.AddWithValue(row.ServerId);
+                    place.Parameters.Add(new NpgsqlParameter { Value = row.CollectionTime, NpgsqlDbType = NpgsqlDbType.Timestamp });
+                    place.Parameters.Add(new NpgsqlParameter { Value = (object?)row.OccurredAt ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
+                    place.Parameters.Add(new NpgsqlParameter { Value = (object?)row.VictimPid ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Integer });
+                    await using var reader = await place.ExecuteReaderAsync(cancellationToken);
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        rawGraphs.Add(reader.GetString(0));
+                    }
+                }
+
+                var position = rawGraphs.IndexOf(row.Graph);
+                if (position < 0)
+                {
+                    outcome = RowOutcome.Unchanged;
+                }
+                else
+                {
+                    var sql = row.OccurredAt is not null && row.VictimPid is not null ? ReportUpdateSql : ReportUpdateOwnBatchSql;
+                    await using var update = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandBackstopSeconds };
                     update.Parameters.AddWithValue(row.ServerId);
                     update.Parameters.Add(new NpgsqlParameter { Value = row.CollectionTime, NpgsqlDbType = NpgsqlDbType.Timestamp });
                     update.Parameters.Add(new NpgsqlParameter { Value = (object?)row.OccurredAt ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
@@ -458,6 +523,8 @@ AND   xmin = $4::xid";
                     update.Parameters.Add(new NpgsqlParameter { Value = (object?)victim ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
                     update.Parameters.Add(new NpgsqlParameter { Value = graph, NpgsqlDbType = NpgsqlDbType.Text });
                     update.Parameters.Add(new NpgsqlParameter { Value = hash, NpgsqlDbType = NpgsqlDbType.Text });
+                    update.Parameters.Add(new NpgsqlParameter { Value = position, NpgsqlDbType = NpgsqlDbType.Integer });
+                    update.Parameters.Add(new NpgsqlParameter { Value = rawGraphs.Count, NpgsqlDbType = NpgsqlDbType.Integer });
                     var written = await update.ExecuteNonQueryAsync(cancellationToken);
                     rewritten += written;
                     outcome = written > 0 ? RowOutcome.Rewritten : RowOutcome.Unchanged;
@@ -604,12 +671,11 @@ AND   xmin = $4::xid";
     /// report's new identity and its object the normalized victim statement.
     /// </summary>
     public static AlertIncident RemaskedIncident(
-        DateTime? occurredAt, int? victimPid, int? participantCount, string? victimStatement, string graphText)
+        DateTime? occurredAt, int? victimPid, int? participantCount, string graphText)
     {
-        var (victim, _, identity) = RemaskReport(occurredAt, victimStatement, graphText);
+        var (victim, _, identity) = RemaskReport(occurredAt, victimPid, graphText);
         return DarlingWorker.BuildPgDeadlockIncident(new DarlingPgDeadlockReader.PgDeadlockRow(
-            occurredAt ?? default, victimPid ?? 0, participantCount ?? 0, identity, null, null,
-            PgDeadlockLogParser.NormalizeStatement(victim), 0));
+            occurredAt ?? default, victimPid ?? 0, participantCount ?? 0, identity, null, null, victim, 0));
     }
 
     /// <summary>
@@ -735,10 +801,14 @@ AND   xmin = $4::xid";
         }) ?? dto.Details!;
 
         var json = MarkRebuilt(JsonSerializer.Serialize(dto with { Details = details, Incidents = rewritten }), rebuilt);
+        /* Longest objects first: an overflow row's text carries several incidents, and where one incident's
+           statement is a prefix of a later one's, replacing the shorter first rewrote the longer line's head
+           and left its tail (the literals past the prefix) as it was. The longer line rewritten first no longer
+           contains the shorter raw statement, whose own line is then the only place it is found. */
         var detail = detailText;
         if (detail is not null)
         {
-            foreach (var (oldKey, newKey, oldObjects, newObjects) in replacements)
+            foreach (var (oldKey, newKey, oldObjects, newObjects) in replacements.OrderByDescending(r => r.OldObjects.Length))
             {
                 if (oldObjects != newObjects)
                 {
@@ -841,7 +911,6 @@ AND   xmin = $4::xid";
                                 reader.IsDBNull(8) ? null : reader.GetDateTime(8),
                                 reader.IsDBNull(9) ? null : reader.GetInt32(9),
                                 reader.IsDBNull(10) ? null : reader.GetInt32(10),
-                                reader.IsDBNull(11) ? null : reader.GetString(11),
                                 reader.GetString(12)))
                             : new ResolvedReport(ReportState.Current, null);
                     }

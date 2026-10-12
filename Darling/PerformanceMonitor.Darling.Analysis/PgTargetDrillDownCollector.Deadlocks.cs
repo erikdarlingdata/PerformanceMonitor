@@ -59,6 +59,10 @@ public sealed partial class PgTargetDrillDownCollector
     /// </summary>
     internal const int VictimFingerprintCap = 120;
 
+    /// <summary>What the frozen prose names in place of a victim fingerprint the normalized graph withholds, when a
+    /// stored finding's exemplars are brought to #4005's rules (<see cref="NormalizeStoredDeadlockExemplars"/>).</summary>
+    internal const string VictimWithheld = "(withheld)";
+
     /// <summary>
     /// The anomaly's spelling of the counter delta — <c>PgTargetAnomalyDetector.DetectDeadlockRateAnomalies</c>
     /// stamps it as a literal, the same literal every anomaly detector in the repo and
@@ -212,15 +216,22 @@ LIMIT $4";
                    literal, and the lexer then withholds the whole statement rather than keep what the cut left of
                    it. The read's own bound is past anything the lexer reads, so what it cuts is withheld whole
                    whichever way round. The flags say whether the caps cut what the reader is shown. */
-                var victimRead = reader.IsDBNull(9) ? null : reader.GetString(9);
-                var victimNormalized = SensitiveStatements.Text(PgDeadlockLogParser.NormalizeStatement(victimRead));
+                var latestPid = reader.IsDBNull(8) ? (int?)null : Convert.ToInt32(reader.GetValue(8));
+                var latestHash = reader.IsDBNull(7) ? null : reader.GetString(7);
+                var latestRaw = !reader.IsDBNull(17) && reader.GetBoolean(17);
+                var graphMasked = PgDeadlockLogParser.NormalizeGraph(reader.IsDBNull(11) ? null : reader.GetString(11));
+                /* A row stored before #4005 holds its statement raw; the victim shown is then the normalized graph's
+                   own (PgDeadlockLogParser.VictimStatementOf), as the collector stores it since, and never the stored
+                   statement normalized alone, which can keep a value the graph withholds. A row in #4005's form
+                   stores the graph's already. Both go through the statement filter last. */
+                var victimNormalized = SensitiveStatements.Text(latestRaw
+                    ? PgDeadlockLogParser.VictimStatementOf(graphMasked?.TrimEnd('\n'), latestPid)
+                    : PgDeadlockLogParser.NormalizeStatement(reader.IsDBNull(9) ? null : reader.GetString(9)));
                 var victimStatement = victimNormalized is { Length: > StatementTextCap } ? victimNormalized[..StatementTextCap] : victimNormalized;
-                var graphNormalized = SensitiveStatements.Text(PgDeadlockLogParser.NormalizeGraph(reader.IsDBNull(11) ? null : reader.GetString(11)));
+                var graphNormalized = SensitiveStatements.Text(graphMasked);
                 var graphCharCut = graphNormalized is { Length: > GraphTextCharCap };
                 var (boundedGraph, graphLines, graphTruncated) = BoundGraphText(
                     graphCharCut ? graphNormalized![..GraphTextCharCap] : graphNormalized, readCut: graphCharCut);
-                var latestPid = reader.IsDBNull(8) ? (int?)null : Convert.ToInt32(reader.GetValue(8));
-                var latestHash = reader.IsDBNull(7) ? null : reader.GetString(7);
 
                 exemplars.Add(new PgTargetDeadlockExemplar(
                     Rank: exemplars.Count + 1,
@@ -359,14 +370,21 @@ LIMIT $4";
         var fingerprints = new List<(string Stored, string Normalized)>();
         foreach (var exemplar in exemplars.OfType<JsonObject>())
         {
-            var statement = PgDeadlockLogParser.NormalizeStatement(StringOf(exemplar["victim_statement"]));
+            /* The victim statement is the normalized graph's own (PgDeadlockLogParser.VictimStatementOf), as every
+               read shows a stored report's: the stored statement normalized alone can keep a value the graph
+               withholds. The graph is the bounded one the finding kept, so a statement past its bound is withheld
+               with it, and the prose then names no victim. */
+            var graph = PgDeadlockLogParser.NormalizeGraph(StringOf(exemplar["graph_text"]));
+            var statement = PgDeadlockLogParser.VictimStatementOf(
+                graph?.TrimEnd('\n'),
+                exemplar["victim_pid"] is JsonValue pidValue && pidValue.TryGetValue<int>(out var exemplarPid) ? exemplarPid : null);
             var storedFingerprint = StringOf(exemplar["victim_statement_fingerprint"]);
             var fingerprint = Fingerprint(statement);
             exemplar["victim_statement"] = statement;
             exemplar["victim_statement_fingerprint"] = fingerprint;
-            exemplar["graph_text"] = PgDeadlockLogParser.NormalizeGraph(StringOf(exemplar["graph_text"]));
+            exemplar["graph_text"] = graph;
             if (storedFingerprint is not null && storedFingerprint != fingerprint)
-                fingerprints.Add(($"`{storedFingerprint}`", $"`{fingerprint}`"));
+                fingerprints.Add(($"`{storedFingerprint}`", fingerprint is null ? VictimWithheld : $"`{fingerprint}`"));
 
             var identity = StringOf(exemplar["deadlock_hash"]);
             if (identity is not null && !PgDeadlockLogParser.TryParseReportIdentity(identity, out _, out _))

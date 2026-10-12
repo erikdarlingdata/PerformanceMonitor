@@ -35,7 +35,8 @@ namespace PerformanceMonitor.Collectors;
 /// (PostgreSQL 16 and later write every bind value there unless that setting is 0) is removed the same way,
 /// before the hash is taken, so a value neither reaches the store nor splits one plan shape into one hash
 /// per parameter value (#5103). Quoted literals are then stripped from
-/// EVERY remaining string, which is safe because relation and alias names are not quoted. Bare numbers are
+/// EVERY remaining string, which is safe because relation and alias names are not quoted, and a name
+/// PostgreSQL does quote is read as one token, so an apostrophe inside it opens no literal. Bare numbers are
 /// stripped only inside condition fields: a blanket numeric strip would rewrite a relation genuinely named
 /// <c>transactionitems1</c> into <c>transactionitems?</c>, destroying identity to hide a value that was
 /// never there.</para>
@@ -313,9 +314,19 @@ public static class PgPlanLogParser
         }
     }
 
+    /* The STORED plan text's own literal pattern, and not the fingerprint pair above. A quoted identifier is
+       a token of its own here: PostgreSQL deparses a name that needs quoting with its quotes, and one holding
+       an apostrophe ("owner's count", "c'") read by the literal pattern alone opens a literal that closes at
+       the next real quote, which leaves the literal after it standing in the stored text. Each quote kind
+       doubles its own quote to embed it, so neither alternative can run past its closing quote. The fingerprint
+       pattern is left as it is on purpose: every stored fingerprint was hashed with it, and this one decides
+       only what the stored text keeps. */
+    private static readonly Regex s_storedPlanLiteral = new(
+        @"""(?:[^""]|"""")*""|'(?:[^']|'')*'", RegexOptions.Compiled);
+
     private static string Scrub(string text, string fieldName)
     {
-        var scrubbed = s_quotedLiteral.Replace(text, "'?'");
+        var scrubbed = s_storedPlanLiteral.Replace(text, static m => m.Value[0] == '"' ? m.Value : "'?'");
 
         if (s_conditionFields.Contains(fieldName))
         {

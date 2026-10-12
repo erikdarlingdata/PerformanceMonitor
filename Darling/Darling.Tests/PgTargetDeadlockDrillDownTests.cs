@@ -373,7 +373,7 @@ public sealed class PgTargetDeadlockDrillDownTests
             const string resourcesA = "relation orders, tuple orders";
             /* The later report of shape A as a build before #4005 stored it: a literal in the graph, and a hash
                over that raw graph. The exemplar carries neither (#4005). */
-            var graphA = "Process 11 waits for ShareLock on transaction 900; blocked by process 12.\nProcess 12 waits for ShareLock on transaction 901; blocked by process 11.\nProcess 11: UPDATE orders SET status = $1 WHERE id = $2\nProcess 12: UPDATE orders SET status = 'held-qx4721' WHERE id = 7";
+            var graphA = "Process 4242 waits for ShareLock on transaction 900; blocked by process 12.\nProcess 12 waits for ShareLock on transaction 901; blocked by process 4242.\nProcess 4242: UPDATE orders SET status = $1 WHERE id = $2\nProcess 12: UPDATE orders SET status = 'held-qx4721' WHERE id = 7";
             var rawHashA2 = PgDeadlockLogParser.HashOf(graphA);
             await PlantDeadlockAsync(connection, windowStart.AddMinutes(10), "hash-a1", 2, modesA, resourcesA, "UPDATE orders SET status = $1 WHERE id = $2", graphA, ct);
             await PlantDeadlockAsync(connection, windowStart.AddMinutes(45), rawHashA2, 2, modesA, resourcesA, "UPDATE   orders\n SET status = $1 WHERE id = $2", graphA, ct);

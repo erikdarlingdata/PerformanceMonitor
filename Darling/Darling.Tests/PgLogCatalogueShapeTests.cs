@@ -50,7 +50,7 @@ public sealed class PgLogCatalogueShapeTests
     [Fact]
     public void EveryFormsToken_IsReadAsSql_AfterEveryPosition()
     {
-        foreach (var format in PgLogTextRedactor.ScannerErrorFormats)
+        foreach (var format in PgLogTextRedactor.LexerErrorFormats)
         {
             foreach (var tail in Tails())
             {
@@ -77,7 +77,7 @@ public sealed class PgLogCatalogueShapeTests
     [Fact]
     public void AnUnterminatedHeadOrAJsonpathToken_IsWithheldUnread()
     {
-        foreach (var format in PgLogTextRedactor.ScannerErrorFormats)
+        foreach (var format in PgLogTextRedactor.LexerErrorFormats)
         {
             foreach (var head in PgLogTextRedactor.UnterminatedMessages)
             {
@@ -126,7 +126,7 @@ public sealed class PgLogCatalogueShapeTests
     public void AMessageCutInsideItsToken_IsWithheldFromItsOpening()
     {
         var skipped = 0;
-        foreach (var format in PgLogTextRedactor.ScannerErrorFormats.Concat(PgLogTextRedactor.JsonpathErrorFormats))
+        foreach (var format in PgLogTextRedactor.LexerErrorFormats.Concat(PgLogTextRedactor.JsonpathErrorFormats))
         {
             var marked = Fill(format, "\u0001", "\u0002");
             var (head, token) = (marked.IndexOf('\u0001', StringComparison.Ordinal), marked.IndexOf('\u0002', StringComparison.Ordinal));
@@ -191,7 +191,7 @@ public sealed class PgLogCatalogueShapeTests
 
         (string MsgId, IReadOnlyList<string> Table)[] forms =
         [
-            ("%s at or near \"%s\"", PgLogTextRedactor.ScannerErrorFormats),
+            ("%s at or near \"%s\"", PgLogTextRedactor.LexerErrorFormats),
             ("%s at or near \"%s\" of jsonpath input", PgLogTextRedactor.JsonpathErrorFormats),
             ("%s at end of input", PgLogTextRedactor.EndOfInputFormats),
             ("%s at end of jsonpath input", PgLogTextRedactor.EndOfInputFormats),
@@ -202,6 +202,26 @@ public sealed class PgLogCatalogueShapeTests
             ("unterminated hexadecimal string literal", PgLogTextRedactor.UnterminatedMessages),
             ("unterminated quoted identifier", PgLogTextRedactor.UnterminatedMessages),
             ("unterminated quoted string", PgLogTextRedactor.UnterminatedMessages),
+            /* The row-value forms: a catalogue's own words for each, so a translated form is masked like the English one. */
+            ("Key %s already exists.", PgLogTextRedactor.KeyExistsDetailFormats),
+            ("Key %s is duplicated.", PgLogTextRedactor.KeyExistsDetailFormats),
+            ("Key %s conflicts with existing key %s.", PgLogTextRedactor.KeyConflictDetailFormats),
+            ("Key %s conflicts with key %s.", PgLogTextRedactor.KeyConflictDetailFormats),
+            ("Key (%s)=(%s) is not present in table \"%s\".", PgLogTextRedactor.KeyReferenceDetailFormats),
+            ("Key (%s)=(%s) is still referenced from table \"%s\".", PgLogTextRedactor.KeyReferenceDetailFormats),
+            ("Key is not present in table \"%s\".", PgLogTextRedactor.KeyReferenceUnreadableDetailFormats),
+            ("Key is still referenced from table \"%s\".", PgLogTextRedactor.KeyReferenceUnreadableDetailFormats),
+            ("Failing row contains %s.", PgLogTextRedactor.FailingRowDetailFormats),
+            ("Partition key of the failing row contains %s.", PgLogTextRedactor.PartitionKeyDetailFormats),
+            ("COPY %s, line %llu: \"%s\"", PgLogTextRedactor.CopyLineContextFormats),
+            ("COPY %s, line %llu, column %s: \"%s\"", PgLogTextRedactor.CopyColumnContextFormats),
+            ("COPY %s", PgLogTextRedactor.CopyBareContextFormats),
+            ("COPY %s, line %llu", PgLogTextRedactor.CopyBareContextFormats),
+            ("COPY %s, line %llu, column %s", PgLogTextRedactor.CopyBareContextFormats),
+            ("COPY %s, line %llu, column %s: null input", PgLogTextRedactor.CopyBareContextFormats),
+            ("JSON data, line %d: %s%s%s", PgLogTextRedactor.JsonContextFormats),
+            ("invalid input syntax for type %s: \"%s\"", PgLogTextRedactor.InputSyntaxMessageFormats),
+            ("invalid input syntax for type %s", PgLogTextRedactor.InputSyntaxBareMessageFormats),
         ];
 
         /* Messages that are not the scanner's: COPY's and format()'s, which never head an "at or near". */

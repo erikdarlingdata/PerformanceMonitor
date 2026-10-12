@@ -50,7 +50,7 @@ public sealed class PgSettingRedactorTests
     [Fact]
     public void RulesVersionIsPinned()
     {
-        Assert.Equal(2, PgSettingRedactor.RulesVersion);
+        Assert.Equal(3, PgSettingRedactor.RulesVersion);
     }
 
     [Fact]
@@ -66,6 +66,36 @@ public sealed class PgSettingRedactorTests
     /// </summary>
     public static IEnumerable<object[]> RedactionCases()
     {
+        // Rules version 3: an HTTP credential header in a command keeps its name and scheme and masks the credential.
+        yield return new object[] { "archive_command",
+            "curl -sf -H \"Authorization: Bearer Kept4348tok\" -T %p https://backup.example.com/wal/%f",
+            "curl -sf -H \"Authorization: Bearer ********\" -T %p https://backup.example.com/wal/%f" };
+        yield return new object[] { "archive_command",
+            "curl -sf -H 'Authorization: Basic Kept4348dXNlcjpw' -T %p https://b/%f",
+            "curl -sf -H 'Authorization: Basic ********' -T %p https://b/%f" };
+        yield return new object[] { "restore_command",
+            "curl -sf -H \"X-Api-Key: Kept4348key\" https://b/%f -o %p",
+            "curl -sf -H \"X-Api-Key: ********\" https://b/%f -o %p" };
+        // Rules version 3: curl's --oauth2-bearer takes a credential as its next token.
+        yield return new object[] { "archive_command",
+            "curl -sf --oauth2-bearer Kept4348tok456 -T %p https://b/%f",
+            "curl -sf --oauth2-bearer ******** -T %p https://b/%f" };
+        // Rules version 3: an escaped space inside an unquoted libpq or shell value is part of the value.
+        yield return new object[] { "primary_conninfo",
+            "user=rep password=abc\\ Kept4348rest host=h1 port=5432",
+            "user=rep password=******** host=h1 port=5432" };
+        yield return new object[] { "archive_command",
+            "PGPASSWORD=abc\\ Kept4348sh pg_receivewal",
+            "PGPASSWORD=******** pg_receivewal" };
+        // Rules version 3: a URI with no user info whose query holds an '@' keeps its port and parameters; only the
+        // password parameter is masked.
+        yield return new object[] { "primary_conninfo",
+            "postgresql://h1:5432?application_name=x@y&password=Kept4348z",
+            "postgresql://h1:5432?application_name=x@y&password=********" };
+        yield return new object[] { "primary_conninfo",
+            "postgresql://h1:5432/db?sslmode=require&password=Kept4348q&application_name=a@b",
+            "postgresql://h1:5432/db?sslmode=require&password=********&application_name=a@b" };
+
         // libpq password keyword: unquoted, first / middle / last, spaces around '='.
         yield return new object[] { "primary_conninfo",
         "password=hunter2 host=127.0.0.1 port=5432 user=replicator application_name=s1a",
@@ -434,7 +464,7 @@ public sealed class PgSettingRedactorTests
     [InlineData("archive_command", "password = \"hunter2\"", "password=********")]
     [InlineData("archive_command", "postgresql://u:p@h/db", "postgresql://u:********@h/db")]
     [InlineData("archive_command", "host=h password=p", "host=h password=********")]
-    [InlineData("archive_command", "https://h/?password=p&x=1", "https://h/?password=********")]
+    [InlineData("archive_command", "https://h/?password=p&x=1", "https://h/?password=********&x=1")]
     [InlineData("archive_command", "sshpass -p p ssh h", "sshpass -p ******** ssh h")]
     [InlineData("archive_command", "curl -u a:b", "curl -u a:********")]
     [InlineData("password_encryption", "password_encryption", "password_encryption")]

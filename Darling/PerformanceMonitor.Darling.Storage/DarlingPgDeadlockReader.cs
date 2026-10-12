@@ -88,7 +88,13 @@ public static class DarlingPgDeadlockReader
             /* Whether the group's hash is over its raw graph, and so must not leave this read (#4005). One
                graph per group, because the hash is over it. PgDeadlockLogParser.RawGraphHashSql, spelled out
                because this is a constant; a test holds the two equal. */
-            (upper(left(encode(sha256(convert_to(MIN(d.graph_text), 'UTF8')), 'hex'), 32)) = d.deadlock_hash) AS raw_hash
+            (upper(left(encode(sha256(convert_to(MIN(d.graph_text), 'UTF8')), 'hex'), 32)) = d.deadlock_hash) AS raw_hash,
+            /* Such a group's graph, for the victim statement the read shows for it: the normalized graph's own
+               (PgDeadlockLogParser.VictimStatementOf), as the collector stores it since #4005, and never the stored
+               statement normalized alone, which can keep a value the graph withholds. Null for a group in #4005's
+               form, whose stored statement is the graph's already. */
+            CASE WHEN (upper(left(encode(sha256(convert_to(MIN(d.graph_text), 'UTF8')), 'hex'), 32)) = d.deadlock_hash)
+                 THEN MIN(d.graph_text) END AS raw_graph_text
         FROM pg_deadlocks AS d
         WHERE d.server_id = $1
         AND   COALESCE(d.occurred_at, d.collection_time) >= $2
@@ -184,14 +190,21 @@ public static class DarlingPgDeadlockReader
         {
             var occurredAt = reader.IsDBNull(0) ? default : reader.GetDateTime(0);
             var victimPid = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
+            var rawHash = !reader.IsDBNull(8) && reader.GetBoolean(8);
             rows.Add(new PgDeadlockRow(
                 occurredAt,
                 victimPid,
                 reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                IdentityOf(reader.GetString(3), !reader.IsDBNull(8) && reader.GetBoolean(8), occurredAt, victimPid),
+                IdentityOf(reader.GetString(3), rawHash, occurredAt, victimPid),
                 reader.IsDBNull(4) ? null : reader.GetString(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : PgDeadlockLogParser.NormalizeStatement(reader.GetString(6)),
+                /* A group stored raw shows the normalized graph's own victim statement (the SQL's raw_graph_text
+                   remark); one in #4005's form stores the graph's already, and normalizing it again changes nothing. */
+                rawHash
+                    ? PgDeadlockLogParser.VictimStatementOf(
+                        PgDeadlockLogParser.NormalizeGraph(reader.IsDBNull(9) ? null : reader.GetString(9))?.TrimEnd('\n'),
+                        reader.IsDBNull(1) ? null : victimPid)
+                    : reader.IsDBNull(6) ? null : PgDeadlockLogParser.NormalizeStatement(reader.GetString(6)),
                 reader.IsDBNull(7) ? 0 : reader.GetInt32(7)));
         }
 
