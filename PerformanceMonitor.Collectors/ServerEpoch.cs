@@ -317,8 +317,7 @@ public static class ServerEpoch
             {
                 context.Deltas.ClearServer(
                     context.ServerId,
-                    "identity epoch changed — start time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime)
-                    + ", server name " + Describe(replaced.Name) + " → " + Describe(current.Name)
+                    "identity epoch changed — " + DescribeChange(replaced, current)
                     + ": every delta baseline and pass window for this server was forgotten, so this pass re-baselines "
                     + "and the next reports the first interval measured on the instance the connection now reaches");
                 /* What was observed, not the merge with the prior: the prior's components describe the OLD
@@ -466,6 +465,37 @@ public static class ServerEpoch
         {
             context.PendingState[stateKey] = text;
         }
+    }
+
+    /// <summary>
+    /// The sides of an identity change that actually moved, for a banner or a log line (#5644 W17): "start time A → B"
+    /// and/or "server name X → Y", joined by a comma. A side that did not change is left out, because listing
+    /// "server name X → X" reads as a rename that never happened. "Moved" is exactly <see cref="IsNewEpoch"/>'s
+    /// own test (known on both sides and different; names case-insensitive). When neither side moved by that
+    /// test (a defensive case: the caller only asks about an epoch), both pairs are printed as before.
+    /// </summary>
+    public static string DescribeChange(Stamp replaced, Stamp current)
+    {
+        var parts = new List<string>(2);
+        if (replaced.StartTime.HasValue && current.StartTime.HasValue
+            && replaced.StartTime.Value != current.StartTime.Value)
+        {
+            parts.Add("start time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime));
+        }
+
+        if (replaced.Name is not null && current.Name is not null
+            && !string.Equals(replaced.Name, current.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            parts.Add("server name " + Describe(replaced.Name) + " → " + Describe(current.Name));
+        }
+
+        if (parts.Count == 0)
+        {
+            parts.Add("start time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime));
+            parts.Add("server name " + Describe(replaced.Name) + " → " + Describe(current.Name));
+        }
+
+        return string.Join(", ", parts);
     }
 
     private static string Describe(DateTime? value)

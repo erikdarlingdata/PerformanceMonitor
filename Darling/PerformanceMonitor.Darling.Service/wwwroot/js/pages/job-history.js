@@ -42,7 +42,9 @@ export const STATUSES = [
 /** The row limits on offer (the read takes at most 1000). */
 export const LIMITS = [100, 250, 500, 1000];
 
-/** The desktop grid's columns, in its order: Run Time, Server, Job, Category, Step, Status, Duration, Retries, Last Success, Message. */
+/** The grid's columns, in the desktop grid's order: Run Time, Server, Job, Category, Step, Status, Duration, Retries, Message.
+ *  #5644 W21: the desktop grid's Last Success column is not here. The read's `last_success` is the JOB's current last
+ *  success, the same on every run row of a job, so an older run showed a time later than its own run. */
 export const JOB_HISTORY_COLUMNS = [
   { key: "run_time", label: "Run Time", format: "time" },
   { key: "server", label: "Server" },
@@ -52,7 +54,6 @@ export const JOB_HISTORY_COLUMNS = [
   { key: "status", label: "Status" },
   { key: "duration_formatted", label: "Duration", sortValue: (r) => r.duration_seconds },
   { key: "retries", label: "Retries", format: "int" },
-  { key: "last_success", label: "Last Success", format: "time" },
   { key: "message", label: "Message", wrap: true, render: messageCell },
 ];
 

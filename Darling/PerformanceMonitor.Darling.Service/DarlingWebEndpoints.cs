@@ -342,6 +342,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         /* The pre-banded fleet roll-up (also surfaced as the get_fleet_overview MCP tool). */
         app.MapGet("/api/fleet", async (HttpContext context) =>
         {
+            /* #5644 W22: a present, non-integer window or count is refused like an out-of-range one. */
+            if (NonIntegerParamRefusal(context) is { } fleetRefusal)
+            {
+                return ToHttpResult(fleetRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, 0, context.RequestAborted);
+            }
+
             var hours = Math.Clamp(QueryInt(context, "hours_back", "hours", DefaultFleetHours), 1, 168);
             var worstCount = Math.Max(0, QueryInt(context, "worst_count", null, DarlingFleetReader.DefaultWorstCount));
             var now = DateTime.UtcNow;
@@ -390,6 +396,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 readScope.Scope.CaptureStatements = true;
                 try
                 {
+                    /* #5644 W22: ?hours=abc / ?hours=1.5 (or any other integer knob) was read as the default and answered
+                       200 for a different window than the one asked for, while ?hours=500 got a 400. Refused up front now,
+                       before any tool runs, in the same envelope the range refusals use. */
+                    if (NonIntegerParamRefusal(context) is { } nonIntegerRefusal)
+                    {
+                        return ToHttpResult(nonIntegerRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                    }
+
                     /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
                        taken once here and handed to both the read and the note check. A request with its own anchor
                        is left as sent. */
@@ -5584,7 +5598,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                web viewer has always shown the whole query text. The row pins its OWN default to true so
                #4198's MCP-side budget cut does not silently truncate what the viewer renders. */
             ["get_plan_corrections"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), AsOf(c), QueryBool(c, "full_text", true), databases, null, c.RequestAborted)
+                ? DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), AsOf(c), QueryBool(c, "full_text", true), databases, null, c.RequestAborted, collapse: true)
                 : DatabaseNamesRefusal(c),
 
             /* ── config (current + history) ── */
@@ -6421,6 +6435,39 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     private static Task<string> UnparseableParam(string key, string? expected = null) =>
         Task.FromResult(McpHelpers.Refusal(key, $"Invalid value for parameter '{key}'. {expected ?? "Expected a number."}"));
 
+
+    /// <summary>
+    /// Every query-string knob the dispatch reads as a whole number through <see cref="QueryInt"/> / <see cref="Rows"/> /
+    /// <see cref="Hours"/> (#5644 W22). <see cref="ParseInt"/> reads an unreadable one as the default, so a window or row
+    /// count the caller got wrong was answered, with a 200, for a different one than the one asked for.
+    /// </summary>
+    internal static readonly string[] IntegerQueryKeys =
+    [
+        "hours", "hours_back", "days_back", "trend_hours_back", "baseline_hours_back", "limit", "top",
+        "bucket_minutes", "min_dop", "worst_count"
+    ];
+
+    /// <summary>
+    /// The 400 envelope for the first <see cref="IntegerQueryKeys"/> knob that is present but not a whole number
+    /// (<c>?hours=abc</c>, <c>?hours=1.5</c>), else null. An absent or empty knob still takes the tool's default, and a number out of
+    /// range is left to the tool, which owns that refusal. Pure over the lookup, so a test pins it without a server.
+    /// </summary>
+    internal static string? NonIntegerParamRefusal(Func<string, string?> lookup)
+    {
+        foreach (var key in IntegerQueryKeys)
+        {
+            var raw = lookup(key);
+            if (!string.IsNullOrEmpty(raw) && !int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+            {
+                return McpHelpers.Refusal(key, $"Invalid {key} value '{McpHelpers.Truncate(raw, 40)}'. Must be a whole number.");
+            }
+        }
+
+        return null;
+    }
+
+    private static string? NonIntegerParamRefusal(HttpContext context) =>
+        NonIntegerParamRefusal(key => First(context, key));
 
     private static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
         ParseInt(First(context, key) ?? (aliasKey is null ? null : First(context, aliasKey)), def);

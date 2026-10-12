@@ -73,7 +73,7 @@ public sealed class JobHistoryPageTests
     {
         var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpJobTools.cs");
         var keys = Regex.Matches(Page(), "\\{ key: \"([a-z_]+)\"").Select(m => m.Groups[1].Value).ToList();
-        Assert.Equal(10, keys.Count);
+        Assert.Equal(9, keys.Count);
         foreach (var key in keys)
             Assert.Matches("(?m)^\\s+" + Regex.Escape(key) + " = ", source.ReplaceLineEndings("\n"));
     }
@@ -149,8 +149,9 @@ public sealed class JobHistoryPageTests
         Assert.Equal("100", q.GetProperty("limit").GetString());
         Assert.False(q.TryGetProperty("server", out _));
         Assert.True(call.GetProperty("signal").GetBoolean());
-        Assert.Equal("Run Time,Server,Job,Category,Step,Status,Duration,Retries,Last Success,Message", string.Join(",", Strings(run.GetProperty("columns"))));
-        Assert.Equal("Run Time,Server,Job,Category,Step,Status,Duration,Retries,Last Success,Message", string.Join(",", Strings(first.GetProperty("headers"))));
+        /* #5644 W21: no Last Success column; it was the job's current last success repeated on every run row. */
+        Assert.Equal("Run Time,Server,Job,Category,Step,Status,Duration,Retries,Message", string.Join(",", Strings(run.GetProperty("columns"))));
+        Assert.Equal("Run Time,Server,Job,Category,Step,Status,Duration,Retries,Message", string.Join(",", Strings(first.GetProperty("headers"))));
         Assert.Equal(2, first.GetProperty("bodyRows").GetInt32());
         Assert.Equal(",srv-a,srv-b", string.Join(",", Strings(first.GetProperty("servers"))));
         Assert.Equal(",Backup,Maintenance", string.Join(",", Strings(first.GetProperty("categories"))));

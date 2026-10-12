@@ -464,6 +464,85 @@ public sealed class DarlingWebEndpointsTests
     public void ParseInt_DefaultsOnMissOrGarbage(string? raw, int expected) =>
         Assert.Equal(expected, DarlingWebEndpoints.ParseInt(raw, 10));
 
+    /// <summary>
+    /// #5644 W22: a present, non-integer integer knob is refused (the 400 envelope), not read as the default, so
+    /// <c>?hours=abc</c> and <c>?hours=1.5</c> no longer answer 200 for a different window than the one asked for.
+    /// Absent and empty knobs still take the default; a whole number (even out of range) is the tool's to judge.
+    /// </summary>
+    [Theory]
+    [InlineData("hours", "abc")]
+    [InlineData("hours", "1.5")]
+    [InlineData("hours", "1e2")]
+    [InlineData("hours_back", "24h")]
+    [InlineData("limit", "ten")]
+    [InlineData("top", "5.0")]
+    [InlineData("days_back", "x")]
+    [InlineData("bucket_minutes", "five")]
+    [InlineData("worst_count", "-")]
+    public void NonIntegerParamRefusal_RefusesAPresentNonInteger(string key, string raw)
+    {
+        var refusal = DarlingWebEndpoints.NonIntegerParamRefusal(k => k == key ? raw : null);
+
+        Assert.NotNull(refusal);
+        Assert.True(McpHelpers.IsRefusalEnvelope(refusal));
+        var envelope = JsonNode.Parse(refusal)!;
+        Assert.Equal("invalid", (string?)envelope["status"]);
+        Assert.Equal(key, (string?)envelope["hints"]!["parameter"]);
+        Assert.Equal($"Invalid {key} value '{raw}'. Must be a whole number.", (string?)envelope["message"]);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("24")]
+    [InlineData("-5")]      // readable: the tool owns the range refusal ("Must be a positive integer")
+    [InlineData("500")]
+    [InlineData("+7")]
+    public void NonIntegerParamRefusal_LeavesAbsentEmptyAndWholeNumbersToTheTool(string? raw)
+    {
+        foreach (var key in DarlingWebEndpoints.IntegerQueryKeys)
+        {
+            Assert.Null(DarlingWebEndpoints.NonIntegerParamRefusal(k => k == key ? raw : null));
+        }
+    }
+
+    [Fact]
+    public void NonIntegerParamRefusal_ThroughTheQueryString_ReadsTheFirstNonEmptyValue()
+    {
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+        context.Request.QueryString = new Microsoft.AspNetCore.Http.QueryString("?server_name=SQL1&hours=abc");
+        Assert.NotNull(DarlingWebEndpoints.NonIntegerParamRefusal(k => DarlingWebEndpoints.First(context, k)));
+
+        context.Request.QueryString = new Microsoft.AspNetCore.Http.QueryString("?hours=&hours=12");
+        Assert.Null(DarlingWebEndpoints.NonIntegerParamRefusal(k => DarlingWebEndpoints.First(context, k)));
+    }
+
+    /// <summary>
+    /// #5644 W22 source pin: the /api/read dispatch loop and /api/fleet both call the check BEFORE any tool or reader
+    /// runs, and every key the dispatch reads through QueryInt/Rows/Hours is in the list.
+    /// </summary>
+    [Fact]
+    public void NonIntegerParamRefusal_RunsBeforeEveryReadAndCoversEveryIntegerKnob()
+    {
+        var source = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs");
+
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(source, @"NonIntegerParamRefusal\(context\) is \{ \}").Count);
+        Assert.True(source.IndexOf("NonIntegerParamRefusal(context) is { } nonIntegerRefusal", StringComparison.Ordinal)
+            < source.IndexOf("result = await handler(context, postgres, analysis);", StringComparison.Ordinal));
+
+        var keys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+            source, @"(?:QueryInt\((?:c|context), ""|Rows\(c, "")([a-z_]+)"""))
+        {
+            keys.Add(m.Groups[1].Value);
+        }
+
+        keys.Add("hours");
+        keys.Add("hours_back");
+        Assert.NotEmpty(keys);
+        Assert.All(keys, k => Assert.Contains(k, DarlingWebEndpoints.IntegerQueryKeys));
+    }
+
     [Theory]
     [InlineData("true", false, true)]
     [InlineData("false", true, false)]

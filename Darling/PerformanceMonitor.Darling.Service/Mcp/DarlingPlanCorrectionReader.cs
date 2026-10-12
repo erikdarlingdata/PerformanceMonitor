@@ -91,6 +91,84 @@ ORDER BY collection_time DESC, score DESC
 LIMIT $4";
 
     /// <summary>
+    /// #5644 W21: <see cref="PlanCorrectionsSql"/> collapsed to ONE row per recommendation (database + the engine's
+    /// <c>recommendation_name</c>). The collector re-captures every open recommendation on every cycle, so the per-capture
+    /// read above fills a 50-row page with three recommendations seen seventeen times each. This read returns each
+    /// recommendation's NEWEST capture (so <c>collection_time</c> is its last-seen time and the state is its latest), with
+    /// <c>first_seen</c> (its oldest capture in the window) and <c>capture_count</c> (captures in the window) as the two
+    /// trailing columns. The cap bounds DISTINCT recommendations, newest last-seen first. The same $1-$5 parameters.
+    /// Used by the web read only; the MCP tool keeps the per-capture rows its contract documents.
+    /// </summary>
+    public const string PlanCorrectionsCollapsedSql = @"
+WITH captured AS (
+    SELECT
+        collection_time,
+        database_name,
+        query_text,
+        recommendation_state,
+        recommendation_state_reason,
+        recommendation_reason,
+        score,
+        estimated_gain_seconds,
+        query_id,
+        regressed_plan_id,
+        last_good_plan_id,
+        last_good_plan_forcing_type,
+        last_good_plan_is_forced,
+        last_good_plan_force_failure_reason,
+        regressed_plan_execution_count,
+        regressed_plan_cpu_time_average_ms,
+        last_good_plan_execution_count,
+        last_good_plan_cpu_time_average_ms,
+        valid_since,
+        last_refresh,
+        execute_action_initiated_by,
+        execute_action_initiated_time,
+        revert_action_initiated_by,
+        revert_action_initiated_time,
+        ROW_NUMBER() OVER (PARTITION BY database_name, recommendation_name ORDER BY collection_time DESC) AS newest_rank,
+        MIN(collection_time) OVER (PARTITION BY database_name, recommendation_name) AS first_seen,
+        COUNT(*) OVER (PARTITION BY database_name, recommendation_name) AS capture_count
+    FROM plan_correction
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   recommendation_name IS NOT NULL
+    AND   ($5::text[] IS NULL OR database_name = ANY($5))
+)
+SELECT
+    collection_time,
+    database_name,
+    query_text,
+    recommendation_state,
+    recommendation_state_reason,
+    recommendation_reason,
+    score,
+    estimated_gain_seconds,
+    query_id,
+    regressed_plan_id,
+    last_good_plan_id,
+    last_good_plan_forcing_type,
+    last_good_plan_is_forced,
+    last_good_plan_force_failure_reason,
+    regressed_plan_execution_count,
+    regressed_plan_cpu_time_average_ms,
+    last_good_plan_execution_count,
+    last_good_plan_cpu_time_average_ms,
+    valid_since,
+    last_refresh,
+    execute_action_initiated_by,
+    execute_action_initiated_time,
+    revert_action_initiated_by,
+    revert_action_initiated_time,
+    first_seen,
+    capture_count
+FROM captured
+WHERE newest_rank = 1
+ORDER BY collection_time DESC, score DESC
+LIMIT $4";
+
+    /// <summary>
     /// The latest FORCE_LAST_GOOD_PLAN enablement snapshot per database. The enablement columns repeat on
     /// every one of a database's recommendation rows, so this takes the newest capture for the server and
     /// DISTINCTs it back to one row per database. $1 server_id, $2 the chosen databases (#5244: one text[], NULL for every
@@ -135,7 +213,9 @@ ORDER BY database_name";
         string? ExecuteActionInitiatedBy,
         DateTime? ExecuteActionInitiatedTimeUtc,
         string? RevertActionInitiatedBy,
-        DateTime? RevertActionInitiatedTimeUtc);
+        DateTime? RevertActionInitiatedTimeUtc,
+        DateTime? FirstSeen = null,
+        long? CaptureCount = null);
 
     /// <summary>One database's FORCE_LAST_GOOD_PLAN enablement state at the newest capture.</summary>
     public sealed record AutomaticTuningRow(
@@ -148,11 +228,21 @@ ORDER BY database_name";
     /// <summary>The newest <paramref name="cap"/> recommendation rows over the window. Callers detecting
     /// truncation pass <c>limit + 1</c> and read the extra row as the signal. <paramref name="databases"/> (#5244) narrows
     /// to the chosen databases before the cap (<see cref="DatabaseFilter.All"/>, the default: every database).</summary>
-    public static async Task<List<PlanCorrectionRow>> GetPlanCorrectionsAsync(
+    public static Task<List<PlanCorrectionRow>> GetPlanCorrectionsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases = default, CancellationToken cancellationToken = default)
+        => ReadPlanCorrectionsAsync(postgres, serverId, startUtc, endUtc, cap, databases, collapse: false, cancellationToken);
+
+    /// <summary><see cref="GetPlanCorrectionsAsync"/> collapsed to one row per recommendation (#5644 W21, <see cref="PlanCorrectionsCollapsedSql"/>):
+    /// each row is the recommendation's newest capture with <c>FirstSeen</c> and <c>CaptureCount</c> set, and the cap counts recommendations.</summary>
+    public static Task<List<PlanCorrectionRow>> GetCollapsedPlanCorrectionsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases = default, CancellationToken cancellationToken = default)
+        => ReadPlanCorrectionsAsync(postgres, serverId, startUtc, endUtc, cap, databases, collapse: true, cancellationToken);
+
+    private static async Task<List<PlanCorrectionRow>> ReadPlanCorrectionsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases, bool collapse, CancellationToken cancellationToken)
     {
         var rows = new List<PlanCorrectionRow>();
-        await using var command = postgres.CreateCommand(PlanCorrectionsSql);
+        await using var command = postgres.CreateCommand(collapse ? PlanCorrectionsCollapsedSql : PlanCorrectionsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
@@ -187,7 +277,9 @@ ORDER BY database_name";
                 reader.IsDBNull(20) ? null : reader.GetString(20),
                 reader.IsDBNull(21) ? null : reader.GetDateTime(21),
                 reader.IsDBNull(22) ? null : reader.GetString(22),
-                reader.IsDBNull(23) ? null : reader.GetDateTime(23)));
+                reader.IsDBNull(23) ? null : reader.GetDateTime(23),
+                collapse && !reader.IsDBNull(24) ? reader.GetDateTime(24) : null,
+                collapse && !reader.IsDBNull(25) ? reader.GetInt64(25) : null));
         }
 
         return rows;

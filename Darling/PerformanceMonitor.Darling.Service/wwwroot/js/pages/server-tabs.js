@@ -3589,8 +3589,12 @@ const LONG_QUERY_COLUMNS = [
    returns no implementation script or action flags, and the page does not rebuild them. */
 const PLAN_CORRECTION_GROUPS = { groups: ["Plans", "Plan metrics", "Lifecycle"], defaultGroups: [] };
 
+/* #5644 W21: the web read collapses the collector's per-cycle re-captures to one row per recommendation, so the old
+   "Collected" column is the recommendation's LAST capture, with its first capture and how many captures the window held beside it. */
 const PLAN_CORRECTION_COLUMNS = [
-  { key: "collection_time", label: "Collected", format: "time" },
+  { key: "first_seen", label: "First seen", format: "time" },
+  { key: "collection_time", label: "Last seen", format: "time" },
+  { key: "capture_count", label: "Captures", format: "int" },
   { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "database_name", label: "Database" },
   { key: "recommendation_state", label: "State" },
@@ -4548,7 +4552,6 @@ const JOB_HISTORY_COLUMNS = [
   { key: "status", label: "Status" },
   { key: "duration_formatted", label: "Duration", sortValue: (r) => r.duration_seconds },
   { key: "retries", label: "Retries", format: "int" },
-  { key: "last_success", label: "Last Success", format: "time" },
   { key: "message", label: "Message", wrap: true, render: jobMessageCell },
 ];
 

@@ -37,7 +37,7 @@ public sealed class ServerTabGridColumnPinTests
         var tool = Tool(toolFile);
         var cols = Columns(constant);
         foreach (var (key, _) in cols)
-            Assert.True(Regex.IsMatch(tool, @"\b" + key + @"\s*="), $"{constant}: '{key}' is not a field of {toolFile}");
+            Assert.True(Regex.IsMatch(tool, @"\b" + key + @"(\s*=|""\]\s*=)"), $"{constant}: '{key}' is not a field of {toolFile}");
         foreach (var key in expected)
             Assert.Contains(cols, c => c.Key == key);
         Assert.Equal(cols.Count, cols.Select(c => c.Key).Distinct().Count());
