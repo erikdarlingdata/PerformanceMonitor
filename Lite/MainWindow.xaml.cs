@@ -1980,9 +1980,14 @@ public partial class MainWindow : Window
         if (result == MessageBoxResult.Yes)
         {
             CloseServerTab(server.Id);
-            await RemoveServerAsync(server);
+            var removedCleanly = await RemoveServerAsync(server);
             RefreshServerList();
-            StatusText.Text = $"Removed server: {server.DisplayNameWithIntent}";
+            /* #5650: when the tag clear gave up on a busy store, the removal left its own explanation in the status bar
+               (what was and was not done). Writing "Removed server" over it, as this used to, hid that. */
+            if (removedCleanly)
+            {
+                StatusText.Text = $"Removed server: {server.DisplayNameWithIntent}";
+            }
         }
     }
 
@@ -1994,9 +1999,16 @@ public partial class MainWindow : Window
     /// itself (#4795). Both doors call this — the sidebar context menu's Remove and Manage Servers' Delete —
     /// so the two paths cannot drift again; before this, Manage Servers deleted the registry entry and left
     /// all three behind.
+    ///
+    /// <para>Returns <c>false</c> when the tag clear gave up on a busy local database (#5650): the server is still removed,
+    /// and the status bar holds the message that says its tag assignments were not cleared. The caller must leave
+    /// that text alone. <c>true</c> means the status bar is blank and the caller may report the removal. Manage Servers'
+    /// Delete takes this method as a plain <c>Func&lt;ServerConnection, Task&gt;</c>, ignores the outcome, and so
+    /// leaves the status bar as this method set it.</para>
     /// </summary>
-    private async Task RemoveServerAsync(ServerConnection server)
+    private async Task<bool> RemoveServerAsync(ServerConnection server)
     {
+        var statusIsClean = true;
         var removedServerId = RemoteCollectorService.GetDeterministicHashCode(
             RemoteCollectorService.GetServerNameForStorage(server));
 
@@ -2018,16 +2030,19 @@ public partial class MainWindow : Window
             {
                 /* The removal goes on without the clear, as it always has on a failure here; what the user needs to
                    know is that this one piece did not happen, and that adding the server again could bring its old tags back. */
+                statusIsClean = false;
                 StatusText.Text = StoreBusyReport.Report("Tags", $"Remove server '{server.DisplayName}': clear its tag assignments", ex,
                     $"removing '{server.DisplayName}'",
                     "the server was removed but its tag assignments were not cleared, and they come back if it is added again");
             }
             catch (PendingRestoreException ex)
             {
+                StatusText.Text = string.Empty;
                 AppLogger.Warn("Tags", $"Tags for the removed server were not cleared: {ex.Message}");
             }
             catch (Exception ex)
             {
+                StatusText.Text = string.Empty;
                 AppLogger.Info("Tags", $"Failed to clear tags for removed server: {ex.Message}");
             }
         }
@@ -2064,6 +2079,7 @@ public partial class MainWindow : Window
            delta against a different identity. Same deterministic id, same one deep-cleanup. */
         _collectorService?.DeltaCalculator?.ClearServer(removedServerId);
         _serverManager.DeleteServer(server.Id);
+        return statusIsClean;
     }
 
     private bool _sidebarCollapsed;

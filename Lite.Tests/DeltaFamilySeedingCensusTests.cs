@@ -275,7 +275,7 @@ public sealed class DeltaFamilySeedingCensusTests
     public void BothHosts_ClearTheDeltaCacheWhenAServerLeavesMonitoring()
     {
         var lite = ReadRepoFile("Lite/MainWindow.xaml.cs");
-        var forget = lite[lite.IndexOf("private async Task RemoveServerAsync(", StringComparison.Ordinal)..];
+        var forget = lite[lite.IndexOf("private async Task<bool> RemoveServerAsync(", StringComparison.Ordinal)..];
         forget = forget[..forget.IndexOf("\n    }", StringComparison.Ordinal)];
         Assert.Contains("_collectorService?.DeltaCalculator?.ClearServer(removedServerId);", forget, StringComparison.Ordinal);
 

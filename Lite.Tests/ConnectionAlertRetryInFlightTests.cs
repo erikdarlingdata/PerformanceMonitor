@@ -406,7 +406,7 @@ public sealed class ConnectionAlertRetryInFlightTests
     [Fact]
     public void ARemovedServer_DropsItsPendingRetry_ItsConnectionMarks_AndItsCollectorErrorAndXeSessionMarks()
     {
-        var forget = Member(WindowSource(), "private async Task RemoveServerAsync(ServerConnection server)");
+        var forget = Member(WindowSource(), "private async Task<bool> RemoveServerAsync(ServerConnection server)");
 
         Assert.Contains("_connectionAlertRetries.Clear(server.Id);", forget, StringComparison.Ordinal);
         Assert.Contains("_previousConnectionStates.Remove(server.Id);", forget, StringComparison.Ordinal);
@@ -471,7 +471,7 @@ public sealed class ConnectionAlertRetryInFlightTests
     [Fact]
     public void ARemoval_AwaitsNothingBetweenItsFirstDropAndTheRegistryDelete()
     {
-        var removal = CodeOf(WindowSource(), "private async Task RemoveServerAsync(ServerConnection server)");
+        var removal = CodeOf(WindowSource(), "private async Task<bool> RemoveServerAsync(ServerConnection server)");
 
         var lastAwait = removal.LastIndexOf("await ", StringComparison.Ordinal);
         var delete = removal.IndexOf("_serverManager.DeleteServer(server.Id);", StringComparison.Ordinal);
@@ -505,7 +505,7 @@ public sealed class ConnectionAlertRetryInFlightTests
     {
         var sidebar = CodeOf(
             WindowSource(), "private async void ServerContextMenu_Remove_Click(object sender, RoutedEventArgs e)");
-        Assert.Contains("await RemoveServerAsync(server);", sidebar, StringComparison.Ordinal);
+        Assert.Contains("= await RemoveServerAsync(server);", sidebar, StringComparison.Ordinal);
         Assert.DoesNotContain("DeleteServer", sidebar, StringComparison.Ordinal);
 
         /* Manage Servers gets the removal from MainWindow, requires it, and has no delete of its own. */

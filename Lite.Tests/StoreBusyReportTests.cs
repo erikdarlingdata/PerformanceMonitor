@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Darling.Tests;
 using Lite.Tests;
 using PerformanceMonitorLite.Database;
@@ -140,6 +142,95 @@ public sealed class StoreBusyReportTests
 
         Assert.StartsWith("Renaming the tag", text, StringComparison.Ordinal);
         Assert.Contains($"{(int)LocalDataService.UserWriteLockBudget.TotalSeconds} seconds", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LogLine_SaysWhatTheCallerSaysWasSaved_NotAlwaysThatNothingChanged()
+    {
+        var plain = StoreBusyReport.LogLine("Save overrides", Timeout());
+        Assert.Contains("nothing was changed", plain, StringComparison.Ordinal);
+
+        var partial = StoreBusyReport.LogLine("Save overrides", Timeout(), "2 of 3 change(s) were saved and the rest were not");
+        Assert.Contains("2 of 3 change(s) were saved", partial, StringComparison.Ordinal);
+        Assert.DoesNotContain("nothing was changed", partial, StringComparison.Ordinal);
+
+        /* A timeout from outside the registry has no wait or holder to report, but the outcome is still the caller's to state. */
+        var untyped = StoreBusyReport.LogLine("Save overrides", new TimeoutException("x"), "2 of 3 change(s) were saved and the rest were not");
+        Assert.Contains("2 of 3 change(s) were saved", untyped, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheMaintenanceSkipWarning_PrintsTheBudgetTheCallWaited_NotAFixedFiveSeconds()
+    {
+        var shipped = LocalDataService.MaintenanceSkippedWarning(7, "holder unknown", TimeSpan.FromSeconds(5));
+        Assert.Contains("within 5s", shipped, StringComparison.Ordinal);
+
+        var host = LocalDataService.MaintenanceSkippedWarning(7, "holder unknown", TimeSpan.FromSeconds(120));
+        Assert.Contains("within 120s", host, StringComparison.Ordinal);
+        Assert.DoesNotContain("within 5s", host, StringComparison.Ordinal);
+
+        var fraction = LocalDataService.MaintenanceSkippedWarning(7, "x", TimeSpan.FromMilliseconds(150));
+        Assert.Contains("within 0.15s", fraction, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5650 final round: a catch can build the right text and still lose it, when the caller of the method that caught goes
+    /// on to write the status bar itself. The sidebar Remove did: it awaited the removal and then set "Removed server"
+    /// over the busy text. This sweeps the main-window files. A method that reports a busy store (carries
+    /// <c>StoreBusyReport.Report(</c>) hands its caller the bad news; a caller that writes <c>StatusText</c> after awaiting it
+    /// must have kept the outcome and let it gate that write, as <c>if (await Reporter(...))</c> or
+    /// <c>var ok = await Reporter(...)</c> then <c>if (ok)</c>. Awaiting it as a bare statement, then writing, is what this fails.
+    /// </summary>
+    [Fact]
+    public void ACallerThatAwaitsABusyReportingMethod_NeverOverwritesItsStatusText_WithoutTheOutcome()
+    {
+        var root = ParitySource.RepoRoot();
+        var files = Directory.EnumerateFiles(Path.Combine(root, "Lite"), "MainWindow*.cs", SearchOption.TopDirectoryOnly)
+            .Where(p => !p.EndsWith(".g.cs", StringComparison.Ordinal) && !p.EndsWith(".g.i.cs", StringComparison.Ordinal))
+            .ToArray();
+
+        var reportersSeen = new List<string>();
+        foreach (var file in files)
+        {
+            var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(file));
+            var methods = Regex.Matches(code, @"\b(?:async\s+)?(?:void|Task(?:<[\w?]+>)?)\s+(\w+)\s*\([^)]*\)\s*\{")
+                .Select(m => (Name: m.Groups[1].Value, Body: CSharpSourceWalker.BraceBalanced(code, m.Index + m.Length - 1)))
+                .ToArray();
+
+            var reporters = methods.Where(m => m.Body.Contains("StoreBusyReport.Report(", StringComparison.Ordinal))
+                .Select(m => m.Name).ToArray();
+            reportersSeen.AddRange(reporters);
+
+            foreach (var (name, body) in methods)
+            {
+                foreach (var reporter in reporters.Where(r => r != name))
+                {
+                    var awaited = Regex.Match(body, @"await\s+" + reporter + @"\s*\(");
+                    if (!awaited.Success)
+                    {
+                        continue;
+                    }
+
+                    var after = body[awaited.Index..];
+                    var write = after.IndexOf("StatusText.Text", StringComparison.Ordinal);
+                    if (write < 0)
+                    {
+                        continue;
+                    }
+
+                    var gatedInline = Regex.IsMatch(body[Math.Max(0, awaited.Index - 8)..awaited.Index], @"if\s*\(\s*!?\s*$");
+                    var kept = Regex.Match(body[Math.Max(0, awaited.Index - 60)..awaited.Index], @"(?:var|bool)\s+(\w+)\s*=\s*$");
+                    var gatedByVariable = kept.Success
+                        && Regex.IsMatch(after[..write], @"if\s*\(\s*!?\s*" + kept.Groups[1].Value + @"\b");
+                    Assert.True(gatedInline || gatedByVariable,
+                        $"{Path.GetFileName(file)}: {name} awaits {reporter}, which can leave a busy-store message in StatusText, and then " +
+                        "writes StatusText without using the outcome, so the user never sees the busy text (#5650)");
+                }
+            }
+        }
+
+        /* The sweep must actually know the removal, or it proves nothing about the sidebar door. */
+        Assert.Contains("RemoveServerAsync", reportersSeen);
     }
 
     /// <summary>

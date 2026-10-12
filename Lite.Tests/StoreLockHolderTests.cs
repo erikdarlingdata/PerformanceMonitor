@@ -94,14 +94,19 @@ public sealed class StoreLockHolderTests
         {
             using var initializer = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
             var service = new LocalDataService(initializer, TimeSpan.FromMilliseconds(150), TimeSpan.FromSeconds(3));
-            await using (await service.OpenUserWriteConnectionAsync())
+            /* The caller's name is captured at the call, so the open is made from this method and the hold is taken, read and
+               released on one thread: s_dbLock is thread-affine, and a release after an await may run on another. */
+            IReadOnlyList<StoreLockHolder> holders = OwnThread.Run(() =>
             {
-                /* The write lock is exclusive, so while this hold is open the registry can name no other writer. */
-                var holders = StoreLockHolders.Snapshot();
-                Assert.Contains(holders, h => h.Write
-                    && h.Name == "StoreLockHolderTests." + nameof(UserWriteConnection_HolderNamesThisTest_NotTheEntryPoint));
-                Assert.DoesNotContain(holders, h => h.Name.Contains("OpenUserWriteConnectionAsync", StringComparison.Ordinal));
-            }
+                using (service.OpenUserWriteConnectionAsync().GetAwaiter().GetResult())
+                {
+                    /* The write lock is exclusive, so while this hold is open the registry can name no other writer. */
+                    return StoreLockHolders.Snapshot();
+                }
+            });
+            Assert.Contains(holders, h => h.Write
+                && h.Name == "StoreLockHolderTests." + nameof(UserWriteConnection_HolderNamesThisTest_NotTheEntryPoint));
+            Assert.DoesNotContain(holders, h => h.Name.Contains("OpenUserWriteConnectionAsync", StringComparison.Ordinal));
         }
         finally
         {

@@ -49,7 +49,7 @@ internal static class StoreBusyReport
     /// </summary>
     internal static string Report(string logArea, string logAction, TimeoutException ex, string doing, string outcome = "nothing was changed")
     {
-        AppLogger.Warn(logArea, LogLine(logAction, ex));
+        AppLogger.Warn(logArea, LogLine(logAction, ex, outcome));
         return Text(ex, doing, outcome);
     }
 
@@ -64,17 +64,20 @@ internal static class StoreBusyReport
             $"{char.ToUpperInvariant(doing[0])}{doing[1..]}... waiting up to {seconds} seconds if the local database is busy.");
     }
 
-    /// <summary>One Warning line for the log: the action, how long it waited, and who held the lock.</summary>
-    internal static string LogLine(string action, TimeoutException ex)
+    /// <summary>
+    /// One Warning line for the log: the action, how long it waited, who held the lock, and the same
+    /// <paramref name="outcome"/> the user was told, so a write that had saved part of its work does not log "nothing was changed".
+    /// </summary>
+    internal static string LogLine(string action, TimeoutException ex, string outcome = "nothing was changed")
     {
         if (ex is not StoreLockTimeoutException typed)
         {
-            return $"{action}: gave up waiting for the local database write lock (holder unknown). {ex.Message}";
+            return $"{action}: gave up waiting for the local database write lock (holder unknown); {outcome}. {ex.Message}";
         }
 
         var who = typed.Holders.Count == 0 ? "holder unknown" : StoreLockTimeoutException.FormatHolders(typed.Holders);
         return string.Create(CultureInfo.InvariantCulture,
-            $"{action}: gave up after waiting {typed.Waited.TotalSeconds:0.#} s for the local database write lock; nothing was changed. {who}");
+            $"{action}: gave up after waiting {typed.Waited.TotalSeconds:0.#} s for the local database write lock; {outcome}. {who}");
     }
 
     /// <summary>Plain wording for the callers that are well known; any other holder is shown by its code name.</summary>

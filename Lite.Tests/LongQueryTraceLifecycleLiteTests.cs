@@ -2100,7 +2100,7 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
     public void TheRemoval_DropsTheSession_AfterTheTagClear_BeforeTheStateDrops_WithinFifteenSeconds()
     {
         var window = ReadLf("Lite/MainWindow.xaml.cs");
-        var start = window.IndexOf("private async Task RemoveServerAsync(ServerConnection server)", StringComparison.Ordinal);
+        var start = window.IndexOf("private async Task<bool> RemoveServerAsync(ServerConnection server)", StringComparison.Ordinal);
         Assert.True(start >= 0, "the window has no RemoveServerAsync");
         var removal = window[start..];
 

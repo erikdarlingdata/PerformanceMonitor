@@ -44,9 +44,14 @@ public sealed class UserWriteLockBudgetTests : IClassFixture<SharedDuckDbFixture
         using var holder = HoldTheWriteLock();
 
         var waited = Stopwatch.StartNew();
-        using (await Task.Run(() => service.OpenUserWriteConnectionAsync()))
+        /* s_dbLock is a thread-affine ReaderWriterLockSlim: the connection is opened and disposed on ONE thread, with no
+           await between, or the release can run on a thread that never entered it and the static lock leaks. */
+        await Task.Run(() => OwnThread.Run(() =>
         {
-        }
+            using (service.OpenUserWriteConnectionAsync().GetAwaiter().GetResult())
+            {
+            }
+        }));
         waited.Stop();
 
         Assert.True(

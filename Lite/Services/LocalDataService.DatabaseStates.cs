@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
@@ -119,6 +120,16 @@ SELECT
     }
 
     /// <summary>
+    /// The Warning for a skipped maintenance cycle (#2266). <paramref name="budget"/> is the write-lock wait the call really
+    /// had (5 s in the shipped app, two minutes in Lite.Tests), not a number written into the text.
+    /// </summary>
+    internal static string MaintenanceSkippedWarning(int serverId, string holder, TimeSpan budget) =>
+        $"server {serverId}: skipped this cycle's database-state maintenance — could not acquire the " +
+            $"store write lock within {budget.TotalSeconds.ToString("0.##", CultureInfo.InvariantCulture)}s ({holder}). Baselines are not being " +
+            "seeded or healed while this persists (#2189/#2203); deviations are still read. Expected " +
+            "occasionally — if it repeats, the write lock is contended.";
+
+    /// <summary>
     /// The databases whose collected state deviates from their expected state, for the baseline-deviation
     /// database-state alert. Fires only when the deviation is present in the TWO most recent collections
     /// (so a restart's RECOVERY_PENDING / RECOVERING transients — and a standby secondary's per-restore
@@ -203,10 +214,7 @@ SELECT
             {
                 _lastMaintenanceSkipped[serverId] = true;
                 AppLogger.Warn(nameof(GetDatabaseStateDeviationsAsync),
-                    $"server {serverId}: skipped this cycle's database-state maintenance — could not acquire the " +
-                    $"store write lock within 5s ({skipHolder}). Baselines are not being " +
-                    "seeded or healed while this persists (#2189/#2203); deviations are still read. Expected " +
-                    "occasionally — if it repeats, the write lock is contended.");
+                    MaintenanceSkippedWarning(serverId, skipHolder, _backgroundWriteLockBudget));
             }
         }
         else if (_lastMaintenanceSkipped.TryGetValue(serverId, out var hadSkipped) && hadSkipped)
