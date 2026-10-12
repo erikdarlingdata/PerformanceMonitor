@@ -13733,6 +13733,14 @@ LIMIT 1";
     private async Task<CommandOutcome> RunExecuteActualPlanAsync(
         List<ServerLoopState> servers, int serverId, ActualPlanRequest request, CancellationToken cancellationToken)
     {
+        /* #5639: a query_stats request is refused BEFORE any work unless it carries the digest of the text the
+           operator confirmed and a hash that names a particular query. */
+        var refusedBeforeResolve = RefuseActualPlanRequest(request);
+        if (refusedBeforeResolve is not null)
+        {
+            return new CommandOutcome(false, "request refused", JsonError(refusedBeforeResolve));
+        }
+
         /* Resolve the connection under the lock (the command loop reconciles the list concurrently). Capture the
            immutable connection string + Azure flag as locals — never hold the runtime across the execute. */
         bool serverExists;
@@ -13802,6 +13810,15 @@ LIMIT 1";
                 JsonError($"no stored query text was found for this {DescribeActualPlanIdentifier(request)} on '{displayName}' — the actual plan is captured by re-executing the stored query text, which is not available"));
         }
 
+        /* #5639: the store picks the latest text for a hash + database, which can differ from the text the
+           operator confirmed in the viewer prompt. Run it only when it is the confirmed text. */
+        var refusedChangedText = RefuseChangedActualPlanText(request, queryText);
+        if (refusedChangedText is not null)
+        {
+            _logger.LogInformation("[{Server}] execute_actual_plan: the stored query text no longer matches the confirmed text; nothing was run", displayName);
+            return new CommandOutcome(false, "stored query changed", JsonError(refusedChangedText));
+        }
+
         /* RE-EXECUTE via the SHARED executor (SET STATISTICS XML ON), as the server's stored credential. */
         try
         {
@@ -13861,6 +13878,52 @@ LIMIT 1";
         ActualPlanSource.QuerySnapshot => ResolveStoredSnapshotForActualPlanSql,
         _ => throw new InvalidOperationException($"no store resolver for actual-plan source {source}"),
     };
+
+    /// <summary>
+    /// #5639: the checks a <c>query_stats</c> actual-plan request must pass before the store is read. Returns the
+    /// refusal message, or null when the request may proceed. The request has to carry the digest of the text the
+    /// operator confirmed (a request from a viewer that predates the digest is refused rather than run unchecked)
+    /// and a hash that names a particular query (an empty or all-zero hash would let the lookup pick any statement
+    /// in the database). Query Store and snapshot requests name one stored row exactly and are not checked.
+    /// </summary>
+    internal static string? RefuseActualPlanRequest(ActualPlanRequest request)
+    {
+        if (request.Source != ActualPlanSource.QueryStats)
+        {
+            return null;
+        }
+
+        if (!QueryModificationDetector.IsUsableQueryHash(request.QueryHash))
+        {
+            return "This row has no usable query hash (it is empty or all zeros), so the stored text cannot be tied to "
+                + "the statement you confirmed. Nothing was run.";
+        }
+
+        if (string.IsNullOrWhiteSpace(request.ConfirmedSha256))
+        {
+            return "This request did not include the digest of the query text you confirmed, so nothing was run. "
+                + "Update the viewer to the same version as the service and try again.";
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// #5639: compares the digest of the text the operator confirmed with the digest of the text the store
+    /// resolved. Returns the refusal message on a mismatch, or null when the texts are the same (or the request is
+    /// not a <c>query_stats</c> one, which names one stored row exactly).
+    /// </summary>
+    internal static string? RefuseChangedActualPlanText(ActualPlanRequest request, string resolvedQueryText)
+    {
+        if (request.Source != ActualPlanSource.QueryStats)
+        {
+            return null;
+        }
+
+        return QueryTextDigest.Matches(request.ConfirmedSha256, resolvedQueryText)
+            ? null
+            : "The stored query text changed after you confirmed. Nothing was run. Reopen the plan and confirm again.";
+    }
 
     /// <summary>Binds the store-resolution parameters ($1 server_id, then the identifier's $2/$3) for the request's
     /// identifier kind (a snapshot also binds $4, the database name). The snapshot's collection_time binds as a

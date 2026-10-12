@@ -10,6 +10,7 @@ using System;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.PlanAnalysis;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -33,15 +34,49 @@ public sealed partial class ViewerDataService
     public const string CommandExecuteActualPlan = "execute_actual_plan";
 
     /// <summary>
-    /// Builds the <c>args_json</c> for a <c>query_stats</c> actual-plan capture — the stored-row key ONLY
-    /// (query_hash + database_name), NO query text. Serves Top Queries, Query-Stats history, and FinOps High
-    /// Impact. Pure — pinned by Darling.Tests against the service's <c>ActualPlanRequest.TryParse</c> and asserted
-    /// to carry no SQL text.
+    /// Builds the <c>args_json</c> for a <c>query_stats</c> actual-plan capture — the stored-row key
+    /// (query_hash + database_name) plus the SHA-256 digest of the FULL query text the row holds, NO query text
+    /// itself. Serves Top Queries, Query-Stats history, and FinOps High Impact. The service resolves the latest
+    /// stored text for the hash and runs it only when its digest equals this one (#5639), so the statement that
+    /// runs is the statement the prompt showed. Pure — pinned by Darling.Tests against the service's
+    /// <c>ActualPlanRequest.TryParse</c> and asserted to carry no SQL text.
     /// </summary>
-    public static string BuildActualPlanArgs(string queryHash, string? databaseName)
+    public static string BuildActualPlanArgs(string queryHash, string? databaseName, string queryText)
         => JsonSerializer.Serialize(
-            new ActualPlanArgs { QueryHash = queryHash, DatabaseName = NullIfBlank(databaseName) },
+            new ActualPlanArgs
+            {
+                QueryHash = queryHash,
+                DatabaseName = NullIfBlank(databaseName),
+                ConfirmedSha256 = QueryTextDigest.Compute(queryText),
+            },
             s_planFetchArgsOptions);
+
+    /// <summary>
+    /// The viewer-side gate for a <c>query_stats</c> actual-plan request (#5639): builds the args only for a row
+    /// whose hash names a particular query (not empty, not all zeros) and that holds query text to confirm.
+    /// Otherwise returns false with the message to show, and no request is made.
+    /// </summary>
+    public static bool TryBuildActualPlanArgs(
+        string? queryHash, string? databaseName, string? queryText, out string argsJson, out string refusal)
+    {
+        argsJson = "";
+        if (!QueryModificationDetector.IsUsableQueryHash(queryHash))
+        {
+            refusal = "This row has no usable query hash (it is empty or all zeros), so the stored text cannot be tied to "
+                + "the statement you would confirm. Nothing was run.";
+            return false;
+        }
+
+        if (string.IsNullOrEmpty(queryText))
+        {
+            refusal = "This row has no query text to confirm. Nothing was run.";
+            return false;
+        }
+
+        argsJson = BuildActualPlanArgs(queryHash!, databaseName, queryText);
+        refusal = "";
+        return true;
+    }
 
     /// <summary>
     /// Builds the <c>args_json</c> for a Query Store actual-plan capture — the stored-row key ONLY (query_id +
@@ -135,6 +170,7 @@ public sealed partial class ViewerDataService
         public DateTime? SnapshotCollectionTime { get; set; }
         public int? SnapshotSessionId { get; set; }
         public string? DatabaseName { get; set; }
+        public string? ConfirmedSha256 { get; set; }
     }
 }
 
