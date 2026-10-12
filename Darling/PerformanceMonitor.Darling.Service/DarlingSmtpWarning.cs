@@ -17,7 +17,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// in the service log for the setups no window touched: one declared in darling.json, and one saved before the
 /// windows warned. It runs at service start and on every config reload, on the settings the service holds.
 /// </summary>
-internal static class DarlingSmtpAdvisory
+internal static class DarlingSmtpWarning
 {
     /// <summary>
     /// The warning for these settings, or null when they are fine or SMTP is not set up. The same rule the

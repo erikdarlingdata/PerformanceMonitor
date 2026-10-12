@@ -20,7 +20,7 @@ namespace Darling.Tests;
 /// the service logs the same warning at start and on every config reload, for the setups no window touched: one
 /// declared in darling.json, and one saved before the windows warned.
 /// </summary>
-public sealed class DarlingSmtpAdvisoryTests
+public sealed class DarlingSmtpWarningTests
 {
     private static SmtpConfig Smtp(string host = "mail.example.test", bool useSsl = false, string? username = "relay",
         string? password = "literal", string? encrypted = null) =>
@@ -31,7 +31,7 @@ public sealed class DarlingSmtpAdvisoryTests
     {
         var logger = new CapturingTestLogger();
 
-        DarlingSmtpAdvisory.Log(Smtp(), logger);
+        DarlingSmtpWarning.Log(Smtp(), logger);
 
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
         Assert.Contains("mail.example.test:25", logger.Joined);
@@ -43,7 +43,7 @@ public sealed class DarlingSmtpAdvisoryTests
     {
         var logger = new CapturingTestLogger();
 
-        DarlingSmtpAdvisory.Log(Smtp(password: null, encrypted: "c2VhbGVk"), logger);
+        DarlingSmtpWarning.Log(Smtp(password: null, encrypted: "c2VhbGVk"), logger);
 
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
         Assert.DoesNotContain("c2VhbGVk", logger.Joined);
@@ -59,7 +59,7 @@ public sealed class DarlingSmtpAdvisoryTests
     {
         var logger = new CapturingTestLogger();
 
-        DarlingSmtpAdvisory.Log(Smtp(host, useSsl, username, password), logger);
+        DarlingSmtpWarning.Log(Smtp(host, useSsl, username, password), logger);
 
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
     }
@@ -74,8 +74,8 @@ public sealed class DarlingSmtpAdvisoryTests
         var start = worker.IndexOf("StoreConfigProvider.ApplyToConfig(config, initialView);", StringComparison.Ordinal);
         var reload = worker.IndexOf("StoreConfigProvider.ApplyToConfig(config, view);", StringComparison.Ordinal);
         Assert.True(start > 0 && reload > 0);
-        Assert.Contains("DarlingSmtpAdvisory.Log(config.Smtp, _logger);", worker.Substring(start, 2500));
-        Assert.Contains("DarlingSmtpAdvisory.Log(config.Smtp, _logger);", worker.Substring(reload, 400));
+        Assert.Contains("DarlingSmtpWarning.Log(config.Smtp, _logger);", worker.Substring(start, 2500));
+        Assert.Contains("DarlingSmtpWarning.Log(config.Smtp, _logger);", worker.Substring(reload, 400));
     }
 
     private static string ThisFile([CallerFilePath] string path = "") => path;

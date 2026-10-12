@@ -28,7 +28,7 @@ namespace Darling.Tests;
 [Collection("timing")]
 public sealed class PlanRegexTimeoutTests
 {
-    // Catastrophic backtracking: about 2^40 ways to fail the trailing $, far past any timeout.
+    // Unbounded backtracking: about 2^40 ways to fail the trailing $, far past any timeout.
     private const string SlowPattern = @"(a+)+$";
     private static readonly string SlowInput = new string('a', 40) + "!";
     private static readonly TimeSpan Tiny = TimeSpan.FromMilliseconds(1);
