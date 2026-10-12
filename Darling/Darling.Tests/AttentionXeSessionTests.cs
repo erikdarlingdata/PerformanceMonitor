@@ -204,8 +204,8 @@ public sealed class AttentionXeSessionTests
         Assert.DoesNotContain("sqlserver.attention", source, StringComparison.Ordinal);
 
         /* Three captures, three separate try blocks: one capture's failure never skips another. */
-        var ensureAll = source.Substring(source.IndexOf("public static async Task EnsureAllAsync", StringComparison.Ordinal));
-        ensureAll = ensureAll.Substring(0, ensureAll.IndexOf("private static async Task EnsureDatabaseScopedAsync", StringComparison.Ordinal));
+        var ensureAll = source.Substring(source.IndexOf("public static async Task<AttentionEnsureFault?> EnsureAllAsync", StringComparison.Ordinal));
+        ensureAll = ensureAll.Substring(0, ensureAll.IndexOf("private static async Task<AttentionEnsureFault?> EnsureDatabaseScopedAsync", StringComparison.Ordinal));
         Assert.Equal(3, ensureAll.Split("catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))").Length - 1);
     }
 

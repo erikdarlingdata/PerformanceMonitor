@@ -21,6 +21,10 @@ public partial class RemoteCollectorService
        never disagree on it. */
     private const string AttentionXeSessionName = AlwaysOnXeSessions.AttentionXeSessionName;
 
+    /* #5640 (L4): the servers whose client-timeout session this run of the app has already dropped and created again for another
+       definition. A second mismatch on the same server is left alone, so a probe that cannot be satisfied never drops every cycle. */
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _attentionDefinitionReplaced = new();
+
     /// <summary>
     /// Ensures the client-timeout XE session (the attention event, #5640) exists and is running. The session comes
     /// from the shared builder (<see cref="AlwaysOnXeSessions"/>), so there is no Lite copy of its DDL: the same statement
@@ -55,7 +59,8 @@ public partial class RemoteCollectorService
 
     /// <summary>
     /// On-prem / Azure MI / AWS RDS: starts the server-scoped client-timeout session when it is stopped, and creates and starts
-    /// it when it is missing, with the statement the shared builder makes.
+    /// it when it is missing, with the statement the shared builder makes. A session of that name with another definition (an
+    /// older definition of our own session, L4) is dropped and created again, once per run of the app.
     /// </summary>
     private async Task EnsureAttentionXeSessionOnPremAsync(SqlConnection connection, ServerConnection server, CancellationToken cancellationToken)
     {
@@ -67,50 +72,47 @@ public partial class RemoteCollectorService
 
             if (result != null)
             {
-                if (result is int isRunning && isRunning == 0)
+                /* #5640 (L4): the name is ours, so another definition under it is an older one of our own session. Without the
+                   event_counter the count is NULL on every read, and without the ring buffer the read returns zero rows as SUCCESS
+                   forever. Dropped and created again once per run of the app, logged once; if the new session still reads as another
+                   definition, it is left alone. */
+                if (result is int mismatch && mismatch == AlwaysOnXeSessions.AttentionDefinitionMismatch)
                 {
-                    /* Session exists but is stopped - start it */
-                    try
+                    if (!_attentionDefinitionReplaced.TryAdd(server.Id, true))
                     {
+                        AppLogger.Debug("XeSession", $"[{server.DisplayName}] The client timeout XE session still has another definition after it was replaced; left as it is");
+                        return;
+                    }
+
+                    AppLogger.Warn("XeSession", $"[{server.DisplayName}] The client timeout XE session {AttentionXeSessionName} has a definition other than this version's (events, actions or targets): dropping it and creating it again");
+                    using var dropCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropSql(), connection);
+                    dropCmd.CommandTimeout = CommandTimeoutSeconds;
+                    await dropCmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+                else
+                {
+                    if (result is int isRunning && isRunning == 0)
+                    {
+                        /* Session exists but is stopped - start it. A failure is not logged here: it propagates to the ensure's catch, which applies the #4964
+                           log-once rule (Warn or Error on the first failing cycle, Debug after it). A line here would repeat at full level every cycle (#5640). */
                         using var startCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerStartSql(), connection);
                         startCmd.CommandTimeout = CommandTimeoutSeconds;
                         await startCmd.ExecuteNonQueryAsync(cancellationToken);
                         AppLogger.Info("XeSession", $"[{server.DisplayName}] Started client timeout XE session");
                     }
-                    catch (SqlException ex)
+                    else
                     {
-                        AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to start client timeout XE session: {ex.Message}");
-                        throw;
+                        AppLogger.Debug("XeSession", $"Client timeout XE session is running on '{server.DisplayName}'");
                     }
+                    return;
                 }
-                else
-                {
-                    AppLogger.Debug("XeSession", $"Client timeout XE session is running on '{server.DisplayName}'");
-                }
-                return;
             }
         }
 
-        try
-        {
-            using var createCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerCreateSql(), connection);
-            createCmd.CommandTimeout = CommandTimeoutSeconds;
-            await createCmd.ExecuteNonQueryAsync(cancellationToken);
-            AppLogger.Info("XeSession", $"[{server.DisplayName}] Created and started client timeout XE session");
-        }
-        catch (SqlException ex)
-        {
-            /* Warn rather than Error when the server simply said no: a denied XE session is a least-privilege
-               posture (#1823), classified as PERMISSIONS upstream. Genuine failures still log at Error. */
-            if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
-            {
-                AppLogger.Warn("XeSession", $"[{server.DisplayName}] Failed to create client timeout XE session: {ex.Message}");
-            }
-            else
-            {
-                AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to create client timeout XE session: {ex.Message}");
-            }
-            throw;
-        }
+        /* No catch here: a failure propagates to the ensure's catch, which logs it once at Warn or Error and then at Debug (#4964). */
+        using var createCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerCreateSql(), connection);
+        createCmd.CommandTimeout = CommandTimeoutSeconds;
+        await createCmd.ExecuteNonQueryAsync(cancellationToken);
+        AppLogger.Info("XeSession", $"[{server.DisplayName}] Created and started client timeout XE session");
     }
 }

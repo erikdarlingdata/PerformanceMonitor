@@ -48,6 +48,9 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
     private const string Deadlock = "deadlock";
     private const string BlockedProcess = "blocked process";
 
+    /* #5640: the client-timeout session shares the server-scoped arm, so it follows the same rule. */
+    private const string Attention = "client timeout";
+
     private readonly string _tempDir;
     private readonly string _configDir;
     private readonly string _dbPath;
@@ -131,6 +134,7 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
         var schedules = new ScheduleManager(_configDir);
         schedules.UpdateSchedule("deadlocks", enabled: true);
         schedules.UpdateSchedule("blocked_process_report", enabled: true);
+        schedules.UpdateSchedule("attention", enabled: true);
 
         var rig = new Rig
         {
@@ -418,7 +422,9 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
     private static Task EnsureOnPremAsync(Rig rig, string session, ServerConnection? server = null) =>
         session == Deadlock
             ? rig.Service.EnsureDeadlockXeSessionAsync(server ?? rig.Server, engineEdition: 3, CancellationToken.None)
-            : rig.Service.EnsureBlockedProcessXeSessionAsync(server ?? rig.Server, engineEdition: 3, CancellationToken.None);
+            : session == Attention
+                ? rig.Service.EnsureAttentionXeSessionAsync(server ?? rig.Server, engineEdition: 3, CancellationToken.None)
+                : rig.Service.EnsureBlockedProcessXeSessionAsync(server ?? rig.Server, engineEdition: 3, CancellationToken.None);
 
     /// <summary>A server-scoped cycle that fails: the collector still gets the exception it records the failure from.</summary>
     private static async Task FailingOnPremCycleAsync(Rig rig, string session, ServerConnection? server = null)
@@ -462,6 +468,7 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
     [Theory]
     [InlineData(Deadlock)]
     [InlineData(BlockedProcess)]
+    [InlineData(Attention)]
     public async Task AServerScopedEnsureThatFailsWithASqlError_LogsOneError_ThenDebug(string session)
     {
         await WithDebugLoggingAsync(async () =>
@@ -492,6 +499,7 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
     [Theory]
     [InlineData(Deadlock)]
     [InlineData(BlockedProcess)]
+    [InlineData(Attention)]
     public async Task AServerScopedEnsureRefusedForPermission_LogsOneWarning_ThenDebug(string session)
     {
         await WithDebugLoggingAsync(async () =>
@@ -574,7 +582,9 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
     }
 
     private static string SessionName(string session) =>
-        session == Deadlock ? DeadlocksCollector.XeSessionName : BlockedProcessReportCollector.XeSessionName;
+        session == Deadlock ? DeadlocksCollector.XeSessionName
+        : session == Attention ? AlwaysOnXeSessions.AttentionXeSessionName
+        : BlockedProcessReportCollector.XeSessionName;
 
     /// <summary>
     /// The collector's own line for a failed ensure follows the ensure's: the first failing cycle logs it at Error, and the

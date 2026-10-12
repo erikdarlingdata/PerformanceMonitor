@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -41,7 +42,10 @@ public enum AlwaysOnXeCatalog
     /// <summary>No row. The catalogs are scoped to what a login can see, so this is not proof the session is absent.</summary>
     Missing = 0,
 
-    /// <summary>A row, but not with the event a deadlock read needs. Never reported for blocked-process sessions.</summary>
+    /// <summary>
+    /// A row, but not with the definition a read needs: for a deadlock session, without its event; for a client-timeout session
+    /// (#5640), with events, actions or targets other than the ones the shared builder makes. Never reported for blocked-process sessions.
+    /// </summary>
     WrongEvent = 1,
 
     /// <summary>A row with the right event.</summary>
@@ -56,6 +60,12 @@ public enum AlwaysOnXeChange
 
     /// <summary>The install created the session it reads.</summary>
     Created,
+
+    /// <summary>
+    /// The install created the client-timeout session without the actions Azure SQL Database was not proved to accept (#5640):
+    /// the first create was refused with error 25744, so the session captures client timeouts without statement text.
+    /// </summary>
+    CreatedWithoutStatementText,
 
     /// <summary>The install started a stopped session by name.</summary>
     Started,
@@ -321,8 +331,8 @@ public static class AlwaysOnXeSessions
     /// (<c>STARTUP_STATE = ON</c>, as it always has); an own session does not (<c>OFF</c>), so a database that restarts does
     /// not bring back a fallback the install may have dropped. Refuses a name that is not the shared name or an own name.
     /// </summary>
-    public static string BuildAzureCreateSql(AlwaysOnXeSessionKind kind, string sessionName) =>
-        BuildAzureCreateDefinitionSql(kind, sessionName) + "\n" + BuildAzureStartSql(kind, sessionName);
+    public static string BuildAzureCreateSql(AlwaysOnXeSessionKind kind, string sessionName, bool withoutUnverifiedActions = false) =>
+        BuildAzureCreateDefinitionSql(kind, sessionName, withoutUnverifiedActions) + "\n" + BuildAzureStartSql(kind, sessionName);
 
     /// <summary>
     /// The create alone, with no start: what a registration with read-only intent sends over a connection without the intent
@@ -330,7 +340,7 @@ public static class AlwaysOnXeSessions
     /// connection, because run state is per replica. A start here would run the session on the primary only. The same
     /// statement <see cref="BuildAzureCreateSql"/> begins with, and it refuses the same names.
     /// </summary>
-    public static string BuildAzureCreateDefinitionSql(AlwaysOnXeSessionKind kind, string sessionName)
+    public static string BuildAzureCreateDefinitionSql(AlwaysOnXeSessionKind kind, string sessionName, bool withoutUnverifiedActions = false)
     {
         RequireName(kind, sessionName);
         var shared = string.Equals(sessionName, SharedNameFor(kind), StringComparison.Ordinal);
@@ -346,7 +356,7 @@ public static class AlwaysOnXeSessions
                 "ADD TARGET package0.ring_buffer\n(\n    SET max_memory = 4096\n)\n",
                 string.Empty),
             AlwaysOnXeSessionKind.Attention => (
-                AttentionEventClause(azure: true),
+                AttentionEventClause(azure: true, withoutUnverifiedActions),
                 AttentionTargets,
                 "    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,\n"),
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
@@ -386,11 +396,30 @@ public static class AlwaysOnXeSessions
     /// </summary>
     internal static readonly string[] AttentionAzureRejectedActions = Array.Empty<string>();
 
-    private static string AttentionEventClause(bool azure)
+    /// <summary>
+    /// The attention actions no Azure SQL Database run has proved (#5640). <c>client_hostname</c> is proved: Microsoft's own
+    /// Azure SQL Database profiler template, <c>Standard_Azure</c> in Azure Data Studio
+    /// (src/sql/workbench/contrib/profiler/browser/profiler.contribution.ts), is an <c>ON DATABASE</c> session whose
+    /// <c>sqlserver.attention</c> event carries <c>sqlserver.client_hostname</c>, <c>client_app_name</c> and <c>session_id</c>.
+    /// <c>sql_text</c> is on no Azure SQL Database session in this repo or in that template, and MS Learn lists no per-action
+    /// table (it points to <c>sys.dm_xe_objects</c>). So a create the engine refuses with error 25744 is retried once without
+    /// these (<see cref="AlwaysOnXeChange.CreatedWithoutStatementText"/>), and the definition probe accepts a session without them.
+    /// </summary>
+    internal static readonly string[] AttentionAzureUnverifiedActions = { "sqlserver.sql_text" };
+
+    /// <summary>The engine's refusal of an action a database-scoped session cannot hold: "The action is not available for Azure SQL Database".</summary>
+    internal const int AzureActionNotAvailableErrorNumber = 25744;
+
+    private static string AttentionEventClause(bool azure, bool withoutUnverifiedActions = false)
     {
         var actions = new List<string>();
         foreach (var action in AttentionActions)
         {
+            if (azure && withoutUnverifiedActions && Array.IndexOf(AttentionAzureUnverifiedActions, action) >= 0)
+            {
+                continue;
+            }
+
             if (!azure || Array.IndexOf(AttentionAzureRejectedActions, action) < 0)
             {
                 actions.Add("        " + action);
@@ -440,20 +469,125 @@ public static class AlwaysOnXeSessions
     public static string BuildAttentionServerStartSql() =>
         "ALTER EVENT SESSION [" + AttentionXeSessionName + "] ON SERVER STATE = START;";
 
+    /// <summary>The drop of the server-scoped client-timeout session (#5640), for a session with another definition. The name is ours.</summary>
+    public static string BuildAttentionServerDropSql() =>
+        "DROP EVENT SESSION [" + AttentionXeSessionName + "] ON SERVER;";
+
+    /// <summary>The <see cref="BuildAttentionServerProbeSql"/> answer for a session that exists with another definition (#5640).</summary>
+    public const int AttentionDefinitionMismatch = 2;
+
     /// <summary>
     /// The presence probe for the server-scoped client-timeout session (#5640): no row when the session does not exist, and
-    /// <c>is_running</c> 1 or 0 when it does. <c>@session_name</c> is the shared name. <paramref name="appTag"/> is the host's
-    /// own comment tag.
+    /// <c>session_state</c> 0 (stopped), 1 (running) or <see cref="AttentionDefinitionMismatch"/> (2: it exists with events, actions or
+    /// targets other than the ones <see cref="BuildAttentionServerCreateSql"/> makes, which is an older definition of our own
+    /// session, since the name is ours). <c>@session_name</c> is the shared name. <paramref name="appTag"/> is the host's own
+    /// comment tag.
     /// </summary>
     public static string BuildAttentionServerProbeSql(string appTag) => @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* " + appTag + @" */
-    is_running = CASE WHEN dxs.name IS NOT NULL THEN 1 ELSE 0 END
+    session_state =
+        CASE
+            WHEN " + AttentionDefinitionMatchPredicate(azure: false, "ses") + @"
+            THEN CASE WHEN dxs.name IS NOT NULL THEN 1 ELSE 0 END
+            ELSE " + AttentionDefinitionMismatch.ToString(CultureInfo.InvariantCulture) + @"
+        END
 FROM sys.server_event_sessions AS ses
 LEFT JOIN sys.dm_xe_sessions AS dxs
   ON dxs.name = ses.name
 WHERE ses.name = @session_name;";
+
+    /// <summary>
+    /// The T-SQL condition that a session's definition is the client-timeout one (#5640): the one <c>attention</c> event, every
+    /// action the builder adds to it and none other, and the <c>event_counter</c> and <c>ring_buffer</c> targets and no other.
+    /// On Azure SQL Database the actions Azure rejects are not required and the unverified ones are optional, because a create the
+    /// engine refused is retried without them. Built from the same lists as the DDL, so the two cannot drift.
+    /// </summary>
+    private static string AttentionDefinitionMatchPredicate(bool azure, string sessionAlias)
+    {
+        var prefix = azure ? "sys.database_event_session" : "sys.server_event_session";
+        var key = sessionAlias + ".event_session_id";
+        var allowed = new List<string>();
+        var required = new List<string>();
+        foreach (var action in AttentionActions)
+        {
+            if (azure && Array.IndexOf(AttentionAzureRejectedActions, action) >= 0)
+            {
+                continue;
+            }
+
+            var bare = "N'" + action.Substring(action.IndexOf('.') + 1) + "'";
+            allowed.Add(bare);
+            if (!azure || Array.IndexOf(AttentionAzureUnverifiedActions, action) < 0)
+            {
+                required.Add(bare);
+            }
+        }
+
+        var allowedList = string.Join(", ", allowed);
+        var requiredList = string.Join(", ", required);
+
+        return @"
+            (
+                EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM " + prefix + @"_events AS e
+                    WHERE e.event_session_id = " + key + @"
+                    AND   e.name = N'attention'
+                )
+                AND NOT EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM " + prefix + @"_events AS e
+                    WHERE e.event_session_id = " + key + @"
+                    AND   e.name <> N'attention'
+                )
+                AND
+                (
+                    SELECT
+                        COUNT_BIG(DISTINCT a.name)
+                    FROM " + prefix + @"_actions AS a
+                    WHERE a.event_session_id = " + key + @"
+                    AND   a.name IN (" + requiredList + @")
+                ) = " + required.Count.ToString(CultureInfo.InvariantCulture) + @"
+                AND NOT EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM " + prefix + @"_actions AS a
+                    WHERE a.event_session_id = " + key + @"
+                    AND   a.name NOT IN (" + allowedList + @")
+                )
+                AND EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM " + prefix + @"_targets AS t
+                    WHERE t.event_session_id = " + key + @"
+                    AND   t.name = N'event_counter'
+                )
+                AND EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM " + prefix + @"_targets AS t
+                    WHERE t.event_session_id = " + key + @"
+                    AND   t.name = N'ring_buffer'
+                )
+                AND NOT EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM " + prefix + @"_targets AS t
+                    WHERE t.event_session_id = " + key + @"
+                    AND   t.name NOT IN (N'event_counter', N'ring_buffer')
+                )
+            )";
+    }
 
     /// <summary>The start of one session by name. Refuses a name that is not the shared name or an own name.</summary>
     public static string BuildAzureStartSql(AlwaysOnXeSessionKind kind, string sessionName)
@@ -529,8 +663,35 @@ SELECT /* " + appTag + @" */
             THEN 1
             ELSE 0
         END;";
-            case AlwaysOnXeSessionKind.BlockedProcess:
             case AlwaysOnXeSessionKind.Attention:
+                /* #5640: present (2) only with the client-timeout definition; another definition under our name is 1, which the
+                   Azure ensure treats as unusable: the install reads its own session and never drops a shared one. */
+                return @"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT /* " + appTag + @" */
+    catalog_state =
+        CASE
+            WHEN NOT EXISTS
+            (
+                SELECT
+                    1/0
+                FROM sys.database_event_sessions AS des
+                WHERE des.name = @session_name
+            )
+            THEN 0
+            WHEN EXISTS
+            (
+                SELECT
+                    1/0
+                FROM sys.database_event_sessions AS des
+                WHERE des.name = @session_name
+                AND   " + AttentionDefinitionMatchPredicate(azure: true, "des") + @"
+            )
+            THEN 2
+            ELSE 1
+        END;";
+            case AlwaysOnXeSessionKind.BlockedProcess:
                 return @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -815,8 +976,8 @@ public static class AlwaysOnXeAzureEnsure
             default:
                 try
                 {
-                    await CreateAsync(database, kind, shared, cancellationToken);
-                    return (true, AlwaysOnXeChange.Created);
+                    var withoutStatementText = await CreateAsync(database, kind, shared, cancellationToken);
+                    return (true, withoutStatementText ? AlwaysOnXeChange.CreatedWithoutStatementText : AlwaysOnXeChange.Created);
                 }
                 catch (Exception ex) when (database.IsAlreadyPresent(ex))
                 {
@@ -857,8 +1018,8 @@ public static class AlwaysOnXeAzureEnsure
 
         try
         {
-            await CreateAsync(database, kind, ownName, cancellationToken);
-            return AlwaysOnXeChange.Created;
+            var withoutStatementText = await CreateAsync(database, kind, ownName, cancellationToken);
+            return withoutStatementText ? AlwaysOnXeChange.CreatedWithoutStatementText : AlwaysOnXeChange.Created;
         }
         catch (Exception ex) when (database.IsAlreadyPresent(ex))
         {
@@ -916,17 +1077,37 @@ public static class AlwaysOnXeAzureEnsure
     /// the session over its own connection, by name: the definition replicates to the replica, and run state is per replica
     /// (#4961). A failure of either is marked for the caps sentence, unless it is the engine's "already there".
     /// </summary>
-    private static async Task CreateAsync(
+    private static async Task<bool> CreateAsync(
         IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, string sessionName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await CreateOnceAsync(database, kind, sessionName, withoutUnverifiedActions: false, cancellationToken);
+            return false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException
+            && kind == AlwaysOnXeSessionKind.Attention
+            && AlwaysOnXeSessions.AttentionAzureUnverifiedActions.Length > 0
+            && database.ErrorNumbers(ex).Contains(AlwaysOnXeSessions.AzureActionNotAvailableErrorNumber))
+        {
+            /* #5640: an action the engine has not been proved to accept was refused (error 25744 refuses the whole create). The
+               session is more use without statement text than not at all: retry once without the unverified actions. */
+            await CreateOnceAsync(database, kind, sessionName, withoutUnverifiedActions: true, cancellationToken);
+            return true;
+        }
+    }
+
+    private static async Task CreateOnceAsync(
+        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, string sessionName, bool withoutUnverifiedActions, CancellationToken cancellationToken)
     {
         if (!database.ReadOnlyIntent)
         {
-            await ExecuteDdlAsync(database, AlwaysOnXeSessions.BuildAzureCreateSql(kind, sessionName), cancellationToken);
+            await ExecuteDdlAsync(database, AlwaysOnXeSessions.BuildAzureCreateSql(kind, sessionName, withoutUnverifiedActions), cancellationToken);
             return;
         }
 
         await ExecuteDdlAsync(
-            database, AlwaysOnXeSessions.BuildAzureCreateDefinitionSql(kind, sessionName), cancellationToken, withoutReadOnlyIntent: true);
+            database, AlwaysOnXeSessions.BuildAzureCreateDefinitionSql(kind, sessionName, withoutUnverifiedActions), cancellationToken, withoutReadOnlyIntent: true);
         await StartByNameAsync(database, kind, sessionName, cancellationToken);
     }
 
