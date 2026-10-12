@@ -456,7 +456,7 @@ public sealed class GuardStageWorkflowTests
         {
             // The script's listing also takes the caller's -ScopeFilter (#5459: the build job runs part of the suite through
             // it), after the Guard exclusion; the exclusion is still the listing's first filter.
-            Assert.Contains("-- -list classes/json @guardFilter @scopeFilter)", run, StringComparison.Ordinal);
+            Assert.Contains("-- -list classes/json @guardFilter @scopeArgs)", run, StringComparison.Ordinal);
         }
         else if (jobKey == "lite-tests")
         {
