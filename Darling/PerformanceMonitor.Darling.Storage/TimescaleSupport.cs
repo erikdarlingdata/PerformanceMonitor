@@ -158,11 +158,14 @@ public static partial class TimescaleSupport
     private const int BackfillTimeoutSeconds = 6 * 60 * 60;
 
     /// <summary>
-    /// The tables converted to hypertables — exactly the shared collector catalog, pinned by
-    /// test so scope can never silently widen to the registry/config/analysis tables (see the
-    /// class remarks for why those stay plain).
+    /// The tables converted to hypertables — the shared collector catalog less the entries that declare
+    /// <see cref="ICollectorSchemaInfo.StaysPlainTable"/> (the attention table, #5640: the 73rd hypertable is a
+    /// grid decision, and its rows are low volume). Pinned by test so scope can never silently widen to the
+    /// registry/config/analysis tables (see the class remarks for why those stay plain) nor silently narrow:
+    /// <c>AttentionPlainTableTests</c> lists the opt-outs.
     /// </summary>
-    public static IReadOnlyList<ICollectorSchemaInfo> HypertableTables => CollectorCatalog.All;
+    public static IReadOnlyList<ICollectorSchemaInfo> HypertableTables { get; } =
+        CollectorCatalog.All.Where(c => !c.StaysPlainTable).ToArray();
 
     /// <summary>
     /// The TRUE number of TimescaleDB hypertables in the store: the collector catalog

@@ -114,6 +114,28 @@ public sealed class ViewerWave3SqlTests
         {
             Assert.Contains(column, v3, StringComparison.Ordinal);
         }
+
+        /* client_app_pattern (#5640) is not a V3 column: V179 adds it, and the viewer's list read is gated on that version. */
+        Assert.Equal(179, ViewerDataService.MuteRuleClientAppMinSchemaVersion);
+        var v179 = PgMigrations.Scripts.Single(m => m.Version == ViewerDataService.MuteRuleClientAppMinSchemaVersion).Sql;
+        Assert.Contains("ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS client_app_pattern text", v179, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MuteRulesSelect_BeforeV179_ReadsATypedNullInPlaceOfClientAppPattern()
+    {
+        /* A store below V179 has no client_app_pattern column, so the list read must not name it (#5640). The two
+           statements differ by exactly that one select-list entry. */
+        var current = ViewerDataService.MuteRulesSelectSql.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var before = ViewerDataService.MuteRulesSelectBeforeClientAppSql.Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Equal(
+            current.Replace("server_id, client_app_pattern\n", "server_id, NULL::text AS client_app_pattern\n", StringComparison.Ordinal),
+            before);
+        Assert.DoesNotContain(", client_app_pattern\nFROM", before, StringComparison.Ordinal);
+
+        var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.MuteRules.cs");
+        Assert.Contains("version < MuteRuleClientAppMinSchemaVersion", source, StringComparison.Ordinal);
+        Assert.Contains("? MuteRulesSelectBeforeClientAppSql", source, StringComparison.Ordinal);
     }
 
     [Fact]

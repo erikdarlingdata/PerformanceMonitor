@@ -91,6 +91,15 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
 
     public override string TargetTable => "attention_events";
 
+    /// <summary>
+    /// A plain table on every store (#5640). The 73rd hypertable is a grid decision (#3035, #3044, #3107: the compression
+    /// band, the worker sizing and the refresh watch lines all derive from the hypertable count), and attention rows are
+    /// low volume: the ring buffer caps the detail at about 1,800 events per read, and a healthy server reads near zero.
+    /// The 30-day retention is the time-sliced DELETE the sweep runs for any table that is not a hypertable. The only
+    /// holder of this opt-out; <c>AttentionPlainTableTests</c> pins it.
+    /// </summary>
+    public override bool StaysPlainTable => true;
+
     public override string PrefixIdColumnName => "attention_event_id";
 
     public override string? WatermarkColumn => "event_time";

@@ -449,7 +449,10 @@ public static class DarlingRetention
                     continue;
                 }
 
-                if (timescaleAvailable)
+                /* #5640: a catalog entry that stays a plain table (the attention table) has no chunks to drop, so on
+                   a TimescaleDB store it takes the same time-sliced DELETE a plain-PostgreSQL store runs, straight
+                   away, instead of a drop_chunks call that fails and warns once per sweep before falling back. */
+                if (timescaleAvailable && !definition.StaysPlainTable)
                 {
                     var dropped = await DropChunksOneAsync(
                         postgres, definition.TargetTable, DropChunksSqlFor(definition, retentionDays),
