@@ -86,7 +86,7 @@ public static class DarlingStoreConnection
     }
 
     /// <summary>
-    /// The text a site prints or logs when a STORE connection string cannot be used (S-8), in place of the
+    /// The text a site prints or logs when a STORE connection string cannot be used, in place of the
     /// exception's own message. Npgsql reports a keyword it cannot set as <c>Couldn't set &lt;keyword&gt;</c>, and
     /// the .NET parser lowercases that keyword. A password with an unquoted <c>;</c> makes the text from that
     /// <c>;</c> to the next <c>=</c> the "keyword", and a password that starts with <c>=</c> puts the whole

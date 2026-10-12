@@ -164,7 +164,7 @@ END $$;
 \set ON_ERROR_STOP on
 DO $$
 DECLARE
-   squatter record;
+   other_holder record;
    unchangeable text;
    remedy text;
 BEGIN
@@ -195,7 +195,7 @@ BEGIN
    -- superuser, not the role running this script and not the database owner holds ADMIN OPTION on it: that role
    -- could reset its password and grant it onward. (A role this run created has no holder but the one running it.)
    -- Plain memberships do not count, and neither does the owner of a first run that a superuser then rotates.
-   FOR squatter IN
+   FOR other_holder IN
       SELECT granted.rolname AS role_name, string_agg(quote_ident(holder.rolname), ', ' ORDER BY holder.rolname) AS holders
       FROM pg_auth_members AS membership
       JOIN pg_roles AS granted ON granted.oid = membership.roleid
@@ -208,7 +208,7 @@ BEGIN
       GROUP BY granted.rolname
       ORDER BY granted.rolname
    LOOP
-      RAISE EXCEPTION 'Role "%" carries the ''darling-managed'' marker, but another login holds ADMIN OPTION on it: %. That login is not a superuser, not the database owner and not the role running this script. It can reset the password of the role or grant the role to other roles, and the marker does not show who made the role. To go on, run this script as that login, which this check leaves out. If more than one login is listed, run the script as one of them after the others lose the option. Or, as a superuser, revoke that ADMIN OPTION (a login that created the role cannot revoke it itself), or drop the role.', squatter.role_name, squatter.holders;
+      RAISE EXCEPTION 'Role "%" carries the ''darling-managed'' marker, but another login holds ADMIN OPTION on it: %. That login is not a superuser, not the database owner and not the role running this script. It can reset the password of the role or grant the role to other roles, and the marker does not show who made the role. To go on, run this script as that login, which this check leaves out. If more than one login is listed, run the script as one of them after the others lose the option. Or, as a superuser, revoke that ADMIN OPTION (a login that created the role cannot revoke it itself), or drop the role.', other_holder.role_name, other_holder.holders;
    END LOOP;
    -- A role that is not a superuser must also be able to change the three roles. If it cannot, each ALTER ROLE ... PASSWORD
    -- below fails, the server writes the failed statement to its log WITH the password, and psql exits 0 unless the caller

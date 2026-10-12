@@ -136,7 +136,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
             Assert.Equal(1, exit);
             Assert.Contains("postgres.connectionString could not be used:", error, StringComparison.Ordinal);
 
-            /* S-8: the keyword Npgsql could not set is named, and the value it was given is not printed. */
+            /* The keyword Npgsql could not set is named, and the value it was given is not printed. */
             Assert.Contains("value for the 'SSL Mode' keyword", error, StringComparison.Ordinal);
             Assert.DoesNotContain("NotARealSslMode", error, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("NotARealSslMode", output, StringComparison.OrdinalIgnoreCase);
@@ -148,7 +148,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     }
 
     /// <summary>
-    /// S-8, every verb that can open a bring-your-own store: a password with an unquoted ';' makes Npgsql report a
+    /// Every verb that can open a bring-your-own store: a password with an unquoted ';' makes Npgsql report a
     /// keyword built out of the password itself (the text from the ';' to the next '=', lowercased), and a password
     /// that starts with '=' puts the whole password there. The verb exits with one and prints no piece of either
     /// password on either stream. The four endpoint toggles are not here for the reason
@@ -189,7 +189,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     [InlineData("--disable-collector", StoreParseFailureFixtures.NegativePortInHost)]
     public async Task ConnectionStringWithAPasswordThatBreaksTheParse_ExitsWithOne_AndNeverEchoesIt(string verb, string connectionString)
     {
-        var root = Directory.CreateTempSubdirectory("darling-cli-s8-fragment-");
+        var root = Directory.CreateTempSubdirectory("darling-cli-parse-fragment-");
         try
         {
             var path = WriteByoConfig(root, connectionString);

@@ -383,7 +383,7 @@ public partial class MainWindow : Window
 
         /* A store string Npgsql cannot parse is a configuration problem to show and log here, not an exception to
            let escape this async void handler: the unhandled-exception log would write the exception's message and
-           its inner exception, and Npgsql's text for a parse failure can quote part of the string (S-8). The text
+           its inner exception, and Npgsql's text for a parse failure can quote part of the string. The text
            shown and logged is the formatter's. */
         if (!ViewerDataService.TryCreate(settings.ConnectionString, _connectionTimeoutSeconds, out var dataService, out var unusable))
         {

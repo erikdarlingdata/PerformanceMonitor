@@ -29,7 +29,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The store connection strings every S-8 test feeds through a parse or a construction step. All values are fake. The
+/// The store connection strings every test in this file feeds through a parse or a construction step. All values are fake. The
 /// first two make Npgsql 10.0.3 report a keyword it cannot set, and the .NET parser lowercases that keyword:
 /// <c>Password=P4SS;W0RD;...</c> makes <c>w0rd;database</c> the "keyword" (an unquoted ';' in the password), and
 /// <c>Password==Zq7Pw;...</c> makes <c>password=zq7pw;database</c> the "keyword" (a password that starts with '=').
@@ -81,7 +81,7 @@ internal static class StoreParseFailureFixtures
 }
 
 /// <summary>
-/// S-8: a store connection string that Npgsql cannot parse must never put part of a value into text that is printed or
+/// A store connection string that Npgsql cannot parse must never put part of a value into text that is printed or
 /// logged. <see cref="DarlingStoreConnection.DescribeParseFailure"/> is the one formatter, and every site that prints
 /// or logs such a failure (the CLI, the service's worker and its two Kestrel hosts, and the viewer) uses it. Every
 /// test here is parse-only: no connection is opened and no store is needed.
@@ -367,7 +367,7 @@ public sealed class DarlingStoreConnectionParseFailureTests
         Assert.Null(ex.InnerException);
         StoreParseFailureFixtures.AssertNoFragment(ex.ToString(), "the exception the host logs (console and Event Log print ToString())");
 
-        var logDir = Directory.CreateTempSubdirectory("darling-s8-worker-").FullName;
+        var logDir = Directory.CreateTempSubdirectory("darling-parse-worker-").FullName;
         try
         {
             using var provider = new DarlingFileLoggerProvider(logDir);

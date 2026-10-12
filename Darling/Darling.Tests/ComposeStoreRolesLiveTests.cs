@@ -692,7 +692,7 @@ public sealed class ComposeStoreRolesLiveTests
     public async Task TheBringYourOwnScript_WhenTheGuardStopsTheRun_LeavesNoPasswordInTheServerLog_Gated()
     {
         var runtimeRoot = RequireRuntime();
-        var root = Directory.CreateTempSubdirectory("darling-s7-log-");
+        var root = Directory.CreateTempSubdirectory("darling-roles-log-");
         var dataDirectory = Path.Combine(root.FullName, "pg");
         var cluster = new DarlingManagedPostgres(
             new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory },
@@ -704,16 +704,16 @@ public sealed class ComposeStoreRolesLiveTests
             var owner = await BootMigratedAsync(cluster, ct);
             await ExecAsync(owner, "ALTER SYSTEM SET log_min_error_statement = 'error'", ct);
             await ExecAsync(owner, "SELECT pg_reload_conf()", ct);
-            await ExecAsync(owner, "CREATE ROLE viewer LOGIN NOSUPERUSER PASSWORD 'PlantedViewerS7'", ct);
+            await ExecAsync(owner, "CREATE ROLE viewer LOGIN NOSUPERUSER PASSWORD 'PlantedViewerR1'", ct);
 
-            var passwords = new[] { "AdminPwGuardS7x", "ViewerPwGuardS7x", "McpPwGuardS7x" };
+            var passwords = new[] { "AdminPwGuardR1x", "ViewerPwGuardR1x", "McpPwGuardR1x" };
             var run = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, passwords, ct);
             Assert.True(run.ExitCode == 3, $"psql exited {run.ExitCode}, not 3.{Environment.NewLine}{run.Error}");
             Assert.Contains("Role \"viewer\" already exists and was not created by Darling", run.Error, StringComparison.Ordinal);
 
             /* The control: a failing statement with a literal is written to the log with that literal. */
-            await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(owner, "SELECT 'LogControlS7' FROM no_such_table_s7", ct));
-            var log = await WaitForServerLogAsync(dataDirectory, new[] { "LogControlS7", "already exists and was not created by Darling" }, ct);
+            await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(owner, "SELECT 'LogControlR1' FROM no_such_table_r1", ct));
+            var log = await WaitForServerLogAsync(dataDirectory, new[] { "LogControlR1", "already exists and was not created by Darling" }, ct);
 
             foreach (var password in passwords)
             {
@@ -741,7 +741,7 @@ public sealed class ComposeStoreRolesLiveTests
     public async Task ANonSuperuserOwner_StopsAtTheGuardWithoutTheSetGrant_AndProvisionsAndRotatesWithIt_Gated()
     {
         var runtimeRoot = RequireRuntime();
-        var root = Directory.CreateTempSubdirectory("darling-s7-owner-");
+        var root = Directory.CreateTempSubdirectory("darling-roles-owner-");
         var dataDirectory = Path.Combine(root.FullName, "pg");
         var cluster = new DarlingManagedPostgres(
             new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory },
@@ -757,7 +757,7 @@ public sealed class ComposeStoreRolesLiveTests
             var byo = await MakeNonSuperuserOwnerAsync(owner, ct);
             await ExecAsync(owner, "SELECT pg_stat_statements_reset()", ct);
 
-            var first = new[] { "AdminPwOwnerS7a", "ViewerPwOwnerS7a", "McpPwOwnerS7a" };
+            var first = new[] { "AdminPwOwnerR1a", "ViewerPwOwnerR1a", "McpPwOwnerR1a" };
             var stopped = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, first, ct);
             Assert.True(stopped.ExitCode == 3, $"psql exited {stopped.ExitCode}, not 3, for an owner that cannot turn utility tracking off.{Environment.NewLine}{stopped.Error}");
             Assert.Contains("pg_stat_statements.track_utility is on", stopped.Error, StringComparison.Ordinal);
@@ -779,7 +779,7 @@ public sealed class ComposeStoreRolesLiveTests
             Assert.Equal("viewer", await CurrentUserAsync(Login(owner, "viewer", first[1]), ct));
             await AssertNoPasswordInStatementStatisticsAsync(owner, first, ct);
 
-            var second = new[] { "AdminPwOwnerS7b", "ViewerPwOwnerS7b", "McpPwOwnerS7b" };
+            var second = new[] { "AdminPwOwnerR1b", "ViewerPwOwnerR1b", "McpPwOwnerR1b" };
             var rotated = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, second, ct);
             Assert.True(rotated.ExitCode == 0, $"psql exited {rotated.ExitCode}.{Environment.NewLine}{rotated.Error}");
             Assert.NotEqual(firstHash, await OwnerScalarAsync<string>(owner, HashSql, ct));
@@ -790,18 +790,18 @@ public sealed class ComposeStoreRolesLiveTests
             /* Adopted roles that picked up attributes and a membership since, run by this owner: it takes back what its own
                privileges allow (CREATEROLE, which it holds and has ADMIN OPTION to change) and says so for the rest
                (CREATEDB, which it does not hold, and a membership granted by a superuser in a role it has no ADMIN OPTION on). */
-            await ExecAsync(owner, "ALTER ROLE viewer CREATEROLE CREATEDB; ALTER ROLE mcp CREATEROLE; CREATE ROLE plain_s7 NOLOGIN; GRANT plain_s7 TO viewer;", ct);
+            await ExecAsync(owner, "ALTER ROLE viewer CREATEROLE CREATEDB; ALTER ROLE mcp CREATEROLE; CREATE ROLE plain_r1 NOLOGIN; GRANT plain_r1 TO viewer;", ct);
             var partial = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, second, ct);
             Assert.True(partial.ExitCode == 0, $"psql exited {partial.ExitCode}.{Environment.NewLine}{partial.Error}");
             Assert.False(await OwnerScalarAsync<bool>(owner, "SELECT bool_or(rolcreaterole) FROM pg_catalog.pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp')", ct),
                 "the owner did not take back CREATEROLE, which its own privileges allow.");
             Assert.Contains("Role \"viewer\" still has the CREATEDB attribute", partial.Error, StringComparison.Ordinal);
-            Assert.Contains("Role \"viewer\" is still a member of \"plain_s7\"", partial.Error, StringComparison.Ordinal);
+            Assert.Contains("Role \"viewer\" is still a member of \"plain_r1\"", partial.Error, StringComparison.Ordinal);
             Assert.True(await OwnerScalarAsync<bool>(owner, "SELECT rolcreatedb FROM pg_catalog.pg_roles WHERE rolname = 'viewer'", ct));
 
             /* A first run by this owner, then a superuser's rotation: the owner holds ADMIN OPTION on the roles it made,
                and it is the database owner, so the guard does not refuse. The superuser's run takes back the rest. */
-            var third = new[] { "AdminPwOwnerS7c", "ViewerPwOwnerS7c", "McpPwOwnerS7c" };
+            var third = new[] { "AdminPwOwnerR1c", "ViewerPwOwnerR1c", "McpPwOwnerR1c" };
             var superuserRun = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, third, ct);
             Assert.True(superuserRun.ExitCode == 0, $"a superuser's rotation after the owner's first run was refused (exit {superuserRun.ExitCode}).{Environment.NewLine}{superuserRun.Error}");
             Assert.Equal("viewer", await CurrentUserAsync(Login(owner, "viewer", third[1]), ct));
@@ -829,7 +829,7 @@ public sealed class ComposeStoreRolesLiveTests
     public async Task TheCarve_CommitsWithItsBlanketGrant_OrNotAtAll_WithOrWithoutStopOnError_Gated()
     {
         var runtimeRoot = RequireRuntime();
-        var root = Directory.CreateTempSubdirectory("darling-s7-carve-");
+        var root = Directory.CreateTempSubdirectory("darling-roles-carve-");
         var cluster = new DarlingManagedPostgres(
             new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = Path.Combine(root.FullName, "pg") },
             NullLogger.Instance, runtimeRoot);
@@ -838,7 +838,7 @@ public sealed class ComposeStoreRolesLiveTests
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
             var ct = timeout.Token;
             var owner = await BootMigratedAsync(cluster, ct);
-            var passwords = new[] { "AdminPwCarveS7", "ViewerPwCarveS7", "McpPwCarveS7" };
+            var passwords = new[] { "AdminPwCarveR1", "ViewerPwCarveR1", "McpPwCarveR1" };
 
             /* 1. Below V131, with the stop on. The run still ends at the script's later routes grant for mcp (exit 3),
                   after the carve has committed. */
@@ -888,10 +888,10 @@ public sealed class ComposeStoreRolesLiveTests
     /// another role granted and one the member granted onward.
     /// </summary>
     [Fact]
-    public async Task ASquattedRole_IsRefused_APlainMembershipIsNot_AndAnAdoptedRoleLosesWhatManagedTakesBack_Gated()
+    public async Task AMarkedRoleAdministeredElsewhere_IsRefused_APlainMembershipIsNot_AndAnAdoptedRoleLosesWhatManagedTakesBack_Gated()
     {
         var runtimeRoot = RequireRuntime();
-        var root = Directory.CreateTempSubdirectory("darling-s7-squat-");
+        var root = Directory.CreateTempSubdirectory("darling-roles-marked-");
         var cluster = new DarlingManagedPostgres(
             new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = Path.Combine(root.FullName, "pg") },
             NullLogger.Instance, runtimeRoot);
@@ -904,30 +904,30 @@ public sealed class ComposeStoreRolesLiveTests
                 "A CREATEROLE login holds ADMIN OPTION on the roles it creates from PostgreSQL 16.");
             const string HashSql = "SELECT coalesce(rolpassword, '') FROM pg_catalog.pg_authid WHERE rolname = 'viewer'";
 
-            /* 1. A squatter pre-creates viewer with the marker. */
-            await ExecAsync(owner, "CREATE ROLE squatter_s7 LOGIN CREATEROLE NOSUPERUSER PASSWORD 'SquatterPwS7'", ct);
-            await ExecAsync(Login(owner, "squatter_s7", "SquatterPwS7"),
+            /* 1. Another login creates viewer with the marker. */
+            await ExecAsync(owner, "CREATE ROLE other_holder_r1 LOGIN CREATEROLE NOSUPERUSER PASSWORD 'OtherHolderPwR1'", ct);
+            await ExecAsync(Login(owner, "other_holder_r1", "OtherHolderPwR1"),
                 "CREATE ROLE viewer LOGIN; COMMENT ON ROLE viewer IS 'darling-managed';", ct);
             Assert.True(await OwnerScalarAsync<bool>(owner,
-                "SELECT bool_or(a.admin_option) FROM pg_catalog.pg_auth_members a JOIN pg_catalog.pg_roles m ON m.oid = a.member JOIN pg_catalog.pg_roles g ON g.oid = a.roleid WHERE m.rolname = 'squatter_s7' AND g.rolname = 'viewer'", ct),
-                "the squatter does not hold ADMIN OPTION on the role it created: this server does not give it one, so the scenario proves nothing.");
-            var squatted = await OwnerScalarAsync<string>(owner, HashSql, ct);
+                "SELECT bool_or(a.admin_option) FROM pg_catalog.pg_auth_members a JOIN pg_catalog.pg_roles m ON m.oid = a.member JOIN pg_catalog.pg_roles g ON g.oid = a.roleid WHERE m.rolname = 'other_holder_r1' AND g.rolname = 'viewer'", ct),
+                "the other login does not hold ADMIN OPTION on the role it created: this server does not give it one, so the scenario proves nothing.");
+            var claimed = await OwnerScalarAsync<string>(owner, HashSql, ct);
 
-            var stopped = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, new[] { "AdminPwSquatS7", "ViewerPwSquatS7", "McpPwSquatS7" }, ct);
-            Assert.True(stopped.ExitCode == 3, $"psql exited {stopped.ExitCode}, not 3: the script did not refuse the squatted role.{Environment.NewLine}{stopped.Error}");
+            var stopped = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, new[] { "AdminPwMarkedR1", "ViewerPwMarkedR1", "McpPwMarkedR1" }, ct);
+            Assert.True(stopped.ExitCode == 3, $"psql exited {stopped.ExitCode}, not 3: the script did not refuse the marked role.{Environment.NewLine}{stopped.Error}");
             Assert.Contains("Role \"viewer\" carries the 'darling-managed' marker", stopped.Error, StringComparison.Ordinal);
-            Assert.Contains("squatter_s7", stopped.Error, StringComparison.Ordinal);
-            Assert.Equal(squatted, await OwnerScalarAsync<string>(owner, HashSql, ct));
+            Assert.Contains("other_holder_r1", stopped.Error, StringComparison.Ordinal);
+            Assert.Equal(claimed, await OwnerScalarAsync<string>(owner, HashSql, ct));
             Assert.False(await RoleExistsAsync(owner, "admin", ct), "the refusal left the admin role behind.");
             Assert.False(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.has_schema_privilege('viewer', 'config', 'USAGE')", ct), "the refused role was granted privileges.");
 
             /* 2. Not refused: the same run once nobody else administers the roles, and a plain membership afterwards. */
-            await ExecAsync(owner, "DROP ROLE viewer; DROP ROLE squatter_s7;", ct);
-            var provisioned = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, new[] { "AdminPwSquatS7b", "ViewerPwSquatS7b", "McpPwSquatS7b" }, ct);
+            await ExecAsync(owner, "DROP ROLE viewer; DROP ROLE other_holder_r1;", ct);
+            var provisioned = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, new[] { "AdminPwMarkedR1b", "ViewerPwMarkedR1b", "McpPwMarkedR1b" }, ct);
             Assert.True(provisioned.ExitCode == 0, $"psql exited {provisioned.ExitCode}.{Environment.NewLine}{provisioned.Error}");
             var provisionedHash = await OwnerScalarAsync<string>(owner, HashSql, ct);
-            await ExecAsync(owner, "CREATE ROLE some_analyst_s7 NOLOGIN; GRANT viewer TO some_analyst_s7;", ct);
-            var rerun = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, new[] { "AdminPwSquatS7c", "ViewerPwSquatS7c", "McpPwSquatS7c" }, ct);
+            await ExecAsync(owner, "CREATE ROLE some_analyst_r1 NOLOGIN; GRANT viewer TO some_analyst_r1;", ct);
+            var rerun = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, new[] { "AdminPwMarkedR1c", "ViewerPwMarkedR1c", "McpPwMarkedR1c" }, ct);
             Assert.True(rerun.ExitCode == 0, $"a plain membership in viewer made the script refuse it (exit {rerun.ExitCode}).{Environment.NewLine}{rerun.Error}");
             Assert.NotEqual(provisionedHash, await OwnerScalarAsync<string>(owner, HashSql, ct));
 
@@ -936,21 +936,21 @@ public sealed class ComposeStoreRolesLiveTests
                 "ALTER ROLE viewer CREATEROLE CREATEDB REPLICATION BYPASSRLS;"
                 + " ALTER ROLE mcp CREATEROLE;"
                 + " GRANT pg_read_all_data TO mcp;"
-                + " CREATE ROLE granter_s7 NOLOGIN; GRANT pg_monitor TO granter_s7 WITH ADMIN OPTION;"
-                + " SET ROLE granter_s7; GRANT pg_monitor TO admin; RESET ROLE;"
+                + " CREATE ROLE granter_r1 NOLOGIN; GRANT pg_monitor TO granter_r1 WITH ADMIN OPTION;"
+                + " SET ROLE granter_r1; GRANT pg_monitor TO admin; RESET ROLE;"
                 + " GRANT pg_signal_backend TO mcp WITH ADMIN OPTION;"
-                + " CREATE ROLE reporting_s7 NOLOGIN;"
-                + " SET ROLE mcp; GRANT pg_signal_backend TO reporting_s7; RESET ROLE;", ct);
+                + " CREATE ROLE reporting_r1 NOLOGIN;"
+                + " SET ROLE mcp; GRANT pg_signal_backend TO reporting_r1; RESET ROLE;", ct);
             Assert.True(await OwnerScalarAsync<bool>(owner, "SELECT bool_or(rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls) FROM pg_catalog.pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp')", ct));
-            var adopted = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, new[] { "AdminPwSquatS7d", "ViewerPwSquatS7d", "McpPwSquatS7d" }, ct);
+            var adopted = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, new[] { "AdminPwMarkedR1d", "ViewerPwMarkedR1d", "McpPwMarkedR1d" }, ct);
             Assert.True(adopted.ExitCode == 0, $"psql exited {adopted.ExitCode}.{Environment.NewLine}{adopted.Error}");
             Assert.False(await OwnerScalarAsync<bool>(
                 owner, "SELECT bool_or(rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls OR rolsuper) FROM pg_catalog.pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp')", ct),
                 "an adopted role kept an attribute managed provisioning takes back.");
             Assert.Equal(0L, await OwnerScalarAsync<long>(
                 owner, "SELECT count(*) FROM pg_catalog.pg_auth_members AS a JOIN pg_catalog.pg_roles AS m ON m.oid = a.member WHERE m.rolname IN ('admin', 'viewer', 'mcp')", ct));
-            Assert.False(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.pg_has_role('reporting_s7', 'pg_signal_backend', 'MEMBER')", ct));
-            Assert.True(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.pg_has_role('some_analyst_s7', 'viewer', 'MEMBER')", ct),
+            Assert.False(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.pg_has_role('reporting_r1', 'pg_signal_backend', 'MEMBER')", ct));
+            Assert.True(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.pg_has_role('some_analyst_r1', 'viewer', 'MEMBER')", ct),
                 "the strip took back a membership IN a script role, which the twin leaves alone.");
         }
         finally
@@ -974,7 +974,7 @@ public sealed class ComposeStoreRolesLiveTests
     public async Task ANonSuperuserOwner_OverRolesASuperuserMade_StopsAtTheGuard_LogsNoPassword_AndPassesWithAdminOption_Gated()
     {
         var runtimeRoot = RequireRuntime();
-        var root = Directory.CreateTempSubdirectory("darling-s7-admin-");
+        var root = Directory.CreateTempSubdirectory("darling-roles-admin-");
         var dataDirectory = Path.Combine(root.FullName, "pg");
         var cluster = new DarlingManagedPostgres(
             new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory },
@@ -991,7 +991,7 @@ public sealed class ComposeStoreRolesLiveTests
             const string HashSql = "SELECT coalesce(rolpassword, '') FROM pg_catalog.pg_authid WHERE rolname = 'viewer'";
 
             /* 1. A superuser's first run makes the roles, and the store then belongs to the non-superuser owner. */
-            var first = new[] { "AdminPwNoAdminS7a", "ViewerPwNoAdminS7a", "McpPwNoAdminS7a" };
+            var first = new[] { "AdminPwNoAdminR1a", "ViewerPwNoAdminR1a", "McpPwNoAdminR1a" };
             var superuserRun = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, first, ct);
             Assert.True(superuserRun.ExitCode == 0, $"psql exited {superuserRun.ExitCode} for the superuser's first run.{Environment.NewLine}{superuserRun.Error}");
             var firstHash = await OwnerScalarAsync<string>(owner, HashSql, ct);
@@ -1003,7 +1003,7 @@ public sealed class ComposeStoreRolesLiveTests
                 "the owner already holds ADMIN OPTION on a role a superuser made, so the scenario proves nothing.");
 
             /* 2. The owner's run with new passwords stops at the guard, sends no password and logs none. */
-            var second = new[] { "AdminPwNoAdminS7b", "ViewerPwNoAdminS7b", "McpPwNoAdminS7b" };
+            var second = new[] { "AdminPwNoAdminR1b", "ViewerPwNoAdminR1b", "McpPwNoAdminR1b" };
             var stopped = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, second, ct);
             Assert.True(stopped.ExitCode == 3, $"psql exited {stopped.ExitCode}, not 3: the owner's run got past the guard.{Environment.NewLine}{stopped.Error}");
             Assert.Contains("does not hold ADMIN OPTION on these roles: admin, mcp, viewer", stopped.Error, StringComparison.Ordinal);
@@ -1011,8 +1011,8 @@ public sealed class ComposeStoreRolesLiveTests
             Assert.Equal(firstHash, await OwnerScalarAsync<string>(owner, HashSql, ct));
             Assert.Equal("viewer", await CurrentUserAsync(Login(owner, "viewer", first[1]), ct));
 
-            await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(owner, "SELECT 'LogControlNoAdminS7' FROM no_such_table_s7", ct));
-            var log = await WaitForServerLogAsync(dataDirectory, new[] { "LogControlNoAdminS7", "does not hold ADMIN OPTION on these roles" }, ct);
+            await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(owner, "SELECT 'LogControlNoAdminR1' FROM no_such_table_r1", ct));
+            var log = await WaitForServerLogAsync(dataDirectory, new[] { "LogControlNoAdminR1", "does not hold ADMIN OPTION on these roles" }, ct);
             foreach (var password in second)
             {
                 Assert.DoesNotContain(password, log, StringComparison.Ordinal);
@@ -1031,14 +1031,14 @@ public sealed class ComposeStoreRolesLiveTests
 
             /* 4. Roles the owner made itself: it holds ADMIN OPTION on them, so its re-run is not stopped and rotates them. */
             await ExecAsync(owner, "DROP OWNED BY admin, viewer, mcp CASCADE; DROP ROLE admin, viewer, mcp;", ct);
-            var third = new[] { "AdminPwNoAdminS7c", "ViewerPwNoAdminS7c", "McpPwNoAdminS7c" };
+            var third = new[] { "AdminPwNoAdminR1c", "ViewerPwNoAdminR1c", "McpPwNoAdminR1c" };
             var created = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, third, ct);
             Assert.True(created.ExitCode == 0, $"psql exited {created.ExitCode} for the owner's own first run.{Environment.NewLine}{created.Error}");
             var thirdHash = await OwnerScalarAsync<string>(owner, HashSql, ct);
             Assert.NotEqual(string.Empty, thirdHash);
             Assert.True(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.pg_has_role('byo', 'viewer', 'MEMBER WITH ADMIN OPTION')", ct),
                 "the owner does not hold ADMIN OPTION on the role it created.");
-            var fourth = new[] { "AdminPwNoAdminS7d", "ViewerPwNoAdminS7d", "McpPwNoAdminS7d" };
+            var fourth = new[] { "AdminPwNoAdminR1d", "ViewerPwNoAdminR1d", "McpPwNoAdminR1d" };
             var rerun = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, fourth, ct);
             Assert.True(rerun.ExitCode == 0, $"the owner's re-run over roles it created was stopped (exit {rerun.ExitCode}).{Environment.NewLine}{rerun.Error}");
             Assert.DoesNotContain("ADMIN OPTION on these roles", rerun.Error, StringComparison.Ordinal);
@@ -1064,7 +1064,7 @@ public sealed class ComposeStoreRolesLiveTests
     public async Task ARunnerThatCannotChangeTheRoles_StopsAtTheGuard_AndLogsNoPassword_ForEachReason_Gated()
     {
         var runtimeRoot = RequireRuntime();
-        var root = Directory.CreateTempSubdirectory("darling-s7-cannot-");
+        var root = Directory.CreateTempSubdirectory("darling-roles-cannot-");
         var dataDirectory = Path.Combine(root.FullName, "pg");
         var cluster = new DarlingManagedPostgres(
             new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory },
@@ -1079,7 +1079,7 @@ public sealed class ComposeStoreRolesLiveTests
             await ExecAsync(owner, "SELECT pg_reload_conf()", ct);
             const string HashSql = "SELECT coalesce(rolpassword, '') FROM pg_catalog.pg_authid WHERE rolname = 'viewer'";
 
-            var first = new[] { "AdminPwCannotS7a", "ViewerPwCannotS7a", "McpPwCannotS7a" };
+            var first = new[] { "AdminPwCannotR1a", "ViewerPwCannotR1a", "McpPwCannotR1a" };
             var superuserRun = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, first, ct);
             Assert.True(superuserRun.ExitCode == 0, $"psql exited {superuserRun.ExitCode} for the superuser's first run.{Environment.NewLine}{superuserRun.Error}");
             var firstHash = await OwnerScalarAsync<string>(owner, HashSql, ct);
@@ -1087,15 +1087,15 @@ public sealed class ComposeStoreRolesLiveTests
             var database = new NpgsqlConnectionStringBuilder(owner).Database!;
             await ExecAsync(owner,
                 "ALTER ROLE byo SET pg_stat_statements.track_utility = off;"
-                + " CREATE ROLE plain_s7 LOGIN NOSUPERUSER PASSWORD 'PlainPwS7';"
-                + " ALTER ROLE plain_s7 SET pg_stat_statements.track_utility = off;"
-                + $" GRANT CONNECT ON DATABASE \"{database}\" TO plain_s7;", ct);
-            var plain = Login(owner, "plain_s7", "PlainPwS7");
+                + " CREATE ROLE plain_r1 LOGIN NOSUPERUSER PASSWORD 'PlainPwR1';"
+                + " ALTER ROLE plain_r1 SET pg_stat_statements.track_utility = off;"
+                + $" GRANT CONNECT ON DATABASE \"{database}\" TO plain_r1;", ct);
+            var plain = Login(owner, "plain_r1", "PlainPwR1");
             var passwords = new List<string>();
 
             async Task AssertStopAsync(string login, string reason, string expected, string tag)
             {
-                var words = new[] { $"AdminPw{tag}S7", $"ViewerPw{tag}S7", $"McpPw{tag}S7" };
+                var words = new[] { $"AdminPw{tag}R1", $"ViewerPw{tag}R1", $"McpPw{tag}R1" };
                 passwords.AddRange(words);
                 var run = await RunFilledScriptAsync(runtimeRoot, root.FullName, login, null, words, ct);
                 Assert.True(run.ExitCode == 3, $"psql exited {run.ExitCode}, not 3, for {reason}.{Environment.NewLine}{run.Error}");
@@ -1121,9 +1121,9 @@ public sealed class ComposeStoreRolesLiveTests
                 await ExecAsync(owner, "ALTER ROLE mcp NOREPLICATION", ct);
             }
 
-            await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(owner, "SELECT 'LogControlCannotS7' FROM no_such_table_s7", ct));
+            await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(owner, "SELECT 'LogControlCannotR1' FROM no_such_table_r1", ct));
             var log = await WaitForServerLogAsync(dataDirectory,
-                new[] { "LogControlCannotS7", "is not a superuser and does not have CREATEROLE", "These roles are superusers: viewer" }, ct);
+                new[] { "LogControlCannotR1", "is not a superuser and does not have CREATEROLE", "These roles are superusers: viewer" }, ct);
             foreach (var password in passwords)
             {
                 Assert.DoesNotContain(password, log, StringComparison.Ordinal);
@@ -1148,7 +1148,7 @@ public sealed class ComposeStoreRolesLiveTests
     public async Task ASuperuserRun_WithStatementLoggingOn_LeavesNoPasswordInTheServerLog_Gated()
     {
         var runtimeRoot = RequireRuntime();
-        var root = Directory.CreateTempSubdirectory("darling-s7-logging-");
+        var root = Directory.CreateTempSubdirectory("darling-roles-logging-");
         var dataDirectory = Path.Combine(root.FullName, "pg");
         var cluster = new DarlingManagedPostgres(
             new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory },
@@ -1163,10 +1163,10 @@ public sealed class ComposeStoreRolesLiveTests
 
             var phases = new[]
             {
-                (Tag: "Ddl", Settings: "SET log_statement = 'ddl'", Control: "CREATE ROLE control_ddl_s7 NOLOGIN PASSWORD 'LogControlDdlS7'", Logged: "LogControlDdlS7"),
-                (Tag: "Dur", Settings: "SET log_min_duration_statement = 0", Control: "SELECT 'LogControlDurS7'", Logged: "LogControlDurS7"),
-                (Tag: "Smp", Settings: "SET log_min_duration_sample = 0", Control: "SELECT 'LogControlSmpS7'", Logged: "LogControlSmpS7"),
-                (Tag: "Trn", Settings: "SET log_transaction_sample_rate = 1", Control: "SELECT 'LogControlTrnS7'", Logged: "LogControlTrnS7"),
+                (Tag: "Ddl", Settings: "SET log_statement = 'ddl'", Control: "CREATE ROLE control_ddl_r1 NOLOGIN PASSWORD 'LogControlDdlR1'", Logged: "LogControlDdlR1"),
+                (Tag: "Dur", Settings: "SET log_min_duration_statement = 0", Control: "SELECT 'LogControlDurR1'", Logged: "LogControlDurR1"),
+                (Tag: "Smp", Settings: "SET log_min_duration_sample = 0", Control: "SELECT 'LogControlSmpR1'", Logged: "LogControlSmpR1"),
+                (Tag: "Trn", Settings: "SET log_transaction_sample_rate = 1", Control: "SELECT 'LogControlTrnR1'", Logged: "LogControlTrnR1"),
             };
             var passwords = new List<string>();
             var expected = new List<string>();
@@ -1185,7 +1185,7 @@ public sealed class ComposeStoreRolesLiveTests
                 Assert.True(control.ExitCode == 0, $"the {phase.Tag} control statement failed.{Environment.NewLine}{control.Error}");
                 expected.Add(phase.Logged);
 
-                var words = new[] { $"AdminPwLog{phase.Tag}S7", $"ViewerPwLog{phase.Tag}S7", $"McpPwLog{phase.Tag}S7" };
+                var words = new[] { $"AdminPwLog{phase.Tag}R1", $"ViewerPwLog{phase.Tag}R1", $"McpPwLog{phase.Tag}R1" };
                 passwords.AddRange(words);
                 var run = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, words, ct);
                 Assert.True(run.ExitCode == 0, $"psql exited {run.ExitCode} in the {phase.Tag} run.{Environment.NewLine}{run.Error}");
@@ -1228,7 +1228,7 @@ public sealed class ComposeStoreRolesLiveTests
     {
         var database = new NpgsqlConnectionStringBuilder(superuser).Database!;
         await ExecAsync(superuser,
-            "CREATE ROLE byo LOGIN CREATEROLE NOSUPERUSER PASSWORD 'ByoOwnerPwS7';"
+            "CREATE ROLE byo LOGIN CREATEROLE NOSUPERUSER PASSWORD 'ByoOwnerPwR1';"
             + $" ALTER DATABASE \"{database}\" OWNER TO byo;"
             + " ALTER SCHEMA collect OWNER TO byo; ALTER SCHEMA config OWNER TO byo;"
             + @" DO $$
@@ -1245,7 +1245,7 @@ BEGIN
    END LOOP;
 END $$;
 ALTER ROLE byo SET pg_stat_statements.track_utility = on;", ct);
-        return Login(superuser, "byo", "ByoOwnerPwS7");
+        return Login(superuser, "byo", "ByoOwnerPwR1");
     }
 
     /// <summary>No statement pg_stat_statements holds names one of the passwords.</summary>

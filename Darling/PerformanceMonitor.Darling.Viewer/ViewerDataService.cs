@@ -501,7 +501,7 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Builds the data service, or says why the store connection string cannot be used (S-8). The constructor
+    /// Builds the data service, or says why the store connection string cannot be used. The constructor
     /// throws when Npgsql cannot use the string, and the caller (<c>MainWindow.OnLoaded</c>, an <c>async void</c>
     /// handler) let that escape into the dispatcher's unhandled-exception log, which writes the exception's message
     /// and its inner exception. Npgsql's text for that can quote part of the string (a password with an unquoted ';'

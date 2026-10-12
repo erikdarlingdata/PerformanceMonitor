@@ -274,7 +274,7 @@ public sealed class DarlingCollectorToggleExitCodeTests
             Assert.Equal(UsageOrConfig, exit);
             Assert.Contains("postgres.connectionString could not be used:", error, StringComparison.Ordinal);
 
-            /* S-8: the message names the keyword Npgsql could not set and never the value it was given. */
+            /* The message names the keyword Npgsql could not set and never the value it was given. */
             Assert.Contains("value for the 'SSL Mode' keyword", error, StringComparison.Ordinal);
             Assert.DoesNotContain("NotARealSslMode", error, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("NotARealSslMode", output, StringComparison.OrdinalIgnoreCase);
@@ -285,7 +285,7 @@ public sealed class DarlingCollectorToggleExitCodeTests
         }
     }
 
-    /// <summary>S-8: a password with an unquoted ';' (or one that starts with '=') makes Npgsql report a keyword built
+    /// <summary>A password with an unquoted ';' (or one that starts with '=') makes Npgsql report a keyword built
     /// out of the password itself. The verb exits with the usage code and prints neither piece of the password on
     /// either stream. Both collector verbs share one body, and the theory covers both.</summary>
     [Theory]
@@ -296,7 +296,7 @@ public sealed class DarlingCollectorToggleExitCodeTests
     public async Task ConnectionStringWithAPasswordThatBreaksTheParse_ExitsWithTheUsageCode_AndNeverEchoesIt(
         bool enable, string connectionString)
     {
-        var root = Directory.CreateTempSubdirectory("darling-toggle-s8-fragment-");
+        var root = Directory.CreateTempSubdirectory("darling-toggle-parse-fragment-");
         try
         {
             var path = WriteConfig(root, PostgresBlock(connectionString));
@@ -363,7 +363,7 @@ public sealed class DarlingCollectorToggleExitCodeTests
             Assert.Equal(DarlingCliCommands.CheckSettingsExitCode.ConfigError, exit);
             Assert.Contains("postgres.connectionString could not be used:", error.ToString(), StringComparison.Ordinal);
 
-            /* S-8: the keyword is named, and the value Npgsql was given is not. */
+            /* The keyword is named, and the value Npgsql was given is not. */
             Assert.Contains("value for the 'SSL Mode' keyword", error.ToString(), StringComparison.Ordinal);
             Assert.DoesNotContain("NotARealSslMode", error.ToString(), StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("NotARealSslMode", output.ToString(), StringComparison.OrdinalIgnoreCase);
@@ -374,14 +374,14 @@ public sealed class DarlingCollectorToggleExitCodeTests
         }
     }
 
-    /// <summary>S-8: <c>--check-settings</c> with a password that breaks the parse exits with its config code and
+    /// <summary><c>--check-settings</c> with a password that breaks the parse exits with its config code and
     /// prints no piece of the password on either stream.</summary>
     [Theory]
     [InlineData(StoreParseFailureFixtures.SemicolonInPassword)]
     [InlineData(StoreParseFailureFixtures.LeadingEqualsInPassword)]
     public async Task CheckSettings_WithAPasswordThatBreaksTheParse_ExitsWithTheConfigCode_AndNeverEchoesIt(string connectionString)
     {
-        var root = Directory.CreateTempSubdirectory("darling-checksettings-s8-fragment-");
+        var root = Directory.CreateTempSubdirectory("darling-checksettings-parse-fragment-");
         try
         {
             var path = WriteConfigWithAServer(root, PostgresBlock(connectionString));
