@@ -409,7 +409,13 @@ LIMIT 1";
            same reason. Carried RAW rather than resolved so the payload builder can say which of the knob's two
            homes decided (DarlingAlertSettings.ResolveUncorroboratedRoute takes this beside the published file
            value) and so a store whose CHECK was dropped reports the same fall-through the service applied. */
-        string? AnalysisUncorroboratedRoute);
+        string? AnalysisUncorroboratedRoute,
+        /* #5641 (V177): the Runnable Queue alert's switch and its two bars (runnable tasks per scheduler, 5-minute
+           average), NOT NULL in the store. APPENDED, same reason. Carried as stored: the payload reports them
+           through RunnableQueueEvaluator.ClampBars, the way the engine reads them. */
+        bool RunnableQueueEnabled,
+        int RunnableQueueWarningPerScheduler,
+        int RunnableQueueCriticalPerScheduler);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -443,7 +449,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        fleet_sweep_enabled, fleet_sweep_interval_minutes,
        self_disk_free_warn_gb,
        long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins,
-       analysis_uncorroborated_route
+       analysis_uncorroborated_route,
+       runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -502,7 +509,9 @@ WHERE id = 1";
             reader.IsDBNull(68) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(68),
             /* #3712 (V137): the route knob's store half at 69 — NULL is the expected reading on every store that
                has not had a route written, not a mid-migration guard. */
-            reader.IsDBNull(69) ? null : reader.GetString(69));
+            reader.IsDBNull(69) ? null : reader.GetString(69),
+            /* #5641 (V177): the Runnable Queue switch and bars at 70-72. */
+            reader.GetBoolean(70), reader.GetInt32(71), reader.GetInt32(72));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

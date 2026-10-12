@@ -370,6 +370,18 @@
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <!-- #5641: the Runnable Queue alert grades the 5-minute AVERAGE of runnable tasks per scheduler (at least 3
+                         samples). Warning and Critical are runnable tasks per scheduler; Critical never sits below Warning. -->
+                    <CheckBox x:Name="AlertRunnableQueueCheckBox" Content="Runnable queue (runnable tasks per scheduler, 5-minute average) — Warning at" VerticalAlignment="Center"
+                              Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertRunnableQueueWarningBox" Width="45" Text="8" Margin="6,0,0,0" VerticalAlignment="Center"
+                             ToolTip="Warning bar: average runnable tasks per scheduler over 5 minutes (at least 1). Default 8."/>
+                    <TextBlock Text="Critical at" VerticalAlignment="Center" Margin="8,0,0,0"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBox x:Name="AlertRunnableQueueCriticalBox" Width="45" Text="16" Margin="6,0,0,0" VerticalAlignment="Center"
+                             ToolTip="Critical bar: average runnable tasks per scheduler over 5 minutes. Never below the Warning bar. Default 16."/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertLongRunningQueryCheckBox" Content="Long-running queries over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertLongRunningQueryThresholdBox" Width="45" Text="30" Margin="6,0,0,0" VerticalAlignment="Center"/>
@@ -975,7 +987,7 @@
                     <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" /> — Alert / Warning (Blocking, Long-Running Queries, tempdb, Jobs)
                 </TextBlock>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                    <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" /> — Warning (High CPU)
+                    <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" /> — Warning (High CPU, Runnable Queue)
                 </TextBlock>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
                     <Run Foreground="#16A34A" FontWeight="Bold" Text="&#x25A0; Green" /> — Resolved (Server Restored)
