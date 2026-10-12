@@ -17,6 +17,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -211,13 +212,200 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
 
     // ── The cap and the relation ──
 
+    /// <summary>One failed step-0 outcome that ran at <paramref name="runUtc"/> (stored on the server's wall clock), in <paramref name="category"/>.</summary>
+    private async Task SeedFailureAsync(int serverId, int offsetMinutes, DateTime runUtc, DateTime collectedUtc, string category)
+    {
+        var connection = await SeedConnectionAsync();
+        using var readLock = _duckDb.AcquireReadLock();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO job_history
+    (job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name,
+     job_enabled, category_name, step_id, step_name, run_status, run_status_desc, run_datetime,
+     run_duration_seconds, retries_attempted, message)
+VALUES
+    ($1, $2, $3, $4, $5, 'quiet_failure', 'quiet_failure', TRUE, $6, 0, '(Job outcome)', 0, 'The job failed.', $7, 30, 0, NULL)";
+        var id = _nextId++;
+        cmd.Parameters.Add(new DuckDBParameter { Value = id });
+        cmd.Parameters.Add(new DuckDBParameter { Value = collectedUtc });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = $"S{serverId}" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = id });
+        cmd.Parameters.Add(new DuckDBParameter { Value = category });
+        cmd.Parameters.Add(new DuckDBParameter { Value = Wall(runUtc, offsetMinutes) });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// #5703: the row cap keeps the newest runs of the whole fleet, so a busy server's latest runs fill it and a filter applied to those
+    /// rows afterwards never saw an older failure on a quieter server: All Servers lost a failure the single-server grid showed. Status
+    /// and Category are applied in the read, ahead of the cap, so the fleet read holds what the quiet server's own read holds.
+    /// </summary>
+    [Fact]
+    public async Task AllServers_WithAStatusOrCategoryFilter_KeepsTheQuietServersOlderFailure_ThatTheFleetCapPushedOut()
+    {
+        await SeedClockAsync(ServerA, OffsetA);
+        await SeedClockAsync(ServerB, OffsetB);
+
+        /* Server B is busy: 120 successful outcomes a minute apart, the newest just now. Server A has one failure two days ago. */
+        await SeedPageAsync(ServerB, OffsetB, 120, _end.AddMinutes(-1), _end);
+        await SeedFailureAsync(ServerA, OffsetA, _end.AddDays(-2), _end, "Quiet category");
+
+        var service = new LocalDataService(_duckDb);
+        const int cap = 50;
+
+        /* The old shape: the fleet read with no filter is the busy server's newest 50 runs, and a client-side Failed filter finds nothing. */
+        var (unfiltered, _) = await service.GetJobHistoryWithClocksAsync(Start, cap, null);
+        Assert.Equal(cap, unfiltered.Count);
+        Assert.All(unfiltered, r => Assert.Equal(ServerB, r.ServerId));
+        Assert.DoesNotContain(unfiltered, r => r.RunStatus == 0);
+
+        /* The quiet server's own read shows the failure; the fleet read with the Failed status holds exactly that. */
+        var (one, _) = await service.GetJobHistoryWithClocksAsync(Start, cap, ServerA, runStatus: 0);
+        var (fleet, _) = await service.GetJobHistoryWithClocksAsync(Start, cap, null, runStatus: 0);
+        Assert.Equal(new[] { "quiet_failure" }, one.Select(r => r.JobName).ToArray());
+        Assert.Equal(one.Select(r => r.JobName).ToArray(), fleet.Select(r => r.JobName).ToArray());
+        Assert.Equal(ServerA, Assert.Single(fleet).ServerId);
+
+        /* Category is exact and ignores case; both filters together; a filter that matches nothing; and a finished range's end composes. */
+        var (byCategory, _) = await service.GetJobHistoryWithClocksAsync(Start, cap, null, category: "QUIET CATEGORY");
+        Assert.Equal(new[] { "quiet_failure" }, byCategory.Select(r => r.JobName).ToArray());
+        var (both, _) = await service.GetJobHistoryWithClocksAsync(Start, cap, null, runStatus: 0, category: "Quiet category");
+        Assert.Single(both);
+        var (none, _) = await service.GetJobHistoryWithClocksAsync(Start, cap, null, runStatus: 1, category: "Quiet category");
+        Assert.Empty(none);
+        var (ended, _) = await service.GetJobHistoryWithClocksAsync(Start, cap, null, windowEndUtc: _end.AddDays(-1), runStatus: 0);
+        Assert.Equal(new[] { "quiet_failure" }, ended.Select(r => r.JobName).ToArray());
+    }
+
+    /// <summary>
+    /// #5703 (round 1): at All servers / All categories the grid's read holds only the busy server's newest runs, so the Server and
+    /// Category drop-downs, built from those rows alone, did not offer the quiet server or its category until a Status filter surfaced
+    /// them. They now merge in the configured servers (the shell's snapshot) and a category read of its own that the row cap does not
+    /// touch.
+    /// </summary>
+    [Fact]
+    public async Task AllServersAllCategories_OffersTheQuietServerAndItsCategory_ThatTheFleetCapLeftOutOfTheRows()
+    {
+        await SeedClockAsync(ServerA, OffsetA);
+        await SeedClockAsync(ServerB, OffsetB);
+        await SeedPageAsync(ServerB, OffsetB, 120, _end.AddMinutes(-1), _end);
+        await SeedFailureAsync(ServerA, OffsetA, _end.AddDays(-2), _end, "Quiet category");
+
+        var service = new LocalDataService(_duckDb);
+        var (rows, _) = await service.GetJobHistoryWithClocksAsync(Start, 50, null);
+        Assert.All(rows, r => Assert.Equal(ServerB, r.ServerId));
+        Assert.DoesNotContain(rows, r => r.CategoryName == "Quiet category");
+
+        /* The category read is the window's, not the cap's. */
+        var categories = await service.GetJobHistoryCategoriesAsync(Start);
+        Assert.Contains("Quiet category", categories);
+        Assert.Contains("Uncategorized (Local)", categories);
+
+        /* The choices the tab offers at All / All: the rows, the configured servers, the category read. */
+        var servers = JobHistoryFilterChoices.MergeServers(
+            [],
+            [new JobHistoryFilterChoices.ServerChoice(ServerA, "quiet"), new JobHistoryFilterChoices.ServerChoice(ServerB, "busy")],
+            rows.Select(r => new JobHistoryFilterChoices.ServerChoice(r.ServerId, r.ServerName)));
+        Assert.Contains(servers, s => s.ServerId == ServerA);
+        Assert.Contains("Quiet category", JobHistoryFilterChoices.MergeCategories([], categories, rows.Select(r => r.CategoryName)));
+
+        /* The window bounds the category read: from one day ago the failure is out; a range that ended three days ago holds neither category. */
+        Assert.DoesNotContain("Quiet category", await service.GetJobHistoryCategoriesAsync(_end.AddDays(-1)));
+        Assert.DoesNotContain("Quiet category", await service.GetJobHistoryCategoriesAsync(Start, _end.AddDays(-3)));
+        Assert.Contains("Quiet category", await service.GetJobHistoryCategoriesAsync(Start, _end.AddDays(-1)));
+    }
+
+    /// <summary>
+    /// #5703 (review bot): the per-server read numbers its optional parameters by position ($5 is the end bound when the range ended,
+    /// then Status, then Category), so the Category placeholder is $7 with an end and a Status and $6 with an end alone. Each
+    /// combination is run on DuckDB and must return exactly the rows its filters name.
+    /// </summary>
+    [Fact]
+    public async Task AFinishedRange_WithStatusAndCategory_OrCategoryAlone_ReturnsExactlyTheMatchingRuns()
+    {
+        await SeedClockAsync(ServerA, OffsetA);
+        await SeedClockAsync(ServerB, OffsetB);
+
+        /* In the range (it ended a day ago): a failure in "Quiet category" and one in "Other category" on server A, and server B's
+           successes in "Uncategorized (Local)". After its end: a newer "Quiet category" failure, which the end bound keeps out. */
+        await SeedFailureAsync(ServerA, OffsetA, _end.AddDays(-2), _end, "Quiet category");
+        await SeedFailureAsync(ServerA, OffsetA, _end.AddDays(-2).AddHours(-1), _end, "Other category");
+        await SeedFailureAsync(ServerA, OffsetA, _end.AddHours(-5), _end, "Quiet category");
+        await SeedPageAsync(ServerB, OffsetB, 30, _end.AddDays(-1).AddMinutes(-30), _end);
+
+        var service = new LocalDataService(_duckDb);
+        var rangeEnd = _end.AddDays(-1);
+        const int cap = 50;
+
+        async Task<List<(int ServerId, string? Category, int Status, DateTime RunUtc)>> ReadAsync(int? server, int? status, string? category) =>
+            (await service.GetJobHistoryWithClocksAsync(Start, cap, server, windowEndUtc: rangeEnd, runStatus: status, category: category))
+                .Rows.Select(r => (r.ServerId, r.CategoryName, r.RunStatus, r.RunDateTimeUtc!.Value)).ToList();
+
+        /* End + status + category ($6 and $7): the one failure in the category inside the range. */
+        var statusAndCategory = await ReadAsync(null, 0, "quiet category");
+        var failure = Assert.Single(statusAndCategory);
+        Assert.Equal((ServerA, "Quiet category", 0), (failure.ServerId, failure.Category, failure.Status));
+        Assert.True(failure.RunUtc <= rangeEnd, "the run after the range's end must not be read");
+
+        /* The same on one server. */
+        Assert.Single(await ReadAsync(ServerA, 0, "Quiet category"));
+        Assert.Empty(await ReadAsync(ServerB, 0, "Quiet category"));
+
+        /* End + category alone ($6): the category's runs inside the range, whatever their status. */
+        var byCategory = await ReadAsync(null, null, "Quiet category");
+        Assert.Equal(statusAndCategory, byCategory);
+        var other = Assert.Single(await ReadAsync(null, null, "OTHER CATEGORY"));
+        Assert.Equal("Other category", other.Category);
+        Assert.Equal(30, (await ReadAsync(null, null, "Uncategorized (Local)")).Count);
+
+        /* A status that the category never had, and a category nobody has, give nothing. */
+        Assert.Empty(await ReadAsync(null, 1, "Quiet category"));
+        Assert.Empty(await ReadAsync(null, 0, "No such category"));
+
+        /* End + status alone ($6): both failures in the range, and none of server B's successes. */
+        Assert.Equal(new[] { "Other category", "Quiet category" }, (await ReadAsync(null, 0, null)).Select(r => r.Category!).Order().ToArray());
+    }
+
+    /// <summary>
+    /// #5703 (review bot): the Category choices are the picked server's. At All Servers they hold every server's categories; with one
+    /// server picked, only that server's, so a pick never gives an empty grid. The server's parameter follows the end bound's ($3 with
+    /// an end, $2 without).
+    /// </summary>
+    [Fact]
+    public async Task TheCategoryChoices_AreThePickedServers_AndFleetWideAtAllServers()
+    {
+        await SeedClockAsync(ServerA, OffsetA);
+        await SeedClockAsync(ServerB, OffsetB);
+        await SeedFailureAsync(ServerA, OffsetA, _end.AddDays(-2), _end, "Quiet category");
+        await SeedFailureAsync(ServerA, OffsetA, _end.AddHours(-5), _end, "Recent category");
+        await SeedPageAsync(ServerB, OffsetB, 5, _end.AddMinutes(-1), _end);
+
+        var service = new LocalDataService(_duckDb);
+
+        Assert.Equal(
+            new[] { "Quiet category", "Recent category", "Uncategorized (Local)" },
+            (await service.GetJobHistoryCategoriesAsync(Start)).ToArray());
+        Assert.Equal(
+            new[] { "Quiet category", "Recent category", "Uncategorized (Local)" },
+            (await service.GetJobHistoryCategoriesAsync(Start, null, null)).ToArray());
+        Assert.Equal(new[] { "Quiet category", "Recent category" }, (await service.GetJobHistoryCategoriesAsync(Start, null, ServerA)).ToArray());
+        Assert.Equal(new[] { "Uncategorized (Local)" }, (await service.GetJobHistoryCategoriesAsync(Start, null, ServerB)).ToArray());
+
+        /* With a range end the server's parameter is $3. */
+        var rangeEnd = _end.AddDays(-1);
+        Assert.Equal(new[] { "Quiet category" }, (await service.GetJobHistoryCategoriesAsync(Start, rangeEnd, ServerA)).ToArray());
+        Assert.Empty(await service.GetJobHistoryCategoriesAsync(Start, rangeEnd, ServerB));
+        Assert.Empty(await service.GetJobHistoryCategoriesAsync(Start, rangeEnd, 99999));
+    }
+
     [Fact]
     public void TheCap_IsThe2000TheReadTakes_AndTheNoteStepGetsTheSameConstant()
     {
         Assert.Equal(2000, JobHistoryTab.RowCap);
 
         var tab = StripComments(File.ReadAllText(RepoFile("Lite", "Controls", "JobHistoryTab.xaml.cs")).Replace("\r\n", "\n"));
-        Assert.Single(Regex.Matches(tab, @"GetJobHistoryWithClocksAsync\(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc\)"));
+        Assert.Single(Regex.Matches(tab, @"GetJobHistoryWithClocksAsync\(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc, statusFilter, categoryFilter\)"));
         Assert.Single(Regex.Matches(tab, @"ServerTab\.CappedGridBannerAsync\(runTimes, RowCap,"));
     }
 
@@ -562,25 +750,58 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
         Assert.Single(Regex.Matches(load, @"var nowUtc = DateTime\.UtcNow;"));
         Assert.Single(Regex.Matches(load, @"var \(startUtc, rangeEndUtc\) = LiteTimeRange\.BoundsOf\(RangePicker, 24, nowUtc\);"));
         Assert.Empty(Regex.Matches(load, @"DateTime\.UtcNow\.AddHours"));
-        Assert.Single(Regex.Matches(load, @"_dataService\.GetJobHistoryWithClocksAsync\(startUtc,\s*RowCap,\s*serverId,\s*openTabClocks,\s*rangeEndUtc\)"));
+        /* #5703: the read takes the tab's Status and Category, so the row cap counts only the runs the grid shows. */
+        Assert.Single(Regex.Matches(load, @"_dataService\.GetJobHistoryWithClocksAsync\(startUtc,\s*RowCap,\s*serverId,\s*openTabClocks,\s*rangeEndUtc,\s*statusFilter,\s*categoryFilter\)"));
         Assert.Single(Regex.Matches(load, @"ShowDataStartNoteAsync\(serverId,\s*readClocks,\s*startUtc,\s*rangeEndUtc \?\? nowUtc,\s*all,\s*gen\)"));
         Assert.Single(Regex.Matches(tab, @"service\.GetJobHistoryDataStartAsync\(serverId,\s*startUtc,\s*endUtc\)"));
         Assert.Single(Regex.Matches(tab, @"var openTabClocks = _openTabClocks\?\.Invoke\(\);"));
     }
 
-    /// <summary>The note comes last: after the rows are bound and the loading note is down, from the read before the Status and Category
-    /// filters (<c>all</c>, never <c>filtered</c>), and the cap label stays in the count text.</summary>
+    /// <summary>The note comes last: after the rows are bound and the loading note is down, from the read (#5703: Status and Category are in it now)
+    /// (<c>all</c>), and the cap label stays in the count text.</summary>
     [Fact]
-    public void TheNote_ComesAfterTheRowsAreBound_FromTheUnfilteredRead()
+    public void TheNote_ComesAfterTheRowsAreBound_FromTheRead()
     {
         var load = LoadJobsBody(TabSource());
 
-        var bind = load.IndexOf("_filterManager.UpdateData(filtered)", StringComparison.Ordinal);
+        /* #5703 (round 2): the bind is BindRows, run by JobHistoryLoadSteps.BindWhenCurrentAsync right after the last supersede check. */
+        var bind = load.IndexOf("JobHistoryLoadSteps.BindWhenCurrentAsync(readTask", StringComparison.Ordinal);
         var loadingDown = load.IndexOf("LoadingMessage.Visibility = Visibility.Collapsed;", Math.Max(bind, 0), StringComparison.Ordinal);
         var note = load.IndexOf("await ShowDataStartNoteAsync(", StringComparison.Ordinal);
         Assert.True(bind >= 0 && loadingDown > bind && note > loadingDown, "the note must come after the rows and the loading note");
         Assert.DoesNotContain("ShowDataStartNoteAsync(serverId, readClocks, startUtc, nowUtc, filtered", load, StringComparison.Ordinal);
         Assert.Matches(@"JobCountIndicator\.Text = JobHistoryCap\.CountText\(displayCount, all\.Count, RowCap\);", load);
+    }
+
+    /// <summary>#5703 (round 2): the rows bind with no await after the last supersede check, and the grid never waits on the Category choices.</summary>
+    [Fact]
+    public void TheRowsBind_WithNoAwaitAfterTheLastSupersedeCheck_AndTheGridNeverWaitsOnTheChoices()
+    {
+        var tab = TabSource();
+        var load = LoadJobsBody(tab);
+
+        Assert.Matches(@"JobHistoryLoadSteps\.BindWhenCurrentAsync\(readTask, \(\) => _loads\.Superseded\(nameof\(LoadJobsAsync\), gen\), read => BindRows\(read\.Rows, read\.Clocks\)\)", load);
+        var bindRows = Regex.Match(tab, @"private void BindRows\(.*?\n    \}\n", RegexOptions.Singleline);
+        Assert.True(bindRows.Success, "BindRows is not in the tab");
+        Assert.DoesNotContain("await", bindRows.Value, StringComparison.Ordinal);
+
+        var bind = load.IndexOf("JobHistoryLoadSteps.BindWhenCurrentAsync(readTask", StringComparison.Ordinal);
+        var apply = load.IndexOf("var choicesApplied = ApplyKnownCategoriesAsync(", StringComparison.Ordinal);
+        Assert.True(bind >= 0 && apply > bind, "the choices must be applied after the grid is bound");
+        Assert.DoesNotContain("await ApplyKnownCategoriesAsync", load, StringComparison.Ordinal);
+        Assert.Contains("await choicesApplied;", load, StringComparison.Ordinal);
+        Assert.Contains("JobHistoryLoadSteps.ApplyWhenCurrentAsync(", tab, StringComparison.Ordinal);
+        /* A failed choices read is logged once per window, not on every refresh. */
+        Assert.Contains("_choicesFailures.ShouldLog(\"categories\", key)", tab, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5703 (round 2): the shell hands the tab the servers the collector runs on, resolved through the same engine editions the alert sweep uses.</summary>
+    [Fact]
+    public void TheShell_OffersTheTabOnlyTheServersTheCollectorRunsOn()
+    {
+        var shell = StripComments(File.ReadAllText(RepoFile("Lite", "MainWindow.AlertEngine.cs")).Replace("\r\n", "\n")).Replace("\n", " ");
+        Assert.Matches(@"JobHistoryContent\.OfferedServers = \(\) => LocalDataService\.BuildJobHistoryChoiceMap\(\s*_serverManager\.GetAllServers\(\),\s*s => _engineEditions\.Resolve\(", shell);
+        Assert.Contains("OfferedServers?.Invoke()", StripComments(TabSource()), StringComparison.Ordinal);
     }
 
     /// <summary>The tab's step goes through the shared steps (the cap-aware decision, the guarded probe, the event-time rule and the two

@@ -126,7 +126,7 @@ try {
     'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\n' +
       'export function zoomableLineChart() { return el("div", {}); }\nexport function chartZoomScope() { return ""; }\n'
   );
-  const { renderJobHistory, JOB_HISTORY_COLUMNS } = await import(pathToFileURL(path.join(scratch, "pages", "job-history.js")).href);
+  const { renderJobHistory, JOB_HISTORY_COLUMNS, limitNote } = await import(pathToFileURL(path.join(scratch, "pages", "job-history.js")).href);
 
   const run = {
     runs: [
@@ -238,6 +238,21 @@ try {
   renderJobHistory(noticed);
   await settle();
   out.notices = { text: noticed.textContent, noticeCount: all(noticed, "div").filter((d) => d.className === "strip notice").length };
+
+  // #5703: the limit note offers "pick a server" only while no server is picked, and the rendered page passes its pick to it.
+  byLabel(noticed, "Server").value = "srv-a";
+  byLabel(noticed, "Server").handlers.change();
+  await settle();
+  out.noticesOneServer = { text: noticed.textContent };
+  byLabel(noticed, "Server").value = "";
+  byLabel(noticed, "Server").handlers.change();
+  await settle();
+  const cut = { ...run, truncated: true };
+  out.limitNotes = {
+    fleet: limitNote(cut, ""),
+    oneServer: limitNote(cut, "srv-a"),
+    notCut: limitNote({ ...run, truncated: false }, "") === null,
+  };
 
   // An empty answer carries its window facts under hints.
   historyBody = JSON.stringify({ status: "empty", message: "No job runs matched in the requested time range.", hints: { effective_start: "2026-03-01T08:00:00Z", window_truncated: true } });
