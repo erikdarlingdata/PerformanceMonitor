@@ -82,7 +82,7 @@ public sealed class ViewerOverviewSqlTests
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
         /* #5710: the newest collection's rows are combined (summed workers and runnable tasks), not one row picked. */
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, collection_time", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
     }
 
