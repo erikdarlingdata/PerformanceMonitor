@@ -29,9 +29,11 @@ namespace PerformanceMonitor.Ui;
 public static class SpreadsheetText
 {
     /// <summary>
-    /// Returns <paramref name="text"/> with a leading apostrophe when it starts with <c>=</c>, <c>+</c>,
-    /// <c>-</c>, <c>@</c>, a tab or a carriage return and is not a plain number; otherwise returns it unchanged.
-    /// Null becomes the empty string.
+    /// Returns <paramref name="text"/> with a leading apostrophe when it starts with a tab or a carriage return,
+    /// or when its first character that is not white space or a control character is <c>=</c>, <c>+</c>,
+    /// <c>-</c> or <c>@</c>, and the text is not a plain number; otherwise returns it unchanged. A spreadsheet
+    /// (and the HTML form of a paste) drops leading white space, so the rule looks past it. Null becomes the
+    /// empty string.
     /// </summary>
     public static string Neutralize(string? text)
     {
@@ -40,12 +42,33 @@ public static class SpreadsheetText
             return string.Empty;
         }
 
-        return IsFormulaStart(text[0]) && !IsPlainNumber(text) ? "'" + text : text;
+        if (text[0] is '\t' or '\r')
+        {
+            return "'" + text;
+        }
+
+        var start = 0;
+        while (start < text.Length && IsLeadingSkipped(text[start]))
+        {
+            start++;
+        }
+
+        if (start == text.Length || !IsFormulaStart(text[start]))
+        {
+            return text;
+        }
+
+        var lead = start == 0 ? text : text.Substring(start);
+        return IsPlainNumber(lead) ? text : "'" + text;
     }
+
+    /// <summary>White space and control characters that a spreadsheet ignores in front of a cell's text.</summary>
+    private static bool IsLeadingSkipped(char c) => char.IsWhiteSpace(c) || char.IsControl(c) || c == '\uFEFF';
 
     /// <summary>
     /// A text cell as the tab-separated copies (Copy Row, Copy All Rows, the keyboard copy) write it: every run of
-    /// tabs and line breaks becomes one space, then the cell goes through <see cref="Neutralize"/>. A tab or a line
+    /// tabs and line breaks becomes one space, then the cell goes through <see cref="Neutralize"/>, which looks
+    /// past leading white space. A tab or a line
     /// break inside a cell would otherwise start a new cell or a new row when the text is pasted into a
     /// spreadsheet, and the new piece would not carry the leading apostrophe. Mirrors the web grid's Copy row.
     /// </summary>
@@ -95,7 +118,7 @@ public static class SpreadsheetText
     /// </summary>
     public static object? NeutralizeCell(object? value) => value is string text ? Neutralize(text) : value;
 
-    private static bool IsFormulaStart(char c) => c is '=' or '+' or '-' or '@' or '\t' or '\r';
+    private static bool IsFormulaStart(char c) => c is '=' or '+' or '-' or '@';
 
     /// <summary>
     /// True for an optional sign followed by digits with optional <c>.</c> and <c>,</c> separators and an

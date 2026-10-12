@@ -130,7 +130,7 @@ public sealed class GridToolsBehaviourTests
     public void TheHelpers_QuoteNeutraliseAndNameFiles()
     {
         var r = Run("helpers");
-        Assert.Equal(new[] { "\"a,b\"", "\"q\"\"q\"", "'=1+1", "'+x", "'@y", "-5", "-5", "+3.5e-2", "'-5x", "", "plain" },
+        Assert.Equal(new[] { "\"a,b\"", "\"q\"\"q\"", "'=1+1", "'+x", "'@y", "-5", "-5", "+3.5e-2", "'-5x", "", "plain", "\"a;b\"", "\"a\tb\"", "a b", "'  =1" },
             r.GetProperty("field").EnumerateArray().Select(e => e.GetString()!).ToArray());
         Assert.Equal("wait-stats-top-10-20260105-143007.csv", Str(r, "name"));
         Assert.Equal("table-20260105-143007.csv", Str(r, "nameEmpty"));
@@ -151,7 +151,8 @@ public sealed class GridToolsBehaviourTests
         var all = texts[3].Split('\n');
         Assert.Equal(new[] { "Q\tA\tB", "'=cmd\t-1,234.5\t-7", "x =HYPERLINK(1)\t-2\t+3", "'+1 =2\t1\t2", "'@SUM(1)\t1\t2", "'-cmd\t1\t2" }, all);
         Assert.All(all, line => Assert.Equal(3, line.Split('\t').Length));
-        Assert.Equal(new[] { "'=1", "'+x", "'-x", "'@y", " =1", "-5", "-1,234.5", "-1e-3", "'-5x", "x =1" },
+        Assert.Equal(new[] { "'=1", "'+x", "'-x", "'@y", "' =1", "-5", "-1,234.5", "-1e-3", "'-5x", "x =1",
+            "' =1", "' @SUM(1)", "  -5", "'\u00a0=1", " x", "'  =1" },
             r.GetProperty("cells").EnumerateArray().Select(e => e.GetString()!).ToArray());
     }
 

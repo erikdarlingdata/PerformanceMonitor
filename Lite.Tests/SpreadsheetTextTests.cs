@@ -60,6 +60,20 @@ public sealed class SpreadsheetTextTests
     [InlineData("@SUM(1)", "'@SUM(1)")]
     [InlineData("\t=1", "'\t=1")]
     [InlineData("\r=1", "'\r=1")]
+    [InlineData(" =1+1", "' =1+1")]
+    [InlineData("   +1+1", "'   +1+1")]
+    [InlineData(" -1+1", "' -1+1")]
+    [InlineData("  @SUM(1)", "'  @SUM(1)")]
+    [InlineData(" \t=1", "' \t=1")]
+    [InlineData(" \r@SUM(1)", "' \r@SUM(1)")]
+    [InlineData("\t =1", "'\t =1")]
+    [InlineData("\n=1", "'\n=1")]
+    [InlineData("\r\n=1", "'\r\n=1")]
+    [InlineData("\n\n+1+1", "'\n\n+1+1")]
+    [InlineData(" \n\t\r -1+1", "' \n\t\r -1+1")]
+    [InlineData("\u00a0=1", "'\u00a0=1")]
+    [InlineData("\u0001=1", "'\u0001=1")]
+    [InlineData("  -- a comment", "'  -- a comment")]
     [InlineData("-- a comment", "'-- a comment")]
     [InlineData("-", "'-")]
     [InlineData("-1e", "'-1e")]
@@ -75,6 +89,11 @@ public sealed class SpreadsheetTextTests
     [InlineData("-1,234.5")]
     [InlineData("-1.5E-05")]
     [InlineData("5")]
+    [InlineData(" -5")]
+    [InlineData("   -1,234.5")]
+    [InlineData(" +5")]
+    [InlineData("\n-1.5E-05")]
+    [InlineData(" \n -0.5")]
     public void PlainNumbers_StayNumbers(string text)
     {
         Assert.Equal(text, SpreadsheetText.Neutralize(text));
@@ -83,9 +102,14 @@ public sealed class SpreadsheetTextTests
     [Theory]
     [InlineData("SELECT 1")]
     [InlineData("a=b")]
-    [InlineData(" =1+1")]
     [InlineData("'=1")]
     [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(" \n ")]
+    [InlineData("\n")]
+    [InlineData("\nSELECT 1")]
+    [InlineData(" a=1")]
+    [InlineData(" 'x")]
     public void OtherText_IsUnchanged(string text)
     {
         Assert.Equal(text, SpreadsheetText.Neutralize(text));
@@ -250,8 +274,18 @@ public sealed class SpreadsheetTextTests
     [InlineData("a\r\n+1", "a +1")]
     [InlineData("a\r\n\r\n-1", "a -1")]
     [InlineData("a\t\t@SUM(1)", "a @SUM(1)")]
-    [InlineData("\t=1", " =1")]
-    [InlineData("\r\n=1", " =1")]
+    [InlineData("\t=1", "' =1")]
+    [InlineData("\r\n=1", "' =1")]
+    [InlineData("\r@SUM(1)", "' @SUM(1)")]
+    [InlineData("\t@SUM(1)", "' @SUM(1)")]
+    [InlineData(" =1", "' =1")]
+    [InlineData("  \t=SUM(1)", "'   =SUM(1)")]
+    [InlineData("\n\n+1+1", "' +1+1")]
+    [InlineData("\r\n\t -1+1", "'  -1+1")]
+    [InlineData(" -5", " -5")]
+    [InlineData("\t-5", " -5")]
+    [InlineData("\r\n-1,234.5", " -1,234.5")]
+    [InlineData("  ", "  ")]
     [InlineData("=1\n=2", "'=1 =2")]
     [InlineData("plain", "plain")]
     public void ClipboardCell_CollapsesTabsAndLineBreaksToOneSpace_BeforeTheFormulaRule(string text, string expected)
@@ -272,6 +306,11 @@ public sealed class SpreadsheetTextTests
     [InlineData("x\r=1+1")]
     [InlineData("\t=1+1")]
     [InlineData("\r\n@SUM(1)")]
+    [InlineData(" =1+1")]
+    [InlineData("  @SUM(1)")]
+    [InlineData("\r@SUM(1)")]
+    [InlineData("\t\r\n -1+1")]
+    [InlineData("\n\t =HYPERLINK(1)")]
     public void RowCopies_KeepOneCellOneField_AndNoFieldStartsLikeAFormula(string text)
     {
         var (copyAll, rowValues) = RunSta(() =>
@@ -297,8 +336,11 @@ public sealed class SpreadsheetTextTests
     {
         foreach (var field in fields)
         {
-            if (field.Length == 0 || int.TryParse(field, out _)) continue;
-            Assert.DoesNotContain(field[0], "=+-@\t\r");
+            // Leading white space is ignored by a spreadsheet, so the first character that is not white space decides.
+            if (field.Length == 0 || field[0] == '\'') continue;
+            var lead = field.TrimStart();
+            if (lead.Length == 0 || int.TryParse(lead, out _)) continue;
+            Assert.DoesNotContain(lead[0], "=+-@");
         }
     }
 
@@ -329,7 +371,7 @@ public sealed class SpreadsheetTextTests
             return data.ClipboardRowContent.Select(c => c.Content).ToArray();
         });
 
-        Assert.Equal(new object?[] { "x =1+1", "x +1", " @SUM(1)", -5 }, content);
+        Assert.Equal(new object?[] { "x =1+1", "x +1", "' @SUM(1)", -5 }, content);
     }
 
     [Fact]
