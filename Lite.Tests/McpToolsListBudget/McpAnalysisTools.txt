@@ -32,3 +32,7 @@ tool mute_analysis_finding 597
 param mute_analysis_finding.reason 27
 param mute_analysis_finding.server_name 50
 param mute_analysis_finding.story_path_hash 45
+
+tool unmute_analysis_finding 466
+param unmute_analysis_finding.server_name 54
+param unmute_analysis_finding.story_path_hash 41

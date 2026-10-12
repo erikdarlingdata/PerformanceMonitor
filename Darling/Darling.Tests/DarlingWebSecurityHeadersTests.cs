@@ -115,11 +115,11 @@ public sealed class DarlingWebSecurityHeadersTests
     public async Task HtmlShell_CarriesTheHeaders(bool networkMode)
     {
         using var server = await BuildServer(networkMode);
-        var ctx = await Get(server, networkMode, "/", token: networkMode ? Token : null);
+        var ctx = await Get(server, networkMode, "/");
 
-        /* Network mode answers a right token with a 302 to the shell; the redirect carries the headers too. */
-        Assert.True(ctx.Response.StatusCode is 200 or 302, $"unexpected status {ctx.Response.StatusCode}");
-        AssertDefaultHeaders(ctx);
+        /* Network mode answers a request with no session with the sign-in page, which sets its own policy. */
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        AssertDefaultHeaders(ctx, expectDefaultPolicy: !networkMode);
     }
 
     [Fact]
@@ -197,9 +197,10 @@ public sealed class DarlingWebSecurityHeadersTests
     {
         using var server = await BuildServer(networkMode: true);
 
-        /* A right token is exchanged for a 302 and a cookie, so the headers are read on that answer; the
-           shell, asset and API replies behind it are the loopback cases above (the same middleware). */
-        var ctx = await Get(server, true, "/api/ping", token: Token);
+        /* A right token posted from the sign-in form is exchanged for a 302 and a cookie, so the headers are read
+           on that answer; the shell, asset and API replies behind it are the loopback cases above (the same
+           middleware). */
+        var ctx = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, Token);
         Assert.Equal(StatusCodes.Status302Found, ctx.Response.StatusCode);
         AssertDefaultHeaders(ctx);
     }

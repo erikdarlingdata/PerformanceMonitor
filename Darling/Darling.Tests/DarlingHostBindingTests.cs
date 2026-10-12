@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Net;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Service.Hosting;
@@ -669,5 +670,136 @@ public sealed class DarlingHostBindingTests
 
         Assert.Contains("--enable-web", fallback, StringComparison.Ordinal);
         Assert.DoesNotContain("--enable-mcp", fallback, StringComparison.Ordinal);
+    }
+
+    /* ---- the token floor: empty or short tokens fail closed before an exposed bind ---- */
+
+    [Fact]
+    public void DescribeTokenProblem_EmptyToken_IsAProblem()
+    {
+        Assert.NotNull(DarlingHostBinding.DescribeTokenProblem(null));
+        Assert.NotNull(DarlingHostBinding.DescribeTokenProblem("   "));
+    }
+
+    [Fact]
+    public void DescribeTokenProblem_ShortToken_NamesTheFloor_WithoutTheValueOrTheLength()
+    {
+        var problem = DarlingHostBinding.DescribeTokenProblem("hunter2");
+
+        Assert.NotNull(problem);
+        Assert.Contains("shorter than " + DarlingHostBinding.MinimumTokenLength, problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("7 characters", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("hunter2", problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DescribeTokenProblem_AtOrAboveTheFloor_IsNull()
+    {
+        Assert.Null(DarlingHostBinding.DescribeTokenProblem("abcdefghijklmnopqrstuvwxyz012345"[..DarlingHostBinding.MinimumTokenLength]));
+        Assert.Null(DarlingHostBinding.DescribeTokenProblem("abcdefghijklmnopqrstuvwxyz012345"));  // the shape of what --configure-network generates
+    }
+
+    [Theory]
+    [InlineData("aaaaaaaaaaaaaaaa")]
+    [InlineData("abababababababababababab")]
+    [InlineData("0123401234012340123401234")]
+    public void DescribeTokenProblem_ALongTokenOfFewDifferentCharacters_IsAProblem_WithoutTheValueOrTheLength(string token)
+    {
+        Assert.True(token.Length >= DarlingHostBinding.MinimumTokenLength);
+
+        var problem = DarlingHostBinding.DescribeTokenProblem(token);
+
+        Assert.NotNull(problem);
+        Assert.Contains("fewer than " + DarlingHostBinding.MinimumDistinctTokenCharacters + " different characters", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain(token, problem, StringComparison.Ordinal);
+        Assert.DoesNotContain(token.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), problem, StringComparison.Ordinal);
+        Assert.False(DarlingHostBinding.ApplyTokenFloor(token, networkMode: true).NetworkMode);
+    }
+
+    [Fact]
+    public void DescribeTokenProblem_ExactlyTheDistinctCharacterFloor_Passes()
+    {
+        var token = new string('a', 10) + "bcdef" + new string('a', 5);
+
+        Assert.Equal(DarlingHostBinding.MinimumDistinctTokenCharacters, token.Distinct().Count());
+        Assert.Null(DarlingHostBinding.DescribeTokenProblem(token));
+        Assert.NotNull(DarlingHostBinding.DescribeTokenProblem(token.Replace('f', 'a')));
+    }
+
+    [Fact]
+    public void TheWebHostsTokenFloor_TurnsTheNetworkBindOff_AndLeavesALoopbackStartAlone()
+    {
+        /* Both hosts' start paths apply the floor through ApplyTokenFloor to the token they resolved: a short one drops
+           the bind to loopback-only (the token is still kept to gate the loopback listener); one at the floor leaves it. */
+        var weak = DarlingHostBinding.ApplyTokenFloor("hunter2", networkMode: true);
+        Assert.False(weak.NetworkMode);
+        Assert.NotNull(weak.Problem);
+
+        var strong = DarlingHostBinding.ApplyTokenFloor("abcdefghijklmnopqrstuvwxyz012345", networkMode: true);
+        Assert.True(strong.NetworkMode);
+        Assert.Null(strong.Problem);
+
+        Assert.False(DarlingHostBinding.ApplyTokenFloor("hunter2", networkMode: false).NetworkMode);
+    }
+
+    /* ---- trustedProxies: IPs and CIDRs, nothing else, none by default ---- */
+
+    [Fact]
+    public void TryParseTrustedProxies_NullOrEmpty_IsNoProxies()
+    {
+        Assert.True(DarlingHostBinding.TryParseTrustedProxies(null, out var none, out var problem));
+        Assert.Empty(none);
+        Assert.Null(problem);
+
+        Assert.True(DarlingHostBinding.TryParseTrustedProxies(new[] { "", "  " }, out var blank, out _));
+        Assert.Empty(blank);
+    }
+
+    [Fact]
+    public void TryParseTrustedProxies_AcceptsIpsAndCidrs()
+    {
+        Assert.True(DarlingHostBinding.TryParseTrustedProxies(
+            new[] { "10.0.0.5", " 10.0.1.0/24 ", "::1", "2001:db8::/32" }, out var proxies, out _));
+
+        Assert.Equal(4, proxies.Count);
+        Assert.True(proxies[0].Contains(IPAddress.Parse("10.0.0.5")));
+        Assert.False(proxies[0].Contains(IPAddress.Parse("10.0.0.6")));   // a bare IP is that one address
+        Assert.True(proxies[1].Contains(IPAddress.Parse("10.0.1.200")));
+        Assert.True(proxies[2].Contains(IPAddress.IPv6Loopback));
+        Assert.True(proxies[3].Contains(IPAddress.Parse("2001:db8::9")));
+    }
+
+    [Fact]
+    public void TryParseTrustedProxies_RefusesAnEntryItCannotRead()
+    {
+        Assert.False(DarlingHostBinding.TryParseTrustedProxies(new[] { "10.0.0.5", "proxy.corp.local" }, out var proxies, out var problem));
+
+        Assert.Empty(proxies);
+        Assert.Contains("proxy.corp.local", problem, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("192.168.010.0/24")]   // a leading zero reads as octal: IPNetwork.TryParse makes it 192.168.8.0/24
+    [InlineData("10/8")]               // a short form is zero-padded: IPNetwork.TryParse makes it 0.0.0.0/8
+    [InlineData("010.0.0.5")]          // the same spellings as a bare address
+    [InlineData("10.1")]
+    public void TryParseTrustedProxies_RefusesAnEntryNotWrittenAsPlainText(string entry)
+    {
+        Assert.False(DarlingHostBinding.TryParseTrustedProxies(new[] { "10.0.0.5", entry }, out var proxies, out var problem));
+
+        Assert.Empty(proxies);
+        Assert.Contains(entry, problem, StringComparison.Ordinal);
+        Assert.Contains("plain address/prefix", problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TryParseTrustedProxies_StillAcceptsPlainEntries()
+    {
+        Assert.True(DarlingHostBinding.TryParseTrustedProxies(
+            new[] { "192.168.10.0/24", "10.0.0.5", "0.0.0.0/8" }, out var proxies, out var problem));
+
+        Assert.Null(problem);
+        Assert.Equal(3, proxies.Count);
+        Assert.True(proxies[0].Contains(IPAddress.Parse("192.168.10.77")));
     }
 }

@@ -355,25 +355,25 @@ public sealed class CollectorRuntimeStateTests
         Assert.Equal(
             DarlingWebHostService.WebRequestAction.Forbid,
             DarlingWebHostService.DecideWebRequest(
-                IPAddress.Parse("203.0.113.9"), cidr, isAuthFlowRoute: false, hasValidCookie: false, hasValidToken: false));
+                IPAddress.Parse("203.0.113.9"), cidr, isAuthFlowRoute: false, hasValidCookie: false));
 
         /* Inside the CIDR but uncredentialed: the login page, NOT this route's body. */
         Assert.Equal(
             DarlingWebHostService.WebRequestAction.ShowLogin,
             DarlingWebHostService.DecideWebRequest(
-                IPAddress.Parse("192.168.1.50"), cidr, isAuthFlowRoute: false, hasValidCookie: false, hasValidToken: false));
+                IPAddress.Parse("192.168.1.50"), cidr, isAuthFlowRoute: false, hasValidCookie: false));
 
         /* And loopback too, in network mode — #1649 removed the tokenless local pass. */
         Assert.Equal(
             DarlingWebHostService.WebRequestAction.ShowLogin,
             DarlingWebHostService.DecideWebRequest(
-                IPAddress.Loopback, cidr, isAuthFlowRoute: false, hasValidCookie: false, hasValidToken: false));
+                IPAddress.Loopback, cidr, isAuthFlowRoute: false, hasValidCookie: false));
 
         /* Only a credential reaches the route. */
         Assert.Equal(
             DarlingWebHostService.WebRequestAction.Allow,
             DarlingWebHostService.DecideWebRequest(
-                IPAddress.Parse("192.168.1.50"), cidr, isAuthFlowRoute: false, hasValidCookie: true, hasValidToken: false));
+                IPAddress.Parse("192.168.1.50"), cidr, isAuthFlowRoute: false, hasValidCookie: true));
     }
 
     // ── The census ────────────────────────────────────────────────────────────────────────

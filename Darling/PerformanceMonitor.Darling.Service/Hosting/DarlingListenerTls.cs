@@ -220,21 +220,23 @@ internal static class DarlingListenerTls
                 logger.LogWarning("{Surface} TLS: {Warning}", labels.Surface, PlaintextPfxPasswordWarning(labels));
             }
 
+            /* #5288: the private key is what makes the endpoint this endpoint, and a key file kept in a folder that
+               inherits read for BUILTIN\Users can be read by every local account. The file is named BEFORE the load,
+               not after it: a key that fails to load (a pair that does not match, an encrypted key, a wrong PFX
+               password) leaves the same readable file on disk, and a warning that waited for a successful load would
+               never name it. On Windows only, where the ACL this reads exists. A warning, not a refusal: the fix is
+               one icacls line, and the load below decides whether the listener serves. */
+            if (OperatingSystem.IsWindows())
+            {
+                WarnWhenKeyFileIsReadableByUsers(logger, labels, tls, plan.Shape);
+            }
+
             loaded = DarlingWebTls.Load(tls, plan.Shape, labels.Section);
             var certificate = loaded.Value.Leaf;
 
             if (plan.Warning is not null)
             {
                 logger.LogWarning("{Surface} TLS: {Warning}", labels.Surface, plan.Warning);
-            }
-
-            /* #5288: the private key is what makes the endpoint this endpoint, and a key file kept in a folder that
-               inherits read for BUILTIN\Users can be read by every local account. After a successful load, on
-               Windows (where the ACL this reads exists), the file is named when ordinary users can read it. A
-               warning, not a refusal: the listener works, and the fix is one icacls line. */
-            if (OperatingSystem.IsWindows())
-            {
-                WarnWhenKeyFileIsReadableByUsers(logger, labels, tls, plan.Shape);
             }
 
             /* Lifetime is checked BEFORE the listener is built, not left to the handshake: an
@@ -331,7 +333,8 @@ internal static class DarlingListenerTls
     /// <summary>
     /// Logs a Warning when ordinary users (<c>Users</c>, <c>Authenticated Users</c>, <c>Everyone</c>) can read the
     /// file that holds the private key: the PEM key (the certificate beside it is public), or the whole PKCS#12
-    /// bundle. Called after a successful load, so the path is known to exist and to name the shape's file.
+    /// bundle. Called before the load, so a key that then fails to load is still named: a path that is empty, absent or
+    /// unreadable is quietly skipped and the load reports it.
     /// </summary>
     [SupportedOSPlatform("windows")]
     private static void WarnWhenKeyFileIsReadableByUsers(
@@ -341,8 +344,9 @@ internal static class DarlingListenerTls
         DarlingWebTls.TlsShape shape)
     {
         /* Trimmed exactly as the loader trims it, so this reads the file the loader read. */
-        var path = (shape == DarlingWebTls.TlsShape.Pfx ? tls.PfxPath : tls.KeyPath)!.Trim();
-        if (!DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
+        var path = (shape == DarlingWebTls.TlsShape.Pfx ? tls.PfxPath : tls.KeyPath)?.Trim();
+        if (string.IsNullOrEmpty(path) || path.IndexOfAny(System.IO.Path.GetInvalidPathChars()) >= 0
+            || !DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
         {
             return;
         }
@@ -367,13 +371,15 @@ internal static class DarlingListenerTls
     /// <param name="detail">The owner-and-exposure parenthetical (<c>DarlingFileSecurity.DescribeOwnerAndExposure</c>),
     /// or an empty string.</param>
     /// <param name="account">The account the service runs as, which the <c>icacls</c> line grants read.</param>
+    [SupportedOSPlatform("windows")]
     internal static string KeyFileReadableWarning(DarlingWebTls.TlsShape shape, string path, string detail, string account)
     {
         var what = shape == DarlingWebTls.TlsShape.Pfx ? "PKCS#12 bundle" : "private key file";
 
         return $"the {what} {path} is readable by ordinary users{detail}. Only SYSTEM, Administrators and the service "
             + $"account should be able to read it. Restrict it with: icacls \"{path}\" /inheritance:r /grant:r "
-            + $"\"NT AUTHORITY\\SYSTEM:(F)\" \"BUILTIN\\Administrators:(F)\" \"{account}:(R)\"";
+            + $"\"NT AUTHORITY\\SYSTEM:(F)\" \"BUILTIN\\Administrators:(F)\" \"{account}:(R)\" "
+            + DarlingFileSecurity.RemoveOrdinaryUserGrantsArgument;
     }
 
     /// <summary>

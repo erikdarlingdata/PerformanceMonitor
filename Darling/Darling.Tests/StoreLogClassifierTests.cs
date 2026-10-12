@@ -260,8 +260,10 @@ public class StoreLogClassifierTests
         var timeout = retained.Single(g => g.EventClass == "statement_timeout");
         Assert.Contains("STATEMENT:  ALTER ROLE admin LOGIN PASSWORD '?'", timeout.SampleLine, StringComparison.Ordinal);
 
+        /* The quoted value and the key tuple are PostgreSQL's own value-bearing forms: their slot is masked in the
+           sample too, and the type, constraint and column names around it stay. */
         var invalid = retained.Single(g => g.MessageText == "invalid input syntax for type integer: \"?\"");
-        Assert.Equal(DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"Kept3944b\"", invalid.SampleLine);
+        Assert.Equal(DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"?\"", invalid.SampleLine);
 
         var duplicate = retained.Single(g => g.MessageText!.StartsWith("duplicate key", StringComparison.Ordinal));
         Assert.Equal("duplicate key value violates unique constraint \"?\"", duplicate.MessageText);
@@ -279,7 +281,7 @@ public class StoreLogClassifierTests
     /// <summary>
     /// #3944: the store groups a retained class's entries by a GROUPING key, so two messages that differ only by a
     /// value (a quoted run, a number) are one row with both occurrences, and two different messages stay two. The
-    /// row stores the key; what it shows is its sample's own message, as PostgreSQL wrote it.
+    /// row stores the key; what it shows is its sample's own message, with a quoted input value masked in its slot.
     /// </summary>
     [Fact]
     public void MessagesThatDifferOnlyByAValue_GroupIntoOneRow()
@@ -301,9 +303,9 @@ public class StoreLogClassifierTests
         var invalid = Assert.Single(census.Groups, g => g.MessageText == "invalid input syntax for type integer: \"?\"");
         Assert.Equal(2, invalid.Occurrences);
         Assert.Equal(StoreLogClassifier.UnclassifiedClass, invalid.EventClass);
-        Assert.Equal(DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"abc\"", invalid.SampleLine);
+        Assert.Equal(DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"?\"", invalid.SampleLine);
         Assert.Equal(
-            "invalid input syntax for type integer: \"abc\"",
+            "invalid input syntax for type integer: \"?\"",
             StoreLogClassifier.DisplayMessageOf(invalid.EventClass, invalid.MessageText, invalid.SampleLine));
 
         var block = Assert.Single(census.Groups, g => g.EventClass == "data_integrity");
@@ -497,12 +499,14 @@ public class StoreLogClassifierTests
         Assert.Contains("STATEMENT:  ALTER ROLE admin PASSWORD '?'", timeoutSample, StringComparison.Ordinal);
         Assert.Equal((timeoutMessage, timeoutSample), StoreLogClassifier.MaskStoredEvent("statement_timeout", timeoutMessage, timeoutSample));
 
-        /* A pre-#3944 row whose message was the text: re-keyed from its sample, the sample's prose kept. */
+        /* A pre-#3944 row whose message was the text: re-keyed from its sample, and the sample's quoted input value,
+           one of PostgreSQL's own value-bearing forms, masked in its slot; the walk brings a row stored under the
+           earlier rules to the current ones. */
         const string rawInvalid = DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"Kept3944i\"";
         var (invalidKey, invalidSample) = StoreLogClassifier.MaskStoredEvent(
             StoreLogClassifier.UnclassifiedClass, "invalid input syntax for type integer: \"Kept3944i\"", rawInvalid);
         Assert.Equal("invalid input syntax for type integer: \"?\"", invalidKey);
-        Assert.Equal(rawInvalid, invalidSample);
+        Assert.Equal(DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"?\"", invalidSample);
         Assert.Equal((invalidKey, invalidSample), StoreLogClassifier.MaskStoredEvent(StoreLogClassifier.UnclassifiedClass, invalidKey, invalidSample));
 
         const string rawSlow = DefaultPrefix + "LOG:  duration: 6120.004 ms  execute <unnamed>: \n\tSELECT a FROM t WHERE b = 'Leak3915j'";
@@ -602,7 +606,11 @@ public class StoreLogClassifierTests
         var census = StoreLogClassifier.Classify(string.Join("\n", [.. entry, .. location, foreign, ""]));
         var retained = census.Groups.Where(g => g.MessageText is not null).ToList();
 
-        Assert.Equal(string.Join("\n", entry), retained.Single(g => g.EventClass == StoreLogClassifier.UnclassifiedClass).SampleLine);
+        /* The first message's quoted value is one of PostgreSQL's own value-bearing forms: that slot alone is masked,
+           its run onto the next line with it, and the HINT after it is kept as written. */
+        Assert.Equal(
+            DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"?\"\n" + entry[2],
+            retained.Single(g => g.EventClass == StoreLogClassifier.UnclassifiedClass).SampleLine);
         Assert.Equal(string.Join("\n", location), retained.Single(g => g.EventClass == "statement_timeout").SampleLine);
         Assert.Equal(foreign, retained.Single(g => g.EventClass == "lock_timeout").SampleLine);
 
