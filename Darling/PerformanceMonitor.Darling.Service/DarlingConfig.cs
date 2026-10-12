@@ -410,9 +410,19 @@ public sealed class DarlingConfig
                 $"Configuration file not found: {path}. Copy darling.sample.json to darling.json and edit it.", path);
         }
 
-        var loaded = Parse(File.ReadAllText(path));
-        DarlingOwnedSecrets.Set(DarlingOwnedSecrets.Compute(loaded, path));
-        return loaded;
+        try
+        {
+            var loaded = Parse(File.ReadAllText(path));
+            DarlingOwnedSecrets.Set(DarlingOwnedSecrets.Compute(loaded, path));
+            return loaded;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            /* The file is restricted on purpose (it holds every stored secret), so a refusal is the expected
+               first experience of a new operator: say which group to join instead of a bare access error. */
+            throw new UnauthorizedAccessException($"{DarlingOperatorGroup.AccessDeniedAdvice(path)} ({ex.Message})", ex);
+        }
+
     }
 
     public static DarlingConfig Parse(string json)

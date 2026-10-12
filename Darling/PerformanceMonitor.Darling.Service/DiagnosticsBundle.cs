@@ -1189,8 +1189,13 @@ internal static class DiagnosticsBundle
     /// Writes the text to a temp file beside the target, then moves it over. The temp name is random and the file is
     /// created with <see cref="FileMode.CreateNew"/>, so a path someone planted in a shared directory is never written
     /// through. The temp file is deleted on every path that does not end in the move.
+    ///
+    /// <para>With <paramref name="restricted"/> set, on Windows, the temp file is created with its access already
+    /// limited to SYSTEM, Administrators and the account running the command (<see cref="DarlingFileSecurity.CreateHardenedFile"/>),
+    /// instead of taking the output folder's inherited access, and the move keeps that access. The alias map is
+    /// written this way: it names the real server or host behind every alias.</para>
     /// </summary>
-    internal static string? WriteAtomically(string path, string text, bool force)
+    internal static string? WriteAtomically(string path, string text, bool force, bool restricted = false)
     {
         string temp;
         try
@@ -1206,7 +1211,9 @@ internal static class DiagnosticsBundle
         var moved = false;
         try
         {
-            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var stream = restricted && OperatingSystem.IsWindows()
+                ? DarlingFileSecurity.CreateHardenedFile(temp, allowInteractiveRead: false)
+                : new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
                 var bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(text);
                 stream.Write(bytes, 0, bytes.Length);

@@ -291,10 +291,29 @@ public sealed class ViewerSettings
         var location = ResolveConfigLocation(explicitPath);
         if (!File.Exists(location.Path))
         {
+            /* File.Exists is false for a file this account is not allowed to reach as well as for one that is not
+               there, and "not found" would send the person to copy a sample over a file that is already in place. */
+            if (ViewerOperatorGroup.IsRefused(location.Path))
+            {
+                throw new UnauthorizedAccessException(ViewerOperatorGroup.AccessDeniedMessage(location.Path));
+            }
+
             return null;
         }
 
-        return Parse(File.ReadAllText(location.Path), location.Directory);
+        /* Only the read is wrapped: Parse can throw its own UnauthorizedAccessException for the credential file,
+           which names that file and must not be relabelled as the config. */
+        string json;
+        try
+        {
+            json = File.ReadAllText(location.Path);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw ViewerOperatorGroup.AccessDenied(location.Path, ex);
+        }
+
+        return Parse(json, location.Directory);
     }
 
     /// <summary>
@@ -354,6 +373,14 @@ public sealed class ViewerSettings
         var credentialPath = string.IsNullOrEmpty(parent) ? null : Path.Combine(parent, credentialFileName);
         if (credentialPath is null || !File.Exists(credentialPath))
         {
+            /* File.Exists is false for a credential this account is not allowed to reach (the store folder grants
+               the operator group traverse and nobody else) as well as for one that is not there yet, and "start the
+               service once" is the wrong advice for a file that exists. */
+            if (credentialPath is not null && ViewerOperatorGroup.IsRefused(credentialPath))
+            {
+                throw new UnauthorizedAccessException(ViewerOperatorGroup.AccessDeniedMessage(credentialPath));
+            }
+
             /* #2197: absence alone does not say WHICH of the two this is, and the two want opposite advice.
                The CLI half of this message (DarlingStoreBootstrapEvidence) sent a field report to darling.json
                by assuming "first run" — the main window shows this string, so it must not do the same. */
@@ -374,7 +401,17 @@ public sealed class ViewerSettings
                   "exit code. Nothing in darling.json produces this.");
         }
 
-        var protectedBytes = Convert.FromBase64String(File.ReadAllText(credentialPath).Trim());
+        string credentialText;
+        try
+        {
+            credentialText = File.ReadAllText(credentialPath);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw ViewerOperatorGroup.AccessDenied(credentialPath, ex);
+        }
+
+        var protectedBytes = Convert.FromBase64String(credentialText.Trim());
         var password = Encoding.UTF8.GetString(
             ProtectedData.Unprotect(protectedBytes, s_dpapiEntropy, DataProtectionScope.LocalMachine));
 

@@ -287,8 +287,9 @@ public sealed class PgLogHashKeyTests
 
     /// <summary>
     /// #4028: on Windows the key is held to an allowlist. The credential check it shares refuses only a key Users,
-    /// Authenticated Users or Everyone can read, so INTERACTIVE, Domain Users or one named user holding ReadData
-    /// passed it, and whoever can read the key can test guesses at every literal the keyed hashes hide.
+    /// Authenticated Users, Everyone or INTERACTIVE can read, so Domain Users or one named user holding ReadData
+    /// passed it (INTERACTIVE did too, until the operator group replaced it and it joined that check), and whoever
+    /// can read the key can test guesses at every literal the keyed hashes hide.
     /// </summary>
     [Fact]
     public void AKeyAnyoneBeyondTheServiceCanRead_IsRefused_OnWindows()
@@ -302,8 +303,10 @@ public sealed class PgLogHashKeyTests
 
             var file = new FileInfo(path);
             var security = file.GetAccessControl();
+            /* A built-in group the shared check passes (INTERACTIVE was the example until it joined that check's
+               groups, when the operator group replaced it), so the allowlist is what refuses here. */
             security.AddAccessRule(new FileSystemAccessRule(
-                new SecurityIdentifier(WellKnownSidType.InteractiveSid, null), FileSystemRights.Read, AccessControlType.Allow));
+                new SecurityIdentifier(WellKnownSidType.BuiltinPerformanceLoggingUsersSid, null), FileSystemRights.Read, AccessControlType.Allow));
             file.SetAccessControl(security);
             var before = File.ReadAllBytes(path);
 
@@ -311,9 +314,9 @@ public sealed class PgLogHashKeyTests
 
             Assert.Null(load.Key);
             Assert.False(load.Generated);
-            Assert.Contains("INTERACTIVE", load.Refusal, StringComparison.Ordinal);
+            Assert.Contains("Performance Log Users", load.Refusal, StringComparison.Ordinal);
             Assert.Equal(before, File.ReadAllBytes(path));
-            /* The shared check alone would have loaded it: INTERACTIVE is not one of its three groups. */
+            /* The shared check alone would have loaded it: this group is not one of its groups. */
             Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(path));
         }
         finally
