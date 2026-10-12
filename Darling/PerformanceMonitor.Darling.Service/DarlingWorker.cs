@@ -10739,8 +10739,8 @@ AND   j.hypertable_name = '{relation}'", connection))
             }
 
             /* The deadlock text an earlier build's pass rewrote is brought to the current rules once per store
-               (PgDeadlockRemask.RulesVersion); the stage waits for the pass above to finish its walks, and the store's
-               marker keeps it from running again. Its own slice budget and catch, as the pass above has. */
+               (PgDeadlockRemask.RulesVersion); it does not wait for the pass above, and the store's marker keeps it
+               from running again. Its own slice budget and catch, as the pass above has. */
             if (_pgDeadlockRemask.RepairPending)
             {
                 if (connection.State != ConnectionState.Open)

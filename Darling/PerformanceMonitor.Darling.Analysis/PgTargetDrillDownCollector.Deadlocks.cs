@@ -315,6 +315,7 @@ LIMIT $4";
                NormalizeStoredDeadlockExemplars rewrites on the way out. A statement this build cut to its cap
                can end inside a `'?'`, and read again it would be withheld, so this one is left as written. */
             sql_normalized = true,
+            text_rules_version = DeadlockTextRulesVersion,
             note = PgTargetAdvice.DeadlockExemplarSentence(summary),
         };
 
@@ -342,6 +343,17 @@ LIMIT $4";
         return (string.Join('\n', lines.Take(GraphTextLineCap)), lines.Length, true);
     }
 
+    /// <summary>The version of the rules a deadlock exemplar section's text is held to: the victim statement is the normalized
+    /// graph's own, whole, as the live read derives it (<see cref="PgDeadlockLogParser.VictimStatementOf"/>). A section this
+    /// build writes, and one the repair pass rewrites, carries it as <see cref="DeadlockTextRulesVersionKey"/>, and is read
+    /// and repaired no more: the graph a section keeps is the bounded one, so deriving its statement again would withhold
+    /// the statement of an exemplar whose graph was cut. <c>PgDeadlockRemask.RulesVersion</c> is this number.</summary>
+    public const int DeadlockTextRulesVersion = 2;
+
+    /// <summary>The key of <see cref="DeadlockTextRulesVersion"/> in a deadlock exemplar section; its alert field reads
+    /// <c>Text Rules Version</c>.</summary>
+    public const string DeadlockTextRulesVersionKey = "text_rules_version";
+
     /// <summary>
     /// A stored finding's deadlock exemplars brought to #4005's rules on the way out, as
     /// <see cref="DarlingPgDeadlockReader"/> brings a stored report: a finding persists its drill-down and its
@@ -352,9 +364,11 @@ LIMIT $4";
     /// every one is replaced by the <see cref="PgDeadlockLogParser.ReportIdentity"/> of the exemplar's latest
     /// report, which <c>get_pg_deadlock_detail</c> takes. Idempotent, and a no-op on a finding with no exemplars
     /// and on one this build wrote, whose section says <c>sql_normalized</c>.
-    /// <para><paramref name="restamped"/> reads a section that says <c>sql_normalized</c> all the same: the repair pass
-    /// (<c>PgDeadlockRemask</c>) sets it, once per store, because an earlier build's pass stamped sections whose
-    /// victim statements it had normalized alone, and the stamp cannot tell those from this build's.</para>
+    /// <para><paramref name="restamped"/> reads a section that says <c>sql_normalized</c> all the same: an earlier build
+    /// stamped sections whose victim statements it had normalized alone, and that stamp cannot tell those from this
+    /// build's. A section that carries <see cref="DeadlockTextRulesVersionKey"/> at this version is the exception: it was
+    /// written under these rules and is left as it is, whichever way this is called. The finding read and the repair
+    /// pass (<c>PgDeadlockRemask</c>) set it.</para>
     /// <para>Returns whether it rewrote the section. <paramref name="markNormalized"/> stamps the rewritten section
     /// <c>sql_normalized</c>, for the pass that writes it back to the store (#4012): its text is then what this
     /// build writes, and a read or a later pass leaves it as it is.</para>
@@ -366,6 +380,7 @@ LIMIT $4";
             || section is not JsonElement { ValueKind: JsonValueKind.Object } element
             || JsonNode.Parse(element.GetRawText()) is not JsonObject node
             || node["exemplars"] is not JsonArray exemplars
+            || (node[DeadlockTextRulesVersionKey] is JsonValue version && version.TryGetValue<int>(out var written) && written >= DeadlockTextRulesVersion)
             || (!restamped && node["sql_normalized"] is JsonValue marker && marker.TryGetValue<bool>(out var normalized) && normalized))
             return false;
 
@@ -403,7 +418,10 @@ LIMIT $4";
             node["note"] = Replace(note, fingerprints);
 
         if (markNormalized)
+        {
             node["sql_normalized"] = true;
+            node[DeadlockTextRulesVersionKey] = DeadlockTextRulesVersion;
+        }
 
         finding.DrillDown[DeadlockExemplarsSection] = JsonSerializer.SerializeToElement(node);
 

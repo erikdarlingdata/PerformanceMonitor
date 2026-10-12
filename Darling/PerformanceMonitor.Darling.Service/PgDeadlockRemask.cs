@@ -564,7 +564,7 @@ AND   xmin = $4::xid";
     /// when every repair stage has finished a clean walk, and a store at this version never runs them again. A change
     /// to those rules raises the number, and the stages run once more.
     /// </summary>
-    public const int RulesVersion = 2;
+    public const int RulesVersion = PgTargetDrillDownCollector.DeadlockTextRulesVersion;
 
     /// <summary>The owner name of the version marker in <c>collect.collector_state</c>.</summary>
     public const string StateCollectorName = "pg_deadlock_remask";
@@ -696,7 +696,10 @@ AND   d.victim_statement IS DISTINCT FROM $5";
                     update.Parameters.Add(new NpgsqlParameter { Value = row.Hash, NpgsqlDbType = NpgsqlDbType.Text });
                     var written = await update.ExecuteNonQueryAsync(cancellationToken);
                     rewritten += written;
-                    outcome = written > 0 ? RowOutcome.Rewritten : RowOutcome.Unchanged;
+                    /* A statement that differs and an UPDATE that finds no row: the row went (retention) or the write
+                       cannot find it. Left, so the walk is not a clean one and no marker is written over it. */
+                    outcome = written > 0 ? RowOutcome.Rewritten : RowOutcome.Left;
+                    failed += written > 0 ? 0 : 1;
                 }
 
                 await transaction.CommitAsync(cancellationToken);
@@ -791,6 +794,15 @@ AND   d.victim_statement IS DISTINCT FROM $5";
 
     /// <summary>Whether an alert incident's key has a PostgreSQL deadlock report's hash shape.</summary>
     public static bool IsReportHash(string? key) => key is not null && s_reportHash.IsMatch(key);
+
+    /// <summary>Whether an alert incident's key is one an earlier build wrote for a report it could not name by hash: a
+    /// keyed hash (<see cref="PgLogHashKey.DeadlockAlertKeyTag"/>, a report retention had pruned) or a timestamp identity
+    /// (<see cref="PgDeadlockLogParser.ReportIdentity"/>, a report that was still raw). The repair pass withholds the
+    /// statement of such an incident.</summary>
+    public static bool IsEarlierBuildKey(string? key) =>
+        key is not null
+        && (key.StartsWith(PgLogHashKey.DeadlockAlertKeyTag, StringComparison.Ordinal)
+            || PgDeadlockLogParser.TryParseReportIdentity(key, out _, out _));
 
     /// <summary>Whether a statement object still holds text normalization would change: only the decision whether a row
     /// was ever rewritten (it is keyed before any report is rewritten only then), never the text a row is given.</summary>
@@ -937,9 +949,20 @@ AND   d.victim_statement IS DISTINCT FROM $5";
            while the report is raw it finds nothing by it, and it is never keyed. */
         var rebuilt = RebuiltIncidentIndexes(contextJson);
         var resolvedAt = new Dictionary<int, ResolvedReport>();
+        var keyedByEarlierBuild = new HashSet<int>();
         var neverRemasked = false;
         for (var index = 0; index < incidents.Count; index++)
         {
+            if (repair && incidents[index] is { } earlier && IsEarlierBuildKey(earlier.DedupKey))
+            {
+                /* An incident an earlier build keyed (a keyed hash for a report retention had pruned, or a timestamp
+                   identity for a raw report) holds a victim that build normalized alone, and there is no report to
+                   derive it from by this key: it is withheld, whatever it says, and its key stays. */
+                resolvedAt[index] = new ResolvedReport(ReportState.Missing, null);
+                keyedByEarlierBuild.Add(index);
+                continue;
+            }
+
             if (incidents[index] is { } candidate && IsReportHash(candidate.DedupKey) && (repair || !rebuilt.Contains(index)))
             {
                 var resolved = resolve(candidate.DedupKey);
@@ -980,7 +1003,9 @@ AND   d.victim_statement IS DISTINCT FROM $5";
                 /* There is no graph to derive the statement from, so it is withheld whatever rule wrote it. An
                    incident a pass rebuilt already carries its report's new identity: it is never keyed, only
                    withheld. */
-                newKey = rebuilt.Contains(index) ? incident.DedupKey : keyWith?.DeadlockAlertKey(incident.DedupKey) ?? incident.DedupKey;
+                newKey = rebuilt.Contains(index) || keyedByEarlierBuild.Contains(index)
+                    ? incident.DedupKey
+                    : keyWith?.DeadlockAlertKey(incident.DedupKey) ?? incident.DedupKey;
                 newObjects = WithheldObjects(objects);
             }
             else if (repair && resolved is { State: ReportState.Current, Incident: { } current })
@@ -1280,10 +1305,15 @@ AND   CASE
       END
 ORDER BY f.ctid";
 
-    /// <summary><see cref="FindingPageSql"/> for the repair pass, which reads the sections an earlier pass stamped
-    /// <c>sql_normalized</c> too (see <see cref="RulesVersion"/>).</summary>
+    /// <summary><see cref="FindingPageSql"/> for the repair pass, which reads the sections an earlier build stamped
+    /// <c>sql_normalized</c> too (see <see cref="RulesVersion"/>), and none that says it was written under this version
+    /// (<see cref="PgTargetDrillDownCollector.DeadlockTextRulesVersionKey"/>): a section this build wrote, or the pass
+    /// rewrote, is not read again.</summary>
     public static readonly string FindingRepairPageSql = FindingPageSql.Replace(
-        "AND strpos(f.drill_down_json, '\"sql_normalized\":true') = 0", "AND true", StringComparison.Ordinal);
+        "AND strpos(f.drill_down_json, '\"sql_normalized\":true') = 0",
+        "AND strpos(f.drill_down_json, '\"" + PgTargetDrillDownCollector.DeadlockTextRulesVersionKey + "\":" + RulesVersion + ",') = 0"
+        + " AND strpos(f.drill_down_json, '\"" + PgTargetDrillDownCollector.DeadlockTextRulesVersionKey + "\":" + RulesVersion + "}') = 0",
+        StringComparison.Ordinal);
 
     /// <summary>Writes one finding's normalized drill-down and prose back, only while the row is still the version
     /// the page read (<c>ctid</c> and <c>xmin</c>), never by sending its raw text back (#4012's review).</summary>
@@ -1525,9 +1555,12 @@ LEFT JOIN LATERAL
 ORDER BY t.alert_time".Replace("__SINCE__", FindingAlertSectionSince.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
 
     /// <summary><see cref="FindingAlertPageSql"/> for the repair pass, which reads the alerts stamped <c>Sql Normalized</c>
-    /// too (see <see cref="RulesVersion"/>).</summary>
+    /// too (see <see cref="RulesVersion"/>), and none whose section carries <see cref="TextRulesVersionLabel"/> at this
+    /// version: an alert flattened from a section written under these rules needs nothing.</summary>
     public static readonly string FindingAlertRepairPageSql = FindingAlertPageSql.Replace(
-        "AND strpos(c.context_json, '{\"Label\":\"Sql Normalized\",\"Value\":\"true\"}') = 0", "AND true", StringComparison.Ordinal);
+        "AND strpos(c.context_json, '{\"Label\":\"Sql Normalized\",\"Value\":\"true\"}') = 0",
+        "AND strpos(c.context_json, '{\"Label\":\"" + TextRulesVersionLabel + "\",\"Value\":\"" + RulesVersion + "\"}') = 0",
+        StringComparison.Ordinal);
 
     /// <summary>Writes one finding alert's context back, only while the row is still the version the page read
     /// (<c>ctid</c> and <c>xmin</c>). Its <c>detail_text</c> carries no drill-down and is not touched.</summary>
@@ -1585,8 +1618,12 @@ AND   xmin = $3::xid";
         var item = dto!.Details[index];
         var fields = item.Fields ?? new List<FieldDto>();
         if ((!repair && fields.Any(f => f.Label == SqlNormalizedLabel && f.Value == "true"))
-            || fields.Any(f => f.Value == WithheldBefore4005))
+            || fields.Any(f => f.Value == WithheldBefore4005)
+            || fields.Any(f => f.Label == TextRulesVersionLabel
+                && f.Value == RulesVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)))
         {
+            /* Withheld already, or flattened from a section written under these rules (so its finding, if it aged out
+               since, is no reason to take its text away). */
             return null;
         }
 
@@ -1611,13 +1648,9 @@ AND   xmin = $3::xid";
             }
         }
 
-        /* The repair pass reads alerts an earlier pass (or this build) stamped. With no finding to rebuild one from there
-           is nothing to check its text against, and it is left as it is. */
-        if (repair && live is null)
-        {
-            return null;
-        }
-
+        /* With no finding to rebuild the fields from, the SQL they carry is withheld, in the repair pass as in the first:
+           an alert an earlier build stamped holds a victim that build normalized alone, and nothing is left to check
+           it against. The next walk stops at the withheld fields above. */
         var newFields = live ?? fields.ConvertAll(f => f.Label is ExemplarsLabel or NoteLabel ? f with { Value = WithheldBefore4005 } : f);
         var details = new List<AlertDetailItemDto>(dto.Details.Count);
         for (var i = 0; i < dto.Details.Count; i++)
@@ -1689,6 +1722,10 @@ AND   xmin = $3::xid";
     private const string ExemplarsLabel = "Exemplars";
     private const string NoteLabel = "Note";
     private const string SqlNormalizedLabel = "Sql Normalized";
+
+    /// <summary>The field a section's <see cref="PgTargetDrillDownCollector.DeadlockTextRulesVersionKey"/> flattens to in
+    /// a finding alert.</summary>
+    private const string TextRulesVersionLabel = "Text Rules Version";
 
     /* The top exemplar's normalized fingerprint, the one the advice prose names (PgTargetAdvice.DescribeShape over
        the first exemplar). */
@@ -1989,9 +2026,9 @@ AND   xmin = $3::xid";
         /// null in the service.</summary>
         public Action<StageProgress, RowOutcome>? RowCounted { get; set; }
 
-        /// <summary>The repair stages (<see cref="RulesVersion"/>), which run once per store after the stages above
-        /// have finished a clean walk: the victim statements of the reports an earlier build's pass rewrote, then the
-        /// alerts, findings and finding alerts it stamped.</summary>
+        /// <summary>The repair stages (<see cref="RulesVersion"/>), which run once per store beside the stages above, not
+        /// after them: the victim statements of the reports an earlier build's pass rewrote, then the alerts,
+        /// findings and finding alerts it stamped or keyed.</summary>
         public StageProgress RepairReports { get; } = new("report statement");
 
         public StageProgress RepairAlerts { get; } = new("repaired alert");
@@ -2036,7 +2073,7 @@ AND   xmin = $3::xid";
         public bool Pending => Stages.Any(stage => !stage.Done || stage.GaveUp);
 
         /// <summary>Whether <see cref="RunRepairAsync"/> has anything to do: until the store's marker is known to say
-        /// <see cref="RulesVersion"/>. Cheap while the stages above have not finished (no statement is run).</summary>
+        /// <see cref="RulesVersion"/>.</summary>
         public bool RepairPending => RulesCurrent != true;
     }
 
@@ -2249,12 +2286,15 @@ AND   xmin = $3::xid";
     }
 
     /// <summary>
-    /// One tick of the repair (<see cref="RulesVersion"/>), run by the worker after <see cref="RunAsync"/>. It starts
-    /// when the stages there have finished a clean walk (the alert-key stage waits for a key and is not part of it),
-    /// reads the store's marker once, and when the store is not at this version walks, in this order: the statements of
-    /// the reports in #4005's form, the alerts built from them, the stamped findings and the stamped finding alerts. A
-    /// stage's failures, cancel and retry follow <see cref="RunAsync"/>'s rules. Once every stage has finished a clean
-    /// walk the marker is written, and the store never runs the stages again.
+    /// One tick of the repair (<see cref="RulesVersion"/>), run by the worker after <see cref="RunAsync"/>. It reads the
+    /// store's marker once, and when the store is not at this version walks, in this order: the statements of the
+    /// reports in #4005's form, the alerts built from them (an incident an earlier build keyed <c>hk-</c> or <c>at-</c>
+    /// has its statement withheld), the stamped findings and the stamped finding alerts. It does not wait for the
+    /// stages of <see cref="RunAsync"/>: it skips the rows those own (a raw report) and writes the same text they do for
+    /// the rest, so neither needs the other done, and a slow stage there cannot hold this one back. A stage's
+    /// failures and retry follow <see cref="RunAsync"/>'s rules; a walk the slice's budget cut goes on at its cursor on
+    /// the next tick, and is not an unclean one. Once every stage has finished a clean walk the marker is written, and
+    /// the store never runs the stages again.
     /// </summary>
     public static async Task RunRepairAsync(
         NpgsqlConnection connection, RemaskProgress progress, ILogger logger, CancellationToken cancellationToken)
@@ -2263,11 +2303,7 @@ AND   xmin = $3::xid";
         ArgumentNullException.ThrowIfNull(progress);
         ArgumentNullException.ThrowIfNull(logger);
 
-        if (progress.RulesCurrent == true
-            || !(progress.Alerts.Done && !progress.Alerts.GaveUp
-                 && progress.Reports.Done && !progress.Reports.GaveUp
-                 && progress.Findings.Done && !progress.Findings.GaveUp
-                 && progress.FindingAlerts.Done && !progress.FindingAlerts.GaveUp))
+        if (progress.RulesCurrent == true)
         {
             return;
         }
@@ -2375,7 +2411,11 @@ AND   xmin = $3::xid";
             }
             catch (Exception) when (cancellationToken.IsCancellationRequested)
             {
-                stage.WalkInterrupted = true;
+                /* The slice's budget ended it. Each walk's cursor stands on a closed batch (the last report batch, alert
+                   instant or finding block range it finished), every finished row is counted, and the next tick
+                   resumes there, so the walk goes on and is neither unclean nor a new one. Only a failure or a Left
+                   row makes a repair walk unclean: a store too big for one slice would otherwise never end a clean
+                   walk, and never reach its marker. */
                 LogTick(stage, examined, rewritten, left, logger, finished: false);
                 return;
             }

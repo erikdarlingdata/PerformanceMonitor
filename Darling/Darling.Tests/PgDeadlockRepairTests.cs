@@ -63,7 +63,8 @@ public sealed class PgDeadlockRepairTests
         var stamped = PgDeadlockRemask.RemaskFinding(drillDown, story);
         Assert.NotNull(stamped);
 
-        var weak = WithExemplarStatement(stamped.Value.DrillDownJson, Weak);
+        /* An earlier build's stamp: sql_normalized, no rules version. */
+        var weak = WithoutRulesVersion(WithExemplarStatement(stamped.Value.DrillDownJson, Weak));
         Assert.Contains("secretword", weak, StringComparison.Ordinal);
 
         Assert.Null(PgDeadlockRemask.RemaskFinding(weak, stamped.Value.StoryText));
@@ -174,6 +175,128 @@ public sealed class PgDeadlockRepairTests
         Assert.Contains("graphMasked is not null", drillDown, StringComparison.Ordinal);
         Assert.Contains("PgDeadlockLogParser.VictimStatementOf(graphMasked.TrimEnd('\\n'), latestPid)", drillDown, StringComparison.Ordinal);
         Assert.Contains("var statement = PgDeadlockLogParser.VictimStatementOf(", drillDown, StringComparison.Ordinal);
+    }
+
+    /// <summary>A section this build wrote, or the repair rewrote, says which rules it was written under, and no pass
+    /// or read derives its statement again from the bounded graph it kept: the live read derived it from the whole
+    /// graph, so a cut graph would lose it. A section an earlier build stamped has no version and is derived.</summary>
+    [Fact]
+    public void ASectionWrittenUnderTheCurrentRules_IsLeftAsItIs_ByEveryPassAndRead()
+    {
+        var (drillDown, story) = PgDeadlockRemaskTests.LegacyFinding();
+        var current = PgDeadlockRemask.RemaskFinding(drillDown, story)!.Value;
+        Assert.Contains("\"text_rules_version\":" + PgDeadlockRemask.RulesVersion, current.DrillDownJson, StringComparison.Ordinal);
+
+        const string Kept = "SELECT kept_from_the_whole_graph FROM t";
+        var keptJson = WithExemplarStatement(current.DrillDownJson, Kept);
+
+        Assert.Null(PgDeadlockRemask.RemaskFinding(keptJson, current.StoryText, repair: true));
+        var read = new AnalysisFinding { DrillDown = DrillDownSerializer.Deserialize(keptJson), StoryText = current.StoryText };
+        Assert.False(PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(read, restamped: true));
+        Assert.Contains(Kept, DrillDownSerializer.Serialize(read.DrillDown)!, StringComparison.Ordinal);
+
+        /* The same section with the earlier build's stamp (no version): read and repair both derive it from the graph. */
+        var earlierJson = WithoutRulesVersion(keptJson);
+        var earlierRead = new AnalysisFinding { DrillDown = DrillDownSerializer.Deserialize(earlierJson), StoryText = current.StoryText };
+        Assert.True(PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(earlierRead, restamped: true));
+        Assert.DoesNotContain(Kept, DrillDownSerializer.Serialize(earlierRead.DrillDown)!, StringComparison.Ordinal);
+        Assert.NotNull(PgDeadlockRemask.RemaskFinding(earlierJson, current.StoryText, repair: true));
+
+        /* The repair statements leave the sections written under these rules unread. */
+        Assert.Contains("text_rules_version", PgDeadlockRemask.FindingRepairPageSql, StringComparison.Ordinal);
+        Assert.Contains("Text Rules Version", PgDeadlockRemask.FindingAlertRepairPageSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>The live collector stamps its section with the version, and the findings read derives a section
+    /// that has none.</summary>
+    [Fact]
+    public void TheCollectorStampsTheVersion_AndTheFindingReadDerivesAnEarlierStamp()
+    {
+        var drillDown = ReadSource("Darling/PerformanceMonitor.Darling.Analysis/PgTargetDrillDownCollector.Deadlocks.cs");
+        Assert.Contains("text_rules_version = DeadlockTextRulesVersion,", drillDown, StringComparison.Ordinal);
+        var store = ReadSource("Darling/PerformanceMonitor.Darling.Analysis/PgFindingStore.cs");
+        Assert.Contains("NormalizeStoredDeadlockExemplars(finding, restamped: true)", store, StringComparison.Ordinal);
+        Assert.Equal(PgDeadlockRemask.RulesVersion, PgTargetDrillDownCollector.DeadlockTextRulesVersion);
+    }
+
+    /// <summary>The collector's entry point reads the victim statement through the one definition.</summary>
+    [Fact]
+    public void FromEntry_ReadsTheVictimStatementThroughTheOneDefinition()
+    {
+        var parser = ReadSource("PerformanceMonitor.Collectors/PgDeadlockLogParser.cs");
+        Assert.Contains("var victimStatement = VictimStatementOf(graph, entry.Pid);", parser, StringComparison.Ordinal);
+        Assert.DoesNotContain("statements.TryGetValue(entry.Pid", parser, StringComparison.Ordinal);
+    }
+
+    /// <summary>An incident an earlier build keyed (<c>hk-</c>, or a timestamp identity) has its statement withheld by
+    /// the repair pass, whatever it says and without a report to look up; a second pass writes nothing; the normal
+    /// pass leaves it alone.</summary>
+    [Theory]
+    [InlineData("hk")]
+    [InlineData("at")]
+    public void AnIncidentAnEarlierBuildKeyed_IsWithheld_ByTheRepairPassOnly(string kind)
+    {
+        var key = kind == "hk"
+            ? PgLogHashKey.DeadlockAlertKeyTag + new string('a', 40)
+            : PgDeadlockLogParser.ReportIdentity(new DateTime(2026, 8, 26, 22, 25, 24, 100), 3101);
+        var stored = AlertContextSerializer.Serialize(new AlertContext
+        {
+            Incidents = [new AlertIncident(key, [Weak, "victim pid 3101, 2 participant(s)"])],
+        });
+        PgDeadlockRemask.ResolvedReport Unreachable(string k) => throw new InvalidOperationException("no report is looked up by " + k);
+
+        Assert.True(PgDeadlockRemask.IsEarlierBuildKey(key));
+        Assert.Null(PgDeadlockRemask.RemaskAlert(stored, null, Unreachable, null));
+
+        var repaired = PgDeadlockRemask.RemaskAlert(stored, "detail: " + Weak, Unreachable, null, repair: true);
+        Assert.NotNull(repaired);
+        Assert.True(AlertContextSerializer.TryDeserialize(repaired.Value.ContextJson, out var context));
+        Assert.Equal(key, context.Incidents![0].DedupKey);
+        Assert.Equal(
+            new[] { PgLogTextRedactor.WithheldStatement, "victim pid 3101, 2 participant(s)" },
+            context.Incidents[0].InvolvedObjects.ToArray());
+        Assert.DoesNotContain("secretword", repaired.Value.ContextJson, StringComparison.Ordinal);
+        Assert.Null(PgDeadlockRemask.RemaskAlert(repaired.Value.ContextJson, repaired.Value.DetailText, Unreachable, null, repair: true));
+        Assert.False(PgDeadlockRemask.IsEarlierBuildKey(PgDeadlockLogParser.HashOf("a report")));
+    }
+
+    /// <summary>A stamped finding alert with no finding to rebuild it from has its SQL and the victim in its prose
+    /// withheld by the repair pass, and the next pass stops there; one flattened from a section written under the
+    /// current rules is left as it is, finding or no finding.</summary>
+    [Fact]
+    public void AStampedFindingAlert_WithNoFinding_IsWithheld_AndOneUnderTheCurrentRulesIsNot()
+    {
+        var (drillDown, story) = PgDeadlockRemaskTests.LegacyFinding();
+        var (_, legacyContext) = PgDeadlockRemaskTests.LegacyFindingAlert(drillDown, story, "ab12cd34ef");
+        var stamped = WithExemplarField(legacyContext, "Sql Normalized", "true");
+
+        var withheld = PgDeadlockRemask.RemaskFindingAlert(stamped, null, null, null, repair: true);
+        Assert.NotNull(withheld);
+        Assert.Contains(PgDeadlockRemask.WithheldBefore4005, withheld, StringComparison.Ordinal);
+        Assert.DoesNotContain("47Q1", withheld, StringComparison.Ordinal);
+        Assert.DoesNotContain("4111111111111111", withheld, StringComparison.Ordinal);
+        Assert.Null(PgDeadlockRemask.RemaskFindingAlert(withheld, null, null, null, repair: true));
+
+        var current = WithExemplarField(stamped, "Text Rules Version", PgDeadlockRemask.RulesVersion.ToString());
+        Assert.Null(PgDeadlockRemask.RemaskFindingAlert(current, null, null, null, repair: true));
+    }
+
+    internal static string WithExemplarField(string contextJson, string label, string value)
+    {
+        var root = JsonNode.Parse(contextJson)!.AsObject();
+        var heading = PgDeadlockRemask.FindingAlertExemplarsHeading;
+        var item = root["Details"]!.AsArray().OfType<JsonObject>().Single(d => (string?)d["Heading"] == heading);
+        item["Fields"]!.AsArray().Add(new JsonObject { ["Label"] = label, ["Value"] = value });
+        return root.ToJsonString();
+    }
+
+    private static string WithoutRulesVersion(string drillDownJson)
+    {
+        var drillDown = DrillDownSerializer.Deserialize(drillDownJson)!;
+        var node = JsonNode.Parse(((JsonElement)drillDown[PgTargetDrillDownCollector.DeadlockExemplarsSection]).GetRawText())!.AsObject();
+        Assert.True(node.Remove(PgTargetDrillDownCollector.DeadlockTextRulesVersionKey));
+        drillDown[PgTargetDrillDownCollector.DeadlockExemplarsSection] = JsonSerializer.SerializeToElement(node);
+        return DrillDownSerializer.Serialize(drillDown)!;
     }
 
     private static string WithExemplarStatement(string drillDownJson, string statement)

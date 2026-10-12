@@ -497,8 +497,7 @@ public static class PgDeadlockLogParser
             .Distinct(StringComparer.Ordinal)
             .Count();
 
-        var statements = ParseStatements(graph);
-        statements.TryGetValue(entry.Pid, out var victimStatement);
+        var victimStatement = VictimStatementOf(graph, entry.Pid);
 
         return new ParsedDeadlock(
             OccurredAtUtc: entry.OccurredAtUtc,
