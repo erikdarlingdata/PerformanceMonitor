@@ -87,7 +87,7 @@ public sealed class WebClickthroughStaleStateTests
     public void AnOnlineServer_KeepsItsLiveValues()
     {
         var online = Texts(Run("cards").GetProperty("online"));
-        Assert.Equal("CPU0%SQL 0%", online[0]);
+        Assert.Equal("Total CPU0%SQL 0%", online[0]);
         Assert.StartsWith("Threads77 free", online[1], StringComparison.Ordinal);
         Assert.StartsWith("Memoryok", online[2], StringComparison.Ordinal);
     }

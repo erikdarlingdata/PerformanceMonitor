@@ -354,8 +354,10 @@ public sealed class WebDataStartNoteTests
         }
 
         var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js").ReplaceLineEndings("\n");
-        Assert.Contains("if (!desc || desc.windowNote === false || (desc.viz !== \"table\" && desc.viz !== \"stat\")) return null;", util, StringComparison.Ordinal);
-        Assert.Contains("if (!source || source.window_truncated !== true) return null;", util, StringComparison.Ordinal);
+        Assert.Contains("if (!desc || desc.windowNote === false) return null;", util, StringComparison.Ordinal);
+        Assert.Contains("if (desc.viz !== \"table\" && desc.viz !== \"stat\" && !chart) return null;", util, StringComparison.Ordinal);
+        // A chart draws only the row-capped note (#5644 W12), and only when the note names the oldest row shown.
+        Assert.Contains("if (typeof source.oldest_shown_utc !== \"string\") return null;", util, StringComparison.Ordinal);
         Assert.Contains("return sent;\n}", util, StringComparison.Ordinal);
     }
 
@@ -388,8 +390,10 @@ public sealed class WebDataStartNoteTests
         Assert.Equal(baselineTail, note.EndsWith("baseline_end.", StringComparison.Ordinal));
 
         var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js").ReplaceLineEndings("\n");
-        Assert.Contains("if (!desc || desc.windowNote === false || (desc.viz !== \"table\" && desc.viz !== \"stat\")) return null;", util, StringComparison.Ordinal);
-        Assert.Contains("if (!source || source.window_truncated !== true) return null;", util, StringComparison.Ordinal);
+        Assert.Contains("if (!desc || desc.windowNote === false) return null;", util, StringComparison.Ordinal);
+        Assert.Contains("if (desc.viz !== \"table\" && desc.viz !== \"stat\" && !chart) return null;", util, StringComparison.Ordinal);
+        // A chart draws only the row-capped note (#5644 W12), and only when the note names the oldest row shown.
+        Assert.Contains("if (typeof source.oldest_shown_utc !== \"string\") return null;", util, StringComparison.Ordinal);
         Assert.Contains("return sent;\n}", util, StringComparison.Ordinal);
     }
 

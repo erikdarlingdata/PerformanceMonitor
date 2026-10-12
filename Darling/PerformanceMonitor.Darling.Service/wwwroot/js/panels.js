@@ -44,6 +44,9 @@ import {
   dbScopeChip,
   dbFilteredEmptyText,
   sourceStrip,
+  clampText,
+  markPartialSubtitle,
+  localizeIsoText,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
 import { plainText, plainTextNamed } from "./plain-text.js";
@@ -192,6 +195,8 @@ async function loadPanelBody(desc, body, signal) {
     const moreNotes = (desc.moreNoteKeys || []).map((k) => getPath(res.data, k));
     /* #4966: a grid says where its table's data starts when that is after the window's start (windowFloorStrip). */
     const floor = windowFloorStrip(res.data, desc);
+    /* #5644 W12: a row-capped panel stops claiming the window it was asked for in its heading. */
+    markPartialSubtitle(body.parentNode, res.data, desc);
     /* A narrowed read draws its chart over the hours it answered for, not the Range it was asked for (#2802).
        A copy, so the caller's descriptor keeps the window it asked for. */
     if (res.keptHours) desc = { ...desc, windowHours: res.keptHours };
@@ -233,7 +238,7 @@ export const VIZ = {
  */
 const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-detect fields.";
 
-/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copy,copyValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
+/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,clamp,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copy,copyValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
 
    Column-header sort (#4843). A header click cycles ascending -> descending -> the server's own order, with a ▲/▼
    indicator and aria-sort; Enter and Space on the focused header do the same. The comparison reads the RAW row value
@@ -1211,7 +1216,8 @@ function cell(row, c) {
      query-text expander. It owns its own content; wrap/mono classes still apply if the column asks for them. */
   if (typeof c.render === "function") {
     const rcls = [];
-    if (c.wrap) rcls.push("wrap");
+    if (c.clamp) rcls.push("clamp");
+    else if (c.wrap) rcls.push("wrap");
     if (c.mono) rcls.push("mono");
     if (c.pre) rcls.push("pre");
     if (typeof c.cellClass === "function") { const k = c.cellClass(row); if (k) rcls.push(k); }
@@ -1220,7 +1226,8 @@ function cell(row, c) {
   const raw = getPath(row, c.key);
   const cls = [];
   if (isNumericCol(c)) cls.push("num");
-  if (c.wrap) cls.push("wrap");
+  if (c.clamp) cls.push("clamp");
+  else if (c.wrap) cls.push("wrap");
   if (c.mono) cls.push("mono");
   if (c.pre) cls.push("pre");
   if (c.sevKey) cls.push(sevClass(getPath(row, c.sevKey)));
@@ -1230,7 +1237,7 @@ function cell(row, c) {
      "n/a (log service)" for the log file of a Hyperscale database). The server wrote the sentence; the page only
      shows it in place of the bare em dash. */
   const why = raw == null && c.nullKey ? getPath(row, c.nullKey) : null;
-  const text =
+  const shown =
     why != null && why !== ""
       ? String(why)
       : typeof c.display === "function"
@@ -1244,6 +1251,9 @@ function cell(row, c) {
             : c.plain
               ? plainText(String(raw))
               : String(raw);
+  /* #5644 W20: a column with no format shows any ISO instant in its text (a bare timestamp or one inside a sentence) in local time, like the grids beside it. */
+  const text = c.format ? shown : localizeIsoText(shown);
+  if (c.clamp) return el("td", { class: cls.join(" ") || null }, [clampText(text)]);
   return el("td", { class: cls.join(" ") || null, text });
 }
 
