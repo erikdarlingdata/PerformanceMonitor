@@ -50,8 +50,12 @@ const ALERT_COLUMNS = [
   { key: "threshold_value", label: "Threshold", format: "num1" },
   { key: "status", label: "Status", render: (a) => statusCell(a) },
   { key: "detail_text", label: "Detail", render: (a) => detailCell(a), copyValue: (a) => detailFullText(a) },
-  { key: "triage", label: "Triage", csv: false, render: (a) => triageCell(a) },
 ];
+
+/* W14 (#5644): Triage and Mute are the grid's FIRST columns. At 1600 px the 1,791 px grid sat in a 1,298 px box and the
+   two actions were the last things reached by horizontal scroll. The checkbox column (a seat that can edit) stays
+   ahead of them. */
+const TRIAGE_COLUMN = { key: "triage", label: "Triage", csv: false, render: (a) => triageCell(a) };
 
 /* The Mute column exists only for a seat whose session reports can_edit (the server enforces the write gate;
    this is only the affordance). Both links open the Mute Rules create form pre-filled from the row. "Mute this
@@ -61,7 +65,7 @@ const ALERT_COLUMNS = [
 let canMute = false;
 const MUTE_COLUMN = { key: "mute", label: "Mute", csv: false, render: (a) => muteCell(a) };
 function alertColumns() {
-  return canMute ? [SELECT_COLUMN].concat(ALERT_COLUMNS, [MUTE_COLUMN]) : ALERT_COLUMNS;
+  return canMute ? [SELECT_COLUMN, TRIAGE_COLUMN, MUTE_COLUMN].concat(ALERT_COLUMNS) : [TRIAGE_COLUMN].concat(ALERT_COLUMNS);
 }
 
 /* Dismiss (the web twin of the Viewer's Dismiss Selected / Dismiss All), for a seat that can edit. The checked

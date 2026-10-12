@@ -87,10 +87,19 @@ LIMIT 1";
     /// $3 the <see cref="EventWindowFloor"/> for $2 — the partition-column bound the event window cannot supply
     /// (#3895, the fleet card's <c>DarlingFleetReader.FleetBlockingSql</c> carries the same one), so the counts
     /// open the window's chunks rather than every retained one.</summary>
-    public const string ServerSummaryBlockingSql = @"
+    /// <remarks>#5644 W1: both counts are WAITS, not report rows (<see cref="BlockingWaits.WaitsCteSql"/>, the
+    /// definition the alert engine, the analysis fact and the fleet tile share), so the summary agrees with the tile.</remarks>
+    public static readonly string ServerSummaryBlockingSql = @"
+WITH " + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "xe_waits",
+        @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_blocked_process_reports
+    WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + "," + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "dmv_waits",
+        @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + @"
 SELECT
-    (SELECT COUNT(*) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3),
-    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots  WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3)";
+    (SELECT COUNT(*) FROM xe_waits),
+    (SELECT COUNT(*) FROM dmv_waits)";
 
     /// <summary>Deadlock count in the window. $1 server_id, $2 window start, $3 the
     /// <see cref="EventWindowFloor"/> for $2 (#3895).</summary>

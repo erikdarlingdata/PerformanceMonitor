@@ -181,7 +181,7 @@ SELECT /* PerformanceMonitorLite */ TOP (60)
        sub-second remainder of the elapsed-ticks offset, and that remainder is different on every poll
        (SYSDATETIME() keeps moving while a given ring-buffer entry's own timestamp does not). Since this
        query re-reads the ring buffer's whole retained history every cycle and dedups client-side on this
-       COMPUTED value (a physical entry has no stable key), a recomputed sample_time that drifts forward
+       COMPUTED value (the store keeps no column for the record id; see RingBufferResampleTolerance), a recomputed sample_time that drifts forward
        by a fraction of a second on a later poll can land just above the watermark and re-insert the same
        entry as a fresh row - a near-duplicate a moment after the original. Issue #2749: this duplicate
        pattern (two samples ~200ms-1s apart, then a real ~60s gap to the next) collapses
@@ -304,6 +304,23 @@ SELECT /* PerformanceMonitorLite */
             : new CollectorQuery(RingBufferQueryText);
     }
 
+    /// <summary>
+    /// #5644 W3: how far past the watermark a ring-buffer stamp may sit and still be the record the watermark
+    /// already holds. A SCHEDULER_MONITOR record IS stable across reads (measured on SQL Server 2022, a minute
+    /// apart: the same <c>Record/@id</c> and the same ring-buffer <c>timestamp</c>), but the query's
+    /// <c>sample_time</c> is recomputed every poll from <c>SYSDATETIME()</c> minus <c>ms_ticks - timestamp</c>, two
+    /// clocks that run slightly apart (8 ms in 68 s on the test box). Re-reading the newest stored record
+    /// therefore lands a few milliseconds ABOVE its stored stamp, clears a strict <c>&lt;= watermark</c> test,
+    /// and is stored again: 82-87 samples an hour where the ring buffer holds 60. The store has no column for the
+    /// record id, so the watermark is the only memory; records are 60 s apart, so anything within this window of
+    /// it is the same record. 20 s is far above any clock drift between polls and far below the spacing, so a
+    /// genuinely new record still lands.
+    /// </summary>
+    internal static readonly TimeSpan RingBufferResampleTolerance = TimeSpan.FromSeconds(20);
+
+    private static DateTime WithRingBufferTolerance(DateTime watermark) =>
+        watermark > DateTime.MaxValue - RingBufferResampleTolerance ? watermark : watermark + RingBufferResampleTolerance;
+
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
@@ -328,7 +345,8 @@ SELECT /* PerformanceMonitorLite */
                than compared across frames or dropped on a guess. No arm produces one — the pins say so —
                and if one ever did, a visible duplicate beats a silent hole. */
             var stampInWatermarkFrame = context.WatermarkFromUtcColumn ? sampleTimeUtc : sampleTime;
-            if (!context.Target.IsAzureSqlDb && context.Watermark.HasValue && stampInWatermarkFrame <= context.Watermark.Value)
+            if (!context.Target.IsAzureSqlDb && context.Watermark.HasValue
+                && stampInWatermarkFrame <= WithRingBufferTolerance(context.Watermark.Value))
             {
                 continue;
             }
