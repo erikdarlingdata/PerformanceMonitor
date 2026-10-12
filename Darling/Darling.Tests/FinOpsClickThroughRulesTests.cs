@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage.FinOps;
 using Xunit;
 
@@ -36,6 +37,33 @@ public class FinOpsClickThroughRulesTests
         {
             Assert.Empty(FinOpsRecommendationFigures.EditionAudit(edition ?? "", 16, 16, Array.Empty<string>(), 5000m, "Standalone", false));
         }
+    }
+
+    private static UtilizationEfficiencyDto CpuUtil(string status, decimal p95, int cpuCount = 16) => new(
+        AvgCpuPct: 12m, MaxCpuPct: 35, P95CpuPct: p95, CpuSamples: 100, TotalMemoryMb: 0, TargetMemoryMb: 0, PhysicalMemoryMb: 0, BufferPoolMb: 0,
+        MemoryRatio: 0m, MaxGrantWaiters: 0, GrantTimeouts: 0, ForcedGrants: 0, GrantUtilizationPct: 0m, MaxWorkersCount: 0, CurrentWorkersCount: null,
+        CpuCount: cpuCount, EngineEdition: 3, ProvisioningStatus: status);
+
+    /// <summary>#5633 item 11, #5644 W18: the Utilization view said RIGHT_SIZED at a P95 of 24% while the recommendation said "reduce".
+    /// The CPU rows now follow the view's verdict, so a server it calls right-sized gets no CPU advice, and one it calls over-provisioned does.</summary>
+    [Fact]
+    public void CpuRightSizing_FollowsTheUtilizationVerdict_SoItCannotDisagreeWithIt()
+    {
+        var rightSized = CpuUtil(ProvisioningVerdict.RightSized, 24m);
+        Assert.False(FinOpsRecommendationFigures.CpuVerdictAllowsDownsizing(rightSized));
+        Assert.Null(FinOpsRecommendationFigures.CpuRightSizingTargetCores(rightSized));
+        Assert.Null(FinOpsRecommendationFigures.CpuRightSizing(rightSized, 1000m));
+
+        var overProvisioned = CpuUtil(ProvisioningVerdict.OverProvisioned, 24m);
+        Assert.True(FinOpsRecommendationFigures.CpuVerdictAllowsDownsizing(overProvisioned));
+        var row = FinOpsRecommendationFigures.CpuRightSizing(overProvisioned, 1000m);
+        Assert.NotNull(row);
+        Assert.Contains("16 logical CPUs", row!.Finding, StringComparison.Ordinal);
+
+        Assert.False(FinOpsRecommendationFigures.CpuVerdictAllowsDownsizing(CpuUtil(ProvisioningVerdict.UnderProvisioned, 10m)));
+        Assert.False(FinOpsRecommendationFigures.CpuVerdictAllowsDownsizing(CpuUtil(ProvisioningVerdict.NotApplicable, 10m)));
+        Assert.False(FinOpsRecommendationFigures.CpuVerdictAllowsDownsizing(CpuUtil("", 0m)));
+        Assert.False(FinOpsRecommendationFigures.CpuVerdictAllowsDownsizing(null));
     }
 
     [Fact]

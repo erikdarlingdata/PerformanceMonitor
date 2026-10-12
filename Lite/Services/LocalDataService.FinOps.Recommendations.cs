@@ -324,13 +324,12 @@ END;", sqlConn);
             AppLogger.Error("FinOps", $"Recommendation check failed (Enterprise features): {ex.Message}");
         }
 
-        /* The two CPU right-sizing rules (2 and 12) read DIFFERENT windows, so each is gated on its own. A server enrolled minutes ago
-           holds only the ring-buffer backfill of its first collect ("68 samples over 4 minutes"), which is not a day or a week of load.
-           Rule 2 reads the last 24 hours (its P95), so it speaks only when the oldest sample INSIDE those 24 hours is at least 23 hours
-           old: a server collected for two days last week, closed, and restarted with 60 minutes of backfill has a 7-day span of days
-           but a 24-hour window of one hour. Rule 12 reads 7 days, so it keeps the 24-hour span over those 7 days. The two never both
-           land in the list: the one that keeps more cores wins. */
-        var cpuSpanEnough = CpuSamplesSpanEnough(await GetCpuSampleSpanAsync(serverId));
+        /* A server enrolled minutes ago holds only the ring-buffer backfill of its first collect ("68 samples over 4 minutes"), which
+           is not a day of load. Both CPU right-sizing rules (2 and 12) read the last 24 hours, the Utilization view's own window and
+           P95, and speak only when that view's verdict is OVER_PROVISIONED, so they cannot disagree with it or with each other
+           (#5633 item 11, #5644 W18). The advice waits until the oldest sample INSIDE those 24 hours is at least 23 hours old: a
+           server collected for two days last week, closed, and restarted with 60 minutes of backfill has a 7-day span of days but a
+           24-hour window of one hour. They never both land in the list: the one that keeps more cores wins. */
         var cpuWindowCoversDay = CpuWindowCoversEnough(await GetOldestCpuSampleAgeAsync(serverId, TimeSpan.FromHours(24)));
         RecommendationRow? computeCpuRow = null;
         var computeCpuTarget = 0;
@@ -342,12 +341,12 @@ END;", sqlConn);
             /* A window with no CPU sample reads a P95 of 0, which is "idle" only because nothing was measured.
                The utilization row gives that window no verdict (HasCpuSample is false); the advice follows it. */
             if (cpuWindowCoversDay && util != null && util.HasCpuSample && util.P95CpuPct < 30 && util.CpuCount > 4
-                && util.ProvisioningStatus != ProvisioningVerdict.NotApplicable)
+                && util.ProvisioningStatus == ProvisioningVerdict.OverProvisioned)
             {
                 var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
                 var savingsPct = 1m - ((decimal)targetCores / util.CpuCount);
                 /* The count is the vCores the service objective gives an Azure SQL Database, so it is named as the utilization card
-                   names it; everywhere else it is the CPU count, and the word stays "cores". */
+                   names it; everywhere else it is cpu_count, so it is "logical CPUs", not physical cores. */
                 var cpuNoun = ServerHardwareScope.CpuCoreNoun(util.EngineEdition);
                 computeCpuTarget = targetCores;
                 recommendations.Add(computeCpuRow = new RecommendationRow
@@ -683,37 +682,13 @@ LIMIT 10";
                    CLR — and could trigger right after a service restart. Now use
                    7-day P95 of total_server_memory_mb from v_memory_stats, the
                    same signal the Utilization tab shows. */
-                decimal p95Cpu7d = vmUtil.P95CpuPct;
+                decimal p95Cpu24h = vmUtil.P95CpuPct;
                 int cpuCount = vmUtil.CpuCount;
                 int p95MemMb = 0;
                 long memSampleCount = 0;
-                var cpuWindow = "recent samples"; // neutral until the 7-day read supplies its own span; the 24-hour fallback has no span of its own
+                var cpuWindow = "the last 24 hours"; // the Utilization view's own window and P95; the memory row below keeps its 7 days
                 var memWindow = RightSizingWindow.Describe(0, TimeSpan.Zero);
                 int physMb = vmUtil.PhysicalMemoryMb;
-
-                // Try 7-day P95 from DuckDB for better accuracy
-                try
-                {
-                    using var cpuConn = await OpenConnectionAsync();
-                    using var cpuCmd = cpuConn.CreateCommand();
-                    cpuCmd.CommandText = @"
-SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu,
-       MIN(collection_time) AS first_sample, MAX(collection_time) AS last_sample,
-       COUNT(sqlserver_cpu_utilization) AS window_samples
-FROM v_cpu_utilization_stats
-WHERE server_id = $1
-AND   collection_time >= $2";
-                    cpuCmd.Parameters.Add(new DuckDBParameter { Value = serverId });
-                    cpuCmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
-
-                    using var cpuReader = await cpuCmd.ExecuteReaderAsync();
-                    if (await cpuReader.ReadAsync() && !cpuReader.IsDBNull(0))
-                    {
-                        p95Cpu7d = Convert.ToDecimal(cpuReader.GetValue(0));
-                        cpuWindow = SampleWindow(cpuReader, 1, 3);
-                    }
-                }
-                catch { /* fall back to 24-hour P95 */ }
 
                 try
                 {
@@ -743,17 +718,17 @@ AND   collection_time >= $2";
                 catch { /* if we cannot get 7-day P95 memory, skip the memory prescription */ }
 
                 // CPU prescription: only if >= 4 cores
-                if (cpuCount >= 4)
+                if (cpuCount >= 4 && vmUtil.ProvisioningStatus == ProvisioningVerdict.OverProvisioned)
                 {
                     int targetCores = 0;
-                    if (p95Cpu7d < 15)
+                    if (p95Cpu24h < 15)
                         targetCores = Math.Max(2, cpuCount / 4);
-                    else if (p95Cpu7d < 30)
+                    else if (p95Cpu24h < 30)
                         targetCores = Math.Max(2, cpuCount / 2);
 
                     /* One CPU right-sizing row per server: rule 2 may already have added its row, and this one then takes its
                        place only when it keeps more cores. */
-                    if (cpuSpanEnough && targetCores > 0 && targetCores < cpuCount
+                    if (cpuWindowCoversDay && targetCores > 0 && targetCores < cpuCount
                         && PrescriptiveCpuRowWins(computeCpuRow == null ? null : computeCpuTarget, targetCores))
                     {
                         if (computeCpuRow != null)
@@ -763,9 +738,9 @@ AND   collection_time >= $2";
                             Category = "Hardware",
                             Severity = "Medium",
                             Confidence = "Medium",
-                            Finding = $"CPU: reduce from {cpuCount} to {targetCores} cores (P95 CPU {p95Cpu7d:N1}%)",
-                            Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
-                                     $"Current allocation of {cpuCount} cores can safely be reduced to {targetCores} cores.",
+                            Finding = $"CPU: reduce from {cpuCount} to {targetCores} logical CPUs (P95 CPU {p95Cpu24h:N1}%)",
+                            Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu24h:N1}%. " +
+                                     $"Current allocation of {cpuCount} logical CPUs can safely be reduced to {targetCores} logical CPUs.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
                                 : null

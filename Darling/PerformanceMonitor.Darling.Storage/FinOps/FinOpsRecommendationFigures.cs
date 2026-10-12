@@ -137,11 +137,18 @@ public static class FinOpsRecommendationFigures
     public static bool PrescriptiveCpuRowWins(int? computeTargetCores, int prescriptiveTargetCores) =>
         computeTargetCores is not int compute || prescriptiveTargetCores > compute;
 
+    /// <summary>
+    /// True when the Utilization view's own verdict for this server is OVER_PROVISIONED. Both CPU right-sizing rows start from this one
+    /// verdict, read off the same 24-hour window and the same P95 the Utilization view shows, so the recommendations cannot say
+    /// "over-provisioned" about a server the view calls RIGHT_SIZED (#5633 item 11, #5644 W18). A window with no CPU sample has no verdict.
+    /// </summary>
+    public static bool CpuVerdictAllowsDownsizing(UtilizationEfficiencyDto? util) =>
+        util != null && FinOpsUtilizationFigures.HasCpuSample(util) && util.ProvisioningStatus == ProvisioningVerdict.OverProvisioned;
+
     /// <summary>The cores the compute row (<see cref="CpuRightSizing"/>) advises, or null when it advises nothing for this row.</summary>
     public static int? CpuRightSizingTargetCores(UtilizationEfficiencyDto? util)
     {
-        if (util == null || !FinOpsUtilizationFigures.HasCpuSample(util) || util.P95CpuPct >= 30 || util.CpuCount <= 4
-            || util.ProvisioningStatus == ProvisioningVerdict.NotApplicable)
+        if (!CpuVerdictAllowsDownsizing(util) || util!.P95CpuPct >= 30 || util.CpuCount <= 4)
             return null;
         return Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
     }
@@ -320,7 +327,7 @@ public static class FinOpsRecommendationFigures
 
         var totalGb = candidates.Sum(c => c.ReservedMb ?? 0m) / 1024m;
         var topItems = candidates.Take(5)
-            .Select(c => $"{c.SchemaName}.{c.TableName} ({(c.ReservedMb ?? 0m) / 1024m:N1}GB)")
+            .Select(c => $"{(string.IsNullOrEmpty(c.DatabaseName) ? "" : c.DatabaseName + ".")}{c.SchemaName}.{c.TableName} ({(c.ReservedMb ?? 0m) / 1024m:N1}GB)")
             .ToList();
 
         return new FinOpsRecommendation
@@ -400,9 +407,9 @@ public static class FinOpsRecommendationFigures
                 Category = "Hardware",
                 Severity = "Medium",
                 Confidence = "Medium",
-                Finding = $"CPU: reduce from {cpuCount} to {targetCores} cores (P95 CPU {p95Cpu7d:N1}%)",
+                Finding = $"CPU: reduce from {cpuCount} to {targetCores} logical CPUs (P95 CPU {p95Cpu7d:N1}%)",
                 Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
-                         $"Current allocation of {cpuCount} cores can safely be reduced to {targetCores} cores.",
+                         $"Current allocation of {cpuCount} logical CPUs can safely be reduced to {targetCores} logical CPUs.",
                 EstMonthlySavings = monthlyCost > 0
                     ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
                     : null
