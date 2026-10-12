@@ -808,7 +808,7 @@ public sealed class AlertEngine
            used to land on its own 30 s sweep with its own clock, so the cooldown had run out between them and the
            sequence arrived in order. Replayed together against one `now`, [fire, resolve, fire] delivered the
            first fire, then "CPU Resolved", then had the cooldown swallow the second fire: the last word was an
-           all-clear while the gate was firing. So [fire, resolve, fire] sends one fire; [resolve, fire] from a
+           all-clear while the gate was firing. So [fire, resolve, fire] sends one fire, the LATER one; [resolve, fire] from a
            firing start sends nothing (the incident never closed); [fire, resolve] still sends both (a real spike
            while we were watching). Consecutive fires that remain collapse to the later one. */
         events = CancelResolveBeforeFire(events);
@@ -836,7 +836,7 @@ public sealed class AlertEngine
 
     /// <summary>
     /// The CPU edges one sweep sends, after a resolve that a fire immediately follows is dropped together with
-    /// that fire (#5642): <c>[fire, resolve, fire]</c> becomes <c>[fire]</c>, <c>[resolve, fire]</c> becomes
+    /// that fire (#5642): <c>[fire, resolve, fire]</c> becomes the later <c>[fire]</c>, <c>[resolve, fire]</c> becomes
     /// nothing, <c>[fire, resolve]</c> is unchanged. Two fires left adjacent collapse to the later one.
     /// </summary>
     internal static List<(bool IsFire, double Value, DateTime? ReadingUtc)> CancelResolveBeforeFire(List<(bool IsFire, double Value, DateTime? ReadingUtc)> events)
@@ -846,7 +846,14 @@ public sealed class AlertEngine
         {
             if (edge.IsFire && kept.Count > 0 && !kept[^1].IsFire)
             {
+                /* Drop the resolve; the fire behind it, when there is one, becomes THIS fire, so the delivered
+                   event carries the newest breaching reading and its instant, not the earlier fire's. With no
+                   fire behind it ([resolve, fire]) nothing remains: the incident never closed. */
                 kept.RemoveAt(kept.Count - 1);
+                if (kept.Count > 0 && kept[^1].IsFire)
+                {
+                    kept[^1] = edge;
+                }
             }
             else if (edge.IsFire && kept.Count > 0)
             {

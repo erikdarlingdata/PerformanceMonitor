@@ -35,6 +35,8 @@ public sealed class AlertEngineCpuBatchTests
 
     private static AlertCpuSample Hot(DateTime at) => new(at, 70, 95);
 
+    private static AlertCpuSample HotAt(DateTime at, double totalPercent) => new(at, 70, totalPercent);
+
     private static AlertCpuSample Cool(DateTime at) => new(at, 10, 20);
 
     /// <summary>A snapshot whose latest-sample fields are the NEWEST of <paramref name="samples"/> (as the worker
@@ -345,6 +347,29 @@ public sealed class AlertEngineCpuBatchTests
            message is the fire. */
         Assert.Single(h.Deliverer.Outcomes);
         Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task AFireResolveFireBatch_DeliversTheNewestBreachingReading_NotTheEarlierFires()
+    {
+        var h = NewHarness();
+        var engine = h.Build();
+        var first = Noon.AddMinutes(-10);
+
+        /* DISTINCT values: the first run peaks at 91%, the second at 97%. The page must name the 97% reading
+           and its instant (the gate fired on the newer streak), not the 91% fire that happened to come first. */
+        await engine.EvaluateServerAsync(Batch(
+            Noon.AddMinutes(-30),
+            HotAt(first, 91), HotAt(first.AddMinutes(1), 91), HotAt(first.AddMinutes(2), 91),
+            Cool(first.AddMinutes(3)), Cool(first.AddMinutes(4)),
+            HotAt(first.AddMinutes(5), 95), HotAt(first.AddMinutes(6), 96), HotAt(first.AddMinutes(7), 97)));
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+        Assert.Equal("97% (Total CPU)", fired.CurrentValue);
+        var sample = fired.Context!.NewestSample!;
+        Assert.Equal(first.AddMinutes(7), sample.InstantUtc);
+        Assert.Equal(TimeSpan.FromMinutes(3), sample.Age);
     }
 
     [Fact]
