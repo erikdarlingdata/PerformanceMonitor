@@ -79,8 +79,8 @@ public sealed class McpServiceParameterDiSeatCensusTests
             "argument instead of resolved from DI.");
 
         /* A change worth knowing about even when nothing is missing: today's distinct complex service types are
-           exactly these eight (AnalyzerConfig, MonitoredServerRegistryState (get_fleet_overview's Azure master scope), NpgsqlDataSource, PostgresConfig, DarlingAnalysisService, ILogger,
-           StoreHostProfileCache, ReadLatencyRecorder) — pin the set so an eighth type appearing here is a deliberate
+           exactly these nine (AnalyzerConfig, DarlingMcpAddServersPolicy, MonitoredServerRegistryState (get_fleet_overview's Azure master scope), NpgsqlDataSource, PostgresConfig, DarlingAnalysisService, ILogger,
+           StoreHostProfileCache, ReadLatencyRecorder) — pin the set so a tenth type appearing here is a deliberate
            addition rather than a silent one. StoreHostProfileCache added deliberately (#4214 round-1 review,
            Medium 2): get_store_host's 5-minute shared cache, registered via the typed-generic
            AddSingleton<StoreHostProfileCache> overload this test's own Contains check requires. AnalyzerConfig
@@ -88,9 +88,12 @@ public sealed class McpServiceParameterDiSeatCensusTests
            AddSingleton<AnalyzerConfig> overload the same way. ReadLatencyRecorder added by #4782:
            run_custom_view_panel's read-latency seat (the composed-panel run is recorded into the host's
            accumulator), registered via the typed-generic AddSingleton<ReadLatencyRecorder> overload the same
-           way. */
+           way. DarlingMcpAddServersPolicy added deliberately: the MCP caller's rules for add_servers,
+           registered by ConfigureMcpServices via the typed-generic AddSingleton<DarlingMcpAddServersPolicy>
+           overload. It is a service type so that a client cannot supply it and the token in McpConfig stays out of
+           DI. */
         Assert.Equal(
-            new List<string> { "AnalyzerConfig", "DarlingAnalysisService", "ILogger", "MonitoredServerRegistryState", "NpgsqlDataSource", "PostgresConfig", "ReadLatencyRecorder", "StoreHostProfileCache" },
+            new List<string> { "AnalyzerConfig", "DarlingAnalysisService", "DarlingMcpAddServersPolicy", "ILogger", "MonitoredServerRegistryState", "NpgsqlDataSource", "PostgresConfig", "ReadLatencyRecorder", "StoreHostProfileCache" },
             serviceParameterTypeNames);
     }
 

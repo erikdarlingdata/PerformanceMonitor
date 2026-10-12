@@ -193,7 +193,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     [
         "%password%", "%passwd%", "%secret%", "%token%", "%://%@%", "%pass%", "%key%",
         "%credential%", "%pwd%", "%-u %", "%--user%", "%-U %", "%sshpass%", "%sig=%",
-        "%signature=%", "%-u%", "%--proxy-user%",
+        "%signature=%", "%-u%", "%--proxy-user%", "%authorization%", "%bearer%", "%auth%", "%cookie%", "%curl%",
     ];
 
     /// <summary>
@@ -351,9 +351,9 @@ AND   t.server_id = $11";
                 void LogTimeout(string? name) =>
                     logger?.LogWarning("PgSettingRedactor timed out matching setting '{Name}'; the value was masked whole.", name);
 
-                var newSetting = PgSettingRedactor.Redact(c.Name, c.Setting, LogTimeout);
-                var newBootVal = PgSettingRedactor.Redact(c.Name, c.BootVal, LogTimeout);
-                var newResetVal = PgSettingRedactor.Redact(c.Name, c.ResetVal, LogTimeout);
+                var newSetting = PgSettingRedactor.RedactStored(c.Name, c.Setting, LogTimeout);
+                var newBootVal = PgSettingRedactor.RedactStored(c.Name, c.BootVal, LogTimeout);
+                var newResetVal = PgSettingRedactor.RedactStored(c.Name, c.ResetVal, LogTimeout);
 
                 if (newSetting == c.Setting && newBootVal == c.BootVal && newResetVal == c.ResetVal)
                 {

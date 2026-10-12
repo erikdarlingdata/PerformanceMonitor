@@ -34,8 +34,8 @@ namespace PerformanceMonitorLite.Services;
 /// <see cref="SetEnabledAsync"/>) and DELETEd by both the operator and a timer-driven expiry purge
 /// (<see cref="DeleteAsync"/>, <see cref="DeleteExpiredAsync"/>) that can be running at the same instant;
 /// DuckDB fails the loser of such a collision rather than queueing it, and the write lock is what stops
-/// that happening. Nothing but the analysis pass writes <c>analysis_muted</c>, so its append needs only
-/// the read lock. <see cref="InsertAsync"/> is an append too and by the rule needs only the read lock;
+/// that happening. <c>analysis_muted</c> only gets appends of new rows, so its append needs only the read
+/// lock; its one DELETE, <c>FindingStore.UnmuteStoryAsync</c>, takes the write lock like the deletes here. <see cref="InsertAsync"/> is an append too and by the rule needs only the read lock;
 /// it is left on the write lock so this store speaks with one voice. The rule and the measurements are
 /// on <c>DuckDbInitializer.s_dbLock</c>.</para>
 /// </summary>

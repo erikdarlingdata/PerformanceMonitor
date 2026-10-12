@@ -1399,9 +1399,38 @@ public static class StoreLogClassifier
             return detail;
         }
 
-        detail = FailingRowPattern.Replace(detail, "$1 (...).");
-        detail = KeyValuePattern.Replace(detail, "Key ($1)=(...)");
-        return KeyValueUnterminatedPattern.Replace(detail, "Key ($1)=(...)");
+        /* A DETAIL the patterns cannot finish reading in time is withheld whole: it is never stored as written, and the
+           timeout never reaches the sweep. */
+        try
+        {
+            detail = Bound(FailingRowPattern).Replace(detail, "$1 (...).");
+            detail = Bound(KeyValuePattern).Replace(detail, "Key ($1)=(...)");
+            return Bound(KeyValueUnterminatedPattern).Replace(detail, "Key ($1)=(...)");
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return PgLogTextRedactor.WithheldValues;
+        }
+    }
+
+    private static readonly System.Threading.AsyncLocal<TimeSpan?> s_matchTimeoutForTest = new();
+
+    /// <summary>A test seam: a timeout that replaces the patterns' own for the current async flow. Null, the default,
+    /// leaves every pattern under its compiled-in timeout.</summary>
+    internal static TimeSpan? MatchTimeoutForTest
+    {
+        get => s_matchTimeoutForTest.Value;
+        set => s_matchTimeoutForTest.Value = value;
+    }
+
+    private static Regex Bound(Regex pattern)
+    {
+        if (MatchTimeoutForTest is not { } timeout)
+        {
+            return pattern;
+        }
+
+        return new Regex(pattern.ToString(), pattern.Options & ~RegexOptions.Compiled, timeout);
     }
 
     /// <summary>A field's text (<see cref="MaskEntry"/>): its first line from <paramref name="from"/>, and the
