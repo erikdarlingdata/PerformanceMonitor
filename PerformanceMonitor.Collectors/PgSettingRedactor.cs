@@ -146,6 +146,8 @@ public static class PgSettingRedactor
 
         public string Replace(string input, MatchEvaluator evaluator) => Current.Replace(input, evaluator);
 
+        public string Replace(string input, string replacement) => Current.Replace(input, replacement);
+
         public Match Match(string input) => Current.Match(input);
 
         public bool IsMatch(string input) => Current.IsMatch(input);
@@ -468,6 +470,49 @@ public static class PgSettingRedactor
     /// or any fragment of it.</para>
     /// </summary>
     public static string? Redact(string? name, string? value, Action<string?>? onMatchTimeout = null)
+    {
+        return RedactCore(name, value, onMatchTimeout);
+    }
+
+    /// <summary>A masked libpq <c>password</c> or <c>sslpassword</c> keyword followed by a bare word. libpq
+    /// conninfo is a run of <c>keyword=value</c> pairs, so a word with no <c>=</c> after a mask is the tail of a
+    /// value that held a backslash-escaped space: rows stored under the earlier rules read such a value up to
+    /// the space and kept the rest.</summary>
+    private static readonly TimeBoundPattern MaskedKeywordStrayWord = new(
+        @"(?:^|\s)(?:sslpassword|password)\s*=\s*\*{8}[ \t]+[^\s=&;'""\\\-][^\s=&;'""]*(?:\s|$)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// <see cref="Redact"/> for a value already stored: one that still shows a masked keyword followed by a word
+    /// of the value is masked whole, since the earlier rules ended a value at a backslash-escaped space.
+    /// </summary>
+    public static string? RedactStored(string? name, string? value, Action<string?>? onMatchTimeout = null)
+    {
+        var redacted = RedactCore(name, value, onMatchTimeout);
+        if (string.IsNullOrEmpty(redacted) || string.Equals(redacted, Mask, StringComparison.Ordinal))
+        {
+            return redacted;
+        }
+
+        try
+        {
+            return MaskedKeywordStrayWord.IsMatch(redacted) ? Mask : redacted;
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            try
+            {
+                onMatchTimeout?.Invoke(name);
+            }
+            catch
+            {
+            }
+
+            return Mask;
+        }
+    }
+
+    private static string? RedactCore(string? name, string? value, Action<string?>? onMatchTimeout)
     {
         if (string.IsNullOrEmpty(value))
         {

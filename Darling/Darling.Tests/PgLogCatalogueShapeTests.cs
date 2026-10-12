@@ -222,6 +222,21 @@ public sealed class PgLogCatalogueShapeTests
             ("JSON data, line %d: %s%s%s", PgLogTextRedactor.JsonContextFormats),
             ("invalid input syntax for type %s: \"%s\"", PgLogTextRedactor.InputSyntaxMessageFormats),
             ("invalid input syntax for type %s", PgLogTextRedactor.InputSyntaxBareMessageFormats),
+            ("invalid input value for enum %s: \"%s\"", PgLogTextRedactor.EnumInputMessageFormats),
+            ("malformed array literal: \"%s\"", PgLogTextRedactor.QuotedValueMessageFormats),
+            ("malformed record literal: \"%s\"", PgLogTextRedactor.QuotedValueMessageFormats),
+            ("malformed range literal: \"%s\"", PgLogTextRedactor.QuotedValueMessageFormats),
+            ("malformed multirange literal: \"%s\"", PgLogTextRedactor.QuotedValueMessageFormats),
+            ("value \"%s\" is out of range for type %s", PgLogTextRedactor.QuotedValueMessageFormats),
+            ("\"%s\" is out of range for type double precision", PgLogTextRedactor.QuotedValueMessageFormats),
+            ("\"%s\" is out of range for type real", PgLogTextRedactor.QuotedValueMessageFormats),
+            ("date/time field value out of range: \"%s\"", PgLogTextRedactor.QuotedValueMessageFormats),
+            ("interval field value out of range: \"%s\"", PgLogTextRedactor.QuotedValueMessageFormats),
+            ("time zone displacement out of range: \"%s\"", PgLogTextRedactor.QuotedValueMessageFormats),
+            ("date out of range: \"%s\"", PgLogTextRedactor.QuotedValueMessageFormats),
+            ("timestamp out of range: \"%s\"", PgLogTextRedactor.QuotedValueMessageFormats),
+            ("Key (%s)=(%s) is referenced from table \"%s\".", PgLogTextRedactor.KeyReferenceDetailFormats),
+            ("Key is referenced from table \"%s\".", PgLogTextRedactor.KeyReferenceUnreadableDetailFormats),
         ];
 
         /* Messages that are not the scanner's: COPY's and format()'s, which never head an "at or near". */

@@ -2073,8 +2073,17 @@ public static class PgLogTextRedactor
             return statement;
         }
 
-        var scrubbed = PgPlanLogParser.s_quotedLiteral.Replace(statement, "'?'");
-        return PgPlanLogParser.s_bareNumber.Replace(scrubbed, "?");
+        /* A statement the patterns cannot finish reading in time is withheld whole: it is never kept as written, and
+           the timeout never reaches the collector. */
+        try
+        {
+            var scrubbed = PgPlanLogParser.s_quotedLiteral.Replace(statement, "'?'");
+            return PgPlanLogParser.s_bareNumber.Replace(scrubbed, "?");
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return WithheldValues;
+        }
     }
 
     /// <summary>

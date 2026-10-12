@@ -162,12 +162,13 @@ public static class PgPlanLogParser
        be duplicated across the plan route and the log-event route any more than across the two plan
        transports — a second spelling of the literal pattern is the one that eventually disagrees, and the
        cost of that disagreement is a customer's data. */
-    internal static readonly Regex s_quotedLiteral = new("'(?:[^']|'')*'", RegexOptions.Compiled);
+    internal static readonly PgSettingRedactor.TimeBoundPattern s_quotedLiteral =
+        new("'(?:[^']|'')*'", RegexOptions.Compiled, TimeSpan.FromSeconds(1));
 
     /* Bare numbers NOT glued to an identifier character, so 'transactionitems1' survives and '(id > 100)'
        does not. */
-    internal static readonly Regex s_bareNumber = new(
-        @"(?<![A-Za-z0-9_])\d+(?:\.\d+)?(?![A-Za-z0-9_])", RegexOptions.Compiled);
+    internal static readonly PgSettingRedactor.TimeBoundPattern s_bareNumber = new(
+        @"(?<![A-Za-z0-9_])\d+(?:\.\d+)?(?![A-Za-z0-9_])", RegexOptions.Compiled, TimeSpan.FromSeconds(1));
 
     /// <summary>
     /// Every plan in a raw slab of server log. Used by the transport that receives log TEXT — the RDS API —
