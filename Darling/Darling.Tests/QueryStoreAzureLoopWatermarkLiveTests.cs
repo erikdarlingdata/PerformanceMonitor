@@ -40,7 +40,9 @@ public sealed class QueryStoreAzureLoopWatermarkLiveTests
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static long Reads(CommandCountingLoggerFactory f) => f.Provider.CountContaining("MAX(last_execution_time)");
+    /* #5684: the seed read is counted by the marker it carries. The seed text no longer holds MAX(last_execution_time);
+       the plain bounded oracle read still does, and must not be counted here. */
+    private static long Reads(CommandCountingLoggerFactory f) => f.Provider.CountContaining("pm:qs-watermark-seed");
 
     private static ServerRuntime MakeServer() => new()
     {

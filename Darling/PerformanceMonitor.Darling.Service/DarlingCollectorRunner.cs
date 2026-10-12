@@ -2010,12 +2010,22 @@ public sealed class DarlingCollectorRunner
         return new StagedDatabaseWatermark(max, foreign, collectionTime);
     }
 
-    /// <summary>A failed item may or may not have committed rows: drop its staged contribution and its cache entry.</summary>
+    /// <summary>
+    /// A failed item: drop its staged contribution, and its cache entry only if a batch was staged (#5684, the
+    /// same rule as the Azure per-database arm's #5514 gate). The staging happens at the end of the item's
+    /// read, and the driver's writeBatch runs only after the read returned, outside the try that routes to
+    /// onItemError. So a fault that reaches here with nothing staged came before any write of this database's
+    /// <c>query_store_stats</c> rows (the plan and text fetches write other tables), the stored maximum did not
+    /// move, and the cached value is still exact. A database that fails every cycle must not turn back into a
+    /// store read every cycle. With a staged batch the write may or may not have committed, so the key goes.
+    /// </summary>
     internal void DiscardQueryStoreDatabaseWatermark(
         ServerRuntime server, string database, Dictionary<string, StagedDatabaseWatermark> staged)
     {
-        staged.Remove(database);
-        _databaseWatermarkCache.Invalidate(server.ServerId, database);
+        if (staged.Remove(database))
+        {
+            _databaseWatermarkCache.Invalidate(server.ServerId, database);
+        }
     }
 
     /// <summary>Lands a staged contribution. Called only after the item's COPY transaction committed.</summary>
@@ -4833,20 +4843,28 @@ public sealed class DarlingCollectorRunner
             ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3"
             : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2";
 
+    /// <summary>The leading comment of the Query Store seed read (#5684): the tests that count seed reads match on it.</summary>
+    internal const string QueryStoreWatermarkSeedMarker = "/* pm:qs-watermark-seed */";
+
     /// <summary>
     /// The per-database watermark SQL for the Query Store cache's seed read (#4749): the bounded value, plus its
     /// witness, which is the newest <c>collection_time</c> among the rows AT that value inside the bound. Same
-    /// predicates as <see cref="BuildServerWatermarkForDatabaseSql"/> (bounded, <c>collection_time</c> last as
-    /// $3), repeated in the inner query in the shape <see cref="BuildServerWatermarkInstanceIdSql"/> already
-    /// uses to pick the newest batch. The unaliased <c>MAX(</c>column<c>)</c> stays in the text: the tests that
-    /// count watermark reads match on it. Exposed for the same reason as its siblings, so a pin asserts the
-    /// SHIPPED string.
+    /// bounded predicates as <see cref="BuildServerWatermarkForDatabaseSql"/> (<c>collection_time</c> last as $3).
+    ///
+    /// <para>#5684: ONE pass, not the inner-<c>MAX</c> two-scan shape it had. The newest row by
+    /// (<c>last_execution_time</c> DESC, <c>collection_time</c> DESC) IS the answer: its first column is the
+    /// maximum, its second the newest stamp among the rows at that maximum. <c>IS NOT NULL</c> stands in for
+    /// <c>MAX</c> ignoring NULLs (PostgreSQL sorts NULLs FIRST in a descending sort, so without it a NULL row would
+    /// win). An empty window and an all-NULL window return NO row where the old text returned one row of NULLs;
+    /// <see cref="ReadLastCollectedTimeAndWitnessForDatabaseAsync"/> reads both as (null, null, succeeded). The
+    /// leading <see cref="QueryStoreWatermarkSeedMarker"/> is what the read-counting tests match. Exposed for the
+    /// same reason as its siblings, so a pin asserts the SHIPPED string.</para>
     /// </summary>
     internal static string BuildServerWatermarkWithWitnessForDatabaseSql(string tableName, string columnName, string databaseColumnName) =>
-        $"SELECT MAX({columnName}), MAX(collection_time) FROM {tableName} "
+        $"{QueryStoreWatermarkSeedMarker} SELECT {columnName}, collection_time FROM {tableName} "
         + $"WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3 "
-        + $"AND {columnName} = (SELECT MAX({columnName}) FROM {tableName} "
-        + $"WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3)";
+        + $"AND {columnName} IS NOT NULL "
+        + $"ORDER BY {columnName} DESC, collection_time DESC LIMIT 1";
 
     /// <summary>
     /// The numeric (bigint identity) watermark SQL behind <see cref="GetLastCollectedInstanceIdAsync"/>
