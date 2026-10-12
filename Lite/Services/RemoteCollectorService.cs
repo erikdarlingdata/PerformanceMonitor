@@ -1292,7 +1292,9 @@ public partial class RemoteCollectorService
         {
             MarkMasterInaccessible(serverId);
 
-            return FallbackDatabaseList(server, targetDb, reason: $"master DB inaccessible (SQL error {ex.Number})");
+            return FallbackDatabaseList(
+                server, targetDb, reason: $"master DB inaccessible (SQL error {ex.Number})",
+                errorNumber: ex.Number, serverMessage: ex.Message);
         }
     }
 
@@ -1371,22 +1373,20 @@ public partial class RemoteCollectorService
     /// interesting event is forming the verdict, not re-reading it — logging both would put four lines
     /// a minute in the log of a #857 user whose setup is working exactly as intended.
     /// </param>
-    internal static List<string> FallbackDatabaseList(ServerConnection server, string? targetDb, string reason, bool quiet = false)
+    internal static List<string> FallbackDatabaseList(
+        ServerConnection server, string? targetDb, string reason, bool quiet = false,
+        int? errorNumber = null, string? serverMessage = null)
     {
         var fallback = SingleDbOrEmpty(targetDb);
 
         if (fallback.Count == 0)
         {
-            /* #5498: the firewall comes first. 40615 means the server's firewall did not allow the client's IP
-               address, which a server-level block causes; a missing Database setting never does. The
-               set-a-Database advice is only the fix for the master-only case (a login allowed into a user
-               database but not master). Text only: the fallback itself is unchanged. */
-            throw new InvalidOperationException(
-                $"{reason}, and this connection has no target database to fall back to " +
-                $"(it resolves to master). If the error is 40615, the Azure firewall did not allow this " +
-                $"client's IP address: add a firewall rule for it, either a server-level rule or a database-level rule in master. " +
-                $"If this login can open a user database but not master, set a Database for " +
-                $"'{server.DisplayName}' so database-scoped collectors have something to read.");
+            /* #5498: the firewall comes first. #5647: 40615 means the server's firewall did not allow the
+               client's IP address, which a missing Database setting never causes, so the message leads with the
+               firewall and then offers the set-a-Database fix for a client allowed only by a database-level rule
+               in a user database. Text only: the fallback itself is unchanged. */
+            throw new InvalidOperationException(AzureMasterFallbackMessage.Build(
+                reason, errorNumber, serverMessage, server.DisplayName, "Database"));
         }
 
         if (quiet)

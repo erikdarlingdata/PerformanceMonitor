@@ -28,7 +28,9 @@ public sealed class BoundedDdlSingleCopyTests
     public void TheHourlyLockTimeout_IsSetInOneMethodOnly()
     {
         var text = Storage();
-        const string setLocal = "SET LOCAL lock_timeout = '{HourlyDdlLockTimeout}'";
+        /* #5667: the statement now reads the local the helper derives from its test seam, whose default is the one 3 s constant. */
+        const string setLocal = "SET LOCAL lock_timeout = '{lockTimeout}'";
+        Assert.Contains("var lockTimeout = lockTimeoutOverride ?? HourlyDdlLockTimeout;", text, StringComparison.Ordinal);
         var first = text.IndexOf(setLocal, StringComparison.Ordinal);
         Assert.True(first >= 0, "could not find the helper's SET LOCAL lock_timeout");
         Assert.Equal(-1, text.IndexOf(setLocal, first + 1, StringComparison.Ordinal));

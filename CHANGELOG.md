@@ -21,13 +21,25 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
-## [3.10.0] - 2026-10-08
+### Added
+
+- **Deadlock graph window: a visible Copy button for the SQL text** ([#5663]) - the only ways to copy a process's SQL text were the right-click "Copy SQL Text" menu item or selecting the text box and pressing Ctrl+C, and the menu was easy to miss. The Properties panel now has a Copy button on the same row as the "SQL Text" heading, in Lite and the Darling viewer. It copies the same full SQL text as the menu item, through the same code, and is only shown when the process has SQL text.
+
+### Fixed
+
+- **The Darling viewer's Manage Servers window now shows the service's version, once, instead of its own version on every server row** ([#5668]) - the grid's Installed Version column filled every row with the viewer's own version, so an old viewer talking to a newer service read as up to date. The service now writes its product version and process start time to the store when it starts (a new table, `config.service_version`, one row per service host, store schema V174, created by the first start after the upgrade), and Manage Servers shows it once above the grid beside the viewer's own version: one line per service host when more than one service writes to the store. A store with no row yet, or without the table, reads `unknown (older than 3.11)`. A write that fails at start logs a warning, and the service tries it again on every sweep until it succeeds. The Installed Version column is removed. The line is display only and shows no warning.
+- **A collector that recovered no longer stays at WARNING** ([#5665]) - the 7-day failure rate gave WARNING above 20% errors and a later success never cleared it, so a new target with 2 errors in its first 8 runs stayed WARNING until its tenth run. The rate now counts only once the window holds 10 runs, or fewer when a collector runs so rarely that a full 7-day window holds fewer (7 for a daily collector, so a daily collector that failed 6 days of 7 and succeeded today stays WARNING), and a collector whose newest 3 runs in a row succeeded is HEALTHY with a note "recovered: the last 3 runs succeeded; last failure <time> UTC" in the Note column of Lite and the Darling viewer, in a Recovered column of the Darling web dashboard, and as note_summary (recovered_note on the shorter rows) in the MCP get_collection_health read. The note appears only on a row the recovery rule moved to HEALTHY, never on one that another rule bands WARNING or STOPPED. A collector that alternates between failing and succeeding stays WARNING, a collector with few runs whose latest run failed stays WARNING, and the staleness, abandon-rate and lost-databases rules are unchanged. The fleet overview card and the Darling viewer's Overview cards agree: when a collector's failure rate alone would band it WARNING, the roll-up reads that collector's newest 3 runs in one follow-up statement (none when no collector needs it), so a recovered collector reads HEALTHY on the fleet card as on its own tab and an alternating one stays WARNING.
+- **The upgrade and installer accept a hand-named `darling.json.bak-*` backup in the install folder** ([#5659]) - In 3.10.0 the check that runs before the lock refused an install folder holding a backup such as `darling.json.bak-before-edit`, because the service owns every `darling.json.bak-*` file after a start and the check trusted it only on the stamped names the CLI writes. The refusal said the folder was writable by ordinary users and told the operator to move the whole install. The check now trusts the service account on every file in the install root whose name starts with `darling.json.bak-`, the same prefix the hardening uses, and nowhere else. Any other grantee on such a file, the service on another file, a folder with that name, a link, a file with more than one name (a hard link) and a file below the root still refuse. A backup-named hard link is now reported as a finding of its own, and the lock and the install pass leave it alone, so it never gets the service as owner. The lock also leaves any other file with more than one name alone, wherever it is in the install tree, and lists it as still open instead of changing its owner or resetting its permissions, because either would change the file's other name too. That owner step opens the install folder once and changes an owner only on an object whose real path it confirms is inside that folder, lists a name that ends in a dot or a space instead of acting on it, and turns on SeTakeOwnershipPrivilege and SeBackupPrivilege for itself and puts them back as it found them. When a refusal lists only backup files, it now starts with a note that names them, says they can hold the secrets that were in darling.json and can be moved to a folder only Administrators can read, and then gives the usual advice unchanged. The check, the install-time hardening, the upgrade's manifest guard, the service sweep and the CLI check now match one prefix per language by ordinal, case-insensitive name, so a Turkish-locale host reads the names the way the service does. The CLI permission check now lists the backups of the config it was given (`prod.json.bak-*` for `prod.json`) instead of always `darling.json.bak-*`. A name that ends in a dot or a space is not treated as a backup by the check, the install-time hardening, the service sweep or the CLI check, because Windows resolves such a name to a different file.
+- **The installer and the upgrade now compare a folder the same way whether it is typed as a short path, with a trailing backslash or in another case** ([#5682]) - the same-folder and at-or-under checks (the folder the upgrade runs from, the source folder, the service's registered folder, the user-profile check on the install folder, the `file:` reference check on a `dataDirectory`, `pfxPath`, `certPath` or `keyPath` value, and the refusal advice) now put both paths in one long spelling first. A folder given as an 8.3 short path, with a trailing backslash or in another case gives the same answer as its long form.
+
+## [3.10.0] - 2026-10-09
 
 Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 
 ### Important
 
-- **Upgrading from 3.9 runs the Darling store migrations V158 through V170 on the service's first start**
+- **Upgrading from 3.9 runs the Darling store migrations V158 through V173 on the service's first start**
+- **On Windows, upgrading an install that ordinary users can write to stops once and prints steps to move it** ([#5627])
 
 ### Added
 
@@ -143,6 +155,7 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 
 ### Changed
 
+- **Darling web sends browser security headers, the actual-plan confirmation says where the query came from, and connection-test errors carry less detail, and a configured token gates the loopback endpoints** ([#5636])
 - **Microsoft.Data.SqlClient moves to 7.1.1** ([#4963])
 - **Fleet Custom Views Query Store panels read the store's chunk floors once** ([#5001])
 - **Web System Events grids show the desktop's columns** ([#5118])
@@ -326,6 +339,9 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 - **"Collection Falling Behind" no longer fires in the first hour after every start** ([#5599])
 - **A hung test shard names its test and keeps its logs** ([#5591])
 - **One-day Custom Views panels on Query Store data read an hourly rollup, or are refused up front** ([#5588], [#5610])
+- **Darling's hourly maintenance step over stored analysis findings no longer times out on a large store** ([#5626])
+- **Upgrade refusals no longer list the service's own files** ([#5628])
+- **Darling's deadlock maintenance logs a line when a stage recovers after a failed pass** ([#5637])
 
 ## [3.9.0] - 2026-10-02
 
@@ -5187,3 +5203,13 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5598]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5598
 [#5599]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5599
 [#5610]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5610
+[#5626]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5626
+[#5627]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5627
+[#5636]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5636
+[#5637]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5637
+[#5628]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5628
+[#5663]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5663
+[#5668]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5668
+[#5665]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5665
+[#5659]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5659
+[#5682]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5682

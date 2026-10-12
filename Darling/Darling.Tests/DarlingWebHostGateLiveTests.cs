@@ -21,6 +21,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -382,6 +383,150 @@ public sealed class DarlingWebHostGateLiveTests
         // A path nothing maps answers 404 once the gate lets the request through; without the cookie it is the login form.
         var withCookie = await Send(server, "/some/unmapped/path", "localhost", IPAddress.Loopback, cookie: cookie);
         Assert.Equal(StatusCodes.Status404NotFound, withCookie.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// A token the operator configured gates a loopback-only dashboard too. The production start resolves it with
+    /// <see cref="DarlingWebHostService.ResolveLoopbackOnlyToken"/> and hands the answer to the pipeline as the access
+    /// token with the loopback-only token gate on; this builds the pipeline from the same answer: an API call with no
+    /// token is 401, a wrong token is 401, the right token is exchanged for a session cookie and the cookie passes.
+    /// </summary>
+    [Fact]
+    public async Task LoopbackOnly_ConfiguredToken_IsRequired_RightTokenPasses()
+    {
+        var resolved = DarlingWebHostService.ResolveLoopbackOnlyToken(
+            new WebNetworkConfig { Token = Token }, NullLogger.Instance);
+        Assert.False(resolved.Refuse);
+        Assert.Equal(Token, resolved.Token);
+
+        using var server = await BuildServer(
+            networkMode: false, requireTokenWhenLoopbackOnly: resolved.Token.Length > 0, accessToken: resolved.Token);
+
+        var (api, apiBody) = await SendWithBody(server, "/api/fleet", "localhost", IPAddress.Loopback);
+        Assert.Equal(StatusCodes.Status401Unauthorized, api.Response.StatusCode);
+        Assert.Contains("\"error\"", apiBody, StringComparison.Ordinal);
+
+        var wrong = await Send(server, "/api/fleet", "localhost", IPAddress.Loopback, token: "not-the-token");
+        Assert.Equal(StatusCodes.Status401Unauthorized, wrong.Response.StatusCode);
+
+        var exchange = await Send(server, "/", "localhost", IPAddress.Loopback, token: Token);
+        Assert.Equal(StatusCodes.Status302Found, exchange.Response.StatusCode);
+        var setCookie = Assert.Single(exchange.Response.Headers.SetCookie) ?? string.Empty;
+        var cookie = setCookie[..setCookie.IndexOf(';')];
+
+        var withCookie = await Send(server, "/some/unmapped/path", "localhost", IPAddress.Loopback, cookie: cookie);
+        Assert.Equal(StatusCodes.Status404NotFound, withCookie.Response.StatusCode);
+    }
+
+    /// <summary>No token configured, loopback-only: the dashboard is open to local browsers exactly as before.</summary>
+    [Fact]
+    public async Task LoopbackOnly_NoTokenConfigured_StaysOpen()
+    {
+        var resolved = DarlingWebHostService.ResolveLoopbackOnlyToken(
+            new WebNetworkConfig { Token = "   " }, NullLogger.Instance);
+        Assert.False(resolved.Refuse);
+        Assert.Equal("", resolved.Token);
+        Assert.Equal("", DarlingWebHostService.ResolveLoopbackOnlyToken(null, NullLogger.Instance).Token);
+
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: resolved.Token.Length > 0);
+        var ctx = await Send(server, "/some/unmapped/path", "localhost", IPAddress.Loopback);
+
+        Assert.Equal(StatusCodes.Status404NotFound, ctx.Response.StatusCode);
+    }
+
+    /// <summary>A configured token that cannot be decrypted stops the start (Critical line, no token in it) instead of
+    /// serving the loopback dashboard open.</summary>
+    [Fact]
+    public void LoopbackOnly_ConfiguredTokenThatCannotBeUsed_RefusesTheStart_WithOneCriticalLine()
+    {
+        var log = new CapturingTestLogger();
+        var resolved = DarlingWebHostService.ResolveLoopbackOnlyToken(
+            new WebNetworkConfig { EncryptedToken = "not-a-protected-blob" }, new CapturingHostLogger(log));
+
+        Assert.True(resolved.Refuse);
+        Assert.Equal("", resolved.Token);
+        Assert.Contains(log.Lines, l => l.Contains("Web dashboard token", StringComparison.Ordinal)
+            && l.Contains("refusing to serve", StringComparison.Ordinal));
+        Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
+    }
+
+    private static int FreeTcpPort()
+    {
+        var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    /// <summary>
+    /// Network mode with a token that is configured but cannot be used (a blob this host cannot decrypt, a variable
+    /// that is not set) does not start the dashboard at all, exactly as a loopback-only start does: the real start
+    /// returns false, logs one Critical line, and nothing answers on the loopback port.
+    /// </summary>
+    [Theory]
+    [InlineData("\"encryptedToken\": \"not-a-protected-blob\"")]
+    [InlineData("\"token\": \"env:DARLING_TEST_WEB_TOKEN_THAT_IS_NOT_SET\"")]
+    public async Task NetworkMode_ConfiguredTokenThatCannotBeUsed_DoesNotStart_AndNothingAnswersOnTheLoopbackPort(string tokenJson)
+    {
+        var port = FreeTcpPort();
+        var config = DarlingConfig.Parse(
+            ("{ 'postgres': { 'managed': true }, 'servers': [ { 'host': 'SQL2022' } ], 'web': { 'enabled': true, 'port': "
+            + port + ", 'network': { 'listen': '" + ListenIp + "', 'allowFrom': '" + AllowedCidr + "', " + tokenJson + " } } }")
+            .Replace('\'', '"'));
+        var log = new CapturingTestLogger();
+        var host = new DarlingWebHostService(
+            new CapturingHostLogger(log), new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+        var toggle = new DarlingHostBinding.EndpointToggle(true, port, DarlingHostBinding.EndpointToggleOrigin.File, false, false);
+        var tryStart = typeof(DarlingWebHostService).GetMethod(
+            "TryStartServerAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var started = true;
+        var answered = false;
+        try
+        {
+            started = await (Task<bool>)tryStart.Invoke(host, [config, toggle, System.Threading.CancellationToken.None])!;
+            try
+            {
+                using var client = new System.Net.Sockets.TcpClient();
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await client.ConnectAsync(IPAddress.Loopback, port, cts.Token);
+                answered = true;
+            }
+            catch (System.Net.Sockets.SocketException)
+            {
+            }
+        }
+        finally
+        {
+            await host.DisposeFailedStartAsync();
+        }
+
+        Assert.False(started, "a configured token that cannot be used must stop the start in network mode");
+        Assert.False(answered, "nothing may answer on the loopback port");
+        Assert.Contains(log.Lines, l => l.Contains("Web dashboard token", StringComparison.Ordinal)
+            && l.Contains("web dashboard not started", StringComparison.Ordinal));
+        Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
+    }
+
+    /// <summary>The start itself calls the resolver on a loopback-only bind and stops on a refusal, so the pipeline
+    /// tests above describe what production serves.</summary>
+    [Fact]
+    public void TryStartServerAsync_ResolvesTheLoopbackOnlyToken_AndStopsOnARefusal()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
+        var start = source.IndexOf("private async Task<bool> TryStartServerAsync(", StringComparison.Ordinal);
+        Assert.True(start > 0);
+        var body = source[start..];
+        var call = body.IndexOf("ResolveLoopbackOnlyToken(network, _logger)", StringComparison.Ordinal);
+        Assert.True(call > 0, "TryStartServerAsync must resolve a configured token on a loopback-only start");
+        var tail = body[call..];
+        Assert.Contains("if (loopbackToken.Refuse)", tail[..400], StringComparison.Ordinal);
+        Assert.Contains("accessToken = loopbackToken.Token;", tail[..700], StringComparison.Ordinal);
     }
 
     /// <summary>The Host guard still runs first on the token-keeping loopback-only server, so a foreign Host is 400

@@ -11,8 +11,10 @@ using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -32,6 +34,39 @@ public sealed class WebDataStartNoteEventReadsTests
         NpgsqlDataSource.Create("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=1;Pooling=false");
 
     private static readonly CancellationToken Cancelled = new(canceled: true);
+
+    /* #5678: the connect timeout that beats Npgsql's look at the request token, as the exception itself: an NpgsqlException that
+       wraps a TimeoutException, not an OperationCanceledException. The rule under test takes the exception and the token, so a
+       hand-built exception stands in for the race with no connection attempt to time. */
+    private static NpgsqlException ConnectTimeout() => new("Exception while connecting", new TimeoutException());
+
+    /// <summary>#5678: a cancelled caller gets the cancellation from a failed registry read, never the registry-fault sentence,
+    /// whatever type the failure had; a live caller still gets the sentence.</summary>
+    [Fact]
+    public void AFailedRegistryRead_SurfacesCancellation_ForACancelledCaller_AndTheFaultSentenceForALiveOne()
+    {
+        Assert.Throws<OperationCanceledException>(() => DarlingServerResolver.FaultOrCancel(ConnectTimeout(), Cancelled));
+
+        var (servers, fault) = DarlingServerResolver.FaultOrCancel(ConnectTimeout(), CancellationToken.None);
+        Assert.Empty(servers);
+        Assert.StartsWith(DarlingServerResolver.RegistryReadFaultPrefix, fault, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5678: a cancelled caller gets the cancellation from a failed data-start probe, not an unannotated grid, whatever
+    /// type the failure had; a live caller still gets the grid untouched and one Debug line.</summary>
+    [Fact]
+    public void AFailedDataStartProbe_SurfacesCancellation_ForACancelledCaller_AndTheGridForALiveOne()
+    {
+        const string grid = "{\"rows\":[]}";
+        var logger = new CapturingTestLogger();
+
+        Assert.Throws<OperationCanceledException>(
+            () => WebDataStartNote.ProbeFailed(grid, ConnectTimeout(), "get_health_parser_system_health", logger, Cancelled));
+        Assert.Equal("(no log lines captured)", logger.Joined);
+
+        Assert.Same(grid, WebDataStartNote.ProbeFailed(grid, ConnectTimeout(), "get_health_parser_system_health", logger, CancellationToken.None));
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Debug));
+    }
 
     private const string DefaultTraceCapped =
         "{\"server\":\"sql01\",\"hours_back\":48,\"total_events\":250,\"shown\":2,\"events\":["

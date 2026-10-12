@@ -99,7 +99,8 @@ public sealed class ProductiveZeroBandingTests
             CollectorHealthClassifier.Healthy,
             CollectorHealthClassifier.Classify(
                 row.TotalRuns, row.SuccessCount, row.ErrorCount, 0, 0, 0,
-                row.HoursSinceLastSuccess, row.HoursSinceLastRun, 1));
+                row.HoursSinceLastSuccess, row.HoursSinceLastRun, 1,
+                null, 0)); // 0: a count-only fixture, no run history
 
         /* And #3819's predicate is false here, which is what makes the two classes disjoint rather than
            overlapping: that one needs the newest run to be a named skip. */

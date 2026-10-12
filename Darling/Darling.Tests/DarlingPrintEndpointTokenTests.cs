@@ -130,6 +130,43 @@ public class DarlingPrintEndpointTokenTests
         Assert.Contains("--configure-network", error.ToString(), StringComparison.Ordinal);
     }
 
+    /// <summary>The warning before the payload says the token gates every client of the endpoint, local ones included,
+    /// and the Viewer's copy-MCP-command button tells the user how to add the header.</summary>
+    [Fact]
+    public void TheTokenText_SaysLocalClientsSendItToo_AndTheViewerButtonNamesTheHeaderAndTheVerb()
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = DarlingCliCommands.PrintEndpointToken(
+            "mcp", "MCP bearer", "--print-mcp-token", "clients send it as a header",
+            elevated: true, configured: true, () => "s3cret-token-value", output, error);
+
+        Assert.Equal(0, exit);
+        Assert.Contains("local clients included", error.ToString(), StringComparison.Ordinal);
+
+        var cli = ReadRepoSource("PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs");
+        Assert.DoesNotContain("Remote MCP clients send it", cli, StringComparison.Ordinal);
+        Assert.Contains("Every MCP client sends it as the header", cli, StringComparison.Ordinal);
+
+        var viewer = ReadRepoSource("PerformanceMonitor.Darling.Viewer", "SettingsWindow.xaml.cs");
+        Assert.Contains("Authorization: Bearer <token>", viewer, StringComparison.Ordinal);
+        Assert.Contains("--print-mcp-token", viewer, StringComparison.Ordinal);
+    }
+
+    private static string ReadRepoSource(string project, string fileName, [CallerFilePath] string thisFile = "")
+    {
+        var relative = Path.Combine("Darling", project, fileName);
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.True(dir is not null, $"{relative} not found above the test file");
+        return File.ReadAllText(Path.Combine(dir!, relative));
+    }
+
     /// <summary>A configured block whose token resolves empty is not a token — printing a blank line would
     /// have the operator paste nothing into a client and wonder why it is refused.</summary>
     [Fact]

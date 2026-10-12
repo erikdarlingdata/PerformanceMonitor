@@ -52,7 +52,7 @@ public sealed class StatementFilterWebTests
     }
 
     private static Task<(int Status, string Body)> ReadRoute(string tool, string raw) =>
-        RunAsync(DarlingWebEndpoints.ToHttpResult(raw, "/api/read/" + tool, NullLogger.Instance, 1));
+        RunAsync(DarlingWebEndpoints.ToHttpResult(raw, "/api/read/" + tool, NullLogger.Instance, 1, System.Threading.CancellationToken.None));
 
     private static void AssertWithheld(string body)
     {
@@ -134,7 +134,7 @@ public sealed class StatementFilterWebTests
             ["sample_rows"] = new JsonArray(new JsonObject { ["query_text"] = Canary, ["wait_type"] = "LCK_M_X" }),
         }.ToJsonString();
 
-        var (_, body) = await RunAsync(DarlingWebEndpoints.ToHttpResult(raw, "/api/alerts/test", NullLogger.Instance, 1));
+        var (_, body) = await RunAsync(DarlingWebEndpoints.ToHttpResult(raw, "/api/alerts/test", NullLogger.Instance, 1, System.Threading.CancellationToken.None));
 
         AssertWithheld(body);
         Assert.Contains("LCK_M_X", body);
@@ -150,7 +150,7 @@ public sealed class StatementFilterWebTests
         }.ToJsonString();
 
         var (status, body) = await RunAsync(DarlingWebEndpoints.MuteRuleToolResult(
-            raw, "/api/mute-rules/{id}/enabled", NullLogger.Instance, 1));
+            raw, "/api/mute-rules/{id}/enabled", NullLogger.Instance, 1, System.Threading.CancellationToken.None));
 
         Assert.Equal(200, status);
         AssertWithheld(body);
@@ -211,7 +211,7 @@ public sealed class StatementFilterWebTests
             ["sections"] = new JsonArray(new JsonObject { ["rows"] = new JsonArray(new JsonObject { ["query_text"] = Plain }) }),
         };
 
-        var (status, written) = await RunAsync(DarlingWebStatementSweep.JsonText(body, route, NullLogger.Instance, 1));
+        var (status, written) = await RunAsync(DarlingWebStatementSweep.JsonText(body, route, NullLogger.Instance, 1, System.Threading.CancellationToken.None));
 
         Assert.Equal(200, status);
         AssertWithheld(written);

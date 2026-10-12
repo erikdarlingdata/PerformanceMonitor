@@ -2,6 +2,12 @@
   "version": 2,
   "dependencies": {
     "net10.0-windows7.0": {
+      "Microsoft.AspNetCore.TestHost": {
+        "type": "Direct",
+        "requested": "[10.0.12, )",
+        "resolved": "10.0.12",
+        "contentHash": "bTHgbcjSrLxlqSasYRDU9BcJ3hDGoqIjtDY0soLNrndOWi3kxtOyddwUMaNZgtoI2Uf6y7ZQs2EuVj0c20B7mA=="
+      },
       "xunit.v3": {
         "type": "Direct",
         "requested": "[4.0.1, )",
@@ -303,8 +309,7 @@
           "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.12",
           "Microsoft.Extensions.Logging": "10.0.12",
           "Microsoft.Extensions.Logging.Abstractions": "10.0.12",
-          "Microsoft.Extensions.Options": "10.0.12",
-          "System.Diagnostics.EventLog": "10.0.12"
+          "Microsoft.Extensions.Options": "10.0.12"
         }
       },
       "Microsoft.Extensions.Logging.EventSource": {
@@ -641,11 +646,6 @@
           "System.Memory.Data": "10.0.1"
         }
       },
-      "System.Diagnostics.EventLog": {
-        "type": "Transitive",
-        "resolved": "10.0.12",
-        "contentHash": "sOZM+VyRj1pg/ItlHsvrSbjws6oGqZveTzTNBGZ9ziwRDyKsOF3ub6vhvOdxotCIqtlnyHAIwP5sLNvgiZC+pQ=="
-      },
       "System.IdentityModel.Tokens.Jwt": {
         "type": "Transitive",
         "resolved": "8.16.0",
@@ -741,8 +741,8 @@
       "performancemonitor.alerting": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.9.0, )",
-          "PerformanceMonitor.Notifications": "[3.9.0, )"
+          "PerformanceMonitor.Common": "[3.10.0, )",
+          "PerformanceMonitor.Notifications": "[3.10.0, )"
         }
       },
       "performancemonitor.analysis": {
@@ -751,7 +751,7 @@
       "performancemonitor.collectors": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.9.0, )"
+          "PerformanceMonitor.Common": "[3.10.0, )"
         }
       },
       "performancemonitor.common": {
@@ -766,22 +766,21 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.12, )",
-          "PerformanceMonitor.Analysis": "[3.9.0, )"
+          "PerformanceMonitor.Analysis": "[3.10.0, )"
         }
       },
       "performancemonitor.plananalysis": {
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.1.1, )",
-          "PerformanceMonitor.Common": "[3.9.0, )",
-          "System.Security.Cryptography.ProtectedData": "[10.0.11, )"
+          "PerformanceMonitor.Common": "[3.10.0, )"
         }
       },
       "performancemonitor.ui": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.9.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.9.0, )",
+          "PerformanceMonitor.Common": "[3.10.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.10.0, )",
           "ScottPlot.WPF": "[5.1.59, )"
         }
       },
@@ -798,13 +797,13 @@
           "Microsoft.Extensions.Logging": "[10.0.12, )",
           "ModelContextProtocol": "[2.2.0, )",
           "ModelContextProtocol.AspNetCore": "[2.2.0, )",
-          "PerformanceMonitor.Alerting": "[3.9.0, )",
-          "PerformanceMonitor.Analysis": "[3.9.0, )",
-          "PerformanceMonitor.Collectors": "[3.9.0, )",
-          "PerformanceMonitor.Common": "[3.9.0, )",
-          "PerformanceMonitor.Notifications": "[3.9.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.9.0, )",
-          "PerformanceMonitor.Ui": "[3.9.0, )",
+          "PerformanceMonitor.Alerting": "[3.10.0, )",
+          "PerformanceMonitor.Analysis": "[3.10.0, )",
+          "PerformanceMonitor.Collectors": "[3.10.0, )",
+          "PerformanceMonitor.Common": "[3.10.0, )",
+          "PerformanceMonitor.Notifications": "[3.10.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.10.0, )",
+          "PerformanceMonitor.Ui": "[3.10.0, )",
           "ScottPlot.WPF": "[5.1.59, )",
           "Velopack": "[1.2.161, )"
         }
@@ -972,12 +971,6 @@
           "ScottPlot": "5.1.59",
           "SkiaSharp.Views.WPF": "3.119.0"
         }
-      },
-      "System.Security.Cryptography.ProtectedData": {
-        "type": "CentralTransitive",
-        "requested": "[10.0.12, )",
-        "resolved": "10.0.11",
-        "contentHash": "PNoxCTPb+Tlux+GJyq4c89ddYdpioVSqfGx8pqOF6shCSKwUNNctXhQtRkCICjbJmGrJJsW8NY52kVYO/b8mlQ=="
       },
       "Velopack": {
         "type": "CentralTransitive",

@@ -34,6 +34,7 @@ public partial class QueryStoreHistoryWindow : Window
 {
     private readonly ViewerDataService _dataService;
     private readonly int _serverId;
+    private readonly string _serverName;
     private readonly string _databaseName;
     private readonly long _queryId;
     private readonly long _planId;
@@ -49,12 +50,13 @@ public partial class QueryStoreHistoryWindow : Window
     private System.Threading.CancellationTokenSource? _actualPlanCts;
 
     public QueryStoreHistoryWindow(
-        ViewerDataService dataService, int serverId, string databaseName, long queryId, long planId,
+        ViewerDataService dataService, int serverId, string serverName, string databaseName, long queryId, long planId,
         string queryText, DateTime startUtc, DateTime endUtc)
     {
         InitializeComponent();
         _dataService = dataService;
         _serverId = serverId;
+        _serverName = serverName;
         _databaseName = databaseName;
         _queryId = queryId;
         _planId = planId;
@@ -310,24 +312,22 @@ public partial class QueryStoreHistoryWindow : Window
         if (_queryId == 0) return;
 
         var planId = SelectedPlanId;
-        string? estimatedPlanXml = null;
-        try { estimatedPlanXml = await _dataService.GetQueryStorePlanTextAsync(_serverId, _databaseName, _queryId, planId); }
-        catch { /* detection degrades to the fail-safe uncertain path */ }
-
         var argsJson = ViewerDataService.BuildActualPlanArgsForQueryStore(_queryId, _databaseName);
         var label = $"Actual Plan - QS {_queryId}/{planId}";
 
         _actualPlanCts?.Dispose();
         _actualPlanCts = new System.Threading.CancellationTokenSource();
 
-        var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
-            this, _dataService, _serverId, "the monitored server", _databaseName, _queryText, estimatedPlanXml, argsJson,
+        var capture = await ViewerActualPlanFlow.RequestActualPlanAsync(
+            this, _dataService, _serverId, _serverName, _databaseName, _queryText,
+            () => _dataService.GetQueryStorePlanTextAsync(_serverId, _databaseName, _queryId, planId), /* #5639: read before the prompt; a failed read counts as no plan */
+            argsJson,
             onStarted: () => System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait,
             onFinished: () => System.Windows.Input.Mouse.OverrideCursor = null,
             _actualPlanCts.Token);
 
-        if (planXml != null)
-            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, _queryText, _databaseName);
+        if (capture != null)
+            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, capture.PlanXml, label, capture.QueryText, _databaseName);
     }
 
     // ── Column Filter Popup (mirrors WaitDrillDownWindow / ViewerServerTab.Filters.cs) ──

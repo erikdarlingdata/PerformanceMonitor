@@ -356,7 +356,7 @@ public sealed class TopRankingLiveTests
         using var provider = services.BuildServiceProvider();
         var context = new DefaultHttpContext { RequestServices = provider };
         context.Response.Body = new MemoryStream();
-        DarlingWebEndpoints.ToHttpResult(toolResult, "/api/read/" + read, new CapturingTestLogger(), 1)
+        DarlingWebEndpoints.ToHttpResult(toolResult, "/api/read/" + read, new CapturingTestLogger(), 1, System.Threading.CancellationToken.None)
             .ExecuteAsync(context).GetAwaiter().GetResult();
         return context.Response.StatusCode;
     }

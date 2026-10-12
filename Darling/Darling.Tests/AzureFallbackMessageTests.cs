@@ -20,7 +20,8 @@ namespace Darling.Tests;
 /// #5498: when master cannot be read and the registration names no database, the thrown text puts the firewall first.
 /// Error 40615 means the Azure firewall did not allow the client's IP address (a server-level block causes it as
 /// readily as a database-only rule), so the text names that and the firewall rule as the fix. Setting a database is
-/// only the fix for the master-only case. The 3.10 Azure release test hit this with a server-level rule removed and
+/// the fix for the master-only case, and (#5647 follow-up) it is also offered on the 40615 text for a client that a
+/// database-level rule on a user database allows, since Azure checks that rule only for that database. The 3.10 Azure release test hit this with a server-level rule removed and
 /// was told to set a database. The fallback behavior itself (throw when there is nothing to fall back to, use the
 /// named database otherwise) is unchanged and pinned here beside the wording.
 /// </summary>
@@ -38,27 +39,84 @@ public sealed class AzureFallbackMessageTests
         ServerId = 5498,
     };
 
+    private const string FirewallMessage =
+        "Cannot open server 'example' requested by the login. Client with IP address '192.0.2.1' is not allowed to " +
+        "access the server. To enable access, use the Azure Management Portal or run sp_set_firewall_rule on the " +
+        "master database to create a firewall rule for this IP address or address range.";
+
     [Theory]
     [InlineData("master")]
     [InlineData("")]
     [InlineData(null)]
-    public void NoDatabaseToFallBackTo_NamesTheFirewallFirst(string? targetDb)
+    public void Error40615_NamesTheFirewallAndTheClientIp_ThenOffersSettingTheDatabase(string? targetDb)
     {
         var ex = Assert.Throws<InvalidOperationException>(
-            () => Runner().FallbackDatabaseList(Server(), targetDb, reason: "master DB inaccessible (SQL error 40615)"));
+            () => Runner().FallbackDatabaseList(
+                Server(), targetDb, reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: 40615, serverMessage: FirewallMessage));
 
         var message = ex.Message;
         Assert.StartsWith("master DB inaccessible (SQL error 40615), and this connection has no target database", message, StringComparison.Ordinal);
-
-        var firewall = message.IndexOf("firewall did not allow this client's IP address", StringComparison.Ordinal);
-        var rule = message.IndexOf("add a firewall rule", StringComparison.Ordinal);
-        var setDatabase = message.IndexOf("set a database for 'AzureTest1007'", StringComparison.Ordinal);
-
-        Assert.True(firewall > 0, message);
-        Assert.True(rule > firewall, message);
+        Assert.Contains("The Azure firewall did not allow this client's IP address (192.0.2.1)", message, StringComparison.Ordinal);
+        Assert.Contains("dd a firewall rule", message, StringComparison.Ordinal);
         Assert.Contains("either a server-level rule or a database-level rule in master", message, StringComparison.Ordinal);
-        Assert.True(setDatabase > rule, "Setting a database comes after the firewall, as the master-only case's fix.");
-        Assert.Contains("can open a user database but not master", message, StringComparison.Ordinal);
+        Assert.EndsWith(
+            "If a database-level rule in a user database already allows this IP, set the database for 'AzureTest1007' to that database instead.",
+            message, StringComparison.Ordinal);
+        Assert.DoesNotContain("can open a user database", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Error40615_WithoutAnIpInTheServerText_StillOffersSettingTheDatabase()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => Runner().FallbackDatabaseList(
+                Server(), "master", reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: 40615, serverMessage: "Ein anderer Text ohne Adresse."));
+
+        Assert.Contains("did not allow this client's IP address. Add a firewall rule", ex.Message, StringComparison.Ordinal);
+        Assert.EndsWith(
+            "If a database-level rule in a user database already allows this IP, set the database for 'AzureTest1007' to that database instead.",
+            ex.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(4060)]
+    [InlineData(18456)]
+    public void AKnownNonFirewallErrorNumber_HasSetDatabaseAdviceAndNoFirewallText(int errorNumber)
+    {
+        /* The decision is the error number, not the words: a reason that merely says 40615 gets neither the
+           firewall-only message nor firewall advice when the number the caller read is something else. */
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => Runner().FallbackDatabaseList(
+                Server(), "master", reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: errorNumber, serverMessage: FirewallMessage));
+
+        var message = ex.Message;
+        Assert.DoesNotContain("firewall", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("40615, the", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("192.0.2.1", message, StringComparison.Ordinal);
+        Assert.EndsWith(
+            "If this login can open a user database but not master, set a database for 'AzureTest1007' " +
+            "so database-scoped collectors have something to read.",
+            message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NoErrorNumber_KeepsTheFirewallThenSetDatabaseMessage()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => Runner().FallbackDatabaseList(
+                Server(), "master", reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: null, serverMessage: FirewallMessage));
+
+        Assert.Contains(
+            "If the error is 40615, the Azure firewall did not allow this client's IP address: " +
+            "add a firewall rule for it, either a server-level rule or a database-level rule in master. " +
+            "If this login can open a user database but not master, set a database for 'AzureTest1007' " +
+            "so database-scoped collectors have something to read.",
+            ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("192.0.2.1", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

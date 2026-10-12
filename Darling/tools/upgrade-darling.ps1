@@ -201,7 +201,11 @@ function Note([string]$message) { Write-Host $message }
 # any other account: the lock gives the service read and execute on $path, so a write right there is not one
 # the lock put there. A caller that passes none (a source build, which the service never writes to) trusts
 # them nowhere.
-function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Recurse, [array]$serviceSids = @(), [array]$serviceDirectories = @()) {
+#
+# The return is the finding TEXTS, or with -AsRecords one object per finding (Kind: Grant, Owner, Link, HardLink,
+# Unreadable or Unlisted; Path; Text, the same line the text form returns; IsFile, from the item the walk itself
+# listed) for the callers that decide something from what a finding IS, never from its text (#5649).
+function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Recurse, [array]$serviceSids = @(), [array]$serviceDirectories = @(), [switch]$AsRecords) {
     $rights = [System.Security.AccessControl.FileSystemRights]
     $allow = [System.Security.AccessControl.AccessControlType]::Allow
     $sidType = [System.Security.Principal.SecurityIdentifier]
@@ -213,25 +217,31 @@ function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Rec
         (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorGroupServerSid, $null)))
     $write = [int64]($rights::WriteData -bor $rights::AppendData -bor $rights::WriteAttributes -bor $rights::WriteExtendedAttributes -bor $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor $rights::ChangePermissions -bor $rights::TakeOwnership) -bor 0x10000000 -bor 0x40000000
 
-    function Get-DarlingOneObjectWriteFindings([string]$itemPath, [bool]$includeInherited) {
+    function New-DarlingWriteFinding([string]$kind, [string]$findingPath, [string]$text, [bool]$isFile = $false) {
+        return [pscustomobject]@{ Kind = $kind; Path = $findingPath; Text = $text; IsFile = $isFile }
+    }
+    # $item is what the walk listed for $itemPath ($null for $path itself). The file-or-folder answer comes from it,
+    # never from a second look at the disk, so the check and the listing cannot disagree (#5649).
+    function Get-DarlingOneObjectWriteFindings([string]$itemPath, [bool]$includeInherited, $item = $null) {
+        $isFile = [bool]($null -ne $item -and -not $item.PSIsContainer)
         try { $acl = Get-Acl -LiteralPath $itemPath -ErrorAction Stop }
-        catch { return @("$itemPath (its permissions could not be read: $($_.Exception.Message))") }
+        catch { return @(New-DarlingWriteFinding 'Unreadable' $itemPath "$itemPath (its permissions could not be read: $($_.Exception.Message))" $isFile) }
         $ownerTrusted = $trusted
         $granteeTrusted = $trusted
         if (@($serviceSids).Count -gt 0) {
-            if (Test-DarlingServiceWrittenPath $path $itemPath $serviceDirectories) { $ownerTrusted = @($trusted) + @($serviceSids); $granteeTrusted = $ownerTrusted }
+            if (Test-DarlingServiceWrittenPath $path $itemPath $serviceDirectories $item) { $ownerTrusted = @($trusted) + @($serviceSids); $granteeTrusted = $ownerTrusted }
         }
         $bad = @($acl.GetAccessRules($true, $includeInherited, $sidType) | Where-Object {
             $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $granteeTrusted -notcontains $_.IdentityReference -and $inheritOnlyTemplates -notcontains $_.IdentityReference })
         $result = @($bad | ForEach-Object {
             $grantee = $_.IdentityReference
             $name = try { $grantee.Translate([System.Security.Principal.NTAccount]).Value } catch { $grantee.Value }
-            "$name on $itemPath"
+            New-DarlingWriteFinding 'Grant' $itemPath "$name on $itemPath" $isFile
         })
         $owner = $acl.GetOwner($sidType)
         if ($ownerTrusted -notcontains $owner) {
             $name = try { $owner.Translate([System.Security.Principal.NTAccount]).Value } catch { $owner.Value }
-            $result += "$itemPath (owned by $name)"
+            $result += New-DarlingWriteFinding 'Owner' $itemPath "$itemPath (owned by $name)" $isFile
         }
         return @($result)
     }
@@ -240,21 +250,44 @@ function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Rec
     if ($Recurse) {
         # -ErrorVariable, so a folder the walk cannot list is a finding of its own (#4043 round-2 review).
         # Skipped silently, nothing under it reached the checks above and the tree read as clean.
+        # Compared in one canonical long spelling (Get-DarlingCanonicalPath), so an install folder handed in as a short path
+        # (C:\PROGRA~1\...), with a trailing backslash or in other case is the same folder as the one the listing returns. A
+        # path that cannot be worked out is taken to be in the root, so the file is checked rather than passed over (#5649).
+        $rootFull = Get-DarlingCanonicalPath $path
         foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable listFailures)) {
             if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                $result += "$($child.FullName) (a junction or link)"
+                $result += New-DarlingWriteFinding 'Link' $child.FullName "$($child.FullName) (a junction or link)"
                 continue
             }
-            $result += Get-DarlingOneObjectWriteFindings $child.FullName $false
+            # A file with more than one name (a hard link) shares its permissions and its owner under every name, so
+            # one of them in the root with a name the service is trusted on would carry the other name's rights into
+            # the lock and the install pass (#5649). Reported like a link, for the root files the service writes.
+            # The names are counted through Get-DarlingFileNameCount, never from LinkType, and a count that cannot be read is a
+            # hard link here too.
+            $childFull = if (-not $child.PSIsContainer -and (Test-DarlingServiceWrittenFileName $child.Name)) { Get-DarlingCanonicalPath $child.FullName } else { $null }
+            if (-not $child.PSIsContainer -and (Test-DarlingServiceWrittenFileName $child.Name) -and ($null -eq $rootFull -or $null -eq $childFull -or [IO.Path]::GetDirectoryName($childFull).TrimEnd('\') -ieq $rootFull.TrimEnd('\'))) {
+                $nameCount = Get-DarlingFileNameCount $child.FullName
+                if ($nameCount -gt 1) {
+                    $result += New-DarlingWriteFinding 'HardLink' $child.FullName "$($child.FullName) (a hard link: this file has more than one name, and its permissions are the same under every one)" $true
+                }
+                elseif ($nameCount -lt 1) {
+                    $result += New-DarlingWriteFinding 'HardLink' $child.FullName "$($child.FullName) (a hard link, as far as can be told: the number of names this file has could not be read, and a file with more than one name has the same permissions under every one)" $true
+                }
+            }
+            $result += Get-DarlingOneObjectWriteFindings $child.FullName $false $child
         }
         foreach ($failure in @($listFailures)) {
             $unlisted = if ($failure.TargetObject) { "$($failure.TargetObject)" } else { $path }
-            $result += "$unlisted (its contents could not be listed: $($failure.CategoryInfo.Reason))"
+            $result += New-DarlingWriteFinding 'Unlisted' $unlisted "$unlisted (its contents could not be listed: $($failure.CategoryInfo.Reason))"
         }
     }
     # Each finding once: a folder made under C:\ inherits BUILTIN\Users as two ACEs (one grants append, one
     # grants write), and without this every caller named that principal twice for the same path.
-    return @($result | Select-Object -Unique)
+    # Compared without regard to case, the way Windows compares paths: the same path spelled in two cases is one finding.
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $unique = @(foreach ($found in $result) { if ($seen.Add($found.Text)) { $found } })
+    if ($AsRecords) { return @($unique) }
+    return @($unique | ForEach-Object { $_.Text })
 }
 
 # Every SID that is a DIRECT member of BUILTIN\Administrators right now (round-1 review, #4043, M2): an
@@ -308,45 +341,419 @@ function Resolve-DarlingServiceAccountSid([string]$account) {
 # (what it creates, grants and keeps the service's ownership of) and by the pre-lock walk (where the service's own
 # account is trusted as owner and as a write grantee), so the two cannot drift apart. Directories are always
 # created and granted; KeyDirectories only on a bring-your-own PostgreSQL install (Get-DarlingExtraServiceWriteDirectories
-# returns them, and only then are they on the list). Files are matched by exact name in the install root only: darling.json,
-# and its backups, which the config-editing verbs name darling.json.bak-yyyyMMdd-HHmmss with an optional -N counter
-# (BackupPattern). Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+# returns them, and only then are they on the list). Files are matched in the install root only, and only files (a folder of the same name is not on the
+# list): darling.json, and every file whose name starts with darling.json.bak- (BackupPrefix, #5649). That is the prefix the hardening covers: the
+# install-time pass in install-darling.ps1, the service's TryHardenConfigBackups and the CLI's backup enumeration all
+# take every darling.json.bak-* name, not only the darling.json.bak-yyyyMMdd-HHmmss(-N) names the config-editing verbs
+# write, so a backup an operator named by hand (darling.json.bak-before-edit) becomes service-owned at the next start
+# and must not read as a stranger's file. A backup is data the service reads and writes, never code that runs. This is
+# the ONE spelling of that prefix in these scripts, and every PowerShell site tests it with
+# StartsWith(prefix, OrdinalIgnoreCase): -like and -Filter fold case by the current culture (Turkish I) and, in Windows
+# PowerShell 5.1, match some look-alike characters, so they can disagree with the service. DarlingConfigBackup.Prefix
+# in the service is the one in C#, and a test pins the two to the same text. A file with more than one name (a hard
+# link) is never one the service writes: the root files this list covers come from Get-DarlingServiceWrittenRootFiles,
+# which leaves those out. Nor is a name ending in a dot or a space, which Windows folds into another name (the path test
+# refuses those too, and the service's backup test does the same). Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingServiceWrittenNames {
     return [pscustomobject]@{
         Directories    = @('pg-runtime', 'pg-runtime-prev')
         KeyDirectories = @('darling-keys')
         Files          = @('darling.json')
-        BackupPattern  = '^darling\.json\.bak-[0-9]{8}-[0-9]{6}(-[0-9]+)?$'
+        BackupPrefix   = 'darling.json.bak-'
     }
 }
 
 # True when a file NAME is one of the root files on the list above.
 function Test-DarlingServiceWrittenFileName([string]$name) {
     $names = Get-DarlingServiceWrittenNames
+    # A name Windows folds into another (a trailing dot or space) is not one the service wrote: it resolves to a DIFFERENT
+    # file, and Test-DarlingServiceWrittenPath already refuses it, so the two answer the same (#5649).
+    if ([string]::IsNullOrEmpty($name) -or $name.EndsWith('.') -or $name.EndsWith(' ')) { return $false }
     foreach ($file in @($names.Files)) {
-        if ($name -ieq $file) { return $true }
+        if ([string]::Equals($name, $file, [StringComparison]::OrdinalIgnoreCase)) { return $true }
     }
-    return [bool]($name -match $names.BackupPattern)
+    return [bool]$name.StartsWith($names.BackupPrefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
+# The number of names a file has (1 for an ordinary file, more for a hard link), read through a handle opened for
+# attributes only, with every sharing mode allowed and the file itself rather than anything it points to (the way
+# DarlingFileSecurity.HardenWithoutFollowingLinks reads it in the service). $item.LinkType is no substitute: Windows
+# PowerShell 5.1 leaves it empty when the file cannot be opened for read (another process holds it with no read
+# sharing, or this account is denied read), so a hard link read as no link at all. Returns -1 when the count cannot be
+# read, and every caller treats that as more than one name: a file whose names cannot be counted is never trusted, made
+# service-owned, granted anything or reset (#5649). Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingFileNameCount([string]$path) {
+    try {
+        if (-not ('DarlingNativeFileNames' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class DarlingNativeFileNames
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTimeValue { public uint Low; public uint High; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public FileTimeValue CreationTime;
+        public FileTimeValue LastAccessTime;
+        public FileTimeValue LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleFileInformation information);
+
+    // FILE_READ_ATTRIBUTES; share read, write and delete; OPEN_EXISTING; FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS.
+    public static int CountNames(string path)
+    {
+        using (SafeFileHandle handle = CreateFileW(path, 0x80, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        {
+            ByHandleFileInformation information;
+            if (handle.IsInvalid || !GetFileInformationByHandle(handle, out information)) { return -1; }
+            return (int)information.NumberOfLinks;
+        }
+    }
+}
+'@
+        }
+        return [int][DarlingNativeFileNames]::CountNames($path)
+    }
+    catch { return -1 }
+}
+
+# Sets the owner of one file or folder to the SID given, only when it has exactly one name and is inside the tree being locked
+# (#5677). OpenRoot opens the tree's root folder once, without sharing delete or rename, and keeps that handle open until
+# CloseRoot, so no folder above the root can be replaced while the walk runs; the root's real path is read from that handle
+# (GetFinalPathNameByHandleW, normalized, by volume GUID). SetOwner opens the object itself rather than anything it points to
+# (FILE_FLAG_OPEN_REPARSE_POINT, the way Get-DarlingFileNameCount opens) through a \\?\ path, so a name ending in a dot or a space
+# is not folded into another, reads the opened handle's real path and sets nothing unless that is the root's path or begins with
+# it and a backslash (ordinal, case-sensitive: both come from the file system), reads the link count from the same handle, and
+# only a count of exactly 1 is followed by SetSecurityInfo on that handle for the owner alone. A file with more than one name (a
+# hard link) shares one owner under every name, so one whose count is not 1 is never touched. SetOwner returns 0 when the owner
+# was set; 1 when the count is not 1 (detail is the count); 2 when it could not be opened and 3 when the count could not be read
+# (detail is the Win32 error); 4 when the owner could not be set (detail is the error); 5 when the opened object is not inside
+# the root, or no root is open, or its real path could not be read (nothing was changed). attributes is the object's attribute
+# bits as read from the handle, so a caller can tell a folder from a link without opening it again. EnablePrivileges turns on
+# SeTakeOwnershipPrivilege and SeBackupPrivilege (backup semantics let an object that denies Administrators read access open)
+# for this process's token, keeps what AdjustTokenPrivileges reports as their previous state and returns false if either could
+# not be turned on; RestorePrivileges puts back exactly that previous state. Kept byte-identical in install-darling.ps1 and
+# upgrade-darling.ps1.
+function Initialize-DarlingNativeOwner {
+    if ('DarlingNativeOwner' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+public static class DarlingNativeOwner
+{
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    private struct TokenPrivilege { public uint Count; public long Luid; public uint Attributes; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTimeValue { public uint Low; public uint High; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public FileTimeValue CreationTime;
+        public FileTimeValue LastAccessTime;
+        public FileTimeValue LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    private static SafeFileHandle rootHandle;
+    private static string rootPath;
+    private static TokenPrivilege[] previousStates = new TokenPrivilege[0];
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(SafeFileHandle file, StringBuilder path, uint length, uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleFileInformation information);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint SetSecurityInfo(SafeFileHandle handle, int objectType, uint securityInfo, byte[] owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool LookupPrivilegeValueW(string systemName, string name, out long luid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPrivilege state, uint length, out TokenPrivilege previous, out uint returned);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPrivilege state, uint length, IntPtr previous, IntPtr returned);
+
+    // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY; SE_PRIVILEGE_ENABLED is 2. A privilege the token does not hold is reported as an
+    // error. A privilege that was already on changes nothing, so its previous state comes back empty and is not touched again.
+    public static bool EnablePrivileges()
+    {
+        IntPtr token;
+        if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) { return false; }
+        try
+        {
+            bool all = true;
+            System.Collections.Generic.List<TokenPrivilege> saved = new System.Collections.Generic.List<TokenPrivilege>();
+            foreach (string name in new string[] { "SeTakeOwnershipPrivilege", "SeBackupPrivilege" })
+            {
+                TokenPrivilege state = new TokenPrivilege();
+                state.Count = 1;
+                state.Attributes = 2u;
+                if (!LookupPrivilegeValueW(null, name, out state.Luid)) { all = false; continue; }
+                TokenPrivilege previous;
+                uint returned;
+                if (!AdjustTokenPrivileges(token, false, ref state, (uint)Marshal.SizeOf(typeof(TokenPrivilege)), out previous, out returned) || Marshal.GetLastWin32Error() != 0) { all = false; }
+                else if (previous.Count > 0) { saved.Add(previous); }
+            }
+            previousStates = saved.ToArray();
+            return all;
+        }
+        finally { CloseHandle(token); }
+    }
+
+    public static bool RestorePrivileges()
+    {
+        IntPtr token;
+        if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) { return false; }
+        try
+        {
+            bool all = true;
+            foreach (TokenPrivilege previous in previousStates)
+            {
+                TokenPrivilege state = previous;
+                if (!AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero) || Marshal.GetLastWin32Error() != 0) { all = false; }
+            }
+            previousStates = new TokenPrivilege[0];
+            return all;
+        }
+        finally { CloseHandle(token); }
+    }
+
+    // The \\?\ spelling of an absolute path (\\?\UNC\ for a UNC path), which Windows does not trim or fold.
+    private static string ExtendedPath(string path)
+    {
+        if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) { return path; }
+        if (path.StartsWith(@"\\", StringComparison.Ordinal)) { return @"\\?\UNC\" + path.Substring(2); }
+        return @"\\?\" + path;
+    }
+
+    // FILE_NAME_NORMALIZED (0) | VOLUME_NAME_GUID (1). Null when the path could not be read.
+    private static string RealPath(SafeFileHandle handle, out int error)
+    {
+        error = 0;
+        StringBuilder buffer = new StringBuilder(1024);
+        uint length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 1);
+        if (length >= buffer.Capacity)
+        {
+            buffer = new StringBuilder((int)length + 1);
+            length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 1);
+        }
+        if (length == 0 || length >= buffer.Capacity)
+        {
+            error = Marshal.GetLastWin32Error();
+            if (error == 0) { error = 122; }
+            return null;
+        }
+        return buffer.ToString();
+    }
+
+    // FILE_READ_ATTRIBUTES; share read and write but not delete; OPEN_EXISTING; FILE_FLAG_BACKUP_SEMANTICS.
+    public static bool OpenRoot(string root, out int detail)
+    {
+        CloseRoot();
+        detail = 0;
+        SafeFileHandle handle = CreateFileW(ExtendedPath(root), 0x80, 3, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        if (handle.IsInvalid) { detail = Marshal.GetLastWin32Error(); handle.Dispose(); return false; }
+        int error;
+        string real = RealPath(handle, out error);
+        if (real == null) { detail = error; handle.Dispose(); return false; }
+        rootHandle = handle;
+        rootPath = real;
+        return true;
+    }
+
+    public static void CloseRoot()
+    {
+        if (rootHandle != null) { rootHandle.Dispose(); }
+        rootHandle = null;
+        rootPath = null;
+    }
+
+    // FILE_READ_ATTRIBUTES | WRITE_OWNER; share read, write and delete; OPEN_EXISTING;
+    // FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS. SE_FILE_OBJECT is 1, OWNER_SECURITY_INFORMATION is 1.
+    public static int SetOwner(string path, byte[] ownerSid, out int detail, out uint attributes)
+    {
+        detail = 0;
+        attributes = 0;
+        using (SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80 | 0x00080000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        {
+            if (handle.IsInvalid) { detail = Marshal.GetLastWin32Error(); return 2; }
+            int pathError;
+            string real = RealPath(handle, out pathError);
+            string root = rootPath;
+            if (real == null || root == null) { detail = pathError; return 5; }
+            string prefix = root.EndsWith(@"\", StringComparison.Ordinal) ? root : root + @"\";
+            if (!string.Equals(real, root, StringComparison.Ordinal) && !real.StartsWith(prefix, StringComparison.Ordinal)) { return 5; }
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information)) { detail = Marshal.GetLastWin32Error(); return 3; }
+            attributes = information.FileAttributes;
+            detail = (int)information.NumberOfLinks;
+            if (information.NumberOfLinks != 1) { return 1; }
+            uint error = SetSecurityInfo(handle, 1, 1, ownerSid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            if (error != 0) { detail = (int)error; return 4; }
+            return 0;
+        }
+    }
+}
+'@
+}
+
+# One long, absolute spelling of a path, to compare paths by (#5649): GetFullPath's answer (separators, '.' and '..'
+# resolved) with every 8.3 short name in it (C:\PROGRA~1, C:\Users\RUNNER~1) spelled out and the trailing backslash dropped
+# (a drive root keeps it). GetFullPath alone is not enough: it spells short names out differently from one runtime to the
+# next (Windows PowerShell 5.1 leaves them when part of the path is missing or has a '..' step, PowerShell 7 spells out only
+# the part that exists), so a root typed one way and a path listed or joined the other compared unequal, which is how a root
+# under a GitHub Windows runner's temp folder (C:\Users\RUNNER~1\...) lost its hard links and its trusted folders. The part
+# of the path that exists is spelled out by GetLongPathName and a name below it that does not exist stays as typed. Returns
+# $null when no part of the path can be worked out, and every caller treats that as not trusted. The separator it trims and
+# joins with is the runtime's, so a backslash is only a separator on Windows. Kept byte-identical in install-darling.ps1 and
+# upgrade-darling.ps1.
+function Get-DarlingCanonicalPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $null }
+    try {
+        $full = [IO.Path]::GetFullPath($path)
+        $trimmed = $full.TrimEnd([IO.Path]::DirectorySeparatorChar)
+        if ($trimmed.Length -le 2) { return $full }
+        if ($trimmed.IndexOf('~') -lt 0) { return $trimmed }
+        if (-not ('DarlingNativePaths' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class DarlingNativePaths
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetLongPathNameW(string shortPath, StringBuilder longPath, uint bufferLength);
+
+    // The long spelling of a path that exists, or null.
+    public static string LongName(string path)
+    {
+        StringBuilder buffer = new StringBuilder(path.Length + 260);
+        uint length = GetLongPathNameW(path, buffer, (uint)buffer.Capacity);
+        if (length > buffer.Capacity)
+        {
+            buffer = new StringBuilder((int)length + 1);
+            length = GetLongPathNameW(path, buffer, (uint)buffer.Capacity);
+        }
+        if (length == 0 || length > buffer.Capacity) { return null; }
+        return buffer.ToString();
+    }
+}
+'@
+        }
+        $below = @()
+        $existing = $trimmed
+        while ($true) {
+            $long = [DarlingNativePaths]::LongName($existing)
+            if ($null -ne $long) { break }
+            $parent = [IO.Path]::GetDirectoryName($existing)
+            if ([string]::IsNullOrEmpty($parent)) { return $null }
+            $below = @([IO.Path]::GetFileName($existing)) + $below
+            $existing = $parent
+        }
+        return (@($long.TrimEnd([IO.Path]::DirectorySeparatorChar)) + $below) -join [IO.Path]::DirectorySeparatorChar
+    }
+    catch { return $null }
+}
+
+# The names on the way from $root down to $candidate, as an array, or $null when $candidate is not below $root, is not an
+# absolute path, has a name on the way that Windows folds into another (a '.' or '..' step, an empty name, a trailing dot or
+# space) or either path cannot be worked out. Both paths go through Get-DarlingCanonicalPath, so a root typed as a short path
+# (C:\PROGRA~1\x), with a trailing backslash or in another case gives the same answer as its long spelling. The fold check
+# runs on the candidate as it was handed in, because that is the spelling Windows would resolve (GetFullPath folds the
+# names away). Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingSegmentsBelowRoot([string]$root, [string]$candidate) {
+    if ([string]::IsNullOrWhiteSpace($candidate) -or $candidate -notmatch '^([A-Za-z]:[\\/]|\\\\)') { return $null }
+    $given = @($candidate.TrimEnd('\', '/') -split '[\\/]')
+    $first = if ($candidate.StartsWith('\\')) { 2 } else { 1 }
+    for ($i = $first; $i -lt $given.Count; $i++) {
+        $name = $given[$i]
+        if ($name -eq '' -or $name -eq '.' -or $name -eq '..' -or $name.EndsWith('.') -or $name.EndsWith(' ')) { return $null }
+    }
+    $rootText = Get-DarlingCanonicalPath $root
+    $candidateText = Get-DarlingCanonicalPath $candidate
+    if ($null -eq $rootText -or $null -eq $candidateText) { return $null }
+    $prefix = $rootText.TrimEnd('\') + '\'
+    if (-not $candidateText.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or $candidateText.Length -eq $prefix.Length) { return $null }
+    return , @($candidateText.Substring($prefix.Length) -split '\\')
+}
+
+# The files directly in $root that the service writes (the names on the list above): the ones the lock makes the
+# service the owner of, and with -BackupsOnly the darling.json.bak-* ones the install pass hardens. A file with more
+# than one name (a hard link) and a file that is a link are left out, so neither gets the service as its owner or a
+# FullControl grant: those rights would land on the other names too (#5649). Hidden files are included. Kept
+# byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingServiceWrittenRootFiles([string]$root, [switch]$BackupsOnly) {
+    $names = Get-DarlingServiceWrittenNames
+    return @(Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue | Where-Object {
+        (Test-DarlingServiceWrittenFileName $_.Name) -and
+        (-not $BackupsOnly -or $_.Name.StartsWith($names.BackupPrefix, [StringComparison]::OrdinalIgnoreCase)) -and
+        -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and
+        (Get-DarlingFileNameCount $_.FullName) -eq 1 })
 }
 
 # True when $candidate is a folder on the list above inside $root (or anything below it), or one of the listed
 # files directly in $root. $extraDirectories are the key folders Get-DarlingExtraServiceWriteDirectories returns
 # for this install, the same ones the lock is handed. The FIRST name below $root is compared exactly, and a name
 # Windows would fold into another ('pg-runtime.', a '..' step) matches nothing. The install root itself and every
-# other file or folder in it are not on the list.
-function Test-DarlingServiceWrittenPath([string]$root, [string]$candidate, [string[]]$extraDirectories = @()) {
-    try { $rootText = [IO.Path]::GetFullPath($root).TrimEnd('\') }
-    catch { return $false }
-    if (-not $candidate.StartsWith($rootText + '\', [StringComparison]::OrdinalIgnoreCase)) { return $false }
-    $segments = @($candidate.Substring($rootText.Length + 1).TrimEnd('\') -split '\\')
-    foreach ($segment in $segments) {
-        if ($segment -eq '' -or $segment -eq '.' -or $segment -eq '..' -or $segment.EndsWith('.') -or $segment.EndsWith(' ')) { return $false }
-    }
+# other file or folder in it are not on the list. $item is what the caller's own walk listed for $candidate: a
+# listed file is trusted by name only when it is a plain file (not a folder, a link or a file with more than one
+# name), and with no item a root file is not trusted. Whether it is a file or a folder and whether it is a link are read from
+# $item, the item the walk listed; the number of names is read live, because Get-DarlingFileNameCount opens the file (for
+# attributes only) each time it is called.
+function Test-DarlingServiceWrittenPath([string]$root, [string]$candidate, [string[]]$extraDirectories = @(), $item = $null) {
+    $segments = Get-DarlingSegmentsBelowRoot $root $candidate
+    if ($null -eq $segments) { return $false }
     $names = Get-DarlingServiceWrittenNames
     foreach ($directory in (@($names.Directories) + @($extraDirectories | Where-Object { $_ }))) {
         if ($segments[0] -ieq $directory) { return $true }
     }
-    return [bool]($segments.Count -eq 1 -and (Test-DarlingServiceWrittenFileName $segments[0]))
+    # Files only (#5649): a folder that carries a listed name is not a file the service writes, and neither is a link or
+    # a file with more than one name. The answer comes from the item the walk listed.
+    return [bool]($segments.Count -eq 1 -and (Test-DarlingServiceWrittenFileName $segments[0]) -and $null -ne $item -and -not $item.PSIsContainer -and -not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and (Get-DarlingFileNameCount $candidate) -eq 1)
 }
 
 # The trusted set for Get-UntrustedWriteGrantees BEFORE a service account exists to add to it (#4043):
@@ -443,7 +850,8 @@ function Get-DarlingPreLockTrustedSidsForRerun([string]$serviceName, $existingSe
 # comment-stripped text, as Get-DarlingExtraServiceWriteDirectories does, because Windows PowerShell 5.1's
 # ConvertFrom-Json rejects comments and trailing commas. Each value is read on its own, so one that cannot be read as a path
 # is left out and the rest still print: a value holding a control character, a line break or any of < > | " is
-# left out, so is one over 260 characters, and at most 10 are listed. A darling.json that cannot be read counts
+# left out, so is one over 260 characters, and a value that starts with two slashes or two backslashes (a network share
+# or device path) is not looked up and counts as Incomplete, and at most 10 are listed. A darling.json that cannot be read counts
 # as Incomplete; a missing one names nothing. Kept byte-identical in install-darling.ps1 and
 # upgrade-darling.ps1.
 function Get-DarlingConfiguredPathsUnder([string]$folder) {
@@ -466,6 +874,7 @@ function Get-DarlingConfiguredPathsUnder([string]$folder) {
         try {
             $value = ($pair[1] -replace '\\\\', '\').Trim()
             if ($value.Length -gt 260 -or $value -match '[\p{C}\p{Zl}\p{Zp}<>|"]') { $incomplete = $true; continue }
+            if ($value -match '^(\\\\|//)') { $incomplete = $true; continue }
             if ($value -and [IO.Path]::IsPathRooted($value) -and (Test-PathIsAtOrUnder $value $folder)) {
                 $found += "`"$value`" ($($pair[0]))"
             }
@@ -542,13 +951,51 @@ Then run install-darling.ps1 from there.
 "@
 }
 
+# The file names, when EVERY finding of a refusal is on a darling.json.bak-* file directly in $root (#5649). $findings
+# are the records Get-UntrustedWriteGrantees returns with -AsRecords, and the decision is made from each record's Kind
+# and Path, never from its text: only a Grant or an Owner finding on a file (as the walk listed it) sitting directly in
+# $root with a backup name counts. Anything else among the findings, a folder, a link, a file with more than one
+# name, a file that is not a backup, a finding about a path that could not be read or listed, returns nothing, and
+# the refusal keeps its standard advice alone. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingBackupFileFindingNames([string]$root, [array]$findings) {
+    if (@($findings).Count -eq 0) { return @() }
+    $names = @()
+    foreach ($finding in @($findings)) {
+        if ($finding.Kind -ne 'Grant' -and $finding.Kind -ne 'Owner') { return @() }
+        if (-not $finding.IsFile) { return @() }
+        $segments = Get-DarlingSegmentsBelowRoot $root "$($finding.Path)"
+        if ($null -eq $segments -or $segments.Count -ne 1) { return @() }
+        $leaf = $segments[0]
+        if (-not (Test-DarlingServiceWrittenFileName $leaf) -or [string]::Equals($leaf, 'darling.json', [StringComparison]::OrdinalIgnoreCase)) { return @() }
+        if ($names -notcontains $leaf) { $names += $leaf }
+    }
+    return @($names)
+}
+
+# The note a refusal that lists only darling.json.bak-* files carries ahead of its standard advice (#5649). With the
+# service's own backups trusted, a file listed here belongs to, or is writable by, some other account. Kept
+# byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingBackupFileAdvice([string[]]$names) {
+    $shown = (@($names) | Select-Object -First 10) -join ', '
+    $more = if (@($names).Count -gt 10) { " and $(@($names).Count - 10) more" } else { '' }
+    return @"
+Every entry above is a darling.json.bak-* backup file in this folder: $shown$more.
+A backup can hold the secrets that were in darling.json. These files can be moved out of this folder, into a
+folder only Administrators can read.
+"@
+}
+
 # The refusal's advice (#5627): the numbered steps when the registered service runs from $folder itself, that is,
 # when its ImagePath folder ($registeredFolder, from Get-DarlingInstallRootFromService) is $folder, so this folder IS
 # the install being replaced; a fresh folder otherwise, including when no service is registered or its path cannot be
-# read. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
-function Get-DarlingRefusalAdvice([string]$folder, [string]$serviceName, [string]$registeredFolder) {
-    if ($registeredFolder -and (Test-DarlingSamePath $registeredFolder $folder)) { return Get-DarlingExistingInstallSteps $folder $serviceName }
-    return Get-DarlingFreshFolderAdvice $folder
+# read. When every finding is a backup file (Get-DarlingBackupFileFindingNames), the note on those files comes first
+# and the advice above follows it unchanged (#5649). $findings are the records from Get-UntrustedWriteGrantees
+# -AsRecords. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingRefusalAdvice([string]$folder, [string]$serviceName, [string]$registeredFolder, [array]$findings = @()) {
+    $default = if ($registeredFolder -and (Test-DarlingSamePath $registeredFolder $folder)) { Get-DarlingExistingInstallSteps $folder $serviceName } else { Get-DarlingFreshFolderAdvice $folder }
+    $backupNames = @(Get-DarlingBackupFileFindingNames $folder $findings)
+    if ($backupNames.Count -gt 0) { return (Get-DarlingBackupFileAdvice $backupNames) + "`n`n" + $default }
+    return $default
 }
 
 # True when $candidate IS $parent or sits underneath it.
@@ -562,10 +1009,16 @@ function Test-PathIsAtOrUnder([string]$candidate, [string]$parent) {
     if ([string]::IsNullOrWhiteSpace($candidate) -or [string]::IsNullOrWhiteSpace($parent)) { return $false }
 
     try {
-        # Normalizes separators, resolves . and .., and makes the comparison independent of how the path
-        # was typed. Anything GetFullPath rejects is not a path we can reason about, so it is not matched.
-        $c = [IO.Path]::GetFullPath($candidate).TrimEnd('\')
-        $p = [IO.Path]::GetFullPath($parent).TrimEnd('\')
+        # Normalizes separators, resolves . and .., spells 8.3 short names out and makes the comparison
+        # independent of how the path was typed (Get-DarlingCanonicalPath, #5673). A path it cannot work out is
+        # compared as GetFullPath spells it, and anything GetFullPath rejects is not a path we can reason about,
+        # so it is not matched.
+        $c = Get-DarlingCanonicalPath $candidate
+        if ($null -eq $c) { $c = [IO.Path]::GetFullPath($candidate) }
+        $p = Get-DarlingCanonicalPath $parent
+        if ($null -eq $p) { $p = [IO.Path]::GetFullPath($parent) }
+        $c = $c.TrimEnd('\')
+        $p = $p.TrimEnd('\')
     }
     catch {
         return $false
@@ -664,8 +1117,9 @@ function Get-DarlingExtraServiceWriteDirectories([string]$root, [string]$configP
     # A NAME under the install root, not a path: Lock-DarlingInstallTree Join-Paths it onto the root, and Join-Path does not
     # treat a rooted child as rooted ('C:\a' + 'C:\a\b' = 'C:\a\C:\a\b'). A darling.json outside the root puts the key
     # folder outside the tree the lock covers, so it needs no grant from here.
-    $configDir = [System.IO.Path]::GetDirectoryName($configPath).TrimEnd('\')   # Split-Path -LiteralPath -Parent is ambiguous on PowerShell 5.1
-    if ($configDir -ine $root.TrimEnd('\')) { return @() }
+    $configDir = Get-DarlingCanonicalPath ([System.IO.Path]::GetDirectoryName($configPath))   # Split-Path -LiteralPath -Parent is ambiguous on PowerShell 5.1
+    $rootCanonical = Get-DarlingCanonicalPath $root
+    if ($null -eq $configDir -or $null -eq $rootCanonical -or $configDir.TrimEnd('\') -ine $rootCanonical.TrimEnd('\')) { return @() }
     return @((Get-DarlingServiceWrittenNames).KeyDirectories)
 }
 
@@ -675,6 +1129,12 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
     # it. So this function judges icacls by its exit code and output, and reports an unreadable object rather
     # than throwing out of the whole lock. The preference is local to this function.
     $ErrorActionPreference = 'Continue'
+    # Every path below is compared with the listing's own spelling, which is the long one, so the root is put in that
+    # spelling first: handed in as a short path (C:\PROGRA~1\...), the root file the service owns would not be recognised as
+    # one directly in it and the service's own grant on it would be stripped (#5649). One that cannot be worked out is not locked.
+    $rootCanonical = Get-DarlingCanonicalPath $root
+    if ($null -eq $rootCanonical) { return @("$root (the full path of the install folder could not be worked out, so it was not locked)") }
+    $root = $rootCanonical
     if ((Get-Item -LiteralPath $root -Force -ErrorAction Stop).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
         return @("$root (the install folder itself is a junction or link: run from the folder it points to)")
     }
@@ -735,11 +1195,74 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
         $output = & icacls.exe $root @step 2>&1
         if ($LASTEXITCODE -ne 0) { return @("$root (icacls $($step -join ' ') failed: $($output -join ' '))") }
     }
-    $output = & icacls.exe $root /setowner "*$($adminsSid.Value)" /T /C /L /Q 2>&1
-    if ($LASTEXITCODE -ne 0) { $open += "$root (could not make Administrators the owner of everything below it; run elevated: $($output | Select-Object -First 1))" }
+    # The owner step (#5677). The tree is walked here and the owner of each object is set one at a time, in this process, on the
+    # handle its name count is read from (see Initialize-DarlingNativeOwner). The root is opened once, without sharing delete or
+    # rename, and kept open for the whole walk; each object's real path is read from its own handle and an object that is not
+    # the root or below it is left alone (result 5), so a folder swapped for a junction while the walk runs cannot send it
+    # outside the tree. A file whose count is not exactly 1, or cannot be read, keeps its owner, because a file with more than one
+    # name (a hard link) has one owner that every name shares, some of them outside this folder. A name ending in a dot or a
+    # space is listed and not acted on (Windows would open a different name). Each such object is listed as open here and put in
+    # $skipped so the walk below leaves it out (it is listed once), except the root and an object whose owner could not be set:
+    # the walk below still fixes and checks those. $skipped compares by ordinal, so two names that differ only in case (a
+    # case-sensitive folder) stay two. The walk does not follow a junction or link: the link itself is the object, and nothing
+    # below it is listed. The two privileges are turned on for the step and put back as they were after it; without them (the
+    # session does not hold them) the step is not run and the root is reported.
+    $skipped = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $ownerBytes = New-Object byte[] $adminsSid.BinaryLength
+    $adminsSid.GetBinaryForm($ownerBytes, 0)
+    $ownerReady = $false
+    try {
+        Initialize-DarlingNativeOwner
+        $ownerReady = [DarlingNativeOwner]::EnablePrivileges()
+        if (-not $ownerReady) { $open += "$root (could not make Administrators the owner of everything below it: this elevated session does not hold SeTakeOwnershipPrivilege and SeBackupPrivilege (see whoami /priv); a policy may have removed them from Administrators)" }
+        else {
+            $rootError = 0
+            if (-not [DarlingNativeOwner]::OpenRoot($root, [ref]$rootError)) { $open += "$root (could not make Administrators the owner of everything below it: the folder could not be pinned and its real path read, error $rootError)" }
+            else {
+                $pending = New-Object System.Collections.Stack
+                $pending.Push((Get-Item -LiteralPath $root -Force))
+                $atRoot = $true
+                while ($pending.Count -gt 0) {
+                    $item = $pending.Pop()
+                    $ownPath = [string]$item.FullName
+                    $isRoot = $atRoot
+                    $atRoot = $false
+                    $belowNote = if ($item.PSIsContainer) { '; nothing below it was given an owner or checked' } else { '' }
+                    if ((-not $isRoot) -and ($ownPath.EndsWith('.') -or $ownPath.EndsWith(' '))) {
+                        $null = $skipped.Add($ownPath)
+                        $open += "$ownPath (its name ends in a dot or a space, which Windows folds into another name, so it was not given an owner or checked$belowNote)"
+                        continue
+                    }
+                    $detail = 0
+                    $attributes = [uint32]0
+                    $result = [DarlingNativeOwner]::SetOwner($ownPath, $ownerBytes, [ref]$detail, [ref]$attributes)
+                    if ($result -ne 0) {
+                        $why = switch ($result) {
+                            1 { "has $detail names (a hard link): its permissions are the same under every one, so its owner and permissions were not changed" }
+                            2 { "could not be opened, error $detail$belowNote" }
+                            3 { "its names could not be counted, error $detail$belowNote" }
+                            4 { "its owner could not be set, error $detail" }
+                            default { "its path resolved outside the install folder, so its owner was not changed$belowNote" }
+                        }
+                        if ($result -ne 4 -and -not $isRoot) { $null = $skipped.Add($ownPath) }
+                        $open += "$ownPath ($why)"
+                    }
+                    if (($attributes -band 0x10) -ne 0 -and ($attributes -band 0x400) -eq 0) {
+                        try { foreach ($kid in @(Get-ChildItem -LiteralPath $ownPath -Force -ErrorAction Stop)) { $pending.Push($kid) } }
+                        catch { $open += "$ownPath (its contents could not be listed, so nothing below it was given an owner: $($_.Exception.Message))" }
+                    }
+                }
+            }
+        }
+    }
+    catch { $open += "$root (could not make Administrators the owner of everything below it: $($_.Exception.Message))" }
+    finally {
+        try { [DarlingNativeOwner]::CloseRoot() } catch { }
+        try { $null = [DarlingNativeOwner]::RestorePrivileges() } catch { }
+    }
     $serviceWritePaths = @()
     if ($serviceSid) {
-        foreach ($secret in @(Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue | Where-Object { Test-DarlingServiceWrittenFileName $_.Name })) {
+        foreach ($secret in @(Get-DarlingServiceWrittenRootFiles $root)) {
             $null = & icacls.exe $secret.FullName /setowner "*$($serviceSid.Value)" /L /Q 2>&1
         }
         foreach ($dir in $serviceWriteDirectories) {
@@ -750,7 +1273,9 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
             }
             $grantOutput = & icacls.exe $dirPath /grant "*$($serviceSid.Value):(OI)(CI)M" 2>&1
             if ($LASTEXITCODE -ne 0) { $open += "$dirPath (icacls /grant Modify for the service failed: $($grantOutput -join ' '))"; continue }
-            $serviceWritePaths += (Get-Item -LiteralPath $dirPath -Force).FullName.TrimEnd('\')
+            $serviceWritePath = Get-DarlingCanonicalPath (Get-Item -LiteralPath $dirPath -Force).FullName
+            if ($null -eq $serviceWritePath) { $open += "$dirPath (its full path could not be worked out, so the service's grant on it cannot be trusted)"; continue }
+            $serviceWritePaths += $serviceWritePath.TrimEnd('\')
         }
     }
     # A write grant to the service SID is only trusted under one of $serviceWritePaths (path-prefix match,
@@ -773,9 +1298,18 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
     if (-not (Get-Acl -LiteralPath $root).AreAccessRulesProtected) { $open += "$root (still inherits from its parent)" }
     $targets = @(Get-Item -LiteralPath $root -Force) + @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue)
     foreach ($target in $targets) {
-        $path = $target.FullName
+        if ($skipped.Contains($target.FullName)) { continue }
+        $path = Get-DarlingCanonicalPath $target.FullName
+        if ($null -eq $path) { $open += "$($target.FullName) (its full path could not be worked out)"; continue }
         if ($path.TrimEnd('\') -ine $root.TrimEnd('\') -and ($target.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
             $open += "$path (a junction or link)"
+            continue
+        }
+        # A root file the service writes that has more than one name (a hard link, or one whose names cannot be counted) is
+        # reported and left alone, the way a junction is: resetting it or stripping a grant would change the permissions of
+        # its other names too, and a reset makes the other name readable by every local user (#5649).
+        if ((-not $target.PSIsContainer) -and ([IO.Path]::GetDirectoryName($path).TrimEnd('\') -ieq $root.TrimEnd('\')) -and (Test-DarlingServiceWrittenFileName $target.Name) -and (Get-DarlingFileNameCount $path) -ne 1) {
+            $open += "$path (a hard link: this file has more than one name, or its names could not be counted, and its permissions are the same under every one)"
             continue
         }
         # The service SID is trusted here only if $path is $root itself (its RX grant) or falls under one of
@@ -793,6 +1327,13 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
         $explicit = @($acl.GetAccessRules($true, $false, $sidType) | Where-Object {
             $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trustedHere -notcontains $_.IdentityReference })
         if ($explicit.Count -gt 0) {
+            # Any file that has more than one name (a hard link anywhere in the tree, not only a backup), or whose names cannot be
+            # counted, is reported and left as it is: /remove:g and /reset write to the one set of permissions all its names share,
+            # and a reset would put the tree's inherited entries on the other name (#5649). Directories have one name.
+            if ((-not $target.PSIsContainer) -and (Get-DarlingFileNameCount $path) -ne 1) {
+                $open += "$path (a hard link: this file has more than one name, or its names could not be counted, and its permissions are the same under every one; its permissions were not changed)"
+                continue
+            }
             if ($isSecretFile) {
                 foreach ($rule in $explicit) { $null = & icacls.exe $path /remove:g "*$($rule.IdentityReference.Value)" /L /Q 2>&1 }
             }
@@ -917,12 +1458,11 @@ function Test-DarlingRollbackBackupIsRecent($backups, [int]$withinMinutes, [date
 
 # ============================ the install tree ============================
 
-# True when two paths name the same directory. One spelling of path equality for the whole script: the
-# comparison decides whether an upgrade is allowed to touch a tree, and two hand-rolled copies of it is
-# the same "two spellings of one rule" that #2525 is a case study in.
-#
-# Separator from the runtime rather than a hardcoded backslash, for the same reason as the process filter
-# below - a rule that gates a destructive operation should be verifiable off the platform it ships to.
+# True when two paths name the same directory: both go through Get-DarlingCanonicalPath (#5673), so a folder typed as a
+# short path (C:\PROGRA~1\x), with a trailing backslash or in another case gives the same answer as its long spelling, and
+# the two are then compared without regard to case. A path Get-DarlingCanonicalPath cannot work out is compared as
+# GetFullPath spells it. The separator comes from the runtime rather than a hardcoded backslash, so the rule can be run off
+# Windows. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Test-DarlingSamePath([string]$left, [string]$right) {
     if ([string]::IsNullOrWhiteSpace($left) -or [string]::IsNullOrWhiteSpace($right)) { return $false }
 
@@ -930,14 +1470,97 @@ function Test-DarlingSamePath([string]$left, [string]$right) {
     $alt = [IO.Path]::AltDirectorySeparatorChar
 
     try {
-        $l = [IO.Path]::GetFullPath($left).TrimEnd($sep, $alt)
-        $r = [IO.Path]::GetFullPath($right).TrimEnd($sep, $alt)
+        # The canonical long spelling (#5673); GetFullPath's answer for a path it cannot work out.
+        $l = Get-DarlingCanonicalPath $left
+        if ($null -eq $l) { $l = [IO.Path]::GetFullPath($left) }
+        $r = Get-DarlingCanonicalPath $right
+        if ($null -eq $r) { $r = [IO.Path]::GetFullPath($right) }
+        $l = $l.TrimEnd($sep, $alt)
+        $r = $r.TrimEnd($sep, $alt)
     }
     catch {
         return $false
     }
 
     return $l.Equals($r, [StringComparison]::OrdinalIgnoreCase)
+}
+
+# Rewrites an extended-length path to its ordinary spelling, leaving anything else alone:
+# \\?\UNC\server\share -> \\server\share, and \\?\C:\dir -> C:\dir. The same function is in install-darling.ps1 (#2348).
+# 'UNC' is tested first because it is the longer prefix, and is matched without regard to case.
+function Convert-ExtendedLengthPath([string]$path) {
+    if ([string]::IsNullOrEmpty($path)) { return $path }
+    if ($path.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) { return '\\' + $path.Substring(8) }
+    if ($path.StartsWith('\\?\', [StringComparison]::Ordinal)) { return $path.Substring(4) }
+    return $path
+}
+
+# The ordinary spelling of a folder typed as \\?\C:\dir or \\.\C:\dir (#5673), so the checks that ask whether the
+# running script's folder or the source folder is the install folder see the same folder. Anything else is unchanged.
+function Get-DarlingOrdinaryPath([string]$path) {
+    if ([string]::IsNullOrEmpty($path)) { return $path }
+    return Convert-ExtendedLengthPath ($path -replace '^\\\\\.\\(?=[A-Za-z]:)', '')
+}
+
+# True when two existing folders are the same folder on disk, however each is spelled: a junction or link in the path, a
+# subst or mapped drive letter and a short name all lead to the same volume serial number and file index (#5673). False
+# when either folder cannot be opened, so the caller keeps the answer of the text comparison.
+function Test-DarlingSameFolderIdentity([string]$left, [string]$right) {
+    if ([string]::IsNullOrWhiteSpace($left) -or [string]::IsNullOrWhiteSpace($right)) { return $false }
+    try {
+        if (-not ('DarlingFileIdentity' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class DarlingFileIdentity
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(IntPtr handle, out ByHandleFileInformation info);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    // 'volume:index' of an existing folder (opened with backup semantics, links followed), or null.
+    public static string Of(string folder)
+    {
+        IntPtr handle = CreateFileW(folder, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) { return null; }
+        try
+        {
+            ByHandleFileInformation info;
+            if (!GetFileInformationByHandle(handle, out info)) { return null; }
+            return info.VolumeSerialNumber.ToString("x") + ":" + info.FileIndexHigh.ToString("x") + ":" + info.FileIndexLow.ToString("x");
+        }
+        finally { CloseHandle(handle); }
+    }
+}
+'@
+        }
+        $leftId = [DarlingFileIdentity]::Of($left)
+        $rightId = [DarlingFileIdentity]::Of($right)
+        if ($null -eq $leftId -or $null -eq $rightId) { return $false }
+        return $leftId -eq $rightId
+    }
+    catch { return $false }
 }
 
 # Where the service is ACTUALLY installed, read from the registered ImagePath rather than guessed from
@@ -1268,7 +1891,7 @@ function Test-DarlingManifestPathIsPreserved([string]$relativePath) {
     # the assertion that the manifest is what it claims to be, placed where being wrong costs a monitoring
     # host its configuration.
     if ($leaf.Equals('darling.json', [StringComparison]::OrdinalIgnoreCase)) { return $true }
-    if ($leaf.StartsWith('darling.json.bak-', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    if ($leaf.StartsWith((Get-DarlingServiceWrittenNames).BackupPrefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
 
     # DPAPI credential blobs. LocalMachine-scoped with an entropy constant that ships in an open-source
     # repo, so READ access is the secret - but they are also not recoverable from anywhere else, and a
@@ -1696,7 +2319,7 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     }
 }
 
-try { $InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\') }
+try { $InstallRoot = [IO.Path]::GetFullPath((Get-DarlingOrdinaryPath $InstallRoot)).TrimEnd('\') }
 catch { Fail "'$InstallRoot' is not a path this script can resolve." }
 
 if (-not (Test-Path -LiteralPath $InstallRoot -PathType Container)) {
@@ -1786,8 +2409,9 @@ function Protect-DarlingStagingFolder([string]$path) {
 }
 
 # A fresh, empty, protected folder under the machine temp directory for H1's zip staging copy. Elevation is
-# assumed (this script requires it), so setting Administrators as owner needs no extra privilege - the same
-# fact Lock-DarlingInstallTree's own /setowner already relies on.
+# assumed (this script requires it), so setting Administrators as owner of this new folder needs no extra privilege.
+# Lock-DarlingInstallTree's owner step, which changes objects this process did not create, turns on
+# SeTakeOwnershipPrivilege and SeBackupPrivilege itself.
 function New-DarlingProtectedStagingFolder {
     $path = Join-Path $env:TEMP ('darling-upgrade-staging-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $path -Force | Out-Null
@@ -1813,7 +2437,8 @@ $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 $preLockTrusted = Get-DarlingPreLockTrustedSidsForRerun $serviceName $existingService
 $sourceTrusted = @(Get-DarlingPreLockTrustedSids)
 if (-not $AcceptWritableExtraction) {
-    $writable = @(Get-UntrustedWriteGrantees $InstallRoot $preLockTrusted.Trusted -Recurse -ServiceSids $preLockTrusted.ServiceSids -ServiceDirectories @(Get-DarlingExtraServiceWriteDirectories $InstallRoot (Join-Path $InstallRoot $configName)))
+    $writableRecords = @(Get-UntrustedWriteGrantees $InstallRoot $preLockTrusted.Trusted -AsRecords -Recurse -ServiceSids $preLockTrusted.ServiceSids -ServiceDirectories @(Get-DarlingExtraServiceWriteDirectories $InstallRoot (Join-Path $InstallRoot $configName)))
+    $writable = @($writableRecords | ForEach-Object { $_.Text })
     if ($writable.Count -gt 0) {
         $lines = ($writable | Select-Object -First 20 | ForEach-Object { "  $_" }) -join "`n"
         $more = if ($writable.Count -gt 20) { "`n  ...and $($writable.Count - 20) more." } else { '' }
@@ -1826,7 +2451,7 @@ A tree installed before #4038 was writable by the accounts above for its whole l
 only copies over what this build ships. It does not check the rest, so other files in the tree can differ
 from what an earlier build shipped.
 
-$(Get-DarlingRefusalAdvice $InstallRoot $serviceName (Get-DarlingInstallRootFromService $serviceName))
+$(Get-DarlingRefusalAdvice $InstallRoot $serviceName (Get-DarlingInstallRootFromService $serviceName) $writableRecords)
 
 If you accept the risk of upgrading this tree in place anyway, re-run with -AcceptWritableExtraction.
 
@@ -1847,7 +2472,7 @@ if ([string]::IsNullOrWhiteSpace($Source)) {
     Fail "No -Source given and this script is not running from a file, so there is nothing to install from."
 }
 
-try { $Source = [IO.Path]::GetFullPath($Source).TrimEnd('\') }
+try { $Source = [IO.Path]::GetFullPath((Get-DarlingOrdinaryPath $Source)).TrimEnd('\') }
 catch { Fail "'$Source' is not a path this script can resolve." }
 
 if (-not (Test-Path -LiteralPath $Source)) {
@@ -1885,11 +2510,17 @@ $runningFrom = $PSScriptRoot
 if (Test-DarlingSamePath $runningFrom $InstallRoot) {
     Fail "This script is running from the install directory, so the upgrade would write the new build over the copy of itself that PowerShell is currently reading. Extract the new zip to a staging folder only an administrator can write to (e.g. C:\Program Files\PerformanceMonitorDarling-staging\<version>, never a folder made directly under C:\) and run ITS upgrade-darling.ps1 instead. To prune rollback backups from the installed copy, use -PruneOnly, which copies nothing."
 }
+if (Test-DarlingSameFolderIdentity $runningFrom $InstallRoot) {
+    Fail "This script is running from the install directory (reached by a different path), so the upgrade would write the new build over the copy of itself that PowerShell is currently reading. Extract the new zip to a staging folder only an administrator can write to and run ITS upgrade-darling.ps1 instead."
+}
 
 # And the degenerate case the rule above does not cover: a source folder that IS the install directory,
 # handed in from a script running somewhere else. Copying a tree over itself is not an upgrade.
 if (-not $sourceIsZip -and (Test-DarlingSamePath $sourceRoot $InstallRoot)) {
     Fail "The source folder is the install directory itself, so there is nothing to upgrade from. Point -Source at the new build."
+}
+if (-not $sourceIsZip -and (Test-DarlingSameFolderIdentity $sourceRoot $InstallRoot)) {
+    Fail "The source folder is the install directory itself (reached by a different path), so there is nothing to upgrade from. Point -Source at the new build."
 }
 
 if ($sourceIsZip) {
@@ -2040,7 +2671,7 @@ if ([string]::IsNullOrWhiteSpace($registeredRoot)) {
     # assume it was.
     Warn "Could not read the '$serviceName' service's ImagePath, so this could not confirm that '$InstallRoot' is the directory the service actually runs from. Check that before trusting the result."
 }
-elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot)) {
+elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot) -and -not (Test-DarlingSameFolderIdentity $registeredRoot $InstallRoot)) {
     Fail "The '$serviceName' service runs from '$registeredRoot', not from '$InstallRoot'. NOTHING has been stopped or copied. Stopping and starting act on the service by NAME, so upgrading '$InstallRoot' would have taken the real service down, written the new build somewhere it does not read, and brought it back up on its old binaries - reporting success the whole way. Drop -InstallRoot to upgrade the registered install, or pass -InstallRoot '$registeredRoot' if that is really the one you meant."
 }
 
@@ -2152,7 +2783,7 @@ function Invoke-UpgradeTreeLock([string]$when) {
         Good "Install folder locked ${when}: only SYSTEM and Administrators can change what runs from $InstallRoot; $logonAccount can write only its runtime folders."
         return
     }
-    Warn ("Ordinary users can still change {0} path(s) in the install folder, and the service runs from there as {1}, so anyone who can replace a binary can run code as that account. First: {2}. Fix from an elevated prompt with: icacls `"{3}`" /inheritance:d, then icacls `"{3}`" /remove:g *S-1-5-11 *S-1-5-32-545 *S-1-1-0 *S-1-5-4, then icacls `"{3}`" /grant `"*S-1-5-32-545:(OI)(CI)RX`" /grant:r `"{1}:(OI)(CI)RX`", then icacls `"{3}`" /setowner *S-1-5-32-544 /T /C /L. A path listed as owned by an account, or below the folder, needs its own fix: icacls `"<path>`" /setowner *S-1-5-32-544 /L, then icacls `"<path>`" /reset /T /C. Remove any junction or link it names." -f $open.Count, $logonAccount, (($open | Select-Object -First 5) -join ', '), $InstallRoot)
+    Warn ("Ordinary users can still change {0} path(s) in the install folder, and the service runs from there as {1}, so anyone who can replace a binary can run code as that account. First: {2}. Fix from an elevated prompt with: icacls `"{3}`" /inheritance:d, then icacls `"{3}`" /remove:g *S-1-5-11 *S-1-5-32-545 *S-1-1-0 *S-1-5-4, then icacls `"{3}`" /grant `"*S-1-5-32-545:(OI)(CI)RX`" /grant:r `"{1}:(OI)(CI)RX`", then run this script again (it makes Administrators the owner of each path itself, and lists a file with more than one name). A path marked as a hard link (a file with more than one name): delete this name if it is not part of the install, or extract the file again if it is, and do not run icacls on it. Any other path listed as owned by an account, or below the folder, needs its own fix; these two commands are only for paths not marked as a hard link: icacls `"<path>`" /setowner *S-1-5-32-544 /L, then icacls `"<path>`" /reset /C. Remove any junction or link it names." -f $open.Count, $logonAccount, (($open | Select-Object -First 5) -join ', '), $InstallRoot)
 }
 
 Invoke-UpgradeTreeLock 'before the backup and the copy'

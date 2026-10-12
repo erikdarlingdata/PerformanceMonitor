@@ -333,7 +333,7 @@ public sealed class StatementFilterPlanReadsLiveTests
     {
         var result = DarlingWebEndpoints.ToHttpResult(
             DarlingWebEndpoints.WrapPlanXml(toolAnswer, queryHash, null), "/api/read/get_plan_xml",
-            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, 1);
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, 1, System.Threading.CancellationToken.None);
         var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
         Microsoft.Extensions.DependencyInjection.LoggingServiceCollectionExtensions.AddLogging(services);
         var context = new Microsoft.AspNetCore.Http.DefaultHttpContext

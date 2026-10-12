@@ -4897,6 +4897,9 @@ const COLLECTOR_COLUMNS = [
      A collector's label=value counts read as its latest NOTED run's ("latest run:" only when every run
      carried them), never a window total. */
   { key: "note_summary", label: "Note", wrap: true, plain: true },
+  /* #5646: a collector that recovered (its newest 3 runs succeeded after failures) is HEALTHY, and this says so with the
+     time of the last failure. Partial rows carry no note_summary, so the sentence rides in its own field. */
+  { key: "recovered_note", label: "Recovered", wrap: true, plain: true, hideWhenEmpty: true },
   /* #3017: which of the two zero-output readings a collector that spent and stored nothing is — read and
      found nothing, or could not read. Blank whenever Rows is positive, for the same reason the Note
      column is blank on a plainly healthy collector. Composed server-side from the shared formatter, so

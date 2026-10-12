@@ -500,7 +500,8 @@ public partial class SettingsWindow : Window
         var command = $"claude mcp add --transport http --scope user sql-monitor-darling http://localhost:{port}/";
         /* SetDataObject with copy=false avoids WPF's problematic Clipboard.Flush(). */
         McpStatusText.Text = ClipboardText.TrySetDataObject(command)
-            ? "Copied to clipboard!"
+            ? "Copied to clipboard! If the service has an MCP token, the client must also send "
+              + "--header \"Authorization: Bearer <token>\"; --print-mcp-token on the service host prints it."
             : "Couldn't copy: the clipboard is in use.";
     }
 

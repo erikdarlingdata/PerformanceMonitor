@@ -289,7 +289,7 @@ public sealed class DisplayZoneTextFrameTests : IDisposable
 
         var drill = ServerTabCode().Single(f => f.Name == "ServerTab.DrillDown.cs").Code;
         Assert.Matches(
-            new Regex(@"new\s+Windows\.WaitDrillDownWindow\(\s*_dataService,\s*_serverId,\s*waitType,\s*1,\s*GetPickerZone\(\),"),
+            new Regex(@"new\s+Windows\.WaitDrillDownWindow\(\s*_dataService,\s*_serverId,\s*_server\.ServerName,\s*waitType,\s*1,\s*GetPickerZone\(\),"),
             drill);
     }
 

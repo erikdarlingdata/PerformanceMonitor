@@ -246,8 +246,9 @@ public sealed class CollectionOutputBesideCostTests
            output or denial-currency term, which is what this pin refuses; #4000 then removed isOnLoad
            (an on-load collector is no longer a distinct input to the ladder, only a distinct CADENCE the
            caller resolves before calling in), netting 9; #4748 then appended latestRunNote - the newest run's
-           own partial-failure note, a text input that is neither an output count nor denial currency - netting 10. */
-        Assert.Equal(10, parameters.Length);
+           own partial-failure note, a text input that is neither an output count nor denial currency - netting 10; #5646 then appended trailingSuccessRuns - how many of the newest runs in a row
+           succeeded, a run outcome like the counts beside it - netting 11. */
+        Assert.Equal(11, parameters.Length);
         Assert.DoesNotContain(parameters, p => p.Contains("rows", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(parameters, p => p.Contains("output", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(parameters, p => p.Contains("denied", StringComparison.OrdinalIgnoreCase)

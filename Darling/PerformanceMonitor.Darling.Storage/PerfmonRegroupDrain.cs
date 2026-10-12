@@ -88,6 +88,7 @@ public sealed class PerfmonRegroupDrain
     private readonly int _statementTimeoutSeconds;
     private readonly Func<NpgsqlConnection, ILogger?, int, CancellationToken, Task<TimescaleSupport.PerfmonRegroupRead>> _readCandidates;
     private readonly TimeSpan _lostWorkThreshold;
+    private readonly string? _lockTimeoutOverride;
     private readonly object _gate = new();
     private readonly HashSet<string> _regrouped = new(StringComparer.Ordinal);
     private readonly HashSet<string> _gaveUp = new(StringComparer.Ordinal);
@@ -103,7 +104,8 @@ public sealed class PerfmonRegroupDrain
     }
 
     /// <summary>The test seam: the reach, the pause floor, the wait itself (a test records the pauses it is asked for
-    /// instead of sleeping them) and the statement cap in seconds.</summary>
+    /// instead of sleeping them), the statement cap in seconds, and (#5667) a lock timeout other than the hourly pass's 3 s, for
+    /// a test that needs the statement cap to be the only timeout that can fire on a held chunk. Production passes none.</summary>
     internal PerfmonRegroupDrain(
         Func<CancellationToken, ValueTask<NpgsqlConnection>> openConnection,
         ILogger? logger,
@@ -112,8 +114,10 @@ public sealed class PerfmonRegroupDrain
         Func<TimeSpan, CancellationToken, Task> delay,
         int statementTimeoutSeconds = TimescaleSupport.PerfmonRegroupStatementTimeoutSeconds,
         Func<NpgsqlConnection, ILogger?, int, CancellationToken, Task<TimescaleSupport.PerfmonRegroupRead>>? readCandidates = null,
-        TimeSpan? lostWorkThreshold = null)
+        TimeSpan? lostWorkThreshold = null,
+        string? lockTimeoutOverride = null)
     {
+        _lockTimeoutOverride = lockTimeoutOverride;
         _readCandidates = readCandidates ?? TimescaleSupport.ReadPerfmonRegroupCandidatesAsync;
         _lostWorkThreshold = lostWorkThreshold ?? DefaultLostWorkThreshold;
         _openConnection = openConnection ?? throw new ArgumentNullException(nameof(openConnection));
@@ -225,7 +229,7 @@ public sealed class PerfmonRegroupDrain
             }
 
             var chunk = next.Value.Chunk;
-            var outcome = await TimescaleSupport.RegroupPerfmonChunkAsync(connection, _logger, next.Value, cancellationToken, _statementTimeoutSeconds);
+            var outcome = await TimescaleSupport.RegroupPerfmonChunkAsync(connection, _logger, next.Value, cancellationToken, _statementTimeoutSeconds, _lockTimeoutOverride);
 
             /* Every outcome waits as long as the work took: a lock lost at the end of a decompress threw a whole rewrite away,
                and the store was just as busy as after a good one. */

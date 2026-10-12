@@ -318,6 +318,13 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < ServiceVersionTable.RungVersion)
+        {
+            /* V174 (#5655) - the service host version table is the probe's sentinel. */
+            await using var dropServiceVersion = new NpgsqlCommand("DROP TABLE IF EXISTS config.service_version", connection);
+            await dropServiceVersion.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < QueryStoreComposeStamp.RungVersion)
         {
             /* V173 (#5582) - the stamp-grain rollup of the wide Query Store table, its validity tables and the two late-row triggers on the

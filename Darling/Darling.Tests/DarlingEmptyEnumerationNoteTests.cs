@@ -277,7 +277,7 @@ public sealed class DarlingEmptyEnumerationNoteTests
                than pinning one formatting of it. */
             var source = Regex.Replace(ReadRepoFile(relative), @"\s+", " ");
             Assert.Contains(
-                "note_summary = CollectorHealthClassifier.FormatCollectionNote( r.LastNote, r.NoteCount, r.TotalRuns, r.CollectorName, r.TargetHasUserDatabases)",
+                "note_summary = CollectorHealthClassifier.FormatCollectionNote( r.LastNote, r.NoteCount, r.TotalRuns, r.CollectorName, r.TargetHasUserDatabases, r.RecoveredNote)",
                 source,
                 StringComparison.Ordinal);
 

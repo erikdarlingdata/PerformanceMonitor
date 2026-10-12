@@ -184,8 +184,11 @@ public sealed class StatementScrubLiveReadTests
             files.Add(relative);
         }
 
-        /* Five windows' plan actions and the server tab's own re-run; a scan that found nothing would pass vacuously. */
-        Assert.Equal(6, calls);
+        /* Five windows' plan actions and the server tab's own re-run (6 sites in 6 files), plus the FinOps tab's
+           second executor: the per-click ActualPlanRunTarget built in FinOpsGetActualPlan_Click (#5639), a separate
+           call from the tab's PlanActions fallback executor, in the same file. A scan that found nothing would pass
+           vacuously. */
+        Assert.Equal(7, calls);
         Assert.Equal(6, files.Count);
         Assert.Equal(calls, wrapped);
     }

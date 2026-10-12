@@ -367,8 +367,8 @@ public sealed class ServerAddRouteTests
         JsonNode.Parse(body)!["results"]![0]!["detail"]!.GetValue<string>();
 
     [Theory]
-    [InlineData("connection_failed", "Could not connect: Connection refused by the target host")]
-    [InlineData("connection_failed", "Could not connect: Login failed for user 'monitor'.")]
+    [InlineData("connection_failed", "Could not connect to sql00,1433. The service log has the details.")]
+    [InlineData("connection_failed", "Could not connect to sql01,1433. The service log has the details.")]
     [InlineData("not_saved", "Not saved: the write was refused")]
     public async Task AFailureRow_CarriesTheCoresOwnText_ToTheCaller_AndTheLog(string rowStatus, string detail)
     {

@@ -170,6 +170,113 @@ public class AzureMasterFallbackTests
         Assert.Contains("can open a user database but not master", ex.Message, StringComparison.Ordinal);
     }
 
+    private const string FirewallMessage =
+        "Cannot open server 'example' requested by the login. Client with IP address '192.0.2.1' is not allowed to " +
+        "access the server. To enable access, use the Azure Management Portal or run sp_set_firewall_rule on the " +
+        "master database to create a firewall rule for this IP address or address range.";
+
+    /// <summary>
+    /// #5647: error 40615 is a firewall rejection, which a missing Database setting never causes. The message names
+    /// the firewall and the client IP the server reported, then offers setting the Database for a client that a
+    /// database-level rule on a user database allows (Azure checks that rule only for that database).
+    /// </summary>
+    [Theory]
+    [InlineData("master")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void Error_40615_Names_The_Firewall_And_Client_Ip_Then_Offers_Setting_The_Database(string? targetDb)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => RemoteCollectorService.FallbackDatabaseList(
+                Server(), targetDb, reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: 40615, serverMessage: FirewallMessage));
+
+        Assert.StartsWith("master DB inaccessible (SQL error 40615), and this connection has no target database", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("The Azure firewall did not allow this client's IP address (192.0.2.1)", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("dd a firewall rule", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("either a server-level rule or a database-level rule in master", ex.Message, StringComparison.Ordinal);
+        Assert.EndsWith(
+            "If a database-level rule in a user database already allows this IP, set the Database for 'azure-logical-server' to that database instead.",
+            ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("can open a user database", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Error_40615_Without_An_Ip_In_The_Server_Text_Still_Offers_Setting_The_Database()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => RemoteCollectorService.FallbackDatabaseList(
+                Server(), "master", reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: 40615, serverMessage: "Ein anderer Text ohne Adresse."));
+
+        Assert.Contains("did not allow this client's IP address. Add a firewall rule", ex.Message, StringComparison.Ordinal);
+        Assert.EndsWith(
+            "If a database-level rule in a user database already allows this IP, set the Database for 'azure-logical-server' to that database instead.",
+            ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A known error number that is not 40615 (4060, 18456) has ruled the firewall out, so the message is the set-a-Database
+    /// advice alone. The decision is the error number, not the words: a reason that merely says 40615 gets neither the
+    /// firewall-only message nor firewall advice when the number the caller read differs.
+    /// </summary>
+    [Theory]
+    [InlineData(4060)]
+    [InlineData(18456)]
+    public void A_Known_Non_Firewall_Error_Number_Has_Set_Database_Advice_And_No_Firewall_Text(int errorNumber)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => RemoteCollectorService.FallbackDatabaseList(
+                Server(), "master", reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: errorNumber, serverMessage: FirewallMessage));
+
+        Assert.DoesNotContain("firewall", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("40615, the", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("192.0.2.1", ex.Message, StringComparison.Ordinal);
+        Assert.EndsWith(
+            "If this login can open a user database but not master, set a Database for 'azure-logical-server' " +
+            "so database-scoped collectors have something to read.",
+            ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>With no error number the caller cannot rule the firewall out, so the combined text stays.</summary>
+    [Fact]
+    public void No_Error_Number_Keeps_The_Firewall_Then_Set_Database_Message()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => RemoteCollectorService.FallbackDatabaseList(
+                Server(), "master", reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: null, serverMessage: FirewallMessage));
+
+        Assert.Contains(
+            "If the error is 40615, the Azure firewall did not allow this client's IP address: " +
+            "add a firewall rule for it, either a server-level rule or a database-level rule in master. " +
+            "If this login can open a user database but not master, set a Database for 'azure-logical-server' " +
+            "so database-scoped collectors have something to read.",
+            ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("192.0.2.1", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The client IP is the only thing read out of the server's text. Documentation addresses only.</summary>
+    [Theory]
+    [InlineData("Client with IP address '192.0.2.1' is not allowed to access the server.", "192.0.2.1")]
+    [InlineData("Client with IP address '2001:db8::1' is not allowed to access the server.", "2001:db8::1")]
+    public void ExtractClientIp_Reads_An_Ipv4_Or_Ipv6_Address(string message, string expected)
+    {
+        Assert.Equal(expected, AzureMasterFallbackMessage.ExtractClientIp(message));
+    }
+
+    [Theory]
+    [InlineData("Client with IP address '<b>x</b>' is not allowed to access the server.")]
+    [InlineData("Client with IP address '{0}' is not allowed to access the server.")]
+    [InlineData("Ein anderer Text ohne Adresse.")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void ExtractClientIp_Gives_Null_For_Markup_No_Address_Or_No_Text(string? message)
+    {
+        Assert.Null(AzureMasterFallbackMessage.ExtractClientIp(message));
+    }
+
     /// <summary>
     /// RunCollectorAsync catches InvalidOperationException TWICE: once filtered on
     /// `ex.Message.Contains("MFA authentication cancelled")` — which records the benign status

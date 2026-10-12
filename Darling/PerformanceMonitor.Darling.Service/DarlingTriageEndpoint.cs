@@ -615,7 +615,7 @@ internal static class DarlingTriageEndpoint
                 var resolveStopwatch = Stopwatch.StartNew();
                 try
                 {
-                    var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverQuery);
+                    var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverQuery, context.RequestAborted);
                     if (error is null)
                     {
                         serverId = resolved.ServerId;
@@ -626,7 +626,7 @@ internal static class DarlingTriageEndpoint
                         /* #4283 H2: the resolver's OWN store-fault sentence, not the caller's refusal — this is
                            the ONE branch below that can carry ex.Message (via LoadEnabledOrFaultAsync's catch), so
                            it is logged once and answered with the fixed generic/timeout note, never shown raw. */
-                        DarlingWebFailureLog.Report(logger, "/api/triage:resolve-server", resolveStopwatch.ElapsedMilliseconds, error);
+                        DarlingWebFailureLog.Report(logger, "/api/triage:resolve-server", resolveStopwatch.ElapsedMilliseconds, error, context.RequestAborted);
                         notes.Add((JsonNode)(DarlingWebFailureLog.IsStatementTimeoutSentence(error)
                             ? DarlingWebFailureLog.TimeoutMessage
                             : DarlingWebFailureLog.GenericMessage));
@@ -647,7 +647,7 @@ internal static class DarlingTriageEndpoint
                     /* #4283: a fixed note, never ex.Message — the real text still reaches the service log. This
                        page answers 200 regardless (a degraded note, not a failed response), so only the TEXT
                        changes, not the status. */
-                    DarlingWebFailureLog.Report(logger, "/api/triage:resolve-server", resolveStopwatch.ElapsedMilliseconds, ex);
+                    DarlingWebFailureLog.Report(logger, "/api/triage:resolve-server", resolveStopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                     notes.Add((JsonNode)"Server resolution failed. The service log names what failed.");
                 }
             }
@@ -705,7 +705,7 @@ internal static class DarlingTriageEndpoint
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 /* #4283: fixed note, real text to the service log — same reasoning as the resolver catch above. */
-                DarlingWebFailureLog.Report(logger, "/api/triage:alert-history", alertHistoryStopwatch.ElapsedMilliseconds, ex);
+                DarlingWebFailureLog.Report(logger, "/api/triage:alert-history", alertHistoryStopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                 notes.Add((JsonNode)"Alert-history lookup failed. The service log names what failed.");
             }
 
@@ -748,7 +748,7 @@ internal static class DarlingTriageEndpoint
             };
 
             /* #4348: the page's own body holds the alert row and every section's read, so it is swept whole. */
-            return DarlingWebStatementSweep.JsonText(body, "/api/triage", logger, 0);
+            return DarlingWebStatementSweep.JsonText(body, "/api/triage", logger, 0, context.RequestAborted);
         });
     }
 
@@ -759,9 +759,10 @@ internal static class DarlingTriageEndpoint
     /// each reduced to its OWN sentence here because <c>error</c> on this page is TEXT the card renders. A tool
     /// that caught an exception (its <c>{"status":"error", ...}</c> envelope since #3653 Q11) or a
     /// binding-layer throw instead gets a fixed sentence (#4283: never <c>ex.Message</c>), and the real text
-    /// goes to the service log once through <see cref="DarlingWebFailureLog.Report(ILogger,string,long,string)"/>.
-    /// Never throws: a broken section is one card on the page, not a dead page.</summary>
-    private static async Task<JsonObject> RunSectionAsync(
+    /// goes to the service log once through <see cref="DarlingWebFailureLog.Report(ILogger,string,long,string,System.Threading.CancellationToken)"/>.
+    /// Never throws for a broken section (one card on the page, not a dead page) and never for a caller who has gone (the section
+    /// ends quietly, #5678).</summary>
+    internal static async Task<JsonObject> RunSectionAsync(
         TriageSection section,
         IReadOnlyDictionary<string, DarlingWebEndpoints.ReadToolHandler> dispatch,
         HttpContext requestContext,
@@ -802,7 +803,7 @@ internal static class DarlingTriageEndpoint
                        ServerError arm answers with (this page still answers 200 overall; only the card's text
                        degrades). */
                     var sentence = McpHelpers.ErrorMessageOf(raw);
-                    DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, sentence);
+                    DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, sentence, requestContext.RequestAborted);
                     result["error"] = DarlingWebFailureLog.IsStatementTimeoutSentence(sentence)
                         ? DarlingWebFailureLog.TimeoutMessage
                         : DarlingWebFailureLog.GenericMessage;
@@ -817,12 +818,21 @@ internal static class DarlingTriageEndpoint
                     break;
             }
         }
+        catch (Exception ex) when (requestContext.RequestAborted.IsCancellationRequested)
+        {
+            /* #5678 round 2: the caller has gone, so whatever the section's tool threw (the read tools resolve the server OUTSIDE
+               their own try, so a cancellation, or a connect timeout the driver threw instead of one, leaves the tool) is not a
+               broken card: nobody is reading this page. This section ends quietly -- no error text, no Warning or Error line
+               (Report with the fired token writes one Debug line). This is what keeps "Never throws" true for a gone caller. */
+            DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex, requestContext.RequestAborted);
+            return result;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* #4283: the binding-layer backstop (a throw, not a tool's own catch) — the real Exception is
                still here, so reported and answered from it directly rather than through the sentence
                classifier, exactly as the /api/read/* loop's own binding-layer catch does. */
-            DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex);
+            DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex, requestContext.RequestAborted);
             result["error"] = DarlingWebFailureLog.IsStatementTimeout(ex)
                 ? DarlingWebFailureLog.TimeoutMessage
                 : DarlingWebFailureLog.GenericMessage;

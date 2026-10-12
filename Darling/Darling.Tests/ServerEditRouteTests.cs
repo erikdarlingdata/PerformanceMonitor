@@ -481,11 +481,11 @@ public sealed class ServerEditRouteTests
     [Fact]
     public async Task AFailedProbe_IsLoggedOnce_WithTheCoresRedactedDetail()
     {
-        var failed = "{\"status\":\"connection_failed\",\"message\":\"Could not connect: timeout. Nothing was saved.\"}";
+        var failed = "{\"status\":\"connection_failed\",\"message\":\"Could not connect to alpha-01.example.test. The service log has the details. Nothing was saved.\"}";
         await using var rig = await StartAsync(edit: (_, _) => Task.FromResult(failed));
         await PatchAsync(rig, Changes("\"password\":\"" + FakeSecret + "\""));
         var line = Assert.Single(rig.Log.Lines, l => l.Contains("Server edit failed for alice: id 41", StringComparison.Ordinal));
-        Assert.Contains("Could not connect: timeout", line, StringComparison.Ordinal);
+        Assert.Contains("Could not connect to alpha-01.example.test", line, StringComparison.Ordinal);
         Assert.DoesNotContain(FakeSecret, rig.Log.Joined, StringComparison.Ordinal);
     }
 
