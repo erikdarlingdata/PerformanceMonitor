@@ -20,6 +20,7 @@ namespace PerformanceMonitorLite.Tests;
 /// every other collector (Azure SQL Database, where DBCC TRACESTATUS is unsupported, is skipped by the collector's AppliesTo gate).
 /// A source pin, because the failure needs a live monitored server to provoke.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class TraceFlagsFailedRunPinTests
 {
     [Fact]

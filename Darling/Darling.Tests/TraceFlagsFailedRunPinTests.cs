@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// PERMISSIONS for a denied permission and ERROR otherwise (Azure SQL Database, where DBCC TRACESTATUS is unsupported, is skipped
 /// by the collector's AppliesTo gate and never reaches the run). A source pin, because the failure needs a live monitored server.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class TraceFlagsFailedRunPinTests
 {
     [Fact]
