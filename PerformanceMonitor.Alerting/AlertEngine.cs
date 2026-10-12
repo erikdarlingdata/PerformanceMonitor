@@ -423,7 +423,7 @@ public sealed class AlertEngine
         await CheckBlockingAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, blockingDeadlockExcluded, ct);
         await CheckDeadlocksAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, blockingDeadlockExcluded, ct);
         await CheckPoisonWaitsAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
-        await CheckRunnableQueueAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckRunnableQueueAsync(snapshot, key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         await CheckLongRunningQueriesAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckTempDbSpaceAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
@@ -1970,7 +1970,7 @@ public sealed class AlertEngine
     /// is one per server; its mute context carries no wait type.</para>
     /// </summary>
     private async Task CheckRunnableQueueAsync(
-        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        AlertServerSnapshot snapshot, string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.RunnableQueueEnabled)
         {
@@ -2015,9 +2015,54 @@ public sealed class AlertEngine
                     var queueContext = new AlertContext { SeverityOverride = finding.Severity };
                     AlertSampleAge.Stamp(queueContext, "scheduler stats", finding.NewestCollectionTime, now);
 
-                    /* #5641 Lane 2 hook: the detail block (CPU percent for the same minute, the top requests from the
-                       latest query snapshot) is added to queueContext here, through AlertContextBuilders, before
-                       ContextToDetailText runs. This lane leaves the context without detail items. */
+                    /* #5641: the card's detail, in AlertContext.Details so every channel that renders another
+                       alert's details (both email bodies, the webhook, the toast text, the history row) renders
+                       it. CPU percent for the same minutes comes from the samples the snapshot already holds;
+                       the top requests come from the newest query snapshot, through the same unfiltered
+                       threshold-zero read the High CPU card's maintenance probe uses. ANNOTATION, NEVER
+                       SUPPRESSION: the fire is decided before this read, a failed read costs the card its
+                       request items and nothing else (logged and counted on the #3013 surface, Warning because
+                       the condition was evaluated correctly), and the read sits inside the cooldown-bounded fire
+                       branch, so a quiet sweep pays nothing. Taken for muted fires too, so the history row
+                       carries the detail the delivered card would have. */
+                    var cpuItem = AlertContextBuilders.BuildRunnableQueueCpuItem(
+                        snapshot.RecentCpuSamples, snapshot.SqlCpuPercent, snapshot.TotalCpuPercent,
+                        now, RunnableQueueEvaluator.WindowMinutes);
+                    if (cpuItem is not null)
+                    {
+                        queueContext.Details.Add(cpuItem);
+                    }
+
+                    var requestClock = Stopwatch.StartNew();
+                    try
+                    {
+                        var activeRequests = await _readAdapter.GetLongRunningQueriesAsync(
+                            key,
+                            thresholdMinutes: 0,
+                            maxResults: ActiveMaintenanceProbeMaxRows,
+                            excludeSpServerDiagnostics: false,
+                            excludeWaitFor: false,
+                            excludeBackups: false,
+                            excludeMiscWaits: false,
+                            excludeCdc: false,
+                            Array.Empty<string>(),
+                            LongRunningQueryExclusions.None,
+                            ct);
+                        foreach (var requestItem in AlertContextBuilders.BuildRunnableQueueRequestItems(activeRequests.Sessions))
+                        {
+                            queueContext.Details.Add(requestItem);
+                        }
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning("Could not read active sessions for the Runnable Queue card's top requests on {Server} after {ElapsedMs} ms - the alert fires without them: {Message}",
+                            serverName, requestClock.ElapsedMilliseconds, ex.Message);
+                        _readFailures?.RecordReadFailure(key, "runnable queue top requests", requestClock.ElapsedMilliseconds);
+                    }
 
                     var detailText = AlertContextBuilders.ContextToDetailText(queueContext);
 

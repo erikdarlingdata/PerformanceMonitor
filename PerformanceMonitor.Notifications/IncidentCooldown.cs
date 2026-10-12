@@ -20,7 +20,7 @@ namespace PerformanceMonitor.Notifications;
 /// (serverId, metricName) cooldown that silently dropped a genuinely distinct incident arriving inside
 /// the window: the cooldown is now keyed per #1140 dedup fingerprint, so a DISTINCT fingerprint is
 /// delivered while a REPEAT of the same fingerprint stays suppressed (#1091). Alerts with no
-/// fingerprintable incidents (Incidents null/empty — CPU/memory/poison-wait/tempdb/failed-job) fall back
+/// fingerprintable incidents (Incidents null/empty — CPU/memory/poison-wait/runnable-queue/tempdb/failed-job) fall back
 /// to the metric-level key, byte-identical to the pre-#1154 behavior.
 /// </summary>
 public sealed class IncidentCooldown
