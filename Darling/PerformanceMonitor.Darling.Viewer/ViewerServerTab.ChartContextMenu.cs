@@ -102,7 +102,7 @@ public partial class ViewerServerTab
         string.Join(separator, new[]
         {
             dateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
-            CsvEscape(series, separator),
+            CsvEscape(SpreadsheetText.Neutralize(series), separator),
             value.ToString(CultureInfo.InvariantCulture),
         });
 
@@ -123,15 +123,7 @@ public partial class ViewerServerTab
     }
 
     /// <summary>RFC-4180 CSV quoting (Lite's ContextMenuHelper.CsvEscape).</summary>
-    internal static string CsvEscape(string value, string separator)
-    {
-        if (value.Contains(separator, StringComparison.Ordinal) || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
-        {
-            return "\"" + value.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
-        }
-
-        return value;
-    }
+    internal static string CsvEscape(string value, string separator) => DataGridExport.CsvEscape(value, separator);
 
     /// <summary>
     /// Builds the copy/save/export <see cref="ContextMenu"/> for a chart and takes right-click over from

@@ -100,7 +100,8 @@ public sealed class ViewerChartContextMenuTests
         var zone = TimeZoneInfo.CreateCustomTimeZone("Custom, Zone", TimeSpan.Zero, "Custom", "Custom");
 
         Assert.Equal("\"DateTime (Custom, Zone)\",Series,Value,UTC offset", ViewerServerTab.ChartCsvHeaderLine(",", zone));
-        Assert.Equal("DateTime (Custom, Zone);Series;Value;UTC offset", ViewerServerTab.ChartCsvHeaderLine(";", zone));
+        /* A comma is quoted whatever the separator is: a spreadsheet may split on its own list separator. */
+        Assert.Equal("\"DateTime (Custom, Zone)\";Series;Value;UTC offset", ViewerServerTab.ChartCsvHeaderLine(";", zone));
     }
 
     [Fact]
@@ -188,11 +189,26 @@ public sealed class ViewerChartContextMenuTests
         Assert.Equal("2026-07-06 00:00:00,\"reads, writes\",3", line);
     }
 
+    [Fact]
+    public void FormatChartCsvLine_WritesAFormulaLookingSeriesAsText_AndANegativeValueAsANumber()
+    {
+        /* A series name is collected text. One that starts with a formula character is written with a leading
+           apostrophe so a spreadsheet shows it instead of evaluating it; the value stays a number. */
+        var line = ViewerServerTab.FormatChartCsvLine(new DateTime(2026, 7, 6, 0, 0, 0), "=1+1", -5, ",");
+        Assert.Equal("2026-07-06 00:00:00,'=1+1,-5", line);
+    }
+
     [Theory]
     [InlineData("plain", ",", "plain")]
     [InlineData("a,b", ",", "\"a,b\"")]
     [InlineData("a;b", ";", "\"a;b\"")]
     [InlineData("has\"quote", ",", "\"has\"\"quote\"")]
+    [InlineData("a,b", ";", "\"a,b\"")]
+    [InlineData("a;b", ",", "\"a;b\"")]
+    [InlineData("a\tb", ",", "\"a\tb\"")]
+    [InlineData("a\nb", ";", "\"a\nb\"")]
+    [InlineData("a\rb", ";", "\"a\rb\"")]
+    [InlineData("a|b", "|", "\"a|b\"")]
     public void CsvEscape_QuotesOnlyWhenNeeded_AndDoublesEmbeddedQuotes(string value, string separator, string expected)
     {
         Assert.Equal(expected, ViewerServerTab.CsvEscape(value, separator));
