@@ -6,6 +6,10 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.ComponentModel;
+using System.Linq;
+using System.Reflection;
 using Npgsql;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -80,4 +84,150 @@ public static class DarlingStoreConnection
         builder.ApplicationName = applicationName;
         return builder.ConnectionString;
     }
+
+    /// <summary>
+    /// The text a site prints or logs when a STORE connection string cannot be used (S-8), in place of the
+    /// exception's own message. Npgsql reports a keyword it cannot set as <c>Couldn't set &lt;keyword&gt;</c>, and
+    /// the .NET parser lowercases that keyword. A password with an unquoted <c>;</c> makes the text from that
+    /// <c>;</c> to the next <c>=</c> the "keyword", and a password that starts with <c>=</c> puts the whole
+    /// password there, so the message (and its <c>ParamName</c>, and the inner exception) can quote part of a
+    /// secret. A bad value for a real keyword (<c>Port</c>, <c>SSL Mode</c>) names only the key, and the value
+    /// sits in the inner exception. A password whose tail becomes a <c>Host</c> value with a ':' in it fails later,
+    /// when Npgsql splits that value into host and port, and that exception's message quotes the text after the ':'.
+    ///
+    /// <para>This method never includes <c>ex.Message</c> or any inner exception's message. It has three outputs:
+    /// (1) when <see cref="ArgumentException.ParamName"/> is a keyword that Npgsql accepts
+    /// (<see cref="NpgsqlConnectionStringBuilder.ContainsKey"/>), the CANONICAL spelling of that keyword, taken
+    /// from Npgsql's own list (its <c>Port</c>, its <c>SSL Mode</c>) and never the spelling in the exception, which
+    /// can be a spelling that came from the secret; (2) one fixed sentence, written here, for each of Npgsql's own
+    /// setting conflicts (Multiplexing without Pooling and the like), which the exception's type and Npgsql's fixed
+    /// message identify and which carry no operator text; (3) one fixed hint for everything else. The output is
+    /// never built from the secret. It does depend on the string in one narrow way: a fragment of a password that
+    /// is itself the name of a Npgsql keyword (<c>;port=x</c>) prints that keyword's canonical name, never its value.
+    /// A site that passes this text to a logger must not also pass the exception: a logger appends the
+    /// exception's message (and, on the console and in the Event Log, its inner exceptions).</para>
+    /// </summary>
+    public static string DescribeParseFailure(Exception ex)
+    {
+        ArgumentNullException.ThrowIfNull(ex);
+
+        if (ex is ArgumentException { ParamName: { Length: > 0 } paramName }
+            && FindCanonicalKeyword(paramName) is { } keyword)
+        {
+            return "Npgsql rejected the value for the '" + keyword + "' keyword. Check that value. " + ParseErrorNotShown;
+        }
+
+        if (DescribeSettingsConflict(ex) is { } conflict)
+        {
+            return conflict;
+        }
+
+        return "Npgsql rejected the string. A value that contains ';' or '=' must be quoted, for example Password='pa;ss'. "
+            + ParseErrorNotShown;
+    }
+
+    /// <summary>
+    /// <see cref="DescribeParseFailure"/>'s text when <paramref name="connectionString"/> cannot be used, or null
+    /// when it can. For a site that builds a data source from the string right afterwards and wants to say why it
+    /// cannot, without a catch around the statement that builds it.
+    ///
+    /// <para>The proof is Npgsql's own construction step, the one <see cref="NpgsqlDataSource"/>'s <c>Create</c>
+    /// runs at those sites, and not only the string parser: construction also runs Npgsql's validation, which
+    /// splits a <c>Host</c> value on its last ':' and range-checks the port (a password whose tail is
+    /// <c>Host=x:y</c> throws a <see cref="FormatException"/> that quotes <c>y</c>), and which rejects setting
+    /// conflicts. The string is built the way those sites build theirs (an application name, then the session time
+    /// zone pin), and the data source is disposed at once. Nothing is opened: no socket, no pool connection. A
+    /// string that passes here does not throw from a site's <c>Create</c> for a parse or a validation reason.</para>
+    /// </summary>
+    public static string? TryDescribeParseFailure(string connectionString)
+    {
+        try
+        {
+            using var dataSource = NpgsqlDataSource.Create(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(connectionString, ProofApplicationName)));
+            return null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return DescribeParseFailure(ex);
+        }
+    }
+
+    /// <summary>
+    /// Npgsql's canonical spelling of the keyword <paramref name="paramName"/> names, or null. Both checks must
+    /// pass: Npgsql accepts the name as a keyword (its own case and synonym rules, which include some non-ASCII
+    /// characters that fold to ASCII ones), and it equals, ignoring case and spaces, the display name of one
+    /// public property of <see cref="NpgsqlConnectionStringBuilder"/>. The result is that display name, so no
+    /// character of <paramref name="paramName"/> reaches the output. A synonym that is not a display name
+    /// gets null and so the fixed hint.
+    /// </summary>
+    private static string? FindCanonicalKeyword(string paramName)
+    {
+        if (!new NpgsqlConnectionStringBuilder().ContainsKey(paramName))
+        {
+            return null;
+        }
+
+        var squashed = paramName.Replace(" ", string.Empty, StringComparison.Ordinal);
+        foreach (var canonical in CanonicalKeywords.Value)
+        {
+            if (string.Equals(canonical.Replace(" ", string.Empty, StringComparison.Ordinal), squashed, StringComparison.OrdinalIgnoreCase))
+            {
+                return canonical;
+            }
+        }
+
+        return null;
+    }
+
+    private static readonly Lazy<string[]> CanonicalKeywords = new(() =>
+        typeof(NpgsqlConnectionStringBuilder)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Select(property => property.GetCustomAttribute<DisplayNameAttribute>()?.DisplayName)
+            .Where(name => !string.IsNullOrEmpty(name))
+            .Select(name => name!)
+            .ToArray());
+
+    /// <summary>
+    /// Our own sentence for a setting conflict that Npgsql's construction step rejects. Npgsql's messages for these
+    /// are fixed text with no operator input, but they are Npgsql's to reword and one of them embeds numbers, so
+    /// the exception's type and message are only compared against Npgsql's known text here and never printed. A
+    /// message that a later Npgsql rewords gets null (so the general hint), and the tests that pin each conflict
+    /// against the real Npgsql fail to say so.
+    /// </summary>
+    private static string? DescribeSettingsConflict(Exception ex)
+    {
+        var message = ex.Message;
+        string? conflict = null;
+
+        if (ex is ArgumentException)
+        {
+            if (message.Equals("Pooling must be on to use multiplexing", StringComparison.Ordinal))
+            {
+                conflict = "Multiplexing needs Pooling to be on.";
+            }
+            else if (message.StartsWith("SSL Mode has to be Require or higher to be used with direct SSL Negotiation", StringComparison.Ordinal))
+            {
+                conflict = "SSL Negotiation=Direct needs SSL Mode Require, Verify CA or Verify Full.";
+            }
+            else if (message.StartsWith("Connection can't have 'Max Pool Size'", StringComparison.Ordinal))
+            {
+                conflict = "Maximum Pool Size is smaller than Minimum Pool Size.";
+            }
+        }
+        else if (ex is NotSupportedException
+            && message.StartsWith("Target Session Attributes other then Any is only supported with multiple hosts", StringComparison.Ordinal))
+        {
+            conflict = "Target Session Attributes other than Any needs more than one host in Host.";
+        }
+
+        return conflict is null ? null : "Npgsql rejected the settings: " + conflict;
+    }
+
+    /// <summary>The application name on the data source <see cref="TryDescribeParseFailure"/> builds and disposes. It
+    /// is never used, because nothing is opened.</summary>
+    private const string ProofApplicationName = "darling-connection-string-proof";
+
+    private const string ParseErrorNotShown = "The parse error is left out on purpose, because it can quote part of a secret.";
 }

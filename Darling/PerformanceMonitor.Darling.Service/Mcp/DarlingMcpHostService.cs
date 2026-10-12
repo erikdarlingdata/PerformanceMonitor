@@ -410,6 +410,23 @@ public sealed class DarlingMcpHostService : BackgroundService
                 }
             }
 
+            /* A string Npgsql cannot use throws from the Create below into the catch at the end of this method,
+               which logs the exception's message, and Npgsql's text for that can quote part of the string (a password
+               with an unquoted ';' makes the text after it the "keyword", and a password tail that becomes a Host
+               value with a ':' in it makes the text after the ':' a bad port). So prove it first, with Npgsql's own
+               construction step (the guard builds and disposes a data source, and opens nothing), and log the
+               formatter's text instead. The keywords added below (application name, session time zone) take part in
+               none of Npgsql's construction checks, so a string that passes here does not throw from the Create below
+               for a parse or a validation reason. */
+            if (DarlingStoreConnection.TryDescribeParseFailure(storeConnectionString) is { } unusableStoreString)
+            {
+                _logger.LogError(
+                    "MCP server not started this attempt: its store connection string (postgres.mcpConnectionString, or postgres.connectionString when that is not set) is unusable: {Detail}",
+                    unusableStoreString);
+                await DisposeFailedStartAsync();
+                return false;
+            }
+
             /* Lifetime tied to the running app (#1560): disposed by StopServerAsync, not this method's
                scope — the supervisor may keep the app running across many poll ticks. #4479: the mcp-role
                connection string built by DarlingManagedPostgres already carries McpApplicationName, but a

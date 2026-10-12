@@ -489,10 +489,14 @@ public static class DarlingCliCommands
             /* A managed store has no connection string setting to blame: what failed is its stored credential (#4744),
                and a DPAPI failure gets the store credential's own explanation instead of the raw
                CryptographicException text. The IsWindows call repeats what readingCredential already implies, for the
-               platform analyzer, which cannot follow a bool. */
+               platform analyzer, which cannot follow a bool.
+
+               Anything else is the connection string failing to parse, and Npgsql's message for that can quote part of
+               the string (a password with an unquoted ';' makes the text after it the "keyword"), so the text printed
+               is DarlingStoreConnection.DescribeParseFailure's and never the exception's own message. */
             unusable = readingCredential && OperatingSystem.IsWindows()
                 ? "The stored store credential could not be read: " + StoreCredentialFailureDetail(ex)
-                : "postgres.connectionString could not be used: " + ex.Message;
+                : "postgres.connectionString could not be used: " + DarlingStoreConnection.DescribeParseFailure(ex);
             return false;
         }
     }

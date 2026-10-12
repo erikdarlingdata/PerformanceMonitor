@@ -269,10 +269,44 @@ public sealed class DarlingCollectorToggleExitCodeTests
         {
             var path = WriteConfig(root, PostgresBlock(MalformedConnectionString));
 
-            var (exit, _, error) = await RunAsync(enable, "wait_stats", "--config", path);
+            var (exit, output, error) = await RunAsync(enable, "wait_stats", "--config", path);
 
             Assert.Equal(UsageOrConfig, exit);
             Assert.Contains("postgres.connectionString could not be used:", error, StringComparison.Ordinal);
+
+            /* S-8: the message names the keyword Npgsql could not set and never the value it was given. */
+            Assert.Contains("value for the 'SSL Mode' keyword", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("NotARealSslMode", error, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("NotARealSslMode", output, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>S-8: a password with an unquoted ';' (or one that starts with '=') makes Npgsql report a keyword built
+    /// out of the password itself. The verb exits with the usage code and prints neither piece of the password on
+    /// either stream. Both collector verbs share one body, and the theory covers both.</summary>
+    [Theory]
+    [InlineData(true, StoreParseFailureFixtures.SemicolonInPassword)]
+    [InlineData(false, StoreParseFailureFixtures.SemicolonInPassword)]
+    [InlineData(true, StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    [InlineData(false, StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    public async Task ConnectionStringWithAPasswordThatBreaksTheParse_ExitsWithTheUsageCode_AndNeverEchoesIt(
+        bool enable, string connectionString)
+    {
+        var root = Directory.CreateTempSubdirectory("darling-toggle-s8-fragment-");
+        try
+        {
+            var path = WriteConfig(root, PostgresBlock(connectionString));
+
+            var (exit, output, error) = await RunAsync(enable, "wait_stats", "--config", path);
+
+            Assert.Equal(UsageOrConfig, exit);
+            Assert.Contains("postgres.connectionString could not be used:", error, StringComparison.Ordinal);
+            StoreParseFailureFixtures.AssertNoFragment(error, "stderr");
+            StoreParseFailureFixtures.AssertNoFragment(output, "stdout");
         }
         finally
         {
@@ -328,6 +362,38 @@ public sealed class DarlingCollectorToggleExitCodeTests
 
             Assert.Equal(DarlingCliCommands.CheckSettingsExitCode.ConfigError, exit);
             Assert.Contains("postgres.connectionString could not be used:", error.ToString(), StringComparison.Ordinal);
+
+            /* S-8: the keyword is named, and the value Npgsql was given is not. */
+            Assert.Contains("value for the 'SSL Mode' keyword", error.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("NotARealSslMode", error.ToString(), StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("NotARealSslMode", output.ToString(), StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>S-8: <c>--check-settings</c> with a password that breaks the parse exits with its config code and
+    /// prints no piece of the password on either stream.</summary>
+    [Theory]
+    [InlineData(StoreParseFailureFixtures.SemicolonInPassword)]
+    [InlineData(StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    public async Task CheckSettings_WithAPasswordThatBreaksTheParse_ExitsWithTheConfigCode_AndNeverEchoesIt(string connectionString)
+    {
+        var root = Directory.CreateTempSubdirectory("darling-checksettings-s8-fragment-");
+        try
+        {
+            var path = WriteConfigWithAServer(root, PostgresBlock(connectionString));
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.CheckSettingsAsync(path, json: false, output, error, CancellationToken.None);
+
+            Assert.Equal(DarlingCliCommands.CheckSettingsExitCode.ConfigError, exit);
+            Assert.Contains("postgres.connectionString could not be used:", error.ToString(), StringComparison.Ordinal);
+            StoreParseFailureFixtures.AssertNoFragment(error.ToString(), "stderr");
+            StoreParseFailureFixtures.AssertNoFragment(output.ToString(), "stdout");
         }
         finally
         {
