@@ -50,7 +50,7 @@ public sealed class PgSettingRedactorTests
     [Fact]
     public void RulesVersionIsPinned()
     {
-        Assert.Equal(2, PgSettingRedactor.RulesVersion);
+        Assert.Equal(3, PgSettingRedactor.RulesVersion);
     }
 
     [Fact]
@@ -66,6 +66,155 @@ public sealed class PgSettingRedactorTests
     /// </summary>
     public static IEnumerable<object[]> RedactionCases()
     {
+        // Rules version 3: an HTTP credential header in a command keeps its name and scheme and masks the credential.
+        yield return new object[] { "archive_command",
+            "curl -sf -H \"Authorization: Bearer Kept4348tok\" -T %p https://backup.example.com/wal/%f",
+            "curl -sf -H \"Authorization: Bearer ********\" -T %p https://backup.example.com/wal/%f" };
+        yield return new object[] { "archive_command",
+            "curl -sf -H 'Authorization: Basic Kept4348dXNlcjpw' -T %p https://b/%f",
+            "curl -sf -H 'Authorization: Basic ********' -T %p https://b/%f" };
+        yield return new object[] { "restore_command",
+            "curl -sf -H \"X-Api-Key: Kept4348key\" https://b/%f -o %p",
+            "curl -sf -H \"X-Api-Key: ********\" https://b/%f -o %p" };
+        // Rules version 3: curl's --oauth2-bearer takes a credential as its next token.
+        yield return new object[] { "archive_command",
+            "curl -sf --oauth2-bearer Kept4348tok456 -T %p https://b/%f",
+            "curl -sf --oauth2-bearer ******** -T %p https://b/%f" };
+        // Rules version 3: an escaped space inside an unquoted libpq or shell value is part of the value.
+        yield return new object[] { "primary_conninfo",
+            "user=rep password=abc\\ Kept4348rest host=h1 port=5432",
+            "user=rep password=******** host=h1 port=5432" };
+        yield return new object[] { "archive_command",
+            "PGPASSWORD=abc\\ Kept4348sh pg_receivewal",
+            "PGPASSWORD=******** pg_receivewal" };
+        // A URI with no path whose query holds an '@' is read the way libpq reads it: user h1, and a password that
+        // runs to the '@' (5432?application_name=x). Both it and the password parameter are masked.
+        yield return new object[] { "primary_conninfo",
+            "postgresql://h1:5432?application_name=x@y&password=Kept4348z",
+            "postgresql://h1:********@y&password=********" };
+        yield return new object[] { "primary_conninfo",
+            "postgresql://h1:5432/db?sslmode=require&password=Kept4348q&application_name=a@b",
+            "postgresql://h1:5432/db?sslmode=require&password=********&application_name=a@b" };
+
+        // A URI password runs to the last '@' of the authority, whatever it holds: '#', '?', both, or an '@'.
+        yield return new object[] { "primary_conninfo",
+            "postgresql://repl:Xy#9k?Lm2@host/db",
+            "postgresql://repl:********@host/db" };
+        yield return new object[] { "primary_conninfo",
+            "postgresql://repl:Xy#9k?Lm2@primary:5432/postgres",
+            "postgresql://repl:********@primary:5432/postgres" };
+        yield return new object[] { "primary_conninfo",
+            "postgresql://u:Kept#4348b@h/d",
+            "postgresql://u:********@h/d" };
+        yield return new object[] { "primary_conninfo",
+            "postgresql://u:Kept?4348b@h/d",
+            "postgresql://u:********@h/d" };
+        yield return new object[] { "primary_conninfo",
+            "postgresql://u:Kept#?4348b@h/d",
+            "postgresql://u:********@h/d" };
+        yield return new object[] { "primary_conninfo",
+            "postgresql://u:Kept@4348b@h/d",
+            "postgresql://u:********@h/d" };
+        yield return new object[] { "primary_conninfo",
+            "postgresql://:Xy#9k?Lm2@h/d",
+            "postgresql://:********@h/d" };
+
+        // An assignment's unquoted value ends at '&' only inside a URI's query; elsewhere it runs to the next space.
+        yield return new object[] { "primary_conninfo",
+            "Server=x;Password=ab&amp;cd;Database=y",
+            "Server=x;Password=********" };
+        yield return new object[] { "primary_conninfo",
+            "Server=x;Password=ab&cd;Database=y",
+            "Server=x;Password=********" };
+        yield return new object[] { "archive_command",
+            "PGPASSWORD=ab&cd pg_receivewal -h x",
+            "PGPASSWORD=******** pg_receivewal -h x" };
+        yield return new object[] { "primary_conninfo",
+            "postgresql://h/db?sslmode=require&token=ab&application_name=a",
+            "postgresql://h/db?sslmode=require&token=********&application_name=a" };
+
+        // A secret HTTP header is masked after its name whatever scheme follows; a known scheme word is kept.
+        yield return new object[] { "archive_command",
+            "curl -H \"Authorization: Splunk Kept4348tok\" https://b/x",
+            "curl -H \"Authorization: ********\" https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl -H \"Authorization: SSWS Kept4348tok\" https://b/x",
+            "curl -H \"Authorization: ********\" https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl -H \"Authorization: SharedKey acct:Kept4348sig\" https://b/x",
+            "curl -H \"Authorization: ********\" https://b/x" };
+        yield return new object[] { "archive_command",
+            "Authorization: AWS4-HMAC-SHA256 Credential=AKIA/20260101/us/s3/aws4_request,SignedHeaders=host,Signature=Kept4348sig",
+            "Authorization: ********" };
+        yield return new object[] { "archive_command",
+            "Authorization: Digest username=\"u\", realm=\"r\", response=\"Kept4348resp\"",
+            "Authorization: Digest ********" };
+        yield return new object[] { "archive_command",
+            "Authorization: NTLM Kept4348tlm",
+            "Authorization: NTLM ********" };
+        yield return new object[] { "archive_command",
+            "Authorization: Negotiate Kept4348neg",
+            "Authorization: Negotiate ********" };
+        yield return new object[] { "archive_command",
+            "Proxy-Authorization: Basic Kept4348dXNlcjpw",
+            "Proxy-Authorization: Basic ********" };
+        yield return new object[] { "archive_command",
+            "curl -H \"X-Vault-Token: Kept4348v\" https://b/x",
+            "curl -H \"X-Vault-Token: ********\" https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl -H \"X-Auth-Token: Kept4348a\" https://b/x",
+            "curl -H \"X-Auth-Token: ********\" https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl -H \"Private-Token: Kept4348p\" https://b/x",
+            "curl -H \"Private-Token: ********\" https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl -H \"X-Goog-Api-Key: Kept4348g\" https://b/x",
+            "curl -H \"X-Goog-Api-Key: ********\" https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl -H \"apikey: Kept4348k\" https://b/x",
+            "curl -H \"apikey: ********\" https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl -H \"Cookie: sid=Kept4348c; csrf=Kept4348d\" https://b/x",
+            "curl -H \"Cookie: ********\" https://b/x" };
+        yield return new object[] { "archive_command",
+            "Set-Cookie: session=Kept4348s",
+            "Set-Cookie: ********" };
+
+        // A quoted cookie value, and curl's own cookie options.
+        yield return new object[] { "archive_command",
+            "curl -H 'Cookie: theme=\"dark\"; sid=Kept5698a' https://b/x",
+            "curl -H 'Cookie: ********' https://b/x" };
+        yield return new object[] { "archive_command",
+            "Cookie: a=\"Kept5698b\"",
+            "Cookie: ********" };
+        yield return new object[] { "archive_command",
+            "Set-Cookie: a=\"Kept5698c\"; Path=/",
+            "Set-Cookie: ********" };
+        yield return new object[] { "archive_command",
+            "curl -H \"Cookie: a=\\\"Kept5698d\\\"\" https://b/x",
+            "curl -H \"Cookie: ********\" https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl -b sid=Kept5698e https://b/x",
+            "curl -b ******** https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl -s --cookie \"sid=Kept5698 f\" https://b/x",
+            "curl -s --cookie ******** https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl --cookie=sid=Kept5698g https://b/x",
+            "curl --cookie ******** https://b/x" };
+        yield return new object[] { "archive_command",
+            "curl -H 'X: y' -b 'sid=\"Kept5698h\"' https://b/x",
+            "curl -H 'X: y' -b ******** https://b/x" };
+        yield return new object[] { "archive_command",
+            "a=1;Authorization: Basic Kept4348z",
+            "a=1;Authorization: Basic ********" };
+        yield return new object[] { "archive_command",
+            "x,Cookie: Kept4348z",
+            "x,Cookie: ********" };
+        yield return new object[] { "archive_command",
+            "{\"Authorization\": \"Bearer Kept4348t\"}",
+            "{\"Authorization\": \"Bearer ********\"}" };
+
         // libpq password keyword: unquoted, first / middle / last, spaces around '='.
         yield return new object[] { "primary_conninfo",
         "password=hunter2 host=127.0.0.1 port=5432 user=replicator application_name=s1a",
@@ -363,6 +512,18 @@ public sealed class PgSettingRedactorTests
         Assert.Equal(actual, RedactUnderGenerousTimeout(name, actual));
     }
 
+    /// <summary>curl's cookie option is read only as curl's: a cookie file the command writes, and another command's
+    /// <c>-b</c>, are not cookie values.</summary>
+    [Theory]
+    [InlineData("curl --cookie-jar jar.txt https://b/x")]
+    [InlineData("curl -c jar.txt https://b/x")]
+    [InlineData("pg_dump -b -Fc db")]
+    [InlineData("Cookie-Policy: none")]
+    public void ACookieOptionOfAnotherCommand_IsKept(string value)
+    {
+        Assert.Equal(value, RedactUnderGenerousTimeout("archive_command", value));
+    }
+
     /// <summary>
     /// Every rule applies wherever the value's own text says so — not only to <c>primary_conninfo</c>.
     /// A password can hide behind an <c>archive_command</c> or <c>restore_command</c> just as easily.
@@ -434,7 +595,7 @@ public sealed class PgSettingRedactorTests
     [InlineData("archive_command", "password = \"hunter2\"", "password=********")]
     [InlineData("archive_command", "postgresql://u:p@h/db", "postgresql://u:********@h/db")]
     [InlineData("archive_command", "host=h password=p", "host=h password=********")]
-    [InlineData("archive_command", "https://h/?password=p&x=1", "https://h/?password=********")]
+    [InlineData("archive_command", "https://h/?password=p&x=1", "https://h/?password=********&x=1")]
     [InlineData("archive_command", "sshpass -p p ssh h", "sshpass -p ******** ssh h")]
     [InlineData("archive_command", "curl -u a:b", "curl -u a:********")]
     [InlineData("password_encryption", "password_encryption", "password_encryption")]
@@ -547,6 +708,17 @@ public sealed class PgSettingRedactorTests
         }
 
         return best;
+    }
+
+    /// <summary>A value longer than a setting can be is masked whole, before any pattern runs.</summary>
+    [Fact]
+    public void AValueLongerThanTheCap_IsMaskedWhole_WithoutReadingIt()
+    {
+        var timeouts = 0;
+        var value = "host=h " + new string('a', PgSettingRedactor.MaxValueLength);
+
+        Assert.Equal("********", PgSettingRedactor.Redact("primary_conninfo", value, _ => timeouts++));
+        Assert.Equal(0, timeouts);
     }
 
     /// <summary>

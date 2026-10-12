@@ -38,12 +38,12 @@ namespace PerformanceMonitorLite.Tests;
 /// today's #4198 backlog. A fix lands by deleting its row: an exempt tool that now fits fails this test until
 /// its row is gone, and a tool that is NOT exempt and goes over fails it too.
 ///
-/// <para><b>Why a roster, not a heuristic, for write tools.</b> Lite serves 89 MCP tools and none of their
+/// <para><b>Why a roster, not a heuristic, for write tools.</b> Lite serves 90 MCP tools and none of their
 /// names is add_servers/create_*/update_*/delete_*/remove_server/set_*_enabled -- Lite has no server-onboarding,
 /// custom-view, custom-alert-rule or notification-route MCP surface at all. Checked against every tool name in
 /// the assembly (not just a grep for a mutating verb): the only tool outside <c>get_*</c>/<c>list_servers</c>/
-/// <c>analyze_*</c>/<c>compare_*</c>/<c>audit_config</c> is <c>mute_analysis_finding</c>, so it is the whole
-/// write surface. <see cref="WriteToolRoster"/> stays an exact, hand-maintained list regardless, so a new write
+/// <c>analyze_*</c>/<c>compare_*</c>/<c>audit_config</c> is <c>mute_analysis_finding</c> and its undo
+/// <c>unmute_analysis_finding</c>, so those two are the whole write surface. <see cref="WriteToolRoster"/> stays an exact, hand-maintained list regardless, so a new write
 /// tool has to be added to it on purpose, or this test will actually invoke it.</para>
 ///
 /// <para><b>The fixture</b> is DuckDB only -- no live rig, no Postgres, no fleet simulation (Lite has no
@@ -120,6 +120,7 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
     private static readonly HashSet<string> WriteToolRoster = new(StringComparer.Ordinal)
     {
         "mute_analysis_finding",
+        "unmute_analysis_finding",
     };
 
     /// <summary>
@@ -178,7 +179,7 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
             .ToArray();
         var missingExemptTools = ExemptOffenders.Keys.Where(name => measured.All(m => m.Name != name)).ToArray();
 
-        /* 89 tools total, minus mute_analysis_finding, five analyze_*, compare_analysis and audit_config = 81
+        /* 90 tools total, minus the two mute tools, five analyze_*, compare_analysis and audit_config = 81
            read tools attempted; a tool with no usable default throws and lands in gaps, not measured, so the
            floor is set under 81 rather than at it. */
         /* An empty store answers every tool in a few hundred bytes and would pass the budget vacuously. The

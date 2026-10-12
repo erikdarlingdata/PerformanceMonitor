@@ -160,7 +160,10 @@ public sealed class McpToolsListBudgetTests
     // #5244 PR5: get_database_sizes, get_table_index_sizes, get_pvs_stats and get_file_io_stats gain database_name (appended last, the same
     // 46-character sentence; the served heads are unchanged), +97 bytes each (+388). The ceiling is the measured total on this tree: 94,429
     // (94,041 before).
-    private const int TotalCeilingBytes = 94_429;
+    // unmute_analysis_finding, the undo of the analysis mute, adds 793 bytes to the registered tool set (a 466-character
+    // description plus its schema and wrapper): 94,429 + 793 = 95,222, the total the test measures on this tree. It is served only when mcp_allow_writes is on, so a default
+    // install's tools/list does not grow by it.
+    private const int TotalCeilingBytes = 95_222;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
@@ -514,7 +517,7 @@ public sealed class McpToolsListBudgetTests
             + $"Measure() built on managed thread {_measureBuildThreadId}, build count = {_measureBuildCount}.";
     }
 
-    private static (List<McpServerTool> Tools, List<Type> Types, IServiceProviderIsService IsService) BuildServedTools()
+    internal static (List<McpServerTool> Tools, List<Type> Types, IServiceProviderIsService IsService) BuildServedTools()
     {
         var registered = Regex
             .Matches(File.ReadAllText(RepoPath("Lite", "Mcp", "McpHostService.cs")),

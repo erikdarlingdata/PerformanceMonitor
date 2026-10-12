@@ -222,6 +222,40 @@ public sealed class ServerEditLiveTests : IDisposable
     }
 
     [Fact]
+    public async Task TheEditServerTool_PassesItsPolicyToTheScreen_SoWindowsAuthOverUnverifiedTlsIsRefused_AndNothingIsWritten()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5161, "alpha-61", "alpha-61.example.test", "integrated", null, null, ct);
+            var before = await RowSignatureAsync(rig.Owner, 5161, ct);
+            var versionBefore = await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct);
+            var modifiedBefore = await ScalarAsync<string>(rig.Owner, "SELECT modified_at::text FROM config_monitored_servers WHERE server_id = 5161", ct);
+            var trustBefore = await ScalarAsync<string>(rig.Owner, "SELECT trust_server_certificate::text FROM config_monitored_servers WHERE server_id = 5161", ct);
+
+            /* The tool method itself, with the host's default policy, not the core: dropping the policy argument
+               on the way from the tool to the screen (EditServer, or EditServerByNameAsync) makes this edit reach
+               the probe and the write. The screen answers first, so no connection is attempted. */
+            var refused = Parse(await Edit.EditServer(rig.Mcp, "alpha-61.example.test", "{\"trust_server_certificate\":true}",
+                DarlingMcpAddServersPolicy.Default, null, ct));
+
+            Assert.Equal("invalid", refused["status"]!.GetValue<string>());
+            Assert.StartsWith("Not saved:", refused["message"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Equal(before, await RowSignatureAsync(rig.Owner, 5161, ct));
+            Assert.Equal(trustBefore, await ScalarAsync<string>(rig.Owner, "SELECT trust_server_certificate::text FROM config_monitored_servers WHERE server_id = 5161", ct));
+            Assert.Equal(modifiedBefore, await ScalarAsync<string>(rig.Owner, "SELECT modified_at::text FROM config_monitored_servers WHERE server_id = 5161", ct));
+            Assert.Equal(versionBefore, await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
     public async Task AsTheMcpRole_AnAddressEditOnARowWithARemediationLogin_IsRefused_AndWritesNothing_WhileANameEditSaves()
     {
         var ct = TestContext.Current.CancellationToken;

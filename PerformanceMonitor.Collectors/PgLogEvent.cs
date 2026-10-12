@@ -113,11 +113,14 @@ public readonly record struct PgLogEvent(
                process was running: query`), and a CONTEXT the statement a function was running (`SQL statement
                "UPDATE ... WHERE id = 42"`); that SQL is normalized like a stored statement, and so is the token a
                syntax error quotes, in any catalogue's words (#3996's reviews, #4006). A deadlock report's later
-               queries are read past one cut inside a literal only when the entry proves its DETAIL whole. The HINT
+               queries are read past one cut inside a literal only when the entry proves its DETAIL whole. The one
+               exception to the prose rule: the row values PostgreSQL's own fixed formats carry (a key's values, a
+               failing row, a COPY or JSON input line, a rejected input value) are masked in their slot, and the
+               entry's SQLSTATE, where the log carries one, names the class whose unread shapes are withheld. The HINT
                companion is deliberately NOT stored: it is advice text, never evidence, and nothing here claims
                otherwise. */
-            Message: PgLogTextRedactor.RedactMessage(entry.Message) ?? string.Empty,
-            Detail: PgLogTextRedactor.RedactDetail(entry.Detail, entry.DetailComplete),
+            Message: PgLogTextRedactor.RedactMessage(entry.Message, sqlState: entry.SqlState) ?? string.Empty,
+            Detail: PgLogTextRedactor.RedactDetail(entry.Detail, entry.DetailComplete, entry.SqlState),
             Context: PgLogTextRedactor.RedactContext(entry.Context),
             /* Stamped by the classifier under the store's key (#4004); see the summary. */
             StatementFingerprint: null,

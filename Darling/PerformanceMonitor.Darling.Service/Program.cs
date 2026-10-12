@@ -466,7 +466,8 @@ builder.Services.AddWindowsService(options =>
 /* The rolling file log under %ProgramData%\PerformanceMonitorDarling\logs — the service's PRIMARY
    diagnostic surface (see DarlingFileLoggerProvider remarks). Registered unconditionally: console
    runs get the same file, which is exactly what an operator collecting a bug report wants. */
-builder.Logging.AddProvider(new DarlingFileLoggerProvider());
+var fileLoggerProvider = new DarlingFileLoggerProvider();
+builder.Logging.AddProvider(fileLoggerProvider);
 
 if (OperatingSystem.IsWindows())
 {
@@ -553,6 +554,14 @@ builder.Services.AddHostedService<DarlingMcpHostService>();
 builder.Services.AddHostedService<DarlingWebHostService>();
 
 var host = builder.Build();
+
+/* The file log is the primary surface, and it is off when its folder could not be created, trusted or locked. The
+   warning that went to the Event Log reaches nobody on a hand install with no registered event source, and the
+   file provider drops everything while it is off, so the console logger is where this one lands. */
+if (fileLoggerProvider.StartupFailure is { } fileLogFailure)
+{
+    host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("DarlingFileLog").LogWarning("{Warning}", fileLogFailure);
+}
 
 /* #1581 single-instance guard: acquire a system-wide named mutex BEFORE running the host (Build() only
    constructs the DI graph; Run() is what starts the worker and touches Postgres). If another instance

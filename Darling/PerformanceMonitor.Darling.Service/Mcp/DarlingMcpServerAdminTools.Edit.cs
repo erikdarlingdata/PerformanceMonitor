@@ -157,6 +157,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "enabled state and excluded databases cannot change. Returns updated, unchanged, or " +
         "invalid/not_found/ambiguous/conflict/collides/connection_failed with nothing written." +
         "<<GUIDE>>" +
+        "SERVING: edit_server is served only when the operator sets mcp.allowServerAdmin (with mcp.allowWrites), like add_servers and remove_server. A change that points Windows authentication at a connection whose server identity is not verified (trust_server_certificate true, or encrypt_mode Optional) is refused as add_servers refuses it, with nothing probed or saved. " +
         "Changes ONLY the fields named in changes_json, a JSON object. Keys: display_name, host, port (PostgreSQL), " +
         "database, read_only_intent, auth (\"Windows\", \"SQL\", \"ServicePrincipal\", \"ManagedIdentity\"), username, " +
         "password, encrypt_mode, trust_server_certificate, multi_subnet_failover, monthly_cost_usd, " +
@@ -184,14 +185,16 @@ public sealed partial class DarlingMcpServerAdminTools
         NpgsqlDataSource postgres,
         [Description("The monitored server to edit: its display name or storage name / address. A partial name is accepted only when it matches exactly one definition.")] string server_name,
         [Description("A JSON object with ONLY the fields to change (e.g. {\"display_name\":\"Orders\",\"monthly_cost_usd\":120}). See the tool guide for the keys.")] string changes_json,
+        DarlingMcpAddServersPolicy policy,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        EditServerByNameAsync(postgres, server_name, changes_json, DefaultProbeAsync, DarlingPasswordKey.Current, logger, cancellationToken);
+        EditServerByNameAsync(postgres, server_name, changes_json, DefaultProbeAsync, DarlingPasswordKey.Current, logger, cancellationToken, policy: policy);
 
     /// <summary>The tool's body with the probe and the platform injected, so a test drives the product's own path
     /// (parse, resolve, core, store) without a reachable server.</summary>
     internal static async Task<string> EditServerByNameAsync(
-        NpgsqlDataSource postgres, string server_name, string changes_json, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, string server_name, string changes_json, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
+        DarlingMcpAddServersPolicy? policy = null)
     {
         string?[] submittedSecrets = [];
         try
@@ -238,7 +241,7 @@ public sealed partial class DarlingMcpServerAdminTools
 
             return await EditServerCoreAsync(
                 new PostgresServerEditStore(postgres), target.Candidates[0].ServerId, changes!, probe,
-                ring, logger, cancellationToken);
+                ring, logger, cancellationToken, policy: policy);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -284,12 +287,12 @@ public sealed partial class DarlingMcpServerAdminTools
     /// An unparseable body is <c>invalid</c> without a store read.</summary>
     internal static async Task<string> EditServerCoreAsync(
         IServerEditStore store, int serverId, string changesJson, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
-        ILogger? probeLogger = null)
+        ILogger? probeLogger = null, DarlingMcpAddServersPolicy? policy = null)
     {
         var (changes, error) = ParseEditChanges(changesJson);
         return error != null
             ? Outcome(EditStatus.Invalid, error)
-            : await EditServerCoreAsync(store, serverId, changes!, probe, ring, logger, cancellationToken, probeLogger);
+            : await EditServerCoreAsync(store, serverId, changes!, probe, ring, logger, cancellationToken, probeLogger, policy);
     }
 
     /// <summary>
@@ -298,7 +301,7 @@ public sealed partial class DarlingMcpServerAdminTools
     /// </summary>
     internal static async Task<string> EditServerCoreAsync(
         IServerEditStore store, int serverId, ServerEditChanges changes, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
-        ILogger? probeLogger = null)
+        ILogger? probeLogger = null, DarlingMcpAddServersPolicy? policy = null)
     {
         var row = await store.ReadRowAsync(serverId, cancellationToken);
         if (row is null)
@@ -343,6 +346,15 @@ public sealed partial class DarlingMcpServerAdminTools
         string? actualStorageKey = null;
         if (plan.NeedsProbe)
         {
+            /* The MCP caller's rules, on the definition as it would be saved (the stored row with the changes applied),
+               before any connection is made: the screen add_servers runs on a new entry. A null policy is the web
+               route, whose caller is signed in, and the operator's own commands. */
+            var refusal = policy?.Refusal(plan.ProbeConfig);
+            if (refusal is not null)
+            {
+                return Outcome(EditStatus.Invalid, RedactEditSecret(refusal.Replace("Not added:", "Not saved:", StringComparison.Ordinal), plan.PlaintextSecret, plan.PlaintextExternalId));
+            }
+
             var probeResult = await probe(plan.ProbeConfig, cancellationToken);
             if (!probeResult.Success)
             {
