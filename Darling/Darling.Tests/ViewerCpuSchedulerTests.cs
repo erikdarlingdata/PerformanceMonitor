@@ -62,7 +62,7 @@ public sealed class ViewerCpuSchedulerSqlTests
            (a collection written before the collector fix can be split across rows), so there is no ORDER BY ... LIMIT 1
            row pick any more. */
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, collection_time", sql, StringComparison.Ordinal);
         Assert.Contains("CAST(SUM(total_runnable_tasks_count) AS integer) AS total_runnable_tasks_count", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
 

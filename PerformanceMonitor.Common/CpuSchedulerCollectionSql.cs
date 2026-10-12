@@ -19,13 +19,33 @@ namespace PerformanceMonitor.Common;
 ///
 /// <para><b>The rule.</b> <c>total_runnable_tasks_count</c>, <c>total_work_queue_count</c> and
 /// <c>total_current_workers_count</c> are SUMs over the pieces. <c>avg_runnable_tasks_count</c> is the stored
-/// average when the collection is one row, and otherwise the summed total over <c>scheduler_count</c> (the
-/// per-scheduler average of the whole server). Every other column comes from a single-row DMV piece the old
+/// average when the collection is one row, and otherwise the summed total over the online scheduler count
+/// (the per-scheduler average of the whole server, rounded to 2 places so both engines round a half value alike; the
+/// divisor is explained below). Every other column comes from a single-row DMV piece the old
 /// collector read once per scheduler row, so its value can differ between the pieces of one collection: the read
 /// takes the MAX, one deterministic value per collection. The two warning flags that are computed from the summed
 /// counts (<c>worker_thread_exhaustion_warning</c>, <c>runnable_tasks_warning</c>) are recomputed from the combined
-/// counts when a collection was split (a flag stored on a partial row says nothing about the whole server); the
-/// other flags are OR-ed (each is monotonic in the MAX it comes from).</para>
+/// counts when a collection was split (a flag stored on a partial row says nothing about the whole server), and so is
+/// <c>physical_memory_pressure_warning</c>: it rises as available memory FALLS, so OR-ing it would follow the MIN of
+/// <c>available_physical_memory_kb</c> while the read shows the MAX. It is recomputed from the two values shown, by the
+/// collector's own rule (available below 10 % of total). The other flags (<c>blocked_tasks_warning</c>,
+/// <c>queued_requests_warning</c>, <c>offline_cpu_warning</c>) are OR-ed: each rises with the count it comes from, so
+/// the OR follows the MAX that the read shows.</para>
+///
+/// <para><b>One server per group.</b> <see cref="PerCollection"/> groups by <c>server_id</c> as well as
+/// <c>collection_time</c>, so a filter that reaches several servers can never add two servers' rows that share a
+/// timestamp into one.</para>
+///
+/// <para><b>The split average's divisor.</b> The collector's own average runs over VISIBLE ONLINE schedulers only.
+/// The stored <c>scheduler_count</c> is <c>sys.dm_os_sys_info.scheduler_count</c>, which Microsoft documents as
+/// "the number of user schedulers configured in the SQL Server process": a configured scheduler that an affinity mask
+/// or an edition core limit has taken offline is still configured, so the count can include VISIBLE OFFLINE
+/// schedulers (the docs do not say whether offline ones are left out, so the read assumes they are counted).
+/// <c>offline_cpu_count</c> stores the VISIBLE OFFLINE count, so the divisor is the configured
+/// count minus the offline count, the best online count the stored row offers (floored at zero, a missing offline
+/// count read as 0). On a server with no offline schedulers it equals <c>scheduler_count</c>. If a server reports
+/// <c>scheduler_count</c> as online-only, an old split collection on a server with offline schedulers would read high
+/// by that subtraction; rows written since the fix are one row and keep the collector's own stored average.</para>
 /// </summary>
 public static class CpuSchedulerCollectionSql
 {
@@ -46,7 +66,7 @@ public static class CpuSchedulerCollectionSql
         CASE
             WHEN COUNT(*) = 1
             THEN MAX(avg_runnable_tasks_count)
-            ELSE CAST(CAST(SUM(total_runnable_tasks_count) AS DECIMAL(38,2)) / NULLIF(MAX(scheduler_count), 0) AS DECIMAL(38,2))
+            ELSE CAST(ROUND(CAST(SUM(total_runnable_tasks_count) AS DECIMAL(38,2)) / NULLIF(GREATEST(MAX(scheduler_count) - COALESCE(MAX(offline_cpu_count), 0), 0), 0), 2) AS DECIMAL(38,2))
         END AS avg_runnable_tasks_count,
         MAX(total_active_request_count) AS total_active_request_count,
         MAX(total_queued_request_count) AS total_queued_request_count,
@@ -70,7 +90,11 @@ public static class CpuSchedulerCollectionSql
         MAX(total_physical_memory_kb) AS total_physical_memory_kb,
         MAX(available_physical_memory_kb) AS available_physical_memory_kb,
         MAX(system_memory_state_desc) AS system_memory_state_desc,
-        BOOL_OR(physical_memory_pressure_warning) AS physical_memory_pressure_warning,
+        CASE
+            WHEN COUNT(*) = 1
+            THEN BOOL_OR(physical_memory_pressure_warning)
+            ELSE MAX(available_physical_memory_kb) < MAX(total_physical_memory_kb) * 0.10
+        END AS physical_memory_pressure_warning,
         MAX(total_node_count) AS total_node_count,
         MAX(nodes_online_count) AS nodes_online_count,
         MAX(offline_cpu_count) AS offline_cpu_count,
@@ -102,10 +126,11 @@ public static class CpuSchedulerCollectionSql
 
         return $"""
             SELECT
+                server_id,
                 {CombinedColumns}
             FROM {table}
             WHERE {rowFilter}{newest}
-            GROUP BY collection_time
+            GROUP BY server_id, collection_time
             """;
     }
 }

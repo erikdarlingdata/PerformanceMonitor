@@ -578,7 +578,7 @@ public sealed class McpLatestSnapshotStampTests
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         /* #5710: the newest collection_time in the window is found first and ALL of its rows are combined into one. */
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, collection_time", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
     }
 

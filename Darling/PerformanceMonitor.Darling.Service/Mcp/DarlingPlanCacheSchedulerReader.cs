@@ -148,7 +148,7 @@ internal static class DarlingPlanCacheSchedulerReader
     /// <para>#5710: the newest <c>collection_time</c> is found first, then ALL of its rows are combined into one
     /// (<see cref="CpuSchedulerCollectionSql"/>). A collection written before the collector fix can be split across
     /// several rows that each cover some of the schedulers; the runnable total is their SUM and the per-scheduler
-    /// average is that total over <c>scheduler_count</c>. This replaces the #3936 <c>collection_id DESC</c> tiebreak:
+    /// average is that total over the online scheduler count (<c>scheduler_count</c> less <c>offline_cpu_count</c>). This replaces the #3936 <c>collection_id DESC</c> tiebreak:
     /// with every same-instant row folded into one, no physical row order can change the answer.</para>
     /// </summary>
     public static readonly string CpuSchedulerPressureSql = $"""

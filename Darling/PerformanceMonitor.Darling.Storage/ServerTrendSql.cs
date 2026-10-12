@@ -67,6 +67,7 @@ public static class ServerTrendSql
                several rows that each cover some of the schedulers: the runnable total is their SUM; the blocked and
                queued counts are workload-group sums every piece repeats, so one deterministic value is their MAX. */
             SELECT
+                server_id,
                 collection_time,
                 SUM(total_runnable_tasks_count) AS total_runnable_tasks_count,
                 MAX(total_blocked_task_count) AS total_blocked_task_count,
@@ -75,7 +76,7 @@ public static class ServerTrendSql
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
-            GROUP BY collection_time
+            GROUP BY server_id, collection_time
         )
         SELECT
             GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,

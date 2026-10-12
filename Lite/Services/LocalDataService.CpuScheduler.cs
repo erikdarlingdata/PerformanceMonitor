@@ -100,6 +100,7 @@ WITH raw AS
        rows that each cover some of the schedulers: the runnable total is their SUM; the blocked and queued counts are
        workload-group sums every piece repeats, so one deterministic value is their MAX. */
     SELECT
+        server_id,
         collection_time,
         SUM(total_runnable_tasks_count) AS total_runnable_tasks_count,
         MAX(total_blocked_task_count) AS total_blocked_task_count,
@@ -108,7 +109,7 @@ WITH raw AS
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
-    GROUP BY collection_time
+    GROUP BY server_id, collection_time
 )
 SELECT
     GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
@@ -125,7 +126,8 @@ ORDER BY 1";
     /// The CPU Scheduler latest-snapshot statement (#5710): the newest <c>collection_time</c> in the window is found
     /// first, then ALL of its rows are combined into one (<see cref="CpuSchedulerCollectionSql"/>), because a
     /// collection written before the collector fix can be split across several rows that each cover some of the
-    /// schedulers. Sums are added, the average is the summed total over <c>scheduler_count</c>, the single-row DMV
+    /// schedulers. Sums are added, the average is the summed total over the online scheduler count (<c>scheduler_count</c> less
+    /// <c>offline_cpu_count</c>), the single-row DMV
     /// columns take their MAX. $1 server_id, $2/$3 the UTC window.
     /// </summary>
     internal static string CpuSchedulerSnapshotSql => $@"
@@ -167,12 +169,11 @@ FROM newest";
     /// The CPU Scheduler latest-snapshot: the single most recent cpu_scheduler_stats row in the window
     /// (every scheduler / worker / NUMA / OS-memory pressure column + the collector's CASE-computed
     /// warning flags), feeding the metric grid. Returns null when the window holds no snapshot.
-    /// #3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A run-overlap
-    /// or clock-resolution collision can store two DIFFERENT snapshots under one <c>collection_time</c> —
-    /// <c>collection_id</c> is the per-process monotonic counter every row already carries, so it orders two
-    /// same-instant rows the same way on every read instead of a bare <c>LIMIT 1</c> returning either one
-    /// depending on physical row order. This is also Lite's <c>get_cpu_scheduler_pressure</c> MCP tool's
-    /// read (McpPlanCacheSchedulerTools), so the fix covers both surfaces.
+    /// #5710: the rows of the newest <c>collection_time</c> are combined into one (see
+    /// <see cref="CpuSchedulerSnapshotSql"/>), which replaces the #3936 <c>collection_id DESC</c> tiebreak: with
+    /// every same-instant row folded into one, no physical row order can change the answer. This is also Lite's
+    /// <c>get_cpu_scheduler_pressure</c> MCP tool's read (McpPlanCacheSchedulerTools), so the fix covers both
+    /// surfaces.
     /// </summary>
     public async Task<CpuSchedulerSnapshot?> GetCpuSchedulerSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {

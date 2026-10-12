@@ -55,7 +55,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
     /// <summary>One piece of a collection: 4 schedulers, 4 CPUs, 100 workers ceiling; only the numbers a test varies.</summary>
     private async Task InsertPieceAsync(
         long collectionId, DateTime collectionTime, int runnable, decimal avg, int currentWorkers,
-        int activeRequests, decimal runnablePercent, long availableMemoryKb)
+        int activeRequests, decimal runnablePercent, long availableMemoryKb,
+        int schedulerCount = 4, int offlineCpus = 0, bool memoryWarning = false)
     {
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(TestContext.Current.CancellationToken);
@@ -63,13 +64,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         cmd.CommandText = InsertSql;
         object?[] values =
         {
-            collectionId, collectionTime, ServerId, ServerName, 100, 4, 4,
+            collectionId, collectionTime, ServerId, ServerName, 100, schedulerCount, 4,
             runnable, 0L, currentWorkers, avg,
             activeRequests, 0, 0,
             3L, 1, activeRequests, runnablePercent,
             false, false, false, false,
             65536000L, availableMemoryKb, "Available physical memory is high",
-            false, 1, 1, 0, false
+            memoryWarning, 1, 1, offlineCpus, false
         };
         foreach (var value in values)
         {
@@ -119,6 +120,78 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         Assert.Equal(31000000L, snapshot.AvailablePhysicalMemoryKb);
         Assert.True(snapshot.RunnableTasksWarning);
         Assert.True(snapshot.WorkerThreadExhaustionWarning);
+    }
+
+    /// <summary>
+    /// #5712 round 1 (L1): the memory-pressure flag rises as available memory FALLS, so OR-ing the pieces' stored flags
+    /// would follow the MIN of available memory while the read shows the MAX. The read recomputes the flag from the two
+    /// values it shows (available below 10 % of the 65,536,000 KB total = 6,553,600 KB), the collector's own rule.
+    /// </summary>
+    [Fact]
+    public async Task Snapshot_SplitCollection_MemoryPressureFlag_FollowsTheMemoryValueShown()
+    {
+        var time = DateTime.UtcNow.AddMinutes(-2);
+
+        /* One piece stored TRUE at 6,000,000 KB, the other FALSE at 20,000,000 KB: the read shows 20,000,000 KB (30 %),
+           so the flag must be FALSE, not the OR of the stored pieces. */
+        await InsertPieceAsync(9301L, time, runnable: 1, avg: 1m, currentWorkers: 10, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 6000000L, memoryWarning: true);
+        await InsertPieceAsync(9302L, time, runnable: 1, avg: 1m, currentWorkers: 10, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 20000000L);
+
+        var snapshot = await new LocalDataService(_duckDb).GetCpuSchedulerSnapshotAsync(ServerId, hoursBack: 24);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(20000000L, snapshot!.AvailablePhysicalMemoryKb);
+        Assert.False(snapshot.PhysicalMemoryPressureWarning);
+    }
+
+    [Fact]
+    public async Task Snapshot_SplitCollection_MemoryPressureFlag_IsTrueWhenTheShownMemoryIsUnderTenPercent()
+    {
+        var time = DateTime.UtcNow.AddMinutes(-2);
+
+        /* Both pieces stored FALSE (test data), the larger available value is 6,000,000 KB < 6,553,600 KB: TRUE. */
+        await InsertPieceAsync(9311L, time, runnable: 1, avg: 1m, currentWorkers: 10, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 5000000L);
+        await InsertPieceAsync(9312L, time, runnable: 1, avg: 1m, currentWorkers: 10, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 6000000L);
+
+        var snapshot = await new LocalDataService(_duckDb).GetCpuSchedulerSnapshotAsync(ServerId, hoursBack: 24);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(6000000L, snapshot!.AvailablePhysicalMemoryKb);
+        Assert.True(snapshot.PhysicalMemoryPressureWarning);
+    }
+
+    /// <summary>
+    /// #5712 round 1 (L5): 1 runnable task over 8 schedulers is exactly 0.125. The average is rounded to 2 places in the
+    /// SQL, so DuckDB reads 0.13 (half away from zero), the same as PostgreSQL's numeric.
+    /// </summary>
+    [Fact]
+    public async Task Snapshot_SplitCollection_AverageAtAHalfCent_RoundsHalfAwayFromZero()
+    {
+        var time = DateTime.UtcNow.AddMinutes(-2);
+        await InsertPieceAsync(9321L, time, runnable: 1, avg: 0.50m, currentWorkers: 10, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 30000000L, schedulerCount: 8);
+        await InsertPieceAsync(9322L, time, runnable: 0, avg: 0.00m, currentWorkers: 10, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 30000000L, schedulerCount: 8);
+
+        var snapshot = await new LocalDataService(_duckDb).GetCpuSchedulerSnapshotAsync(ServerId, hoursBack: 24);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(0.13m, (decimal)snapshot!.AvgRunnableTasksCount);
+    }
+
+    /// <summary>
+    /// Part 4 of the round 1 fixes: the split average divides by the ONLINE scheduler count, the configured
+    /// <c>scheduler_count</c> less <c>offline_cpu_count</c>: 6 runnable tasks over 8 - 4 = 4 online schedulers is 1.5.
+    /// </summary>
+    [Fact]
+    public async Task Snapshot_SplitCollection_AverageDividesByTheOnlineSchedulers()
+    {
+        var time = DateTime.UtcNow.AddMinutes(-2);
+        await InsertPieceAsync(9331L, time, runnable: 4, avg: 1m, currentWorkers: 10, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 30000000L, schedulerCount: 8, offlineCpus: 4);
+        await InsertPieceAsync(9332L, time, runnable: 2, avg: 1m, currentWorkers: 10, activeRequests: 1, runnablePercent: 1m, availableMemoryKb: 30000000L, schedulerCount: 8, offlineCpus: 4);
+
+        var snapshot = await new LocalDataService(_duckDb).GetCpuSchedulerSnapshotAsync(ServerId, hoursBack: 24);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(1.5m, (decimal)snapshot!.AvgRunnableTasksCount);
     }
 
     [Fact]

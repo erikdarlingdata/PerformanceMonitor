@@ -107,7 +107,7 @@ public sealed class DarlingMcpPlanCacheSchedulerToolsSurfaceAndSqlTests
         Assert.Contains("worker_thread_exhaustion_warning", sql, StringComparison.Ordinal);
         /* #5710: the newest collection_time is found first and ALL of its rows are combined into one. */
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, collection_time", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
         /* #3541 A10: the newest row IN THE WINDOW, as Lite reads it — not the newest row the store ever held. */
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
@@ -373,6 +373,62 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
             Assert.Equal(0.00m, zero.AvgRunnableTasksCount);
             Assert.Equal(40, zero.TotalCurrentWorkersCount);
             Assert.False(zero.RunnableTasksWarning);
+
+            /* The tool's own verdict over the combined row (#5712 round 1): the read above is the reader, this is the
+               tool the MCP client calls, so the pressure_level text it builds over a combined row is checked live too.
+               The split collection is the newest one inside a window that ends a minute after it. Neither piece alone
+               reaches the bar (50 and 45 workers of 100); the combined 95 does: the worker-utilization band, not NORMAL. */
+            var asOf = splitTime.AddMinutes(1).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture);
+            var toolSplit = await DarlingMcpPlanCacheSchedulerTools.GetCpuSchedulerPressure(postgres, ServerName, hours_back: 1, as_of: asOf, cancellationToken: ct);
+            DarlingMcpTestData.AssertEnvelope(toolSplit, ServerName, "pressure_level");
+            Assert.Contains("HIGH - Worker thread exhaustion", toolSplit, StringComparison.Ordinal);
+            Assert.Contains("Worker thread exhaustion - check max worker threads setting", toolSplit, StringComparison.Ordinal);
+
+            /* #5712 round 1 L1: the memory flag follows the memory value the read shows. One piece stored TRUE at
+               6,000,000 KB (below 10 % of 65,536,000), the other FALSE at 20,000,000 KB: the read shows the larger 20,000,000 KB, so
+               the flag is FALSE (an OR of the stored flags would say TRUE). */
+            var memHighTime = baseTime.AddMinutes(25);
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9401L, memHighTime, ServerId, ServerName, 100, 4, 4, 1, 0L, 10, 1.00m, 1, 0, 0, 0L, 1m, false, false, false, false, 65536000L, 6000000L, true, 1, 1, 0, false);
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9402L, memHighTime, ServerId, ServerName, 100, 4, 4, 1, 0L, 10, 1.00m, 1, 0, 0, 0L, 1m, false, false, false, false, 65536000L, 20000000L, false, 1, 1, 0, false);
+            var memHigh = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(
+                postgres, ServerId, memHighTime.AddMinutes(-1), memHighTime.AddMinutes(1), ct);
+            Assert.NotNull(memHigh);
+            Assert.False(memHigh!.PhysicalMemoryPressureWarning);
+
+            /* The other side: both pieces stored FALSE, the larger available value is 6,000,000 KB < 6,553,600 KB. */
+            var memLowTime = baseTime.AddMinutes(26);
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9411L, memLowTime, ServerId, ServerName, 100, 4, 4, 1, 0L, 10, 1.00m, 1, 0, 0, 0L, 1m, false, false, false, false, 65536000L, 5000000L, false, 1, 1, 0, false);
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9412L, memLowTime, ServerId, ServerName, 100, 4, 4, 1, 0L, 10, 1.00m, 1, 0, 0, 0L, 1m, false, false, false, false, 65536000L, 6000000L, false, 1, 1, 0, false);
+            var memLow = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(
+                postgres, ServerId, memLowTime.AddMinutes(-1), memLowTime.AddMinutes(1), ct);
+            Assert.NotNull(memLow);
+            Assert.True(memLow!.PhysicalMemoryPressureWarning);
+
+            /* L5: 1 runnable task over 8 schedulers is exactly 0.125, rounded in the SQL to 0.13 on both engines. */
+            var halfTime = baseTime.AddMinutes(27);
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9421L, halfTime, ServerId, ServerName, 100, 8, 8, 1, 0L, 10, 0.50m, 1, 0, 0, 0L, 1m, false, false, false, false, 65536000L, 30000000L, false, 1, 1, 0, false);
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9422L, halfTime, ServerId, ServerName, 100, 8, 8, 0, 0L, 10, 0.00m, 1, 0, 0, 0L, 1m, false, false, false, false, 65536000L, 30000000L, false, 1, 1, 0, false);
+            var half = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(
+                postgres, ServerId, halfTime.AddMinutes(-1), halfTime.AddMinutes(1), ct);
+            Assert.NotNull(half);
+            Assert.Equal(0.13m, half!.AvgRunnableTasksCount);
+
+            /* Part 4: the divisor is the online schedulers, the configured 8 less the 4 offline: 6 / 4 = 1.50. */
+            var offlineTime = baseTime.AddMinutes(28);
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9431L, offlineTime, ServerId, ServerName, 100, 8, 8, 4, 0L, 10, 1.00m, 1, 0, 0, 0L, 1m, false, false, false, false, 65536000L, 30000000L, false, 1, 1, 4, true);
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9432L, offlineTime, ServerId, ServerName, 100, 8, 8, 2, 0L, 10, 1.00m, 1, 0, 0, 0L, 1m, false, false, false, false, 65536000L, 30000000L, false, 1, 1, 4, true);
+            var offline = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(
+                postgres, ServerId, offlineTime.AddMinutes(-1), offlineTime.AddMinutes(1), ct);
+            Assert.NotNull(offline);
+            Assert.Equal(1.50m, offline!.AvgRunnableTasksCount);
 
             bodySucceeded = true;
         }
