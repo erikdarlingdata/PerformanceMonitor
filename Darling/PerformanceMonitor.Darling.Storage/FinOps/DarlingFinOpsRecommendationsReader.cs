@@ -371,6 +371,11 @@ ORDER BY database_name";
         var recommendations = new List<FinOpsRecommendation>();
         var memoryCutoff = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified);
 
+        /* #5633 item 4: the databases the server has now (its newest database_states snapshot; null when unknown, which skips
+           nothing). A database dropped since its rows were collected is left out of the database-named rules below; the index
+           read (compression) applies the same set at its own read. */
+        var currentDatabases = await CurrentDatabaseScope.ReadAsync(dataSource, serverId, cancellationToken);
+
         // 1. Enterprise feature / license audit (collected server_properties + database_config.is_encrypted).
         try
         {
@@ -389,7 +394,8 @@ ORDER BY database_name";
                     /* #5558: a secondary copy's TDE is the primary's to report. When every TDE database here is a secondary copy,
                        "no Enterprise-only features" would be false and the blocker is the primary's, so the audit says nothing
                        (a secondary-role instance keeps its own edition note, which never reads this list). */
-                    tdeDbNames = AgReplicaScope.WithoutSecondaries(tdeAllNames, secondaryDatabases);
+                    tdeDbNames = AgReplicaScope.WithoutSecondaries(tdeAllNames, secondaryDatabases)
+                        .Where(name => !CurrentDatabaseScope.IsDropped(currentDatabases, name)).ToList();
                     tdeSecondaryOnly = tdeAllNames.Count > 0 && tdeDbNames.Count == 0
                         && !string.Equals(f.AgReplicaRole.Trim(), "Secondary", StringComparison.OrdinalIgnoreCase);
                 }
@@ -495,7 +501,8 @@ ORDER BY database_name";
                database idle. */
             var idleDbs = (await DarlingFinOpsOptimizationReader.GetIdleDatabaseReadAsync(
                 dataSource, serverId, DateTime.UtcNow.AddDays(-7), commandTimeoutSeconds, cancellationToken)).Rows
-                .Where(d => !AgReplicaScope.IsSkipped(secondaryDatabases, d.DatabaseName)).ToList();
+                .Where(d => !AgReplicaScope.IsSkipped(secondaryDatabases, d.DatabaseName)
+                    && !CurrentDatabaseScope.IsDropped(currentDatabases, d.DatabaseName)).ToList();
             if (idleDbs.Count > 0)
             {
                 var allocatedTotalMb = 0m;
@@ -523,7 +530,8 @@ ORDER BY database_name";
         {
             var devDbs = FinOpsRecommendationFigures.MatchDevTestDatabases(
                 (await GetDatabaseEncryptionFactsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken))
-                    .Select(r => r.DatabaseName).Where(name => !AgReplicaScope.IsSkipped(secondaryDatabases, name)));
+                    .Select(r => r.DatabaseName).Where(name => !AgReplicaScope.IsSkipped(secondaryDatabases, name)
+                        && !CurrentDatabaseScope.IsDropped(currentDatabases, name)));
             var devTestRecommendation = FinOpsRecommendationFigures.DevTest(devDbs);
             if (devTestRecommendation != null)
                 recommendations.Add(devTestRecommendation);
@@ -599,7 +607,8 @@ ORDER BY database_name";
         {
             var storageRows = await GetStorageTierIoAsync(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken);
 
-            var storageRecommendation = FinOpsRecommendationFigures.StorageTier(storageRows);
+            var storageRecommendation = FinOpsRecommendationFigures.StorageTier(
+                storageRows.Where(r => !CurrentDatabaseScope.IsDropped(currentDatabases, r.DatabaseName)));
             if (storageRecommendation != null)
                 recommendations.Add(storageRecommendation);
         }
