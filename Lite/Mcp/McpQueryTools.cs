@@ -173,6 +173,15 @@ public sealed class McpQueryTools
         }
     }
 
+    /// <summary>#5633 item 3: the empty-page envelope of get_top_procedures_by_cpu, from the collector's own run history. Two cycles only while
+    /// the collector is new; <c>empty</c> once it has run and found no procedure in the window. Words in <see cref="CollectorRunFacts"/>,
+    /// shared with Darling's twin.</summary>
+    internal static string EmptyProcedureStatsStatus(CollectorRunFacts facts, int hoursBack)
+    {
+        var (status, message) = facts.ProcedureStatsEmpty(hoursBack);
+        return McpHelpers.Status(status, message);
+    }
+
     [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears. Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopProceduresByCpu(
         LocalDataService dataService,
@@ -207,9 +216,9 @@ public sealed class McpQueryTools
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats")
-                    ?? McpHelpers.Status(
-                        "unavailable",
-                        "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
+                    ?? EmptyProcedureStatsStatus(
+                        await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "procedure_stats", hours_back, windowEnd),
+                        hours_back);
             }
 
             /* #4231: what the window ACTUALLY reached, from the SAME relation (v_procedure_stats) the ranking

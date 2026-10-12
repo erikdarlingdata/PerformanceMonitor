@@ -114,6 +114,19 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
         Assert.Equal(band, row.GetProperty("health_band").GetString());
     }
 
+    /// <summary>#5633 item 20: no cost set is null with a reason, as every other FinOps tool says it, not a 0 that reads as a free server.</summary>
+    [Fact]
+    public void Row_WithNoCostSet_IsNullWithTheSameReasonTheOtherFinOpsToolsGive()
+    {
+        var row = Row(Dto(monthly: 0m), new ServerMetricsDto(12.25m, 3.05m, 4, "RIGHT_SIZED"));
+        Assert.False(row.TryGetProperty("monthly_cost_usd", out _), "null fields are left out of the row");
+        Assert.False(row.TryGetProperty("annual_cost_usd", out _));
+        Assert.Equal("monthly cost not set", row.GetProperty("cost_reason").GetString());
+
+        var priced = Row(Dto(monthly: 100m), new ServerMetricsDto(12.25m, 3.05m, 4, "RIGHT_SIZED"));
+        Assert.False(priced.TryGetProperty("cost_reason", out _));
+    }
+
     [Fact]
     public void Row_CostsTimesAndRounding_FollowTheContract()
     {

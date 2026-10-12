@@ -148,6 +148,123 @@ public sealed class ProvisionRolesAclDriftTests
         }
     }
 
+    /// <summary>
+    /// The blanket config grants and the secret-column carve are ONE transaction. The blanket grant gives viewer and
+    /// mcp table-wide SELECT on the secret columns until the carve takes it back, and as separate autocommit statements
+    /// it stayed open on every run, and for good when a statement in the carve failed. The V131 pair (a table a store
+    /// below V131 does not have) runs only when that table exists, as EXECUTE of a dollar-quoted string with its text
+    /// unchanged, so a store below V131 does not abort the transaction, and a failing pair on a store that has the table
+    /// rolls everything back instead of leaving a half-applied carve.
+    /// </summary>
+    [Fact]
+    public void ProvisionRolesSql_GrantsAndCarve_AreOneTransaction_AndTheV131PairRunsOnlyWhenTheTableExists()
+    {
+        var sql = ReadProvisionRolesSql().Replace("\r\n", "\n", StringComparison.Ordinal);
+        var code = StripComments(sql);
+
+        var begin = Regex.Matches(code, @"(?m)^BEGIN;[ \t]*$");
+        var commit = Regex.Matches(code, @"(?m)^COMMIT;[ \t]*$");
+        Assert.Single(begin);
+        Assert.Single(commit);
+
+        var firstGrant = code.IndexOf("GRANT USAGE ON SCHEMA collect, config TO admin, viewer;", StringComparison.Ordinal);
+        var adminWrites = code.IndexOf("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", StringComparison.Ordinal);
+        Assert.True(firstGrant >= 0 && adminWrites > firstGrant, "the step 2 grants or step 3's admin write grant moved - update this pin with them.");
+        Assert.True(begin[0].Index < firstGrant, "BEGIN must come before the first blanket grant.");
+        Assert.True(commit[0].Index < adminWrites, "COMMIT must come before step 3.");
+
+        /* Everything that reads as the carve or the blanket grant sits inside the transaction. */
+        var inside = new List<(string What, int Index)>();
+        foreach (Match m in TableRevoke.Matches(code))
+        {
+            inside.Add((m.Value, m.Index));
+        }
+
+        foreach (Match m in ColumnGrant.Matches(code))
+        {
+            inside.Add((m.Value, m.Index));
+        }
+
+        foreach (Match m in Regex.Matches(code, @"GRANT SELECT ON ALL TABLES IN SCHEMA (collect|config)\s+TO [a-z_, ]+;"))
+        {
+            inside.Add((m.Value, m.Index));
+        }
+
+        /* One REVOKE and one column GRANT per carved table and read role, and four blanket grants. */
+        Assert.True(inside.Count >= 4 * DarlingManagedRoles.ViewerRestrictedConfigTables.Count + 4, "the parse of the carve found too few statements.");
+        Assert.All(inside, item => Assert.True(
+            item.Index > begin[0].Index && item.Index < commit[0].Index,
+            $"'{item.What.Split('\n')[0]}' must sit between BEGIN and COMMIT."));
+
+        /* The V131 pair: only under a to_regclass check, only through EXECUTE, its text unchanged. */
+        foreach (var role in new[] { ViewerRole, McpRole })
+        {
+            var revoke = $"REVOKE SELECT ON {ConfigSchema}.config_notification_routes FROM {role};";
+            Assert.Single(Regex.Matches(code, Regex.Escape(revoke)));
+            var at = code.IndexOf(revoke, StringComparison.Ordinal);
+            var before = code[..at].TrimEnd();
+            Assert.EndsWith("EXECUTE $v131$", before, StringComparison.Ordinal);
+            Assert.EndsWith(
+                "IF to_regclass('config.config_notification_routes') IS NOT NULL THEN",
+                before[..^"EXECUTE $v131$".Length].TrimEnd(),
+                StringComparison.Ordinal);
+
+            var pair = code[at..code.IndexOf("$v131$;", at, StringComparison.Ordinal)];
+            Assert.Matches($@"^{Regex.Escape(revoke)}\s+GRANT SELECT \(route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at\)\s+ON {ConfigSchema}\.config_notification_routes TO {role};\s*$", pair);
+        }
+    }
+
+    /// <summary>
+    /// The blanket config grant also gives viewer and mcp SELECT on the password key tables, and the COMMIT makes it
+    /// durable, so the revoke on those tables is in effect at the COMMIT (step 2d), not only in step 3g far below it.
+    /// Managed mode sends the grants and the revoke as one batch; this holds the script to the same result. The V160
+    /// grant is guarded like the V131 pair, so a store below V160 does not abort the transaction.
+    /// </summary>
+    [Fact]
+    public void ProvisionRolesSql_RevokesThePasswordKeyTables_BeforeTheCommit_AndAgainInStep3g_AndGuardsTheV160Grant()
+    {
+        var sql = ReadProvisionRolesSql().Replace("\r\n", "\n", StringComparison.Ordinal);
+        var code = StripComments(sql);
+
+        var begin = code.IndexOf("\nBEGIN;\n", StringComparison.Ordinal);
+        var commit = code.IndexOf("\nCOMMIT;\n", StringComparison.Ordinal);
+        Assert.True(begin >= 0 && commit > begin);
+
+        /* The step 2d block: after the last blanket grant, before the COMMIT, one table at a time. */
+        var revoke = code.IndexOf("REVOKE ALL ON config.%I FROM PUBLIC, admin, viewer, mcp CASCADE", StringComparison.Ordinal);
+        Assert.True(revoke > begin && revoke < commit, "the key tables' revoke must sit between BEGIN and COMMIT.");
+        var lastBlanket = Regex.Matches(code, @"GRANT SELECT ON ALL TABLES IN SCHEMA config\s+TO [a-z_, ]+;").Max(m => m.Index);
+        Assert.True(revoke > lastBlanket, "the revoke must come after the last blanket config grant.");
+
+        var block = code[code.LastIndexOf("DO $do$", revoke, StringComparison.Ordinal)..commit];
+        foreach (var table in new[] { "password_key", "password_key_service", "legacy_secret_pin", "legacy_secret_pin_marker", "legacy_secret_pin_candidate" })
+        {
+            Assert.Contains($"'{table}'", block, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("pg_catalog.to_regclass(pg_catalog.format('config.%I', key_table)) IS NOT NULL", block, StringComparison.Ordinal);
+        Assert.Contains("IF key_table IN ('password_key', 'password_key_service') THEN", block, StringComparison.Ordinal);
+        Assert.Contains("GRANT SELECT ON config.%I TO admin", block, StringComparison.Ordinal);
+
+        /* Step 3g still runs after the COMMIT and after step 3's admin write grant, and keeps its full revoke. */
+        var step3g = code.IndexOf("REVOKE ALL ON config.password_key,", StringComparison.Ordinal);
+        Assert.True(step3g > commit);
+        Assert.True(step3g > code.IndexOf("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", StringComparison.Ordinal));
+
+        /* The V160 grant: only under a to_regclass check, only through EXECUTE, and inside the transaction. */
+        const string V160Grant = "GRANT SELECT ON config.config_collector_run_times TO mcp;";
+        Assert.Single(Regex.Matches(code, Regex.Escape(V160Grant)));
+        var grantAt = code.IndexOf(V160Grant, StringComparison.Ordinal);
+        Assert.True(grantAt > begin && grantAt < commit);
+        var before = code[..grantAt].TrimEnd();
+        Assert.EndsWith("EXECUTE $v160$", before, StringComparison.Ordinal);
+        Assert.EndsWith(
+            "IF to_regclass('config.config_collector_run_times') IS NOT NULL THEN",
+            before[..^"EXECUTE $v160$".Length].TrimEnd(),
+            StringComparison.Ordinal);
+        Assert.StartsWith("$v160$;", code[(grantAt + V160Grant.Length)..].TrimStart(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ProvisionRolesSql_GrantsNoSecretColumn_ToAnyRole()
     {
@@ -174,9 +291,9 @@ public sealed class ProvisionRolesAclDriftTests
            a bring-your-own store connected as the owner anyway; postgres.mcpConnectionString now points it at a
            role of the operator's, so the script creates mcp — and, as this test's predecessor demanded of any BYO
            mcp role, with its carve in the same change (the Theory above holds the carve to the C# list). */
-        Assert.Contains("CREATE ROLE mcp LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_MCP_PASSWORD';", sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE ROLE mcp LOGIN NOSUPERUSER;", sql, StringComparison.Ordinal);
         Assert.Contains("COMMENT ON ROLE mcp IS 'darling-managed';", sql, StringComparison.Ordinal);
-        Assert.Contains("ALTER ROLE mcp    LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_MCP_PASSWORD';", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE mcp    LOGIN PASSWORD 'CHANGE_ME_MCP_PASSWORD';", sql, StringComparison.Ordinal);
         Assert.Contains("RAISE EXCEPTION 'Role \"mcp\" already exists and was not created by Darling", sql, StringComparison.Ordinal);
 
         /* Every column-level SELECT grant names one of the two read roles, never admin, never several at once. */

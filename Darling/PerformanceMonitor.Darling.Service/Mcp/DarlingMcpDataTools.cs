@@ -342,6 +342,14 @@ public sealed class DarlingMcpDataTools
         }
     }
 
+    /// <summary>#5633 item 3: the empty-page envelope of the procedure tools, from the collector's own run history. Two cycles only while
+    /// the collector is new; <c>empty</c> once it has run and found no procedure in the window. Words in <see cref="CollectorRunFacts"/>.</summary>
+    internal static string EmptyProcedureStatsStatus(CollectorRunFacts facts, int hoursBack)
+    {
+        var (status, message) = facts.ProcedureStatsEmpty(hoursBack);
+        return McpHelpers.Status(status, message);
+    }
+
     /// <summary>
     /// The <c>get_memory_stats</c> payload for one snapshot, built from the row and the ONE engine edition the tool read for this
     /// answer from the registry (<see cref="DarlingEngineCapability.EngineEditionAsync"/>;
@@ -1106,9 +1114,11 @@ public sealed class DarlingMcpDataTools
                             "empty",
                             "raw procedure_stats holds nothing in this window; the hourly rollup, which covers this window, cannot rank by reads (the stitched rollups carry no per-procedure logical reads, and the io hourly rollup, procedure_stats_io_hourly, does not reach this window's start on this store). Rank by cpu, duration or executions to read the rollup.",
                             new { window_truncated = true })
-                        : McpHelpers.Status(
-                            "unavailable",
-                            "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values."));
+                        /* #5633 item 3: the two-cycles reason is true only while the collector is new. Past two successful runs an
+                           empty page means the collector looked and no procedure ran, so say that (shared words, Lite says the same). */
+                        : EmptyProcedureStatsStatus(
+                            await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "procedure_stats", requestedStart, now, cancellationToken),
+                            hours_back));
 
             /* #4231: what the raw tier actually held, beside what was asked for — same probe and disclosure as
                get_top_queries_by_cpu and get_query_store_top (#2364), over procedure_stats.

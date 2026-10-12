@@ -10,14 +10,6 @@
         "EstMonthlySavings": 180.24902343750000
       },
       {
-        "Category": "Compute",
-        "Severity": "Medium",
-        "Confidence": "Medium",
-        "Finding": "CPU over-provisioned (16 cores, P95 = 24.0%)",
-        "Detail": "P95 CPU utilization is 24.0% (avg 21.8%, max 24%) across 16 cores. Consider reducing to ~5 cores.",
-        "EstMonthlySavings": 412.500000
-      },
-      {
         "Category": "Databases",
         "Severity": "Medium",
         "Confidence": "High",
@@ -105,14 +97,6 @@
         "Confidence": "Medium",
         "Finding": "Memory over-provisioned (P95 SQL memory uses 20% of 64GB RAM)",
         "Detail": "P95 SQL Server memory from 20 samples over 19 hours is 13,080 MB out of 65,536 MB physical RAM (20% utilization). Consider reducing to ~25GB.",
-        "EstMonthlySavings": null
-      },
-      {
-        "Category": "Compute",
-        "Severity": "Medium",
-        "Confidence": "Medium",
-        "Finding": "CPU over-provisioned (16 cores, P95 = 24.0%)",
-        "Detail": "P95 CPU utilization is 24.0% (avg 21.8%, max 24%) across 16 cores. Consider reducing to ~5 cores.",
         "EstMonthlySavings": null
       },
       {
