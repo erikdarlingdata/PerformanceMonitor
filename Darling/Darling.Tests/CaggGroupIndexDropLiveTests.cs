@@ -318,6 +318,13 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < 179)
+        {
+            /* V179 (#5640) - the Client Timeouts alert's enabled flag on the alert settings row is the probe's sentinel. */
+            await using var dropClientTimeouts = new NpgsqlCommand("ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS client_timeouts_enabled", connection);
+            await dropClientTimeouts.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < 175)
         {
             /* V175 (#5631) - the rows-per-call column of the daily plan regression totals is the probe's sentinel. */
