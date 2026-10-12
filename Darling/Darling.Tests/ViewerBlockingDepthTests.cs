@@ -49,7 +49,9 @@ public sealed class ViewerBlockingDepthSqlTests
         Assert.Contains("blocking_query_plan_xml", ViewerDataService.BlockedProcessReportsSql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY event_time DESC", ViewerDataService.BlockedProcessReportsSql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 200", ViewerDataService.BlockedProcessReportsSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", ViewerDataService.BlockedProcessReportsSql, StringComparison.Ordinal);
+        Assert.Contains("event_time >= $2", ViewerDataService.BlockedProcessReportsSql, StringComparison.Ordinal);
+        Assert.Contains("event_time <= $3", ViewerDataService.BlockedProcessReportsSql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $5", ViewerDataService.BlockedProcessReportsSql, StringComparison.Ordinal);
 
         /* The widened grid columns Lite's row carries that the old 9-column viewer read dropped. */
         foreach (var column in new[]
@@ -120,7 +122,7 @@ public sealed class ViewerBlockingDepthSqlTests
     public void DeadlockSlicerSql_HourlyBuckets_OverDeadlocksView()
     {
         Assert.Contains("FROM v_deadlocks", ViewerDataService.DeadlockSlicerSql, StringComparison.Ordinal);
-        Assert.Contains("date_trunc('hour', collection_time)", ViewerDataService.DeadlockSlicerSql, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('hour', deadlock_time)", ViewerDataService.DeadlockSlicerSql, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) AS deadlock_count", ViewerDataService.DeadlockSlicerSql, StringComparison.Ordinal);
     }
 

@@ -23,6 +23,7 @@ namespace Lite.Tests;
 /// fires on the consequence, by which point a restart is overdue, and cannot attribute the space to one file.
 /// Between them sits a file that has grown large but has not yet filled its disk.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public class FileGrowthAlertTests
 {
     private const string Server = "SQLPROD01";
@@ -190,6 +191,25 @@ public class FileGrowthAlertTests
         Assert.Contains(fields, x => x.Item1 == "Physical Name");
         Assert.Contains(fields, x => x.Item1 == "Volume Free");
         Assert.Contains(fields, x => x.Item1 == "Autogrowth" && x.Item2.Contains("percent growth", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AnUnknownVolume_PrintsNotAvailable_NotZeroGigabytesFree()
+    {
+        var f = File(sizeMb: 400_000, growthMb: 40_000);
+        f.VolumeMountPoint = null;
+        f.VolumeTotalMb = null;
+        f.VolumeFreeMb = null;
+
+        var context = AlertContextBuilders.BuildFileGrowthContext(Server, new List<DatabaseFileGrowthInfo> { f });
+
+        Assert.NotNull(context);
+        var fields = context!.Details.SelectMany(d => d.Fields).ToList();
+        Assert.Contains(fields, x => x.Item1 == "Volume Free" && x.Item2 == "n/a");
+        Assert.Contains(fields, x => x.Item1 == "Volume" && x.Item2 == "(unknown)");
+        Assert.Contains(fields, x => x.Item1 == "File % of Volume" && x.Item2 == "n/a");
+        Assert.DoesNotContain("0% of", context.Details[0].Heading, StringComparison.Ordinal);
+        Assert.Equal(0, f.VolumePercent);
     }
 
     /// <summary>

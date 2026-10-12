@@ -31,6 +31,7 @@ namespace PerformanceMonitorLite.Tests;
 /// XE→DMV fallback merge (<see cref="BlockedProcessReportMerge"/>) both store adapters share, and
 /// that Lite's row types ARE the shared alert row shapes (inheritance, no mapping copy).
 /// </summary>
+[Trait("Reads", "Darling")]
 public class BlockingDeadlockContextBuilderTests
 {
     private const string Server = "SQL2022";

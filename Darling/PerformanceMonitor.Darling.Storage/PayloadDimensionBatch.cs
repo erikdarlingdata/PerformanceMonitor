@@ -31,10 +31,15 @@ public sealed class PayloadDimensionBatch
 {
     private readonly Dictionary<string, Dictionary<string, Entry>> _byDimTable = new(StringComparer.Ordinal);
 
+    /* Digests the batch's rows reference WITHOUT carrying the content (a row written from a digest the host
+       already holds), per dim table, keyed by hex so repeats collapse. Kept apart from _byDimTable: these have
+       no payload to upsert, only a last_seen to keep alive. */
+    private readonly Dictionary<string, Dictionary<string, byte[]>> _touchedByDimTable = new(StringComparer.Ordinal);
+
     private readonly record struct Entry(byte[] Digest, string Payload);
 
     /// <summary>True when nothing was diverted — the caller skips the flush entirely.</summary>
-    public bool IsEmpty => _byDimTable.Count == 0;
+    public bool IsEmpty => _byDimTable.Count == 0 && _touchedByDimTable.Count == 0;
 
     /// <summary>
     /// The dimension tables this batch has content for. Enumeration order is unspecified and does
@@ -75,6 +80,43 @@ public sealed class PayloadDimensionBatch
             entries[key] = new Entry(digest, payload);
         }
     }
+
+    /// <summary>
+    /// Records a digest a row references with no content: the dim row is already stored, and the flush must
+    /// keep its <c>last_seen</c> alive (see <see cref="PayloadDimensionWriter.FlushAsync"/>).
+    /// </summary>
+    public void AddTouch(string dimTable, byte[] digest)
+    {
+        if (dimTable is null)
+        {
+            throw new ArgumentNullException(nameof(dimTable));
+        }
+
+        if (digest is null)
+        {
+            throw new ArgumentNullException(nameof(digest));
+        }
+
+        if (!_touchedByDimTable.TryGetValue(dimTable, out var touched))
+        {
+            touched = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+            _touchedByDimTable[dimTable] = touched;
+        }
+
+        touched.TryAdd(Convert.ToHexString(digest), digest);
+    }
+
+    /// <summary>The dimension tables holding digests referenced without content.</summary>
+    public IReadOnlyCollection<string> TouchedDimTables => _touchedByDimTable.Keys;
+
+    /// <summary>
+    /// The distinct touched digests for one dimension table, in digest order: the same total order
+    /// <see cref="ToArrays"/> imposes, for the same reason (the touch takes row locks too).
+    /// </summary>
+    public byte[][] TouchedDigests(string dimTable)
+        => _touchedByDimTable.TryGetValue(dimTable, out var touched)
+            ? touched.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => e.Value).ToArray()
+            : Array.Empty<byte[]>();
 
     /// <summary>How many distinct payloads this batch holds for one dimension table.</summary>
     public int DistinctCount(string dimTable)

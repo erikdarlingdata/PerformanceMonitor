@@ -163,16 +163,64 @@ public sealed class DatabaseFileGrowthReadTests
         }
     }
 
+    /// <summary>An Azure SQL Database file stores no volume: the read returns null for the mount point, total and
+    /// free space, not an empty string and 0 MB. A file with a real volume reads its values.</summary>
+    [Fact]
+    public async Task AnUnknownVolume_ReadsBackNull_AndAKnownVolumeReadsItsValues()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live file-growth read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteTestRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var adapter = new DarlingAlertReadAdapter(postgres);
+
+        var bodySucceeded = false;
+        try
+        {
+            var rawNow = DateTime.UtcNow;
+            var utcNow = DateTime.SpecifyKind(new DateTime(rawNow.Ticks - (rawNow.Ticks % 10)), DateTimeKind.Unspecified);
+            await SeedFileAsync(connection, ct, 1L, utcNow.AddMinutes(-10), "tempdb", "tempdev", 4_096m, unknownVolume: true);
+            await SeedFileAsync(connection, ct, 1L, utcNow.AddMinutes(-10), "tempdb", "templog", 1_024m);
+
+            var files = await adapter.GetDatabaseFileGrowthAsync(TestServerKey, lookbackMinutes: 120, ct);
+
+            var unknown = Assert.Single(files, f => f.FileName == "tempdev");
+            Assert.Null((object?)unknown.VolumeMountPoint);
+            Assert.Equal((double?)null, (double?)unknown.VolumeTotalMb);
+            Assert.Equal((double?)null, (double?)unknown.VolumeFreeMb);
+
+            var known = Assert.Single(files, f => f.FileName == "templog");
+            Assert.Equal(@"D:\", known.VolumeMountPoint);
+            Assert.Equal((double?)4_096_000d, (double?)known.VolumeTotalMb);
+            Assert.Equal((double?)3_000_000d, (double?)known.VolumeFreeMb);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteTestRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task SeedFileAsync(
         NpgsqlConnection connection, CancellationToken ct,
-        long collectionId, DateTime collectionTime, string databaseName, string fileName, decimal totalSizeMb)
+        long collectionId, DateTime collectionTime, string databaseName, string fileName, decimal totalSizeMb, bool unknownVolume = false)
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO database_size_stats
     (collection_id, collection_time, server_id, server_name, database_name, database_id,
      file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb,
      volume_mount_point, volume_total_mb, volume_free_mb, auto_growth_mb, is_percent_growth, growth_pct, max_size_mb)
-VALUES ($1, $2, $3, $4, $5, 2, $6, $7, $8, $9, $10, $11, 'D:\', 4096000, 3000000, 1024, false, NULL, -1)", connection);
+VALUES ($1, $2, $3, $4, $5, 2, $6, $7, $8, $9, $10, $11, " + (unknownVolume ? "NULL, NULL, NULL" : "'D:\\', 4096000, 3000000") + ", 1024, false, NULL, -1)", connection);
         command.Parameters.AddWithValue(collectionId);
         command.Parameters.AddWithValue(collectionTime);
         command.Parameters.AddWithValue(TestServerId);

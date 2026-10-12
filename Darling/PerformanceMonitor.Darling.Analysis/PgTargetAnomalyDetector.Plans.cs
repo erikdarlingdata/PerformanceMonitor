@@ -43,6 +43,12 @@ public sealed partial class PgTargetAnomalyDetector
     /// plan actually changed in this window. A statement that got slower without a captured flip is the regular
     /// family's <c>PG_BAD_ACTOR</c> / its own-normal anomaly (lane 34), not a plan regression.</para>
     ///
+    /// <para><b>The peak's collection time skips a collection with no mean (#4731).</b> <c>mean_ms</c> is NULL when
+    /// every row in a collection has a NULL <c>delta_total_exec_time_ms</c> (the <c>HAVING</c> guards only
+    /// <c>delta_calls</c>), a NULL sorts first under <c>DESC</c> and <c>MAX(mean_ms)</c> ignores it. The peak-time
+    /// ORDER BY therefore ends <c>DESC NULLS LAST, collection_time DESC</c>: such a collection is never reported as
+    /// the peak time (it feeds <c>peak_age_s</c>), and a tie reports the later collection.</para>
+    ///
     /// <para><c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC, the closed PostgreSQL fact-read shape),
     /// <c>$4</c> the candidate count.</para>
     /// </summary>
@@ -77,7 +83,7 @@ SELECT queryid,
        MAX(mean_ms) AS peak_mean_ms,
        AVG(mean_ms) AS avg_mean_ms,
        COUNT(*)     AS sample_count,
-       (ARRAY_AGG(collection_time ORDER BY mean_ms DESC, collection_time DESC))[1] AS peak_time
+       (ARRAY_AGG(collection_time ORDER BY mean_ms DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM per_collection
 GROUP BY queryid
 ORDER BY SUM(stmt_ms) DESC
@@ -90,7 +96,9 @@ LIMIT $4";
     /// every statement row of one <c>collection_time</c>, the collector's STORED deltas; a collection with no calls
     /// is not a sample (a mean over no calls is undefined, not zero), so the mean here and the bucket's both exclude
     /// idle minutes and the #3653 pair gate compares like with like. The peak's collection time rides along for the
-    /// advice's age clause. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC).
+    /// advice's age clause; as in <see cref="StatementMeanKeyedWindowSql"/> its ORDER BY ends
+    /// <c>DESC NULLS LAST, collection_time DESC</c>, so a collection whose every <c>delta_total_exec_time_ms</c> is NULL
+    /// (a NULL mean) is never the peak time (#4731). <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC).
     /// </summary>
     public const string StatementMeanWindowSql = @"
 WITH per_collection AS (
@@ -104,7 +112,7 @@ WITH per_collection AS (
 SELECT MAX(mean_ms) AS peak_mean_ms,
        AVG(mean_ms) AS avg_mean_ms,
        COUNT(*)     AS sample_count,
-       (SELECT collection_time FROM per_collection ORDER BY mean_ms DESC, collection_time DESC LIMIT 1) AS peak_time
+       (SELECT collection_time FROM per_collection ORDER BY mean_ms DESC NULLS LAST, collection_time DESC LIMIT 1) AS peak_time
 FROM per_collection";
 
     /// <summary>

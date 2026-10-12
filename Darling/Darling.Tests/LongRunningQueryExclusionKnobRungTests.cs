@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// ahead of this rung with Darling evaluating on the seeds through <c>DarlingAlertSettings</c>; this PR gives
 /// the knob its store home so an operator can change it.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class LongRunningQueryExclusionKnobRungTests
 {
     private const int RungVersion = 135;

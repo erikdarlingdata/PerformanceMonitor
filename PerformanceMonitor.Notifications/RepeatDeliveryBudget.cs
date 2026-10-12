@@ -140,6 +140,12 @@ public sealed class RepeatDeliveryBudget
     /// have carried, which are exactly the ones a fold owes the roster.
     /// </param>
     /// <param name="window">The same <c>delivery.cooldown_minutes</c> window the cooldown was evaluated on.</param>
+    /// <param name="serverKey">
+    /// The server's persistence id, the key <see cref="IncidentCooldown"/> already uses. A fold's roster entry
+    /// is keyed on it when given: the fingerprint hashes the display NAME, and a blank name falls back to the
+    /// host, so two registrations on one Azure SQL Database logical server share both and would fold into one
+    /// roster line, hiding one of them. Null (or blank) keeps the label-keyed entry.
+    /// </param>
     /// <param name="aggregateRepeats">
     /// Whether this delivery's mode permits folding. False for <see cref="AlertNotificationMode.PerEvent"/>
     /// and for any caller that did not resolve a mode. Per-event exists so downstream automation gets one
@@ -160,7 +166,8 @@ public sealed class RepeatDeliveryBudget
         IncidentCooldown.Decision cooldown,
         TimeSpan window,
         bool aggregateRepeats,
-        IReadOnlyList<AlertIncident>? incidents = null)
+        IReadOnlyList<AlertIncident>? incidents = null,
+        string? serverKey = null)
     {
         if (cooldown is null)
         {
@@ -185,13 +192,22 @@ public sealed class RepeatDeliveryBudget
 
             var repeat = !cooldown.AnyFirstNotice;
 
+            /* #4732: a carrier time AHEAD of this evaluation (the wall clock stepped back since it was reserved) is
+               replaced by this evaluation's time, so the window holds one window from the first evaluation that
+               sees the step, not the step plus the window. (This assembly does not reference
+               PerformanceMonitor.Common, where LastFiredStamp holds the rule for stamps kept in maps.) */
+            if (state.LastCarrierUtc is DateTime ahead && ahead > cooldown.EvaluatedAtUtc)
+            {
+                state.LastCarrierUtc = cooldown.EvaluatedAtUtc;
+            }
+
             if (repeat &&
                 state.LastCarrierUtc is DateTime last &&
                 cooldown.EvaluatedAtUtc - last < window)
             {
                 return Decision.Folded(
                     metric,
-                    state.Fold(serverLabel, cooldown.DeliverableDedupKeys, incidents, cooldown.EvaluatedAtUtc));
+                    state.Fold(serverLabel, serverKey, cooldown.DeliverableDedupKeys, incidents, cooldown.EvaluatedAtUtc));
             }
 
             /* Reserve BEFORE the send so a concurrent sibling folds rather than posting a second card, and
@@ -346,6 +362,7 @@ public sealed class RepeatDeliveryBudget
         /// <summary>Records a folded delivery's fingerprints and returns the metric's live roster size.</summary>
         public int Fold(
             string serverLabel,
+            string? serverKey,
             IReadOnlyList<string>? dedupKeys,
             IReadOnlyList<AlertIncident>? incidents,
             DateTime nowUtc)
@@ -356,13 +373,13 @@ public sealed class RepeatDeliveryBudget
                than being exempted for lacking a fingerprint it never had. */
             if (dedupKeys is not { Count: > 0 })
             {
-                Record(serverLabel, string.Empty, occurrences: 0, nowUtc);
+                Record(serverLabel, serverKey, string.Empty, occurrences: 0, nowUtc);
                 return _entries.Count;
             }
 
             foreach (var dedupKey in dedupKeys)
             {
-                Record(serverLabel, dedupKey, OccurrencesFor(incidents, dedupKey), nowUtc);
+                Record(serverLabel, serverKey, dedupKey, OccurrencesFor(incidents, dedupKey), nowUtc);
             }
 
             return _entries.Count;
@@ -459,9 +476,10 @@ public sealed class RepeatDeliveryBudget
             }
         }
 
-        private void Record(string serverLabel, string dedupKey, int occurrences, DateTime nowUtc)
+        private void Record(string serverLabel, string? serverKey, string dedupKey, int occurrences, DateTime nowUtc)
         {
-            var key = serverLabel + " " + dedupKey;
+            /* The id when there is one, else the label: the label is not an identity (see Evaluate's serverKey). */
+            var key = (string.IsNullOrEmpty(serverKey) ? serverLabel : serverKey) + " " + dedupKey;
             if (_entries.TryGetValue(key, out var existing))
             {
                 existing.Folds++;

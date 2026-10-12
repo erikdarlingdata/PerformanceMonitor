@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// in (c) below documents WHY the scrub's own site is allowed to exist, not that it is invisible to the
 /// census.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PlanForceActionDetailCensusTests
 {
     private const string StoreFileName = "PgPlanForceActionStore.cs";

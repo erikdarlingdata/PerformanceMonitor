@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// Lite and Darling drift in what a setting means, which is the #1839/#1911 class of bug. Also pins the SEEDED
 /// DEFAULTS to the read's four classes, because a default nobody pins is a default that quietly changes.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class LongRunningQueryExclusionsTests
 {
     [Theory]

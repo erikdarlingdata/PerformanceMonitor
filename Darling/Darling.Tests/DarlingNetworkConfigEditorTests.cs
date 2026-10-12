@@ -514,6 +514,65 @@ public sealed class DarlingNetworkConfigEditorTests
         Assert.Equal(Host.McpBindMode.NetworkAndLoopback, Host.ResolveMcpBind(DarlingConfig.Parse(edited).Mcp, managed: true).Mode);
     }
 
+    /// <summary>
+    /// #5288: <c>mcp.network.tls</c> and <c>mcp.network.hostName</c> are not keys the wizard owns, so the #4743 rule
+    /// keeps them when the wizard replaces the block, byte for byte with their comments, and the "Kept ..." line
+    /// names both. No change to <see cref="Editor.McpNetworkOwnedKeys"/> was needed: this pins that none is.
+    /// </summary>
+    [Fact]
+    public void UpsertMcpBlock_KeepsTlsAndHostName_AndSaysSo()
+    {
+        const string json = """
+            {
+              "postgres": { "managed": true },
+              "mcp": {
+                "network": {
+                  "listen": "192.168.1.205",  // old bind
+                  "allowFrom": "192.168.1.0/24",
+                  "encryptedToken": "OLD-BLOB",
+                  "tls": {
+                    "certPath": "C:\\certs\\mcp.crt",
+                    "keyPath": "C:\\certs\\mcp.key"
+                  },  // HTTPS for MCP
+                  "hostName": "darling.example.test"  // the name on the certificate
+                }
+              },
+              "servers": [ { "host": "S" } ]
+            }
+            """;
+
+        var edited = Editor.UpsertNetworkBlock(json, "mcp",
+            Editor.BuildMcpNetworkBlock("10.0.0.5", " 10.8.0.0/16 , 192.168.1.5/24", encryptedToken: "NEW-BLOB", plaintextToken: null),
+            Editor.McpNetworkOwnedKeys, out var kept);
+
+        AssertStrictJson(edited);
+        var config = DarlingConfig.Parse(edited);
+
+        /* The prompted keys took the new answers (a list lands as ONE canonical string), and nothing old survives. */
+        Assert.Equal("10.0.0.5", config.Mcp.Network!.Listen);
+        Assert.Equal("10.8.0.0/16,192.168.1.0/24", config.Mcp.Network!.AllowFrom);
+        Assert.Equal("NEW-BLOB", config.Mcp.Network!.EncryptedToken);
+        Assert.DoesNotContain("OLD-BLOB", edited, StringComparison.Ordinal);
+        Assert.DoesNotContain("192.168.1.205", edited, StringComparison.Ordinal);
+
+        /* tls and hostName came through byte for byte, comments included, and still mean what they meant. */
+        foreach (var key in new[] { "tls", "hostName" })
+        {
+            Assert.Equal(NetworkMemberText(json, "mcp", key), NetworkMemberText(edited, "mcp", key));
+        }
+
+        Assert.Contains("},  // HTTPS for MCP", edited, StringComparison.Ordinal);
+        Assert.Contains("\"hostName\": \"darling.example.test\"  // the name on the certificate", edited, StringComparison.Ordinal);
+        Assert.Equal(@"C:\certs\mcp.crt", config.Mcp.Network!.Tls!.CertPath);
+        Assert.Equal("darling.example.test", config.Mcp.Network!.HostName);
+
+        /* ... and the wizard SAYS so, naming both, in the order they sat in the block. */
+        Assert.Equal(["tls", "hostName"], kept);
+        Assert.Equal(
+            "Kept mcp.network.tls and mcp.network.hostName from the existing darling.json.",
+            Editor.FormatKeptLine(kept.Select(key => $"mcp.network.{key}").ToList()));
+    }
+
     [Fact]
     public void UpsertStore_OverLiveBlock_ReplacesItsRole_KeepsAnUnknownKey()
     {
@@ -665,6 +724,85 @@ public sealed class DarlingNetworkConfigEditorTests
         Assert.False(decision.Exposed);
         Assert.NotNull(decision.DegradeReason);
     }
+
+    /* ============================ #5288: allowFrom as a list, always ONE JSON string ============================ */
+
+    [Fact]
+    public void BuildMcpNetworkBlock_OneEntry_ByteIdentical()
+    {
+        /* The text the wizard wrote before the list existed, character for character (the value is the operator's). */
+        Assert.Equal(
+            "\"network\": {\n" +
+            "      \"listen\": \"192.168.1.205\",  // bind IP; 0.0.0.0 = all interfaces.\n" +
+            "      \"allowFrom\": \"192.168.1.0/24\",  // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).\n" +
+            "      \"encryptedToken\": \"DPAPI-BLOB\"  // DPAPI bearer token (from --encrypt-password); required to expose.\n" +
+            "    }",
+            Editor.BuildMcpNetworkBlock("192.168.1.205", "192.168.1.0/24", encryptedToken: "DPAPI-BLOB", plaintextToken: null));
+
+        /* One entry stays as TYPED, host bits and all: the resolver masks it, the file keeps the operator's text. */
+        Assert.Contains("\"allowFrom\": \"192.168.1.5/24\",",
+            Editor.BuildMcpNetworkBlock("192.168.1.205", "192.168.1.5/24", encryptedToken: "B", plaintextToken: null), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildWebNetworkBlock_OneEntry_ByteIdentical()
+    {
+        Assert.Equal(
+            "\"network\": {\n" +
+            "      \"listen\": \"192.168.1.205\",  // bind IP; 0.0.0.0 = all interfaces.\n" +
+            "      \"allowFrom\": \"192.168.1.0/24\",  // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).\n" +
+            "      \"encryptedToken\": \"DPAPI-BLOB\"  // DPAPI access token (from --encrypt-password); the browser login secret.\n" +
+            "    }",
+            Editor.BuildWebNetworkBlock("192.168.1.205", "192.168.1.0/24", encryptedToken: "DPAPI-BLOB", plaintextToken: null));
+
+        Assert.Contains("\"allowFrom\": \"192.168.1.5/24\",",
+            Editor.BuildWebNetworkBlock("192.168.1.205", "192.168.1.5/24", encryptedToken: "B", plaintextToken: null), StringComparison.Ordinal);
+    }
+
+    private static JsonElement AllowFromOf(string editedJson, string surface)
+    {
+        using var doc = JsonDocument.Parse(editedJson, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+        return doc.RootElement.GetProperty(surface).GetProperty("network").GetProperty("allowFrom").Clone();
+    }
+
+    [Fact]
+    public void BuildMcpNetworkBlock_TwoEntries_WritesOneCanonicalString()
+    {
+        /* Typed with spaces, a host-bit entry and a duplicate: the file gets the parser's canonical text, as ONE string.
+           An older service refuses to start on a JSON array, so the wizard never writes one. */
+        var block = Editor.BuildMcpNetworkBlock("192.168.1.205", " 10.8.0.0/16 , 192.168.1.5/24,10.8.0.0/16", "DPAPI-BLOB", null);
+        Assert.Contains("\"allowFrom\": \"10.8.0.0/16,192.168.1.0/24\",", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("[", block, StringComparison.Ordinal);
+
+        var edited = Editor.UpsertNetworkBlock(LoadSample(), "mcp", block, Editor.McpNetworkOwnedKeys);
+        var allowFrom = AllowFromOf(edited, "mcp");
+        Assert.Equal(JsonValueKind.String, allowFrom.ValueKind);
+        Assert.Equal("10.8.0.0/16,192.168.1.0/24", allowFrom.GetString());
+        Assert.Equal(Host.McpBindMode.NetworkAndLoopback, Host.ResolveMcpBind(DarlingConfig.Parse(edited).Mcp, managed: true).Mode);
+    }
+
+    [Fact]
+    public void BuildWebNetworkBlock_TwoEntries_WritesOneCanonicalString()
+    {
+        var block = Editor.BuildWebNetworkBlock("192.168.1.205", " 10.8.0.0/16 , 192.168.1.5/24,10.8.0.0/16", "DPAPI-BLOB", null);
+        Assert.Contains("\"allowFrom\": \"10.8.0.0/16,192.168.1.0/24\",", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("[", block, StringComparison.Ordinal);
+
+        var edited = Editor.UpsertNetworkBlock(LoadSample(), "web", block, Editor.WebNetworkOwnedKeys);
+        var allowFrom = AllowFromOf(edited, "web");
+        Assert.Equal(JsonValueKind.String, allowFrom.ValueKind);
+        Assert.Equal("10.8.0.0/16,192.168.1.0/24", allowFrom.GetString());
+        Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, WebHost.ResolveWebBind(DarlingConfig.Parse(edited).Web, managed: true).Mode);
+    }
+
+    [Theory]
+    [InlineData("192.168.1.5/24", "192.168.1.5/24")]                                             // one entry: as typed
+    [InlineData("192.168.1.0/24,10.0.0.0/8", "192.168.1.0/24,10.0.0.0/8")]
+    [InlineData(" 10.8.0.0/16 , 192.168.1.5/24", "10.8.0.0/16,192.168.1.0/24")]                  // list: canonical
+    [InlineData("10.0.0.0/8,10.0.0.0/8", "10.0.0.0/8")]                                          // a list that de-duplicates to one: no comma left
+    [InlineData("not-a-cidr,10.0.0.0/8", "not-a-cidr,10.0.0.0/8")]                               // refused text comes back as typed
+    public void AllowFromText_OneEntryAsTyped_AListCanonical(string typed, string expected)
+        => Assert.Equal(expected, Editor.AllowFromText(typed));
 
     [Fact]
     public void BuildMcp_EmitsPlaintextTokenWhenNoEncryptedTokenGiven()

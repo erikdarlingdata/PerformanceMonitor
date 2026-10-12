@@ -16,6 +16,9 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -434,6 +437,9 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// shared alert row's fields (same WHERE / ORDER BY event_time DESC / LIMIT 200 semantics).
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
+    /// <remarks>Deliberately windows on <c>collection_time</c>, NOT <c>event_time</c>: the alert sweep is a
+    /// delivery cursor ("rows collected since the last sweep"). On the event time, a report collected seconds
+    /// late, or hours late after an outage, would fall before the window and never alert.</remarks>
     public const string BlockedProcessReportsSql = @"
 SELECT
     event_time,
@@ -639,11 +645,14 @@ GROUP BY collection_time";
     /* ---------------- deadlocks ---------------- */
 
     /// <summary>Lite's deadlock read (column list trimmed to the shared alert row's fields).</summary>
+    /// <remarks>Deliberately windows on <c>collection_time</c>, NOT <c>deadlock_time</c>: the alert sweep is a
+    /// delivery cursor ("rows collected since the last sweep"), so a deadlock collected late must still alert.</remarks>
     public const string DeadlocksSql = @"
 SELECT
     victim_process_id,
     victim_sql_text,
-    deadlock_graph_xml
+    deadlock_graph_xml,
+    collection_time
 FROM deadlocks
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -687,7 +696,9 @@ LIMIT 50";
             {
                 VictimProcessId = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 VictimSqlText = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                DeadlockGraphXml = reader.IsDBNull(2) ? "" : reader.GetString(2)
+                DeadlockGraphXml = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                /* #5642: the row's own collection instant (naive UTC in the store), the age line's newest sample. */
+                NewestSampleUtc = reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc)
             });
         }
 
@@ -799,6 +810,9 @@ ORDER BY accumulated_wait_ms DESC";
 
     /* ---------------- long-running queries ---------------- */
 
+    /// <summary>The characters of a statement the long-running-query alert prints (#5320: judged whole, then cut to this).</summary>
+    internal const int AlertStatementPreviewLength = 300;
+
     /// <summary>
     /// Lite's long-running-query read with the two PG dialect adjustments: DuckDB's bare
     /// <c>NOW() - INTERVAL '10 MINUTES'</c> becomes the parameterized naive-UTC $4 (a bare
@@ -837,7 +851,7 @@ WITH candidates AS (
     SELECT
         r.session_id,
         r.database_name,
-        SUBSTRING(r.query_text, 1, 300) AS query_text,
+        r.query_text,
         r.total_elapsed_time_ms / 1000 AS elapsed_seconds,
         r.cpu_time_ms,
         r.reads,
@@ -848,6 +862,7 @@ WITH candidates AS (
         r.program_name,
         r.login_name,
         r.total_elapsed_time_ms,
+        r.collection_time,
         {1} AS excluded_by_program_prefix,
         {2} AS excluded_by_login,
         {3} AS excluded_by_database
@@ -874,7 +889,8 @@ SELECT
     r.login_name,
     CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_program_prefix) AS integer) AS excluded_by_program_prefix_count,
     CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS integer) AS excluded_by_login_count,
-    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS integer) AS excluded_by_database_count
+    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS integer) AS excluded_by_database_count,
+    r.collection_time AS newest_collection_time
 FROM candidates AS r
 WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login OR r.excluded_by_database)
 ORDER BY r.total_elapsed_time_ms DESC
@@ -979,7 +995,9 @@ LIMIT $3";
                 {
                     SessionId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
                     DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    QueryText = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    /* #5320: the whole statement is judged, then cut to the alert's 300 characters here. The read used to cut
+                       in SQL (SUBSTRING), so a value early in a batch whose naming text sat past the 300th character read clean. */
+                    QueryText = reader.IsDBNull(2) ? "" : McpHelpers.StatementPreview(reader.GetString(2), AlertStatementPreviewLength) ?? "",
                     ElapsedSeconds = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                     CpuTimeMs = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                     Reads = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
@@ -988,7 +1006,9 @@ LIMIT $3";
                     BlockingSessionId = reader.IsDBNull(8) ? null : (int?)reader.GetInt32(8),
                     QueryHash = reader.IsDBNull(9) ? null : reader.GetString(9),
                     ProgramName = reader.IsDBNull(10) ? "" : reader.GetString(10),
-                    LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11)
+                    LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11),
+                    /* #5642: the snapshot's own collection instant (naive UTC in the store). */
+                    NewestSampleUtc = reader.IsDBNull(15) ? null : DateTime.SpecifyKind(reader.GetDateTime(15), DateTimeKind.Utc)
                 });
                 /* The same three scalars on every row — read once is enough; a read with no rows has nothing to
                    fire and therefore nothing to render the counts beside. */
@@ -1028,6 +1048,15 @@ LIMIT $3";
     /// binds do not move. #3579's <c>observed_at</c> on the forced-plan read is the same column for the same
     /// reason.</para>
     ///
+    /// <para>A row stored before the allocated/used fix for another database on an Azure SQL Database server holds
+    /// that database's USED space as its total, where every later row holds the ALLOCATED size
+    /// (<see cref="AzureSiblingDatabaseSize"/>). Set beside a later row, it would read as a rise of the whole
+    /// allocation: 10,121 MB for a Hyperscale database that did not grow. Both CTEs leave those rows out, at read
+    /// time, so the read covers history collected before the change without rewriting it, and the newest row and
+    /// the baseline always come from the same shape. The database then reads like one with a single sample in the
+    /// window, growth 0, until a second sample in the new shape is inside it. Until the first collection after the
+    /// upgrade the window holds only old-shape rows, so the database is not listed at all.</para>
+    ///
     /// <para>$1 server_id, $2 window start (naive UTC).</para>
     /// </summary>
     public const string DatabaseFileGrowthSql = @"
@@ -1039,6 +1068,7 @@ WITH current_files AS (
     FROM database_size_stats
     WHERE server_id = $1
     AND   collection_time >= $2
+    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
     ORDER BY database_name, file_name, collection_time DESC
 ),
 baseline AS (
@@ -1047,6 +1077,7 @@ baseline AS (
     FROM database_size_stats
     WHERE server_id = $1
     AND   collection_time >= $2
+    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
     ORDER BY database_name, file_name, collection_time ASC
 )
 SELECT
@@ -1057,9 +1088,9 @@ SELECT
     COALESCE(c.total_size_mb, 0) AS total_size_mb,
     COALESCE(c.total_size_mb, 0) - COALESCE(b.total_size_mb, c.total_size_mb, 0) AS growth_mb,
     COALESCE(EXTRACT(EPOCH FROM (c.collection_time - b.collection_time)) / 60.0, 0) AS growth_window_minutes,
-    COALESCE(c.volume_mount_point, '') AS volume_mount_point,
-    COALESCE(c.volume_total_mb, 0) AS volume_total_mb,
-    COALESCE(c.volume_free_mb, 0) AS volume_free_mb,
+    c.volume_mount_point,
+    c.volume_total_mb,
+    c.volume_free_mb,
     c.auto_growth_mb,
     COALESCE(c.is_percent_growth, false) AS is_percent_growth,
     c.growth_pct,
@@ -1113,9 +1144,9 @@ ORDER BY c.database_name, c.file_name";
                 TotalSizeMb = Convert.ToDouble(reader.GetValue(4)),
                 GrowthMb = Convert.ToDouble(reader.GetValue(5)),
                 GrowthWindowMinutes = Convert.ToDouble(reader.GetValue(6)),
-                VolumeMountPoint = reader.GetString(7),
-                VolumeTotalMb = Convert.ToDouble(reader.GetValue(8)),
-                VolumeFreeMb = Convert.ToDouble(reader.GetValue(9)),
+                VolumeMountPoint = reader.IsDBNull(7) ? null : reader.GetString(7),
+                VolumeTotalMb = reader.IsDBNull(8) ? null : Convert.ToDouble(reader.GetValue(8)),
+                VolumeFreeMb = reader.IsDBNull(9) ? null : Convert.ToDouble(reader.GetValue(9)),
                 AutoGrowthMb = reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10)),
                 IsPercentGrowth = !reader.IsDBNull(11) && reader.GetBoolean(11),
                 GrowthPct = reader.IsDBNull(12) ? null : Convert.ToDouble(reader.GetValue(12)),
@@ -1138,7 +1169,8 @@ ORDER BY c.database_name, c.file_name";
 SELECT
     volume_mount_point,
     MAX(volume_total_mb) AS volume_total_mb,
-    MIN(volume_free_mb) AS volume_free_mb
+    MIN(volume_free_mb) AS volume_free_mb,
+    MAX(collection_time) AS newest_collection_time
 FROM database_size_stats
 WHERE server_id = $1
 AND   collection_time = (
@@ -1184,7 +1216,9 @@ ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
             {
                 MountPoint = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 TotalMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                FreeMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
+                FreeMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                /* #5642: the newest snapshot's instant (naive UTC in the store). */
+                NewestSampleUtc = reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc)
             });
         }
 
@@ -1208,7 +1242,8 @@ SELECT
     oldest_active_transaction_id,
     oldest_aborted_transaction_id,
     aborted_version_cleaner_start_time,
-    aborted_version_cleaner_end_time
+    aborted_version_cleaner_end_time,
+    collection_time
 FROM pvs_stats
 WHERE server_id = $1
 AND   collection_time = (
@@ -1260,7 +1295,9 @@ ORDER BY
                 OldestActiveTransactionId = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 OldestAbortedTransactionId = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                 /* MS's documented shape for "cleanup is ongoing": a start time with no end time. */
-                AbortedCleanupOngoing = !reader.IsDBNull(6) && reader.IsDBNull(7)
+                AbortedCleanupOngoing = !reader.IsDBNull(6) && reader.IsDBNull(7),
+                /* #5642: the newest snapshot's instant (naive UTC in the store). */
+                NewestSampleUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
             });
         }
 
@@ -1346,13 +1383,26 @@ LIMIT 1";
     /// <summary>
     /// Lite's anomalous-jobs read verbatim (running_jobs table). $2 is the threshold percent
     /// (multiplier x 100, as numeric — percent_of_average is numeric(10,1)).
-    /// <para><c>start_time</c> is the monitored server's own clock, so the server's collected UTC offset
-    /// is projected beside it — NOT <c>COALESCE(..., 0)</c>: the alert body renders an absent offset as an
+    /// <para><c>start_time</c> is the monitored server's own clock, so the newest snapshot's collected UTC
+    /// offset and time zone id (one <c>server_properties</c> row, so the two describe one snapshot) are
+    /// projected beside it — NOT <c>COALESCE(..., 0)</c>: the alert body renders an absent offset as an
     /// explicitly unconverted server-clock instant rather than as UTC (see
     /// <c>AlertTimestamp</c>), and coalescing here would take that choice away from it. Rides on this
     /// statement rather than a second command so the pass's command count is unchanged.</para>
+    /// <para>The reader turns that pair into the offset in force at EACH job's <c>start_time</c>
+    /// (<see cref="ServerLocalTimes.JobStartOffsetMinutes"/>, #4821), because the newest offset alone puts a
+    /// job that started before the zone's last daylight saving change an hour off in
+    /// <c>AnomalousJobInfo.StartTimeUtc</c> and in the alert's "Started" label.</para>
     /// </summary>
     public const string AnomalousJobsSql = @"
+WITH svr AS (
+    SELECT sp.utc_offset_minutes, sp.time_zone_id
+    FROM server_properties AS sp
+    WHERE sp.server_id = $1
+    AND   sp.utc_offset_minutes IS NOT NULL
+    ORDER BY sp.collection_time DESC
+    LIMIT 1
+)
 SELECT
     job_name,
     job_id,
@@ -1361,14 +1411,8 @@ SELECT
     p95_duration_seconds,
     percent_of_average,
     start_time,
-    (
-        SELECT sp.utc_offset_minutes
-        FROM server_properties AS sp
-        WHERE sp.server_id = $1
-        AND   sp.utc_offset_minutes IS NOT NULL
-        ORDER BY sp.collection_time DESC
-        LIMIT 1
-    ) AS utc_offset_minutes
+    (SELECT utc_offset_minutes FROM svr) AS utc_offset_minutes,
+    (SELECT time_zone_id FROM svr) AS time_zone_id
 FROM running_jobs
 WHERE server_id = $1
 AND collection_time = (SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1)
@@ -1406,6 +1450,7 @@ LIMIT 5";
            or lost msdb access leaves a stale "latest" that would otherwise read as NOW, and the engine's
            per-run cooldown key expires each pass, so a stale snapshot re-fires the same historical run
            every cooldown, forever. Same rule as Lite's adapter; parity is the point. */
+        DateTime? newestSampleUtc = null;
         using (var snapshotProbe = new NpgsqlCommand(
             "SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1", connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
         {
@@ -1417,15 +1462,23 @@ LIMIT 5";
             {
                 return AnomalousJobsResult.Stale;
             }
+
+            /* #5642: the snapshot the rows below were read from, for the age line (naive UTC in the store). */
+            newestSampleUtc = DateTime.SpecifyKind(snapshotTime, DateTimeKind.Utc);
         }
 
         using var command = new NpgsqlCommand(AnomalousJobsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdPercent);
 
+        ServerClock? clock = null;
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var startTime = reader.IsDBNull(6) ? DateTime.MinValue : reader.GetDateTime(6);
+            var snapshotOffset = reader.IsDBNull(7) ? (int?)null : reader.GetInt32(7);
+            /* #4821: every row carries the same newest-snapshot zone and offset, so the clock is built once. */
+            clock ??= ServerLocalTimes.ClockFrom(reader.IsDBNull(8) ? null : reader.GetString(8), snapshotOffset);
             items.Add(new AnomalousJobInfo
             {
                 JobName = reader.GetString(0),
@@ -1434,8 +1487,11 @@ LIMIT 5";
                 AvgDurationSeconds = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 P95DurationSeconds = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 PercentOfAverage = reader.IsDBNull(5) ? null : reader.GetDecimal(5),
-                StartTime = reader.IsDBNull(6) ? DateTime.MinValue : reader.GetDateTime(6),
-                UtcOffsetMinutes = reader.IsDBNull(7) ? null : reader.GetInt32(7)
+                StartTime = startTime,
+                /* The offset in force when THIS job started, so StartTimeUtc and the "Started" label are right for a
+                   job from before the last daylight saving change; a null offset stays null. */
+                UtcOffsetMinutes = ServerLocalTimes.JobStartOffsetMinutes(clock, startTime, snapshotOffset),
+                NewestSampleUtc = newestSampleUtc
             });
         }
 
@@ -1600,7 +1656,8 @@ previous AS (
     FROM database_states ds
     WHERE ds.server_id = $1 AND ds.collection_time = (SELECT t FROM prev)
 )
-SELECT l.database_name, l.eff, COALESCE(e.expected_state, ''), COALESCE(e.last_alerted_state, '')
+SELECT l.database_name, l.eff, COALESCE(e.expected_state, ''), COALESCE(e.last_alerted_state, ''),
+       (SELECT t FROM newest) AS newest_collection_time
 FROM latest l
 JOIN previous p
   ON p.database_name = l.database_name
@@ -1629,6 +1686,16 @@ ORDER BY l.database_name";
             serverKey,
             "database state",
             cancellationToken);
+    }
+
+    /* The shared interface returns null for "no verdict" (Lite's store has too little evidence to judge). This
+       host always has a verdict, so the public method above stays non-nullable and the compiler keeps it that
+       way: this explicit member is the only place the two shapes meet, and it passes the list through
+       unchanged. */
+    async Task<List<DatabaseStateInfo>?> IAlertReadAdapter.GetDatabaseStatesAsync(
+        string serverKey, CancellationToken cancellationToken)
+    {
+        return await GetDatabaseStatesAsync(serverKey, cancellationToken);
     }
 
     private async Task<List<DatabaseStateInfo>> GetDatabaseStatesCoreAsync(
@@ -1695,7 +1762,9 @@ ORDER BY l.database_name";
                     DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                     StateDesc = reader.IsDBNull(1) ? "" : reader.GetString(1),
                     ExpectedState = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                    LastAlertedState = reader.IsDBNull(3) ? "" : reader.GetString(3)
+                    LastAlertedState = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                    /* #5642: the newest collection both samples of the two-sample rule end at (naive UTC). */
+                    NewestSampleUtc = reader.IsDBNull(4) ? null : DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc)
                 });
             }
         }

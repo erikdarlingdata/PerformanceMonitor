@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using Xunit;
 
 namespace Lite.Tests;
@@ -83,21 +84,26 @@ public sealed class SkippedMaintenanceIsReportedTests
     /// exactly as before", and swallowing the read instead would report every database as recovered and clear
     /// the alert memory for all of them. It is one stray <c>return</c> away at all times, and my first cut of
     /// this change added exactly that <c>return</c> in the catch. So: the catch sets a flag and falls through,
-    /// and there is no <c>return</c> between it and the read.</para>
+    /// and there is no <c>return</c> between it and the check that returns the sweep's own result.</para>
     /// </summary>
     [Fact]
     public void ASkippedMaintenanceBlockStillRunsTheDeviationRead()
     {
         var source = ReadDatabaseStatesSource().Replace("\r\n", "\n");
 
-        var catchIndex = source.IndexOf("catch (TimeoutException)", StringComparison.Ordinal);
+        /* With or without a variable: #5650 binds it (catch (TimeoutException ex)) to name the lock holder, and the pin is about the clause, not the identifier. */
+        var catchMatch = Regex.Match(source, @"catch \(TimeoutException(?: \w+)?\)");
+        var catchIndex = catchMatch.Success ? catchMatch.Index : -1;
+        Assert.True(catchIndex > 0, "the best-effort maintenance catch must still exist");
+        var judgedIndex = source.IndexOf("if (judged)", catchIndex, StringComparison.Ordinal);
         var readIndex = source.IndexOf("using var connection = await OpenConnectionAsync();", StringComparison.Ordinal);
 
-        Assert.True(catchIndex > 0, "the best-effort maintenance catch must still exist");
-        Assert.True(readIndex > catchIndex, "the deviation read must follow the maintenance block");
+        Assert.True(judgedIndex > catchIndex, "the sweep's own result is returned only when the sweep ran");
+        Assert.True(readIndex > judgedIndex, "the deviation read must follow the maintenance block");
 
-        /* The catch records and falls through rather than returning. */
-        var between = source[catchIndex..readIndex];
+        /* The catch records and falls through rather than returning. The one return after it is guarded by
+           "judged", which only a sweep that ran sets. */
+        var between = source[catchIndex..judgedIndex];
         Assert.Contains("maintenanceSkipped = true;", between, StringComparison.Ordinal);
         Assert.DoesNotContain("return ", between);
     }

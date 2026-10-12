@@ -47,18 +47,30 @@ public sealed partial class ViewerDataService
     /// wait time descending so the picker sees the heaviest types first (the checked-to-top order and
     /// the "Top Waits" fill both lean on it). Lite's per-user IgnoredWaitTypes exclusion clause is
     /// deliberately DROPPED — the viewer has no per-user ignore config to share.
+    /// <para>A wait stored under two spellings is one name with its summed total. Four wait names were stored with
+    /// the trailing space <c>sys.dm_os_wait_stats</c> reports before the collector began trimming them (#4884), and a
+    /// store upgraded across that change holds both spellings. The read sums per stored spelling first, the same
+    /// aggregation as before, then merges the spellings on <c>rtrim(wait_type)</c>: one <c>rtrim</c> per group, not
+    /// per row. The picker hands the clean name to <see cref="WaitTrendsSql"/>, which matches both.</para>
     /// $1 server_id, $2 window start, $3 window end (all naive UTC).
     /// </summary>
     public const string DistinctWaitTypesSql = """
         SELECT
-            wait_type,
-            SUM(delta_wait_time_ms) AS total_delta
-        FROM v_wait_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        GROUP BY wait_type
-        ORDER BY SUM(delta_wait_time_ms) DESC
+            rtrim(wait_type) AS wait_type,
+            SUM(total_delta) AS total_delta
+        FROM
+        (
+            SELECT
+                wait_type,
+                SUM(delta_wait_time_ms) AS total_delta
+            FROM v_wait_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY wait_type
+        ) AS per_spelling
+        GROUP BY rtrim(wait_type)
+        ORDER BY SUM(total_delta) DESC
         """;
 
     /// <summary>
@@ -87,6 +99,12 @@ public sealed partial class ViewerDataService
     /// <c>wait_type IN (...)</c> list, so that list's existing <c>$4..</c> numbering does not shift. Neither
     /// wait-stats chart series plots a peak, so unlike the MCP twin there is no peak column.
     /// </para>
+    /// <para>A wait stored under two spellings is one series (#4884). Before the collector began trimming wait
+    /// names, four were stored with the trailing space <c>sys.dm_os_wait_stats</c> reports, so a store upgraded across
+    /// that change holds both. The <c>IN</c> list names each requested wait twice, as <c>$n</c> and
+    /// <c>$n || ' '</c>, and keeps <c>wait_type</c> bare so the filter reads the column as stored. Everything after
+    /// the filter keys on <c>rtrim(wait_type)</c>: the <c>LAG</c> partition, so the first clean row's interval runs
+    /// from the last spaced one, and the bucket grouping, so both spellings sum into one point.</para>
     /// <para>#4234 review (item 3): <c>first_collection_time</c> (<c>MIN(collection_time)</c>, every row in
     /// <c>rated</c> — rated or not, mirroring <c>DurationTrendRouting.BuildBucketedRawTrendSql</c>'s own
     /// column of the same name) and <c>collection_count</c> (<c>COUNT(*)</c> over that same population) ride
@@ -97,13 +115,13 @@ public sealed partial class ViewerDataService
     /// </summary>
     public static string WaitTrendsSql(int waitTypeCount)
     {
-        var typeParams = string.Join(", ", Enumerable.Range(0, waitTypeCount).Select(i => "$" + (i + 4)));
+        var typeParams = string.Join(", ", Enumerable.Range(0, waitTypeCount).Select(i => "$" + (i + 4) + ", $" + (i + 4) + " || ' '"));
         var widthParam = "$" + (waitTypeCount + 4);
         return $$"""
             WITH raw AS
             (
                 SELECT
-                    wait_type,
+                    rtrim(wait_type) AS wait_type,
                     collection_time,
                     delta_wait_time_ms,
                     delta_signal_wait_time_ms,
@@ -113,7 +131,7 @@ public sealed partial class ViewerDataService
                        drops the row — a missing sample, never the confident 0.00 ms/sec a restart used to
                        render. NULL (a pre-V127 row) falls back to the LAG this read always used. */
                     CASE WHEN sample_interval_seconds IS NULL
-                         THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time))))
+                         THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY rtrim(wait_type) ORDER BY collection_time))))
                          ELSE NULLIF(sample_interval_seconds, 0)
                     END AS interval_seconds
                 FROM v_wait_stats

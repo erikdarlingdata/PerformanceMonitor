@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -47,7 +48,9 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
 {
     /* Test seams — the production ctor wires the real tray/email/servers.json paths. */
     internal delegate void ShowToast(string title, string message, BalloonIcon icon, string serverName, string metricName);
-    internal delegate Task SendAlert(
+    /* #4752: the send answers the delivery the email service recorded its history row with (null when it could not
+       say), so the deliverer can pass on whether any channel received the alert. */
+    internal delegate Task<AlertDelivery?> SendAlert(
         string metricName, string serverName, string currentValue, string thresholdValue,
         int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
         bool muted, string? detailText, AlertNotificationMode deliveryMode, CancellationToken cancellationToken);
@@ -118,12 +121,45 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
         _resolveServerDeliveryOverride = resolveServerDeliveryOverride;
     }
 
-    public async Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// <see cref="DeliverAndReportAsync"/> with the answer discarded, so there is one delivery path and not a
+    /// reporting one beside a silent one.
+    /// </summary>
+    public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default) =>
+        DeliverAndReportAsync(outcome, cancellationToken);
+
+    /// <summary>
+    /// The delivery, reporting what the channels did (#4752). Written by hand rather than inherited, because
+    /// the interface declares the member REQUIRED (CONTRIBUTING, Two-Store Parity: a defaulted member leaves the
+    /// implementer you forgot quietly doing nothing).
+    ///
+    /// <para><b>What comes back.</b> On a combined send (the direct road every metric but the three that carry
+    /// incidents takes, and Summary mode for those three) the exact <see cref="AlertDelivery"/>
+    /// <c>EmailAlertService.TrySendAlertEmailAsync</c> wrote the history row with, so the engine can tell "every
+    /// channel failed" (<see cref="FailedSendBackoff.EveryChannelFailed"/>) from a delivery and try the failed
+    /// alert again sooner than its cooldown. With no email or webhook configured that delivery is the tray
+    /// toast's, and a muted alert attempts nothing: neither is a failure, and neither is retried. On a Per-event
+    /// split there are N sends and N rows, and the answer is the one <see cref="FailedSendBackoff.ReportForSplit"/>
+    /// picks (#4822), as Darling's deliverer answers it: a delivery that reached a channel, else a failed one so
+    /// the engine tries the alert again, else <c>null</c> when no send was attempted. <c>null</c> is
+    /// "unreported", never "failed": the engine reads it as delivered, and it is also the answer when the send
+    /// threw anything but the caller's cancel, or could not say what it did.</para>
+    ///
+    /// <para>The caller's own cancel leaves as the <see cref="OperationCanceledException"/> it is, before any
+    /// history row is written (see <see cref="EmailAlertService.TrySendAlertEmailAsync"/>).</para>
+    /// </summary>
+    public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
     {
         if (outcome is null)
         {
             throw new ArgumentNullException(nameof(outcome));
         }
+
+        /* #5320 (part of #4348): the statement filter runs at this choke point, so a caller that hands an outcome
+           straight here (any direct caller) is filtered like an
+           engine alert. An outcome AlertEngine.FireAsync already filtered is remembered by the filter and passes
+           through untouched, so nothing is judged twice. Never throws. */
+        outcome = AlertStatementFilter.Apply(outcome);
 
         try
         {
@@ -149,24 +185,27 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
             var deliveryMode = AlertDeliveryModeResolver.Resolve(
                 _resolveServerDeliveryOverride(serverId), App.AlertDeliveryMode);
 
+            /* #5642: the sample-age line rides the history row's detail_text and every channel's prose exactly once,
+               whichever way the engine built the text. The age is the one the engine computed when the alert fired
+               (outcome.Context.NewestSample), never recomputed here; no line when the context carries none. */
+            var detailText = AlertDetailText.WithSampleAge(outcome.DetailText, outcome.Context);
+
             /* Only blocking/deadlocks ever routed through SendDetectedAlertAsync's #1141 split in
                the old loop; every other metric was a direct single send with its numerics. */
             /* #1839's "Blocking Wait Time" joins them: it carries the same blocked-process incident
                context, so it splits per-event the same way. */
             if (outcome.MetricName is "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected")
             {
-                await SendDetectedAlertAsync(
+                return await SendDetectedAlertAsync(
                     outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
                     serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
-                    outcome.Muted, outcome.DetailText, deliveryMode, cancellationToken);
+                    outcome.Muted, detailText, deliveryMode, cancellationToken);
             }
-            else
-            {
-                await _sendAlert(
-                    outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
-                    serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
-                    outcome.Muted, outcome.DetailText, deliveryMode, cancellationToken);
-            }
+
+            return await _sendAlert(
+                outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
+                serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
+                outcome.Muted, detailText, deliveryMode, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -178,24 +217,8 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
         catch (Exception ex)
         {
             AppLogger.Error("Alerts", $"Alert delivery failed for {outcome.MetricName} on {outcome.ServerName}: {ex.Message}");
+            return null;
         }
-    }
-
-    /// <summary>
-    /// <see cref="DeliverAsync"/>, reporting nothing (#3580). Lite hosts neither of the two daily documents
-    /// the report exists for, and its send seam (<see cref="SendAlert"/> over
-    /// <c>EmailAlertService.TrySendAlertEmailAsync</c>) returns no disposition — the fan-out result stays
-    /// inside the email service, which writes the history row itself — so there is nothing truthful to
-    /// report without rewiring that seam, which no Lite caller needs. Written by hand rather than
-    /// inherited, because the interface declares the member REQUIRED (CONTRIBUTING, Two-Store Parity: a
-    /// defaulted member leaves the implementer you forgot quietly doing nothing). <c>null</c> is
-    /// "unreported", never "failed"; if Lite ever grows a document-class self-alert, this is the seam to
-    /// teach, and the Darling deliverer is the shape.
-    /// </summary>
-    public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
-    {
-        await DeliverAsync(outcome, cancellationToken);
-        return null;
     }
 
     /// <summary>
@@ -211,7 +234,7 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
        Summary mode or when there are no incidents. The engine's edge-triggered gating already
        decided whether to fire; this only shapes delivery. Moved verbatim from the pre-forwarding
        MainWindow.SendDetectedAlertAsync. */
-    private async Task SendDetectedAlertAsync(
+    private async Task<AlertDelivery?> SendDetectedAlertAsync(
         string metricName, string serverName, string summaryCurrentValue, string thresholdValue,
         int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
         bool isMuted, string? summaryDetailText, AlertNotificationMode deliveryMode,
@@ -219,20 +242,24 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
     {
         if (deliveryMode == AlertNotificationMode.PerEvent && context?.Incidents is { Count: > 0 })
         {
+            var deliveries = new List<AlertDelivery?>();
             foreach (var msg in PerEventNotification.Split(context, App.AlertPerEventMaxPerCycle))
             {
                 /* Each per-event row stores its OWN numeric (#1830): the overflow message's
                    "+N more incident(s)" text is unparseable, and the history store's text fallback
                    silently recorded 0 for it. The threshold is the outcome's, unchanged. */
-                await _sendAlert(
+                deliveries.Add(await _sendAlert(
                     metricName, serverName, msg.CurrentValue, thresholdValue, serverId,
                     msg.Context, msg.NumericValue, numericThresholdValue, isMuted,
-                    AlertContextBuilders.ContextToDetailText(msg.Context), deliveryMode, cancellationToken);
+                    AlertDetailText.WithSampleAge(AlertContextBuilders.ContextToDetailText(msg.Context), msg.Context),
+                    deliveryMode, cancellationToken));
             }
-            return;
+
+            /* N sends, N rows: the split reports the one delivery the engine acts on (#4822). */
+            return FailedSendBackoff.ReportForSplit(deliveries);
         }
 
-        await _sendAlert(
+        return await _sendAlert(
             metricName, serverName, summaryCurrentValue, thresholdValue, serverId,
             context, numericCurrentValue, numericThresholdValue, isMuted, summaryDetailText, deliveryMode,
             cancellationToken);

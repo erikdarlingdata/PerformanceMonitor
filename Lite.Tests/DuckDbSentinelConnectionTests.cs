@@ -73,7 +73,7 @@ public class DuckDbSentinelConnectionTests : IDisposable
     [Fact]
     public async Task ResetDatabaseAsync_WithLiveSentinel_NewConnectionSeesEmptyTable()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         await SeedCollectionLogRowAsync(initializer, "TestCollector");
@@ -100,7 +100,7 @@ public class DuckDbSentinelConnectionTests : IDisposable
     [Fact]
     public async Task ArchiveAllAndResetAsync_WithLiveSentinel_ClearsHotTableThroughRealPath()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         await SeedCollectionLogRowAsync(initializer, "ArchivedCollector");
@@ -142,7 +142,7 @@ public class DuckDbSentinelConnectionTests : IDisposable
             await ExecAsync(seed, "CREATE INDEX idx_server_properties_time ON server_properties(server_id, collection_time)");
         }
 
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using (var verify = new DuckDBConnection($"Data Source={_dbPath}"))
@@ -166,7 +166,7 @@ public class DuckDbSentinelConnectionTests : IDisposable
     [Fact]
     public async Task Dispose_ClosesSentinel_FileDeletableAfterward()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         Assert.Throws<IOException>(() => File.Open(_dbPath, FileMode.Open, FileAccess.Read, FileShare.None).Dispose());
@@ -230,7 +230,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task ReadSentinelMemoryUsageBytes_RealConnection_ReturnsPositiveNumber()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using var connection = initializer.CreateConnection();
@@ -252,7 +252,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task RunMemoryTrimCycle_OverThreshold_RestoresConfiguredMemoryLimit()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
@@ -290,7 +290,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task RunMemoryTrimCycle_ReadLockHeldByAnotherThread_SkipsWithoutWaiting()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
@@ -326,6 +326,49 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     }
 
     /// <summary>
+    /// #5650: a trim cycle that skips because the lock is busy leaves nothing in the holder registry. With another thread
+    /// holding the read lock and the threshold at 0, the cycle takes its own short read hold (registers, then unregisters
+    /// in the <c>finally</c>) and then skips at the write lock, which is registered only after it is won. A skip that
+    /// left an entry behind would be named as a lock holder in every later timeout message.
+    /// </summary>
+    [Fact]
+    public async Task BusyTrimCycle_LeavesNoHolderInTheRegistry()
+    {
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        const string trimHolder = "DuckDbInitializer." + nameof(DuckDbInitializer.RunMemoryTrimCycle);
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 0;
+        var readerReady = new ManualResetEventSlim();
+        var releaseReader = new ManualResetEventSlim();
+        try
+        {
+            var readerTask = Task.Run(() =>
+            {
+                using var readLock = initializer.AcquireReadLock();
+                readerReady.Set();
+                releaseReader.Wait(TimeSpan.FromSeconds(5));
+            });
+            Assert.True(readerReady.Wait(TimeSpan.FromSeconds(5)));
+
+            var completedBefore = initializer.CompletedTrimCycleCount;
+            initializer.RunMemoryTrimCycle();
+
+            Assert.Equal(completedBefore, initializer.CompletedTrimCycleCount); // skipped at the busy write lock
+            Assert.DoesNotContain(StoreLockHolders.Snapshot(), h => h.Name == trimHolder);
+
+            releaseReader.Set();
+            await readerTask;
+        }
+        finally
+        {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+            initializer.Dispose();
+        }
+    }
+
+    /// <summary>
     /// #4262 round 3, my ruling. The tests above assert side effects that hold whether or not the cycle's
     /// SET statements ever ran (<c>memory_limit</c> round-trips either way if nothing touched it) — this
     /// asserts the run itself, through <see cref="DuckDbInitializer.CompletedTrimCycleCount"/>, which only
@@ -334,7 +377,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task RunMemoryTrimCycle_OverThreshold_IncrementsCompletedCycleCount()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
@@ -374,7 +417,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task RunMemoryTrimCycle_RacingReset_NeverThrowsAndResetStillCompletes()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
         await SeedCollectionLogRowAsync(initializer, "TestCollector");
 
@@ -427,7 +470,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task Dispose_ReadLockHeldOnAnotherThread_ReturnsWithoutHangingOrThrowing()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var readerReady = new ManualResetEventSlim();
@@ -495,7 +538,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         }
         AppDomain.CurrentDomain.FirstChanceException += OnFirstChance;
 
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         try
         {
             Assert.True(DuckDbInitializer.TestTrimTickEntered.Wait(TimeSpan.FromSeconds(5)),
@@ -539,7 +582,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task CreateArchiveViewsAsync_WaitsForConcurrentWriteLock()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var writeLockAcquired = new ManualResetEventSlim();
@@ -574,7 +617,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task CreateArchiveViewsAsync_CalledWhileHoldingWriteLockOnSameThread_DoesNotThrow()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using (initializer.AcquireWriteLock())
@@ -615,7 +658,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task RunMemoryTrimCycle_AfterWideRead_ReducesProcessMemory()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using (var seed = initializer.CreateConnection())
@@ -659,20 +702,31 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
                instance, not just this one), same as a real caller mid-archival. A skipped cycle reports
                beforeBytes == afterBytes with no error — exactly the "trim released nothing" failure this
                test chased intermittently on CI (one Windows run: 105906176 -> 105906176). That is lock
-               contention from an unrelated parallel test, not a broken trim, so the test retries the
-               cycle itself rather than looser-than-the-contract on a single skipped attempt. */
-            for (var attempt = 0; attempt < 20; attempt++)
+               contention from an unrelated parallel test, not a broken trim. The first fix re-ran the
+               cycle 20 times 50 ms apart, which is still a one-second timing budget: a parallel test that
+               holds the lock longer than that skips every attempt and fails the same way (#5459 W5; a
+               planted three-second hold reproduces the CI numbers exactly). So the wait is for the one
+               thing that tells a skipped cycle from one that ran: CompletedTrimCycleCount, which moves
+               only after both SET statements ran. It is bounded by a 30 s hang backstop, not a budget.
+               The measurement is then taken ONCE, after a cycle that really ran, so a trim that ran and
+               released nothing fails the assertions below at once and is never retried into a pass. */
+            var cyclesBefore = initializer.CompletedTrimCycleCount;
+            var hangBackstop = Stopwatch.StartNew();
+            while (true)
             {
                 initializer.RunMemoryTrimCycle();
-
-                using var measure = initializer.CreateConnection();
-                await measure.OpenAsync();
-                afterBytes = initializer.ReadSentinelMemoryUsageBytes(measure);
-
-                if (afterBytes.HasValue && afterBytes.Value <= trimTargetBytes)
+                if (initializer.CompletedTrimCycleCount != cyclesBefore)
                     break;
 
+                Assert.True(hangBackstop.Elapsed < TimeSpan.FromSeconds(30),
+                    "RunMemoryTrimCycle did not complete a cycle within 30 s: the process-wide database lock stayed busy, or the cycle bailed out before its SET statements");
                 await Task.Delay(50);
+            }
+
+            using (var measure = initializer.CreateConnection())
+            {
+                await measure.OpenAsync();
+                afterBytes = initializer.ReadSentinelMemoryUsageBytes(measure);
             }
         }
         finally

@@ -36,6 +36,7 @@ public partial class WaitDrillDownWindow : Window
 {
     private readonly ViewerDataService _dataService;
     private readonly int _serverId;
+    private readonly string _serverName;
     private readonly string _waitType;
     private readonly DateTime _fromUtc;
     private readonly DateTime _toUtc;
@@ -46,11 +47,12 @@ public partial class WaitDrillDownWindow : Window
     private System.Threading.CancellationTokenSource? _actualPlanCts;
 
     public WaitDrillDownWindow(
-        ViewerDataService dataService, int serverId, string waitType, DateTime fromUtc, DateTime toUtc)
+        ViewerDataService dataService, int serverId, string serverName, string waitType, DateTime fromUtc, DateTime toUtc)
     {
         InitializeComponent();
         _dataService = dataService;
         _serverId = serverId;
+        _serverName = serverName;
         _waitType = waitType;
         _fromUtc = fromUtc;
         _toUtc = toUtc;
@@ -288,9 +290,9 @@ public partial class WaitDrillDownWindow : Window
     private string GetTimeRangeDescription(List<ViewerQuerySnapshotRow> data)
     {
         if (data.Count == 0) return "";
-        var first = ViewerTimeHelper.ForDisplay(data.Min(r => r.CollectionTime));
-        var last = ViewerTimeHelper.ForDisplay(data.Max(r => r.CollectionTime));
-        return $"{first:yyyy-MM-dd HH:mm:ss} to {last:yyyy-MM-dd HH:mm:ss}";
+        var first = ViewerTimeHelper.FormatForDisplay(data.Min(r => r.CollectionTime), "yyyy-MM-dd HH:mm:ss");
+        var last = ViewerTimeHelper.FormatForDisplay(data.Max(r => r.CollectionTime), "yyyy-MM-dd HH:mm:ss");
+        return $"{first} to {last}";
     }
 
     private void OnThemeChanged(string _) => _filterManager.UpdateFilterButtonStyles();
@@ -464,14 +466,15 @@ public partial class WaitDrillDownWindow : Window
         _actualPlanCts?.Dispose();
         _actualPlanCts = new System.Threading.CancellationTokenSource();
 
-        var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
-            this, _dataService, _serverId, "the monitored server", row.DatabaseName, row.QueryText, estimatedPlanXml, argsJson,
+        var capture = await ViewerActualPlanFlow.RequestActualPlanAsync(
+            this, _dataService, _serverId, _serverName, row.DatabaseName, row.QueryText,
+            () => System.Threading.Tasks.Task.FromResult(estimatedPlanXml), argsJson,
             onStarted: () => System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait,
             onFinished: () => System.Windows.Input.Mouse.OverrideCursor = null,
             _actualPlanCts.Token);
 
-        if (planXml != null)
-            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, row.QueryText, row.DatabaseName);
+        if (capture != null)
+            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, capture.PlanXml, label, capture.QueryText, row.DatabaseName);
     }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();

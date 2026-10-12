@@ -450,14 +450,6 @@ public static class FactAdvice
         facts.TryGetValue(key, out var f) ? (long)Math.Round(f.Value) : (long?)null;
 
     /// <summary>
-    /// Cores-per-socket from SERVER_HARDWARE metadata — the per-NUMA-node proxy MAXDOP guidance keys
-    /// on (NUMA node count itself is not collected). 0 when absent.
-    /// </summary>
-    private static int CoresPerSocket(IReadOnlyDictionary<string, Fact> facts) =>
-        facts.TryGetValue("SERVER_HARDWARE", out var hw)
-            && hw.Metadata.TryGetValue("cores_per_socket", out var c) ? (int)c : 0;
-
-    /// <summary>
     /// The collection-gap caveat appended to every THREADPOOL-family block: under live thread
     /// exhaustion the collector is itself a query waiting for a worker, so a gap in Collection Health
     /// around the window corroborates the event rather than being a separate problem.
@@ -482,9 +474,9 @@ public static class FactAdvice
         if (maxdop is null && ctfp is null)
             return fallback;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
-        return fallback with { Remediation = ParallelGuardCore(maxdop, ctfp, cores, rec) + CollectionGapNote };
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
+        return fallback with { Remediation = ParallelGuardCore(maxdop, ctfp, basis, rec) + CollectionGapNote };
     }
 
     /// <summary>
@@ -500,14 +492,14 @@ public static class FactAdvice
         if (maxdop is null && ctfp is null)
             return fallback;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
         var remediation =
             "Collapse the blocking first — workers parked on locks are not running, so it is the " +
             "faster win: if the chain was headed by a sleeping/abandoned transaction, fix the code " +
             "path that leaves a BEGIN TRAN open (and SET XACT_ABORT ON so an aborted batch rolls " +
             "back); otherwise fix the slow operation under the held lock. Then guard parallelism. " +
-            ParallelGuardCore(maxdop, ctfp, cores, rec) + CollectionGapNote;
+            ParallelGuardCore(maxdop, ctfp, basis, rec) + CollectionGapNote;
         return fallback with { Remediation = remediation };
     }
 
@@ -519,7 +511,7 @@ public static class FactAdvice
     /// guard harder for the concurrency level. Does NOT include the collection-gap note (the caller
     /// appends it once).
     /// </summary>
-    private static string ParallelGuardCore(long? maxdop, long? ctfp, int cores, long rec)
+    private static string ParallelGuardCore(long? maxdop, long? ctfp, FactRemediation.MaxdopBasis basis, long rec)
     {
         var sb = new StringBuilder();
 
@@ -528,7 +520,7 @@ public static class FactAdvice
           .Append(maxdop?.ToString() ?? "not readable this window")
           .Append(" and cost threshold for parallelism is ")
           .Append(ctfp?.ToString() ?? "not readable this window")
-          .Append(cores > 0 ? $" (cores per socket {cores})." : ".");
+          .Append(basis.Cores > 0 ? $" {basis.Note}." : ".");
 
         var ctfpGuarded = ctfp is >= 50;
         var maxdopGuarded = maxdop is > 0 && maxdop <= rec;
@@ -554,9 +546,9 @@ public static class FactAdvice
                 sb.Append(" cost threshold for parallelism is already past the trivial-query cutoff");
 
             if (maxdop is 0)
-                sb.Append($", and cap MAXDOP at {rec} (this server's per-NUMA-node processor count, capped at 8) instead of unlimited");
+                sb.Append($", and cap MAXDOP at {rec} ({basis.Source}, capped at 8) instead of unlimited");
             else if (maxdop > rec)
-                sb.Append($", and lower MAXDOP from {maxdop} to {rec} (the per-NUMA-node processor count, capped at 8)");
+                sb.Append($", and lower MAXDOP from {maxdop} to {rec} ({basis.Bare}, capped at 8)");
             else
                 sb.Append($"; MAXDOP at {maxdop} is already within the ≤ {rec} guidance");
             sb.Append(". Then go after the specific high-DOP offenders");
@@ -587,18 +579,27 @@ public static class FactAdvice
         if (maxdop is null)
             return fallback;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
-        var coresNote = cores > 0 ? $" (cores per socket {cores})" : string.Empty;
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
+        var coresNote = basis.Cores > 0 ? $" {basis.Note}" : string.Empty;
+        var cappedFrom = basis.FromVcores ? "vCores" : "cores-per-socket";
+        /* MAXDOP is an instance option (sp_configure) everywhere except an Azure SQL Database, which has no instance setting for it:
+           there it is the database-scoped MAXDOP, set with ALTER DATABASE SCOPED CONFIGURATION. Only that engine carries vCores
+           instead of cores per socket, so the vCores basis is the one that names the database-scoped statement. */
+        var applySentence = basis.FromVcores
+            ? $"An Azure SQL Database has no instance setting for it; set it per database with ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = {rec}, an online change."
+            : "The Apply button runs sp_configure + RECONFIGURE, an online metadata change.";
+        var viaClause = basis.FromVcores
+            ? $"with ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = {rec}"
+            : "via sp_configure + RECONFIGURE";
 
         string headline, remediation;
         if (maxdop == 0)
         {
             headline = "MAXDOP is 0 — a single query can fan out across every scheduler (up to 64)";
             remediation =
-                $"Set MAXDOP to {rec} — this server's cores-per-socket capped at 8{coresNote}, the per-NUMA-node " +
-                "proxy; the SKU is irrelevant to the right value. The Apply button runs sp_configure + " +
-                "RECONFIGURE, an online metadata change. On hardware with more than 16 logical processors " +
+                $"Set MAXDOP to {rec} — this {(basis.FromVcores ? "database" : "server")}'s {cappedFrom} capped at 8{coresNote}, the per-NUMA-node " +
+                $"proxy; the SKU is irrelevant to the right value. {applySentence} On hardware with more than 16 logical processors " +
                 "per NUMA node you can raise it by hand. Raise Cost Threshold for Parallelism in the same pass " +
                 "if its companion finding fired.";
         }
@@ -608,15 +609,14 @@ public static class FactAdvice
             remediation =
                 $"MAXDOP 1 forces every query serial: large analytical queries, index rebuilds, and DBCC run " +
                 $"far slower. Unless this was set deliberately to fix a specific parallelism problem, set MAXDOP " +
-                $"to {rec} (cores-per-socket capped at 8{coresNote}) via sp_configure + RECONFIGURE, an online change.";
+                $"to {rec} ({cappedFrom} capped at 8{coresNote}) {viaClause}, an online change.";
         }
         else
         {
-            headline = $"MAXDOP is {maxdop} — above this server's topology-based guidance of {rec}";
+            headline = $"MAXDOP is {maxdop} — above this {(basis.FromVcores ? "database" : "server")}'s topology-based guidance of {rec}";
             remediation =
-                $"Lower MAXDOP from {maxdop} to {rec} (cores-per-socket capped at 8{coresNote}, the per-NUMA-node " +
-                "proxy; the SKU is irrelevant). The Apply button runs sp_configure + RECONFIGURE, an online " +
-                "metadata change. On hardware with more than 16 logical processors per NUMA node a higher value " +
+                $"Lower MAXDOP from {maxdop} to {rec} ({cappedFrom} capped at 8{coresNote}, the per-NUMA-node " +
+                $"proxy; the SKU is irrelevant). {applySentence} On hardware with more than 16 logical processors per NUMA node a higher value " +
                 "can be justified by hand. Pair it with a sane Cost Threshold for Parallelism if that finding fired.";
         }
 
@@ -661,8 +661,8 @@ public static class FactAdvice
         if (maxdop is null && ctfp is null)
             return string.Empty;
 
-        var cores = CoresPerSocket(facts);
-        var rec = FactRemediation.RecommendedMaxdop(cores);
+        var basis = FactRemediation.MaxdopBasisFrom(facts);
+        var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
         var sb = new StringBuilder("This server's MAXDOP is ")
             .Append(maxdop?.ToString() ?? "not readable this window")
             .Append(" and cost threshold for parallelism is ")
@@ -675,7 +675,7 @@ public static class FactAdvice
         else if (ctfp is not null && ctfp < 50)
             recs.Add($"raise cost threshold for parallelism from {ctfp} toward 50");
         if (maxdop is 0)
-            recs.Add($"cap MAXDOP at {rec} (the per-NUMA-node processor count, ≤ 8)");
+            recs.Add($"cap MAXDOP at {rec} ({basis.Bare}, ≤ 8)");
         else if (maxdop is not null && maxdop > rec)
             recs.Add($"lower MAXDOP from {maxdop} to {rec}");
 
@@ -974,10 +974,16 @@ public static class FactAdvice
     private static string QueryCauseClause(IReadOnlyDictionary<string, Fact> facts)
     {
         var bits = new List<string>();
-        if (Fired(facts, "PLAN_REGRESSION"))
-            bits.Add("a plan regression — force the historically faster plan (see that finding)");
+        /* #5630: parameter sensitivity leads when both fired: the plan regression beside it may compare plans compiled for
+           different inputs, so it is named second and carries no force advice. */
         if (Fired(facts, "PARAMETER_SENSITIVITY"))
             bits.Add("parameter sensitivity — a plan is far more expensive for some parameter values (that finding has the figures)");
+        if (Fired(facts, "PLAN_REGRESSION"))
+        {
+            bits.Add(Fired(facts, "PARAMETER_SENSITIVITY")
+                ? "a plan regression — do not force a query that also shows the parameter-sensitivity signature (see that finding)"
+                : "a plan regression — force the historically faster plan (see that finding)");
+        }
         if (Fired(facts, "MISSING_INDEX"))
             bits.Add("missing-index requests — the missing-index card lists the optimizer's suggestions from this window's top plans as corroboration, with its caveat");
         if (Fired(facts, "PLAN_WARNING"))
@@ -1297,10 +1303,16 @@ public static class FactAdvice
         inv.Append(". The sessions active at the peak are attached.");
 
         var rem = new StringBuilder();
-        if (Fired(facts, "PLAN_REGRESSION"))
-            rem.Append("A plan regression co-fired — the engine attaches the historically faster plan and a ready-to-run force statement; forcing it is the fast fix while you address why the worse plan got chosen.");
-        else if (Fired(facts, "PARAMETER_SENSITIVITY"))
+        /* #5630: parameter sensitivity leads. When it fired, the plan regression beside it compares plans that may have
+           been compiled for different inputs, so its force advice must not show. */
+        if (Fired(facts, "PARAMETER_SENSITIVITY"))
+        {
             rem.Append("Parameter sensitivity co-fired — do NOT force a plan (it locks in the wrong shape for the other parameter values); use OPTION (RECOMPILE) on the affected statement, or branch the procedure by parameter.");
+            if (Fired(facts, "PLAN_REGRESSION"))
+                rem.Append(" A plan regression co-fired too, but do not force a query that also shows that signature.");
+        }
+        else if (Fired(facts, "PLAN_REGRESSION"))
+            rem.Append("A plan regression co-fired — the engine attaches the historically faster plan and a ready-to-run force statement; forcing it is the fast fix while you address why the worse plan got chosen.");
         else
             rem.Append("Neither a plan regression nor parameter sensitivity fired this window, so the burst is most likely ad-hoc or scheduled work — the sessions active at the peak are attached; Resource Governor or moving that work off-peak is the durable fix.");
         if (Fired(facts, "MISSING_INDEX"))
@@ -1723,17 +1735,51 @@ public static class FactAdvice
             : bestAge.Value < 1
                 ? " (it last ran within the past day)"
                 : $" (it last ran {Plural(Math.Floor(bestAge.Value), "day")} ago)";
-        inv.Append($". Query Store has the faster plan on record{bestAgeText}, so this is a plan choice that got worse — not a query that inherently costs more.");
+        /* #5630/#5631: what the input check found for the worst query decides what the text may claim.
+           worst_input_basis: 0 not checked, 1 both plans compiled for the same values, 2 the statistics changed between the compiles. */
+        var paramSensitive = Fired(facts, "PARAMETER_SENSITIVITY");
+        var basis = FactMeta(facts, "PLAN_REGRESSION", "worst_input_basis") switch { 1 => 1, 2 => 2, _ => 0 };
+        if (paramSensitive)
+        {
+            inv.Append($". Query Store has a cheaper plan on record{bestAgeText}, but parameter sensitivity fired as well, so the cheaper plan may only have served easy parameter values — this may not be a plan choice that got worse.");
+            if (basis == 1)
+                inv.Append(" Both plans were compiled for the same parameter values.");
+            else if (basis == 2)
+                inv.Append(" The statistics changed between the two compiles.");
+        }
+        else if (basis == 1)
+            inv.Append($". Query Store has the faster plan on record{bestAgeText}, so this is a plan choice that got worse — not a query that inherently costs more: both plans were compiled for the same parameter values.");
+        else if (basis == 2)
+            inv.Append($". Query Store has the faster plan on record{bestAgeText}, so the newer plan costs more. The two plans were compiled for different parameter values, and the statistics they used changed between the compiles (updated, or a different set), so the plan may have flipped after a statistics update.");
+        else
+            inv.Append($". Query Store has the faster plan on record{bestAgeText}, so the newer plan costs more, but the compiled parameter values and statistics of the two plans could not be compared, so the cause is not established.");
+        var crossInput = FactMeta(facts, "PLAN_REGRESSION", "cross_input_excluded_count");
+        if (crossInput is > 0)
+            inv.Append($" {Plural(crossInput.Value, "other query")} {(crossInput.Value == 1 ? "was" : "were")} left out: the statement recompiles on every call, the newer plan returns many times the rows of the cheaper one at no higher cost per row, or the plans were compiled for different parameter values over unchanged statistics.");
         if (forceFailing && forceFails is not null)
             inv.Append($" A forced plan is in place but failing to apply ({Plural(forceFails.Value, "failure")}), so SQL Server is silently falling back to the regressed plan — the force is not actually protecting you.");
 
-        var rem = forceFailing
+        var unverified = FactMeta(facts, "PLAN_REGRESSION", "inputs_unverified_count");
+        var rem = paramSensitive
+            ? "Parameter sensitivity fired for this server too, so do not force a query that also shows that signature: forcing the cheaper plan can lock in the wrong shape for other parameter values and make the slow calls slower. The fix is the parameter sensitivity: OPTION (RECOMPILE) on the statement, or branch the procedure by parameter."
+            : forceFailing
             ? "Fix the failing force first — the recorded plan force is not taking effect (the plan was likely evicted or invalidated); re-force the good plan or clear the broken force, then confirm it sticks. Then address WHY the plan regressed — usually stale statistics or a parameter-sensitivity swing."
+            : basis == 2
+            ? "Look at the statistics first: they changed between the compiles (compare the last-update dates in both plans), so the newer plan may simply reflect the new statistics. Forcing the historically faster plan is the usual fix for a plan that flipped after a statistics update; confirm it on one slow call first, because the compiled parameter values also differ."
+            : basis == 0
+            ? "The compiled parameter values and statistics dates of the two plans could not be compared, so check them in both plans first. If only the compiled values differ, forcing the cheaper plan can make the slow calls slower."
             : "The engine attaches a ready-to-run force statement for the historically faster plan — forcing it stops the bleeding immediately. Then address WHY the worse plan got chosen — usually stale statistics or a parameter-sensitivity swing — so you are not relying on a forced plan indefinitely.";
+        /* The failing force is still the first thing to clear when parameter sensitivity fired too (#5630). */
+        if (paramSensitive && forceFailing)
+            rem += " A forced plan is also failing to apply, so clear the broken force (or fix why it fails) — it is not taking effect, and the plan was likely evicted or invalidated.";
+        if (unverified is > 0)
+            rem += $" {Plural(unverified.Value, "reported query")} could not be compared (a stored plan or the statement text was unavailable), so check each one's compiled parameter values and statistics dates before forcing.";
 
         return fallback with
         {
-            Headline = $"A query regressed to {factor.Value:0.#}× its best plan's cost — a plan choice got worse",
+            Headline = basis == 1 && !paramSensitive
+                ? $"A query regressed to {factor.Value:0.#}× its best plan's cost — a plan choice got worse"
+                : $"A query regressed to {factor.Value:0.#}× its best plan's cost",
             Investigation = inv.ToString(),
             Remediation = rem
         };
@@ -1834,11 +1880,7 @@ public static class FactAdvice
 
         if ((FactMeta(facts, key, "baseline_zero_history") ?? 0) >= 1)
         {
-            var days = FactMeta(facts, key, "baseline_distinct_days");
-            var restsOn = samples is > 0
-                ? $"{samples.Value:N0} baseline sample{(samples.Value == 1 ? "" : "s")}" +
-                  (days is > 0 ? $" across {days.Value:N0} distinct day{(days.Value == 1 ? "" : "s")}" : string.Empty)
-                : "this server's hour-of-week baseline";
+            var restsOn = ZeroHistoryRestsOn(samples, FactMeta(facts, key, "baseline_distinct_days"));
             return fallback with
             {
                 Headline = $"{noun} reached {fmt(observed.Value)} — against a month in which this hour saw none",
@@ -1879,9 +1921,32 @@ public static class FactAdvice
     }
 
     /// <summary>
+    /// The clause every zero-history shape rests its claim on: the baseline's sample count and the distinct
+    /// days behind it, or the plain "this server's hour-of-week baseline" when the fact carries no sample
+    /// count. One spelling for <see cref="ComposeAnomaly"/>, <see cref="ComposeAnomalyRatio"/> and the
+    /// PostgreSQL-target composers in <c>PgTargetAdvice</c> (#4731), so no two of them can word the same
+    /// measurement two ways. <paramref name="provider"/> is the number format: null keeps the current culture
+    /// this class has always used, and the PostgreSQL composers pass the invariant culture their other figures
+    /// are written in.
+    /// </summary>
+    internal static string ZeroHistoryRestsOn(double? samples, double? days, IFormatProvider? provider = null) =>
+        samples is > 0
+            ? $"{samples.Value.ToString("N0", provider)} baseline sample{(samples.Value == 1 ? "" : "s")}" +
+              (days is > 0 ? $" across {days.Value.ToString("N0", provider)} distinct day{(days.Value == 1 ? "" : "s")}" : string.Empty)
+            : "this server's hour-of-week baseline";
+
+    /// <summary>
     /// Ratio-anomaly composed (BLOCKING / DEADLOCK spike): states the event count this window and how
     /// many times the hour-of-week baseline rate it represents. Falls back to the static block when
     /// the count/ratio metadata is absent.
+    /// <para>
+    /// #4731: a <c>baseline_zero_history</c> fact gets the gate families' third shape (see
+    /// <see cref="ComposeAnomaly"/>), checked BEFORE <c>is_new</c>. A zero-history bucket is never trustworthy,
+    /// so the detector stamps it <c>is_new = 1</c> as well, and read in the old order it was worded "first
+    /// occurrence, no baseline yet" — the words for a baseline the engine has not built, said about a month it
+    /// measured as empty. The zero-history shape prints no multiple: <c>ratio</c> on such a fact is the
+    /// first-occurrence sentinel, and any multiple of a zero rate would be infinite.
+    /// </para>
     /// </summary>
     private static AdviceBlock ComposeAnomalyRatio(IReadOnlyDictionary<string, Fact> facts, string key, string noun)
     {
@@ -1890,6 +1955,28 @@ public static class FactAdvice
         var ratio = FactMeta(facts, key, "ratio");
         if (current is null || ratio is null)
             return fallback;
+
+        if ((FactMeta(facts, key, "baseline_zero_history") ?? 0) >= 1)
+        {
+            var restsOn = ZeroHistoryRestsOn(FactMeta(facts, key, "baseline_samples"), FactMeta(facts, key, "baseline_distinct_days"));
+            var invZero =
+                $"{Plural(current.Value, noun)} this window. This server's baseline for this hour-of-week is not thin — " +
+                $"it is a measured ZERO: {restsOn}, not one of them above zero. That makes this an extremity rather than " +
+                "a multiple of a normal rate: the count went from never-happens to this, and a rate that is zero has no " +
+                "multiple to print. Check whether it lines up with a workload change, a deploy, or a one-off job before " +
+                "treating it as chronic.";
+            var remZero =
+                "This is the first time this hour has seen it at all, which makes the change itself the lead: find what " +
+                "changed. If it was a one-time event — a report run, a backfill, a deploy — awareness is enough, but a count " +
+                "that was reliably zero and now is not will usually recur; if it recurs or sustains, it will cross the standard " +
+                $"{noun} threshold and surface as a first-class finding with its chain or graph detail on a later window; treat it then.";
+            return fallback with
+            {
+                Headline = $"{Plural(current.Value, noun)} this window — against a month in which this hour saw none",
+                Investigation = invZero,
+                Remediation = remZero
+            };
+        }
 
         // is_new = the baseline was too thin to trust a ratio (the detector fell back to the absolute
         // count). Render it as a first occurrence — never the dishonest "spiked to 100×" the sentinel
@@ -1954,10 +2041,15 @@ public static class FactAdvice
 
         // Top contributors: metadata keys "contrib_<TYPE>" → value = the type's total wait ms; name
         // them in descending order.
+        // A contributor the firing young-baseline bar left out (bar_excluded_<TYPE>) is ranked after the ones that counted
+        // and labelled; with no marker the order and text are unchanged.
         var contributors = f.Metadata
             .Where(kvp => kvp.Key.StartsWith("contrib_", StringComparison.Ordinal))
-            .OrderByDescending(kvp => kvp.Value)
-            .Select(kvp => kvp.Key.Substring("contrib_".Length))
+            .Select(kvp => (Type: kvp.Key.Substring("contrib_".Length), kvp.Value))
+            .Select(c => (c.Type, c.Value, Excluded: PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.IsBarExcluded(f.Metadata, c.Type)))
+            .OrderBy(c => c.Excluded)
+            .ThenByDescending(c => c.Value)
+            .Select(c => c.Excluded ? c.Type + " (not counted toward the threshold on Azure SQL Database)" : c.Type)
             .ToList();
         var topList = contributors.Count == 0
             ? "the collected wait types"
@@ -2632,7 +2724,7 @@ public static class FactAdvice
             Investigation:
                 "Open the CPU tab to see the SQL vs. other-process split over the analysis window — that confirms SQL is the consumer rather than antivirus, a runaway agent job, or another tenant on the VM. The top CPU-consuming queries for the window are attached, ranked by total CPU. SOS_SCHEDULER_YIELD co-elevation on the Wait Stats tab means schedulers are saturated; a CPU spike means the load is bursty rather than steady.",
             Remediation:
-                "Tune the attached top queries — almost always cheaper than buying cores. If parameter sensitivity or a plan regression fired alongside this, they point at the specific cause: a plan cached for one parameter value reused for a worse one, or a plan worse than the same query used to run. For a plan regression, force the historically faster plan as a fast fix while you address why the worse one was chosen.");
+                "Tune the attached top queries — almost always cheaper than buying cores. If parameter sensitivity or a plan regression fired alongside this, they point at the specific cause: a plan cached for one parameter value reused for a worse one, or a plan worse than the same query used to run. If parameter sensitivity fired, do NOT force a plan: it locks in the wrong shape for the other parameter values, so use OPTION (RECOMPILE) on the affected statement or branch the procedure by parameter. For a plan regression without it, force the historically faster plan as a fast fix while you address why the worse one was chosen.");
 
         t["CPU_SPIKE"] = new AdviceBlock(
             Headline:
@@ -2640,7 +2732,7 @@ public static class FactAdvice
             Investigation:
                 "Spikes differ from steady saturation: the box has headroom most of the time but something briefly burns it all. The exact peak time and the sessions active around it are attached. Open the CPU tab and zoom to that timestamp, then cross-check the Wait Stats tab for what waits dominated. A co-fired plan regression, parameter sensitivity, or CXPACKET points at the cause.",
             Remediation:
-                "If a plan regression co-fired, force the historically faster plan as the fast fix. If parameter sensitivity co-fired, do NOT force a plan — that locks in the wrong plan for the other parameter values; use OPTION (RECOMPILE) on the affected statement, or branch the procedure by parameter value. For an ad-hoc reporting spike matching neither, Resource Governor or moving the report off-peak is the durable fix.");
+                "If parameter sensitivity co-fired, do NOT force a plan — that locks in the wrong plan for the other parameter values; use OPTION (RECOMPILE) on the affected statement, or branch the procedure by parameter value. If a plan regression co-fired without it, force the historically faster plan as the fast fix. For an ad-hoc reporting spike matching neither, Resource Governor or moving the report off-peak is the durable fix.");
 
         t["RUNNABLE_TASKS"] = new AdviceBlock(
             Headline:

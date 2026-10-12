@@ -36,8 +36,13 @@ public sealed class ViewerWaitStatsSqlTests
         Assert.Contains("WHERE server_id = $1", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
+        /* #4884: the deltas sum per stored name first, then the spellings merge on rtrim, once per group. */
+        Assert.Contains("SUM(delta_wait_time_ms) AS total_delta", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY wait_type", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY SUM(delta_wait_time_ms) DESC", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
+        Assert.Contains(") AS per_spelling", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
+        Assert.Contains("rtrim(wait_type) AS wait_type", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY rtrim(wait_type)", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY SUM(total_delta) DESC", ViewerDataService.DistinctWaitTypesSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -58,7 +63,7 @@ public sealed class ViewerWaitStatsSqlTests
         /* #3540: the STORED interval first — 0 (the calculator's unknowable marker) mapped to NULL — and the
            per-type LAG window (the truncate-then-diff epoch idiom proven value-identical between DuckDB and
            Postgres) only for pre-V127 rows that never recorded one. */
-        ViewerLatchSpinlockSqlTests.AssertStoredIntervalIdiom(sql, "wait_type");
+        ViewerLatchSpinlockSqlTests.AssertStoredIntervalIdiom(sql, "rtrim(wait_type)");
         /* #4234: bucketed — a bucket's rate is its summed rated wait over its summed rated seconds (the
            "rated" CTE), not a per-row division. Neither rate CASE carries an ELSE, so an all-unrated bucket
            sums to NULL/NULL = NULL and the reader drops the row, same as the pre-#4234 per-row read did. */
@@ -75,8 +80,8 @@ public sealed class ViewerWaitStatsSqlTests
     }
 
     [Theory]
-    [InlineData(1, "$4", "IN ($4)")]
-    [InlineData(3, "$6", "IN ($4, $5, $6)")]
+    [InlineData(1, "$4", "IN ($4, $4 || ' ')")]
+    [InlineData(3, "$6", "IN ($4, $4 || ' ', $5, $5 || ' ', $6, $6 || ' ')")]
     public void WaitTrendsSql_BuildsDynamicInListFromFour(int count, string highestParam, string inClause)
     {
         var sql = ViewerDataService.WaitTrendsSql(count);

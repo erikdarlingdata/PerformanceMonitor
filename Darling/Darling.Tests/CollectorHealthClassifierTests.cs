@@ -10,6 +10,7 @@ using System;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -161,7 +162,8 @@ public sealed class CollectorHealthClassifierTests
     {
         Assert.Equal(expected, CollectorHealthClassifier.Classify(
             totalRuns, successCount, errorCount, permissionDeniedCount, extensionMissingCount, abandonedCount,
-            hoursSinceLastSuccess, hoursSinceLastRun, frequencyMinutes));
+            hoursSinceLastSuccess, hoursSinceLastRun, frequencyMinutes,
+            latestRunNote: null, trailingSuccessRuns: 0)); // 0: the table's rows are counts only, no run history
     }
 
     /// <summary>
@@ -176,7 +178,8 @@ public sealed class CollectorHealthClassifierTests
     {
         Assert.Equal(CollectorHealthClassifier.Stopped, CollectorHealthClassifier.Classify(
             totalRuns: 882, successCount: 882, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
-            abandonedCount: 0, hoursSinceLastSuccess: 120, hoursSinceLastRun: 120, frequencyMinutes: 5));
+            abandonedCount: 0, hoursSinceLastSuccess: 120, hoursSinceLastRun: 120, frequencyMinutes: 5,
+            latestRunNote: null, trailingSuccessRuns: 0)); // 0: a count-only fixture, no run history
     }
 
 
@@ -195,7 +198,7 @@ public sealed class CollectorHealthClassifierTests
     [InlineData("DarlingDataReader.CollectionHealthSql")]
     [InlineData("DarlingFleetReader.FleetCollectionHealthSql")]
     [InlineData("ViewerDataService.CollectionHealthSql")]
-    [InlineData("ViewerDataService.FleetCollectionHealthSql")]
+    [InlineData("ViewerDataService.FleetCollectionHealthByServerSql")]
     public void EveryBandingRead_SelectsTheAbandonedCount_SoNoSurfaceBandsOnADefaultedZero(string which)
     {
         var sql = which switch
@@ -203,7 +206,7 @@ public sealed class CollectorHealthClassifierTests
             "DarlingDataReader.CollectionHealthSql" => DarlingDataReader.CollectionHealthSql,
             "DarlingFleetReader.FleetCollectionHealthSql" => DarlingFleetReader.FleetCollectionHealthSql,
             "ViewerDataService.CollectionHealthSql" => ViewerDataService.CollectionHealthSql,
-            "ViewerDataService.FleetCollectionHealthSql" => ViewerDataService.FleetCollectionHealthSql,
+            "ViewerDataService.FleetCollectionHealthByServerSql" => ViewerDataService.FleetCollectionHealthByServerSql,
             _ => throw new ArgumentOutOfRangeException(nameof(which), which, "unmapped banding read"),
         };
 
@@ -239,7 +242,7 @@ public sealed class CollectorHealthClassifierTests
     [InlineData("DarlingDataReader.CollectionHealthSql")]
     [InlineData("DarlingFleetReader.FleetCollectionHealthSql")]
     [InlineData("ViewerDataService.CollectionHealthSql")]
-    [InlineData("ViewerDataService.FleetCollectionHealthSql")]
+    [InlineData("ViewerDataService.FleetCollectionHealthByServerSql")]
     public void EveryBandingRead_SelectsTheExtensionMissingCount_SoNoSurfaceBandsOnADefaultedZero(string which)
     {
         var sql = which switch
@@ -247,7 +250,7 @@ public sealed class CollectorHealthClassifierTests
             "DarlingDataReader.CollectionHealthSql" => DarlingDataReader.CollectionHealthSql,
             "DarlingFleetReader.FleetCollectionHealthSql" => DarlingFleetReader.FleetCollectionHealthSql,
             "ViewerDataService.CollectionHealthSql" => ViewerDataService.CollectionHealthSql,
-            "ViewerDataService.FleetCollectionHealthSql" => ViewerDataService.FleetCollectionHealthSql,
+            "ViewerDataService.FleetCollectionHealthByServerSql" => ViewerDataService.FleetCollectionHealthByServerSql,
             _ => throw new ArgumentOutOfRangeException(nameof(which), which, "unmapped banding read"),
         };
 
@@ -480,7 +483,8 @@ public sealed class CollectorHealthClassifierTests
         CollectorHealthClassifier.Classify(
             totalRuns: 100, successCount: 100, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
             abandonedCount: 0, hoursSinceLastSuccess: hoursSinceLastSuccess, hoursSinceLastRun: hoursSinceLastRun,
-            frequencyMinutes: 5, latestRunNote: note);
+            frequencyMinutes: 5, latestRunNote: note,
+            trailingSuccessRuns: 0); // 0: the note is the input under test, not the newest runs
 
     /// <summary>The run still records SUCCESS, so the counts read clean; the newest run's note is the only
     /// record of the loss. Half or more of the attempted databases failing bands Warning, fewer stays Healthy.</summary>
@@ -561,17 +565,18 @@ public sealed class CollectorHealthClassifierTests
     }
 
     /// <summary>Every read that builds a banding row selects the newest run's note, at the ordinal its mapper
-    /// reads; the viewer's fleet read gets it from plain aggregates (no window function), and the sentence its
+    /// reads (the per-server reads from the newest-run lookup, #4955, the status gate on the row it returns);
+    /// the viewer's fleet read gets it from plain aggregates (no window function), and the sentence its
     /// LIKE looks for is the one the writer writes.</summary>
     [Fact]
     public void EveryDarlingHealthRead_ProjectsTheNewestRunsNote()
     {
-        Assert.Contains("recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note", DarlingDataReader.CollectionHealthSql, StringComparison.Ordinal);
-        Assert.Contains("AS latest_run_note", ViewerDataService.CollectionHealthSql, StringComparison.Ordinal);
-        Assert.Contains("AS recency_rank", ViewerDataService.CollectionHealthSql, StringComparison.Ordinal);
-        Assert.Contains("AS latest_run_note", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ROW_NUMBER()", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
-        Assert.Contains($"'%{PartialDatabaseFailureNote.Marker}%'", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note", DarlingDataReader.CollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note", ViewerDataService.CollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains("AS latest_run_note", ViewerDataService.FleetCollectionHealthByServerSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROW_NUMBER()", ViewerDataService.FleetCollectionHealthByServerSql, StringComparison.Ordinal);
+        Assert.Contains(CollectionHealthRollupSupport.LatestRunNoteRawSql, ViewerDataService.FleetCollectionHealthByServerSql, StringComparison.Ordinal);
+        Assert.Contains($"'%{PartialDatabaseFailureNote.Marker}%'", CollectionHealthRollupSupport.LatestRunNoteRawSql, StringComparison.Ordinal);
         Assert.Contains(PartialDatabaseFailureNote.Marker, PartialDatabaseFailureNote.Format, StringComparison.Ordinal);
     }
 

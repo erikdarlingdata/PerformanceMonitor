@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitorLite.Services;
@@ -190,6 +191,9 @@ public class EmailAlertService : IFindingAlertSender
     /// </summary>
     public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
     {
+        /* #5320 (part of #4348): the statement filter, before anything is composed, sent or written, so the
+           digest row, the channels and the history row all carry the filtered context and prose. */
+        alert = AlertStatementFilter.Apply(alert);
         var serverId = int.TryParse(alert.ServerId, out var sid) ? sid : 0;
 
         if (alert.Route == FindingRoute.Digest)
@@ -231,6 +235,9 @@ public class EmailAlertService : IFindingAlertSender
             return null;
         try
         {
+        /* #5320 (part of #4348): the statement filter, before anything is composed, sent or written, so the
+           digest row, the channels and the history row all carry the filtered context and prose. */
+            named = AlertStatementFilter.Apply(named);
             var (serverName, currentValue, context) = FindingSummary.Compose(named);
             var result = await _core.TrySendAsync(
                 FindingSummary.MetricName, serverName, currentValue, named.Count.ToString(),

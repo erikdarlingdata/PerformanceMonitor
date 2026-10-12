@@ -237,7 +237,9 @@ public sealed class ViewerPostgresTabsTests
 
         foreach (var file in ViewerFiles("ViewerServerTab"))
         {
-            if (Path.GetFileName(file).Equals("ViewerServerTab.Postgres.cs", StringComparison.OrdinalIgnoreCase))
+            /* The PostgreSQL tab's own partial: its data-start probe helper (#4966) is a PostgreSQL read by design. */
+            if (Path.GetFileName(file).Equals("ViewerServerTab.Postgres.cs", StringComparison.OrdinalIgnoreCase)
+                || Path.GetFileName(file).Equals("ViewerServerTab.PostgresDataStart.cs", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }

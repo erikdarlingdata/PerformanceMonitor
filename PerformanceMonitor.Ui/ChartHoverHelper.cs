@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Windows;
@@ -25,10 +26,12 @@ namespace PerformanceMonitor.Ui;
 internal sealed class ChartHoverHelper
 {
     /// <summary>A registered series: the scatter, its full (untruncated) label, and the unmutated
-    /// identity color captured at registration (see <see cref="Add"/>).</summary>
+    /// identity color captured at registration (see <see cref="Add"/>). <paramref name="PointDetails"/> is an optional
+    /// extra hover line per point, keyed by the point's X (see <see cref="Add"/>).</summary>
     internal readonly record struct SeriesEntry(
         ScottPlot.Plottables.Scatter Scatter, string Label, ScottPlot.Color Identity,
-        ScottPlot.Color OrigLineColor, float OrigLineWidth, float OrigMarkerSize, bool OrigFillY);
+        ScottPlot.Color OrigLineColor, float OrigLineWidth, float OrigMarkerSize, bool OrigFillY,
+        IReadOnlyDictionary<double, string>? PointDetails = null);
 
     private readonly ScottPlot.WPF.WpfPlot _chart;
     private readonly List<SeriesEntry> _series = new();
@@ -58,11 +61,37 @@ internal sealed class ChartHoverHelper
     /// disappear when the chart is collected.</summary>
     private static readonly ConditionalWeakTable<ScottPlot.WPF.WpfPlot, ChartHoverHelper> _registry = new();
 
-    public ChartHoverHelper(ScottPlot.WPF.WpfPlot chart, string unit, bool enableClickIsolate = true)
+    /// <summary>
+    /// The display zone when the chart's X is the UTC instant (#4766), else <c>null</c>: X is then the server-time
+    /// value the app plotted and the text goes through <see cref="UiTimeContext.ConvertForDisplay"/> as before.
+    /// </summary>
+    private readonly Func<TimeZoneInfo>? _displayZone;
+
+    /// <summary>
+    /// Says whether a plotted X is one whose stored wall time names two instants (#4766): the server's repeated
+    /// hour, where the instant the X sits at is only the first of the two and cannot say which pass the data was.
+    /// For such an X the hover words the time without the repeated-hour UTC offset, which would name a pass the data
+    /// never recorded. An X whose stored wall time happens once is an exact instant and keeps its offset. The
+    /// argument is the plotted X as <see cref="DateTime.FromOADate"/> reads it. Only used with a display zone;
+    /// <see cref="Clear"/> sets it back to <c>null</c>, so a predicate never outlives the data it was built for.
+    /// </summary>
+    public Func<DateTime, bool>? PlainTimeAt { get; set; }
+
+    /// <param name="chart">The chart to attach to.</param>
+    /// <param name="unit">The unit printed after a value.</param>
+    /// <param name="enableClickIsolate">Whether a click isolates the series under the cursor.</param>
+    /// <param name="displayZone">
+    /// Set when the chart plots the UTC instant as X: the hover time is then that instant in the zone, with the
+    /// UTC offset added when the wall time is ambiguous (<see cref="DisplayZone.Format"/>). Read on every hover,
+    /// so a display-mode switch shows on the next move. Leave it out and the hover behaves exactly as it always has.
+    /// </param>
+    public ChartHoverHelper(ScottPlot.WPF.WpfPlot chart, string unit, bool enableClickIsolate = true,
+        Func<TimeZoneInfo>? displayZone = null)
     {
         _chart = chart;
         _unit = unit;
         _enableClickIsolate = enableClickIsolate;
+        _displayZone = displayZone;
 
         _text = new TextBlock
         {
@@ -150,9 +179,20 @@ internal sealed class ChartHoverHelper
         _isolatedLabel = null;
         _series.Clear();
         _barPlots.Clear();
+        PlainTimeAt = null;
     }
 
-    public void Add(ScottPlot.Plottables.Scatter scatter, string label) =>
+    /// <param name="scatter">The series to hover.</param>
+    /// <param name="label">The series' name, the popup's first line.</param>
+    /// <param name="pointDetails">
+    /// Optional, keyed by the X a point of <paramref name="scatter"/> is drawn at (#4989): a fourth popup line for the nearest
+    /// point, for a series whose point stands for more than its value (a bucket's maximum drawn over the runs behind it).
+    /// The key is the point's X and not its position in the scatter, because the scatter can hold points the caller never
+    /// gave it (<c>Add.TimeSeries</c> inserts one into every gap), which would put every position after the first gap one
+    /// point out. A point with no entry, such as an inserted one, shows no fourth line. Build the keys from the same X
+    /// values the scatter was built from, so the lookup is exact. Left out, the popup is the three lines it always was.
+    /// </param>
+    public void Add(ScottPlot.Plottables.Scatter scatter, string label, IReadOnlyDictionary<double, string>? pointDetails = null) =>
         /* Capture the IDENTITY color from the marker fill, NOT scatter.Color: Add runs after
            ChartStyle.StyleScatter, which has already mutated the line color to identity.WithAlpha(215)
            but never touches the marker fill — so MarkerStyle.FillColor still holds the pure identity
@@ -161,7 +201,7 @@ internal sealed class ChartHoverHelper
            no fill, and never call StyleScatter) as well as the StyleScatter'd fill charts. */
         _series.Add(new SeriesEntry(
             scatter, label, scatter.MarkerStyle.FillColor,
-            scatter.LineColor, scatter.LineWidth, scatter.MarkerSize, scatter.FillY));
+            scatter.LineColor, scatter.LineWidth, scatter.MarkerSize, scatter.FillY, pointDetails));
 
     public void Add(ScottPlot.Plottables.BarPlot barPlot, string label) =>
         _barPlots.Add((barPlot, label));
@@ -242,6 +282,66 @@ internal sealed class ChartHoverHelper
         }
     }
 
+    /// <summary>
+    /// The popup's text for the mouse at <paramref name="pixel"/> (the chart's own pixel space), or <c>null</c> when no point
+    /// is near enough to say anything. The one place the hover decides what it shows, <c>internal</c> so the tests ask it
+    /// what a hover says without a mouse.
+    /// </summary>
+    internal string? HoverTextAt(ScottPlot.Pixel pixel)
+    {
+        var mouseCoords = _chart.Plot.GetCoordinates(pixel);
+
+        /* Use X-axis (time) proximity as the primary filter, Y-axis distance
+           as tiebreaker. This makes tooltips appear reliably when hovering at
+           any Y position near a data point's time — standard for time-series. */
+        double bestYDistance = double.MaxValue;
+        ScottPlot.DataPoint bestPoint = default;
+        string bestLabel = "";
+        string? bestDetail = null;
+        bool found = false;
+
+        foreach (var entry in _series)
+        {
+            var nearest = entry.Scatter.Data.GetNearest(mouseCoords, _chart.Plot.LastRender);
+            if (!nearest.IsReal) continue;
+
+            var nearestPixel = _chart.Plot.GetPixel(
+                new ScottPlot.Coordinates(nearest.X, nearest.Y));
+            double dx = Math.Abs(nearestPixel.X - pixel.X);
+            double dy = Math.Abs(nearestPixel.Y - pixel.Y);
+
+            /* Must be within 80px horizontally (time axis). Among matches,
+               pick the series closest in Y (nearest line to cursor). */
+            if (dx < 80 && dy < bestYDistance)
+            {
+                bestYDistance = dy;
+                bestPoint = nearest;
+                bestLabel = entry.Label;
+                bestDetail = entry.PointDetails is { } details && details.TryGetValue(nearest.X, out var detail)
+                    ? detail
+                    : null;
+                found = true;
+            }
+        }
+
+        /* A bar that beats the series' nearest point (it lowers the Y distance) carries no detail line. */
+        var distanceBeforeBars = bestYDistance;
+        FindNearestBar(pixel, ref bestYDistance, ref bestPoint, ref bestLabel, ref found);
+        if (bestYDistance < distanceBeforeBars)
+        {
+            bestDetail = null;
+        }
+
+        if (!found) return null;
+
+        var plottedX = DateTime.FromOADate(bestPoint.X);
+        var time = FormatHoverTime(plottedX, _displayZone, PlainTimeAt?.Invoke(plottedX) == true);
+        string valueFormatted = (bestPoint.Y == Math.Floor(bestPoint.Y))
+            ? bestPoint.Y.ToString("N0")
+            : bestPoint.Y.ToString("N1");
+        return HoverText(bestLabel, valueFormatted, _unit, time, bestDetail);
+    }
+
     private void OnMouseMove(object sender, MouseEventArgs e)
     {
         if (_series.Count == 0 && _barPlots.Count == 0) return;
@@ -256,46 +356,11 @@ internal sealed class ChartHoverHelper
             var pixel = new ScottPlot.Pixel(
                 (float)(pos.X * dpi.DpiScaleX),
                 (float)(pos.Y * dpi.DpiScaleY));
-            var mouseCoords = _chart.Plot.GetCoordinates(pixel);
 
-            /* Use X-axis (time) proximity as the primary filter, Y-axis distance
-               as tiebreaker. This makes tooltips appear reliably when hovering at
-               any Y position near a data point's time — standard for time-series. */
-            double bestYDistance = double.MaxValue;
-            ScottPlot.DataPoint bestPoint = default;
-            string bestLabel = "";
-            bool found = false;
-
-            foreach (var entry in _series)
+            var text = HoverTextAt(pixel);
+            if (text is not null)
             {
-                var nearest = entry.Scatter.Data.GetNearest(mouseCoords, _chart.Plot.LastRender);
-                if (!nearest.IsReal) continue;
-
-                var nearestPixel = _chart.Plot.GetPixel(
-                    new ScottPlot.Coordinates(nearest.X, nearest.Y));
-                double dx = Math.Abs(nearestPixel.X - pixel.X);
-                double dy = Math.Abs(nearestPixel.Y - pixel.Y);
-
-                /* Must be within 80px horizontally (time axis). Among matches,
-                   pick the series closest in Y (nearest line to cursor). */
-                if (dx < 80 && dy < bestYDistance)
-                {
-                    bestYDistance = dy;
-                    bestPoint = nearest;
-                    bestLabel = entry.Label;
-                    found = true;
-                }
-            }
-
-            FindNearestBar(pixel, ref bestYDistance, ref bestPoint, ref bestLabel, ref found);
-
-            if (found)
-            {
-                var time = UiTimeContext.ConvertForDisplay(DateTime.FromOADate(bestPoint.X));
-                string valueFormatted = (bestPoint.Y == Math.Floor(bestPoint.Y))
-                    ? bestPoint.Y.ToString("N0")
-                    : bestPoint.Y.ToString("N1");
-                _text.Text = $"{bestLabel}\n{valueFormatted} {_unit}\n{time:HH:mm:ss}";
+                _text.Text = text;
                 _popup.HorizontalOffset = pos.X + 15;
                 _popup.VerticalOffset = pos.Y + 15;
                 /* Updating the offsets above moves an already-open popup, so only toggle IsOpen
@@ -327,6 +392,29 @@ internal sealed class ChartHoverHelper
     {
         _popup.IsOpen = false;
     }
+
+    /// <summary>
+    /// The popup's text: the series' <paramref name="label"/>, the value with its <paramref name="unit"/>, the time and,
+    /// when the nearest point has one (<see cref="Add(ScottPlot.Plottables.Scatter, string, IReadOnlyDictionary{double, string}?)"/>),
+    /// its <paramref name="detail"/> line (#4989). Without a detail it is the three lines it always was.
+    /// </summary>
+    internal static string HoverText(string label, string valueFormatted, string unit, string time, string? detail = null) =>
+        detail is null ? $"{label}\n{valueFormatted} {unit}\n{time}" : $"{label}\n{valueFormatted} {unit}\n{time}\n{detail}";
+
+    /// <summary>
+    /// The time line of a hover for the plotted X <paramref name="plottedX"/>. With no zone, X is the app's
+    /// server-time value and the line is the display-mode conversion of it, as it has always been. With a zone, X
+    /// is the UTC instant: the line is that instant in the zone, and the zone's offset follows it when the wall
+    /// time happens twice. With a zone and <paramref name="plain"/> (the X's stored wall time names two instants,
+    /// <see cref="PlainTimeAt"/>) the line is the same wall time without that offset; without a zone
+    /// <paramref name="plain"/> changes nothing.
+    /// </summary>
+    internal static string FormatHoverTime(DateTime plottedX, Func<TimeZoneInfo>? displayZone, bool plain = false)
+        => displayZone is null
+            ? UiTimeContext.ConvertForDisplay(plottedX).ToString("HH:mm:ss")
+            : plain
+                ? DisplayZone.ToDisplay(plottedX, displayZone()).ToString("HH:mm:ss", CultureInfo.InvariantCulture)
+                : DisplayZone.Format(plottedX, displayZone(), "HH:mm:ss");
 
     // ── Click-to-isolate ───────────────────────────────────────────────────────────────────────
 

@@ -40,6 +40,8 @@ namespace PerformanceMonitorLite.Tests;
 /// record of why it existed stays below so the next family that cannot be seeded has the idiom to
 /// follow.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class DeltaFamilySeedingCensusTests
 {
     private const string LiteSeeder = "Lite/Services/DeltaCalculator.cs";
@@ -273,7 +275,7 @@ public sealed class DeltaFamilySeedingCensusTests
     public void BothHosts_ClearTheDeltaCacheWhenAServerLeavesMonitoring()
     {
         var lite = ReadRepoFile("Lite/MainWindow.xaml.cs");
-        var forget = lite[lite.IndexOf("private async Task ForgetServerRuntimeStateAsync(", StringComparison.Ordinal)..];
+        var forget = lite[lite.IndexOf("private async Task<bool> RemoveServerAsync(", StringComparison.Ordinal)..];
         forget = forget[..forget.IndexOf("\n    }", StringComparison.Ordinal)];
         Assert.Contains("_collectorService?.DeltaCalculator?.ClearServer(removedServerId);", forget, StringComparison.Ordinal);
 

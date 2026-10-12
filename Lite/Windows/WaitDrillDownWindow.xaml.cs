@@ -29,6 +29,7 @@ public partial class WaitDrillDownWindow : Window
     private readonly int _serverId;
     private readonly string _waitType;
     private readonly int _hoursBack;
+    private readonly TimeZoneInfo _displayZone;
     private readonly DateTime? _fromDate;
     private readonly DateTime? _toDate;
     private readonly string? _connectionString;
@@ -39,11 +40,16 @@ public partial class WaitDrillDownWindow : Window
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
 
+    /// <param name="displayZone">#4766: the zone the opening server tab words its times in (its own clock or the
+    /// display mode's zone), so the range line names the same wall times the tab does. It is required, so no caller
+    /// can leave the window on whichever server's clock happens to be the active one.</param>
     public WaitDrillDownWindow(
         LocalDataService dataService,
         int serverId,
+        string serverName,
         string waitType,
         int hoursBack,
+        TimeZoneInfo displayZone,
         DateTime? fromDate = null,
         DateTime? toDate = null,
         string? connectionString = null)
@@ -53,6 +59,7 @@ public partial class WaitDrillDownWindow : Window
         _serverId = serverId;
         _waitType = waitType;
         _hoursBack = hoursBack;
+        _displayZone = displayZone;
         _fromDate = fromDate;
         _toDate = toDate;
         _connectionString = connectionString;
@@ -60,11 +67,12 @@ public partial class WaitDrillDownWindow : Window
         _planActions = new PlanNavigationController(
             this,
             async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
-                this, xml, label, qt, await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId)),
-            (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
+                this, xml, label, qt, await System.Threading.Tasks.Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId))),
+            /* #4348: the re-run's plan comes from the monitored server, not the collected rows, so it is judged here. */
+            async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
-                productName: "SQL Server Performance Monitor Lite"),
-            "the monitored server");
+                productName: "SQL Server Performance Monitor Lite")),
+            serverName);
 
         _filterManager = new DataGridFilterManager<QuerySnapshotRow>(ResultsDataGrid);
 
@@ -104,14 +112,16 @@ public partial class WaitDrillDownWindow : Window
         }
         catch (Exception ex)
         {
-            SummaryText.Text = $"Error: {ex.Message}";
+            SummaryText.Text = $"Error: {DuckDbMemoryLimitSetting.Describe(ex)}";
         }
     }
 
+    /* #5457: the three loads below read on the pool, not the dispatcher: each read takes the store read lock, which an archive or
+       compaction pass can hold, and the window would stop pumping input for as long. */
     private async System.Threading.Tasks.Task LoadDirectDataAsync(WaitClassification classification)
     {
-        var data = await _dataService.GetQuerySnapshotsByWaitTypeAsync(
-            _serverId, _waitType, _hoursBack, _fromDate, _toDate);
+        var data = await System.Threading.Tasks.Task.Run(() => _dataService.GetQuerySnapshotsByWaitTypeAsync(
+            _serverId, _waitType, _hoursBack, _fromDate, _toDate));
 
         if (data.Count == 0)
         {
@@ -124,7 +134,7 @@ public partial class WaitDrillDownWindow : Window
 
         _filterManager!.UpdateData(data);
 
-        var timeRange = GetTimeRangeDescription(data);
+        var timeRange = GetTimeRangeDescription(data, _displayZone);
         var truncated = data.Count >= 500 ? " (limited to 500 rows)" : "";
         SummaryText.Text = $"{data.Count} snapshot(s) | {classification.Description} | {timeRange}{truncated}";
 
@@ -135,8 +145,8 @@ public partial class WaitDrillDownWindow : Window
     private async System.Threading.Tasks.Task LoadCorrelatedDataAsync(WaitClassification classification)
     {
         // Fetch ALL queries in the time range (no wait type filter)
-        var data = await _dataService.GetAllQuerySnapshotsInRangeAsync(
-            _serverId, _hoursBack, _fromDate, _toDate);
+        var data = await System.Threading.Tasks.Task.Run(() => _dataService.GetAllQuerySnapshotsInRangeAsync(
+            _serverId, _hoursBack, _fromDate, _toDate));
 
         if (data.Count == 0)
         {
@@ -147,7 +157,7 @@ public partial class WaitDrillDownWindow : Window
         data = SortByProperty(data, classification.SortProperty);
         _filterManager!.UpdateData(data);
 
-        var timeRange = GetTimeRangeDescription(data);
+        var timeRange = GetTimeRangeDescription(data, _displayZone);
         var truncated = data.Count >= 500 ? " (limited to 500 rows)" : "";
         SummaryText.Text = $"{data.Count} snapshot(s) | {classification.Description} | {timeRange}{truncated}";
 
@@ -157,8 +167,8 @@ public partial class WaitDrillDownWindow : Window
     private async System.Threading.Tasks.Task LoadChainDataAsync(WaitClassification classification)
     {
         // Get waiters with the target wait type
-        var waiters = await _dataService.GetQuerySnapshotsByWaitTypeAsync(
-            _serverId, _waitType, _hoursBack, _fromDate, _toDate);
+        var waiters = await System.Threading.Tasks.Task.Run(() => _dataService.GetQuerySnapshotsByWaitTypeAsync(
+            _serverId, _waitType, _hoursBack, _fromDate, _toDate));
 
         if (waiters.Count == 0)
         {
@@ -167,8 +177,8 @@ public partial class WaitDrillDownWindow : Window
         }
 
         // Get all snapshots in range for chain walking
-        var allSnapshots = await _dataService.GetAllQuerySnapshotsInRangeAsync(
-            _serverId, _hoursBack, _fromDate, _toDate);
+        var allSnapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetAllQuerySnapshotsInRangeAsync(
+            _serverId, _hoursBack, _fromDate, _toDate));
 
         // Map to SnapshotInfo for the chain walker
         var waiterInfos = waiters.Select(ToSnapshotInfo).ToList();
@@ -180,7 +190,7 @@ public partial class WaitDrillDownWindow : Window
         {
             // No chain found — fall back to showing the waiters directly
             _filterManager!.UpdateData(waiters);
-            var timeRange = GetTimeRangeDescription(waiters);
+            var timeRange = GetTimeRangeDescription(waiters, _displayZone);
             SummaryText.Text = $"{waiters.Count} snapshot(s) | {classification.Description} | {timeRange} | No blocking chains found, showing waiters";
             return;
         }
@@ -206,7 +216,7 @@ public partial class WaitDrillDownWindow : Window
         {
             // Head blockers not found in snapshots — show waiters instead
             _filterManager!.UpdateData(waiters);
-            var timeRange = GetTimeRangeDescription(waiters);
+            var timeRange = GetTimeRangeDescription(waiters, _displayZone);
             SummaryText.Text = $"{waiters.Count} snapshot(s) | {classification.Description} | {timeRange} | Head blockers not in snapshots, showing waiters";
             return;
         }
@@ -216,7 +226,7 @@ public partial class WaitDrillDownWindow : Window
 
         _filterManager!.UpdateData(headBlockerRows);
 
-        var timeRangeDesc = GetTimeRangeDescription(headBlockerRows);
+        var timeRangeDesc = GetTimeRangeDescription(headBlockerRows, _displayZone);
         SummaryText.Text = $"{headBlockerRows.Count} head blocker(s) from {waiters.Count} waiting session(s) | " +
                            $"{classification.Description} | {timeRangeDesc}";
     }
@@ -353,13 +363,20 @@ public partial class WaitDrillDownWindow : Window
         }
     }
 
-    private static string GetTimeRangeDescription(List<QuerySnapshotRow> data)
+    /// <summary>
+    /// The window's range line (#4766): the earliest and latest collection instant of <paramref name="data"/>, each
+    /// worded as a wall time of <paramref name="zone"/> with <see cref="DisplayZone.Format"/>. Rows at 05:30Z and
+    /// 06:30Z on a US Eastern autumn change day both read 01:30, and the line says which is which.
+    /// </summary>
+    internal static string GetTimeRangeDescription(List<QuerySnapshotRow> data, TimeZoneInfo zone)
     {
         if (data.Count == 0) return "";
         var first = data.Min(r => r.CollectionTime);
         var last = data.Max(r => r.CollectionTime);
-        return $"{ServerTimeHelper.FormatServerTime(first)} to {ServerTimeHelper.FormatServerTime(last)}";
+        return $"{DisplayZone.Format(first, zone, RangeTimeFormat)} to {DisplayZone.Format(last, zone, RangeTimeFormat)}";
     }
+
+    private const string RangeTimeFormat = "yyyy-MM-dd HH:mm:ss";
 
 
     private void OnThemeChanged(string _)
@@ -444,14 +461,12 @@ public partial class WaitDrillDownWindow : Window
     private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
     {
         if ((ResultsDataGrid.CurrentItem ?? ResultsDataGrid.SelectedItem) is not QuerySnapshotRow row) return;
-        /* #4239: fetch before passing estimatedPlanXml on — it feeds ReproScriptBuilder's SET-options
-           extraction (ActualPlanExecutor, #233); a null plan silently loses that fidelity. (This path's
-           confirm dialog is PlanNavigationController's generic one — Lite's only QueryModificationDetector
-           call is ServerTab.Plans.cs's GetActualPlan_Click, unaffected by this window.) */
-        var estimatedPlanXml = await FetchSnapshotPlanAsync(row);
+        /* #4239: the plan is read before the prompt, not passed as null — it feeds ReproScriptBuilder's SET-options
+           extraction (ActualPlanExecutor, #233). #5639: it also feeds the data-modification check; the controller
+           reads it (a stored-plan read, nothing runs) and counts a failed read as no plan, which shows the warning. */
         await _planActions.GetActualPlanAsync(row.QueryText, row.DatabaseName ?? "",
             $"Actual Plan - SPID {row.SessionId}",
-            estimatedPlanXml: estimatedPlanXml,
+            fetchPlanXml: () => FetchSnapshotPlanAsync(row),
             isolationLevel: row.TransactionIsolationLevel);
     }
 

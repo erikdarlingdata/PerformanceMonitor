@@ -61,6 +61,8 @@ namespace Darling.Tests;
 /// And a mislabel on some OTHER tempdb number (a field naming reserved MB as "used") is outside the
 /// property: this pin is about the percentage.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public class TempDbReservedLabelProvenanceTests
 {
     /// <summary>

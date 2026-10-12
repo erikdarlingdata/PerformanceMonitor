@@ -32,6 +32,8 @@ namespace PerformanceMonitorLite.Tests;
 /// HERE, beside Lite's, because the two notes are one sentence on two SKUs and the pin that matters is that
 /// they stay byte-identical (#3653 — Darling's copy was ported one lane after Lite's).</para>
 /// </summary>
+[Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class McpDescriptionTruthPinTests
 {
     [Fact]

@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using PerformanceMonitor.Common;
+
 namespace PerformanceMonitor.Collectors;
 
 /// <summary>
@@ -16,6 +18,9 @@ namespace PerformanceMonitor.Collectors;
 /// with PostgreSQL's own regex engine (the <c>~*</c> operator) everywhere it is used, so a store and a
 /// collector can never drift apart on what counts as sensitive.
 ///
+/// <para>The pattern itself now lives in <see cref="SensitiveStatements"/>; this class keeps the PostgreSQL
+/// helpers that embed it in SQL.</para>
+///
 /// <para><b>Why a PostgreSQL regex, not a .NET one.</b> The pattern uses POSIX ARE syntax
 /// (<c>[[:&lt;:]]</c>/<c>[[:&gt;:]]</c> word boundaries, <c>[[:space:]]</c> classes) that only PostgreSQL's
 /// engine understands, and it has no backslash so it means the same thing under either
@@ -25,37 +30,19 @@ namespace PerformanceMonitor.Collectors;
 /// </summary>
 public static class PgSensitiveStatementFilter
 {
-    /// <summary>What may separate two SQL tokens: whitespace, a block comment or a line comment. Used only by
-    /// <see cref="SensitiveStatementPattern"/>, a blocklist, where reading a comment short can only add matches.
-    /// </summary>
-    private const string TokenGap = "([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)";
-
     /// <summary>
     /// The statements whose text can carry a credential, as a case-insensitive PostgreSQL regular expression:
-    /// any <c>CREATE</c> or <c>ALTER</c> of a role, user, group, subscription or server — withheld by name
-    /// alone, whether or not that particular statement happens to carry a literal, because subscription and
-    /// foreign-server DDL can carry a connection string in options other than a trailing literal — a
-    /// <c>PASSWORD</c> keyword followed by a literal (covers role, user and group DDL's <c>PASSWORD</c>
-    /// clause, and <c>CREATE/ALTER USER MAPPING</c>'s password option, since both always end in the literal),
-    /// a libpq <c>password=</c> or <c>PGPASSWORD=</c> setting (covers a connection string wherever it appears —
-    /// subscription DDL, foreign server DDL, <c>dblink</c>), and a URI's <c>user:secret@</c>, with comments
-    /// allowed wherever the grammar allows whitespace.
-    ///
-    /// <para><b>No backslash, on purpose.</b> <c>[[:&lt;:]]</c>, <c>[[:&gt;:]]</c>, <c>[[:space:]]</c>,
-    /// <c>[*]</c> and <c>[$]</c> spell what a first version wrote with backslash escapes, so the literal means
-    /// the same under either <c>standard_conforming_strings</c> setting. A normalized DML parameter
-    /// (<c>password = $1</c>) is not a hit: it carries no value.</para>
+    /// an alias of the one shared definition, <see cref="SensitiveStatements.Pattern"/> (PostgreSQL's own
+    /// credential forms and the T-SQL ones, #4348). A const alias, not a copy, so the string is the same
+    /// instance everywhere and no second definition can drift.
     /// </summary>
-    public const string SensitiveStatementPattern =
-        "[[:<:]](create|alter)" + TokenGap + "+(role|user|group|subscription|server)[[:>:]]"
-        + "|[[:<:]]password[[:>:]]" + TokenGap + "*(=|to)?" + TokenGap + "*(e?'|u&'|[$][^0-9])"
-        + "|[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]"
-        + "|[a-z][a-z0-9+.-]*://[^[:space:]/@:]+:[^[:space:]/@]+@";
+    public const string SensitiveStatementPattern = SensitiveStatements.Pattern;
 
     /// <summary>What a collector or reader stores/returns in place of a statement <see cref="SensitiveStatementPattern"/>
-    /// names, in place of its text. Fixed, so a reader never has to distinguish "withheld" from "not captured
-    /// yet" by anything other than this literal.</summary>
-    public const string PlaceholderText = "-- statement text withheld (#4348)";
+    /// names, in place of its text: an alias of <see cref="SensitiveStatements.PlaceholderText"/>. Fixed, so a
+    /// reader never has to distinguish "withheld" from "not captured yet" by anything other than this
+    /// literal.</summary>
+    public const string PlaceholderText = SensitiveStatements.PlaceholderText;
 
     /// <summary>
     /// A value as a single-quoted SQL string literal, with its own quote characters doubled — the one rule
@@ -71,8 +58,12 @@ public static class PgSensitiveStatementFilter
     /// so <c>PgStatementText</c> and <c>PgBlockingCollector</c> embed the identical expression rather than each
     /// composing their own copy.
     /// </summary>
-    public static string SqlPredicate(string column) =>
-        "CASE WHEN " + column + " ~* " + SqlLiteral(SensitiveStatementPattern) +
+    public static string SqlPredicate(string column) => SqlPredicate(column, SensitiveStatementPattern);
+
+    /// <summary>The same expression with an explicit pattern, for a caller that must stay on a frozen one
+    /// (the stored-text scrub keeps its version 1 pattern); the placeholder stays the shared one.</summary>
+    public static string SqlPredicate(string column, string pattern) =>
+        "CASE WHEN " + column + " ~* " + SqlLiteral(pattern) +
         " THEN " + SqlLiteral(PlaceholderText) +
         " ELSE " + column + " END";
 }

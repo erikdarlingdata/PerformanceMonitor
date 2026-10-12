@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -22,7 +23,21 @@ public sealed partial class ViewerDataService
     /// <c>collection_time = MAX(...)</c> self-subquery), ordered by current duration descending. All the
     /// derived columns (avg/p95/percent-of-average/is-running-long) are collector-side, so the read is
     /// a plain projection.
-    /// $1 server_id.
+    ///
+    /// <para>The snapshot counts only while it is the collector's CURRENT answer. The collector writes no row when no job
+    /// is running, so the newest <c>running_jobs</c> row can be weeks old, and the tab then listed a job that ended long
+    /// ago as running now. The collector's latest SUCCESSFUL run (<c>collection_log</c>, which records a SUCCESS with
+    /// zero rows for a run that found nothing) decides: a run that stored rows means the newest snapshot is that run's;
+    /// a run that stored none means nothing is running, unless a snapshot newer than that log row exists (the Darling
+    /// service stamps the log row when the run ends, after its rows are stored). A server with no such log row keeps the
+    /// newest snapshot. The same text as the MCP tool's <c>DarlingJobReader.RunningJobsSql</c> and Lite's
+    /// <c>GetRunningJobsAsync</c>.</para>
+    ///
+    /// <para>The snapshot must also be recent: <c>collection_time &gt;= $2</c> is the alert read's #1812 bound
+    /// (<see cref="PerformanceMonitor.Alerting.RunningJobsCurrency.Cutoff"/>, three missed cycles at the effective running_jobs cadence).
+    /// A server that went offline while a job ran (only failed runs after it), a lost msdb login or a collector switched off
+    /// otherwise left the job reading as running for days.</para>
+    /// $1 server_id, $2 the oldest collection time still current (naive UTC).
     /// </summary>
     public const string RunningJobsSql = """
         SELECT
@@ -43,6 +58,34 @@ public sealed partial class ViewerDataService
             SELECT MAX(collection_time)
             FROM v_running_jobs
             WHERE server_id = $1
+        )
+        AND   collection_time >= $2
+        AND   (
+            NOT EXISTS
+            (
+                SELECT 1
+                FROM collection_log
+                WHERE server_id = $1
+                AND   collector_name = 'running_jobs'
+                AND   status = 'SUCCESS'
+            )
+            OR EXISTS
+            (
+                SELECT 1
+                FROM
+                (
+                    SELECT collection_time, rows_collected
+                    FROM collection_log
+                    WHERE server_id = $1
+                    AND   collector_name = 'running_jobs'
+                    AND   status = 'SUCCESS'
+                    ORDER BY collection_time DESC
+                    LIMIT 1
+                ) AS last_run
+                WHERE last_run.rows_collected IS NULL
+                OR    last_run.rows_collected > 0
+                OR    v_running_jobs.collection_time > last_run.collection_time
+            )
         )
         ORDER BY current_duration_seconds DESC
         """;
@@ -66,14 +109,65 @@ public sealed partial class ViewerDataService
         LIMIT 1
         """;
 
-    /// <summary>The latest snapshot of running jobs for one server (latest collection_time only).</summary>
+    /// <summary>The newest collection time for the running_jobs collector: its latest SUCCESS run (a run that found nothing logs
+    /// SUCCESS with zero rows) or its newest snapshot, whichever is later. The same text as the MCP tool's
+    /// <c>DarlingJobReader.RunningJobsLastGoodCollectionSql</c>. $1 server_id.</summary>
+    public const string RunningJobsLastGoodCollectionSql = """
+        SELECT MAX(t)
+        FROM
+        (
+            SELECT MAX(collection_time) AS t
+            FROM collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'running_jobs'
+            AND   status = 'SUCCESS'
+            UNION ALL
+            SELECT MAX(collection_time)
+            FROM v_running_jobs
+            WHERE server_id = $1
+        ) AS x
+        """;
+
+    /// <summary>The latest snapshot of running jobs for one server (latest collection_time only), while it is current.</summary>
     public async Task<List<RunningJobRow>> GetRunningJobsAsync(int serverId, CancellationToken cancellationToken = default)
+        => (await ReadRunningJobsAsync(serverId, cancellationToken)).Jobs;
+
+    /// <summary>
+    /// <see cref="GetRunningJobsAsync"/> with the not-current verdict: when no job is listed because the collector's last good
+    /// collection is older than the freshness bound (the alert read's #1812 rule at this server's effective running_jobs cadence,
+    /// the per-server override, else the fleet one, else the shipped default), <see cref="RunningJobsRead.LastGoodCollection"/>
+    /// carries its time. A schedule read that fails leaves the shipped cadence.
+    /// </summary>
+    public async Task<RunningJobsRead> ReadRunningJobsAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        var overrides = await ReadScheduleOverridesForHealthAsync(cancellationToken);
+        var cadence = CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes("running_jobs", serverId, overrides) ?? 5;
+        var cutoff = DateTime.SpecifyKind(PerformanceMonitor.Alerting.RunningJobsCurrency.Cutoff(DateTime.UtcNow, cadence), DateTimeKind.Unspecified);
+        var items = await ReadRunningJobRowsAsync(serverId, cutoff, cancellationToken);
+        if (items.Count > 0)
+        {
+            return new RunningJobsRead(items, null);
+        }
+
+        /* Nothing listed: it reads as "not current" only when the collector's last good collection is older than the bound. A healthy
+           collector that found no job logs a recent SUCCESS, so this stays null for it. The rows read is finished (its command and
+           connection released) before this one opens, so one call holds one connection. */
+        await using var lastGood = _dataSource.CreateCommand(RunningJobsLastGoodCollectionSql);
+        lastGood.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        lastGood.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        var last = await lastGood.ExecuteScalarAsync(cancellationToken);
+        DateTime? lastGoodTime = last is DateTime t ? DateTime.SpecifyKind(t, DateTimeKind.Utc) : null;
+        return new RunningJobsRead(items, PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentSince(lastGoodTime, cutoff));
+    }
+
+    private async Task<List<RunningJobRow>> ReadRunningJobRowsAsync(int serverId, DateTime cutoff, CancellationToken cancellationToken)
     {
         var items = new List<RunningJobRow>();
 
         await using var command = _dataSource.CreateCommand(RunningJobsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -108,6 +202,69 @@ public sealed partial class ViewerDataService
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result as string;
     }
+
+    /// <summary>
+    /// When one collector last ran for one server, beside when that server last and first collected anything at all. This is
+    /// the Darling service's own read (<c>DarlingRuntimePrecondition.CollectorLastRunSql</c>), copied here because the viewer
+    /// does not reference the service; a test holds the two texts equal. A null first column means the collector has no
+    /// <c>collection_log</c> row for this server in all the history the store retains, and a null second or third column means
+    /// the server has none from any collector. The third column feeds the first-run grace: a collector is not called never-run
+    /// before it was due. Every part filters on <c>server_id</c> first and carries no time predicate on purpose:
+    /// a collector that runs once at load (server_config, trace_flags) wrote its row hours or weeks ago and still counts as
+    /// having run. The last collection uses <c>idx_collection_log_time (server_id, collection_time)</c>. The first collection
+    /// is read as the oldest row in time order, not as a <c>MIN</c>, so the ordered read can stop in the oldest chunk, which is
+    /// likely compressed and out of reach of that index. A read that fails makes no claim: the tab shows no switched-off
+    /// note. The collector half filters
+    /// with <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c> and orders by
+    /// <c>collection_time</c>, the hypertable's time dimension, so the newest chunk answers first and a collector that ran
+    /// recently is found at once. A collector that has never run has no row to find, so for it the read still goes through the
+    /// server's whole retained history. The viewer therefore reads only for an empty surface, and not again once a read has
+    /// seen the collector run (<c>ViewerServerTab.ReadEngineGapStateAsync</c>).
+    /// $1 server_id, $2 collector.
+    /// </summary>
+    public const string CollectorLastRunSql = """
+        SELECT (
+                   SELECT collection_time
+                   FROM collection_log
+                   WHERE server_id = $1
+                   AND   collector_name = $2
+                   ORDER BY collection_time DESC
+                   LIMIT 1
+               ) AS collector_last_run,
+               (
+                   SELECT MAX(collection_time)
+                   FROM collection_log
+                   WHERE server_id = $1
+               ) AS server_last_collected,
+               (
+                   SELECT collection_time
+                   FROM collection_log
+                   WHERE server_id = $1
+                   ORDER BY collection_time ASC
+                   LIMIT 1
+               ) AS server_first_collected
+        """;
+
+    /// <summary>
+    /// When one collector last ran for one server, and when that server last and first collected anything (see
+    /// <see cref="CollectorLastRunSql"/>). Each is null where there is no such row.
+    /// </summary>
+    public async Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)> GetCollectorLastRunAsync(
+        int serverId, string collectorName, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(CollectorLastRunSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return (null, null, null);
+        }
+
+        return CollectorRuntimePrecondition.CollectorLastRunFrom(reader);
+    }
 }
 
 /// <summary>
@@ -140,6 +297,9 @@ public class RunningJobRow
 
     public string StartTimeLocal => ViewerDataService.FormatServerClock(StartTime);
 
+    /// <summary><see cref="CollectionTime"/> (naive UTC) in the display zone, to the second; the "Collected" column sorts by <see cref="CollectionTime"/>.</summary>
+    public string CollectionTimeLocal => HistoryTime.CollectionLocal(CollectionTime);
+
     public string CurrentDurationFormatted => FormatDuration(CurrentDurationSeconds);
     public string AvgDurationFormatted => FormatDuration(AvgDurationSeconds);
     public string P95DurationFormatted => FormatDuration(P95DurationSeconds);
@@ -157,3 +317,7 @@ public class RunningJobRow
         return $"{seconds / 3600}h {(seconds % 3600) / 60}m";
     }
 }
+
+/// <summary>The running jobs, and the time of the collector's last good collection when no job is listed because that is older
+/// than the freshness bound (null otherwise). See <see cref="ViewerDataService.ReadRunningJobsAsync"/>.</summary>
+public sealed record RunningJobsRead(List<RunningJobRow> Jobs, DateTime? LastGoodCollection);

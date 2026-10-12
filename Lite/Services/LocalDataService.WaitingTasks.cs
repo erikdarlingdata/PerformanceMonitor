@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
@@ -39,14 +40,14 @@ public partial class LocalDataService
         /* The window's upper edge is $3, so the optional database list starts at $4. Bounding both edges
            (rather than only the lower one) is what lets an as_of anchor mean anything here. The row cap, when
            one is given, binds LAST so the database list keeps its ordinals whether or not a cap is present. */
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var limitClause = limit.HasValue ? $"\nLIMIT ${4 + dbValues.Count}" : string.Empty;
         command.CommandText = $@"
 SELECT
     collection_time,
     session_id,
-    wait_type,
+    rtrim(wait_type) AS wait_type,
     wait_duration_ms,
     blocking_session_id,
     resource_description,
@@ -123,17 +124,18 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
         var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         /* #1240 parity: exclude the user's ignored (benign) wait types at DISPLAY time (mirrors the
-           wait-stats reads) so the Current Waits duration chart matches the Wait Stats tab. */
+           wait-stats reads) so the Current Waits duration chart matches the Wait Stats tab. Keyed on
+           rtrim(wait_type), so a name stored with the DMV's trailing space is the same series. */
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
 SELECT
-    wait_type,
+    rtrim(wait_type) AS wait_type,
     GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
     SUM(wait_duration_ms) AS total_wait_ms,
     MIN(collection_time) AS first_collection_time,
@@ -145,9 +147,9 @@ AND   collection_time <= $3
 AND   wait_type IS NOT NULL
 {exclude}
 GROUP BY
-    wait_type, 2
+    rtrim(wait_type), 2
 ORDER BY
-    wait_type, 2";
+    rtrim(wait_type), 2";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -200,7 +202,7 @@ ORDER BY
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var widthParam = 4 + dbValues.Count;
 

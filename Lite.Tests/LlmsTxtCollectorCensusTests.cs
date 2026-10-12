@@ -26,6 +26,7 @@ namespace Lite.Tests;
 /// <para>Every match is checked, not only the first, so a second mention of a count cannot go stale behind
 /// the first one.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class LlmsTxtCollectorCensusTests
 {
     [Theory]

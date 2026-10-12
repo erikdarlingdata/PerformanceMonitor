@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -81,7 +83,7 @@ internal static class DarlingCurrentConfigReader
         bool IsQueryStoreOn, bool IsEncrypted, bool IsTrustworthyOn, bool IsDbChainingOn, bool IsBrokerEnabled,
         bool IsCdcEnabled, bool IsMixedPageAllocationOn, string LogReuseWaitDesc, string PageVerifyOption,
         int TargetRecoveryTimeSeconds, string DelayedDurability, bool IsAcceleratedDatabaseRecoveryOn,
-        bool IsMemoryOptimizedEnabled, bool IsOptimizedLockingOn);
+        bool IsMemoryOptimizedEnabled, bool? IsOptimizedLockingOn);
 
     /* 28 columns in the viewer's / Lite's exact SELECT order — the reader below maps them by incrementing
        ordinal, so this list's order is load-bearing and must stay byte-identical. capture_time is APPENDED
@@ -148,11 +150,32 @@ internal static class DarlingCurrentConfigReader
                 reader.IsDBNull(++ordinal) ? "" : reader.GetString(ordinal),
                 !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
-                !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal)));
+                reader.IsDBNull(++ordinal) ? null : reader.GetBoolean(ordinal)));
             capturedAt ??= reader.GetDateTime(DatabaseConfigCaptureTimeOrdinal);
         }
 
         return new LatestSnapshot<DatabaseConfigReadRow>(capturedAt, rows);
+    }
+
+    /// <summary>
+    /// #5245: the rows of <paramref name="rows"/> whose database is one of the chosen <paramref name="databases"/>
+    /// (<see cref="DatabaseFilter.All"/> keeps every row). This read has always filtered IN C#, over the latest snapshot,
+    /// comparing with <see cref="StringComparison.OrdinalIgnoreCase"/> so a differently cased name over MCP still matches;
+    /// that rule stays, and now matches ANY name in the list. It does not move to SQL, and it never moves the snapshot
+    /// anchor: the caller tests the UNFILTERED snapshot for "nothing collected" (unavailable) before it filters, so a
+    /// filter that matches nothing is a quiet answer for the chosen databases, never an "unavailable" one.
+    /// </summary>
+    public static List<DatabaseConfigReadRow> FilterToDatabases(IEnumerable<DatabaseConfigReadRow> rows, DatabaseFilter databases)
+    {
+        if (databases.IsAll)
+        {
+            return rows.ToList();
+        }
+
+        var chosen = databases.Names;
+        return rows
+            .Where(r => chosen.Any(name => r.DatabaseName.Equals(name, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
     }
 
     /* ─────────────────────────── trace flags (DBCC TRACESTATUS) ─────────────────────────── */

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -37,7 +38,16 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>The file-growth read's text, exposed like <see cref="ForcePlanFailuresSql"/> so the tests can
-    /// pin its shape against Darling's twin without a DuckDB round trip. $1 server_id, $2 window start.</summary>
+    /// pin its shape against Darling's twin without a DuckDB round trip. $1 server_id, $2 window start.
+    ///
+    /// <para>A row stored before the allocated/used fix for another database on an Azure SQL Database server holds
+    /// that database's USED space as its total, where every later row holds the ALLOCATED size
+    /// (<see cref="AzureSiblingDatabaseSize"/>). Set beside a later row, it would read as a rise of the whole
+    /// allocation: 10,121 MB for a Hyperscale database that did not grow. The window leaves those rows out, at read
+    /// time, so the read covers history collected before the change without rewriting it. The database then reads
+    /// like one with a single sample in the window, growth 0, until a second sample in the new shape is inside it.
+    /// Until the first collection after the upgrade the window holds only old-shape rows, so the database is not
+    /// listed at all.</para></summary>
     public const string DatabaseFileGrowthSql = @"
 WITH windowed AS (
     SELECT
@@ -49,6 +59,7 @@ WITH windowed AS (
     FROM v_database_size_stats
     WHERE server_id = $1
     AND   collection_time >= $2
+    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
 )
 SELECT
     c.database_name,
@@ -58,9 +69,9 @@ SELECT
     COALESCE(c.total_size_mb, 0) AS total_size_mb,
     COALESCE(c.total_size_mb, 0) - COALESCE(b.total_size_mb, c.total_size_mb, 0) AS growth_mb,
     COALESCE(date_diff('second', b.collection_time, c.collection_time) / 60.0, 0) AS growth_window_minutes,
-    COALESCE(c.volume_mount_point, '') AS volume_mount_point,
-    COALESCE(c.volume_total_mb, 0) AS volume_total_mb,
-    COALESCE(c.volume_free_mb, 0) AS volume_free_mb,
+    c.volume_mount_point,
+    c.volume_total_mb,
+    c.volume_free_mb,
     c.auto_growth_mb,
     COALESCE(c.is_percent_growth, false) AS is_percent_growth,
     c.growth_pct,
@@ -101,9 +112,9 @@ ORDER BY c.database_name, c.file_name";
                 TotalSizeMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
                 GrowthMb = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
                 GrowthWindowMinutes = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
-                VolumeMountPoint = reader.IsDBNull(7) ? "" : reader.GetString(7),
-                VolumeTotalMb = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
-                VolumeFreeMb = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
+                VolumeMountPoint = reader.IsDBNull(7) ? null : reader.GetString(7),
+                VolumeTotalMb = reader.IsDBNull(8) ? null : ToDouble(reader.GetValue(8)),
+                VolumeFreeMb = reader.IsDBNull(9) ? null : ToDouble(reader.GetValue(9)),
                 AutoGrowthMb = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
                 IsPercentGrowth = !reader.IsDBNull(11) && Convert.ToBoolean(reader.GetValue(11)),
                 GrowthPct = reader.IsDBNull(12) ? null : ToDouble(reader.GetValue(12)),

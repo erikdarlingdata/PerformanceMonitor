@@ -506,20 +506,124 @@ public sealed class DarlingNetworkTests
     [InlineData("' | Out-Null; New-NetFirewallRule -DisplayName 'pwn' -RemoteAddress Any; '")]
     [InlineData("$(whoami)")]
     [InlineData("`nStop-Service 'PerformanceMonitor Darling'")]
-    public void BuildFirewallEnableCommand_KeepsAnyRemoteAddressInsideOneSingleQuotedLiteral(string hostile)
+    [InlineData("10.0.0.0/8’; whoami; ’")]
+    public void SingleQuotedPowerShell_KeepsAnyValueInsideOneSingleQuotedLiteral(string hostile)
     {
-        var cmd = DarlingManagedPostgres.BuildFirewallEnableCommand("PerformanceMonitor Darling MCP (port 5152)", 5152, hostile);
+        var literal = DarlingManagedPostgres.SingleQuotedPowerShell(hostile);
 
-        /* Inside '…' PowerShell expands nothing, so the ONE way out is an unescaped quote. Every quote in the
-           emitted command must therefore be part of a balanced pair: an odd count would mean the value broke
-           out of its literal. The builder emits exactly 6 quotes of its own (two rule names + the address). */
-        var quotes = cmd.Split('\'').Length - 1;
-        Assert.True(quotes % 2 == 0, $"unbalanced quoting lets the value escape its literal: {cmd}");
-
-        /* And the value's own quotes are doubled, never passed through raw. */
-        var expected = "-RemoteAddress '" + hostile.Replace("'", "''", StringComparison.Ordinal) + "'";
-        Assert.Contains(expected, cmd, StringComparison.Ordinal);
+        /* Inside '…' PowerShell expands nothing, so the ONE way out is an unescaped quote character. Read the
+           literal back the way PowerShell's tokenizer reads it: it must close exactly at its last character
+           and hand the value back unchanged. */
+        Assert.Equal(hostile, ReadSingleQuotedLiteral(literal));
     }
+
+    [Theory]
+    [InlineData(0x27)]     // '  apostrophe
+    [InlineData(0x2018)]   // left single quotation mark
+    [InlineData(0x2019)]   // right single quotation mark
+    [InlineData(0x201A)]   // single low-9 quotation mark
+    [InlineData(0x201B)]   // single high-reversed-9 quotation mark
+    public void SingleQuotedPowerShell_UnicodeQuote_IsDoubled(int codePoint)
+    {
+        /* PowerShell's tokenizer closes a single-quoted string on ANY of these five characters, and a quote
+           character followed by another stands for one quote character inside the string. So each of the
+           five is doubled, not just the apostrophe. */
+        var quote = (char)codePoint;
+
+        Assert.Equal($"'a{quote}{quote}b'", DarlingManagedPostgres.SingleQuotedPowerShell($"a{quote}b"));
+        Assert.Equal($"'{quote}{quote}{quote}{quote}'", DarlingManagedPostgres.SingleQuotedPowerShell($"{quote}{quote}"));
+        Assert.Equal($"'x{quote}{quote}; whoami; {quote}{quote}'", DarlingManagedPostgres.SingleQuotedPowerShell($"x{quote}; whoami; {quote}"));
+    }
+
+    [Fact]
+    public void SingleQuotedPowerShell_EveryQuoteCharacterMixedTogether_ReadsBackAsTheValue()
+    {
+        const string mixed = "a'b‘c’d‚e‛f''’‘'";
+        var literal = DarlingManagedPostgres.SingleQuotedPowerShell(mixed);
+
+        Assert.Equal(mixed, ReadSingleQuotedLiteral(literal));
+
+        /* A value with none of the five comes back byte-for-byte, so every real rule name is unchanged. */
+        Assert.Equal("'PerformanceMonitor Darling store (port 5641)'",
+            DarlingManagedPostgres.SingleQuotedPowerShell("PerformanceMonitor Darling store (port 5641)"));
+    }
+
+    [Theory]
+    [InlineData("192.168.1.0/24; Start-Process calc.exe")]
+    [InlineData("10.0.0.0/8'; whoami; '")]
+    [InlineData("' | Out-Null; New-NetFirewallRule -DisplayName 'pwn' -RemoteAddress Any; '")]
+    [InlineData("$(whoami)")]
+    [InlineData("`nStop-Service 'PerformanceMonitor Darling'")]
+    [InlineData("10.0.0.0/8’; whoami; ’")]   // U+2019 closes a PowerShell literal as the apostrophe does
+    [InlineData("10.0.0.0/8‘")]
+    [InlineData("10.0.0.0/8‚")]
+    [InlineData("10.0.0.0/8‛")]
+    [InlineData("10.0.0.0/8 ")]                        // a space
+    [InlineData(" 10.0.0.0/8")]
+    [InlineData("10.0.0.0/8 x")]
+    [InlineData("Any")]                                // a real New-NetFirewallRule keyword, still not an address
+    [InlineData("10.0.0.0/8%5")]
+    public void BuildFirewallEnableCommand_RefusesARemoteAddressThatIsNotAnAddressAndPrefix(string remoteCidr)
+        => Assert.Throws<ArgumentException>(
+            () => DarlingManagedPostgres.BuildFirewallEnableCommand("PerformanceMonitor Darling MCP (port 5152)", 5152, remoteCidr));
+
+    [Theory]
+    [InlineData("10.0.0.0/8,x y")]                     // one bad element refuses the whole list
+    [InlineData("10.0.0.0/8,10.8.0.0/16'")]
+    [InlineData("10.0.0.0/8,10.8.0.0/16’")]
+    [InlineData("10.0.0.0/8, 10.8.0.0/16")]            // no trimming here: the canonical text has no spaces
+    public void BuildFirewallEnableCommand_RefusesTheWholeList_WhenOneElementIsNotAnAddressAndPrefix(string remoteCidr)
+        => Assert.Throws<ArgumentException>(
+            () => DarlingManagedPostgres.BuildFirewallEnableCommand("PerformanceMonitor Darling MCP (port 5152)", 5152, remoteCidr));
+
+    [Theory]
+    [InlineData("10.0.0.0/8")]
+    [InlineData("255.255.255.255/32")]
+    [InlineData("2001:db8::/32")]
+    [InlineData("2001:DB8::/32")]
+    [InlineData("::1.2.3.4/128")]
+    [InlineData("fe80::/10")]
+    public void BuildFirewallEnableCommand_AddressAndPrefixCharacters_AreQuotedAsOneLiteral(string remoteCidr)
+        => Assert.Contains(
+            $"-RemoteAddress '{remoteCidr}' |",
+            DarlingManagedPostgres.BuildFirewallEnableCommand("PerformanceMonitor Darling MCP (port 5152)", 5152, remoteCidr),
+            StringComparison.Ordinal);
+
+    /// <summary>Reads <paramref name="literal"/> as PowerShell's tokenizer reads a single-quoted string: any of
+    /// the five single-quote characters opens it, a quote character followed by another one stands for ONE quote
+    /// character inside it, and a quote character that is not followed by one closes it. Fails the test when the
+    /// literal does not close at its last character, which is how a value would end its own literal early.</summary>
+    private static string ReadSingleQuotedLiteral(string literal)
+    {
+        Assert.True(literal.Length >= 2 && IsPowerShellSingleQuote(literal[0]), $"not a single-quoted literal: {literal}");
+
+        var value = new System.Text.StringBuilder();
+        var i = 1;
+        while (i < literal.Length)
+        {
+            var c = literal[i];
+            if (IsPowerShellSingleQuote(c))
+            {
+                if (i + 1 < literal.Length && IsPowerShellSingleQuote(literal[i + 1]))
+                {
+                    value.Append(literal[i + 1]);
+                    i += 2;
+                    continue;
+                }
+
+                Assert.True(i == literal.Length - 1, $"the literal closes before its last character: {literal}");
+                return value.ToString();
+            }
+
+            value.Append(c);
+            i++;
+        }
+
+        Assert.Fail($"the literal is never closed: {literal}");
+        return value.ToString();
+    }
+
+    private static bool IsPowerShellSingleQuote(char c) => c is '\'' or '‘' or '’' or '‚' or '‛';
 
     [Fact]
     public void FirewallCommandBuilders_QuoteTheRuleNameToo_AndAreUnchangedForRealRuleNames()
@@ -667,6 +771,35 @@ public sealed class DarlingNetworkTests
     [Fact]
     public void ResolveNetworkExposure_Degrades_WhenAddressFamilyMismatch()
         => AssertDegraded(new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "2001:db8::/32", Role = "viewer" });
+
+    [Theory]
+    [InlineData("010.0.0.0/8")]            // a leading zero reads as octal: a different range, and the value feeds pg_hba
+    [InlineData("192.168.010.0/24")]
+    [InlineData("10/8")]                   // short forms are zero-padded
+    [InlineData("10.1/16")]
+    [InlineData("0x0A.0.0.0/8")]           // 0x reads as hex
+    [InlineData("1.2.3.04/32")]
+    public void ResolveNetworkExposure_Degrades_WhenAllowFromIsNotFourPlainDecimalNumbers(string allowFrom)
+        => AssertDegraded(new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = allowFrom, Role = "viewer" });
+
+    [Theory]
+    [InlineData("::", "fe80::1%5/64")]
+    [InlineData("::", "fe80::1%x';calc;'/64")]
+    public void ResolveNetworkExposure_Degrades_WhenAllowFromHasAnIPv6ZoneIndex(string listen, string allowFrom)
+        => AssertDegraded(new PostgresNetworkConfig { Listen = listen, AllowFrom = allowFrom, Role = "viewer" });
+
+    [Theory]
+    [InlineData("192.168.1.5/24", "192.168.1.0/24")]   // host bits are still masked, not refused
+    [InlineData("10.0.0.0/8", "10.0.0.0/8")]
+    [InlineData(" 203.0.113.9/32 ", "203.0.113.9/32")]
+    public void ResolveNetworkExposure_PlainDecimalAllowFrom_IsStillExposed_WithTheMaskedCidr(string allowFrom, string expected)
+    {
+        var decision = DarlingManagedPostgres.ResolveNetworkExposure(
+            new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = allowFrom, Role = "viewer" }, CertPath, KeyPath);
+
+        Assert.True(decision.Exposed);
+        Assert.Equal(expected, decision.Cidr);
+    }
 
     [Fact]
     public void ResolveNetworkExposure_Degrades_WhenRoleInvalid()

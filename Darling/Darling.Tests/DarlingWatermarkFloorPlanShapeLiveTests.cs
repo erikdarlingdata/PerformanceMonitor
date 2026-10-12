@@ -80,7 +80,8 @@ public sealed class DarlingWatermarkFloorPlanShapeLiveTests
         var bodySucceeded = false;
         try
         {
-            var nowUtc = DateTime.UtcNow;
+            /* #5608: the end of the window is a fixed point inside one chunk, so the chunk layout the plan is read against is the same at any hour. */
+            var nowUtc = DateTime.SpecifyKind(LiveClock.AnchoredEnd(), DateTimeKind.Utc);
             long logId = 4_469_000_000;
 
             /* 30 days of history, one row per collector per day, most of it old enough to compress —

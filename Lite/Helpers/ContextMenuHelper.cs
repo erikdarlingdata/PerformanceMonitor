@@ -167,14 +167,60 @@ public static class ContextMenuHelper
         return value;
     }
 
+    /// <summary>The time text of a chart CSV export line, the format the export has always used.</summary>
+    private const string ChartCsvTimeFormat = "yyyy-MM-dd HH:mm:ss";
+
+    /// <summary>The name of the last column of a chart CSV export, the UTC offset of each row's instant.</summary>
+    private const string ChartCsvOffsetColumn = "UTC offset";
+
+    /// <summary>
+    /// The header line of a chart's CSV export (#4766). The time column names the zone its times are written in
+    /// ("DateTime (UTC)", "DateTime (Eastern Standard Time)"), so a file opened later still says which clock they are
+    /// on. The last column, "UTC offset", holds the offset each row's instant carries in that zone, so the two rows
+    /// that read the same wall time in the repeated hour of a fall-back day can still be told apart. Pure, so a test
+    /// calls it without the WPF handler.
+    /// </summary>
+    internal static string ChartCsvHeader(string separator, TimeZoneInfo displayZone)
+    {
+        var time = $"DateTime ({displayZone.Id})";
+        return string.Join(separator, new[] { CsvEscape(time, separator), "Series", "Value", ChartCsvOffsetColumn });
+    }
+
+    /// <summary>
+    /// One data line of a chart's CSV export (#4766). A ServerTab chart plots the naive-UTC instant as X, so the
+    /// time column is that instant read in the zone (<see cref="DisplayZone.ToDisplay"/>): the same wall time the
+    /// chart's axis shows for it, always a plain date and time so a spreadsheet reads the whole column one way. A
+    /// point in the repeated hour of a fall-back day is written as the wall time it reads there, and the last cell,
+    /// on every row, is that instant's UTC offset (<see cref="DisplayZone.UtcOffsetText"/>), "-04:00" for the first
+    /// 01:30 and "-05:00" for the second on a US Eastern change day ("+00:00" in UTC). Pure, so a test calls it
+    /// without the WPF handler.
+    /// </summary>
+    internal static string ChartCsvLine(double x, string seriesName, double y, string separator, TimeZoneInfo displayZone)
+    {
+        var plotted = DateTime.FromOADate(x);
+        var shown = DisplayZone.ToDisplay(plotted, displayZone);
+        return string.Join(separator, new[]
+        {
+            shown.ToString(ChartCsvTimeFormat, CultureInfo.InvariantCulture),
+            CsvEscape(seriesName, separator),
+            y.ToString(CultureInfo.InvariantCulture),
+            DisplayZone.UtcOffsetText(plotted, displayZone)
+        });
+    }
+
     /// <summary>
     /// Sets up a context menu for a ScottPlot chart with standard options:
     /// Copy Image, Save Image As, Open in New Window, Revert, Export Data to CSV.
     /// <paramref name="revertAction"/> lets a windowed caller (ServerTab) re-pin the X axis to its current
     /// settable time window on Revert / double-click instead of AutoScale()'ing to the data range (which
     /// re-introduces ScottPlot's ~10% side dead-space); windowless callers omit it and fall back to AutoScale.
+    /// <paramref name="displayZone"/> is the zone the chart's own axis labels are drawn in (#4766): the CSV export
+    /// writes each point's time in it and names it in the header (<see cref="ChartCsvLine"/>,
+    /// <see cref="ChartCsvHeader"/>). It is a function so the export reads the zone as it is when the user clicks,
+    /// after any display-mode switch. It is required: every chart this menu is set up for plots the naive-UTC
+    /// instant as X, so none is left to export it unconverted.
     /// </summary>
-    public static ContextMenu SetupChartContextMenu(WpfPlot chart, string chartName, string? dataSource = null, Action<WpfPlot>? revertAction = null)
+    public static ContextMenu SetupChartContextMenu(WpfPlot chart, string chartName, Func<TimeZoneInfo> displayZone, string? dataSource = null, Action<WpfPlot>? revertAction = null)
     {
         var contextMenu = new ContextMenu();
 
@@ -279,7 +325,8 @@ public static class ContextMenuHelper
                 {
                     var sb = new StringBuilder();
                     var sep = App.CsvSeparator;
-                    sb.AppendLine(string.Join(sep, new[] { "DateTime", "Series", "Value" }));
+                    var zone = displayZone();
+                    sb.AppendLine(ChartCsvHeader(sep, zone));
 
                     var plottables = chart.Plot.GetPlottables();
                     int seriesIndex = 1;
@@ -303,13 +350,7 @@ public static class ContextMenuHelper
                                     continue;
                                 }
 
-                                var dateTime = DateTime.FromOADate(point.X);
-                                sb.AppendLine(string.Join(sep, new[]
-                                {
-                                    dateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
-                                    CsvEscape(seriesName, sep),
-                                    point.Y.ToString(CultureInfo.InvariantCulture)
-                                }));
+                                sb.AppendLine(ChartCsvLine(point.X, seriesName, point.Y, sep, zone));
                             }
                             seriesIndex++;
                         }

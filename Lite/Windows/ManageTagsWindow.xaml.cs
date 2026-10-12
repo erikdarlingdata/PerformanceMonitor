@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 
@@ -117,8 +118,10 @@ public partial class ManageTagsWindow : Window
     {
         try
         {
-            _tags = await _dataService.GetServerTagsAsync();
-            var assignments = await _dataService.GetServerTagAssignmentsAsync();
+            /* #5457: both reads run on the pool, not the dispatcher: each takes the store read lock, which an archive or
+               compaction pass can hold, and the window would stop pumping input for as long. */
+            _tags = await Task.Run(() => _dataService.GetServerTagsAsync());
+            var assignments = await Task.Run(() => _dataService.GetServerTagAssignmentsAsync());
 
             _assignedServersByTag = new Dictionary<int, HashSet<int>>();
             foreach (var a in assignments)
@@ -289,13 +292,15 @@ public partial class ManageTagsWindow : Window
         var tagId = _selectedNode.Tag.Id;
         try
         {
-            if (assign)
+            if (!await WriteWhileWaitingAsync(
+                    assign ? "assigning the tag" : "removing the tag from the server",
+                    assign ? "Assign tag" : "Unassign tag",
+                    () => assign
+                        ? Task.Run(() => _dataService.AssignServerTagAsync(new[] { serverId }, tagId))
+                        : Task.Run(() => _dataService.UnassignServerTagAsync(new[] { serverId }, tagId)),
+                    reloadAfterBusy: true))
             {
-                await _dataService.AssignServerTagAsync(new[] { serverId }, tagId);
-            }
-            else
-            {
-                await _dataService.UnassignServerTagAsync(new[] { serverId }, tagId);
+                return;
             }
 
             if (!_assignedServersByTag.TryGetValue(tagId, out var set))
@@ -344,13 +349,15 @@ public partial class ManageTagsWindow : Window
 
         try
         {
-            if (assign)
+            if (!await WriteWhileWaitingAsync(
+                    assign ? "adding the servers to the tag" : "removing the servers from the tag",
+                    assign ? "Assign tag to servers" : "Unassign tag from servers",
+                    () => assign
+                        ? Task.Run(() => _dataService.AssignServerTagAsync(ids, tagId))
+                        : Task.Run(() => _dataService.UnassignServerTagAsync(ids, tagId)),
+                    reloadAfterBusy: true))
             {
-                await _dataService.AssignServerTagAsync(ids, tagId);
-            }
-            else
-            {
-                await _dataService.UnassignServerTagAsync(ids, tagId);
+                return;
             }
 
             if (!_assignedServersByTag.TryGetValue(tagId, out var set))
@@ -384,6 +391,47 @@ public partial class ManageTagsWindow : Window
             MessageBox.Show(this, $"Could not update assignments: {ex.Message}", "Manage Tags",
                 MessageBoxButton.OK, MessageBoxImage.Error);
             await ReloadTagsAsync();
+        }
+    }
+
+    /* #5650: a tag write can wait up to 30 s for the local database (LocalDataService.OpenUserWriteConnectionAsync) while
+       archival or a collector write holds it. While it waits, the whole work area (tree, buttons and server list) is
+       greyed out, so a second click cannot start another write, and the line at the bottom says what is happening.
+       Close stays enabled. A busy store is reported with StoreBusyReport's wording ("nothing was changed", the holder
+       when known) and one Warning line; the caller gets false and stops. Any other failure is rethrown to the caller's
+       existing catch, which keeps the old Error line and message. The write is passed already wrapped in Task.Run
+       (TabLoadsOffUiThreadTests reads that at the call), so the window stays responsive for the whole wait. */
+    private async Task<bool> WriteWhileWaitingAsync(string doing, string logAction, Func<Task> write, bool reloadAfterBusy = false)
+    {
+        TagWorkArea.IsEnabled = false;
+        WriteWaitText.Text = StoreBusyReport.WaitingText(doing);
+        WriteWaitText.Visibility = Visibility.Visible;
+        try
+        {
+            await write();
+            return true;
+        }
+        catch (StoreLockTimeoutException ex)
+        {
+            var text = StoreBusyReport.Report("ManageTags", logAction, ex, doing);
+            if (!IsLoaded)
+            {
+                return false;   // closed while it waited: nothing left to show or reload
+            }
+
+            MessageBox.Show(this, text, "Manage Tags", MessageBoxButton.OK, MessageBoxImage.Warning);
+            if (reloadAfterBusy)
+            {
+                /* The check box was ticked before the write started; put it back to what the store holds. */
+                await ReloadTagsAsync();
+            }
+
+            return false;
+        }
+        finally
+        {
+            WriteWaitText.Visibility = Visibility.Collapsed;
+            TagWorkArea.IsEnabled = true;
         }
     }
 
@@ -423,7 +471,13 @@ public partial class ManageTagsWindow : Window
     {
         try
         {
-            await _dataService.CreateServerTagAsync(name, parentId);
+            if (!await WriteWhileWaitingAsync(
+                    "creating the tag", "Create tag",
+                    () => Task.Run(() => _dataService.CreateServerTagAsync(name, parentId))))
+            {
+                return;
+            }
+
             ChangedAny = true;
             await ReloadTagsAsync();
         }
@@ -450,7 +504,14 @@ public partial class ManageTagsWindow : Window
 
         try
         {
-            await _dataService.RenameServerTagAsync(_selectedNode.Tag.Id, name);
+            var renamedId = _selectedNode.Tag.Id;
+            if (!await WriteWhileWaitingAsync(
+                    "renaming the tag", "Rename tag",
+                    () => Task.Run(() => _dataService.RenameServerTagAsync(renamedId, name))))
+            {
+                return;
+            }
+
             ChangedAny = true;
             await ReloadTagsAsync();
         }
@@ -477,7 +538,15 @@ public partial class ManageTagsWindow : Window
 
         try
         {
-            await _dataService.SetServerTagColorAsync(_selectedNode.Tag.Id, dialog.SelectedColour);
+            var recolouredId = _selectedNode.Tag.Id;
+            var colour = dialog.SelectedColour;
+            if (!await WriteWhileWaitingAsync(
+                    "setting the tag colour", "Set tag colour",
+                    () => Task.Run(() => _dataService.SetServerTagColorAsync(recolouredId, colour))))
+            {
+                return;
+            }
+
             ChangedAny = true;
             await ReloadTagsAsync();
         }
@@ -511,7 +580,14 @@ public partial class ManageTagsWindow : Window
 
         try
         {
-            await _dataService.DeleteServerTagAsync(_selectedNode.Tag.Id);
+            var deletedId = _selectedNode.Tag.Id;
+            if (!await WriteWhileWaitingAsync(
+                    "deleting the tag", "Delete tag",
+                    () => Task.Run(() => _dataService.DeleteServerTagAsync(deletedId))))
+            {
+                return;
+            }
+
             _selectedNode = null;
             ChangedAny = true;
             await ReloadTagsAsync();

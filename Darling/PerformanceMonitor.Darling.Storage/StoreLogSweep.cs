@@ -294,6 +294,11 @@ WHERE ctid = $3::tid";
 
         var candidates = await ListAsync(connection, cancellationToken);
 
+        /* Read once per sweep, with the store login: the wording of a row-carrying DETAIL follows it, so an entry kept
+           under a catalogue other than English keeps no DETAIL (StoreLogClassifier.WithheldDetail). A read that
+           fails counts as not English. */
+        var detailInEnglish = candidates.Count > 0 && await ReadDetailInEnglishAsync(connection, cancellationToken);
+
         foreach (var candidate in candidates)
         {
             var resume = StoreLogSlab.ResolveResume(candidate.StoredOffset, candidate.StoredLastSize, candidate.SizeBytes);
@@ -313,7 +318,7 @@ WHERE ctid = $3::tid";
                 continue;
             }
 
-            var census = StoreLogClassifier.Classify(slab.Text);
+            var census = StoreLogClassifier.Classify(slab.Text, detailInEnglish);
             var newOffset = resume.Offset + slab.BytesConsumed;
 
             var capture = new FileCapture(
@@ -414,6 +419,24 @@ WHERE ctid = $3::tid";
 
     /// <summary>One row of <see cref="LogDirectoryListSql"/>.</summary>
     private readonly record struct Candidate(string LogFile, long SizeBytes, long? StoredOffset, long? StoredLastSize);
+
+    private const string LcMessagesSql = "SHOW lc_messages";
+
+    /// <summary>Whether the store's <c>lc_messages</c> writes English (<see cref="StoreLogClassifier.IsEnglishLcMessages"/>);
+    /// false when it cannot be read.</summary>
+    private static async Task<bool> ReadDetailInEnglishAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = new NpgsqlCommand(LcMessagesSql, connection) { CommandTimeout = SweepTimeoutSeconds };
+            var value = await command.ExecuteScalarAsync(cancellationToken);
+            return StoreLogClassifier.IsEnglishLcMessages(value as string);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
 
     private static async Task<List<Candidate>> ListAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {

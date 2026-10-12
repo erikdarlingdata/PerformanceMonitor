@@ -43,23 +43,38 @@ public sealed class RawGatePerSlotSourceFloorLiveTests
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4300 per-slot floor pins.");
 
         var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default);
-
-        var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { MaxAutoPrepare = 0 }.ConnectionString;
-        var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync();
-        await PgMigrations.MigrateAsync(connection, default);
-
-        var enabled = await TimescaleSupport.TryEnableAsync(connection, null, default);
-        Assert.SkipWhen(!enabled, "The live #4300 per-slot floor pins need TimescaleDB.");
-        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, default);
-        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, default);
-
-        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection) { CommandTimeout = SetupTimeoutSeconds })
+        NpgsqlConnection? connection = null;
+        /* A skip (no TimescaleDB) or a failed setup throws before the caller owns the store, so the opener drops it
+           here. Left alone it would survive to the process-exit drain, which the test runner waits only 10 s for. */
+        try
         {
-            await stop.ExecuteNonQueryAsync();
-        }
+            var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { MaxAutoPrepare = 0 }.ConnectionString;
+            connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync();
+            await PgMigrations.MigrateAsync(connection, default);
 
-        return (connection, scratch);
+            var enabled = await TimescaleSupport.TryEnableAsync(connection, null, default);
+            Assert.SkipWhen(!enabled, "The live #4300 per-slot floor pins need TimescaleDB.");
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, default);
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, default);
+
+            await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                await stop.ExecuteNonQueryAsync();
+            }
+
+            return (connection, scratch);
+        }
+        catch
+        {
+            if (connection is not null)
+            {
+                await connection.DisposeAsync();
+            }
+
+            await scratch.DisposeAsync();
+            throw;
+        }
     }
 
     /// <summary>Hour 0 (the raw floor) holds ONLY CPU-unknown rows: <c>delta_worker_time = NULL</c>,
@@ -139,6 +154,7 @@ FROM generate_series(1, 3) AS n", connection) { CommandTimeout = SetupTimeoutSec
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -177,6 +193,7 @@ FROM generate_series(1, 3) AS n", connection) { CommandTimeout = SetupTimeoutSec
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 }

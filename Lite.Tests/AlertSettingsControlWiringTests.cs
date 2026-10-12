@@ -29,6 +29,7 @@ namespace Lite.Tests;
 /// regresses. The apps are checked separately because their control sets legitimately differ (Darling has
 /// AG boxes Lite has no concept of); what is pinned is that each app is internally consistent.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class AlertSettingsControlWiringTests
 {
     /// <summary>

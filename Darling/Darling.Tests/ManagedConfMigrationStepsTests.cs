@@ -16,7 +16,11 @@ namespace Darling.Tests;
 /// <summary>
 /// <see cref="ManagedConfMigrationSteps"/> (#4336): the backup, the two-step atomic write, and the
 /// verified stamp. Pure file I/O in throwaway temp directories, no database.
+///
+/// <para>One test here sets <c>ManagedConfMigrationSteps.FailBetweenSteps</c>, a static shared by the whole test
+/// process, so this class shares a non-parallel collection with the other class that sets it (#4773).</para>
 /// </summary>
+[Collection("managed-conf-crash-hook")]
 public sealed class ManagedConfMigrationStepsTests : IDisposable
 {
     private readonly string _dataDir;

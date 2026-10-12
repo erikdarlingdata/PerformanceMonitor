@@ -173,6 +173,35 @@ public sealed class ReadLatencyFlushLiveTests
     }
 
     [Fact]
+    public async Task AFallbackAndAGateFailure_AreStoredWithTheirOwnOutcomeLabels()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the read-latency outcome pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var accumulator = new ReadLatencyAccumulator();
+        accumulator.Record(ReadSurface.Mcp, "get_query_store_top", ReadOutcome.FallbackRaw, 40);
+        accumulator.Record(ReadSurface.Mcp, "get_query_store_top", ReadOutcome.GateFailed, 40);
+        await accumulator.FlushAsync(connection, new DateTime(2026, 1, 1, 5, 0, 0, DateTimeKind.Utc), logger: null, ct);
+
+        using var read = new NpgsqlCommand("SELECT outcome FROM collect.read_latency ORDER BY outcome", connection);
+        await using var reader = await read.ExecuteReaderAsync(ct);
+        var labels = new System.Collections.Generic.List<string>();
+        while (await reader.ReadAsync(ct))
+        {
+            labels.Add(reader.GetString(0));
+        }
+
+        Assert.Equal(new[] { "fallback_raw", "gate_failed" }, labels);
+    }
+
+    [Fact]
     public async Task ASecondFlushInTheSameHour_AddsToTheFirst()
     {
         var baseConnectionString = ConnectionString;

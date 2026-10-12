@@ -243,7 +243,10 @@ public sealed class CompressionPhaseAssignmentTests
         Assert.Equal(24, TimescaleSupport.CompressionPhaseMinutes.Count);
         /* #3653 (LC): back to 21 minutes now that the legacy trio froze off the refresh grid and their
            successors took the three positions instead of staying appended behind it (was 18 during Q12). */
-        Assert.Equal(21, TimescaleSupport.HeaviestRefreshWindowMinutes);
+        /* #5329: 19 now that the two io hourlies joined the phase grid as light members (14 light members, the
+           window re-derives 21 -> 19; TimescaleSupportTests pins the derivation). The band, its 24 minutes and
+           the 3-per-minute cap below are unchanged, so the assignment is still a permutation of the same minutes. */
+        Assert.Equal(19, TimescaleSupport.HeaviestRefreshWindowMinutes);
         Assert.Equal(35, TimescaleSupport.AggregateCompressionBandMinute);
         Assert.Equal(3, TimescaleSupport.CompressionPhaseMaxPerMinute);
 

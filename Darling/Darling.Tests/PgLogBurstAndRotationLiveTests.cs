@@ -242,9 +242,12 @@ public sealed class PgLogBurstAndRotationLiveTests
 
         var cycle = await EventCycleAsync(connection, Carry(baseline.Context), false, ct);
 
-        Assert.Equal(1, WaitCount(cycle.Rows, pidA));
+        /* PostgreSQL 18 logs a lock wait's "still waiting" line again on a latch wakeup, so one wait can leave more
+           than one line. What the rotation must hold: the finished marked file (A) and the newest file (C) are read,
+           each line exactly once, and nothing from the skipped middle file (B). */
+        AssertReadOnce(cycle.Rows, pidA);
         Assert.Equal(0, WaitCount(cycle.Rows, pidB));
-        Assert.Equal(1, WaitCount(cycle.Rows, pidC));
+        AssertReadOnce(cycle.Rows, pidC);
         Assert.Contains(cycle.Context.Measurements, m => m.Label == PgServerLogTail.FilesSkippedByRotationMeasurement && m.Value == 1);
     }
 
@@ -260,6 +263,15 @@ public sealed class PgLogBurstAndRotationLiveTests
         }
 
         await ExecAsync(connection, "SELECT pg_sleep(0.3)", ct);
+    }
+
+    /// <summary>The wait's lines are present and none was read twice: a re-read repeats a line's timestamp and
+    /// text, while PostgreSQL 18's repeated "still waiting" line carries a later timestamp and a longer wait.</summary>
+    private static void AssertReadOnce(IEnumerable<PgLogEvent> rows, int pid)
+    {
+        var lines = rows.Where(r => r.Pid == pid && r.Message.Contains("still waiting", StringComparison.Ordinal)).ToList();
+        Assert.NotEmpty(lines);
+        Assert.Equal(lines.Count, lines.Select(r => (r.OccurredAtUtc, r.Message)).Distinct().Count());
     }
 
     private static int WaitCount(IEnumerable<PgLogEvent> rows, int pid) =>

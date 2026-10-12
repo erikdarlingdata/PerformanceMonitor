@@ -12,6 +12,9 @@ using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Analysis;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -101,12 +104,41 @@ SELECT @count;";
     }
 
     /// <summary>
+    /// True for an edition that is paid for as Enterprise, the only editions the licensing advice ("Enterprise may not be
+    /// required", the downgrade savings) can apply to. A Developer or Evaluation edition (including "Enterprise Developer Edition"
+    /// and "Enterprise Evaluation Edition") has no license fee to save, so neither gets licensing advice. Express needs no clause of
+    /// its own: no Express edition string contains "Enterprise", so the first test already leaves it out.
+    /// </summary>
+    internal static bool EditionNeedsLicensingAdvice(string? edition) =>
+        !string.IsNullOrEmpty(edition)
+        && edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase)
+        && !edition.Contains("Developer", StringComparison.OrdinalIgnoreCase)
+        && !edition.Contains("Evaluation", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Runs all Phase 1 recommendation checks and returns a consolidated list.
     /// Uses DuckDB for collected data and live SQL queries for server-specific checks.
     /// </summary>
-    public async Task<List<RecommendationRow>> GetRecommendationsAsync(int serverId, string connectionString, string utilityConnectionString, decimal monthlyCost)
+    public async Task<List<RecommendationRow>> GetRecommendationsAsync(int serverId, string connectionString, string utilityConnectionString, decimal monthlyCost) =>
+        (await GetRecommendationsWithNoteAsync(serverId, connectionString, utilityConnectionString, monthlyCost)).Rows;
+
+    /// <summary>
+    /// The recommendations plus the note for databases the per-database rules skipped (#5558). A database this node holds only as a
+    /// secondary copy in an Availability Group is judged on the primary: its settings and contents replicate, so each node would raise
+    /// the same idle, dev/test, TDE and compression finding for it. The set comes from the stored Availability Group snapshots and fails
+    /// open (no rows, stale rows, NULL or RESOLVING roles, a standalone server, Azure SQL Database: nothing is skipped). The low IO
+    /// latency rule keeps every database, because each replica's own storage is that replica's own cost. Live SQL results are filtered here
+    /// in C#, so no Availability Group query is added.
+    /// <para>Instance-level role: the Enterprise edition note still keys on <c>GetAgReplicaRoleAsync</c>, because an edition is one
+    /// decision for the whole group and is not a finding about any single database. The per-database set replaces it only for the
+    /// TDE blocker list, where an instance that is primary for one group and secondary for another still lists the databases it
+    /// holds as primary.</para>
+    /// </summary>
+    public async Task<(List<RecommendationRow> Rows, string? SkippedNote)> GetRecommendationsWithNoteAsync(
+        int serverId, string connectionString, string utilityConnectionString, decimal monthlyCost)
     {
         var recommendations = new List<RecommendationRow>();
+        var secondary = await SecondaryReplicaScope.ReadAsync(_duckDb, serverId, DateTime.UtcNow, System.Threading.CancellationToken.None);
 
         // 1. Enterprise feature usage audit (live SQL query)
         try
@@ -127,7 +159,7 @@ SELECT @count;";
                 majorVersion = editionReader.IsDBNull(1) ? 0 : editionReader.GetInt32(1);
             }
 
-            if (edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase))
+            if (EditionNeedsLicensingAdvice(edition))
             {
                 var agRole = await GetAgReplicaRoleAsync(sqlConn);
 
@@ -217,15 +249,23 @@ BEGIN
 END;", sqlConn);
                     featCmd.CommandTimeout = 30;
 
-                    var tdeDbNames = new List<string>();
+                    var tdeAllNames = new List<string>();
                     using var featReader = await featCmd.ExecuteReaderAsync();
                     while (await featReader.ReadAsync())
                     {
                         if (!featReader.IsDBNull(0))
-                            tdeDbNames.Add(featReader.GetString(0));
+                            tdeAllNames.Add(featReader.GetString(0));
                     }
 
-                    if (tdeDbNames.Count == 0)
+                    /* #5558: a secondary copy's TDE is the primary's to report. */
+                    var tdeDbNames = AgReplicaScope.WithoutSecondaries(tdeAllNames, secondary);
+
+                    if (tdeAllNames.Count > 0 && tdeDbNames.Count == 0)
+                    {
+                        /* Every TDE database here is a secondary copy: the blocker (and the licensing estimate that follows it) is
+                           the primary's finding. "No Enterprise-only features" would be false, so nothing is said. */
+                    }
+                    else if (tdeDbNames.Count == 0)
                     {
                         recommendations.Add(new RecommendationRow
                         {
@@ -284,22 +324,40 @@ END;", sqlConn);
             AppLogger.Error("FinOps", $"Recommendation check failed (Enterprise features): {ex.Message}");
         }
 
+        /* The two CPU right-sizing rules (2 and 12) read DIFFERENT windows, so each is gated on its own. A server enrolled minutes ago
+           holds only the ring-buffer backfill of its first collect ("68 samples over 4 minutes"), which is not a day or a week of load.
+           Rule 2 reads the last 24 hours (its P95), so it speaks only when the oldest sample INSIDE those 24 hours is at least 23 hours
+           old: a server collected for two days last week, closed, and restarted with 60 minutes of backfill has a 7-day span of days
+           but a 24-hour window of one hour. Rule 12 reads 7 days, so it keeps the 24-hour span over those 7 days. The two never both
+           land in the list: the one that keeps more cores wins. */
+        var cpuSpanEnough = CpuSamplesSpanEnough(await GetCpuSampleSpanAsync(serverId));
+        var cpuWindowCoversDay = CpuWindowCoversEnough(await GetOldestCpuSampleAgeAsync(serverId, TimeSpan.FromHours(24)));
+        RecommendationRow? computeCpuRow = null;
+        var computeCpuTarget = 0;
+
         // 2. CPU right-sizing score (from DuckDB)
         try
         {
             var util = await GetUtilizationEfficiencyAsync(serverId);
-            if (util != null && util.P95CpuPct < 30 && util.CpuCount > 4)
+            /* A window with no CPU sample reads a P95 of 0, which is "idle" only because nothing was measured.
+               The utilization row gives that window no verdict (HasCpuSample is false); the advice follows it. */
+            if (cpuWindowCoversDay && util != null && util.HasCpuSample && util.P95CpuPct < 30 && util.CpuCount > 4
+                && util.ProvisioningStatus != ProvisioningVerdict.NotApplicable)
             {
                 var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
                 var savingsPct = 1m - ((decimal)targetCores / util.CpuCount);
-                recommendations.Add(new RecommendationRow
+                /* The count is the vCores the service objective gives an Azure SQL Database, so it is named as the utilization card
+                   names it; everywhere else it is the CPU count, and the word stays "cores". */
+                var cpuNoun = ServerHardwareScope.CpuCoreNoun(util.EngineEdition);
+                computeCpuTarget = targetCores;
+                recommendations.Add(computeCpuRow = new RecommendationRow
                 {
                     Category = "Compute",
                     Severity = util.P95CpuPct < 15 ? "High" : "Medium",
                     Confidence = "Medium",
-                    Finding = $"CPU over-provisioned ({util.CpuCount} cores, P95 = {util.P95CpuPct:N1}%)",
-                    Detail = $"P95 CPU utilization is {util.P95CpuPct:N1}% (avg {util.AvgCpuPct:N1}%, max {util.MaxCpuPct}%) across {util.CpuCount} cores. " +
-                             $"Consider reducing to ~{targetCores} cores.",
+                    Finding = $"CPU over-provisioned ({util.CpuCount} {cpuNoun}, P95 = {util.P95CpuPct:N1}%)",
+                    Detail = $"P95 CPU utilization is {util.P95CpuPct:N1}% (avg {util.AvgCpuPct:N1}%, max {util.MaxCpuPct}%) across {util.CpuCount} {cpuNoun}. " +
+                             $"Consider reducing to ~{targetCores} {cpuNoun}.",
                     EstMonthlySavings = monthlyCost > 0 ? monthlyCost * savingsPct * 0.60m : null
                 });
             }
@@ -318,17 +376,26 @@ END;", sqlConn);
                could fire right after a service restart or on servers where plan
                cache / workspace memory dominates, falsely showing "buffer pool 0%". */
             var util = await GetUtilizationEfficiencyAsync(serverId);
-            if (util != null && util.PhysicalMemoryMb > 8192)
+            /* No memory advice on an Azure SQL Database (engine_edition 5): its memory comes with its service objective
+               and cannot be resized on its own. util.PhysicalMemoryMb is the database's own memory limit there
+               (memory_stats, filled from committed_target_kb), not the host's, so the skip is not about a wrong
+               denominator: there is nothing to resize. Managed Instance (8) and SQL Server are unchanged. */
+            if (util != null && util.PhysicalMemoryMb > 8192
+                && await GetSqlEngineEditionAsync(serverId) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
                 int p95Mb = 0;
                 long sampleCount = 0;
+                var window = RightSizingWindow.Describe(0, TimeSpan.Zero);
                 using (var conn = await OpenConnectionAsync())
                 using (var cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = @"
 SELECT
     PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,
-    COUNT(*) AS sample_count
+    COUNT(*) AS sample_count,
+    MIN(collection_time) AS first_sample,
+    MAX(collection_time) AS last_sample,
+    COUNT(total_server_memory_mb) AS window_samples
 FROM v_memory_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
@@ -340,6 +407,7 @@ AND   collection_time >= $2";
                     {
                         p95Mb = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
                         sampleCount = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
+                        window = SampleWindow(reader, 2, 4);
                     }
                 }
 
@@ -350,16 +418,17 @@ AND   collection_time >= $2";
                 if (sampleCount >= 16)
                 {
                     var memRatio = (decimal)p95Mb / util.PhysicalMemoryMb;
-                    if (memRatio < 0.50m)
+                    var targetMb = Math.Max(8192, p95Mb * 2);
+                    // Compared in the whole GB the text prints, so the advice never reads "of 8GB RAM ... reducing to ~8GB".
+                    if (memRatio < 0.50m && targetMb / 1024 < util.PhysicalMemoryMb / 1024)
                     {
-                        var targetMb = Math.Max(8192, p95Mb * 2);
                         recommendations.Add(new RecommendationRow
                         {
                             Category = "Memory",
                             Severity = memRatio < 0.30m ? "High" : "Medium",
                             Confidence = "Medium",
                             Finding = $"Memory over-provisioned (P95 SQL memory uses {memRatio:P0} of {util.PhysicalMemoryMb / 1024}GB RAM)",
-                            Detail = $"P95 SQL Server memory over 7 days is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
+                            Detail = $"P95 SQL Server memory from {window} is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
                                      $"Consider reducing to ~{targetMb / 1024}GB.",
                             EstMonthlySavings = monthlyCost > 0 ? monthlyCost * (1m - (decimal)targetMb / util.PhysicalMemoryMb) * 0.30m : null
                         });
@@ -400,6 +469,8 @@ AND   collection_time >= $2";
             using var sqlConn = new SqlConnection(connectionString);
             await sqlConn.OpenAsync();
 
+            /* The query reads the database the connection opens in; when that is a secondary copy here, the primary reports it (#5558). */
+            var compressionSkipped = AgReplicaScope.IsSkipped(secondary, sqlConn.Database);
             using var compCmd = new SqlCommand(@"
 SELECT
     s.name AS schema_name,
@@ -427,16 +498,19 @@ ORDER BY
             compCmd.CommandTimeout = 60;
 
             var candidates = new List<(string Schema, string Table, string Index, string Type, decimal SizeMb)>();
-            using var compReader = await compCmd.ExecuteReaderAsync();
-            while (await compReader.ReadAsync())
+            if (!compressionSkipped)
             {
-                candidates.Add((
-                    compReader.IsDBNull(0) ? "" : compReader.GetString(0),
-                    compReader.IsDBNull(1) ? "" : compReader.GetString(1),
-                    compReader.IsDBNull(2) ? "" : compReader.GetString(2),
-                    compReader.IsDBNull(3) ? "" : compReader.GetString(3),
-                    compReader.IsDBNull(5) ? 0m : Convert.ToDecimal(compReader.GetValue(5))
-                ));
+                using var compReader = await compCmd.ExecuteReaderAsync();
+                while (await compReader.ReadAsync())
+                {
+                    candidates.Add((
+                        compReader.IsDBNull(0) ? "" : compReader.GetString(0),
+                        compReader.IsDBNull(1) ? "" : compReader.GetString(1),
+                        compReader.IsDBNull(2) ? "" : compReader.GetString(2),
+                        compReader.IsDBNull(3) ? "" : compReader.GetString(3),
+                        compReader.IsDBNull(5) ? 0m : Convert.ToDecimal(compReader.GetValue(5))
+                    ));
+                }
             }
 
             if (candidates.Count > 0)
@@ -465,7 +539,13 @@ ORDER BY
         // 6. Dormant database detection with cost impact (from DuckDB)
         try
         {
-            var idleDbs = await GetIdleDatabasesAsync(serverId);
+            /* "No query activity in 7 days" is only true once 7 days of query stats exist: a server enrolled hours
+               ago has not been watched long enough to call any database idle. */
+            var idleDbs = await HasQueryStatsCoverageAsync(serverId)
+                ? await GetIdleDatabasesAsync(serverId)
+                : new List<IdleDatabaseRow>();
+            /* #5558: zero reads on a secondary copy is not idleness (its readers may be elsewhere). */
+            idleDbs = idleDbs.Where(d => !AgReplicaScope.IsSkipped(secondary, d.DatabaseName)).ToList();
             if (idleDbs.Count > 0)
             {
                 var totalSizeGb = idleDbs.Sum(d => d.TotalSizeMb) / 1024m;
@@ -474,7 +554,7 @@ ORDER BY
                 if (monthlyCost > 0)
                 {
                     var allDbSizes = await GetDatabaseSizeLatestAsync(serverId);
-                    var totalMb = allDbSizes.Sum(d => d.TotalSizeMb);
+                    var totalMb = DatabaseSizeRow.AllocatedTotalMb(allDbSizes);
                     if (totalMb > 0)
                         costShare = (idleDbs.Sum(d => d.TotalSizeMb) / totalMb) * monthlyCost;
                 }
@@ -517,6 +597,7 @@ AND   database_id > 4", sqlConn);
                 if (!devReader.IsDBNull(0))
                     devDbs.Add(devReader.GetString(0));
             }
+            devDbs = AgReplicaScope.WithoutSecondaries(devDbs, secondary);
 
             if (devDbs.Count > 0)
             {
@@ -550,7 +631,7 @@ SELECT
     MAX(current_duration_seconds) AS max_duration_seconds,
     AVG(avg_duration_seconds) AS avg_historical,
     SUM(CASE WHEN is_running_long THEN 1 ELSE 0 END) AS times_ran_long
-FROM running_jobs
+FROM v_running_jobs
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   avg_duration_seconds > 0
@@ -591,7 +672,10 @@ LIMIT 10";
         try
         {
             var vmUtil = await GetUtilizationEfficiencyAsync(serverId);
-            if (vmUtil != null)
+            /* No VM to resize on Azure SQL Database (its cores and memory come with its service objective),
+               and no advice from a window with no CPU sample (its P95 of 0 is not a measurement). */
+            if (vmUtil != null && vmUtil.HasCpuSample
+                && await GetSqlEngineEditionAsync(serverId) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
                 /* Memory side previously read util.BufferPoolMb (a single snapshot
                    of perfmon "Database Cache Memory") — only the data-cache slice
@@ -603,6 +687,8 @@ LIMIT 10";
                 int cpuCount = vmUtil.CpuCount;
                 int p95MemMb = 0;
                 long memSampleCount = 0;
+                var cpuWindow = "recent samples"; // neutral until the 7-day read supplies its own span; the 24-hour fallback has no span of its own
+                var memWindow = RightSizingWindow.Describe(0, TimeSpan.Zero);
                 int physMb = vmUtil.PhysicalMemoryMb;
 
                 // Try 7-day P95 from DuckDB for better accuracy
@@ -611,7 +697,9 @@ LIMIT 10";
                     using var cpuConn = await OpenConnectionAsync();
                     using var cpuCmd = cpuConn.CreateCommand();
                     cpuCmd.CommandText = @"
-SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu
+SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu,
+       MIN(collection_time) AS first_sample, MAX(collection_time) AS last_sample,
+       COUNT(sqlserver_cpu_utilization) AS window_samples
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
@@ -622,6 +710,7 @@ AND   collection_time >= $2";
                     if (await cpuReader.ReadAsync() && !cpuReader.IsDBNull(0))
                     {
                         p95Cpu7d = Convert.ToDecimal(cpuReader.GetValue(0));
+                        cpuWindow = SampleWindow(cpuReader, 1, 3);
                     }
                 }
                 catch { /* fall back to 24-hour P95 */ }
@@ -633,7 +722,10 @@ AND   collection_time >= $2";
                     memCmd.CommandText = @"
 SELECT
     PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,
-    COUNT(*) AS sample_count
+    COUNT(*) AS sample_count,
+    MIN(collection_time) AS first_sample,
+    MAX(collection_time) AS last_sample,
+    COUNT(total_server_memory_mb) AS window_samples
 FROM v_memory_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
@@ -645,6 +737,7 @@ AND   collection_time >= $2";
                     {
                         p95MemMb = memReader.IsDBNull(0) ? 0 : Convert.ToInt32(memReader.GetValue(0));
                         memSampleCount = memReader.IsDBNull(1) ? 0L : ToInt64(memReader.GetValue(1));
+                        memWindow = SampleWindow(memReader, 2, 4);
                     }
                 }
                 catch { /* if we cannot get 7-day P95 memory, skip the memory prescription */ }
@@ -658,15 +751,20 @@ AND   collection_time >= $2";
                     else if (p95Cpu7d < 30)
                         targetCores = Math.Max(2, cpuCount / 2);
 
-                    if (targetCores > 0 && targetCores < cpuCount)
+                    /* One CPU right-sizing row per server: rule 2 may already have added its row, and this one then takes its
+                       place only when it keeps more cores. */
+                    if (cpuSpanEnough && targetCores > 0 && targetCores < cpuCount
+                        && PrescriptiveCpuRowWins(computeCpuRow == null ? null : computeCpuTarget, targetCores))
                     {
+                        if (computeCpuRow != null)
+                            recommendations.Remove(computeCpuRow);
                         recommendations.Add(new RecommendationRow
                         {
                             Category = "Hardware",
                             Severity = "Medium",
                             Confidence = "Medium",
                             Finding = $"CPU: reduce from {cpuCount} to {targetCores} cores (P95 CPU {p95Cpu7d:N1}%)",
-                            Detail = $"Over the last 7 days, P95 CPU utilization was {p95Cpu7d:N1}%. " +
+                            Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
                                      $"Current allocation of {cpuCount} cores can safely be reduced to {targetCores} cores.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
@@ -685,7 +783,7 @@ AND   collection_time >= $2";
                     else if (memRatio < 0.40m)
                         targetMb = Math.Max(4096, physMb / 2);
 
-                    if (targetMb > 0 && targetMb < physMb)
+                    if (targetMb > 0 && targetMb / 1024 < physMb / 1024)
                     {
                         recommendations.Add(new RecommendationRow
                         {
@@ -693,7 +791,7 @@ AND   collection_time >= $2";
                             Severity = "Medium",
                             Confidence = "Medium",
                             Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (P95 SQL memory uses {memRatio:P0})",
-                            Detail = $"P95 SQL Server memory over 7 days is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
+                            Detail = $"P95 SQL Server memory from {memWindow} is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
                                      $"Reducing to {targetMb / 1024}GB would still leave headroom.",
                             EstMonthlySavings = monthlyCost > 0
                                 ? monthlyCost * (1m - (decimal)targetMb / physMb) * 0.30m
@@ -719,8 +817,11 @@ SELECT
     SUM(delta_reads) AS total_reads,
     SUM(delta_stall_read_ms) AS total_stall_read_ms,
     SUM(delta_writes) AS total_writes,
-    SUM(delta_stall_write_ms) AS total_stall_write_ms
-FROM file_io_stats
+    SUM(delta_stall_write_ms) AS total_stall_write_ms,
+    MIN(collection_time) AS first_sample,
+    MAX(collection_time) AS last_sample,
+    COUNT(*) AS window_samples
+FROM v_file_io_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   delta_reads > 0
@@ -730,6 +831,9 @@ HAVING SUM(delta_reads) > 1000";
             ioCmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
 
             var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal AvgWriteMs)>();
+            var storageMin = DateTime.MaxValue;
+            var storageMax = DateTime.MinValue;
+            long storageSamples = 0;
             using var ioReader = await ioCmd.ExecuteReaderAsync();
             while (await ioReader.ReadAsync())
             {
@@ -745,11 +849,20 @@ HAVING SUM(delta_reads) > 1000";
                 if (avgReadMs < 5m && avgWriteMs < 3m)
                 {
                     lowLatencyDbs.Add((dbName, avgReadMs, avgWriteMs));
+                    storageSamples += ioReader.IsDBNull(7) ? 0L : ToInt64(ioReader.GetValue(7));
+                    if (!ioReader.IsDBNull(5) && !ioReader.IsDBNull(6))
+                    {
+                        var first = Convert.ToDateTime(ioReader.GetValue(5));
+                        var last = Convert.ToDateTime(ioReader.GetValue(6));
+                        if (first < storageMin) storageMin = first;
+                        if (last > storageMax) storageMax = last;
+                    }
                 }
             }
 
             if (lowLatencyDbs.Count > 0)
             {
+                var storageWindow = RightSizingWindow.Describe(storageSamples, storageMax > storageMin ? storageMax - storageMin : TimeSpan.Zero);
                 var detail = string.Join("; ", lowLatencyDbs.Take(10)
                     .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, write {d.AvgWriteMs:N1}ms)"));
                 recommendations.Add(new RecommendationRow
@@ -758,7 +871,7 @@ HAVING SUM(delta_reads) > 1000";
                     Severity = "Low",
                     Confidence = "Medium",
                     Finding = $"{lowLatencyDbs.Count} database(s) with low IO latency — standard storage may suffice",
-                    Detail = $"These databases have avg read latency under 5ms and write under 3ms over 7 days: {detail}" +
+                    Detail = $"These databases have avg read latency under 5ms and write under 3ms across {storageWindow}: {detail}" +
                              (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
                              ". Premium/high-performance storage may not be needed."
                 });
@@ -769,7 +882,8 @@ HAVING SUM(delta_reads) > 1000";
             AppLogger.Error("FinOps", $"Recommendation check failed (Storage tier): {ex.Message}");
         }
 
-        // 14. Reserved capacity candidates — stable CPU utilization (from DuckDB)
+        // 14. Reserved capacity candidates — stable CPU utilization (from DuckDB). Read through the archive view,
+        // like every other CPU reader: the hot table alone holds only what was collected since the last 512 MB reset.
         try
         {
             using var rcConn = await OpenConnectionAsync();
@@ -779,7 +893,7 @@ SELECT
     AVG(sqlserver_cpu_utilization) AS avg_cpu,
     STDDEV(sqlserver_cpu_utilization) AS stddev_cpu,
     COUNT(*) AS sample_count
-FROM cpu_utilization_stats
+FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 HAVING COUNT(*) >= 24";
@@ -816,7 +930,139 @@ HAVING COUNT(*) >= 24";
             AppLogger.Error("FinOps", $"Recommendation check failed (Reserved capacity): {ex.Message}");
         }
 
-        return recommendations.OrderBy(r => r.SeveritySort).ToList();
+        return (recommendations.OrderBy(r => r.SeveritySort).ToList(), AgReplicaScope.SkippedNote(secondary));
+    }
+
+    /// <summary>The window the samples a rule read cover: their count and the oldest-to-newest span, in the right-sizing wording. Columns <paramref name="firstOrdinal"/> and the next are MIN and MAX of collection_time; <paramref name="countOrdinal"/> is the count of the value rows the rule's percentile read.</summary>
+    private static string SampleWindow(System.Data.Common.DbDataReader reader, int firstOrdinal, int countOrdinal)
+    {
+        var count = reader.IsDBNull(countOrdinal) ? 0L : ToInt64(reader.GetValue(countOrdinal));
+        if (reader.IsDBNull(firstOrdinal) || reader.IsDBNull(firstOrdinal + 1))
+            return RightSizingWindow.Describe(count, TimeSpan.Zero);
+        return RightSizingWindow.Describe(count, Convert.ToDateTime(reader.GetValue(firstOrdinal + 1)) - Convert.ToDateTime(reader.GetValue(firstOrdinal)));
+    }
+
+    /// <summary>How long the server's CPU samples must span before either CPU right-sizing rule may speak.</summary>
+    internal static readonly TimeSpan CpuRightSizingMinSpan = TimeSpan.FromHours(24);
+
+    /// <summary>True when CPU samples spanning <paramref name="span"/> are enough for CPU right-sizing advice: a full day, so the advice is not read off the minutes a first collect backfills.</summary>
+    internal static bool CpuSamplesSpanEnough(TimeSpan span) => span >= CpuRightSizingMinSpan;
+
+    /// <summary>How old the oldest CPU sample inside rule 2's 24-hour window must be: most of the window, so its P95 is a day's load and not the minutes since a restart.</summary>
+    internal static readonly TimeSpan CpuWindowMinOldestAge = TimeSpan.FromHours(23);
+
+    /// <summary>True when the oldest CPU sample inside the 24-hour window is at least 23 hours old, so the window's P95 describes most of a day.</summary>
+    internal static bool CpuWindowCoversEnough(TimeSpan oldestSampleAge) => oldestSampleAge >= CpuWindowMinOldestAge;
+
+    /// <summary>
+    /// True when the prescriptive CPU row (rule 12) replaces the compute row (rule 2) or stands alone: it does when no compute row
+    /// exists (<paramref name="computeTargetCores"/> null) or when it keeps MORE cores than that row. At a tie the compute row stays.
+    /// </summary>
+    internal static bool PrescriptiveCpuRowWins(int? computeTargetCores, int prescriptiveTargetCores) =>
+        computeTargetCores is not int compute || prescriptiveTargetCores > compute;
+
+    /// <summary>How long ago the oldest CPU sample inside the last <paramref name="window"/> was taken (rule 2 reads the last 24 hours): zero when there is none or the read fails.</summary>
+    private async Task<TimeSpan> GetOldestCpuSampleAgeAsync(int serverId, TimeSpan window)
+    {
+        try
+        {
+            var now = DateTime.UtcNow;
+            using var connection = await OpenConnectionAsync();
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+SELECT MIN(collection_time)
+FROM v_cpu_utilization_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   sqlserver_cpu_utilization IS NOT NULL";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = now - window });
+            var oldest = await command.ExecuteScalarAsync();
+            if (oldest != null && oldest != DBNull.Value)
+                return now - Convert.ToDateTime(oldest);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Recommendation check failed (CPU window coverage): {ex.Message}");
+        }
+
+        return TimeSpan.Zero;
+    }
+
+    /// <summary>The span from the oldest to the newest CPU sample in the last 7 days (the window rule 12 reads): zero when there is none or the read fails.</summary>
+    private async Task<TimeSpan> GetCpuSampleSpanAsync(int serverId)
+    {
+        try
+        {
+            using var connection = await OpenConnectionAsync();
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+SELECT MIN(collection_time), MAX(collection_time)
+FROM v_cpu_utilization_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   sqlserver_cpu_utilization IS NOT NULL";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+            using var reader = await command.ExecuteReaderAsync();
+            if (await reader.ReadAsync() && !reader.IsDBNull(0) && !reader.IsDBNull(1))
+                return Convert.ToDateTime(reader.GetValue(1)) - Convert.ToDateTime(reader.GetValue(0));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Recommendation check failed (CPU sample span): {ex.Message}");
+        }
+
+        return TimeSpan.Zero;
+    }
+
+    /// <summary>The number of complete UTC days (the seven before today) that must each hold a query-stats sample before a database is called idle for 7 days.</summary>
+    internal const int IdleCoverageDays = 7;
+
+    /// <summary>
+    /// The bounds of the idle-coverage check at <paramref name="nowUtc"/>: the first UTC day that must hold a sample (seven days
+    /// back), the start of today (exclusive end: today is not required, so coverage does not vanish from 00:00 UTC until the first
+    /// sample of the day), and the instant the oldest query-stats sample must be at or before (now minus seven days). The per-server
+    /// check and the fleet read share it.
+    /// </summary>
+    internal static (DateTime StartDay, DateTime EndDay, DateTime OldestCutoff) IdleCoverageBounds(DateTime nowUtc) =>
+        (nowUtc.Date.AddDays(-IdleCoverageDays), nowUtc.Date, nowUtc.AddDays(-IdleCoverageDays));
+
+    /// <summary>What the Optimization tab's Idle Databases grid says when it is empty: that no database is idle, or (when the query
+    /// stats do not cover the last 7 UTC days) that idle cannot be judged yet. An empty grid after a collection gap must not read as
+    /// a clean bill.</summary>
+    internal static string IdleDatabasesEmptyText(bool hasCoverage) => hasCoverage
+        ? "No idle databases detected"
+        : "Idle databases cannot be judged yet: query stats do not cover each of the last 7 days";
+
+    /// <summary>
+    /// True when the server's query stats cover a full 7 days: BOTH the oldest sample is at or before now minus 7 days, AND each of
+    /// the 7 complete UTC days before today holds at least one sample. The advice text claims "no query activity in 7 days", so all
+    /// 7 days must have been watched. The oldest sample alone is not enough: after a collection gap (the app was closed for nine
+    /// days) the oldest sample is old, yet the days since hold no sample, and every database reads as idle because nothing was
+    /// watching. The per-day check alone is not enough either: seven dates can all hold a sample after only six days and a few
+    /// minutes of history. Today is not required, so a covered server stays covered just after 00:00 UTC. Without the coverage there
+    /// is no idle row at all.
+    /// </summary>
+    internal async Task<bool> HasQueryStatsCoverageAsync(int serverId)
+    {
+        var (startDay, endDay, oldestCutoff) = IdleCoverageBounds(DateTime.UtcNow);
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT
+    MIN(collection_time),
+    COUNT(DISTINCT CASE WHEN collection_time >= $2 AND collection_time < $3 THEN CAST(collection_time AS DATE) END)
+FROM v_query_stats
+WHERE server_id = $1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startDay });
+        command.Parameters.Add(new DuckDBParameter { Value = endDay });
+        using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync() || reader.IsDBNull(0) || reader.IsDBNull(1))
+            return false;
+
+        return Convert.ToDateTime(reader.GetValue(0)) <= oldestCutoff && Convert.ToInt64(reader.GetValue(1)) >= IdleCoverageDays;
     }
 
     private static string FormatDuration(long seconds)

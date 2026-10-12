@@ -140,7 +140,7 @@ LIMIT 5";
 
         try
         {
-            var windowEnd = TruncateToSeconds(DateTime.UtcNow);
+            var windowEnd = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var windowStart = windowEnd.AddHours(-4);
             var context = new AnalysisContext
             {

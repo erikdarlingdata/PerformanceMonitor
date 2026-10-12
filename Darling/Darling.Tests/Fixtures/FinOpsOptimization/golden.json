@@ -1,0 +1,153 @@
+{
+  "a": {
+    "idleDatabases": [
+      {
+        "DatabaseName": "IdleOld",
+        "TotalSizeMb": 1024.00,
+        "FileCount": 1,
+        "LastExecutionTime": null
+      },
+      {
+        "DatabaseName": "IdleNoRows",
+        "TotalSizeMb": 750.75,
+        "FileCount": 2,
+        "LastExecutionTime": null
+      },
+      {
+        "DatabaseName": "IdleZero",
+        "TotalSizeMb": 64.00,
+        "FileCount": 1,
+        "LastExecutionTime": "anchor-8.916667d"
+      }
+    ],
+    "tempdbSummary": [
+      {
+        "Metric": "User Objects",
+        "CurrentMb": 800.00,
+        "Peak24hMb": 1500.50,
+        "Warning": "High user object usage"
+      },
+      {
+        "Metric": "Internal Objects",
+        "CurrentMb": 1200.25,
+        "Peak24hMb": 1200.25,
+        "Warning": "High internal object usage (sorts/hashes)"
+      },
+      {
+        "Metric": "Version Store",
+        "CurrentMb": 100.00,
+        "Peak24hMb": 2500.00,
+        "Warning": "Version store pressure — check long-running transactions"
+      },
+      {
+        "Metric": "Total Reserved",
+        "CurrentMb": 2100.25,
+        "Peak24hMb": 4300.50,
+        "Warning": ""
+      }
+    ],
+    "waitCategories": [
+      {
+        "Category": "CPU",
+        "TotalWaitTimeMs": 2300,
+        "WaitingTasks": 35,
+        "PctOfTotal": 47.9,
+        "TopWaitType": "CXPACKET",
+        "TopWaitTimeMs": 1500,
+        "MonthlyCostShare": 0
+      },
+      {
+        "Category": "Storage",
+        "TotalWaitTimeMs": 1000,
+        "WaitingTasks": 10,
+        "PctOfTotal": 20.8,
+        "TopWaitType": "PAGEIOLATCH_SH",
+        "TopWaitTimeMs": 700,
+        "MonthlyCostShare": 0
+      },
+      {
+        "Category": "Locks",
+        "TotalWaitTimeMs": 700,
+        "WaitingTasks": 7,
+        "PctOfTotal": 14.6,
+        "TopWaitType": "LCK_M_X",
+        "TopWaitTimeMs": 700,
+        "MonthlyCostShare": 0
+      },
+      {
+        "Category": "Memory",
+        "TotalWaitTimeMs": 700,
+        "WaitingTasks": 9,
+        "PctOfTotal": 14.6,
+        "TopWaitType": "RESOURCE_SEMAPHORE",
+        "TopWaitTimeMs": 700,
+        "MonthlyCostShare": 0
+      },
+      {
+        "Category": "Other",
+        "TotalWaitTimeMs": 100,
+        "WaitingTasks": 1,
+        "PctOfTotal": 2.1,
+        "TopWaitType": "BROKER_TASK_STOP",
+        "TopWaitTimeMs": 100,
+        "MonthlyCostShare": 0
+      }
+    ],
+    "expensiveQueries": [
+      {
+        "DatabaseName": "Alpha",
+        "TotalCpuMs": 11500,
+        "AvgCpuMsPerExec": 310.81,
+        "TotalReads": 1400,
+        "AvgReadsPerExec": 38,
+        "Executions": 37,
+        "QueryPreview": "SELECT alpha",
+        "FullQueryText": "SELECT alpha",
+        "MonthlyCostShare": 0,
+        "QueryPlanXml": "<ShowPlanXML />"
+      },
+      {
+        "DatabaseName": "Beta",
+        "TotalCpuMs": 4000,
+        "AvgCpuMsPerExec": 500.00,
+        "TotalReads": 300,
+        "AvgReadsPerExec": 38,
+        "Executions": 8,
+        "QueryPreview": "SELECT beta",
+        "FullQueryText": "SELECT beta",
+        "MonthlyCostShare": 0,
+        "QueryPlanXml": null
+      },
+      {
+        "DatabaseName": "Gamma",
+        "TotalCpuMs": 4000,
+        "AvgCpuMsPerExec": 500.00,
+        "TotalReads": 200,
+        "AvgReadsPerExec": 25,
+        "Executions": 8,
+        "QueryPreview": "SELECT gamma",
+        "FullQueryText": "SELECT gamma",
+        "MonthlyCostShare": 0,
+        "QueryPlanXml": null
+      },
+      {
+        "DatabaseName": "Delta",
+        "TotalCpuMs": 3000,
+        "AvgCpuMsPerExec": 1000.00,
+        "TotalReads": 50,
+        "AvgReadsPerExec": 17,
+        "Executions": 3,
+        "QueryPreview": "SELECT ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "FullQueryText": "SELECT dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "MonthlyCostShare": 0,
+        "QueryPlanXml": null
+      }
+    ]
+  },
+  "b": {
+    "idleDatabases": [],
+    "tempdbSummary": [],
+    "waitCategories": [],
+    "expensiveQueries": []
+  }
+}

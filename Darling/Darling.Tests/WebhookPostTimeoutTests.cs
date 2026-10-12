@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// connection and never answered held the whole alert delivery for that long, once per channel, and a service
 /// stop waited it out. These tests post to a loopback endpoint that accepts and never answers.
 /// </summary>
+[Collection("timing")]
 public sealed class WebhookPostTimeoutTests
 {
     /* Well above anything the bounded paths need (a 200 ms timeout, an immediate cancel) and well below the

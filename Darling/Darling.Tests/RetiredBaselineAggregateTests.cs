@@ -145,15 +145,34 @@ FROM collect.cpu_utilization_stats
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA", ct);
         await ExecuteAsync(connection,
-            "SELECT add_continuous_aggregate_policy('collect.cpu_utilization_baseline', start_offset => INTERVAL '3 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', if_not_exists => true)", ct);
+            /* #5416: initial_start a day out, so TimescaleDB's scheduler never runs this policy's refresh job while
+               the test is alive. A refresh job running at the moment of the sweep's DROP fails it with XX000
+               "tuple concurrently deleted" and left a test connection Closed (one CI flake, reproduced locally).
+               The policy still exists for the cascade assertions. */
+            "SELECT add_continuous_aggregate_policy('collect.cpu_utilization_baseline', start_offset => INTERVAL '3 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', initial_start => now() + INTERVAL '1 day', if_not_exists => true)", ct);
         await ExecuteAsync(connection,
             "SELECT add_retention_policy('collect.cpu_utilization_baseline', drop_after => INTERVAL '35 days', if_not_exists => true)", ct);
         await ExecuteAsync(connection,
             "CREATE OR REPLACE VIEW collect.file_io_baseline AS SELECT server_id, date_trunc('hour', collection_time) AS bucket, collection_time, count(*) AS row_count FROM collect.file_io_stats GROUP BY 1, 2, 3", ct);
 
         /* ---- the sweep: both shapes drop in one pass; policies go with the CAGG. */
-        var dropped = await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, ct);
-        Assert.Equal(2, dropped);
+        /* A concurrent continuous-aggregate refresh can make one DROP fail (40P01 / XX000); production simply
+           retries on its next pass. The test asserts the outcome, not that a single call drops everything. */
+        var sweepLog = new CapturingTestLogger();
+        var dropped = 0;
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            if (attempt > 0)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), ct);
+            }
+            dropped += await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, sweepLog, ct);
+            if (dropped >= 2)
+            {
+                break;
+            }
+        }
+        Assert.True(dropped == 2, $"the sweep dropped {dropped} of 2 retired relations: {sweepLog.Joined}");
 
         using (var check = new NpgsqlCommand(
             "SELECT to_regclass('collect.cpu_utilization_baseline') IS NULL AND to_regclass('collect.file_io_baseline') IS NULL", connection))
@@ -263,7 +282,8 @@ WITH NO DATA", ct);
             await ExecuteAsync(connection, TimescaleSupport.LegacyCreateWaitStatsBaselineSql, ct);
             await ExecuteAsync(connection, TimescaleSupport.CreateWaitStatsIntervalBaselineSql, ct);
             await ExecuteAsync(connection,
-                $"SELECT add_continuous_aggregate_policy('collect.{legacy}', start_offset => INTERVAL '1 day', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', if_not_exists => true)", ct);
+                /* #5416: initial_start a day out, so no refresh job races the day-forty DROP (see the first test). */
+                $"SELECT add_continuous_aggregate_policy('collect.{legacy}', start_offset => INTERVAL '1 day', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', initial_start => now() + INTERVAL '1 day', if_not_exists => true)", ct);
             await RefreshFromAsync(connection, legacy, hour1, ct);
             await RefreshFromAsync(connection, successor, hour2, ct);
 
@@ -344,7 +364,37 @@ WITH NO DATA", ct);
             var dayFortyVerdict = await TimescaleSupport.JudgeSupersededBaselineRelationAsync(connection, legacy, successor, dayForty, ct);
             Assert.Equal(TimescaleSupport.SupersededBaselineDecision.Drop, dayFortyVerdict.Decision);
             Assert.True(dayFortyVerdict.LegacyHoldsRows, "this legacy still HOLDS rows at day forty — it drops on coverage, not on #4289's empty-aggregate rule");
-            Assert.True(await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, dayForty, ct) >= 1);
+            /* A concurrent refresh can make one DROP fail; production retries on its next pass, so the test
+               asserts the outcome (the sweep removes the legacy), not that the first call does. */
+            var sweepLog = new CapturingTestLogger();
+            var sweepDropped = 0;
+            /* DropRetiredBaselineAggregatesAsync catches every non-cancel exception into its logger, so a drop
+               that broke the connection surfaced here as "Connection is not open" from the loop's next
+               statement while the real error sat in sweepLog, which only the assert below prints and a thrown
+               loop never reaches. Any failure in the loop, and a connection no longer open after a drop, now
+               fails with the sweep's log in the message. */
+            try
+            {
+                for (var attempt = 0;
+                     attempt < 5 && await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct);
+                     attempt++)
+                {
+                    if (attempt > 0)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                    }
+                    sweepDropped += await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, sweepLog, dayForty, ct);
+                    if (connection.State != System.Data.ConnectionState.Open)
+                    {
+                        throw new InvalidOperationException($"the connection is {connection.State} after sweep attempt {attempt + 1}");
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw new Xunit.Sdk.XunitException($"the sweep loop failed with {ex.GetType().Name}: {ex.Message} -- the sweep's log: {sweepLog.Joined}", ex);
+            }
+            Assert.True(sweepDropped >= 1, $"the sweep never dropped the legacy aggregate: {sweepLog.Joined}");
             Assert.False(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct), "the legacy aggregate must be gone");
             Assert.True(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(successor), null, ct), "the successor must stay");
             Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = '{legacy}'", null, ct));
@@ -489,13 +539,20 @@ public sealed class EmptySupersededBaselineLiveTests
         Assert.True(await RelationExistsAsync(connection, successor, ct), "the successor must stay, empty or not");
     }
 
+    /* #5667: the probe's lock_timeout and the release of the held lock are two timers this test owns, and the test needs the probe
+       to time out BEFORE the release (else the probe succeeds and the drop runs) and the release to come BEFORE a wrongly
+       attempted drop would itself time out (else a regression is hidden). At 1 s and 1.5 s that was 0.5 s each side, which a
+       slow runner closes; 4 s and 6 s leave 2 s each side, and no assertion changed. */
+    private static readonly TimeSpan ProbeLockTimeout = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan ReleaseAfter = TimeSpan.FromSeconds(6);
+
     /// <summary>#4292 Low 1: when the has-rows probe itself fails, the legacy must survive, not read as empty.
     /// <see cref="TimescaleSupport.JudgeSupersededBaselineRelationAsync"/> has no catch of its own, so the
     /// exception reaches <see cref="TimescaleSupport.DropRetiredBaselineAggregatesAsync"/>'s
     /// per-relation catch, which logs and skips the drop. Forced with a lock timeout (a plain <c>REVOKE SELECT</c>
     /// does not work here — <see cref="ScratchPostgres"/> connects as a superuser, which bypasses grants):
     /// a second connection holds <c>ACCESS EXCLUSIVE</c> on the legacy relation in an open transaction, and the
-    /// judged connection carries a 1-second <c>lock_timeout</c>, so its <c>EXISTS</c> read against the legacy
+    /// judged connection carries a <see cref="ProbeLockTimeout"/> <c>lock_timeout</c>, so its <c>EXISTS</c> read against the legacy
     /// view times out server-side.</summary>
     [Fact]
     public async Task LegacyProbeFails_LegacySurvives_AgainstDevPostgres()
@@ -541,14 +598,14 @@ public sealed class EmptySupersededBaselineLiveTests
             await lockCommand.ExecuteNonQueryAsync(ct);
         }
 
-        await using (var setLockTimeout = new NpgsqlCommand("SET lock_timeout = '1s'", connection))
+        await using (var setLockTimeout = new NpgsqlCommand($"SET lock_timeout = '{ProbeLockTimeout.TotalSeconds:0}s'", connection))
         {
             await setLockTimeout.ExecuteNonQueryAsync(ct);
         }
 
-        /* The lock blocks the has-rows probe, which times out at 1s and (correctly, today) propagates all the
+        /* The lock blocks the has-rows probe, which times out at ProbeLockTimeout and (correctly, today) propagates all the
            way out of DropRetiredBaselineAggregatesAsync's per-relation try, so the drop statement it guards is
-           never attempted and this returns almost immediately -- dropped stays 0. Released 1.5s in regardless,
+           never attempted and this returns once the probe has timed out -- dropped stays 0. Released ReleaseAfter in regardless,
            on its own timer: a REGRESSION this test must still be able to catch -- a catch inside
            JudgeSupersededBaselineRelationAsync that swallows the probe error and answers "empty" -- reaches
            that same drop statement, which would otherwise sit behind the SAME lock and time out too, hiding the
@@ -557,7 +614,7 @@ public sealed class EmptySupersededBaselineLiveTests
         var dropTask = TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, DateTime.UtcNow, ct);
         var releaseTask = Task.Run(async () =>
         {
-            await Task.Delay(TimeSpan.FromSeconds(1.5), ct);
+            await Task.Delay(ReleaseAfter, ct);
             await lockTransaction.RollbackAsync(ct);
         }, ct);
 

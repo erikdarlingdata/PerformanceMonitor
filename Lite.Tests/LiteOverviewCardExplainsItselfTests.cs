@@ -39,6 +39,7 @@ namespace PerformanceMonitorLite.Tests;
 /// a CONNECTION word, so a card in real metric trouble reads a green "Online" while its border is red, and its
 /// amber "Warning" is about failing collectors and says nothing about the metrics at all.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class LiteOverviewCardExplainsItselfTests
 {
     /* Every fixture leaves OtherProcessCpuPercent null on purpose. CpuPercentForAlert reads the process-wide

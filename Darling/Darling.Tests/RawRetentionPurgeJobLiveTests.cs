@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// <para><b>#1776 own-store</b>: deliberately NOT <c>[Collection("live-postgres")]</c>. Goes through
 /// <see cref="ScratchPostgres.CreateAsync"/> and never touches the shared database's tables.</para>
 /// </summary>
+[Collection("timing")]
 public sealed class RawRetentionPurgeJobLiveTests
 {
     private const string Raw = "query_stats";

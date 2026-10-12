@@ -71,6 +71,7 @@ namespace Darling.Tests;
 /// without a reader on top of it. That is the same duplication one layer down, it is a larger population
 /// than this one was, and it is deliberately not in scope.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class RepoFileAdoptionTests
 {
     private const string Authority = "RepoFile.cs";
@@ -110,6 +111,9 @@ public sealed class RepoFileAdoptionTests
     /// </summary>
     private static readonly string[] s_lfReaders =
     {
+        /* Its fieldRow pin takes the text from that function's declaration to the closing brace on the next
+           line start, and its stylesheet pins anchor rule bodies across the lines they span. */
+        "AlertHistoryDetailLabelsTests.cs",
         /* #4194: its live-mount-guard pin anchors the `if (live …) { … return; }` block in renderAlerts across
            its four source lines as one literal, so the guard's return is told apart from just those words
            appearing somewhere else in the file. */
@@ -119,12 +123,32 @@ public sealed class RepoFileAdoptionTests
            not tripped by the file's own prose comment saying "never innerHTML". */
         "AlertNotebookRenderClientTests.cs",
         "BuiltinAlertPersistenceRungTests.cs",
+        /* Its count-chart pins anchor the `COUNT_SERIES, {` panels' option blocks across their line breaks (the
+           subtitle line and the format line that follows it) and slice niceScale's own body, so the panels that
+           chart counts are told apart from the constant's prose and the function from its callers. */
+        "ChartIntegerTicksPinTests.cs",
         "ChartWindowDomainTests.cs",
+        /* #4605: its wiring pins read the endpoint source with comments stripped and whitespace collapsed, so a call 
+           that wraps across lines compares as one spelling. */
+        "ComposeClientTimeoutAttributionTests.cs",
+        /* #4887: its StoredEventCopies census takes each helper's table from that class's own source, on an anchor
+           that runs from the helper's `=>` across the line break to the `Read("v_` on the next line. */
+        "ConsumedTimestampFrameDisciplineTests.cs",
+        /* #5288: its host-source pins slice TryStartServerAsync and the release methods out of
+           DarlingMcpHostService.cs and anchor on the line break and indent that close a block (the
+           `if (networkMode)` gate), which a CRLF checkout spells differently. */
+        "DarlingMcpHostTests.cs",
         "DarlingPathFilterGateTests.cs",
         /* #3653 (A8e, PostgreSQL host): its per-arm fire-site pin anchors `Severity: null,` on the line break
            that follows it, so the CODE spelling is told apart from the same words inside the arms' own
            comments, which continue on the same line. */
         "DarlingPgOperationalAlertTests.cs",
+        /* #5627: its pins slice the workflow's `on:` and `jobs:` blocks and the nightly's job body by line break and
+           indent, which a CRLF checkout spells differently. */
+        "DarlingUpgradeShapesWorkflowTests.cs",
+        "FinOpsPageShellTests.cs",
+        "FinOpsTabLockingPageTests.cs",
+        "FinOpsTabUtilizationRawPageTests.cs",
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",
         /* #3735: its source pin anchors the collection-health statement's tail across three line breaks
            (`FROM v_collection_log` / `WHERE` / `AND` / `GROUP BY`) and the CreateCommand line on the
@@ -135,12 +159,33 @@ public sealed class RepoFileAdoptionTests
            CreateCommand-plus-CommandTimeout shape, and the statement's own WHERE/AND tail) — the same
            reasoning as the fleet twin above, which is the file this one was written beside. */
         "PerServerCollectionHealthMemoTests.cs",
+        /* #5366: its Linux-build-job pin slices the `darling-linux:` job out of the workflow starting at a line break
+           (`\n  darling-linux:`), so the text must be LF whatever the checkout's line endings. */
+        "PasswordKeySelfCheckTests.cs",
         "FleetPageAttentionFilterTests.cs",
+        /* Its every-site pins match each `new AlertMuteContext { ... };` initializer across its line breaks in
+           AlertEngine.cs and the Darling producers, and assert each one sets ServerId. */
+        "MuteRuleServerIdTests.cs",
+        /* Its store-SQL pin slices PgMuteRuleStore's SELECT, INSERT and UPDATE texts across their line breaks. */
+        "MuteRuleServerIdRungTests.cs",
+        /* #4731: its twin pin slices EventBaselineSql out of both products' provider SOURCES (from the signature
+           line to the SQL's closing `GROUP BY hh, dw";`) and asserts the two multi-line bodies are byte-identical. */
+        "DarlingEventBaselineCoveredDaysTests.cs",
         /* #3653 item 12 (Q6): its cross-SKU pin slices the multi-line `keyed` CTE out of the Darling provider's
            SOURCE (from `keyed AS (` to `FROM clean` + `)` on the next line) and asserts Lite's source carries the
            identical text; the clock-read twin pin likewise compares a multi-line const body one token apart. */
+        /* #4961: its no-drop pin looks for a statement block that runs across a line break in DarlingXeSessions.cs. */
+        "AlwaysOnXeSessionsTests.cs",
+        /* #5459: it cuts build.yml into jobs, steps and arms on the line breaks between them. */
+        "GuardStageWorkflowTests.cs",
         "LocalClockBucketKeyTests.cs",
         "LockedModeRestoreCoverageTests.cs",
+        /* Its always-on guard pin slices EnsureDatabaseScopedAsync's body up to the method's closing brace, on an
+           anchor that runs from the line break before that brace to the line break after it. */
+        "LongQueryTraceLifecycleTests.cs",
+        /* #4961: its pin slices RunOneAsync's body up to the method's closing brace, on an anchor that starts at the line
+           break before that brace. */
+        "LongQueryTraceRestartTests.cs",
         /* #3541 A10: its top-level-key discriminator anchors on the line break BEFORE the key (a per-row
            collection_time inside a Select is indented deeper and must not match), and its tool-body slicing
            keys on attribute text either side of one. */
@@ -164,6 +209,9 @@ public sealed class RepoFileAdoptionTests
         /* Reads the lineage comment blocks above the flipped PostgreSQL bars; a block is several lines and
            is collapsed to one before its citation is matched, so the read has to be LF-normalised first. */
         "PgTargetMeasuredLineageTests.cs",
+        /* #4825: its source pins slice the Collection Health tab's purge members (PurgeNow_Click, StartPurgeWatch,
+           RunPurgeWatchAsync, the unload handler) by brace balance, and compare the order of calls inside them. */
+        "PurgeNowTotalsWatchTests.cs",
         /* #3797: its viewer-surface pins slice regions out of ViewerServerTab.xaml and server-tabs.js between
            anchors several lines apart (the Queries group's sub-tab block, a column array, one DataGrid's
            column list), and its dispatch pin anchors `case QueryStoreClutterSubTabIndex:` on the awaited
@@ -171,14 +219,28 @@ public sealed class RepoFileAdoptionTests
         "QueryStoreClutterViewerSurfacesTests.cs",
         /* #4231: its web source pin counts noteKey: "truncation_note" occurrences across server-tabs.js and
            view-templates.js, which an LF-normalised read makes exact instead of CRLF-fragile. */
-        /* #4427: its wiring pin slices RunPurgeNowAsync's body by brace balance and matches calls that span line breaks. */
+        /* #4427: its wiring pins slice RunPurgeNowBackgroundAsync's body by brace balance and matches calls that span line breaks. */
         "RawPurgeNowWiringTests.cs",
         "RawWindowFloorViewerPortTests.cs",
+        /* #5452: its worker pin anchors the general catch arm on the line break and indent that follow `catch (Exception ex)`,
+           so the role arm is proven to come before it. */
+        "RdsAssumeRoleSeamTests.cs",
         /* #3653 item 3: its twin pin extracts the multi-line GetPriorOccurrencesSql const body from BOTH finding
            stores' sources and asserts them equal up to one token, and its wiring pin slices each pass method by
            call sites that sit on their own lines — anchors spanning line breaks on every arm. */
         "RecurrenceLabelStoreReadTests.cs",
+        /* #5320: its gate pins split build.yml into steps by line and anchor the gate step's PowerShell check (the
+           Tee-Object line through the Select-String line that reads the same log) across the lines between them. */
+        "ReleaseStatementGateWorkflowTests.cs",
+        /* #5374: its start pin slices the provisioning chain of DarlingWorker.cs, comments removed, and matches the rules call
+           inside each branch of it, across line breaks. */
+        "SelfManagedStoreRulesStartPinTests.cs",
+        /* Its heading pin slices fillServerHead's body out of server.js, from its declaration to the closing brace
+           on its own line, and asserts the display-name assignment sits inside it and ahead of the dot update. */
+        "ServerPageTitlePinTests.cs",
         "ServerPageTabsTests.cs",
+        // #4218: reads build.yml to pin the SignPath action version.
+        "SignPathActionVersionTests.cs",
         "StartupFailureTriageTests.cs",
         "StoreCopyPhaseTests.cs",
         /* #3754: its reconcile and worker pins anchor multi-statement arms across their line breaks - the
@@ -186,8 +248,19 @@ public sealed class RepoFileAdoptionTests
            and the pre-dispatch `if (…LongQueryTraceFault is { } traceFault) { throw … }` in RunOneAsync - so
            the CODE shape is told apart from the same words inside the comments beside it. */
         "SwallowedItemFailureTests.cs",
+        "TuningHourlyCreateLiveTests.cs",
         "ViewTemplatesTests.cs",
+        "ViewerFinOpsPickerRefreshPinTests.cs",
         "ViewerSidebarDotRendersTheCardStatusTests.cs",
+        /* #5586: its compose.js pin slices each renderer call up to the `break;` that ends its switch case, and its halo pin
+           splits app.css on line breaks to take the `.chart .bar-value` rule as one line. */
+        "WebChartWidthBehaviourTests.cs",
+        /* #5245: pins that the filtered reads' catalog rows, dispatch entries and FILTERED list agree, over
+           DarlingWebEndpoints.cs and the js tree. */
+        "WebDatabaseFilterReadsTests.cs",
+        /* #4961: its RunOneAsync pin takes the body from the method's declaration to the closing brace on its own line
+           (`\n    }\n`), which only matches once the line endings are one spelling. */
+        "XeSessionMissingWarningTests.cs",
     };
 
     /// <summary>

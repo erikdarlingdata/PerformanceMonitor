@@ -168,6 +168,11 @@
                          Foreground="{DynamicResource ForegroundBrush}" FontFamily="Consolas"
                          FontSize="12" MaxHeight="300"
                          VerticalScrollBarVisibility="Auto"/>
+
+                <!-- #5642: how old the newest sample was when the alert fired, from the persisted context. -->
+                <TextBlock x:Name="SampleAgeText" Visibility="Collapsed" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundBrush}" FontFamily="Consolas"
+                           FontSize="12" Margin="0,8,0,0"/>
             </StackPanel>
         </Border>
 

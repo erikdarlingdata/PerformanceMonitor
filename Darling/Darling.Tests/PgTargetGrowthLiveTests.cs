@@ -32,7 +32,7 @@ namespace Darling.Tests;
 /// straight-line days-to-double, the unsized database counted and the total marked unavailable; through the REAL
 /// <c>analyze_server</c>: a finding rooted on it whose headline names the database and the doubling estimate, with
 /// PostgreSQL <c>next_tools</c>, and <c>get_analysis_facts source=pg_growth</c> showing it with
-/// <c>threshold_lineage = 0</c>. The growth-rate anomaly is ALSO exercised on the live store: its baseline arm and
+/// <c>threshold_lineage = 1</c>. The growth-rate anomaly is ALSO exercised on the live store: its baseline arm and
 /// window read run against the planted series (the total is NULL here by design, so the detector is silent — the
 /// brief's "silent where the total is NULL" arm, asserted), and a second planting with a sized instance proves the
 /// SQL of both reads executes and the arm yields buckets. Gated on <c>DARLING_TEST_PG</c>; <c>[Collection("live-postgres")]</c>
@@ -135,10 +135,10 @@ public sealed class PgTargetGrowthLiveTests
             Assert.DoesNotContain(trend.Metadata.Keys, k => k.Contains("vendor", StringComparison.Ordinal));
 
             /* Scored: 40 GiB is past the bytes critical (1.0); 40 % is past the fraction critical (1.0) → 1.0, database
-               subject, lineage 0. */
+               subject, lineage 1 (measured, #4404). */
             new FactScorer().ScoreAll(facts);
             Assert.Equal(1.0, trend.BaseSeverity, precision: 9);
-            Assert.Equal(0, trend.Metadata["threshold_lineage"]);
+            Assert.Equal(1, trend.Metadata["threshold_lineage"]);
             Assert.Equal(PgTargetScorer.GrowthSubjectDatabase, trend.Metadata[PgTargetScorer.GrowthGradedSubjectKey]);
 
             /* ── the anomaly side on the live store: the total is NULL on every row, so the baseline arm yields NO
@@ -177,7 +177,7 @@ public sealed class PgTargetGrowthLiveTests
                 Assert.DoesNotContain(tools, t => t.StartsWith("get_wait", StringComparison.Ordinal) || t.StartsWith("get_index", StringComparison.Ordinal) || t == "get_database_sizes");
             }
 
-            /* The facts read shows the family under its source with the unmeasured-lineage flag. */
+            /* The facts read shows the family under its source with the measured-lineage flag. */
             var factsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, 4, PgTargetSources.GrowthSource);
             using (var doc = JsonDocument.Parse(factsJson))
             {
@@ -185,7 +185,7 @@ public sealed class PgTargetGrowthLiveTests
                 Assert.Equal(1, root.GetProperty("shown").GetInt32());
                 var fact = Assert.Single(root.GetProperty("facts").EnumerateArray());
                 Assert.Equal(PgTargetFactKeys.DatabaseGrowth, fact.GetProperty("key").GetString());
-                Assert.Equal(0, fact.GetProperty("metadata").GetProperty("threshold_lineage").GetDouble());
+                Assert.Equal(1, fact.GetProperty("metadata").GetProperty("threshold_lineage").GetDouble());
             }
 
             /* ── a SIZED instance: re-plant with vendor sized too (total = the four), so the total's trend exists and

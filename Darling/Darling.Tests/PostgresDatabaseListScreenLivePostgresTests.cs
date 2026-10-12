@@ -123,13 +123,15 @@ public sealed class PostgresDatabaseListScreenLivePostgresTests
                this test leaked would then go unreported even on a passing run, and the NEXT run would find
                rdsadmin already present, not create it, and so never drop it either. RunAsync stays silent
                only while the body's own failure is in flight. */
-            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            /* #5549: the cleanup connection runs the drops, so it is unpooled; a pooled one would hand the backend that ran a
+               DROP DATABASE to the next test. */
+            await LiveStoreCleanup.RunAsync(ScratchPostgres.UnpooledAdminConnectionString(cs!), bodySucceeded, async (cleanup, cleanupCt) =>
             {
-                await DropAsync(cleanup, CustomerDatabase, cleanupCt);
+                await DropAsync(cs!, cleanup, CustomerDatabase, cleanupCt);
 
                 if (weCreatedRdsadmin)
                 {
-                    await DropAsync(cleanup, ManagedMaintenanceDatabase, cleanupCt);
+                    await DropAsync(cs!, cleanup, ManagedMaintenanceDatabase, cleanupCt);
                 }
             });
         }
@@ -142,7 +144,8 @@ public sealed class PostgresDatabaseListScreenLivePostgresTests
     private static async Task<bool> CreateIfAbsentAsync(
         string adminConnectionString, string databaseName, CancellationToken cancellationToken)
     {
-        await using var admin = new NpgsqlConnection(adminConnectionString);
+        /* #5549: unpooled, like the drop that undoes this create. */
+        await using var admin = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(adminConnectionString));
         await admin.OpenAsync(cancellationToken);
 
         await using (var exists = new NpgsqlCommand("SELECT 1 FROM pg_database WHERE datname = $1", admin))
@@ -169,8 +172,10 @@ public sealed class PostgresDatabaseListScreenLivePostgresTests
     /// <see cref="ScratchPostgres"/>'s teardown. <c>IF EXISTS</c> because the create is conditional.</para>
     /// </summary>
     private static async Task DropAsync(
-        NpgsqlConnection connection, string databaseName, CancellationToken cancellationToken)
+        string connectionString, NpgsqlConnection connection, string databaseName, CancellationToken cancellationToken)
     {
+        /* No TimescaleDB job worker is left in the database the FORCE drop below kills (#5480). */
+        await ScratchPostgres.QuiesceTimescaleJobsAsync(connectionString, databaseName);
         await using var drop = new NpgsqlCommand(
             $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)", connection);
         await drop.ExecuteNonQueryAsync(cancellationToken);

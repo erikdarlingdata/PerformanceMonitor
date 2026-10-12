@@ -13,6 +13,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.Versioning;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -35,9 +36,16 @@ namespace PerformanceMonitor.Darling.Service;
 /// dashboard's write surfaces run as this role, so it holds INSERT/UPDATE/DELETE on
 /// <c>config.custom_views</c> (#1563, the user-authored view definitions), <c>config.custom_alert_rules</c>
 /// (#3285, the user-authored alert rules), <c>config.database_state_expected</c> (#1986, the Viewer's
-/// per-database override editor) and <c>config.config_mute_rules</c> (#3450, the dedicated mute-rule
-/// endpoints — plus the two <c>config_service</c> beacon columns its bump trigger writes as the caller).
-/// All non-secret tables; over the web, editing is gated server-side by the host's auth + the seat model
+/// per-database override editor), <c>config.server_tags</c> and <c>config.server_tag_map</c> (#5085, the
+/// server-tag endpoints) and <c>config.config_mute_rules</c> (#3450, the dedicated mute-rule
+/// endpoints — plus the two <c>config_service</c> beacon columns its bump trigger writes as the caller), and
+/// the single <c>dismissed</c> column of <c>config.config_alert_log</c> (#4843, the web Alert History dismiss),
+/// and INSERT (never DELETE, and no UPDATE of any kind) on <c>config.config_monitored_servers</c> (#4843, the web
+/// add-server route, which runs the <c>add_servers</c> core; #5240, the web edit route, which holds no UPDATE on the
+/// table and edits through <c>config.edit_monitored_server</c>, a function the batch grants EXECUTE on to viewer and
+/// mcp; the <c>encrypted_password</c> column stays SELECT-carved, so the web host can write a password blob and
+/// never read one back).
+/// Every table is non-secret-keyed; over the web, editing is gated server-side by the host's auth + the seat model
 /// (an OIDC viewer seat is refused every write) — these grants are only the floor beneath that gate. A
 /// locked-down deployment points the Viewer at this role, and its WPF surfaces still read as "look but
 /// don't touch": the read-only probe discriminates on a privilege this role never gets
@@ -52,7 +60,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// the single non-secret <c>email_cooldown_minutes</c> column of <c>config.config_notification</c>, plus the
 /// two beacon columns of <c>config.config_service</c> so the settings write's self-bump trigger can fire),
 /// and the server-onboarding writes (INSERT/UPDATE/DELETE on <c>config.config_monitored_servers</c> for the
-/// <c>add_servers</c>/<c>remove_server</c> tools — a single non-secret-KEY table; the credential column stays
+/// <c>add_servers</c>/<c>remove_server</c> tools — a single non-secret-KEY table; INSERT/UPDATE/DELETE on
+/// <c>config.server_tags</c> and <c>config.server_tag_map</c> (the fleet server-tag tools, #5085); the credential column stays
 /// SELECT-carved, so <c>mcp</c> can WRITE a password blob but never READ one back).
 /// Deliberately NOT <c>admin</c>: a token-holder reachable over the network must never get the
 /// <c>config_command</c> service-credential pivot or the secret columns. Every write grant is an EXPLICIT
@@ -156,13 +165,21 @@ public static class DarlingManagedRoles
                    learns a server is armed at all: the phase-1 surface exists when this is non-null, so a
                    `viewer` seat that could not read it would see no surface on an armed server. */
                 "remediation_username",
+                /* V169 (#5452): the AWS role Darling assumes for an RDS or Aurora target, and whether an external
+                   ID is stored with it. Non-secret: an account id is an identifier, not a credential, and the
+                   viewer has to be able to SHOW which role a target uses. The flag lets it show that an
+                   external ID is set without ever being able to read the ID. */
+                "aws_role_arn", "aws_external_id_set",
             },
             /* remediation_encrypted_password is the same kind of thing as encrypted_password beside it: a
                DPAPI blob whose whole purpose is to authenticate a WRITE to a monitored server, so if
                anything in this table is secret it is. Named explicitly rather than left unclassified
                because unclassified is only invisible until someone "fixes" the failing security gate by
                adding the column to whichever list is nearer. */
-            SecretColumns: new[] { "encrypted_password", "remediation_encrypted_password" }),
+            /* aws_external_id (V169, #5452) is write-only for these roles. AWS does not treat an external ID as
+               a secret, but a role that trusts a whole account plus an external ID is only as closed as that ID
+               is private, so it is named here rather than left unclassified. */
+            SecretColumns: new[] { "encrypted_password", "remediation_encrypted_password", "aws_external_id" }),
 
         new ViewerSecretTableAcl(
             "config_command",
@@ -180,6 +197,12 @@ public static class DarlingManagedRoles
                 "id", "smtp_host", "smtp_port", "smtp_use_ssl", "smtp_from_address", "smtp_recipients",
                 "email_cooldown_minutes", "teams_proxy", "slack_proxy", "modified_at",
                 "generic_body_template", "generic_proxy", "pagerduty_use_eu_region", "pagerduty_proxy",
+                /* V166. Non-secret: which lifecycle a PagerDuty recovery rides — the shipped info-trigger or
+                   the opt-in close — is behaviour, exactly as sensitive as pagerduty_use_eu_region beside
+                   it. The fail-closed design is why it must be named at all: unclassified stays invisible
+                   to the read roles and the live security gate fails until someone decides which side it
+                   is on. */
+                "pagerduty_auto_resolve",
             },
             /* generic_headers carries the Authorization bearer token itself, and generic_url is a bearer
                secret like the sibling webhook URLs (#1506 / V26). pagerduty_routing_key is the Events API v2
@@ -355,6 +378,286 @@ public static class DarlingManagedRoles
     }
 
     /// <summary>
+    /// The advisory-lock key every role-provisioning write takes (#5560): "DARLROLE" in ASCII. Distinct from the
+    /// migration lock's key on purpose, so a long migration never makes a provisioning start wait for it.
+    /// </summary>
+    internal const long ProvisioningLockKey = 0x4441524C_524F4C45;
+
+    /// <summary>
+    /// How long a provisioning write waits for <see cref="ProvisioningLockKey"/> before it stops waiting and runs
+    /// without it (#5560). A real sibling's batch takes well under this, so the wait only runs out when something
+    /// else is holding the key, and the write must not stall behind that.
+    /// </summary>
+    internal const int ProvisioningLockWaitSeconds = 12;
+
+    /// <summary>How often the wait for <see cref="ProvisioningLockKey"/> asks again.</summary>
+    internal const int ProvisioningLockPollMilliseconds = 1000;
+
+    /// <summary>
+    /// How many times a write that fails with a concurrent-write code (<see cref="IsConcurrentProvisioningConflict"/>) is run again, each time in a fresh
+    /// transaction (#5560). Three runs in all.
+    /// </summary>
+    internal const int ProvisioningConcurrentUpdateRetries = 2;
+
+    /// <summary>The savepoint a read inside the locked transaction takes, so a read that fails and is answered with a
+    /// default does not leave the transaction aborted for the batch that follows it.</summary>
+    private const string ReadSavepoint = "darling_provisioning_read";
+
+    /// <summary>
+    /// Runs a role-provisioning batch in ONE transaction that first takes <see cref="ProvisioningLockKey"/>
+    /// (#5560), for a caller that has the command already built. The callback overload below has the whole contract.
+    /// </summary>
+    /// <remarks>
+    /// Takes the CALLER's command rather than SQL text, so each call site keeps spelling its own
+    /// <c>CommandTimeout</c> (the startup-deadline census reads it there). The wait for the key has its own budget
+    /// (<see cref="ProvisioningLockWaitSeconds"/>); the batch keeps the call site's <c>CommandTimeout</c>.
+    /// </remarks>
+    internal static Task ExecuteSerializedAsync(
+        NpgsqlCommand command, ILogger logger, CancellationToken cancellationToken, TimeSpan? lockWait = null)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        var connection = command.Connection ?? throw new ArgumentException("The command has no connection.", nameof(command));
+        return ExecuteSerializedCoreAsync(
+            connection,
+            (transaction, _) =>
+            {
+                command.Transaction = transaction;
+                return Task.FromResult<NpgsqlCommand?>(command);
+            },
+            disposeCommand: false, logger, lockWait, cancellationToken);
+    }
+
+    /// <summary>
+    /// Runs a role-provisioning write in ONE transaction that first takes <see cref="ProvisioningLockKey"/>, and
+    /// lets the caller read and plan INSIDE that transaction (#5560). Roles, database privileges and default
+    /// privileges are rows in shared catalogs, and PostgreSQL does not lock the row a GRANT, DROP OWNED or ALTER
+    /// ROLE rewrites: two sessions rewriting the same row at once make the second fail with XX000 "tuple
+    /// concurrently updated" once the first commits. The service adopts a postmaster that is already running, so
+    /// two services can start against one cluster at once, each running the same batch against the same
+    /// <c>CONNECT</c> ACL and the same roles. The batch is idempotent, so the loser has only to wait for the
+    /// winner, and what it read before the wait would be stale after it: <paramref name="prepare"/> runs after the
+    /// lock is taken (READ COMMITTED gives each of its reads a snapshot taken then) and returns the command to run,
+    /// or <see langword="null"/> when there is nothing to run. A transaction-scoped lock is released by the commit
+    /// (or the rollback, or the connection dropping), so it can never outlive the pooled connection it was taken on.
+    ///
+    /// <para><b>The lock never fails or stalls the write.</b> Any login with a session in the store's database can
+    /// take an advisory lock, so the key is polled with <c>pg_try_advisory_xact_lock</c> about once a second for
+    /// <see cref="ProvisioningLockWaitSeconds"/> rather than waited on without end. When that budget runs out one
+    /// warning names the key and the session holding it (pid, user, application name), and the write runs WITHOUT
+    /// the lock, in a fresh transaction, in the same order (<paramref name="prepare"/>, then the command). A write
+    /// that fails with a concurrent-write code (<see cref="IsConcurrentProvisioningConflict"/>) is run again, up to <see cref="ProvisioningConcurrentUpdateRetries"/> more times, each in a
+    /// fresh transaction, <paramref name="prepare"/> included. Npgsql closes the connection on an XX-class error, so a
+    /// retry opens it again first (a new session from the same pool). That is safe because every write here is
+    /// idempotent (the live tests run the real batch twice).</para>
+    ///
+    /// <para><b>What the lock covers.</b> An advisory lock belongs to the database the session is connected to, so
+    /// it serializes only the sessions connected to the STORE's database, although the catalog rows it protects
+    /// (<c>pg_authid</c>, <c>pg_db_role_setting</c>, <c>pg_database</c>) are cluster-wide. That is enough because
+    /// every writer connects to that one database: the managed store always uses the fixed database
+    /// <c>darling</c>, and the compose path refuses a cluster that holds any other non-template database
+    /// (<c>RefuseComposeStore</c>), so a second database with a provisioning writer cannot exist. If either rule is
+    /// ever relaxed, the lock stops serializing and only the retry is left;
+    /// <c>ProvisioningSerializationTests</c> pins both rules.</para>
+    /// </summary>
+    /// <param name="connection">An open connection with no transaction on it.</param>
+    /// <param name="prepare">Runs inside the transaction, after the lock, and returns the command to run (the helper
+    /// disposes it) or <see langword="null"/>. It runs again on a retry, so it must not keep state between runs.
+    /// A read in it that fails and is answered with a default must take the transaction's read savepoint first and
+    /// roll back to it, or the transaction stays aborted. A callback whose read failed and was not rolled back to the
+    /// read savepoint must throw, never return null, because a null return commits.</param>
+    /// <param name="lockWait">The wait for the key; defaults to <see cref="ProvisioningLockWaitSeconds"/>.</param>
+    internal static Task ExecuteSerializedAsync(
+        NpgsqlConnection connection, Func<NpgsqlTransaction, CancellationToken, Task<NpgsqlCommand?>> prepare,
+        ILogger logger, CancellationToken cancellationToken, TimeSpan? lockWait = null)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(prepare);
+        return ExecuteSerializedCoreAsync(connection, prepare, disposeCommand: true, logger, lockWait, cancellationToken);
+    }
+
+    private static async Task ExecuteSerializedCoreAsync(
+        NpgsqlConnection connection, Func<NpgsqlTransaction, CancellationToken, Task<NpgsqlCommand?>> prepare,
+        bool disposeCommand, ILogger logger, TimeSpan? lockWait, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(logger);
+        var wait = lockWait ?? TimeSpan.FromSeconds(ProvisioningLockWaitSeconds);
+        var lockGivenUp = false;
+
+        for (var retries = 0; ; retries++)
+        {
+            try
+            {
+                if (!lockGivenUp)
+                {
+                    if (await RunUnderLockAsync(connection, prepare, disposeCommand, wait, logger, cancellationToken))
+                    {
+                        return;
+                    }
+
+                    lockGivenUp = true;
+                }
+
+                await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+                await RunInTransactionAsync(transaction, prepare, disposeCommand, cancellationToken);
+                return;
+            }
+            catch (PostgresException ex) when (IsConcurrentProvisioningConflict(ex) && retries < ProvisioningConcurrentUpdateRetries)
+            {
+                logger.LogInformation(
+                    "Role provisioning write failed with {SqlState} ({Message}), which a concurrent catalog rewrite causes; running it again in a new transaction (retry {Retry} of {Retries})",
+                    ex.SqlState, ex.MessageText, retries + 1, ProvisioningConcurrentUpdateRetries);
+
+                /* Npgsql breaks the connection on an XX-class error (it closes it, and the server rolls the transaction
+                   back), so the retry needs it opened again: the same object draws a new session from the pool. */
+                if (connection.State != System.Data.ConnectionState.Open)
+                {
+                    await connection.OpenAsync(cancellationToken);
+                }
+            }
+        }
+    }
+
+    /// <summary>Whether a failed provisioning write is the kind two sessions running the batch together cause, so a
+    /// rerun in a fresh transaction is right. Each is safe to rerun because the batch is idempotent and the failed
+    /// transaction rolled back, so the rerun sees the row the other session made: XX000 (a catalog row updated
+    /// under it), 23505 (both inserted the same catalog key; the rerun finds the row), 42710 (the role was created
+    /// between the existence check and the create; the rerun skips it) and 40P01 (the two took the same rows in
+    /// different orders; the other one finished). Any other code (a missing right, a timeout) is not a conflict
+    /// and reaches the caller on the first failure. Matched on the code, never the message, which
+    /// <c>lc_messages</c> translates.</summary>
+    internal static bool IsConcurrentProvisioningConflict(PostgresException ex)
+    {
+        ArgumentNullException.ThrowIfNull(ex);
+        return ex.SqlState is PostgresErrorCodes.InternalError
+            or PostgresErrorCodes.UniqueViolation
+            or PostgresErrorCodes.DuplicateObject
+            or PostgresErrorCodes.DeadlockDetected;
+    }
+
+    /// <summary>One run with the key taken. False when the wait for the key ran out (after the one warning), in which
+    /// case nothing ran.</summary>
+    private static async Task<bool> RunUnderLockAsync(
+        NpgsqlConnection connection, Func<NpgsqlTransaction, CancellationToken, Task<NpgsqlCommand?>> prepare,
+        bool disposeCommand, TimeSpan wait, ILogger logger, CancellationToken cancellationToken)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            await using (var poll = new NpgsqlCommand(
+                $"SELECT pg_try_advisory_xact_lock({ProvisioningLockKey})", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
+            {
+                if ((bool)(await poll.ExecuteScalarAsync(cancellationToken))!)
+                {
+                    break;
+                }
+            }
+
+            var remaining = wait - clock.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                await WarnLockHeldAsync(connection, transaction, wait, logger, cancellationToken);
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+
+            var pause = TimeSpan.FromMilliseconds(ProvisioningLockPollMilliseconds);
+            await Task.Delay(remaining < pause ? remaining : pause, cancellationToken);
+        }
+
+        await RunInTransactionAsync(transaction, prepare, disposeCommand, cancellationToken);
+        return true;
+    }
+
+    private static async Task RunInTransactionAsync(
+        NpgsqlTransaction transaction, Func<NpgsqlTransaction, CancellationToken, Task<NpgsqlCommand?>> prepare,
+        bool disposeCommand, CancellationToken cancellationToken)
+    {
+        var command = await prepare(transaction, cancellationToken);
+        try
+        {
+            if (command is not null)
+            {
+                command.Transaction = transaction;
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        finally
+        {
+            if (disposeCommand && command is not null)
+            {
+                await command.DisposeAsync();
+            }
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>The one warning for a wait that ran out: the key and the session that holds it, read from
+    /// <c>pg_locks</c> joined to <c>pg_stat_activity</c> in the current database. A login that is not a superuser,
+    /// not a member of <c>pg_read_all_stats</c> and not in the holder's role sees "many columns" of the holder's row
+    /// as null (the query text, state and client fields among them), but the pid, the session user and the
+    /// application name stay visible to everyone, so the "(not visible)" text below shows only for a row that has
+    /// no name at all (a background worker, for example). See the PostgreSQL manual, "The Cumulative Statistics
+    /// System", security note on the dynamic statistics views
+    /// (https://www.postgresql.org/docs/current/monitoring-stats.html).</summary>
+    private static async Task WarnLockHeldAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, TimeSpan wait, ILogger logger, CancellationToken cancellationToken)
+    {
+        var holder = "no holder found (it may have just let go)";
+        try
+        {
+            await using var command = new NpgsqlCommand(
+                $@"SELECT a.pid, a.usename, a.application_name
+FROM pg_catalog.pg_locks AS l
+JOIN pg_catalog.pg_stat_activity AS a ON a.pid = l.pid
+WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
+  AND l.classid::bigint = {ProvisioningLockKey >> 32} AND l.objid::bigint = {ProvisioningLockKey & 0xFFFFFFFFL}
+  AND l.database = (SELECT d.oid FROM pg_catalog.pg_database AS d WHERE d.datname = current_database())
+LIMIT 1", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                holder = string.Format(
+                    CultureInfo.InvariantCulture, "pid {0}, user '{1}', application '{2}'",
+                    reader.GetInt32(0), reader.IsDBNull(1) ? "(not visible)" : reader.GetString(1), reader.IsDBNull(2) ? "(not visible)" : reader.GetString(2));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            holder = "the holder could not be read (" + ex.Message + ")";
+        }
+
+        logger.LogWarning(
+            "Role provisioning could not take its advisory lock 0x{Key} within {Seconds}s; it is held by {Holder}. Running the provisioning write without it. Releasing the lock from that session (or ending the session) restores the serialization.",
+            ProvisioningLockKey.ToString("X16", CultureInfo.InvariantCulture), (int)wait.TotalSeconds, holder);
+    }
+
+    /// <summary>Takes the read savepoint before a read inside the locked transaction (nothing without one).</summary>
+    private static Task TakeReadSavepointAsync(NpgsqlTransaction? transaction, CancellationToken cancellationToken) =>
+        transaction is null ? Task.CompletedTask : transaction.SaveAsync(ReadSavepoint, cancellationToken);
+
+    /// <summary>Rolls the transaction back to the read savepoint after a read that failed and was answered with a
+    /// default, so the batch after it does not meet "current transaction is aborted". Never throws: a connection that is
+    /// gone fails the batch with its own error.</summary>
+    private static async Task RecoverFromReadAsync(NpgsqlTransaction? transaction)
+    {
+        if (transaction is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await transaction.RollbackAsync(ReadSavepoint, CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The connection is unusable; the next command on it reports that. */
+        }
+    }
+
+    /// <summary>
     /// The rest of provisioning once each role's password is in hand — shared by
     /// <see cref="EnsureProvisionedAsync"/> and <see cref="EnsureComposeStoreProvisionedAsync"/> (#3914), which
     /// differ only in where the passwords live and in <paramref name="target"/>. Returns the compose
@@ -365,30 +668,38 @@ public static class DarlingManagedRoles
         ProvisioningTarget target, ILogger logger, CancellationToken cancellationToken)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
-        /* #2357: read the live knob rather than a constant. Ordering is what makes this safe -- migrations
-           run before provisioning at startup, so the column exists by now -- and because this DDL is re-run
-           on every managed start, a changed value reaches an existing install on its next restart without
-           any new machinery. A store whose config row is not seeded yet answers with the default. */
-        var composeTimeoutSeconds = await ReadComposeStatementTimeoutAsync(connection, logger, cancellationToken);
 
-        /* #3910: the batch carries SCRAM-SHA-256 VERIFIERS, never a password, so no surface that records
-           statement text (the server log's STATEMENT lines, log_statement, auto_explain, pg_stat_statements
-           with utility tracking on) can capture a credential. And a role whose stored verifier already accepts
-           its credential file's password is not re-asserted at all: a steady-state start sends no PASSWORD
-           clause. The CREATE branch still carries a fresh verifier, for a role that does not exist yet. */
-        var stored = await ReadStoredRoleSecretsAsync(connection, logger, cancellationToken);
-        var reassert = PlanPasswordReassert(stored, adminPassword, viewerPassword, mcpPassword);
+        /* #5560: the two reads, the plan and the batch all run inside the provisioning lock's transaction, so a sibling
+           service's batch cannot rewrite the same catalog rows at once and what this one planned from is read after
+           the wait rather than before it. The callback runs again on a retry, so it only assigns these. */
+        int? composeTimeoutSeconds = null;
+        var reassert = PasswordReassert.None;
+        await ExecuteSerializedAsync(connection, async (transaction, token) =>
+        {
+            /* #2357: read the live knob rather than a constant. Ordering is what makes this safe -- migrations
+               run before provisioning at startup, so the column exists by now -- and because this DDL is re-run
+               on every managed start, a changed value reaches an existing install on its next restart without
+               any new machinery. A store whose config row is not seeded yet answers with the default. */
+            composeTimeoutSeconds = await ReadComposeStatementTimeoutAsync(connection, transaction, logger, token);
 
-        await using var command = new NpgsqlCommand(
-            BuildProvisioningSql(
-                ScramSha256Verifier.Create(adminPassword),
-                ScramSha256Verifier.Create(viewerPassword),
-                ScramSha256Verifier.Create(mcpPassword),
-                composeTimeoutSeconds,
-                reassert,
-                target),
-            connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
-        await command.ExecuteNonQueryAsync(cancellationToken);
+            /* #3910: the batch carries SCRAM-SHA-256 VERIFIERS, never a password, so no surface that records
+               statement text (the server log's STATEMENT lines, log_statement, auto_explain, pg_stat_statements
+               with utility tracking on) can capture a credential. And a role whose stored verifier already accepts
+               its credential file's password is not re-asserted at all: a steady-state start sends no PASSWORD
+               clause. The CREATE branch still carries a fresh verifier, for a role that does not exist yet. */
+            var stored = await ReadStoredRoleSecretsAsync(connection, transaction, logger, token);
+            reassert = PlanPasswordReassert(stored, adminPassword, viewerPassword, mcpPassword);
+
+            return new NpgsqlCommand(
+                BuildProvisioningSql(
+                    ScramSha256Verifier.Create(adminPassword),
+                    ScramSha256Verifier.Create(viewerPassword),
+                    ScramSha256Verifier.Create(mcpPassword),
+                    composeTimeoutSeconds,
+                    reassert,
+                    target),
+                connection, transaction) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+        }, logger, cancellationToken);
 
         logger.LogInformation(
             "Role passwords: {Reasserted} (sent as SCRAM-SHA-256 verifiers, never as the password)",
@@ -397,7 +708,7 @@ public static class DarlingManagedRoles
                 : "re-asserted for " + DescribeReassert(reassert));
 
         logger.LogInformation(
-            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + the narrow web-surface writes (custom_views, custom_alert_rules, database_state_expected, config_mute_rules + the reload beacon); mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers)) — the Viewer, the web dashboard and the MCP host no longer connect as the superuser");
+            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + the narrow web-surface writes (custom_views, custom_alert_rules, database_state_expected, config_mute_rules + the reload beacon + the config_alert_log dismissed column + server_tags, server_tag_map + INSERT and a column-level UPDATE on config_monitored_servers); mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers) + tag servers (server_tags, server_tag_map)) — the Viewer, the web dashboard and the MCP host no longer connect as the superuser");
 
         /* CLAMPED, not raw: the batch above wrote the clamped form, so returning the raw read would hand the
            caller a baseline that differs from what the roles actually carry (a stored 0 provisions '15s').
@@ -570,10 +881,16 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         try
         {
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            /* #5560: the same lock as provisioning, so a reload cannot rewrite a role row a starting sibling is
+               rewriting. The wait is the serial-loop deadline, not the full provisioning wait, because this runs at
+               the top of a sweep: a key something else is holding delays the reload by that wait, then the lines run
+               without it, so the bound is that wait plus the batch at its own CommandTimeout (and a rerun if it
+               hits a concurrent-write failure). */
             await using var command = new NpgsqlCommand(
                 BuildComposeStatementTimeoutSql(composeStatementTimeoutSeconds) + "\n" + BuildComposeTempFileLimitSql(),
                 connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
-            await command.ExecuteNonQueryAsync(cancellationToken);
+            await ExecuteSerializedAsync(
+                command, logger, cancellationToken, lockWait: TimeSpan.FromSeconds(ServiceCommandDeadlines.SerialLoopSeconds));
 
             logger.LogInformation(
                 "Compose statement_timeout re-asserted on the viewer/mcp roles at {Seconds}s, with slow-statement logging at {SlowMs} ms and a temp_file_limit of {TempFileLimit} — takes effect on each role's next session (an already-connected viewer keeps the old ceiling until it reconnects)",
@@ -699,13 +1016,14 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
     /// be reported as "the store said 15". That is the <c>ex is not OperationCanceledException</c> filter
     /// this file's own callers already use.</para>
     /// </summary>
-    private static async Task<int?> ReadComposeStatementTimeoutAsync(
-        NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
+    internal static async Task<int?> ReadComposeStatementTimeoutAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, ILogger logger, CancellationToken cancellationToken)
     {
         try
         {
+            await TakeReadSavepointAsync(transaction, cancellationToken);
             await using var command = new NpgsqlCommand(
-                "SELECT compose_statement_timeout_seconds FROM config.config_service WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+                "SELECT compose_statement_timeout_seconds FROM config.config_service WHERE id = 1", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             var value = await command.ExecuteScalarAsync(cancellationToken);
 
             /* No row, or a NULL column: the store has not been seeded yet. The shipped default is the
@@ -717,6 +1035,7 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         {
             /* A store older than the column or the table. Also "no opinion", and expected on a first start
                against a pre-#2357 store, so it is not a warning. */
+            await RecoverFromReadAsync(transaction);
             logger.LogDebug(
                 "config_service.compose_statement_timeout_seconds is not present on this store ({SqlState}) — provisioning the roles with the shipped {Seconds}s default",
                 ex.SqlState, McpCommandDeadlines.ComposedQueryFallbackSeconds);
@@ -725,6 +1044,7 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            await RecoverFromReadAsync(transaction);
             logger.LogWarning(
                 "Could not read config_service.compose_statement_timeout_seconds ({Message}) — leaving the viewer/mcp roles' statement_timeout at whatever the last successful provisioning set, rather than overwriting it with a default the operator did not choose. #2931's client-side composed-query deadline reads the same column, so writing a guess here would desync the two halves of that backstop.",
                 ex.Message);
@@ -999,6 +1319,13 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {mcp};
 GRANT UPDATE ON {config}.config_alert_settings TO {mcp};
 GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
+-- #5085: the fleet server-tag write tools (create/update/delete/assign/unassign_server_tag) run as mcp. The admin
+--    gate is these two single-table grants and nothing else: a role without them gets 42501 on a tag write.
+--    Both tables are non-secret, have no reload-beacon trigger (so no config_service column is needed) and
+--    server_tags.id is GENERATED ALWAYS AS IDENTITY (so no sequence grant). Provisioning re-runs every start, so
+--    no migration rung carries this.
+GRANT INSERT, UPDATE, DELETE ON {config}.server_tags TO {mcp};
+GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {mcp};
 -- #3450: the web dashboard's dedicated mute-rule endpoints (POST/PATCH/PUT/DELETE under /api/mute-rules) run
 --    as the least-privilege viewer role -- the web host's ONLY store identity -- so viewer gets the SAME
 --    single-table config_mute_rules write mcp holds above, the shape of the custom_views/custom_alert_rules
@@ -1015,6 +1342,51 @@ GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
 --    read-only UX is unchanged by this grant.
 GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {viewer};
 GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {viewer};
+-- #4843: the web dashboard's Alert History dismiss route (POST /api/alert-history/dismiss) runs as viewer, the web
+--    host's ONLY store identity, and its write is `UPDATE config_alert_log SET dismissed = TRUE` (AlertDismissStore,
+--    the one copy the Viewer's Dismiss Selected / Dismiss All share). The grant is COLUMN-level on exactly that one
+--    column: viewer can flip the dismissed flag and cannot rewrite what an alert said (alert_time, server_id,
+--    metric_name, the values, send_error, muted, detail_text, context_json) or reach INSERT/DELETE. config_alert_log
+--    carries no trigger, so nothing else is written as the invoking role. The seat model, not this grant, decides who
+--    may call the route (a read-only OIDC seat is refused every unsafe method by the host's write gate). The WPF
+--    read-only probe is unaffected: has_table_privilege(..., 'UPDATE') answers for the TABLE-level privilege only
+--    (the column-level form is has_column_privilege), so it stays false for viewer and the locked-down Viewer's
+--    dismiss buttons stay hidden. mcp gets no such grant: no MCP tool dismisses an alert.
+GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {viewer};
+-- #5085: the web dashboard's server-tag endpoints (POST/PATCH/DELETE under /api/server-tags) run as viewer, so it
+--    gets the SAME two single-table writes mcp holds above. The seat model decides who may call them (a read-only
+--    seat is refused every unsafe method); these grants are only the floor beneath that gate. Both tables are
+--    non-secret and carry no reload-beacon trigger, so no config_service column is involved. The WPF Viewer's
+--    read-only probe is unchanged: it discriminates on config_alert_log UPDATE (ViewerDataService.ReadOnlyProbeSql),
+--    which these grants do not touch, so a read-only desktop seat still reads as read-only and its tag editors
+--    stay disabled. A server removal also clears that server's server_tag_map rows, which needs the DELETE here.
+GRANT INSERT, UPDATE, DELETE ON {config}.server_tags TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {viewer};
+-- #4843: the web dashboard's add-server route (POST /api/servers) runs the SAME add_servers core the MCP tool runs, as
+--    viewer, so viewer gets the INSERT that core issues on config_monitored_servers; no DELETE, because no web route
+--    removes a server yet. Viewer holds no UPDATE on the table: see the #5240 note right below.
+--    The credential column stays out of reach in both directions that matter here. encrypted_password is still
+--    SELECT-carved from viewer (section 6), so viewer can WRITE a password blob and never READ one back; and the
+--    cores need no carved read to write: the INSERT names no RETURNING, its ON CONFLICT (server_id) DO NOTHING arbiter
+--    reads only server_id, and the dedupe and by-id lookups SELECT the five non-secret identity columns viewer
+--    already holds. The BEACON is covered by the two-column config_service grant above: the write fires
+--    trg_bump_monitored_servers -> config_bump_version (SECURITY INVOKER), which UPDATEs config_service.config_version
+--    AS viewer. The seat model, not this grant, decides who may call the route (a read-only seat is refused every
+--    unsafe method); the grant is only the floor beneath that gate. The WPF Viewer's read-only probe is unchanged: it
+--    discriminates on config_alert_log UPDATE (ViewerDataService.ReadOnlyProbeSql), which this grant does not touch.
+GRANT INSERT ON {config}.config_monitored_servers TO {viewer};
+-- #5240: the web dashboard's edit route (PATCH /api/servers/{{id}}) and the MCP edit_server tool change a monitored
+--    server through {config}.edit_monitored_server, a SECURITY DEFINER function granted to viewer and mcp in section 10.
+--    Viewer holds NO UPDATE on this table, column-level or otherwise: the function checks the optimistic token, works
+--    out for itself whether host or port moves, and refuses a move that keeps the stored secret on a SQL or
+--    service-principal row, so a session holding the viewer login cannot send a stored secret to a host it picks.
+--    REVOKE, not merely an absent grant: a store that ran a build with a column-level UPDATE keeps it until this
+--    statement takes it away, and revoking the table privilege also revokes every column privilege on it, so each run
+--    leaves viewer with no UPDATE at all (the same shape as the section-6 read carve). A plain REVOKE removes only the
+--    privileges recorded as granted by the role that issues it (a superuser or the owner counts as the owner); this
+--    batch grants and revokes as that same owner. The write fires trg_bump_monitored_servers inside the function, as
+--    the owner. Idempotent, applied on every managed startup: not a migration rung.
+REVOKE UPDATE ON {config}.config_monitored_servers FROM {viewer};
 -- #3314: the DELIVERY cooldown -- the sole throttle on a Slack/Teams/PagerDuty/webhook post -- is the one
 -- alert-engine knob stored on config_notification rather than config_alert_settings, so update_alert_settings
 -- spans two tables and needs a write here. This DOES widen mcp into a table holding bearer secrets (the SMTP
@@ -1051,7 +1423,13 @@ GRANT UPDATE (enabled, modified_at), DELETE ON {config}.config_notification_rout
 --    config_monitored_servers write fires trg_bump_monitored_servers -> config_bump_version (SECURITY INVOKER),
 --    which UPDATEs config_service.config_version AS mcp, and section 8 already granted mcp
 --    UPDATE (config_version, updated_at) ON config_service -- so no additional config_service grant is needed here.
-GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
+GRANT INSERT, DELETE ON {config}.config_monitored_servers TO {mcp};
+REVOKE UPDATE ON {config}.config_monitored_servers FROM {mcp};
+-- The role and external ID of a server are set only through the edit function (and an INSERT): mcp's UPDATE
+-- names every other column of the table and leaves out aws_role_arn, aws_external_id and the generated
+-- aws_external_id_set. A column added to the table later is added to this list.
+GRANT UPDATE ({McpMonitoredServerUpdateColumns})
+   ON {config}.config_monitored_servers TO {mcp};
 
 -- 10. Custom-alert resolve-on-delete privileged write (#3334). The recovery/resolution row a caller-initiated
 --     rule DELETE writes (CustomAlertEvaluator.WriteTeardownResolutionAsync) lands in config.config_alert_log,
@@ -1067,7 +1445,7 @@ GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
 --     rather than a natural clear's 'tray' (a teardown surfaces no operator notification) -- so a caller can
 --     page nothing and fabricate no fire; only server_id/name and the already-sanitized title/detail vary.
 --     Definer-safe: owned by the store owner (the creating provisioning role, {owner}), an explicit pinned
---     search_path so no injected path can redirect the unqualified config_alert_log or now(), and a fully
+--     search_path with pg_temp last and the table named by its schema, so no temporary object can redirect the config_alert_log write or now(), and a fully
 --     parameterized INSERT with NO dynamic SQL. Created + REVOKEd-from-PUBLIC by the shared builder below;
 --     EXECUTE is the only privilege the least-privilege roles get, and admin/owner keep their direct INSERT and
 --     never call it. NOT a versioned migration: CREATE OR REPLACE is idempotent and owner-run every start and
@@ -1075,6 +1453,79 @@ GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
 --     probe rung + ladder fixture + version-pin tests for no gain.
 {BuildCustomAlertResolveFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) TO {viewer}, {mcp};
+-- #5240: the edit write. The web edit route (viewer) and the MCP edit_server tool (mcp) call
+--     {config}.edit_monitored_server for their one UPDATE of a config_monitored_servers row. It locks the row, checks
+--     the expected modified_at, and refuses a change of host or port that keeps the stored secret on a SQL or
+--     service-principal row (the caller must send a new secret with it). Owned by the store owner, pinned
+--     search_path, one fixed UPDATE with no dynamic SQL; created and REVOKEd from PUBLIC by the shared builder
+--     below, and EXECUTE is the only privilege viewer and mcp get for this write. NOT a versioned migration:
+--     CREATE OR REPLACE is idempotent and owner-run every start. A self-managed store gets the same function from
+--     tools/provision-roles.sql, and is told to re-run it when the function is missing.
+{BuildEditMonitoredServerFunctionSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSignature}) TO {viewer}, {mcp};
+-- #5452: the 15-argument edit function stays as a permanent wrapper over the 17-argument one, for a caller that
+--     was built before the AWS role columns. It passes NULL for both and strips the two AWS column names from
+--     p_columns, so a caller of the old signature can neither change nor clear a role. Same grants, same owner.
+{BuildEditMonitoredServerLegacyWrapperSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLegacySignature}) TO {viewer}, {mcp};
+-- The store's own password rules for every role but the owner (see BuildServerPasswordRulesSql): a trigger on
+--     config_monitored_servers that refuses a password reference (env: or file:) and a move that keeps the stored
+--     password. Created here, not in a migration: CREATE OR REPLACE is idempotent and owner-run every start. A
+--     self-managed store gets the same function and trigger from tools/provision-roles.sql.
+{BuildServerPasswordRulesSql(config)}
+
+-- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
+--     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
+--     and it runs after EVERY blanket grant above (the schema-wide SELECT and write grants and the mcp column ACL), so
+--     none of them can put a privilege back. REVOKE ALL ... CASCADE takes every privilege on the five tables from
+--     PUBLIC and the three roles, TRIGGER and REFERENCES included, so no role can add a new trigger or foreign key. A
+--     trigger or foreign key already there (made while a role held the privilege) is dropped by the loops below, with
+--     a WARNING, because it would outlast the REVOKE. Then SELECT on the key and service-state tables is granted back
+--     to {admin} only (the desktop Viewer reads them as admin), and the DO block checks that nothing else is left; the
+--     pin tables are read by the owner only. Provisioning runs after the migrations, so the tables exist here.
+REVOKE ALL ON {config}.password_key, {config}.password_key_service,
+   {config}.legacy_secret_pin, {config}.legacy_secret_pin_marker FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+REVOKE ALL ON {config}.legacy_secret_pin_candidate FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+GRANT SELECT ON {config}.password_key, {config}.password_key_service TO {admin};
+DO $do$
+DECLARE
+   stray record;
+BEGIN
+   FOR stray IN
+      SELECT t.tgname, t.tgrelid::pg_catalog.regclass::pg_catalog.text AS tablename
+      FROM pg_catalog.pg_trigger AS t
+      WHERE NOT t.tgisinternal
+        AND t.tgrelid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'), pg_catalog.to_regclass('{config}.legacy_secret_pin_candidate'))
+        AND t.tgname NOT IN ('trg_password_key_owner_only_row', 'trg_password_key_owner_only_truncate', 'trg_password_key_service_owner_only_row', 'trg_password_key_service_owner_only_truncate', 'trg_legacy_secret_pin_owner_only_row', 'trg_legacy_secret_pin_owner_only_truncate', 'trg_legacy_secret_pin_marker_owner_only_row', 'trg_legacy_secret_pin_marker_owner_only_truncate', 'trg_legacy_secret_pin_candidate_owner_only_row', 'trg_legacy_secret_pin_candidate_owner_only_truncate')
+   LOOP
+      RAISE WARNING 'Dropped trigger % from % because only the store owner may write the password key tables.', stray.tgname, stray.tablename;
+      EXECUTE pg_catalog.format('DROP TRIGGER %I ON %s', stray.tgname, stray.tablename);
+   END LOOP;
+
+   FOR stray IN
+      SELECT k.conname, k.conrelid::pg_catalog.regclass::pg_catalog.text AS tablename
+      FROM pg_catalog.pg_constraint AS k
+      WHERE k.contype = 'f'
+        AND k.confrelid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'), pg_catalog.to_regclass('{config}.legacy_secret_pin_candidate'))
+   LOOP
+      RAISE WARNING 'Dropped foreign key % on % because it references a password key table.', stray.conname, stray.tablename;
+      EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %I', stray.tablename, stray.conname);
+   END LOOP;
+
+   IF EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_class AS c
+      CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
+      LEFT JOIN pg_catalog.pg_roles AS r ON r.oid = a.grantee
+      WHERE c.oid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'), pg_catalog.to_regclass('{config}.legacy_secret_pin_candidate'))
+        AND (a.grantee = 0 OR r.rolname IN ('{admin}', '{viewer}', '{mcp}'))
+        AND NOT (COALESCE(r.rolname = '{admin}', false) AND a.privilege_type = 'SELECT'
+                 AND c.oid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service')))
+   ) THEN
+      RAISE EXCEPTION 'A role other than the store owner still holds a privilege it should not on a password key table.';
+   END IF;
+END
+$do$;
 
 -- 11. Role memberships (#3914): the three roles hold none. Nothing above grants one, so every membership in which
 --     admin, viewer or mcp is the MEMBER was given by someone else, and each outranks the grants above -- a
@@ -1114,8 +1565,8 @@ END $do$;
     /// freshly created function is EXECUTE-able by PUBLIC by default, so revoking is mandatory); the caller adds
     /// the narrow <c>GRANT EXECUTE</c>. Shared so the gated live proof test creates the IDENTICAL function rather
     /// than a drifting hand-copy. Definer-safe by construction: owned by whoever runs it (the provisioning owner,
-    /// which holds the config_alert_log INSERT the body needs), an explicit <c>SET search_path = {config},
-    /// pg_catalog</c> so neither the unqualified table nor <c>now()</c> can be redirected by a caller's
+    /// which holds the config_alert_log INSERT the body needs), an explicit <c>SET search_path = pg_catalog,
+    /// pg_temp</c> so neither the schema-qualified table nor <c>now()</c> can be redirected by a caller's
     /// search_path, and a fully parameterized INSERT that hardcodes the resolution shape (never a fire) with no
     /// dynamic SQL. The 12-column list matches <c>PgAlertHistoryStore.RecordAlertAsync</c>'s write for a
     /// <c>BuildResolutionRecord</c> and so do the fixed values, EXCEPT this is pinned to a no-channel row
@@ -1131,9 +1582,9 @@ CREATE OR REPLACE FUNCTION {config}.record_custom_alert_resolution(
 RETURNS void
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = {config}, pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $fn$
-   INSERT INTO config_alert_log
+   INSERT INTO {config}.config_alert_log
       (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
        alert_sent, notification_type, send_error, muted, detail_text, context_json)
    VALUES
@@ -1141,6 +1592,493 @@ AS $fn$
        false, 'none', NULL, false, p_detail_text, NULL);
 $fn$;
 REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) FROM PUBLIC;";
+
+    // A new column on config.config_monitored_servers is added to this list. A column that holds a secret goes into the
+    // exclusion list of ServerEditLiveTests (the NOT IN (...) beside the column-set check) instead, and stays out of the grant.
+    /// <summary>The columns of <c>config.config_monitored_servers</c> the <c>mcp</c> login may UPDATE directly (#5452): every column except the AWS role, the external ID and the generated external-ID flag, which change only through <c>config.edit_monitored_server</c>. <c>tools/provision-roles.sql</c> carries the same list.</summary>
+    internal const string McpMonitoredServerUpdateColumns =
+        "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password";
+
+    /// <summary>The argument types of <c>config.edit_monitored_server</c> (#5240), in order. The one place the signature is
+    /// spelled for the <c>GRANT EXECUTE</c>, so a changed parameter list cannot leave the grant naming another function.</summary>
+    internal const string EditMonitoredServerSignature = "integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text";
+
+    /// <summary>The argument types of the 15-argument <c>config.edit_monitored_server</c> that callers built before the AWS
+    /// role columns (#5452) still call: a permanent wrapper over <see cref="EditMonitoredServerSignature"/>'s function
+    /// (<see cref="BuildEditMonitoredServerLegacyWrapperSql"/>).</summary>
+    internal const string EditMonitoredServerLegacySignature = "integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric";
+
+    /// <summary>
+    /// The <c>SECURITY DEFINER</c> function (#5240) that is the one write of a monitored-server edit, for the web edit route
+    /// (viewer) and the MCP <c>edit_server</c> tool (mcp). Returns the <c>CREATE OR REPLACE FUNCTION</c> plus the
+    /// <c>REVOKE ALL ... FROM PUBLIC</c>; the caller adds the <c>GRANT EXECUTE</c>. It locks the row, compares
+    /// <c>modified_at</c> to the token the edit read (exact to the microsecond), works out a change of host or port
+    /// itself from the stored row, answers <c>remediation_kept</c> instead of writing when the row holds a remediation login,
+    /// and answers <c>password_needed</c> instead of writing when that change, or a switch
+    /// of authentication mode, would keep the stored secret on a SQL or service-principal row. A row whose
+    /// authentication stores no secret never keeps one. A missing value for a required column, or a value the table's
+    /// checks refuse, answers <c>invalid_value</c> instead of writing. Same builder for the managed batch, the script's text and the
+    /// live tests, so none drifts. Pinned <c>search_path</c>, fixed statements, no dynamic SQL.
+    /// </summary>
+    internal static string BuildEditMonitoredServerFunctionSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.edit_monitored_server(
+   p_server_id integer,
+   p_expected_modified_at timestamp,
+   p_columns text[],
+   p_name text,
+   p_host text,
+   p_port integer,
+   p_database text,
+   p_read_only_intent boolean,
+   p_auth text,
+   p_username text,
+   p_secret text,
+   p_encrypt_mode text,
+   p_trust_server_certificate boolean,
+   p_multi_subnet_failover boolean,
+   p_monthly_cost_usd numeric,
+   p_aws_role_arn text,
+   p_aws_external_id text)
+RETURNS TABLE (outcome text, new_modified_at timestamp)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_old_modified_at timestamp;
+   v_old_host text;
+   v_old_port integer;
+   v_old_auth text;
+   v_old_database text;
+   v_old_read_only_intent boolean;
+   v_old_username text;
+   v_old_encrypt_mode text;
+   v_old_trust_server_certificate boolean;
+   v_old_multi_subnet_failover boolean;
+   v_host text;
+   v_port integer;
+   v_auth text;
+   v_database text;
+   v_read_only_intent boolean;
+   v_username text;
+   v_encrypt_mode text;
+   v_trust_server_certificate boolean;
+   v_multi_subnet_failover boolean;
+   v_secret_auth boolean;
+   v_new_secret boolean;
+   v_secret_set boolean;
+   v_secret text;
+   v_remediation_held boolean;
+   v_connection_changed boolean;
+   v_old_role text;
+   v_old_ext text;
+   v_role text;
+   v_ext text;
+BEGIN
+   p_columns := COALESCE(p_columns, ARRAY[]::text[]);
+
+   SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
+          s.trust_server_certificate, s.multi_subnet_failover, COALESCE(s.remediation_encrypted_password, '') <> '',
+          s.aws_role_arn, s.aws_external_id
+   INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
+        v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
+        v_remediation_held, v_old_role, v_old_ext
+   FROM {config}.config_monitored_servers AS s
+   WHERE s.server_id = p_server_id
+   FOR UPDATE OF s;
+
+   IF NOT FOUND THEN
+      RETURN QUERY SELECT 'not_found'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- The token is compared as it was read, to the microsecond.
+   IF v_old_modified_at IS DISTINCT FROM p_expected_modified_at THEN
+      RETURN QUERY SELECT 'conflict'::text, v_old_modified_at;
+      RETURN;
+   END IF;
+
+   v_host := CASE WHEN 'host' = ANY (p_columns) THEN btrim(p_host) ELSE v_old_host END;
+   v_port := CASE WHEN 'port' = ANY (p_columns) THEN p_port ELSE v_old_port END;
+   v_auth := CASE WHEN 'auth' = ANY (p_columns) THEN p_auth ELSE v_old_auth END;
+   v_database := CASE WHEN 'database' = ANY (p_columns) THEN p_database ELSE v_old_database END;
+   v_read_only_intent := CASE WHEN 'read_only_intent' = ANY (p_columns) THEN p_read_only_intent ELSE v_old_read_only_intent END;
+   v_username := CASE WHEN 'username' = ANY (p_columns) THEN p_username ELSE v_old_username END;
+   v_encrypt_mode := CASE WHEN 'encrypt_mode' = ANY (p_columns) THEN p_encrypt_mode ELSE v_old_encrypt_mode END;
+   v_trust_server_certificate := CASE WHEN 'trust_server_certificate' = ANY (p_columns) THEN p_trust_server_certificate ELSE v_old_trust_server_certificate END;
+   v_multi_subnet_failover := CASE WHEN 'multi_subnet_failover' = ANY (p_columns) THEN p_multi_subnet_failover ELSE v_old_multi_subnet_failover END;
+   -- The AWS role (#5452). Left out of p_columns, the stored role and external ID are kept. A role named in p_columns
+   -- with a NULL value clears it, and a cleared role takes its external ID with it.
+   v_role := CASE WHEN 'aws_role_arn' = ANY (p_columns) THEN p_aws_role_arn ELSE v_old_role END;
+   v_ext := CASE WHEN v_role IS NULL THEN NULL
+                 WHEN 'aws_external_id' = ANY (p_columns) THEN p_aws_external_id
+                 ELSE v_old_ext END;
+   v_secret_auth := lower(v_auth) IN ('sql', 'serviceprincipal');
+   v_new_secret := 'encrypted_password' = ANY (p_columns) AND COALESCE(p_secret, '') <> '';
+
+   -- A NULL for a column the table requires is refused with a plain outcome: the edit sends nothing the table would
+   -- have to turn away.
+   IF ('name' = ANY (p_columns) AND p_name IS NULL)
+      OR v_host IS NULL OR v_port IS NULL OR v_auth IS NULL OR v_encrypt_mode IS NULL
+      OR v_read_only_intent IS NULL OR v_trust_server_certificate IS NULL OR v_multi_subnet_failover IS NULL
+      OR ('monthly_cost_usd' = ANY (p_columns) AND p_monthly_cost_usd IS NULL) THEN
+      RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- The store takes the password itself from these roles: a secret that starts with env: or file: (a reference,
+   -- compared as the service reads one, case-sensitive and at the start of the text) is refused. References are set
+   -- in the configuration file.
+   IF v_new_secret AND (left(p_secret, 4) = 'env:' OR left(p_secret, 5) = 'file:') THEN
+      RETURN QUERY SELECT 'reference_refused'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- A new role would take the stored external ID with it unseen; the caller sends the ID again or clears it.
+   IF v_role IS NOT NULL AND v_role IS DISTINCT FROM v_old_role AND v_old_ext IS NOT NULL
+      AND NOT ('aws_external_id' = ANY (p_columns)) THEN
+      RETURN QUERY SELECT 'external_id_needed'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- An external ID with no role is refused (the table's check would refuse it too).
+   IF v_role IS NULL AND 'aws_external_id' = ANY (p_columns) AND p_aws_external_id IS NOT NULL THEN
+      RETURN QUERY SELECT 'external_id_needs_role'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- Any change to how the row connects (host, port, database, read-only intent, authentication mode, username,
+   -- encryption, certificate trust, multi-subnet failover) never keeps the stored secret on a row that has one:
+   -- the same set the route refuses (#5240). The caller's word is not taken: the change is worked out from the row.
+   v_connection_changed := v_host IS DISTINCT FROM v_old_host
+      OR v_port IS DISTINCT FROM v_old_port
+      OR v_database IS DISTINCT FROM v_old_database
+      OR v_read_only_intent IS DISTINCT FROM v_old_read_only_intent
+      OR lower(v_auth) IS DISTINCT FROM lower(v_old_auth)
+      OR v_username IS DISTINCT FROM v_old_username
+      OR lower(v_encrypt_mode) IS DISTINCT FROM lower(v_old_encrypt_mode)
+      OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
+      OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover;
+
+   -- A row that holds a remediation secret is not moved from here, whatever else the call sends: that secret is
+   -- set and changed on the service host, and a new main password does not replace it.
+   IF v_connection_changed AND v_remediation_held THEN
+      RETURN QUERY SELECT 'remediation_kept'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   IF v_secret_auth AND NOT v_new_secret AND v_connection_changed THEN
+      RETURN QUERY SELECT 'password_needed'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- A row whose authentication stores no secret never keeps one.
+   IF NOT v_secret_auth THEN
+      v_secret_set := true;
+      v_secret := NULL;
+   ELSIF 'encrypted_password' = ANY (p_columns) THEN
+      v_secret_set := true;
+      v_secret := p_secret;
+   ELSE
+      v_secret_set := false;
+      v_secret := NULL;
+   END IF;
+
+   -- A value the table's own checks refuse (a required column, a format, a duplicate) answers invalid_value too:
+   -- the table's error text is not passed on.
+   BEGIN
+      UPDATE {config}.config_monitored_servers AS s
+      SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
+          host = v_host,
+          port = v_port,
+          database = v_database,
+          read_only_intent = v_read_only_intent,
+          auth = v_auth,
+          username = v_username,
+          encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
+          encrypt_mode = v_encrypt_mode,
+          trust_server_certificate = v_trust_server_certificate,
+          multi_subnet_failover = v_multi_subnet_failover,
+          monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
+          aws_role_arn = v_role,
+          aws_external_id = v_ext,
+          modified_at = (now() AT TIME ZONE 'UTC')
+      WHERE s.server_id = p_server_id
+      RETURNING s.modified_at INTO new_modified_at;
+   EXCEPTION WHEN integrity_constraint_violation THEN
+      RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
+      RETURN;
+   END;
+
+   outcome := 'saved';
+   RETURN NEXT;
+END;
+$fn$;
+REVOKE ALL ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSignature}) FROM PUBLIC;";
+
+    /// <summary>
+    /// The 15-argument <c>config.edit_monitored_server</c> (#5452), kept for good as a wrapper over the 17-argument
+    /// function, for a caller built before the AWS role columns existed (the web route, the MCP tool and the service's
+    /// own call all name the shorter list until they are moved). It passes NULL for the role and the external ID, and
+    /// removes both AWS column names from <c>p_columns</c> first, so a caller of this signature cannot change or clear a
+    /// role, however it builds its list. <c>SECURITY DEFINER</c> with a pinned <c>search_path</c>, revoked from PUBLIC;
+    /// the caller adds the <c>GRANT EXECUTE</c>. Must run after <see cref="BuildEditMonitoredServerFunctionSql"/>.
+    /// </summary>
+    internal static string BuildEditMonitoredServerLegacyWrapperSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.edit_monitored_server(
+   p_server_id integer,
+   p_expected_modified_at timestamp,
+   p_columns text[],
+   p_name text,
+   p_host text,
+   p_port integer,
+   p_database text,
+   p_read_only_intent boolean,
+   p_auth text,
+   p_username text,
+   p_secret text,
+   p_encrypt_mode text,
+   p_trust_server_certificate boolean,
+   p_multi_subnet_failover boolean,
+   p_monthly_cost_usd numeric)
+RETURNS TABLE (outcome text, new_modified_at timestamp)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   SELECT e.outcome, e.new_modified_at
+   FROM {config}.edit_monitored_server(
+      p_server_id, p_expected_modified_at,
+      array_remove(array_remove(COALESCE(p_columns, ARRAY[]::text[]), 'aws_role_arn'), 'aws_external_id'),
+      p_name, p_host, p_port, p_database, p_read_only_intent, p_auth, p_username, p_secret, p_encrypt_mode,
+      p_trust_server_certificate, p_multi_subnet_failover, p_monthly_cost_usd, NULL::text, NULL::text) AS e;
+$fn$;
+REVOKE ALL ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLegacySignature}) FROM PUBLIC;";
+
+    /// <summary>
+    /// The store's own password rules for every role but the owner: a <c>BEFORE INSERT OR UPDATE</c> trigger on
+    /// <c>config_monitored_servers</c> and its function. A password that starts with <c>env:</c> or <c>file:</c> (a
+    /// reference, read as <see cref="DarlingSecretSource.IsReference"/> reads it) is refused on insert and on change, and an
+    /// update that changes how the row connects while it keeps a stored password is refused, and one that changes it on a
+    /// row holding a remediation login is refused with its own state (<c>PW003</c>). The owner (the table's
+    /// owner or a superuser: the service, <c>--add-server</c>, the configuration-file seed and the body of
+    /// <c>edit_monitored_server</c>) is not held to either rule, and no existing row is touched. The same text is
+    /// in <c>tools/provision-roles.sql</c> for a self-managed store.
+    /// </summary>
+    internal static string BuildServerPasswordRulesSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.monitored_server_password_rules()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $rules$
+DECLARE
+   v_reference_main boolean;
+   v_reference_remediation boolean;
+   v_held boolean;
+   v_moved boolean;
+BEGIN
+   -- The store owner (the role that owns the table, and a superuser) writes what it writes: the service, the
+   -- --add-server verb, the configuration-file seed, and the body of edit_monitored_server, which runs as the
+   -- function's owner. Every other role is held to the two rules below.
+   IF pg_has_role(current_user, (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = TG_RELID), 'USAGE') THEN
+      RETURN NEW;
+   END IF;
+
+   v_reference_main := COALESCE(left(NEW.encrypted_password, 4) = 'env:' OR left(NEW.encrypted_password, 5) = 'file:', false);
+   v_reference_remediation := COALESCE(left(NEW.remediation_encrypted_password, 4) = 'env:' OR left(NEW.remediation_encrypted_password, 5) = 'file:', false);
+
+   IF TG_OP = 'INSERT' THEN
+      -- A new row never holds a reference. The one pass: an upsert's proposed row for a server whose stored value is
+      -- already that exact reference (the row is locked, so it cannot go away before the write), which then meets the
+      -- UPDATE rules below. A role that cannot read or lock the row (viewer, mcp) gets the refusal.
+      IF v_reference_main OR v_reference_remediation THEN
+         v_held := false;
+         BEGIN
+            PERFORM 1
+            FROM {config}.config_monitored_servers AS s
+            WHERE s.server_id = NEW.server_id
+              AND (NOT v_reference_main OR s.encrypted_password = NEW.encrypted_password)
+              AND (NOT v_reference_remediation OR s.remediation_encrypted_password = NEW.remediation_encrypted_password)
+            FOR UPDATE OF s;
+            v_held := FOUND;
+         EXCEPTION WHEN insufficient_privilege THEN
+            v_held := false;
+         END;
+
+         IF NOT v_held THEN
+            RAISE EXCEPTION '%', 'Enter the password itself. References (env: or file:) can only be set in the configuration file.' USING ERRCODE = 'PW001';
+         END IF;
+      END IF;
+
+      RETURN NEW;
+   END IF;
+
+   -- An update never sets a reference.
+   IF (v_reference_main AND NEW.encrypted_password IS DISTINCT FROM OLD.encrypted_password)
+      OR (v_reference_remediation AND NEW.remediation_encrypted_password IS DISTINCT FROM OLD.remediation_encrypted_password) THEN
+      RAISE EXCEPTION '%', 'Enter the password itself. References (env: or file:) can only be set in the configuration file.' USING ERRCODE = 'PW001';
+   END IF;
+
+   -- An update that changes how the row connects (the set edit_monitored_server counts, plus the engine) never keeps
+   -- a stored secret that is still there: the main password is typed again with the change, and a remediation
+   -- password is changed on the service host.
+   v_moved := NEW.host IS DISTINCT FROM OLD.host
+      OR NEW.port IS DISTINCT FROM OLD.port
+      OR NEW.engine IS DISTINCT FROM OLD.engine
+      OR NEW.database IS DISTINCT FROM OLD.database
+      OR NEW.read_only_intent IS DISTINCT FROM OLD.read_only_intent
+      OR lower(NEW.auth) IS DISTINCT FROM lower(OLD.auth)
+      OR NEW.username IS DISTINCT FROM OLD.username
+      OR lower(NEW.encrypt_mode) IS DISTINCT FROM lower(OLD.encrypt_mode)
+      OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
+      OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover;
+
+   -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how
+   -- the row is reached as the host is, so it is not changed here either. Not part of v_moved, so it never raises PW002.
+   IF COALESCE(OLD.remediation_encrypted_password, '') <> ''
+      AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password
+      AND (v_moved OR NEW.remediation_username IS DISTINCT FROM OLD.remediation_username) THEN
+      RAISE EXCEPTION '%', 'This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.' USING ERRCODE = 'PW003';
+   END IF;
+
+   IF v_moved
+      AND COALESCE(OLD.encrypted_password, '') <> ''
+      AND NEW.encrypted_password IS NOT DISTINCT FROM OLD.encrypted_password THEN
+      RAISE EXCEPTION '%', 'Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.' USING ERRCODE = 'PW002';
+   END IF;
+
+   -- A new AWS role (#5452) never inherits an external ID stored for the old one, unseen: the update names the ID
+   -- again, or clears it. The owner is not held to this; edit_monitored_server answers it first.
+   IF NEW.aws_role_arn IS NOT NULL
+      AND NEW.aws_role_arn IS DISTINCT FROM OLD.aws_role_arn
+      AND OLD.aws_external_id IS NOT NULL
+      AND NEW.aws_external_id IS NOT DISTINCT FROM OLD.aws_external_id THEN
+      RAISE EXCEPTION '%', 'Changing the AWS role needs the external ID with it: send the external ID again, or clear it.' USING ERRCODE = 'PW004';
+   END IF;
+
+   RETURN NEW;
+END;
+$rules$;
+REVOKE ALL ON FUNCTION {config}.monitored_server_password_rules() FROM PUBLIC;
+CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
+   BEFORE INSERT OR UPDATE ON {config}.config_monitored_servers
+   FOR EACH ROW EXECUTE FUNCTION {config}.monitored_server_password_rules();";
+
+    /// <summary>
+    /// A self-managed store (not the managed one, and not the compose store the service provisions) has its password rules
+    /// from <c>tools/provision-roles.sql</c> alone, so a store upgraded without re-running the script has none. This runs
+    /// <see cref="BuildServerPasswordRulesSql"/> on the service's own connection, which owns the tables, on every start. It
+    /// never throws and never fails the start: when the connection may not create the function or the trigger, one warning
+    /// names <c>provision-roles.sql</c>. Rules that are already in place are left alone: when the trigger exists, is
+    /// enabled and its function has the built text and search path (a function another role created from the script
+    /// included, which this connection could not replace), nothing is run and nothing is warned, and no lock is taken on
+    /// the table. The check and the command run under the provisioning advisory lock (#5560,
+    /// <see cref="ProvisioningLockKey"/>), so two services starting against one store do not both replace the function
+    /// at once. Returns whether the rules are in place.
+    /// </summary>
+    public static async Task<bool> EnsureServerPasswordRulesAsync(
+        NpgsqlDataSource dataSource, ILogger logger, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        try
+        {
+            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+
+            /* #5560: the check and the CREATE OR REPLACE run under the provisioning lock, like the provisioning batch.
+               Two services on one self-managed store would otherwise both find the function stale and both replace
+               the same pg_proc row at once, and the second would fail "tuple concurrently updated". The check runs
+               inside the lock, so the one that waited finds the function the other wrote and runs nothing. */
+            var alreadyInPlace = false;
+            await ExecuteSerializedAsync(connection, async (transaction, token) =>
+            {
+                alreadyInPlace = await ServerPasswordRulesAreInPlaceAsync(connection, transaction, token);
+                return alreadyInPlace
+                    ? null
+                    : new NpgsqlCommand(BuildServerPasswordRulesSql("config"), connection, transaction)
+                    {
+                        CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+                    };
+            }, logger, cancellationToken);
+
+            logger.LogInformation(
+                alreadyInPlace
+                    ? "The store's password rules are already in place on config.config_monitored_servers"
+                    : "The store's password rules are in place on config.config_monitored_servers");
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                "Could not create the store's password rules on config.config_monitored_servers ({Message}). Run provision-roles.sql against the store as the role that owns its tables.",
+                ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether the trigger is on <c>config_monitored_servers</c>, enabled, a row-level BEFORE INSERT OR UPDATE one, and its
+    /// function has the text <see cref="BuildServerPasswordRulesSql"/> builds (full-line comments and spacing set aside) and
+    /// the pinned search path. A read that fails answers false, so the caller falls back to creating them.
+    /// </summary>
+    internal static async Task<bool> ServerPasswordRulesAreInPlaceAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await TakeReadSavepointAsync(transaction, cancellationToken);
+            await using var read = new NpgsqlCommand(@"
+SELECT p.prosrc, p.proconfig
+FROM pg_catalog.pg_trigger AS t
+JOIN pg_catalog.pg_proc AS p ON p.oid = t.tgfoid
+WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
+  AND t.tgname = 'trg_monitored_server_password_rules'
+  AND t.tgenabled = 'O'
+  AND t.tgtype = 23
+  AND p.proname = 'monitored_server_password_rules'
+  AND p.pronamespace = 'config'::regnamespace", connection, transaction)
+            {
+                CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+            };
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return false;
+            }
+
+            var stored = reader.GetString(0);
+            var settings = reader.IsDBNull(1) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(1);
+            if (settings.Length != 1 || !string.Equals(settings[0], "search_path=pg_catalog, pg_temp", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var built = BuildServerPasswordRulesSql("config");
+            const string quote = "$rules$";
+            var open = built.IndexOf(quote, StringComparison.Ordinal);
+            var close = built.IndexOf(quote, open + quote.Length, StringComparison.Ordinal);
+            if (open < 0 || close < 0)
+            {
+                return false;
+            }
+
+            return string.Equals(
+                NormalizeRulesText(stored),
+                NormalizeRulesText(built.Substring(open + quote.Length, close - open - quote.Length)),
+                StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await RecoverFromReadAsync(transaction);
+            return false;
+        }
+    }
+
+    /// <summary>The function text with full-line comments and runs of white space set aside, the comparison the script's
+    /// copy of the rules is held to as well.</summary>
+    private static string NormalizeRulesText(string sql) =>
+        Regex.Replace(Regex.Replace(sql, @"(?m)^\s*--.*$", ""), @"\s+", " ").Trim();
 
     /// <summary>
     /// Fails closed unless <paramref name="secret"/> is a SCRAM-SHA-256 verifier (#3910). This refuses a plain
@@ -1164,14 +2102,15 @@ REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, te
     /// exist yet is absent. Needs a superuser, which the managed owner is. A read this role is refused
     /// returns nothing, so every role is re-asserted: the safe direction, and the pre-#3910 behaviour.
     /// </summary>
-    private static async Task<Dictionary<string, string?>> ReadStoredRoleSecretsAsync(
-        NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
+    internal static async Task<Dictionary<string, string?>> ReadStoredRoleSecretsAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, ILogger logger, CancellationToken cancellationToken)
     {
         var stored = new Dictionary<string, string?>(StringComparer.Ordinal);
         try
         {
+            await TakeReadSavepointAsync(transaction, cancellationToken);
             await using var command = new NpgsqlCommand(
-                "SELECT rolname::text, rolpassword FROM pg_catalog.pg_authid WHERE rolname = ANY($1)", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+                "SELECT rolname::text, rolpassword FROM pg_catalog.pg_authid WHERE rolname = ANY($1)", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             command.Parameters.AddWithValue(new[] { DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.McpRoleName });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -1181,6 +2120,7 @@ REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, te
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
+            await RecoverFromReadAsync(transaction);
             logger.LogDebug("Could not read the managed roles' stored verifiers ({Message}); re-asserting every role's password.", ex.Message);
             stored.Clear();
         }
@@ -1607,10 +2547,11 @@ WHERE u.rolname = current_user";
                     var verdict = JudgeComposeCredentialDirectory(before, modes.Get(directory));
                     if (verdict.Distrust is not { } wasOpen || !verdict.MayWrite)
                     {
-                        /* #4004 review, round 3: a directory this process found open and could not empty stays refused
-                           to every later caller this start, though it now reads owner-only, so "nothing in it is used this
-                           start" holds for all of them. The next start trusts it: only a directory can be left, and no
-                           reader takes one for a credential. */
+                        /* A directory this process found open and could not empty stays refused to every later caller
+                           this start, though it now reads owner-only, so "nothing in it is used this start" holds for
+                           all of them. The next start trusts it, so what was left must not pass for a credential then:
+                           a password key that could not be moved aside leaves an empty file at its quarantine name (so
+                           its load refuses on every start), and a directory at a credential's name is read by nothing. */
                         return verdict.Distrust is null && guard.LeftBehind(directory) is { } leftBehind
                             ? new ComposeCredentialDirectoryTrust(leftBehind, MayWrite: false)
                             : verdict;
@@ -1684,7 +2625,9 @@ WHERE u.rolname = current_user";
 
     /// <summary>
     /// Every file the service reads from a credentials directory, and the temporary file each is written through
-    /// (#4004 review, round 2): the three role passwords and the log-hash key, under both platforms' names.
+    /// (#4004, round 2): the three role passwords and the log-hash key, under both platforms' names. The
+    /// password key's own two names are not here, because an open directory keeps that file, renamed
+    /// (<see cref="PasswordKeyNames"/>); only the temporary files it is written through are.
     /// </summary>
     internal static IReadOnlyList<string> CredentialDirectoryFileNames { get; } = BuildCredentialDirectoryFileNames();
 
@@ -1698,16 +2641,28 @@ WHERE u.rolname = current_user";
             DarlingLogHashKeyFile.UnixFileName,
             DarlingLogHashKeyFile.WindowsFileName,
         };
-        return names.SelectMany(name => new[] { name, name + ".tmp" }).ToArray();
+        return names.SelectMany(name => new[] { name, name + ".tmp" })
+            .Concat(PasswordKeyNames.Select(name => name + ".tmp"))
+            .ToArray();
     }
 
+    /// <summary>The password key's file name on each platform (#5366). The directory check does not remove these when it
+    /// finds the directory open: it renames what is at them to the quarantine name
+    /// (<see cref="DarlingPasswordKeyFile.QuarantineSuffix"/>), so the key's load can say so, on this start and every
+    /// later one, and the caller can check the key against what it published.</summary>
+    internal static IReadOnlyList<string> PasswordKeyNames =>
+        [DarlingPasswordKeyFile.UnixFileName, DarlingPasswordKeyFile.WindowsFileName];
+
     /// <summary>
-    /// The directory was open to other users until this call set it owner-only (#4004 review, round 2), so any file
-    /// in it could have been planted, and the file check cannot tell (it cannot see a Unix owner). Every entry at a
-    /// name the service reads is removed NOW, before anything reads it, so the discard does not depend on this start
-    /// living long enough to reach whichever step would have replaced that file: the chmod is permanent, and the
-    /// next start, finding the directory owner-only, trusts what is left. Removed, the directory holds only what the
-    /// service writes from here on, so it is trusted.
+    /// The directory was open to other users until this call set it owner-only (#4004, round 2), so any file
+    /// in it could have been planted. Every entry at a name the service reads, except the password key, is removed NOW,
+    /// before anything reads it, so the discard does not depend on this start living long enough to reach whichever
+    /// step would have replaced that file: the chmod is permanent, and the next start, finding the directory
+    /// owner-only, trusts what is left. Removed, the directory holds only what the service writes from here on, so it
+    /// is trusted. The password key is the one file that cannot be regenerated, so it is renamed, not removed
+    /// (<see cref="SetPasswordKeyAside"/>): the live name is empty before the directory lock is released, the kept file
+    /// stays on disk under its quarantine name, and every later start finds it there until the key's owner accepts or
+    /// retires it (<see cref="DarlingPasswordKeyFile.Accept"/>, <see cref="DarlingPasswordKeyFile.Retire"/>).
     ///
     /// <para><b>Every name is tried, and the directory stays owner-only whatever is left</b> (#4004 review, round 3).
     /// Round 2 stopped at the first entry it could not remove and set the directory back to the mode it was found
@@ -1731,7 +2686,32 @@ WHERE u.rolname = current_user";
     {
         var removed = new List<string>();
         var left = new List<string>();
-        foreach (var name in CredentialDirectoryFileNames)
+
+        /* #5366: the password key is kept, not removed: whatever is at its name is renamed (never overwritten) to a name
+           that says it was found while the directory was open, so the record is on disk and survives a restart. The live
+           name is empty before the lock is released, and the key's load reads the kept file under its usual checks. */
+        foreach (var name in PasswordKeyNames)
+        {
+            SetPasswordKeyAside(directory, name, guard, left, logger);
+        }
+
+        /* The password key is written through a temporary file with a name of its own each time (#5366): the ones a
+           crashed write left are removed with the rest. */
+        var names = new List<string>(CredentialDirectoryFileNames);
+        foreach (var keyName in PasswordKeyNames)
+        {
+            try
+            {
+                names.AddRange(Directory.EnumerateFileSystemEntries(directory, keyName + DarlingServiceKeyFile.UniqueTemporaryInfix + "*")
+                    .Select(Path.GetFileName)!);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                left.Add($"{Path.Combine(directory, keyName + DarlingServiceKeyFile.UniqueTemporaryInfix)}* (they could not be listed: {ex.Message})");
+            }
+        }
+
+        foreach (var name in names)
         {
             var path = Path.Combine(directory, name);
             var info = new FileInfo(path);
@@ -1785,6 +2765,106 @@ WHERE u.rolname = current_user";
 
         guard.RecordLeftBehind(directory, null);
         return new ComposeCredentialDirectoryTrust(null, MayWrite: true);
+    }
+
+    /// <summary>
+    /// Renames whatever is at <paramref name="name"/> in <paramref name="directory"/> to the password key's quarantine name
+    /// (<see cref="DarlingPasswordKeyFile.QuarantineSuffix"/>), with no overwrite (#5366). A file already at the
+    /// quarantine name is never replaced and never trusted: this one goes to the next free
+    /// <c>name.discarded-N</c> instead. Nothing is deleted. A directory or a link at the name is moved as it is, never
+    /// followed. On Unix a regular file that is kept is set to 0600 afterwards (a mount's group setting can add group
+    /// bits back); when that fails the load reports the file untrusted. An entry that cannot be moved is added to
+    /// <paramref name="left"/>, which refuses the directory this start.
+    /// </summary>
+    private static void SetPasswordKeyAside(string directory, string name, ComposeCredentialDirectoryGuard guard, List<string> left, ILogger logger)
+    {
+        var path = Path.Combine(directory, name);
+        var quarantine = path + DarlingPasswordKeyFile.QuarantineSuffix;
+        var target = quarantine;
+        var moveStarted = false;
+        try
+        {
+            if (!DarlingServiceKeyFile.AnythingAt(path))
+            {
+                return;
+            }
+
+            for (var attempt = 1; DarlingServiceKeyFile.AnythingAt(target) && attempt < 1000; attempt++)
+            {
+                target = path + ".discarded-" + attempt.ToString(CultureInfo.InvariantCulture);
+            }
+
+            var regularFile = new FileInfo(path).LinkTarget is null && File.Exists(path);
+            moveStarted = true;
+            if (!regularFile && Directory.Exists(path) && new FileInfo(path).LinkTarget is null)
+            {
+                Directory.Move(path, target);
+            }
+            else
+            {
+                File.Move(path, target, overwrite: false);
+            }
+
+            moveStarted = false;
+            if (regularFile && guard.UnixModes is { } modes)
+            {
+                SetKeptKeyOwnerOnly(modes, target, logger);
+            }
+
+            logger.LogWarning(
+                "The password key at {Path} was found while the credentials directory {Directory} was open to other users, and is kept as {Kept} (#5366). It is not deleted, and the key's load checks it against the store before it is used.",
+                path, directory, target);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            left.Add($"{path} (it could not be set aside as {Path.GetFileName(target)}: {ex.Message})");
+
+            /* A move that failed leaves the key at its live name in a directory that is owner-only from now on, which the
+               next start would trust and load with nothing to say it was found open (#5366). An empty file at the
+               quarantine name makes every later load refuse (two names, or an empty key), however many starts follow. When
+               the quarantine name was taken already, that file is the record and nothing is added. */
+            if (moveStarted && target == quarantine)
+            {
+                try
+                {
+                    var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        options.UnixCreateMode = OwnerOnlyFile;
+                    }
+
+                    using var marker = new FileStream(quarantine, options);
+                }
+                catch (Exception markerEx) when (markerEx is IOException or UnauthorizedAccessException)
+                {
+                    logger.LogError("Could not leave a marker at {Path} for the password key that could not be set aside: {Message}", quarantine, markerEx.Message);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sets a kept password key to 0600 (#5366; a mount's group setting can add group bits back), but only a file that is
+    /// the service's own with one name: as root, a chmod would otherwise change the mode of whatever file someone
+    /// linked in while the directory was open. A file whose owner cannot be told is left as it is; the load then
+    /// reports it untrusted by its mode.
+    /// </summary>
+    private static void SetKeptKeyOwnerOnly(IUnixDirectoryModes modes, string target, ILogger logger)
+    {
+        try
+        {
+            if (DarlingServiceKeyFile.UnexpectedOwnerReason(target) is { } notOurs)
+            {
+                logger.LogDebug("Left {File} as it is: {Reason}", target, notOurs);
+                return;
+            }
+
+            modes.Set(target, OwnerOnlyFile);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogDebug("Could not set {File} to owner-only: {Message}", target, ex.Message);
+        }
     }
 
     private const UnixFileMode GroupOrOtherAccess =
@@ -2172,7 +3252,17 @@ internal interface IUnixDirectoryModes
     UnixFileMode Get(string directory);
 
     void Set(string directory, UnixFileMode mode);
+
+    /// <summary>The owner's user id and the link count of the file at <paramref name="path"/> (#5366), or null when they
+    /// cannot be read here (Windows, a platform whose stat layout is not known, a stand-in that does not model them).</summary>
+    UnixFileOwner? OwnerOf(string path) => null;
+
+    /// <summary>The user id this process runs as, for comparing with <see cref="UnixFileOwner.UserId"/>.</summary>
+    uint EffectiveUserId => 0;
 }
+
+/// <summary>Who owns a file and how many names it has (#5366).</summary>
+internal readonly record struct UnixFileOwner(uint UserId, ulong Links);
 
 /// <summary>The platform's own <see cref="IUnixDirectoryModes"/>, on every platform but Windows.</summary>
 [UnsupportedOSPlatform("windows")]
@@ -2183,4 +3273,8 @@ internal sealed class PlatformUnixDirectoryModes : IUnixDirectoryModes
     public UnixFileMode Get(string directory) => File.GetUnixFileMode(directory);
 
     public void Set(string directory, UnixFileMode mode) => File.SetUnixFileMode(directory, mode);
+
+    public UnixFileOwner? OwnerOf(string path) => FileIdentity.UnixOwnerOf(path);
+
+    public uint EffectiveUserId => FileIdentity.EffectiveUserId();
 }

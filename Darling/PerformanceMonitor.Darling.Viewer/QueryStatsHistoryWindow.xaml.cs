@@ -34,6 +34,7 @@ public partial class QueryStatsHistoryWindow : Window
 {
     private readonly ViewerDataService _dataService;
     private readonly int _serverId;
+    private readonly string _serverName;
     private readonly string _databaseName;
     private readonly string _queryHash;
     private readonly string _queryText;
@@ -47,12 +48,13 @@ public partial class QueryStatsHistoryWindow : Window
     private System.Threading.CancellationTokenSource? _actualPlanCts;
 
     public QueryStatsHistoryWindow(
-        ViewerDataService dataService, int serverId, string databaseName, string queryHash,
+        ViewerDataService dataService, int serverId, string serverName, string databaseName, string queryHash,
         string queryText, DateTime startUtc, DateTime endUtc)
     {
         InitializeComponent();
         _dataService = dataService;
         _serverId = serverId;
+        _serverName = serverName;
         _databaseName = databaseName;
         _queryHash = queryHash;
         _queryText = queryText;
@@ -81,9 +83,9 @@ public partial class QueryStatsHistoryWindow : Window
             {
                 var totalExec = _historyData.Sum(r => r.DeltaExecutions);
                 var totalCpu = _historyData.Sum(r => r.DeltaCpuMs);
-                var first = ViewerTimeHelper.ForDisplay(_historyData.First().CollectionTime);
-                var last = ViewerTimeHelper.ForDisplay(_historyData.Last().CollectionTime);
-                SummaryText.Text = $"{_historyData.Count} samples from {first:MM/dd HH:mm} to {last:MM/dd HH:mm} | " +
+                var first = ViewerTimeHelper.FormatForDisplay(_historyData.First().CollectionTime, "MM/dd HH:mm");
+                var last = ViewerTimeHelper.FormatForDisplay(_historyData.Last().CollectionTime, "MM/dd HH:mm");
+                SummaryText.Text = $"{_historyData.Count} samples from {first} to {last} | " +
                                    $"Total Executions: {totalExec:N0} | Total CPU: {totalCpu:N1} ms";
             }
             else
@@ -129,7 +131,7 @@ public partial class QueryStatsHistoryWindow : Window
         var tag = selected?.Tag?.ToString() ?? "AvgCpuMs";
         var label = selected?.Content?.ToString() ?? "Avg CPU (ms)";
 
-        var xs = _historyData.Select(r => ViewerTimeHelper.ForDisplay(r.CollectionTime).ToOADate()).ToArray();
+        var xs = _historyData.Select(r => r.CollectionTime.ToOADate()).ToArray();
         var ys = _historyData.Select(r => GetMetricValue(r, tag)).ToArray();
 
         var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);
@@ -139,13 +141,13 @@ public partial class QueryStatsHistoryWindow : Window
 
         var unit = tag.Contains("Ms") ? "ms" : "";
         if (_chartHover == null)
-            _chartHover = new ChartHoverHelper(HistoryChart, unit);
+            _chartHover = new ChartHoverHelper(HistoryChart, unit, displayZone: ViewerTimeHelper.CurrentDisplayZone);
         else
             _chartHover.Unit = unit;
         _chartHover.Clear();
         _chartHover.Add(scatter, label);
 
-        HistoryChart.Plot.Axes.DateTimeTicksBottom();
+        HistoryChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ApplyTheme(HistoryChart);
 
         HistoryChart.Refresh();
@@ -194,6 +196,9 @@ public partial class QueryStatsHistoryWindow : Window
                     "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
+
+            /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
+            if (WithheldPlanGuard.RefuseSave(plan)) return;
 
             var dialog = new SaveFileDialog
             {
@@ -268,24 +273,32 @@ public partial class QueryStatsHistoryWindow : Window
     {
         if (string.IsNullOrEmpty(_queryHash)) return;
 
-        string? estimatedPlanXml = null;
-        try { estimatedPlanXml = await _dataService.GetQueryStatsPlanXmlAsync(_serverId, _databaseName, _queryHash); }
-        catch { /* detection degrades to the fail-safe uncertain path */ }
+        /* #5639: an empty or all-zero hash names no particular query. The flow reads the text the service will run
+           (the latest stored text for the hash and database, which can differ from this window's text) and uses
+           it for the prompt, the modification check and the digest in the request. */
+        if (!ViewerActualPlanFlow.TryCheckQueryStatsHash(this, _queryHash))
+        {
+            return;
+        }
 
-        var argsJson = ViewerDataService.BuildActualPlanArgs(_queryHash, _databaseName);
         var label = $"Actual Plan - {_queryHash}";
 
         _actualPlanCts?.Dispose();
         _actualPlanCts = new System.Threading.CancellationTokenSource();
 
-        var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
-            this, _dataService, _serverId, "the monitored server", _databaseName, _queryText, estimatedPlanXml, argsJson,
+        var capture = await ViewerActualPlanFlow.RequestActualPlanAsync(
+            this, _dataService, _serverId, _serverName, _databaseName,
+            queryText: null, fetchPlanXml: null, argsJson: "",
             onStarted: () => System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait,
             onFinished: () => System.Windows.Input.Mouse.OverrideCursor = null,
-            _actualPlanCts.Token);
+            _actualPlanCts.Token,
+            queryStatsHash: _queryHash);
 
-        if (planXml != null)
-            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, _queryText, _databaseName);
+        if (capture != null)
+        {
+            /* The plan window gets the statement that ran, not this window's text. */
+            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, capture.PlanXml, label, capture.QueryText, _databaseName);
+        }
     }
 
     /// <summary>"View Cached Plan" — asks the service to read the RIGHT-CLICKED snapshot's plan from the target's

@@ -66,8 +66,10 @@ public sealed class SwallowedItemFailureTests
     /// <summary>
     /// The Azure arm of the long-query reconcile keeps the #2623 account over the databases it tried to
     /// ENABLE in, throws the first refusal when every database refused (so the worker does not latch and
-    /// the run classifies SESSION_MISSING), and returns the partial note when some did. The DROP arm is
-    /// deliberately not scored: no run is dispatched while disabled.
+    /// the run classifies SESSION_MISSING), and returns the partial note when some did. Drops are
+    /// deliberately not scored: no run is dispatched while disabled, and a drop outside the monitored set is
+    /// not a capture outage. The scored loop runs only on the ENABLE side; drops go through the shared
+    /// LongQueryTraceDatabases.DropEachAsync.
     /// </summary>
     [Fact]
     public void TheAzureReconcile_ThrowsWhenEveryDatabaseRefused_AndReturnsThePartialNoteWhenSomeDid()
@@ -77,19 +79,22 @@ public sealed class SwallowedItemFailureTests
         Assert.Contains("public static async Task<string?> ReconcileLongQueryCompletionsAsync(", source, StringComparison.Ordinal);
         Assert.Contains("private static async Task<string?> ReconcileLongQueryCompletionsAzureAsync(", source, StringComparison.Ordinal);
 
-        /* Scored only while enabling. */
-        Assert.Contains("if (enabled)\n            {\n                attempted++;\n            }", source, StringComparison.Ordinal);
-        Assert.Contains("if (enabled)\n                {\n                    failed++;\n                    failedDatabases.Add(databaseName);\n                    CollectorFaultDatabase.Stamp(ex, databaseName);\n                    firstFailure ??= ex;\n                }", source, StringComparison.Ordinal);
+        /* Scored only while enabling: the loop over the plan's create list counts, the drops do not. */
+        Assert.Contains("foreach (var databaseName in LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create)\n        {\n            cancellationToken.ThrowIfCancellationRequested();\n            attempted++;", source, StringComparison.Ordinal);
+        Assert.Contains("failed++;\n                failedDatabases.Add(databaseName);\n                CollectorFaultDatabase.Stamp(ex, databaseName);\n                firstFailure ??= ex;", source, StringComparison.Ordinal);
+        Assert.Contains("LongQueryTraceDatabases.DropEachAsync(", source, StringComparison.Ordinal);
 
         /* All refused: the first failure, raw, after the summary line. Same predicate as the runners'. */
         Assert.Contains("if (attempted > 0 && failed == attempted && firstFailure is not null)", source, StringComparison.Ordinal);
         Assert.Contains("System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(firstFailure).Throw();", source, StringComparison.Ordinal);
 
-        /* Some refused: the shared composer, so the wording is the runners'. */
+        /* Some refused: the shared composer, so the wording is the runners'. The first failure is worded as the per-database
+           line words it, so a create or start refused on Azure carries the caps sentence (#4961). */
         Assert.Contains(
-            "return EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure?.Message);",
+            "var partialNote = EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure is null ? null : AlwaysOnXeSessions.DescribeFailure(firstFailure));",
             source,
             StringComparison.Ordinal);
+        Assert.Contains("return partialNote;", source, StringComparison.Ordinal);
 
         /* The per-database warning that names the refusing database is KEPT - the account rides beside
            it, it does not replace it. */
@@ -109,17 +114,21 @@ public sealed class SwallowedItemFailureTests
     {
         var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
 
-        /* The two slots on the loop state. */
-        Assert.Contains("public string? LongQueryTraceFault { get; set; }", source, StringComparison.Ordinal);
+        /* The slots on the loop state. #5378: the fault became a property over a backing field, so that clearing
+           it also clears the permission flag that rides beside it (a stale flag would mislabel the next fault). */
+        Assert.Contains("public string? LongQueryTraceFault\n", source, StringComparison.Ordinal);
+        Assert.Contains("_longQueryTraceFault = value;\n                if (value is null)\n                {\n                    LongQueryTraceFaultIsPermission = false;", source, StringComparison.Ordinal);
+        Assert.Contains("public bool LongQueryTraceFaultIsPermission { get; set; }", source, StringComparison.Ordinal);
         Assert.Contains("public string? LongQueryTracePartialNote { get; set; }", source, StringComparison.Ordinal);
 
         /* The reconcile fills them: partial note on success (enabled only), fault on a throw (enabled only). */
         Assert.Contains("var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(", source, StringComparison.Ordinal);
         Assert.Contains("server.LongQueryTracePartialNote = enabled ? partialNote : null;", source, StringComparison.Ordinal);
         var reconcileCatch = source.IndexOf("Failed to reconcile the long-query completion XE session: {Message}", StringComparison.Ordinal);
-        var faultSet = source.IndexOf("server.LongQueryTraceFault = refusedIn is null", StringComparison.Ordinal);
+        var faultSet = source.IndexOf("server.LongQueryTraceFault = permissionDenied", StringComparison.Ordinal);
         Assert.True(reconcileCatch > 0 && faultSet > reconcileCatch, "the fault is recorded in the reconcile's catch");
         Assert.Contains("var refusedIn = CollectorFaultDatabase.For(ex, fallback: null);", source, StringComparison.Ordinal);
+        Assert.Contains("server.LongQueryTraceFaultIsPermission = permissionDenied;", source, StringComparison.Ordinal);
 
         /* Reset with the latch on every (re)connect. */
         var latchReset = source.IndexOf("server.LongQueryTraceApplied = null;", StringComparison.Ordinal);
@@ -131,18 +140,24 @@ public sealed class SwallowedItemFailureTests
         /* RunOneAsync: the fault throws the SESSION_MISSING type BEFORE the dispatch; the partial note is
            merged onto HostNote AFTER it. Both gated on the collector's own declared name. */
         var runOne = source.IndexOf("private async Task<int> RunOneAsync(", StringComparison.Ordinal);
+        /* #5378: the fault throws the PERMISSIONS type when the reconcile's refusal was a permission denial, and
+           the SESSION_MISSING type for any other refusal - both before the dispatch. */
         var faultThrow = source.IndexOf(
-            "if (IsLongQueryCompletionsCollector(collectorName) && server.LongQueryTraceFault is { } traceFault)\n            {\n                throw new DarlingXeSessionMissingException(traceFault);\n            }",
+            "if (IsLongQueryCompletionsCollector(collectorName) && server.LongQueryTraceFault is { } traceFault)\n            {",
+            StringComparison.Ordinal);
+        var permissionThrow = source.IndexOf(
+            "if (server.LongQueryTraceFaultIsPermission)\n                {\n                    throw new DarlingXeSessionDeniedException(traceFault);\n                }\n\n                throw new DarlingXeSessionMissingException(traceFault);\n            }",
             StringComparison.Ordinal);
         var dispatch = source.IndexOf("var result = await run(runner, runtime, cancellationToken);", StringComparison.Ordinal);
         var noteMerge = source.IndexOf(
             "result = result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, partialNote) };",
             StringComparison.Ordinal);
-        Assert.True(runOne > 0 && faultThrow > runOne && dispatch > faultThrow && noteMerge > dispatch,
-            "fault check, then dispatch, then partial-note merge, all inside RunOneAsync");
+        Assert.True(runOne > 0 && faultThrow > runOne && permissionThrow > faultThrow && dispatch > permissionThrow && noteMerge > dispatch,
+            "fault check (permission refusal, else session missing), then dispatch, then partial-note merge, all inside RunOneAsync");
 
         /* The message-only constructor the pre-dispatch throw needs, beside the wrapping one. */
         Assert.Contains("public DarlingXeSessionMissingException(string message) : base(message) { }", source, StringComparison.Ordinal);
+        Assert.Contains("public DarlingXeSessionDeniedException(string message) : base(message) { }", source, StringComparison.Ordinal);
 
         /* Name-guarded on the collector's OWN name, not a literal. */
         Assert.Contains(

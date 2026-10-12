@@ -15,7 +15,9 @@ namespace PerformanceMonitor.Collectors;
 /// The default benign wait types excluded from wait_stats collection — the shared source both
 /// SKUs filter by, so portable Lite and the Darling service collect identical wait sets. Lite
 /// ships the same list as config/ignored_wait_types.json (user-overridable per machine) and an
-/// identity-pin test asserts the two cannot drift; Darling consumes this constant directly.
+/// identity-pin test asserts the two cannot drift; Darling consumes this constant directly. Entries are the
+/// clean names: the collectors trim the trailing space a few wait names carry before they match (see
+/// <see cref="WaitTypeName"/>), so an entry never needs one.
 /// </summary>
 public static class IgnoredWaitDefaults
 {
@@ -145,5 +147,22 @@ public static class IgnoredWaitDefaults
         "XE_FILE_TARGET_TVF",
         "XE_LIVE_TARGET_TVF",
         "XE_TIMER_EVENT",
+
+        /* Two Azure SQL Database Hyperscale platform timers, grouped here because one measurement decides both.
+           Measured on one Hyperscale database over 3 hours (93 two-minute buckets):
+             RBIO_COMM_RETRY      ONE waiter, a steady ~1,000 ms of wait per second (min 960, max 1,126);
+                                  735 waits that average exactly 15.0 s.
+             SQP_STATS_REPORTING  ONE waiter; 37 waits that average exactly 300.0 s. The server reports this name
+                                  with a trailing space, which the collectors trim at the read.
+           One waiter on a fixed interval, at a rate that does not follow the workload, is a timer and not
+           contention. Kept, it only adds a constant line to the wait charts.
+
+           REMOTE_BLOCK_IO has the same timer shape in that measurement and is deliberately NOT listed. Its name
+           says real remote I/O (page-server reads on Hyperscale), the test workload most likely never forced
+           one, and Microsoft Learn's sys.dm_os_wait_stats page lists it as "Internal use only". A page-server
+           read wait is what a Hyperscale operator needs to see, so it stays visible.
+           The same page does not list RBIO_COMM_RETRY or SQP_STATS_REPORTING at all. */
+        "RBIO_COMM_RETRY",
+        "SQP_STATS_REPORTING",
     };
 }

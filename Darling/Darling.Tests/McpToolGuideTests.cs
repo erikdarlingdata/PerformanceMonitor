@@ -35,6 +35,7 @@ namespace Darling.Tests;
 /// <see cref="McpToolGuideHeadsHealthParserTests"/> for the pattern) — lanes converting a new family add a file
 /// there and never edit this one, so two families converting in parallel never conflict here.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class McpToolGuideTests
 {
     internal static McpToolsListBudgetTests.MeasuredTool Served(string tool) =>

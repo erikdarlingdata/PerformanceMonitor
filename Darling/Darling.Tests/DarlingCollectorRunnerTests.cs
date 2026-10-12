@@ -824,6 +824,26 @@ public class ServerWatermarkReadFloorTests
     }
 
     /// <summary>
+    /// #4749: the Query Store cache's seed read returns the value and its witness in one statement. The witness
+    /// is the newest <c>collection_time</c> among the rows AT the maximum value, so the outer query is limited
+    /// to those rows by an inner <c>MAX</c> over the same bounded predicates, and the unaliased
+    /// <c>MAX(last_execution_time)</c> stays in the text for the tests that count watermark reads by it.
+    /// </summary>
+    [Fact]
+    public void TheWatermarkWithWitnessForDatabaseSql_TakesTheNewestStampAmongTheRowsAtTheMaximumValue()
+    {
+        var sql = DarlingCollectorRunner.BuildServerWatermarkWithWitnessForDatabaseSql("query_store_stats", "last_execution_time", "database_name");
+        const string Predicates = "WHERE server_id = $1 AND database_name = $2 AND collection_time > $3";
+
+        Assert.StartsWith("SELECT MAX(last_execution_time), MAX(collection_time) FROM query_store_stats ", sql, StringComparison.Ordinal);
+        Assert.Equal(2, sql.Split(Predicates).Length - 1);
+        Assert.EndsWith(
+            "AND last_execution_time = (SELECT MAX(last_execution_time) FROM query_store_stats " + Predicates + ")",
+            sql,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #4197: job_history's numeric (instance_id) watermark read carried NO bound at all before this
     /// issue — this pins that it now has the same collection_time bound as its timestamp siblings, on the
     /// PARTITIONING column rather than on instance_id itself (which does not partition the table).

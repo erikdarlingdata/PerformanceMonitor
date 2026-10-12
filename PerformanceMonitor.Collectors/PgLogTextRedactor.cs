@@ -398,6 +398,11 @@ public static class PgLogTextRedactor
         @"^duration: [0-9]+(?:\.[0-9]+)? ms  plan:$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /// <summary>Whether a message is auto_explain's plan head, <c>duration: N ms  plan:</c>, whose plan is on the lines
+    /// under it (#5097). The one spelling of the head, shared with <see cref="WithholdPlan"/>.</summary>
+    public static bool IsPlanHead(string? firstLineMessage) =>
+        firstLineMessage is not null && s_planHead.IsMatch(firstLineMessage);
+
     /// <summary>What an auto_explain plan becomes in a stored message: its statement's text rides in it.</summary>
     public const string WithheldPlan = "<plan withheld: auto_explain writes the statement's text into it>";
 

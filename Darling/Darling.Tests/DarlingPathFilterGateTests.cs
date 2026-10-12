@@ -173,7 +173,15 @@ public sealed class DarlingPathFilterGateTests
         var step = StepBlock(job, stepName);
 
         Assert.Contains("ALL_COUNT: ${{ steps.filter.outputs.all_count }}", step, StringComparison.Ordinal);
-        Assert.Contains("ALL_FILES: ${{ steps.filter.outputs.all_files }}", step, StringComparison.Ordinal);
+        /* The lists reach the environment only up to 1,000 files: Linux refuses to start a process whose
+           single environment string passes 128 KiB, so a dev-to-main release PR of 2,843 files failed
+           before the script ran. The cap is pinned with the source, so a later edit cannot drop either. */
+        var allFiles = step.Split('\n').Single(line => line.TrimStart().StartsWith("ALL_FILES: ", StringComparison.Ordinal));
+        Assert.Contains("steps.filter.outputs.all_files", allFiles, StringComparison.Ordinal);
+        Assert.Contains("fromJSON(steps.filter.outputs.all_count || '0') <= 1000", allFiles, StringComparison.Ordinal);
+        var darlingFiles = step.Split('\n').Single(line => line.TrimStart().StartsWith("DARLING_FILES: ", StringComparison.Ordinal));
+        Assert.Contains("steps.filter.outputs.darling_files", darlingFiles, StringComparison.Ordinal);
+        Assert.Contains("fromJSON(steps.filter.outputs.darling_count || '0') <= 1000", darlingFiles, StringComparison.Ordinal);
 
         /* Every branch that decides against running says how many changed files it classified, so the number
            is the run's own rather than a sentence about it. */
@@ -214,6 +222,35 @@ public sealed class DarlingPathFilterGateTests
         Assert.Contains("Darling/PerformanceMonitor.Darling.Service/**/!(*.md)", patterns, StringComparer.Ordinal);
         Assert.Contains("Darling/tools/new-upgraded-store-fixture.ps1", patterns, StringComparer.Ordinal);
         Assert.Contains("Darling/tools/fetch-pg-runtime.ps1", patterns, StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// The two CI shard scripts reach the Darling gate (#5616). The Darling PostgreSQL shard job runs
+    /// run-darling-pg-shard.ps1, and Darling.Tests parses both it and run-lite-shard.ps1, so a pull request
+    /// that edits only a script must not be waved through with every shard skipped.
+    /// </summary>
+    [Fact]
+    public void TheDarlingGate_CoversTheTwoShardScripts()
+    {
+        var patterns = FilterPatterns(ReadRepoFileLf(s_gateSegments), "darling");
+
+        Assert.NotEmpty(patterns);
+        Assert.Contains(".github/scripts/run-darling-pg-shard.ps1", patterns, StringComparer.Ordinal);
+        Assert.Contains(".github/scripts/run-lite-shard.ps1", patterns, StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// The upgrade-shape workflow and its script reach the Darling gate (#5627). Darling.Tests parses both
+    /// (DarlingUpgradeShapesWorkflowTests), so a pull request that edits only one of them must not be waved
+    /// through with every shard skipped.
+    /// </summary>
+    [Fact]
+    public void TheDarlingGate_CoversTheUpgradeShapeWorkflowAndItsScript()
+    {
+        var patterns = FilterPatterns(ReadRepoFileLf(s_gateSegments), "darling");
+
+        Assert.Contains(".github/workflows/darling-upgrade-shapes.yml", patterns, StringComparer.Ordinal);
+        Assert.Contains(".github/scripts/darling-upgrade-shapes.ps1", patterns, StringComparer.Ordinal);
     }
 
     /// <summary>

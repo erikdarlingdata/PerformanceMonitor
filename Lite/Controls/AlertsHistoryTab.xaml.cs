@@ -17,8 +17,10 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Controls;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
@@ -36,7 +38,17 @@ public partial class AlertsHistoryTab : UserControl
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
     private DateTime? _lastRefreshed;
+
+    /// <summary>The read's row cap (D7): the newest 500 alerts. The count text says "showing the newest 500" when the read
+    /// reached it (<see cref="JobHistoryCap.CountText(int, int, int, string)"/>).</summary>
+    internal const int RowCap = 500;
+
+    /// <summary>How many rows the last read returned, before any column filter: the cap belongs to the read.</summary>
+    private int _lastReadRowCount;
     private readonly DispatcherTimer _staleDataTimer;
+
+    /* #4766: the clock of the open server tab for a server id, or null when that server has no tab open. */
+    private Func<int, ServerClock?> _openTabClock = _ => null;
 
     public MuteRuleService? MuteRuleService { get; set; }
 
@@ -50,6 +62,15 @@ public partial class AlertsHistoryTab : UserControl
     public AlertsHistoryTab()
     {
         InitializeComponent();
+        RangePicker.Value = TimeRangePresets.FromLegacyHours(24)!; /* 24 hours, as the list opened */
+        /* #5562 M1: typed times and calendar periods are read in the zone the Time column is worded in (the display mode), as the
+           Darling Viewer's Alert History does with its display zone. */
+        RangePicker.ZoneProvider = () => ServerTimeHelper.CurrentDisplayZone;
+        /* R8: "All" is a span of 365 days, longer than anything Lite keeps (archive files are deleted by whole month, 3 months
+           back, so rows older than 3 months survive until their month's file goes), through the shared control's longest choice. */
+        RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice, "All");
+        /* #5565: a cross-server list has one fixed filter scope, so its filters survive a restart. */
+        ColumnFilterScope.SetServer(this, ColumnFilterScope.AllServers);
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
@@ -57,9 +78,13 @@ public partial class AlertsHistoryTab : UserControl
     /// <summary>
     /// Initializes the control with required dependencies.
     /// </summary>
-    public void Initialize(LocalDataService dataService)
+    /// <param name="openTabClock">#4766: the clock of the open server tab for a server id, or null when that server
+    /// has no tab open. The second place a row's clock comes from, after the server's own collected one
+    /// (<see cref="StampClocks"/>).</param>
+    public void Initialize(LocalDataService dataService, Func<int, ServerClock?> openTabClock)
     {
         _dataService = dataService;
+        _openTabClock = openTabClock;
         _filterManager = new DataGridFilterManager<AlertHistoryRow>(AlertsDataGrid);
         _staleDataTimer.Start();
     }
@@ -70,6 +95,24 @@ public partial class AlertsHistoryTab : UserControl
     public async void RefreshAlerts()
     {
         await LoadAlertsAsync();
+    }
+
+    /// <summary>Puts one read's rows on the grid and writes the empty message, the clock header and the count text. Returns how many
+    /// rows the grid shows. Split out of the load so a test can drive it with rows (#5542 L6).</summary>
+    internal int ShowAlerts(List<AlertHistoryRow> alerts)
+    {
+        if (_filterManager != null)
+            _filterManager.UpdateData(alerts);
+        else
+            AlertsDataGrid.ItemsSource = alerts;
+
+        var displayCount = AlertsDataGrid.ItemsSource is ICollection<AlertHistoryRow> coll ? coll.Count : alerts.Count;
+        NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
+        AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ServerTimeHelper.CurrentDisplayMode); // D5: the column names its clock
+        /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
+        _lastReadRowCount = alerts.Count;
+        AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert(s)");
+        return displayCount;
     }
 
     private async System.Threading.Tasks.Task LoadAlertsAsync()
@@ -83,21 +126,24 @@ public partial class AlertsHistoryTab : UserControl
 
         try
         {
-            var hoursBack = GetSelectedHoursBack();
+            var (sinceUtc, untilUtc) = GetSelectedWindow();
             int? serverId = GetSelectedServerId();
 
-            var alerts = await System.Threading.Tasks.Task.Run(() => _dataService.GetAlertHistoryAsync(hoursBack, 500, serverId));
+            /* #4766: the rows and each server's collected clock come back from ONE hop off the UI thread, and the
+               clocks are read once per distinct server id, not once per row. */
+            var dataService = _dataService;
+            var (alerts, collectedClocks) = await System.Threading.Tasks.Task.Run(async () =>
+            {
+                var rows = await dataService.GetAlertHistoryWindowAsync(sinceUtc, untilUtc, serverId, RowCap);
+                return (rows, await ReadCollectedClocksAsync(dataService, rows));
+            });
             if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
 
-            if (_filterManager != null)
-                _filterManager.UpdateData(alerts);
-            else
-                AlertsDataGrid.ItemsSource = alerts;
+            /* Back on the UI thread, where the open tabs can be asked for their clocks. */
+            StampClocks(alerts, collectedClocks, _openTabClock);
 
-            var displayCount = AlertsDataGrid.ItemsSource is ICollection<AlertHistoryRow> coll ? coll.Count : alerts.Count;
-            NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-            AlertCountIndicator.Text = displayCount > 0 ? $"{displayCount} alert(s)" : "";
-            AppLogger.Debug("AlertsHistory", $"Loaded {displayCount} alert(s) (query returned {alerts.Count}, hoursBack={hoursBack}, serverId={serverId?.ToString() ?? "all"})");
+            var displayCount = ShowAlerts(alerts);
+            AppLogger.Debug("AlertsHistory", $"Loaded {displayCount} alert(s) (query returned {alerts.Count}, since={sinceUtc:O}, until={(untilUtc.HasValue ? untilUtc.Value.ToString("O") : "now")}, serverId={serverId?.ToString() ?? "all"})");
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
@@ -107,6 +153,59 @@ public partial class AlertsHistoryTab : UserControl
         catch (Exception ex)
         {
             AppLogger.Error("AlertsHistory", $"Failed to load alert history: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Each distinct server in <paramref name="rows"/> with its collected clock (#4766), or null where it has none
+    /// yet: one <c>GetServerClockAsync</c> per server id, however many rows that server has. A read that fails leaves
+    /// that server on the next clock in the chain (its open tab's, then the machine's) rather than failing the whole
+    /// list, since the rows are already read and only the Server-mode text depends on the clock.
+    /// </summary>
+    internal static async System.Threading.Tasks.Task<Dictionary<int, ServerClock?>> ReadCollectedClocksAsync(
+        LocalDataService dataService, IEnumerable<AlertHistoryRow> rows)
+    {
+        var clocks = new Dictionary<int, ServerClock?>();
+        foreach (var serverId in rows.Select(r => r.ServerId).Distinct())
+        {
+            try
+            {
+                clocks[serverId] = await dataService.GetServerClockAsync(serverId);
+            }
+            catch (Exception ex)
+            {
+                clocks[serverId] = null;
+                AppLogger.Debug("AlertsHistory", $"Server clock read failed for server {serverId}, its rows take the open tab's or the machine's clock: {ex.Message}");
+            }
+        }
+
+        return clocks;
+    }
+
+    /// <summary>
+    /// Stamps each row with the clock of its own server (#4766), one chain per distinct server id:
+    /// <see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/> of the server's collected clock
+    /// (<paramref name="collected"/>) and its open tab's (<paramref name="openTabClock"/>). Two servers with
+    /// different clocks in one list therefore each convert on their own, in Server mode. Pure of the control, so a
+    /// test drives it directly; the lookup is called here, on the caller's thread, because the open tabs are UI
+    /// objects.
+    /// </summary>
+    internal static void StampClocks(
+        IEnumerable<AlertHistoryRow> rows,
+        IReadOnlyDictionary<int, ServerClock?> collected,
+        Func<int, ServerClock?>? openTabClock)
+    {
+        var chosen = new Dictionary<int, ServerClock>();
+        foreach (var row in rows)
+        {
+            if (!chosen.TryGetValue(row.ServerId, out var clock))
+            {
+                collected.TryGetValue(row.ServerId, out var own);
+                clock = ServerTimeHelper.ClockForServer(own, openTabClock?.Invoke(row.ServerId));
+                chosen[row.ServerId] = clock;
+            }
+
+            row.Clock = clock;
         }
     }
 
@@ -161,12 +260,9 @@ public partial class AlertsHistoryTab : UserControl
         ServerFilterComboBox.SelectionChanged += ServerFilterComboBox_SelectionChanged;
     }
 
-    private int GetSelectedHoursBack()
-    {
-        if (TimeRangeComboBox.SelectedItem is ComboBoxItem item && item.Tag is string tagStr)
-            return int.TryParse(tagStr, out var hours) ? hours : 24;
-        return 24;
-    }
+    /// <summary>The picker's window for the read and for Dismiss All (#5562): the start and, for a range that has finished, its exclusive end (null while it runs to now).</summary>
+    private (DateTime sinceUtc, DateTime? untilUtc) GetSelectedWindow()
+        => LiteTimeRange.BoundsOf(RangePicker, 24, DateTime.UtcNow);
 
     private int? GetSelectedServerId()
     {
@@ -214,7 +310,15 @@ public partial class AlertsHistoryTab : UserControl
         if (_filterPopup != null)
             _filterPopup.IsOpen = false;
 
-        _filterManager?.SetFilter(e.FilterState);
+        ApplyColumnFilter(e.FilterState);
+    }
+
+    /// <summary>Applies a column filter, then rebuilds the count text from what the grid now shows and the last read's size (the
+    /// Viewer's tab does the same). The popup's Clear button raises FilterApplied with an empty filter, so clearing comes through here too (#5542 L6).</summary>
+    internal void ApplyColumnFilter(ColumnFilterState filterState)
+    {
+        _filterManager?.SetFilter(filterState);
+        AlertCountIndicator.Text = JobHistoryCap.CountText(AlertsDataGrid.Items.Count, _lastReadRowCount, RowCap, "alert(s)");
     }
 
     private void FilterPopup_FilterCleared(object? sender, EventArgs e)
@@ -260,7 +364,7 @@ public partial class AlertsHistoryTab : UserControl
 
     #region Event Handlers
 
-    private async void TimeRangeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void RangePicker_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
     {
         if (IsLoaded)
             await LoadAlertsAsync();
@@ -281,12 +385,33 @@ public partial class AlertsHistoryTab : UserControl
     {
         var selected = AlertsDataGrid.SelectedItems.OfType<AlertHistoryRow>().ToList();
         var liveCount = selected.Count(a => !a.IsArchived);
-        DismissSelectedButton.IsEnabled = liveCount > 0;
+        DismissSelectedButton.IsEnabled = liveCount > 0 && !_dismissInFlight;
+    }
+
+    /* #5650: a dismiss can wait up to 30 s for the local database (LocalDataService.OpenUserWriteConnectionAsync) while
+       archival or a collector write holds it. While it waits, both buttons are off, the line beside them says so, and a
+       second click (the context menu's too) is refused rather than queued behind the first. The flag is read and set on
+       the dispatcher, so it needs no lock; the write itself runs inside Task.Run, so the window stays responsive. */
+    private bool _dismissInFlight;
+
+    private void SetDismissInFlight(bool inFlight)
+    {
+        _dismissInFlight = inFlight;
+        DismissAllButton.IsEnabled = !inFlight;
+        DismissWaitIndicator.Visibility = inFlight ? Visibility.Visible : Visibility.Collapsed;
+        if (inFlight)
+        {
+            DismissSelectedButton.IsEnabled = false;
+        }
+        else
+        {
+            AlertsDataGrid_SelectionChanged(this, null!);
+        }
     }
 
     private async void DismissSelected_Click(object sender, RoutedEventArgs e)
     {
-        if (_dataService == null) return;
+        if (_dataService == null || _dismissInFlight) return;
 
         var selected = AlertsDataGrid.SelectedItems
             .OfType<AlertHistoryRow>()
@@ -318,6 +443,7 @@ public partial class AlertsHistoryTab : UserControl
             if (confirmResult != MessageBoxResult.Yes) return;
         }
 
+        SetDismissInFlight(true);
         try
         {
             var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAlertsAsync(liveAlerts));
@@ -333,23 +459,32 @@ public partial class AlertsHistoryTab : UserControl
             foreach (var dismissedServerId in liveAlerts.Select(a => a.ServerId).Distinct())
                 AlertsDismissed?.Invoke(dismissedServerId);
         }
-        catch (TimeoutException)
+        catch (TimeoutException ex)
         {
+            AppLogger.Warn("AlertsHistory", StoreBusyReport.LogLine("Dismiss selected", ex));
             MessageBox.Show(
-                "The database is currently busy (archival or maintenance in progress).\n\nPlease try again in a few moments.",
+                StoreBusyReport.DialogText(ex),
                 "Dismiss Unavailable",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
+        }
+        catch (PendingRestoreException ex)
+        {
+            MessageBox.Show(ex.Message, "Dismiss Unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         catch (Exception ex)
         {
             AppLogger.Error("AlertsHistory", $"Failed to dismiss selected alerts: {ex.Message}");
         }
+        finally
+        {
+            SetDismissInFlight(false);
+        }
     }
 
     private async void DismissAll_Click(object sender, RoutedEventArgs e)
     {
-        if (_dataService == null) return;
+        if (_dataService == null || _dismissInFlight) return;
 
         var allAlerts = (AlertsDataGrid.ItemsSource as IEnumerable<AlertHistoryRow>)?.ToList();
         if (allAlerts == null || allAlerts.Count == 0) return;
@@ -380,11 +515,13 @@ public partial class AlertsHistoryTab : UserControl
 
         if (result != MessageBoxResult.Yes) return;
 
+        SetDismissInFlight(true);
         try
         {
-            var hoursBack = GetSelectedHoursBack();
+            /* The same window the grid read (#5562): a range that ended in the past dismisses only the rows up to its end. */
+            var (sinceUtc, untilUtc) = GetSelectedWindow();
             int? serverId = GetSelectedServerId();
-            var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAllVisibleAlertsAsync(hoursBack, serverId));
+            var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, untilUtc, serverId));
             if (affected < liveCount && App.LogAlertDismissals)
             {
                 AppLogger.Warn("AlertsHistory", $"Dismiss all: only {affected} of {liveCount} live alert(s) were updated");
@@ -394,17 +531,26 @@ public partial class AlertsHistoryTab : UserControl
             /* Clear the matching server tab badge(s) so the indicator matches the cleared list (issue #1092). */
             AlertsDismissed?.Invoke(serverId);
         }
-        catch (TimeoutException)
+        catch (TimeoutException ex)
         {
+            AppLogger.Warn("AlertsHistory", StoreBusyReport.LogLine("Dismiss all", ex));
             MessageBox.Show(
-                "The database is currently busy (archival or maintenance in progress).\n\nPlease try again in a few moments.",
+                StoreBusyReport.DialogText(ex),
                 "Dismiss Unavailable",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
         }
+        catch (PendingRestoreException ex)
+        {
+            MessageBox.Show(ex.Message, "Dismiss Unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
         catch (Exception ex)
         {
             AppLogger.Error("AlertsHistory", $"Failed to dismiss all alerts: {ex.Message}");
+        }
+        finally
+        {
+            SetDismissInFlight(false);
         }
     }
 
@@ -465,7 +611,7 @@ public partial class AlertsHistoryTab : UserControl
 
         var context = new AlertMuteContext
         {
-            ServerName = item.ServerName,
+            ServerName = string.IsNullOrEmpty(item.StoredServerName) ? item.ServerName : item.StoredServerName,
             MetricName = item.MetricName
         };
         context.PopulateFromDetailText(item.DetailText);
@@ -473,7 +619,9 @@ public partial class AlertsHistoryTab : UserControl
         var dialog = new Windows.MuteRuleDialog(context) { Owner = Window.GetWindow(this) };
         if (dialog.ShowDialog() == true)
         {
-            await MuteRuleService.AddRuleAsync(dialog.Rule);
+            if (PendingRestoreNotice.Refuse("config_mute_rules", Window.GetWindow(this))) return;
+            var saved = await MuteRuleService.AddRuleAsync(dialog.Rule);
+            if (!saved) PendingRestoreNotice.SaveFailed(Window.GetWindow(this));
             await LoadAlertsAsync();
         }
     }
@@ -493,7 +641,9 @@ public partial class AlertsHistoryTab : UserControl
         var dialog = new Windows.MuteRuleDialog(context) { Owner = Window.GetWindow(this) };
         if (dialog.ShowDialog() == true)
         {
-            await MuteRuleService.AddRuleAsync(dialog.Rule);
+            if (PendingRestoreNotice.Refuse("config_mute_rules", Window.GetWindow(this))) return;
+            var saved = await MuteRuleService.AddRuleAsync(dialog.Rule);
+            if (!saved) PendingRestoreNotice.SaveFailed(Window.GetWindow(this));
             await LoadAlertsAsync();
         }
     }

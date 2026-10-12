@@ -89,6 +89,10 @@ public sealed class DarlingMcpTools
                 }, McpHelpers.JsonOptions);
             }
 
+            /* #5558: databases left to the primary because this node holds only a secondary copy of them in an
+               availability group; the set THIS pass used. Null when none, and then the field is simply null. */
+            var secondaryReplicaNote = analysisService.LastSecondaryReplicaNote;
+
             /* #2506: whether this run's findings reached the store, and why not when they did not.
                Reported rather than left to the documentation because the caller cannot otherwise tell:
                an anchored run returns a complete, correct set of findings that simply does not exist in
@@ -123,7 +127,8 @@ public sealed class DarlingMcpTools
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
                         persisted = anchor is null,
-                        persistence_note = persistenceNote
+                        persistence_note = persistenceNote,
+                        secondary_replica_note = secondaryReplicaNote
                     }, McpHelpers.JsonOptions));
             }
 
@@ -165,12 +170,14 @@ public sealed class DarlingMcpTools
                     : $"No significant findings in the {coverage!.Fraction:P0} of this window the collector observed — a PARTIAL reading, not a full all-clear. {coverage.Describe()}. The unobserved stretch could have held anything, and nothing here speaks for it; check get_collection_health for why collection stopped.";
                 return McpHelpers.Status(
                     "empty",
-                    collectionCaveat is null ? allClear : $"{allClear} COLLECTION CAVEAT: {collectionCaveat}",
+                    (collectionCaveat is null ? allClear : $"{allClear} COLLECTION CAVEAT: {collectionCaveat}")
+                        + (secondaryReplicaNote is null ? string.Empty : " " + secondaryReplicaNote),
                     collection.Attach(new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
                         persisted = anchor is null,
                         persistence_note = persistenceNote,
+                        secondary_replica_note = secondaryReplicaNote,
                         coverage = coverage?.ToPayload(),
                         fact_count = analysisService.LastFactCount,
                         facts_scored = analysisService.LastFactsScored
@@ -205,6 +212,7 @@ public sealed class DarlingMcpTools
                 /* Null at full coverage (#3538 A2) — same rule; the collection caveat (#3691) joins it
                    only when a family failed, so a clean full-coverage pass keeps its null. */
                 caveat = CollectionCaveats.Compose(coverageCaveat, collectionCaveat),
+                secondary_replica_note = secondaryReplicaNote,
                 coverage = coverage?.ToPayload(),
                 time_range = new
                 {
@@ -301,7 +309,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "get_analysis_facts"), Description("Raw scored facts from the inference engine's pipeline, WITHOUT graph traversal: facts, not findings. Includes ANOMALY_* facts with gate metadata even when they fired but stayed under the finding floor, so a fact here did not necessarily produce a finding. baseline_confidence (a fact's baseline trustworthiness) differs from a finding's confidence in analyze_server. collection_caveats is absent on a clean read; when present, the families it names were NOT read, so their absence is not evidence they were quiet. ranked is absent unless 2+ objects ride. <<GUIDE>> Exposes the raw scored facts from the inference engine's collect+score pipeline WITHOUT graph traversal. Shows every observation the engine sees: wait stats as fraction-of-period, blocking rates, config settings, memory stats, plus base severity, final severity after amplifiers, and which amplifiers matched. The anomaly detector runs on this read too, so the ANOMALY_* facts the full pass would score are here with the gate metadata the pass scored them on (deviation_sigma against fire_threshold, baseline_samples, baseline_tier, baseline_low_quality), including the ones that fired but stayed under the finding floor; the cost is the detector's baseline reads on top of the collector's. For ANOMALY_* facts the metadata carries baseline_confidence — the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server. Use this to understand exactly what the engine is working with, or to investigate facts that didn't reach the severity threshold for findings. When one or more fact families could not be read (a timed-out, cancelled or failed collector read), the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the caveat says so; the field is absent on a clean read, and a fact set missing those families is not evidence that they were quiet. A fact whose read ranked several objects carries ranked: the objects it ranks, worst first, as [{object_name, database_name, value, figures}] with the family's own un-prefixed metadata names as the figure keys, entry [0] being the fact's own subject (same object_name and value). Absent unless two or more objects ride, and capped at three - the per-object lists are the get_pg_* reads. source accepts: anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, pg_bloat, pg_blocking, pg_buffer, pg_config, pg_cpu, pg_database, pg_growth, pg_io, pg_kernel, pg_memory, pg_plans, pg_posture, pg_queries, pg_replication, pg_sessions, pg_temp, pg_vacuum, pg_waits, pg_write, queries, sessions, tempdb, waits; omit it for all. total_facts counts every scored fact before the source and min_severity filters; shown counts the facts that passed them; filters echoes the two values applied.")]
+    [McpServerTool(Name = "get_analysis_facts"), Description("Raw scored facts from the inference engine's pipeline, WITHOUT graph traversal: facts, not findings. Includes ANOMALY_* facts with gate metadata even when they fired but stayed under the finding floor, so a fact here did not necessarily produce a finding. baseline_confidence (a fact's baseline trustworthiness) differs from a finding's confidence in analyze_server. collection_caveats is absent on a clean read; when present, the families it names were NOT read, so their absence is not evidence they were quiet. ranked is absent unless 2+ objects ride. <<GUIDE>> Exposes the raw scored facts from the inference engine's collect+score pipeline WITHOUT graph traversal. Shows every observation the engine sees: wait stats as fraction-of-period, blocking rates, config settings, memory stats, plus base severity, final severity after amplifiers, and which amplifiers matched. The anomaly detector runs on this read too, so the ANOMALY_* facts the full pass would score are here with the gate metadata the pass scored them on (deviation_sigma against fire_threshold, baseline_samples, baseline_tier, baseline_low_quality), including the ones that fired but stayed under the finding floor; the cost is the detector's baseline reads on top of the collector's. For ANOMALY_* facts the metadata carries baseline_confidence — the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server. Use this to understand exactly what the engine is working with, or to investigate facts that didn't reach the severity threshold for findings. When one or more fact families could not be read (a timed-out, cancelled or failed collector read), the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the caveat says so; the field is absent on a clean read, and a fact set missing those families is not evidence that they were quiet. A fact whose read ranked several objects carries ranked: the objects it ranks, worst first, as [{object_name, database_name, value, figures}] with the family's own un-prefixed metadata names as the figure keys, entry [0] being the fact's own subject (same object_name and value). Absent unless two or more objects ride, and capped at three - the per-object lists are the get_pg_* reads. The PLAN_REGRESSION fact leaves out a regression whose statement is OPTION (RECOMPILE), whose newer plan returns 10x the rows per call with the cost gone per row, or whose two plans were compiled for different parameter values over unchanged statistics, and counts them in cross_input_excluded_count. Its worst_input_basis says how the worst kept offender's two plans were compared: 1 both plans were compiled for the same parameter values, 2 the compiled values differ and the statistics were updated between the compiles (a possible statistics-update flip), 0 not checked (a plan or the statement text was missing or withheld). source accepts: anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, pg_bloat, pg_blocking, pg_buffer, pg_config, pg_cpu, pg_database, pg_growth, pg_io, pg_kernel, pg_memory, pg_plans, pg_posture, pg_queries, pg_replication, pg_sessions, pg_temp, pg_vacuum, pg_waits, pg_write, queries, sessions, tempdb, waits; omit it for all. total_facts counts every scored fact before the source and min_severity filters; shown counts the facts that passed them; filters echoes the two values applied.")]
     public static async Task<string> GetAnalysisFacts(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -332,6 +340,12 @@ public sealed class DarlingMcpTools
             var (facts, coverage, collection) = await analysisService.CollectAndScoreFactsAsync(
                 resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor, cancellationToken: cancellationToken);
 
+            /* #5558: databases left to the primary because this node holds only a secondary copy of them in an
+               availability group, as of the window end; the facts below were trimmed of them. Built from the set the
+               read's own context filtered with (carried on the returned collection state), not from a second read, so
+               the note cannot disagree with what was skipped. Null when none, and then the field is simply null. */
+            var secondaryReplicaNote = AgReplicaScope.SkippedNote(collection.SecondaryReplicaDatabases);
+
             /* #3691: null on a clean read, and then every envelope below is byte-for-byte what it was; when
                a family failed, the sentence is appended to the message and collection_caveats to the payload. */
             var collectionCaveat = collection.Describe();
@@ -343,12 +357,11 @@ public sealed class DarlingMcpTools
                    #3691: a pass in which every family FAILED lands here too, and used to be told apart from
                    "no data" only by the service log; the caveat now says which families were not read. */
                 const string noFacts = "No facts collected. The collector may not have run yet, or no data exists in the requested time range.";
-                return collectionCaveat is null
-                    ? McpHelpers.Status("unavailable", noFacts)
-                    : McpHelpers.Status(
-                        "unavailable",
-                        $"{noFacts} COLLECTION CAVEAT: {collectionCaveat}",
-                        collection.Attach(new { coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
+                var noFactsMessage = secondaryReplicaNote is null ? noFacts : $"{noFacts} {secondaryReplicaNote}";
+                return McpHelpers.Status(
+                    "unavailable",
+                    collectionCaveat is null ? noFactsMessage : $"{noFactsMessage} COLLECTION CAVEAT: {collectionCaveat}",
+                    collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
             }
 
             if (coverage is null || !coverage.IsObserved)
@@ -365,7 +378,7 @@ public sealed class DarlingMcpTools
                     $"{facts.Count} point-in-time fact(s) — configuration and current state — could still be read; audit_config reports those. " +
                     "Check get_collection_health to see when collectors last succeeded and why they stopped." +
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
-                    collection.Attach(new { coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
+                    collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
             }
 
             var filtered = facts.AsEnumerable();
@@ -417,6 +430,7 @@ public sealed class DarlingMcpTools
                 total_facts = facts.Count,
                 shown = result.Count,
                 filters = new { source, min_severity },
+                secondary_replica_note = secondaryReplicaNote, /* #5558: null when nothing was left to the primary */
                 /* #3538 A2: null at full coverage; below the partial bar it says what share of the window
                    the fractions and rates were divided over, because a 25%-of-observed-time wait on a
                    quarter-collected window is a different claim from 25% of four hours. #3691: the
@@ -467,11 +481,17 @@ public sealed class DarlingMcpTools
             var baselineEnd = windowEnd.AddHours(-baseline_hours_back + hours_back);
             var baselineStart = windowEnd.AddHours(-baseline_hours_back);
 
-            var (baselineFacts, comparisonFacts, baselineCoverage, comparisonCoverage, dispersion) = await analysisService.ComparePeriodsAsync(
+            var (baselineFacts, comparisonFacts, baselineCoverage, comparisonCoverage, dispersion, baselineSecondaries, comparisonSecondaries) = await analysisService.ComparePeriodsAsync(
                 resolved.ServerId, resolved.ServerName,
                 baselineStart, baselineEnd,
                 comparisonStart, comparisonEnd,
                 cancellationToken);
+
+            /* #5558: per window, because each window uses the role at its own end and the two can straddle a
+               failover. Built from the sets the windows' contexts filtered with (returned beside the coverages), not
+               from a second read, so the note names exactly what the comparison skipped. */
+            var baselineSecondaryNote = AgReplicaScope.SkippedNote(baselineSecondaries);
+            var comparisonSecondaryNote = AgReplicaScope.SkippedNote(comparisonSecondaries);
 
             /* The COLLECTION_GAP context fact (#3538 A2) is an observation of the COLLECTOR, not of the
                server, and it is reported through the coverage blocks and caveat below. Left in the
@@ -523,7 +543,9 @@ public sealed class DarlingMcpTools
                            it observed and found idle — is the difference between "check collection" and
                            "the server was quiet", and only the coverage can tell them apart. */
                         baseline_coverage = baselineCoverage?.ToPayload(),
-                        comparison_coverage = comparisonCoverage?.ToPayload()
+                        comparison_coverage = comparisonCoverage?.ToPayload(),
+                        baseline_secondary_replica_note = baselineSecondaryNote,
+                        comparison_secondary_replica_note = comparisonSecondaryNote
                     });
             }
 
@@ -580,14 +602,16 @@ public sealed class DarlingMcpTools
                     start = baselineStart.ToString("o"),
                     end = baselineEnd.ToString("o"),
                     fact_count = baselineServerFacts.Count,
-                    coverage = baselineCoverage?.ToPayload()
+                    coverage = baselineCoverage?.ToPayload(),
+                    secondary_replica_note = baselineSecondaryNote
                 },
                 comparison = new
                 {
                     start = comparisonStart.ToString("o"),
                     end = comparisonEnd.ToString("o"),
                     fact_count = comparisonServerFacts.Count,
-                    coverage = comparisonCoverage?.ToPayload()
+                    coverage = comparisonCoverage?.ToPayload(),
+                    secondary_replica_note = comparisonSecondaryNote
                 },
                 summary = comparison.SummaryPayload(),
                 families = comparison.Families.Select(f => f.ToPayload()).ToList(),
@@ -775,22 +799,10 @@ public sealed class DarlingMcpTools
             var totalMemoryMb = factsByKey.TryGetValue("MEMORY_TOTAL_PHYSICAL_MB", out var memFact) ? memFact.Value : 0;
             var totalDbSizeMb = factsByKey.TryGetValue("DATABASE_TOTAL_SIZE_MB", out var dbFact) ? dbFact.Value : 0;
 
-            // Edition names: 3 = Enterprise, 2 = Standard, 4 = Express
-            var editionName = edition switch
-            {
-                1 => "Personal",
-                2 => "Standard",
-                3 => "Enterprise",
-                4 => "Express",
-                5 => "Azure SQL Database",
-                6 => "Azure SQL Managed Instance",
-                8 => "Azure SQL Managed Instance (HADR)",
-                9 => "Azure SQL Edge",
-                11 => "Azure Synapse serverless",
-                _ => "Unknown"
-            };
-            var coresPerSocket = factsByKey.TryGetValue("SERVER_HARDWARE", out var hwFact)
-                && hwFact.Metadata.TryGetValue("cores_per_socket", out var cps) ? (int)cps : 0;
+            var editionName = AuditEditionName(edition);
+            /* The recommended MAXDOP follows the cores per socket the SERVER_HARDWARE fact carries. On an Azure SQL Database the fact carries its vCores instead, because the stored
+               cores_per_socket is the host's (see FactRemediation.MaxdopBasisFrom). */
+            var maxdopBasis = FactRemediation.MaxdopBasisFrom(factsByKey);
 
             var recommendations = new List<ConfigRecommendation>();
 
@@ -823,11 +835,11 @@ public sealed class DarlingMcpTools
                 }
             }
 
-            // MAXDOP audit — topology-based (min(cores-per-socket, 8)), NOT edition-based.
+            // MAXDOP audit — topology-based (min(cores-per-socket, 8); min(vCores, 8) on an Azure SQL Database), NOT edition-based.
             if (factsByKey.TryGetValue("CONFIG_MAXDOP", out var maxdopFact))
             {
                 var maxdop = (int)maxdopFact.Value;
-                var recommended = (int)FactRemediation.RecommendedMaxdop(coresPerSocket);
+                var recommended = (int)FactRemediation.RecommendedMaxdop(maxdopBasis.Cores);
 
                 if (maxdop == 0)
                 {
@@ -835,7 +847,7 @@ public sealed class DarlingMcpTools
                         $"MAXDOP is 0 (unlimited). This lets one query fan out across all schedulers, " +
                         $"leading to CXPACKET waits and thread exhaustion under load. Microsoft's guidance is " +
                         $"topology-based: keep MAXDOP at or under the logical processors in a single NUMA node, capped at 8. " +
-                        $"Start with {recommended} (this server's cores-per-socket, capped at 8) and adjust to the workload."));
+                        $"Start with {recommended} ({(maxdopBasis.FromVcores ? "this database's vCores" : "this server's cores-per-socket")}, capped at 8) and adjust to the workload."));
                 }
                 else if (maxdop == 1 && recommended > 1)
                 {
@@ -938,12 +950,15 @@ public sealed class DarlingMcpTools
 
             if (recommendations.Count == 0)
             {
-                return JsonSerializer.Serialize(new
-                {
-                    server = resolved.ServerName,
-                    status = "no_config_data",
-                    message = "No configuration data found. The config collector may not have run yet."
-                }, McpHelpers.JsonOptions);
+                /* Same engine question get_server_config asks on its miss: an engine that never collects
+                   server_config (Azure SQL Database) gets the permanent-gap answer, not "may not have run yet". */
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "server_config", cancellationToken)
+                    ?? JsonSerializer.Serialize(new
+                    {
+                        server = resolved.ServerName,
+                        status = "no_config_data",
+                        message = "No configuration data found. The config collector may not have run yet."
+                    }, McpHelpers.JsonOptions);
             }
 
             return JsonSerializer.Serialize(new
@@ -973,6 +988,19 @@ public sealed class DarlingMcpTools
             return McpHelpers.FormatError("audit_config", ex);
         }
     }
+
+    /// <summary>
+    /// The <c>edition</c> word audit_config echoes: <see cref="CollectorEngineCapability.DescribeEngineEdition"/>'s
+    /// table, which every other surface uses, so this tool cannot name an EngineEdition differently from them
+    /// (its own switch called 6 Managed Instance and 8 "Managed Instance (HADR)" — 6 is Azure Synapse Analytics,
+    /// 8 is Managed Instance, and there is no HADR edition). <c>0</c> stays "Unknown": it is the absence of a
+    /// probed edition, not an edition, and the shared table would render it "Unknown (0)". Kept out of the tool
+    /// body because the body's edition reads are pinned (see <c>DarlingMcpToolsTests</c>).
+    /// </summary>
+    internal static string AuditEditionName(int engineEdition) =>
+        engineEdition == CollectorEngineCapability.UnknownEngineEdition
+            ? "Unknown"
+            : CollectorEngineCapability.DescribeEngineEdition(engineEdition);
 
     /// <summary>
     /// A <c>CONFIG_PG_*</c> fact's value as an operator would read it in <c>pg_settings</c> — with its unit,
@@ -1124,11 +1152,16 @@ public sealed class DarlingMcpTools
                 resolved.ServerId, hours_back, FindingOccurrences.WindowCoveringLimit + 1, asOfUtc: anchor, cancellationToken: cancellationToken);
             var (findings, truncated) = McpHelpers.BoundPage(fetched, FindingOccurrences.WindowCoveringLimit);
 
+            /* #5558: databases skipped because this node holds only a secondary copy of them in an availability group
+               (their per-database findings are the primary's). Null when none; the same sentence on every surface. */
+            var secondaryReplicaNote = await PgSecondaryReplicaScope.NoteAsync(postgres, resolved.ServerId, null, cancellationToken, anchor);
+
             if (findings.Count == 0)
             {
                 return McpHelpers.Status(
                     "empty",
-                    "No findings in the requested time range. Run analyze_server to generate new findings.");
+                    "No findings in the requested time range. Run analyze_server to generate new findings."
+                    + (secondaryReplicaNote is null ? "" : " " + secondaryReplicaNote));
             }
 
             /* #2000: collapse to one entry per (story_path_hash, incident_id). Measured 27.9x
@@ -1176,6 +1209,7 @@ public sealed class DarlingMcpTools
                 finding_count = groups.Count,
                 total_finding_count = totalFindingCount,
                 total_occurrences = findings.Count,
+                secondary_replica_note = secondaryReplicaNote,
                 // No silent caps: a read the window-covering limit CUT has had its OLDEST rows dropped by
                 // the store's newest-first LIMIT, so occurrence stats may under-report — say so instead of
                 // letting first_seen quietly lie. truncated is the #3594 flag (observed above); the note
@@ -1282,7 +1316,9 @@ public sealed class DarlingMcpTools
                         // carry this tool's cut.
                         remediation_command = remediationCommand,
                         // #2138: the machine-first projection — see analyze_server's twin field.
-                        structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation, forcePlanStates, forcePlanStateNote)
+                        structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation, forcePlanStates, forcePlanStateNote),
+                        // A standing config fix (database/RCSI/autogrowth/server config), not an incident: the viewer's rule.
+                        is_config_fix = FactRemediation.IsConfigFix(f.Remediation)
                     };
                 })
             }, McpHelpers.JsonOptions);
@@ -1293,7 +1329,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "mute_analysis_finding"), Description("Write: stores a per-pattern, not per-occurrence, mute row in the monitoring store for story_path_hash, scoped to server_name (all servers when omitted), so it is skipped in later analysis runs. registered: a NEW row was stored this call. already_muted: the scope already held the hash; nothing was written. matched_now: retained findings in scope carrying the hash now. status: muted (registered, matched_now at least 1), muted_unmatched (registered, matched_now 0; maybe a mistyped hash), already_muted (nothing changed), error (the write failed; nothing is muted). <<GUIDE>> Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded); \"error\" when the row could not be written (nothing is muted). server_name resolves the way remove_server resolves it, not first-match like the reads: an exact match on the server or display name, else a partial one. A name that matches more than one server answers \"ambiguous\" with the candidates, and one that matches none answers \"not_found\"; either way nothing is muted, and a successful call echoes the resolved server name. story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
+    [McpServerTool(Name = "mute_analysis_finding"), Description("Write: stores a per-pattern, not per-occurrence, mute row in the monitoring store for story_path_hash, scoped to server_name (all servers when omitted), so it is skipped in later analysis runs. registered: a NEW row was stored this call. already_muted: the scope already held the hash; nothing was written. matched_now: retained findings in scope carrying the hash now. status: muted (registered, matched_now at least 1), muted_unmatched (registered, matched_now 0; maybe a mistyped hash), already_muted (nothing changed), error (the write failed; nothing is muted). <<GUIDE>> Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded); \"error\" when the row could not be written (nothing is muted). server_name resolves the way the read tools and remove_server resolve it: an exact match on the server or display name, else a partial one. A name that matches more than one server answers \"ambiguous\" with the candidates, and one that matches none answers \"not_found\"; either way nothing is muted, and a successful call echoes the resolved server name. story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
     public static async Task<string> MuteAnalysisFinding(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -1308,11 +1344,11 @@ public sealed class DarlingMcpTools
                 return McpHelpers.Refusal("story_path_hash", "story_path_hash is required.");
             }
 
-            /* #4734: the scope is resolved with the REMOVAL rule (exact, else partial, and a tie refuses), not the
-               read resolver's first-match rule. A read that lands on the wrong sibling shows its name in the
-               payload and the caller re-asks; this write persists a mute row against whichever server the name
+            /* #4734: the scope is resolved with the shared rule (exact, else partial, and a tie refuses), the one
+               the read tools match with too. This write persists a mute row against whichever server the name
                resolved to, so a name two servers answer to used to mute the pattern on whichever sorted first and
-               say so only afterwards. The read rule itself is untouched (it is pinned as Lite parity). */
+               say so only afterwards. Unlike a read, it answers a tie with its own `ambiguous` status and the
+               candidates, since nothing was written. */
             var scope = MuteScope.All;
             string? kind = null;
             if (server_name != null)
@@ -1437,14 +1473,15 @@ WHERE d.server_id = $1";
     }
 
     /// <summary>
-    /// Resolves <c>mute_analysis_finding</c>'s <c>server_name</c> with the REMOVAL rule
-    /// (<see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/>, the one <c>remove_server</c> applies): the one
-    /// registration whose storage name matches exactly (case-sensitive) if there is one, else every exact match on the
-    /// storage name or display name if there is one, otherwise every partial match, and anything other than exactly
-    /// one match is refused with the candidates named. #4734: the tool used the read resolver, whose first-match
-    /// rule picks whichever registration sorts first, so a partial name (or a display name that per-database and
-    /// <c>:RO</c> registrations of one host share) muted the pattern on an arbitrary sibling and echoed the caller's
-    /// spelling, not the server it had picked. The read resolver's rule is Lite parity and stays; only this write leaves it.
+    /// Resolves <c>mute_analysis_finding</c>'s <c>server_name</c> with the shared matching rule
+    /// (<see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/>, the one <c>remove_server</c> and the read tools
+    /// apply): the one registration whose storage name matches exactly (case-sensitive) if there is one, else every
+    /// exact match on the storage name or display name if there is one, otherwise every partial match, and anything
+    /// other than exactly one match is refused with the candidates named. #4734: the tool used the read resolver, whose
+    /// first-match rule then picked whichever registration sorts first, so a partial name (or a display name that
+    /// per-database and <c>:RO</c> registrations of one host share) muted the pattern on an arbitrary sibling and
+    /// echoed the caller's spelling, not the server it had picked. The read resolver now refuses such a name too, and
+    /// alone also takes the storage name in another letter case.
     ///
     /// <para><b>Pure.</b> It takes the registry rows and returns the decision, so the rule unit-tests without a store. The
     /// tool writes only when <see cref="MuteScope.Answer"/> is null, and echoes <see cref="MuteScope.Label"/> — the

@@ -21,7 +21,7 @@ public class IgnoredWaitTypesTests
     public void BuildExclusionClause_BuildsNotInList()
     {
         var clause = IgnoredWaitTypes.BuildExclusionClause(new[] { "SOS_WORK_DISPATCHER", "DISPATCHER_QUEUE_SEMAPHORE" });
-        Assert.Equal("AND wait_type NOT IN ('SOS_WORK_DISPATCHER','DISPATCHER_QUEUE_SEMAPHORE')", clause);
+        Assert.Equal("AND rtrim(wait_type) NOT IN ('SOS_WORK_DISPATCHER','DISPATCHER_QUEUE_SEMAPHORE')", clause);
     }
 
     [Fact]
@@ -29,6 +29,6 @@ public class IgnoredWaitTypesTests
     {
         // A real wait_type is always an identifier; drop anything else so the inlined SQL can't be injected.
         var clause = IgnoredWaitTypes.BuildExclusionClause(new[] { "GOOD_WAIT", "bad'); DROP TABLE x;--", "ALSO_OK" });
-        Assert.Equal("AND wait_type NOT IN ('GOOD_WAIT','ALSO_OK')", clause);
+        Assert.Equal("AND rtrim(wait_type) NOT IN ('GOOD_WAIT','ALSO_OK')", clause);
     }
 }

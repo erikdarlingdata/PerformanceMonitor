@@ -19,8 +19,9 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// curve on the sub-tab's slicer (<see cref="TimeRangeSlicerControl.SetOverlay"/> / <c>ClearOverlay</c>, which
 /// were ported earlier but left dead). The per-item timeline comes from
 /// <see cref="ViewerDataService"/> (<c>ItemTimeline</c> partial); the metric shown tracks the slicer's current
-/// sort metric via <see cref="ComputeOverlayPoints"/>. One deviation from Lite: Darling's <c>delta_*</c> reads
-/// are already per-interval, so no C# row-over-row differencing is needed (Lite diffs cumulative history rows).
+/// sort metric via <see cref="ComputeOverlayPoints"/>. Darling's <c>delta_*</c> reads
+/// are already per-interval, so no C# row-over-row differencing is needed (Lite's history rows carry the same deltas and,
+/// since #5449, its overlay plots them as they are).
 /// </summary>
 public partial class ViewerServerTab
 {

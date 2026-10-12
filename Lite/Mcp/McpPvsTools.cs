@@ -28,7 +28,8 @@ public sealed class McpPvsTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of size-trend history for the top-5 databases; 0 (default) returns the latest snapshot only.")] int trend_hours_back = 0)
+        [Description("Hours of size-trend history for the top-5 databases; 0 (default) returns the latest snapshot only.")] int trend_hours_back = 0,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -42,20 +43,40 @@ public sealed class McpPvsTools
             }
 
             /* The stamps below are THIS server's local wall clock in the store, so putting them in the
-               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
-               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
-               because the WPF grids read the same rows and render them through ServerTimeHelper — that
-               surface has its own frame defect and its own issue, and folding the two together would fix
-               one by breaking the other. */
-            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+               naive-UTC frame every other field on this payload uses needs THIS server's clock, not the
+               desktop tab's, and converts each stamp at its own instant so one from before a daylight
+               saving change is not an hour off (#4793). See McpServerLocalWindow. De-skewed HERE and not
+               inside LocalDataService because the WPF grids read the same rows and render them through
+               ServerTimeHelper — that surface has its own frame defect and its own issue, and folding the
+               two together would fix one by breaking the other. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
+            string? UtcOrNull(DateTime? serverLocal) => serverLocal is { } stamp ? serverClock.ToUtc(stamp).ToString("o") : null;
 
-            var rows = await dataService.GetPvsStatsLatestAsync(resolved.ServerId);
+            /* #5244: database_name appended LAST (H1). A blank is "no filter"; any other value is kept exactly (no trim). The filter is on the
+               newest snapshot's ROWS (as_of is the server's), and the trend's top five are the top five of the chosen database. */
+            var names = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
+            var rows = await dataService.GetPvsStatsLatestAsync(resolved.ServerId, names);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "pvs_stats")
-                    ?? McpHelpers.Status("empty",
+                /* A filter that matches no database at the newest snapshot is an answer about the chosen database, not about the
+                   server's PVS collection: the probe is the same newest-snapshot read, unfiltered. */
+                if (names != null && await dataService.GetPvsStatsLatestAsync(resolved.ServerId) is { Count: > 0 } serverRows)
+                {
+                    return McpHelpers.StatusForDatabase("empty",
+                        $"No PVS rows for {McpDatabaseSelection.Scope(names)} on {resolved.ServerName} in the snapshot taken at "
+                        + $"{serverRows[0].CollectionTime:o}, though it holds {serverRows.Count:N0} other database(s). Check the database "
+                        + "name: the filter matches exactly, and a database with no row at that snapshot looks identical to one that does not exist.",
+                        McpDatabaseSelection.Describe(names));
+                }
+
+                /* #5244: every answer shape says which database it was limited to (null for every database). */
+                return McpHelpers.WithDatabase(
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "pvs_stats"),
+                           McpDatabaseSelection.Describe(names))
+                    ?? McpHelpers.StatusForDatabase("empty",
                         "No PVS data collected for this server. The collector reads sys.dm_tran_persistent_version_store_stats " +
-                        "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.");
+                        "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.",
+                        McpDatabaseSelection.Describe(names));
             }
 
             var databases = rows.Select(r => new
@@ -81,10 +102,10 @@ public sealed class McpPvsTools
                    presented as the DMV reports it; the FRAME is not — these four are server-local in the
                    store and are de-skewed above, so they compare directly against as_of instead of reading
                    one whole UTC offset stale on a value that is usually seconds old. */
-                aborted_version_cleaner_start_time = r.AbortedCleanerStartTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                aborted_version_cleaner_end_time = r.AbortedCleanerEndTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                offrow_version_cleaner_start_time = r.OffrowCleanerStartTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                offrow_version_cleaner_end_time = r.OffrowCleanerEndTime?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                aborted_version_cleaner_start_time = UtcOrNull(r.AbortedCleanerStartTime),
+                aborted_version_cleaner_end_time = UtcOrNull(r.AbortedCleanerEndTime),
+                offrow_version_cleaner_start_time = UtcOrNull(r.OffrowCleanerStartTime),
+                offrow_version_cleaner_end_time = UtcOrNull(r.OffrowCleanerEndTime),
                 /* The lag between these ids is how far cleanup is behind — the gap itself, never a verdict. */
                 oldest_active_transaction_id = r.OldestActiveTransactionId,
                 oldest_aborted_transaction_id = r.OldestAbortedTransactionId,
@@ -93,7 +114,7 @@ public sealed class McpPvsTools
             object? trend = null;
             if (trend_hours_back > 0)
             {
-                var points = await dataService.GetPvsTrendAsync(resolved.ServerId, DateTime.UtcNow.AddHours(-trend_hours_back));
+                var points = await dataService.GetPvsTrendAsync(resolved.ServerId, DateTime.UtcNow.AddHours(-trend_hours_back), names);
                 trend = points
                     .GroupBy(p => p.DatabaseName)
                     .Select(g => new
@@ -114,6 +135,7 @@ public sealed class McpPvsTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                database_name = McpDatabaseSelection.Describe(names),
                 as_of = rows[0].CollectionTime.ToString("o"),
                 databases,
                 trend_hours_back = trend_hours_back > 0 ? trend_hours_back : (int?)null,

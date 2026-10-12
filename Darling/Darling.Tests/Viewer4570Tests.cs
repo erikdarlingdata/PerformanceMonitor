@@ -132,7 +132,7 @@ public sealed class Viewer4570Tests
     // --- BuildRuntimeSummaryRows: row order (E11) ------------------------------------------
 
     [Fact]
-    public void BuildRuntimeSummaryRows_ActualPlan_OrdersElapsedCpuElapsedDopCpuCompileMemoryOptCe()
+    public void BuildRuntimeSummaryRows_ActualPlan_OrdersElapsedCpuElapsedDopCpuCompileMemoryCeOptEarlyAbort()
     {
         var stmt = Statement();
         stmt.QueryTimeStats = new QueryTimeInfo { ElapsedTimeMs = 1000, CpuTimeMs = 2000 };
@@ -140,13 +140,50 @@ public sealed class Viewer4570Tests
         stmt.CompileTimeMs = 5;
         stmt.MemoryGrant = new MemoryGrantInfo { GrantedMemoryKB = 1024, MaxUsedMemoryKB = 512 };
         stmt.StatementOptmLevel = "FULL";
+        stmt.StatementOptmEarlyAbortReason = "TimeOut";
         stmt.CardinalityEstimationModelVersion = 160;
 
         var labels = PlanDisplayText.BuildRuntimeSummaryRows(stmt).Select(r => r.Label).ToArray();
 
+        // #4836 (PerformanceStudio#613/#614): CE model moved above Optimization, and Early abort
+        // follows Optimization, so Optimization and its reason end the card.
         Assert.Equal(
-            new[] { "Elapsed", "CPU:Elapsed", "DOP", "CPU", "Compile", "Memory grant", "Optimization", "CE model" },
+            new[] { "Elapsed", "CPU:Elapsed", "DOP", "CPU", "Compile", "Memory grant", "CE model", "Optimization", "Early abort" },
             labels);
+    }
+
+    // --- #4836: the early abort reason nests under Optimization ----------------------------
+
+    [Fact]
+    public void BuildRuntimeSummaryRows_EarlyAbortWithOptimizationLevel_IsNestedAndNothingElseIs()
+    {
+        var stmt = Statement();
+        stmt.QueryTimeStats = new QueryTimeInfo { ElapsedTimeMs = 1000, CpuTimeMs = 2000 };
+        stmt.StatementOptmLevel = "FULL";
+        stmt.StatementOptmEarlyAbortReason = "GoodEnoughPlanFound";
+        stmt.CardinalityEstimationModelVersion = 160;
+
+        var rows = PlanDisplayText.BuildRuntimeSummaryRows(stmt);
+
+        var earlyAbort = rows.Single(r => r.Label == "Early abort");
+        Assert.Equal("GoodEnoughPlanFound", earlyAbort.Value);
+        Assert.True(earlyAbort.Nested);
+        Assert.False(rows.Single(r => r.Label == "Optimization").Nested);
+        Assert.All(rows.Where(r => r.Label != "Early abort"), r => Assert.False(r.Nested, r.Label));
+    }
+
+    [Fact]
+    public void BuildRuntimeSummaryRows_EarlyAbortWithoutOptimizationLevel_IsNotNested()
+    {
+        var stmt = Statement();
+        stmt.StatementOptmEarlyAbortReason = "TimeOut";
+        stmt.CardinalityEstimationModelVersion = 160;
+
+        var rows = PlanDisplayText.BuildRuntimeSummaryRows(stmt);
+
+        // No Optimization row to sit under, so the reason is a plain row, still after CE model.
+        Assert.Equal(new[] { "CE model", "Early abort" }, rows.Select(r => r.Label).ToArray());
+        Assert.All(rows, r => Assert.False(r.Nested, r.Label));
     }
 
     [Fact]

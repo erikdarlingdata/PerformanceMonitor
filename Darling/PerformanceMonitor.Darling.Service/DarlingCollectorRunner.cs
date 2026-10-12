@@ -381,12 +381,71 @@ public sealed class DarlingCollectorRunner
        all, so it is unaffected either way. */
     private readonly Func<int> _procedureStatsPlanCycleInterval;
 
+    /* #5158: whether query_stats defers its plan fetch (darling.json "queryStatsDeferredPlanFetch", default true).
+       Off gives the inline plan capture exactly as before. Read through a provider on every cycle, but a file-only
+       knob: darling.json is loaded once at start and nothing re-reads it, so an edit takes effect on the next
+       RESTART. */
+    private readonly Func<bool> _queryStatsDeferredPlanFetch;
+
+    /* #5158: what this host knows of the statement plans it has already committed, one cache per server and per
+       service lifetime. A restart starts empty (each server renders its plans once more); nothing seeds it from
+       the store, because a probe costs more than the render it would save (#2831). */
+    private readonly ConcurrentDictionary<int, PlanDigestCache<QueryStatsPlanKey>> _queryStatsPlanCaches = new();
+
+    /// <summary>How long a plan identity may go unseen before the host forgets it (#5158).</summary>
+    internal static readonly TimeSpan QueryStatsPlanCacheMaxAge = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// How long a procedure_stats module-plan identity may go unseen before the host forgets it (#5158). The same
+    /// value as <see cref="QueryStatsPlanCacheMaxAge"/>, named for the collector that uses it so the two can move apart.
+    /// </summary>
+    internal static readonly TimeSpan ProcedureStatsPlanCacheMaxAge = QueryStatsPlanCacheMaxAge;
+
+    /* #5158: procedure_stats' knob (darling.json "procedureStatsDeferredPlanFetch": off | shadow | on), read through a
+       provider like its siblings. Null provider = off, the shipped default. */
+    private readonly Func<string?> _procedureStatsDeferredPlanFetch;
+
+    /* #5158: what this host knows of the module plans it has committed, per server; empty after a restart. */
+    private readonly ConcurrentDictionary<int, PlanDigestCache<ProcedureStatsPlanKey>> _procedureStatsPlanCaches = new();
+
+    /* #5367 review, A-L1: the mode each server's procedure_stats cache was last filled under. A shadow pass digests the
+       plans its rows carry inline, which can be the whole-plan marker; an on pass would answer a hit on that entry with the
+       marker's digest, and the row would store the marker until the entry expired. A switch clears the cache. */
+    private readonly ConcurrentDictionary<int, ProcedureStatsPlanFetchMode> _procedureStatsPlanCacheModes = new();
+
+    /* #5158: how many capture cycles each server has run with the knob on or shadow. The cache's age limit counts these,
+       so a cycle the cadence gate skips does not age an entry. */
+    private readonly ConcurrentDictionary<int, long> _procedureStatsCaptureOrdinals = new();
+
+    /* The unrecognized knob value already warned about, so the warning appears once per value rather than per cycle. */
+    private string? _warnedProcedureStatsPlanFetchValue;
+
+    /// <summary>
+    /// Runs between query_stats' main query and its plan fetch, on the same target connection. A test uses it to
+    /// age a plan out of the cache in that window. Null in production.
+    /// </summary>
+    internal Func<CancellationToken, Task>? BetweenPlanPhasesForTests { get; set; }
+
     /* Resolves the per-collector database scope (#3477) for one (collector, server) pair — the worker
        passes StoreConfigProvider.ResolveDatabaseScope over its live schedule overrides, so a store
        write to config_collector_schedules.databases is honored on the collector's NEXT run through the
        same reload beacon every other schedule column rides. Provider-shaped like its knob siblings:
        resolved ONCE per run, at dispatch, so one run cannot see two different scopes. Empty = unscoped. */
     private readonly Func<string, int, IReadOnlyList<string>> _databaseScope;
+
+    /* The databases monitored as their own servers, for a runtime on an Azure SQL Database logical server
+       (AzureMasterScope.SeparatelyMonitoredDatabases). Empty for every other runtime. */
+    private readonly Func<ServerRuntime, IReadOnlyList<string>> _separatelyMonitoredDatabases;
+
+    /// <summary>
+    /// The #3477 database scope for one collector on one server: per-server row, then fleet row, then unscoped (empty).
+    /// The same delegate the read loop resolves at dispatch, so the long-query trace's lifecycle and its read cannot
+    /// disagree about which databases are in scope.
+    /// </summary>
+    internal IReadOnlyList<string> DatabaseScopeFor(string collectorName, int serverId) => _databaseScope(collectorName, serverId);
+
+    /// <summary>The databases monitored as their own servers, for this runtime. Empty unless it is an Azure SQL Database logical server.</summary>
+    internal IReadOnlyList<string> SeparatelyMonitoredDatabasesFor(ServerRuntime server) => _separatelyMonitoredDatabases(server);
 
     /// <summary>
     /// Per-(server, collector) cycle counter for the #2862 plan-capture cadence. In-memory, and lost on a
@@ -425,7 +484,8 @@ public sealed class DarlingCollectorRunner
     private readonly ServerWatermarkCache _watermarkCache = new();
 
     /// <summary>
-    /// Exact per-(server, database) Query Store watermark cache for the enumerated per-item path. The
+    /// Exact per-(server, database) Query Store watermark cache for the enumerated per-item path and the
+    /// Azure SQL Database per-database loop (#5514). The
     /// runner is constructed once per service process and the backfill holds this same runner, so the
     /// cache outlives every cycle and sees every writer. See <see cref="DatabaseWatermarkCache"/> for the
     /// hit rule and the single-writer assumption.
@@ -654,6 +714,77 @@ public sealed class DarlingCollectorRunner
         _capturePlans() && ShouldCapturePlanForCollector(collectorName, serverId);
 
     /// <summary>
+    /// #5158: whether this run of this collector leaves plan XML out of its main query and fetches it in a
+    /// second target query for only the plans the host has not committed. True for query_stats on a server-scoped
+    /// target that captures plans, with the knob on. Azure SQL Database reads per database through a path with no
+    /// second query, so it keeps the inline capture.
+    /// </summary>
+    internal bool ShouldDeferPlanFetchFor(string collectorName, bool capturePlanXml, CollectorTargetInfo target) =>
+        ShouldDeferPlanFetchFor(collectorName, capturePlanXml, target, ProcedureStatsPlanFetchModeFor(collectorName, target));
+
+    /// <summary>
+    /// The same decision with procedure_stats' mode already resolved, so one run reads the knob and the capture setting
+    /// once (see <see cref="StampPlanFetchFlags"/>).
+    /// </summary>
+    internal bool ShouldDeferPlanFetchFor(
+        string collectorName, bool capturePlanXml, CollectorTargetInfo target, ProcedureStatsPlanFetchMode procedureStatsMode) =>
+        capturePlanXml
+        && ((string.Equals(collectorName, QueryStatsCollector.Instance.Name, StringComparison.Ordinal)
+                && !target.IsAzureSqlDb
+                && _queryStatsDeferredPlanFetch())
+            || procedureStatsMode == ProcedureStatsPlanFetchMode.On);
+
+    /// <summary>
+    /// #5158: the two context flags that describe a run's plan fetch, resolved from ONE read of the knob and of the
+    /// capture setting. The store reloads the capture setting live, so deciding the stamp, the reader close and the apply
+    /// branch from separate reads could disagree inside one run (shadow rows carrying inline plans, then an on-mode fetch
+    /// run on them over an open reader). Everything after the stamp reads the mode back from the context with
+    /// <see cref="ProcedureStatsPlanFetchModes.OfRun"/>.
+    /// </summary>
+    internal (bool DeferPlanXmlFetch, bool PlanIdentityColumns) StampPlanFetchFlags(
+        string collectorName, bool capturePlanXml, CollectorTargetInfo target)
+    {
+        var mode = ProcedureStatsPlanFetchModeFor(collectorName, target);
+        return (
+            ShouldDeferPlanFetchFor(collectorName, capturePlanXml, target, mode),
+            /* Shadow adds the identity columns after the inline plan on a capture cycle; on sends them every cycle, a
+               gated one included, where they stand alone. */
+            mode == ProcedureStatsPlanFetchMode.On
+                || (mode == ProcedureStatsPlanFetchMode.Shadow && capturePlanXml));
+    }
+
+    /// <summary>
+    /// #5158: the procedure_stats plan fetch mode for this run. Off for every other collector, while the host captures
+    /// no plans, and on Azure SQL Database, where whether <c>sys.dm_exec_query_stats</c> lists a module's statements
+    /// is unverified, so the identity could not be trusted there. An unrecognized knob value is off and warns once.
+    /// </summary>
+    internal ProcedureStatsPlanFetchMode ProcedureStatsPlanFetchModeFor(string collectorName, CollectorTargetInfo target)
+    {
+        if (!string.Equals(collectorName, PlanCadenceGatedCollector, StringComparison.Ordinal)
+            || target.IsAzureSqlDb
+            || !_capturePlans())
+        {
+            return ProcedureStatsPlanFetchMode.Off;
+        }
+
+        var value = _procedureStatsDeferredPlanFetch();
+        if (!ProcedureStatsPlanFetchModes.TryParse(value, out var mode))
+        {
+            if (!string.Equals(_warnedProcedureStatsPlanFetchValue, value, StringComparison.Ordinal))
+            {
+                _warnedProcedureStatsPlanFetchValue = value;
+                _logger?.LogWarning(
+                    "procedureStatsDeferredPlanFetch is '{Value}', which is not off, shadow or on; procedure_stats keeps its inline plan capture (#5158).",
+                    value);
+            }
+
+            return ProcedureStatsPlanFetchMode.Off;
+        }
+
+        return mode;
+    }
+
+    /// <summary>
     /// The instance side of the #2862 cadence: advances this (server, collector) cycle counter and asks the
     /// pure policy. Returns true unconditionally for every collector except
     /// <see cref="PlanCadenceGatedCollector"/>, so no other collector's behaviour changes and no other
@@ -694,7 +825,7 @@ public sealed class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null, Func<bool>? queryStatsDeferredPlanFetch = null, Func<string?>? procedureStatsDeferredPlanFetch = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _queryStoreWriteFence = queryStoreWriteFence;
@@ -712,15 +843,39 @@ public sealed class DarlingCollectorRunner
         _queryStoreIntervalWide = new QueryStoreIntervalWide(logger);
         /* Null provider = 1 = capture a plan on every cycle, i.e. the pre-#2862 behaviour. */
         _procedureStatsPlanCycleInterval = procedureStatsPlanCycleInterval ?? (() => 1);
+        /* Null provider = the deferred plan fetch is on, the shipped default (#5158). */
+        _queryStatsDeferredPlanFetch = queryStatsDeferredPlanFetch ?? (() => true);
+        /* Null provider = procedure_stats keeps its inline plan capture, the shipped default (#5158). */
+        _procedureStatsDeferredPlanFetch = procedureStatsDeferredPlanFetch ?? (() => ProcedureStatsPlanFetchModes.DefaultValue);
         /* Null provider = no scope for any collector = every database the server enumerates, which is
            what Lite's twin and every pre-#3477 test constructs. */
         _databaseScope = databaseScope ?? ((_, _) => Array.Empty<string>());
+        _separatelyMonitoredDatabases = separatelyMonitoredDatabases ?? (_ => Array.Empty<string>());
+        /* #4961: null provider = no install id, so no long-query session can be named (what a test that builds a runner
+           without one gets). The worker passes the id it made at start. */
+        _installId = installId ?? (() => null);
+        _awsRoles = new Targets.AwsRoleCredentialCache(installId: () => _installId(), logger: logger);
         /* #4004: the store's log-hash key, loaded once by the worker at start and shared by every run that hashes log
            text (pg_log_events on both transports). Null = none could be used: those runs refuse, with the reason. */
         _logHashKey = logHashKey;
     }
 
     private readonly PgLogHashKey? _logHashKey;
+
+    private readonly Func<string?> _installId;
+
+    /// <summary>
+    /// This install's id (#4961), or null when the runner was built without one. The long-query session's name is made
+    /// from it: the lifecycle names the session it creates and drops from it, and the read names the session it reads.
+    /// </summary>
+    internal string? InstallId => _installId();
+
+    /// <summary>
+    /// The name of this install's long-query completions session, or null when there is no install id to make it from
+    /// (#4961). Null means no session exists to create, drop or read, and the caller says why as a fault.
+    /// </summary>
+    internal string? LongQuerySessionName() =>
+        LongQueryCompletionsCollector.TryXeSessionNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallId);
 
     /// <summary>The store's log-hash key this runner was given (#4004), null when the service could not load one. The
     /// hourly deadlock re-mask reads it here (#4012's review), the one instance every log-hashing run shares.</summary>
@@ -746,6 +901,24 @@ public sealed class DarlingCollectorRunner
        _rdsPlans/_rdsDeadlocks get: its resume watermark lives in the store, not in this field. */
     private RdsCpuIngestor? _rdsCpu;
 
+    /* One verifier for the four RDS readers: a server's endpoint verdict and its fresh login are made once per lifetime,
+       not once per collector, and ForgetRdsVerdicts clears both when the server's definition changes. */
+    private readonly RdsEndpointVerifier _rdsVerifier = new();
+
+    /* #5452: the assumed-role credentials of every server that names its own AWS role, one session per (role, external ID)
+       however many servers share it. Built beside the verifier and handed to the four RDS readers; the allow list it checks
+       is AwsRoleAllowlist.Current, which the worker sets at start. A server with no role never touches it. */
+    private readonly Targets.AwsRoleCredentialCache _awsRoles;
+
+    /// <summary>Drops the assumed-role sessions that no enabled server names any more (#5452). Called after each reload of the server list.</summary>
+    internal void RetainAwsRoles(IEnumerable<Targets.AwsRoleKey> liveKeys) => _awsRoles.Retain(liveKeys);
+
+    /// <summary>The role-credential cache the RDS readers use, for the tests (#5452).</summary>
+    internal Targets.AwsRoleCredentialCache AwsRoles => _awsRoles;
+
+    /// <summary>Forgets the endpoint verdicts and the fresh login held for <paramref name="serverId"/>: its definition changed.</summary>
+    internal void ForgetRdsVerdicts(int serverId) => _rdsVerifier.ClearServer(serverId);
+
     /// <summary>
     /// #4708: where an RDS log ingestor keeps its positions across a restart - <c>collect.collector_state</c>, under
     /// the collector <paramref name="collectorName"/> and the keys the self-hosted tail already declares
@@ -753,6 +926,34 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     internal RdsResumeStore RdsResumeStoreFor(string collectorName)
         => new(collectorName, GetCollectorStateAsync, SaveCollectorStateAsync);
+
+    /* #5003: the four accessors below publish an RDS ingestor once, however many targets' first runs reach them together.
+       A plain ??= lets each of those runs build an ingestor and keep its own, and the ingestor holds the positions and
+       carries the other run was using. EnsureInitialized publishes with a compare-exchange, so a run that loses the race
+       builds an ingestor it throws away and every caller gets the one that was published. */
+
+    /// <summary>The one plan ingestor of this runner, built the first time a target needs it.</summary>
+    internal RdsPlanIngestor PublishedRdsPlanIngestor()
+        => LazyInitializer.EnsureInitialized(
+            ref _rdsPlans,
+            () => new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles));
+
+    /// <summary>The one deadlock ingestor of this runner, built the first time a target needs it.</summary>
+    internal RdsDeadlockIngestor PublishedRdsDeadlockIngestor()
+        => LazyInitializer.EnsureInitialized(
+            ref _rdsDeadlocks,
+            () => new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles));
+
+    /// <summary>The one log-event ingestor of this runner, built the first time a target needs it with the store's
+    /// log-hash key <paramref name="logHashKey"/>.</summary>
+    internal RdsLogEventIngestor PublishedRdsLogEventIngestor(PgLogHashKey logHashKey)
+        => LazyInitializer.EnsureInitialized(
+            ref _rdsLogEvents,
+            () => new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles));
+
+    /// <summary>The one CPU ingestor of this runner, built the first time a target needs it.</summary>
+    internal RdsCpuIngestor PublishedRdsCpuIngestor()
+        => LazyInitializer.EnsureInitialized(ref _rdsCpu, () => new RdsCpuIngestor(_postgres, logger: _logger, verifier: _rdsVerifier, roles: _awsRoles));
 
     /// <summary>
     /// <paramref name="result"/> with <see cref="PgServerLogTail.ForeignZoneLinesNote"/> merged into its host note
@@ -884,7 +1085,7 @@ public sealed class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestRdsPlansAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
-        _rdsPlans ??= new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name));
+        var rdsPlans = PublishedRdsPlanIngestor();
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
@@ -895,8 +1096,8 @@ public sealed class DarlingCollectorRunner
 
         var started = Stopwatch.GetTimestamp();
 
-        var outcome = await _rdsPlans.IngestAsync(
-            server.ServerId, server.StorageName, host, pgLogUsesCsvlog, cancellationToken);
+        var outcome = await rdsPlans.IngestAsync(
+            server.ServerId, server.StorageName, host, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -920,7 +1121,7 @@ public sealed class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestRdsDeadlocksAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
-        _rdsDeadlocks ??= new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name));
+        var rdsDeadlocks = PublishedRdsDeadlockIngestor();
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
@@ -935,8 +1136,8 @@ public sealed class DarlingCollectorRunner
 
         var started = Stopwatch.GetTimestamp();
 
-        var outcome = await _rdsDeadlocks.IngestAsync(
-            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
+        var outcome = await rdsDeadlocks.IngestAsync(
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -993,7 +1194,8 @@ public sealed class DarlingCollectorRunner
     {
         ArgumentNullException.ThrowIfNull(warnedUtc);
 
-        if (warnedUtc.TryGetValue(serverId, out var last) && nowUtc - last < LogTimezoneReadWarningInterval)
+        /* #4732: a stamp ahead of the clock (it stepped back since the Warning) is replaced by this reading. */
+        if (LastFiredStamp.TryGet(warnedUtc, serverId, nowUtc, out var last) && nowUtc - last < LogTimezoneReadWarningInterval)
         {
             return LogLevel.Debug;
         }
@@ -1110,7 +1312,7 @@ public sealed class DarlingCollectorRunner
     {
         /* #4004: no key, no hashing - the same refusal the pg_read_file route's BuildQuery makes. */
         var logHashKey = _logHashKey ?? throw new InvalidOperationException(PgLogHashKey.UnavailableMessage);
-        _rdsLogEvents ??= new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name));
+        var rdsLogEvents = PublishedRdsLogEventIngestor(logHashKey);
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
@@ -1128,8 +1330,8 @@ public sealed class DarlingCollectorRunner
 
         var started = Stopwatch.GetTimestamp();
 
-        var outcome = await _rdsLogEvents.IngestAsync(
-            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
+        var outcome = await rdsLogEvents.IngestAsync(
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -1207,14 +1409,14 @@ public sealed class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestPgCpuAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
-        _rdsCpu ??= new RdsCpuIngestor(_postgres, logger: _logger);
+        var rdsCpu = PublishedRdsCpuIngestor();
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
         var started = Stopwatch.GetTimestamp();
 
-        var outcome = await _rdsCpu.IngestAsync(
-            server.ServerId, server.StorageName, host, cancellationToken);
+        var outcome = await rdsCpu.IngestAsync(
+            server.ServerId, server.StorageName, host, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -1756,7 +1958,9 @@ public sealed class DarlingCollectorRunner
 
     /// <summary>
     /// The per-database Query Store watermark: the cache when it can prove the bounded store read's answer,
-    /// otherwise that read (reseeding the cache when the read succeeded).
+    /// otherwise that read (reseeding the cache when the read succeeded). The read also returns the witness
+    /// row's <c>collection_time</c> (#4749), so a database whose newest row is recent but which has had no
+    /// batch since the seed keeps hitting the cache until that row leaves the floor.
     /// </summary>
     internal async Task<DateTime?> ResolveQueryStoreDatabaseWatermarkAsync(
         ServerRuntime server, string table, string column, string dbColumn, string database,
@@ -1768,11 +1972,11 @@ public sealed class DarlingCollectorRunner
         }
 
         var token = _databaseWatermarkCache.TokenFor(server.ServerId, database);
-        var (value, ok) = await ReadLastCollectedTimeForDatabaseAsync(
-            server.ServerId, table, column, dbColumn, database, ct, readFloor);
+        var (value, witness, ok) = await ReadLastCollectedTimeAndWitnessForDatabaseAsync(
+            server.ServerId, table, column, dbColumn, database, readFloor, ct);
         if (ok)
         {
-            _databaseWatermarkCache.Seed(server.ServerId, database, value, readFloor, collectionTime, token);
+            _databaseWatermarkCache.Seed(server.ServerId, database, value, readFloor, collectionTime, token, witness);
         }
 
         return value;
@@ -2090,6 +2294,8 @@ public sealed class DarlingCollectorRunner
             }
         }
 
+        var capturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId);
+        var planFetchFlags = StampPlanFetchFlags(definition.Name, capturePlanXml, server.Target);
         var context = new CollectorContext
         {
             ServerId = server.ServerId,
@@ -2111,11 +2317,18 @@ public sealed class DarlingCollectorRunner
             /* #3477: same shared-not-re-derived rule for the scope — one resolution per run, above. */
             DatabaseScope = databaseScope,
             PerfmonCounterOverride = null,
+            LongQuerySessionName = LongQuerySessionName(),
             /* #2862: plan capture is additionally cadence-gated for procedure_stats — see
                ShouldCapturePlanForCollector. Every other collector reads exactly _capturePlans().
                Only this path is gated: FetchRowsAsync below is the on-demand live fetch, which an
                operator asked for by name and which stores nothing, so it always renders. */
-            CapturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId),
+            CapturePlanXml = capturePlanXml,
+            /* #5158: query_stats' main query leaves the plan out and the plan fetch below renders only the plans this
+               host has not committed. */
+            DeferPlanXmlFetch = planFetchFlags.DeferPlanXmlFetch,
+            /* #5158: procedure_stats' identity columns, so the host can recognize a module plan. Both flags come from one
+               resolution of the mode (StampPlanFetchFlags); the reader close and the reuse pass read it back from here. */
+            PlanIdentityColumns = planFetchFlags.PlanIdentityColumns,
             /* #4735 item 1: 0 on the first attempt; RunWithSplitCharacterRetryAsync raises it after a 22021. */
             PgLogReadShiftBytes = pgLogReadShiftBytes,
             /* #2150: ON. query_sql_text is no longer carried on every runtime-stats row — it is fetched once
@@ -2158,11 +2371,12 @@ public sealed class DarlingCollectorRunner
            NULL on ~98 percent of collection_log rows. */
         var fanout = new FanoutCostAccumulator();
 
-        /* The per-database FETCH split, summed (#2860). Only the enumerated branch feeds it — the plan and
-           text fetches run inside its per-item read and nowhere else — so a collector that never fetches
-           never calls Observe and the accumulator stays empty, which is how these ten columns end up NULL on
-           ~98 percent of collection_log rows. Declared beside the fan-out accumulator because it is the same
-           kind of thing: a cross-item rollup the run's single row could not otherwise carry. */
+        /* The per-database FETCH split, summed (#2860). Fed by the two branches that fetch - the enumerated
+           branch, inside its per-item read, and the Azure per-database loop for query_store - so a collector
+           that never fetches never calls Observe and the accumulator stays empty, which is how these ten
+           columns end up NULL on ~98 percent of collection_log rows. Declared beside the fan-out accumulator
+           because it is the same kind of thing: a cross-item rollup the run's single row could not otherwise
+           carry. */
         var fetchPhases = new FetchPhaseCostAccumulator();
 
         /* The collection_log note for this run (#1837) — null on every ordinary path. Only the enumeration
@@ -2178,7 +2392,7 @@ public sealed class DarlingCollectorRunner
            "Keyword not supported: 'host'". Worse, an ArgumentException is neither SqlException nor
            PostgresException, so it missed BOTH classification arms in DarlingWorker and recorded a raw
            ERROR every sweep forever — including for all three Tier 0 outage predictors. */
-        var targetProvider = TargetProviders.For(server.Target);
+        var targetProvider = TargetProviderOverrideForTests?.Invoke(server.Target) ?? TargetProviders.For(server.Target);
 
         if (definition.RunsPerDatabase(context.Target))
         {
@@ -2209,7 +2423,36 @@ public sealed class DarlingCollectorRunner
                turn a permissions problem into a silent one-database collection. */
             var databases = server.Target.Engine == CollectorTargetEngine.PostgreSql
                 ? await GetPostgresDatabaseListAsync(server, databaseScope, cancellationToken)
-                : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
+                : AzureDatabaseListOverrideForTests is { } listOverride
+                    ? await listOverride(server, cancellationToken)
+                    : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
+
+            /* The long-query trace leaves a database monitored as its own server to that registration, and never
+               keeps a session in master, so its read does too (LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases).
+               A logical server lists master beside its user databases. master goes first and is not counted as
+               listed: the note below speaks of user databases, and a list of master alone has none to blame it on
+               (#4961). Other collectors read the list as it came. Mirrors Lite. */
+            var listedDatabaseCount = databases.Count;
+            if (definition.SkipsSeparatelyMonitoredDatabases)
+            {
+                databases = databases.FindAll(LongQueryTraceDatabases.CanHoldSession);
+                listedDatabaseCount = databases.Count;
+                databases = AzureSweepScope.WithoutSeparatelyMonitored(databases, SeparatelyMonitoredDatabasesFor(server));
+            }
+
+            /* #4961: a list with nothing left to read used to record SUCCESS, 0 rows and no note, which reads as
+               "nothing ran". The note names why nothing was read (every user database monitored as its own server,
+               or every database excluded). The status stays SUCCESS: nothing failed. It is held here and merged
+               into the assignment that follows the loop, because that assignment is unconditional and would erase
+               a note set before it. A database scope can empty the list too, and the exclusions are then
+               not known to be the reason, so a scoped collector gets the separately-monitored note or none.
+               Mirrors Lite. */
+            var emptyListNote = EmptyDatabaseListNote.For(
+                listedDatabaseCount,
+                databases.Count,
+                definition.SkipsSeparatelyMonitoredDatabases,
+                exclusionsConfigured: server.Config.ExcludedDatabases is { Count: > 0 },
+                databaseScoped: databaseScope.Count > 0);
 
             var attempted = 0;
             var failed = 0;
@@ -2247,6 +2490,16 @@ public sealed class DarlingCollectorRunner
                    into a sibling database's landing. */
                 string? stagedOpenIntervalStamp = null;
 
+                /* #5514: this database's contribution to the per-database Query Store watermark cache, staged
+                   after the read and landed only once the flush returned — per iteration, like the stamp above,
+                   so a fault cannot leak one database's contribution into a sibling's. */
+                StagedDatabaseWatermark? stagedDatabaseWatermark = null;
+
+                /* The definition's own per-item staged state (CollectorContext.StagedItemState), cleared per
+                   iteration for the same reason: a fault must not leak this database's staged cursor into a
+                   sibling's landing. It lands below, after this database's flush, and nowhere else. */
+                context.DropStagedItemState();
+
                 /* #2896: the DECLARATION is hoisted, the START is not. The catch arms below print this
                    database's split and a split needs its parent, so the stopwatch has to be in scope
                    there — but it is still started at exactly the statement it was started at before, so
@@ -2264,6 +2517,15 @@ public sealed class DarlingCollectorRunner
                     /* The authoritative database_name for XE rows read on this path — see
                        CollectorContext.CurrentDatabaseName. */
                     context.CurrentDatabaseName = databaseName;
+
+                    /* #4961: the deadlock and blocked-process reads name the session the ensure chose for THIS database, so
+                       the name is set per database, beside the database name. Every other definition leaves it null. */
+                    context.AlwaysOnSessionName = definition switch
+                    {
+                        DeadlocksCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.Deadlock),
+                        BlockedProcessReportCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.BlockedProcess),
+                        _ => null,
+                    };
 
                     /* #2855: cleared once per iteration, because this loop reuses ONE context across every
                        database and without the reset a database whose read faults would print the PREVIOUS
@@ -2287,6 +2549,12 @@ public sealed class DarlingCollectorRunner
                     context.PerDatabaseOpenMs = 0;
                     context.PerDatabaseDrainMs = 0;
                     context.PerDatabasePhasesMeasured = false;
+
+                    /* The plan and text fetch readings, on the same rule: query_store's fetches run on this
+                       branch too now, and this loop reuses ONE context across every database, so a database
+                       that skips or faults its fetch would otherwise add the previous database's figures to
+                       the run's fetch sums as its own. */
+                    ClearFetchPhaseStamps(context);
 
                     var dbPlan = plan;
                     if (dbPlan is null)
@@ -2315,11 +2583,26 @@ public sealed class DarlingCollectorRunner
                         var azureReadFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                             ? WatermarkPolicy.ReadFloor(collectionTime)
                             : null;
-                        /* This path is excluded from the per-database cache; the invalidate is only defensive. */
-                        _databaseWatermarkCache.Invalidate(server.ServerId, databaseName);
-                        context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
-                            server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
-                            definition.PerDatabaseWatermarkColumn!, databaseName, dbToken, azureReadFloor);
+                        /* #5514: query_store on this arm resolves its watermark through the per-database cache,
+                           exactly as the enumerated arm does. #4669 left this arm out of the cache ("it shares its
+                           read with the unbounded XE collectors") and invalidated the key every pass, so every
+                           Azure SQL Database paid one bounded store read per database per cycle: 181,050 calls in
+                           13 days on a 43-server store. The key is read through the same floor the enumerated arm
+                           uses, advanced from this database's batch only after its write returned (stage below,
+                           commit in the success block), and dropped by both fault arms. The XE ring-buffer
+                           collectors have no read floor (azureReadFloor is null) and keep their own read. */
+                        if (azureReadFloor is DateTime azureCacheFloor)
+                        {
+                            context.Watermark = await ResolveQueryStoreDatabaseWatermarkAsync(
+                                server, definition.TargetTable, definition.WatermarkColumn!,
+                                definition.PerDatabaseWatermarkColumn!, databaseName, azureCacheFloor, collectionTime, dbToken);
+                        }
+                        else
+                        {
+                            context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
+                                server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
+                                definition.PerDatabaseWatermarkColumn!, databaseName, dbToken, azureReadFloor);
+                        }
 
                         /* #2111 adaptive shrink, Azure arm — tighten BEFORE BuildQuery: the
                            definition's own clamp only floors OLDER watermarks, so a tighter one
@@ -2428,7 +2711,11 @@ public sealed class DarlingCollectorRunner
                         context.PerDatabasePhasesMeasured = true;
                     }
 
-                    using (var dbConnection = openedConnection)
+                    /* Held to the end of the iteration rather than closed with the read: query_store's plan and
+                       text fetches below run on this database's own connection, after its command and reader
+                       are disposed. Every other collector on this branch simply holds an idle connection for
+                       the flush, which is milliseconds. */
+                    using var dbConnection = openedConnection;
                     using (var dbCommand = CreateCollectorCommand(perDbProvider, dbPlan, dbConnection, perDbTimeout))
                     {
                         /* #2855: the open, same contract as the other two paths — ExecuteReaderAsync returns
@@ -2498,22 +2785,77 @@ public sealed class DarlingCollectorRunner
                     var dbSqlMs = sqlSlice.ElapsedMilliseconds;
                     sqlMs += dbSqlMs;
 
+                    /* query_store's plan XML and statement text, for THIS database, on its own connection. The
+                       payload always carries a NULL plan and (FetchQueryTextSeparately) no text, so these two
+                       fetches are the only way either reaches the store - and this loop, which Azure SQL
+                       Database takes because QueryStoreCollector.RunsPerDatabase is IsAzureSqlDb, read and
+                       flushed without ever calling them: every Azure row was stored with neither.
+
+                       databaseName, never the registration's initial catalog: the by-ids queries run
+                       [db].sys.sp_executesql, which Azure accepts only for the connection's current database,
+                       and dbConnection is connected to exactly this one.
+
+                       BEFORE the flush, as on the enumerated path, and the order matters beyond symmetry: the
+                       fetch repairs the shared store connection it borrows before it touches it, so the flush
+                       that follows never meets a connection a previous database's budget expiry broke. After
+                       the flush that repair would come one database too late. dbToken, so the wall-clock
+                       budget bounds the fetch as it bounds the read; an expiry lands in the budget arm below
+                       and the database is re-read next cycle, exactly as on the enumerated path.
+
+                       Outside dbSqlMs on purpose (the #2896 pins): the read's connect/open/drain/other split
+                       keeps meaning what it meant, and the fetch is reported on its own lines and in the run's
+                       fetch sums. Its time is folded into sqlMs and the fan-out figure below, because the
+                       enumerated path counts it inside the item's SQL slice and a database that is expensive
+                       only because of its fetches should still read as expensive. */
+                    long dbFetchMs = 0;
+                    if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                    {
+                        await FetchQueryStorePlansAndTextAsync(
+                            dbConnection, pgConnection, server, databaseName, definition.Name, context, perDbTimeout, batch, dbToken);
+
+                        dbFetchMs = context.PerItemPlanFetchMs + context.PerItemTextFetchMs;
+                        sqlMs += dbFetchMs;
+                    }
+
+                    /* #5514: what this batch contributes to the cache, computed from the rows as read (the same
+                       staging the enumerated arm does after its fetch) and landed below, after the flush. */
+                    if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                    {
+                        stagedDatabaseWatermark = StageQueryStoreDatabaseWatermark(batch, databaseName, collectionTime);
+                    }
+
                     /* Flush this database before reading the next — peak memory is one database's rows. */
                     long dbStorageMs = 0;
                     if (batch.Count > 0)
                     {
                         var storageSlice = Stopwatch.StartNew();
+                        PerDatabaseWriteFaultForTests?.Invoke(databaseName);
                         rowsWritten += await WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, cancellationToken);
                         dbStorageMs = storageSlice.ElapsedMilliseconds;
                         storageMs += dbStorageMs;
                     }
+
+                    /* The read AND the flush both succeeded: only now may the state the definition staged for
+                       this database (a telemetry cursor, the shred gate's execution count) be saved. A failed
+                       write throws past this line into the per-database catch, which skips the database while
+                       a sibling's success still saves PendingState - so state landed any earlier would advance
+                       past rows that were never stored. */
+                    context.LandStagedItemState();
 
                     /* #2472: this database's slice, counted even when its batch was empty — an empty batch
                        still paid for its read, and that read is in the blended total the rollup is a ratio
                        against. Observed here rather than beside the log line below for the same reason the
                        completion hook fires after the flush: both slices are only known once the write is
                        done. */
-                    fanout.Observe(databaseName, dbSqlMs + dbStorageMs);
+                    fanout.Observe(databaseName, dbSqlMs + dbFetchMs + dbStorageMs);
+
+                    /* And this database's fetch readings into the run's fetch sums (#2860), for every completed
+                       database and not gated on rows, for the reason the enumerated hook states: a quiet
+                       database can still pay real fetch time draining ids deferred from an earlier pass. Here,
+                       past the flush, because the enumerated hook fires only for items whose read and flush
+                       both landed and the sums should mean the same thing on both branches. The readings are
+                       still this database's own: they clear at the top of the next iteration, not here. */
+                    fetchPhases.Observe(context);
 
                     /* #2855: this branch's per-database phase line — the line it did not emit at all. Read
                        after the flush, like the other two paths, so pg: is this database's own figure.
@@ -2564,6 +2906,10 @@ public sealed class DarlingCollectorRunner
                             batch.Count, dbStorageMs);
                     }
 
+                    /* The fetch sub-splits, on their own lines after the phase line they are not part of, and
+                       only for a fetch that ran (query_store; nothing else sets the readings). */
+                    LogFetchPhaseSplits(server, definition.Name, databaseName, context);
+
                     /* Same per-database bounded-cycle WARNING the enumeration path emits from
                        onItemComplete, mirroring Lite. Reachable here since #1836 put query_store — the
                        only collector that declares either bound — on this branch for Azure SQL DB;
@@ -2587,6 +2933,13 @@ public sealed class DarlingCollectorRunner
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemSucceeded(server.ServerId, databaseName);
+
+                        /* #5514: the flush returned, so the staged batch is in the store and the cache may
+                           advance past it. Never earlier: a watermark ahead of committed rows skips them. */
+                        if (stagedDatabaseWatermark is { } landedWatermark)
+                        {
+                            CommitQueryStoreDatabaseWatermark(server, databaseName, landedWatermark);
+                        }
 
                         /* #2312: read and flush both landed — the staged open-interval stamp may too. */
                         if (stagedOpenIntervalStamp is not null)
@@ -2629,6 +2982,19 @@ public sealed class DarlingCollectorRunner
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemFailed(server.ServerId, databaseName);
+
+                        /* #5514: a batch was staged, so its write may or may not have committed: drop this key and
+                           let the next cycle read the store. A fault before the stage wrote nothing, and the key
+                           stays. That matters for a PARTIAL failure: a database that fails every cycle (offline, a
+                           login that cannot reach it) beside healthy siblings must not turn back into a store read
+                           every cycle. When EVERY database fails (a one-database registration, the common shape)
+                           the loop rethrows and RunAsync's catch drops all of this server's query_store keys
+                           anyway, so there the kept key buys nothing. Correctness is the same either way: a kept
+                           key is equal to the store or stale-low, never ahead. */
+                        if (stagedDatabaseWatermark is not null)
+                        {
+                            _databaseWatermarkCache.Invalidate(server.ServerId, databaseName);
+                        }
                     }
 
                     /* WARNING, not Debug, unlike the routine per-database skip beside it: an offline
@@ -2667,6 +3033,19 @@ public sealed class DarlingCollectorRunner
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemFailed(server.ServerId, databaseName);
+
+                        /* #5514: a batch was staged, so its write may or may not have committed: drop this key and
+                           let the next cycle read the store. A fault before the stage wrote nothing, and the key
+                           stays. That matters for a PARTIAL failure: a database that fails every cycle (offline, a
+                           login that cannot reach it) beside healthy siblings must not turn back into a store read
+                           every cycle. When EVERY database fails (a one-database registration, the common shape)
+                           the loop rethrows and RunAsync's catch drops all of this server's query_store keys
+                           anyway, so there the kept key buys nothing. Correctness is the same either way: a kept
+                           key is equal to the store or stale-low, never ahead. */
+                        if (stagedDatabaseWatermark is not null)
+                        {
+                            _databaseWatermarkCache.Invalidate(server.ServerId, databaseName);
+                        }
                     }
 
                     _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
@@ -2708,11 +3087,14 @@ public sealed class DarlingCollectorRunner
 
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
-               which is exactly what this path carried before. */
+               which is exactly what this path carried before. The empty-list note (#4961) rides in this
+               assignment: it is the one place the note is set, so nothing assigned earlier can be erased. */
             collectionNote = EnumeratedCollectorDriver.MergeNotes(
-                cycleProbeFailures.Note,
-                EnumeratedCollectorDriver.BuildPartialFailureNote(
-                    failed, attempted, failedDatabases, firstFailure?.Message));
+                emptyListNote,
+                EnumeratedCollectorDriver.MergeNotes(
+                    cycleProbeFailures.Note,
+                    EnumeratedCollectorDriver.BuildPartialFailureNote(
+                        failed, attempted, failedDatabases, firstFailure?.Message)));
             LogEnumerationProbeFailures(definition, server, cycleProbeFailures.Failures);
 
             /* One database failing is routine (offline, mid-restore, a permissions oddity) and stays a
@@ -2730,8 +3112,30 @@ public sealed class DarlingCollectorRunner
         }
         else
         {
-            using var targetConnection = CreateTargetConnection(server);
+            /* #5320: the provider resolved at the top of this method (the test override when one is set, TargetProviders.For
+               otherwise), so the server-wide path has the same fake-reader seam the per-database path has. */
+            using var targetConnection = CreateTargetConnection(server, targetProvider);
             await targetConnection.OpenAsync(cancellationToken);
+
+            /* #5132: the target's own session id, resolved right after the open and BEFORE any reader
+               exists on this connection. SQL Server's property is 0 under MARS at every point, so the id
+               comes from a lookup cached per physical connection (one SELECT @@SPID per new connection,
+               none on pool reuse); see TargetSessionIdCache. Best-effort: null on any failure.
+
+               The lookup is TIMED into sqlMs (no open-phase column covers this point: ServerScopeOpenMs
+               and PerItemOpenMs time only the reader opens). It stays OUTSIDE PerItemWallClockBudget on
+               purpose; the lookup's own 5 s CommandTimeout bounds it. */
+            var sessionIdWatch = Stopwatch.StartNew();
+            Guid sessionIdKey;
+            try
+            {
+                (context.TargetSessionId, sessionIdKey) =
+                    await TargetSessionIdCache.Shared.ResolveAsync(targetConnection, _logger, cancellationToken);
+            }
+            finally
+            {
+                sqlMs += sessionIdWatch.ElapsedMilliseconds;
+            }
 
             var enumerationPlan = definition.BuildEnumerationQuery(context);
             if (enumerationPlan is not null)
@@ -2947,6 +3351,7 @@ public sealed class DarlingCollectorRunner
                     readItem: async (item, ct) =>
                     {
                         var batch = new List<TRow>();
+                        context.DropStagedItemState();
                         using var itemCommand = CreateCollectorCommand(targetProvider, definition.BuildPerItemQuery(item, context), targetConnection, itemTimeout);
                         /* #2164: time the OPEN separately from the drain. ExecuteReaderAsync returns only
                            when the first rowset is available, so for query_store's staged batch this is the
@@ -2959,24 +3364,7 @@ public sealed class DarlingCollectorRunner
                            phase is NOT cleared here: it ran already, for THIS item, and clearing it would
                            hand its milliseconds to drain. The fetch phases clear on the same rule. */
                         context.PerItemOpenMs = 0;
-                        context.PerItemPlanFetchMs = 0;
-                        context.PerItemTextFetchMs = 0;
-                        /* #2811: the sub-phases clear on the SAME rule as their parents, and for the same
-                           reason — an item whose fetch faults before setting them must not print the previous
-                           database's split as its own. A stale sub-split is worse than a stale total, because
-                           it looks precise. */
-                        context.PerItemPlanProbeMs = 0;
-                        context.PerItemPlanTargetMs = 0;
-                        context.PerItemPlanWriteMs = 0;
-                        context.PerItemPlanChunks = 0;
-                        context.PerItemPlanIdsAttempted = 0;
-                        context.PerItemPlanProbeIds = 0;
-                        context.PerItemTextProbeMs = 0;
-                        context.PerItemTextTargetMs = 0;
-                        context.PerItemTextWriteMs = 0;
-                        context.PerItemTextChunks = 0;
-                        context.PerItemTextIdsAttempted = 0;
-                        context.PerItemTextProbeIds = 0;
+                        ClearFetchPhaseStamps(context);
                         context.PerItemPhasesMeasured = false;
                         /* #2854: stamped from finally, and the reader is hoisted out of the try only so the
                            `using` below keeps its original disposal scope. A trailing assignment here was
@@ -3001,63 +3389,11 @@ public sealed class DarlingCollectorRunner
                         }
                         using var itemReader = openedReader;
                         await definition.ReadItemAsync(item, itemReader, batch, context, ct);
-                        /* #2210: this database's plan-XML fetch, right after its runtime-stats read. A separate
-                           query on purpose — it ships in plan_id order, so a budget cut truncates a SUFFIX,
-                           which is the only reason the watermark can advance from a cut pass at all. */
-                        /* `is SqlConnection` rather than a bare cast, and it does two jobs (merge resolution
-                           against #2213's provider seam): the connection here is a provider-neutral
-                           DbConnection now, and this fetch is Query-Store-only, so the pattern narrows the
-                           type the signature needs AND gates the engine in one expression that cannot drift
-                           from either. The enumerated path serves PostgreSQL targets since #2213; query_store
-                           declares TargetEngine = SqlServer so it never reaches here for one, but relying on
-                           the catalog for that would be an invariant held somewhere else. */
-                        if (context.CapturePlanXml && targetConnection is SqlConnection planFetchConnection)
-                        {
-                            /* #2312 investigation: timed so the log split can say whether the invariant
-                               per-cycle cost lives HERE rather than in the payload — a 0-row cycle's
-                               blended sql: could not distinguish them. */
-                            /* #2854: stamped from finally. This one is the PARENT of the sub-split #2816
-                               already fixed, which makes a bare stamp here worse than the defect it fixed:
-                               probe/target/write stamp from their own handlers and report real values, so a
-                               throwing fetch printed plan_fetch:0ms above non-zero children. PlanFetchOtherMs
-                               then clamps a negative residual to zero and the line reads as precise while
-                               being arithmetically impossible. */
-                            var planFetchWatch = Stopwatch.StartNew();
-                            try
-                            {
-                                await FetchAndStorePlansAsync(planFetchConnection, pgConnection,
-                                    server, item, definition.Name, context, itemTimeout, ExtractPlanReferences(batch), ct);
-                            }
-                            finally
-                            {
-                                context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
-                            }
-                        }
-
-                        /* #2150: and this database's statement-text fetch, for the same reason and with the
-                           same shape — the payload no longer carries query_sql_text, because selecting it
-                           inside the shipping TOP/ORDER BY made a Top-N Sort materialize nvarchar(max) text
-                           for the whole qualifying set (measured 4.67s vs 0.45s time-to-first-row). Ships in
-                           query_id order so a budget cut is a suffix, which is what lets the watermark
-                           advance from a cut pass.
-
-                           Gated on the same flag the payload branches on, so the two can never disagree
-                           about who owns the text: if the column is nulled, this runs. */
-                        if (context.FetchQueryTextSeparately && targetConnection is SqlConnection textFetchConnection)
-                        {
-                            /* #2312 investigation: same split as the plan fetch above. */
-                            /* #2854: stamped from finally, same parent/child inconsistency as the plan fetch. */
-                            var textFetchWatch = Stopwatch.StartNew();
-                            try
-                            {
-                                await FetchAndStoreQueryTextAsync(textFetchConnection, pgConnection,
-                                    server, item, definition.Name, context, itemTimeout, ExtractTextReferences(batch), ct);
-                            }
-                            finally
-                            {
-                                context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
-                            }
-                        }
+                        /* #2210 / #2150: this database's plan-XML and statement-text fetches, right after its
+                           runtime-stats read. One method, because the Azure SQL Database per-database loop runs the
+                           same two for each database it reads; the why and the shape are on the method. */
+                        await FetchQueryStorePlansAndTextAsync(
+                            targetConnection, pgConnection, server, item, definition.Name, context, itemTimeout, batch, ct);
 
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
@@ -3104,6 +3440,10 @@ public sealed class DarlingCollectorRunner
                             }
                         }
 
+                        /* Enumerated items stage no definition state today; landed here so the rule holds for
+                           any that start to: this hook fires only after the item's read and flush succeeded. */
+                        context.LandStagedItemState();
+
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
                            every database into one number, which hid a single busy database's 50s burst
                            behind four quiet siblings. Quiet databases (0 rows — the 2-of-3 cycles between
@@ -3139,28 +3479,9 @@ public sealed class DarlingCollectorRunner
                                         context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs),
                                         context.PerItemPlanFetchMs, context.PerItemTextFetchMs, itemStorageMs);
 
-                                    /* #2811: the sub-split rides its OWN line rather than nesting inside the
-                                       one above, because that line is parsed by tooling outside this repo and
-                                       "don't break the parser" outranks "one line to grep". Emitted only when
-                                       the corresponding fetch actually ran, so a text-only pass prints one
-                                       line and a fetchless collector prints none. */
-                                    if (context.PerItemPlanFetchMs > 0)
-                                    {
-                                        _logger?.LogDebug("  [{Server}] {Collector} [{Database}] plan_fetch:{PlanFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
-                                            server.Config.DisplayName, definition.Name, item, context.PerItemPlanFetchMs,
-                                            context.PerItemPlanProbeMs, context.PerItemPlanTargetMs, context.PerItemPlanWriteMs,
-                                            context.PlanFetchOtherMs, context.PerItemPlanChunks, context.PerItemPlanIdsAttempted,
-                                            context.PerItemPlanProbeIds);
-                                    }
-
-                                    if (context.PerItemTextFetchMs > 0)
-                                    {
-                                        _logger?.LogDebug("  [{Server}] {Collector} [{Database}] text_fetch:{TextFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
-                                            server.Config.DisplayName, definition.Name, item, context.PerItemTextFetchMs,
-                                            context.PerItemTextProbeMs, context.PerItemTextTargetMs, context.PerItemTextWriteMs,
-                                            context.TextFetchOtherMs, context.PerItemTextChunks, context.PerItemTextIdsAttempted,
-                                            context.PerItemTextProbeIds);
-                                    }
+                                    /* #2811: the sub-splits ride their OWN lines, emitted by the method the Azure per-database
+                                       loop shares - see LogFetchPhaseSplits for why they are not folded into the line above. */
+                                    LogFetchPhaseSplits(server, definition.Name, item, context);
                                 }
                                 else
                                 {
@@ -3271,6 +3592,8 @@ public sealed class DarlingCollectorRunner
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
+                List<QueryStatsPlanKey>? pendingPlanKeys = null;
+                List<ProcedureStatsPlanKey>? pendingProcedureKeys = null;
                 /* #2851: this branch IS the server-scoped path, so its phases are measured from here on.
                    Set before the read rather than after it so the wall-clock-budget catch below reports the
                    phases of the cycle it abandoned — that is the case where "where did the time go" matters
@@ -3344,24 +3667,15 @@ public sealed class DarlingCollectorRunner
 
                     using var reader = opened;
 
-                    /* #2864: the target's own session id, read off the connection as a client property rather
-                       than asked for with SELECT @@SPID — a round trip would be ~25,000 extra queries an hour
-                       across the fleet to fetch a number the client already holds. It is what makes a stalled
-                       run joinable to waiting_tasks / dmv_blocking_snapshot / query_snapshots, all of which
-                       record a session id; without it "what was OUR session waiting on" cannot be asked
-                       retrospectively even for a window where the answering snapshot was captured.
+                    /* A transparent reconnect during the open gives a new physical connection (new
+                       ClientConnectionId, new session); the id resolved at open then belongs to the old
+                       one. Property comparison only. */
+                    if (targetConnection is SqlConnection openedSql
+                        && TargetSessionIdCache.Shared.DiscardIfReplaced(sessionIdKey, openedSql.ClientConnectionId))
+                    {
+                        context.TargetSessionId = null;
+                    }
 
-                       Captured HERE, after ExecuteReaderAsync has returned, and not beside the phase flag
-                       above (#2884): SqlConnection.ServerProcessId is not reliably populated until the
-                       connection has round-tripped a command, so a read placed before the open recorded 0 —
-                       a value no real session has — on exactly the abandoned cycles the id exists to explain.
-                       Here the round trip has provably happened, so a drain-stall abandon (open completes in
-                       ~100-200ms; the budget fires minutes into the read) records its REAL id, which is the
-                       load-bearing case. An abandon that fires INSIDE ExecuteReaderAsync leaves this null,
-                       which the store reads as NOT RECORDED — the honest answer for a connection that never
-                       finished its first exchange, and one of the reachable-NULL cases the V109 write-side
-                       comment already documents. */
-                    context.TargetSessionId = TryReadTargetSessionId(targetConnection);
                     var drainWatch = Stopwatch.StartNew();
 
                     /* #2864: the collector reads through a counting decorator rather than the provider reader
@@ -3420,6 +3734,45 @@ public sealed class DarlingCollectorRunner
                        trigger evidence that included time no reader was waiting on. Dispose is
                        idempotent for exactly this pairing. */
                     stallProbeArm.Dispose();
+
+                    /* #5449: procedure_stats' plan phase. The main query is numbers only, so a host that captures plans or
+                       reads identities asks the target for them in a second query over the first MaxPlansPerRun kept rows,
+                       here: on this same target connection and inside the same wall-clock budget (itemToken), before the
+                       #5158 reuse pass below reads the identities it fills. Lite never reaches this: it captures no plans. */
+                    var procedureStatsPlanPhaseMs = 0L;
+                    if ((object)rows is List<ProcedureStatsCollector.Row> phaseRows
+                        && ProcedureStatsCollector.PlanPhaseApplies(context))
+                    {
+                        procedureStatsPlanPhaseMs = await RunProcedureStatsPlanPhaseAsync(
+                            targetProvider, reader, targetConnection, server, context, phaseRows, itemToken);
+                    }
+
+                    /* #5158: the deferred plan fetch. After the main read is over and on this same target connection,
+                       inside the same wall-clock budget (itemToken), so a slow fetch is cut by the budget like the read. */
+                    if (context.DeferPlanXmlFetch && (object)rows is List<QueryStatsCollector.Row> deferredRows)
+                    {
+                        await reader.CloseAsync();
+                        pendingPlanKeys = await FetchDeferredQueryStatsPlansAsync(
+                            targetProvider, targetConnection, server, context, deferredRows, itemToken);
+                    }
+                    else if (context.PlanIdentityColumns && (object)rows is List<ProcedureStatsCollector.Row> identityRows)
+                    {
+                        /* The run's mode, read back from the stamp: the knob and the capture setting are not asked again. */
+                        var procedureStatsMode = ProcedureStatsPlanFetchModes.OfRun(context);
+                        if (procedureStatsMode == ProcedureStatsPlanFetchMode.On)
+                        {
+                            await reader.CloseAsync();
+                        }
+
+                        pendingProcedureKeys = await ApplyProcedureStatsPlanReuseAsync(
+                            targetProvider, targetConnection, server, context, identityRows, procedureStatsMode, itemToken,
+                            procedureStatsPlanPhaseMs);
+                    }
+                    else if (procedureStatsPlanPhaseMs > 0 && (object)rows is List<ProcedureStatsCollector.Row> offRows)
+                    {
+                        /* Off mode renders the plans in the plan phase and has no reuse pass: stamp what it rendered. */
+                        StampProcedureStatsOffPlanPhase(context, offRows, procedureStatsPlanPhaseMs);
+                    }
                 }
                 catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(itemBudget, cancellationToken))
                 {
@@ -3482,8 +3835,57 @@ public sealed class DarlingCollectorRunner
 
                 var storageSlice = Stopwatch.StartNew();
                 await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
-                rowsWritten = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
+                var committed = false;
+                try
+                {
+                    rowsWritten = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
+                    committed = true;
+                }
+                finally
+                {
+                    /* #5158: a plan this run rendered counts as stored only once its batch committed (a successful
+                       StoreWriteReattempt included). A batch that failed leaves nothing cached, so the next run
+                       renders those plans again rather than sending a digest the store never received. */
+                    if (pendingPlanKeys is not null
+                        && _queryStatsPlanCaches.TryGetValue(server.ServerId, out var planCache))
+                    {
+                        if (committed)
+                        {
+                            planCache.ConfirmPending(pendingPlanKeys, DateTime.UtcNow);
+                        }
+                        else
+                        {
+                            planCache.DiscardPending(pendingPlanKeys);
+                        }
+                    }
+
+                    /* Two runs of one server's procedure_stats never overlap, so no other run can overwrite a pending entry
+                       between this run's add and this confirm (ConfirmPending trusts the entry it finds under the key):
+                       - a non-daily run is awaited inside the server's sweep body, under the per-server CollectionGate
+                         (DarlingWorker.cs:12146), and a snapshot_now takes the same gate (DarlingWorker.cs:12430);
+                       - the sweep launches one body per server at a time (DarlingWorker.cs:3358);
+                       - a run an override makes daily goes through the per-(server, collector) DetachedCollectorGate
+                         (DarlingWorker.cs:13799), and the at-connect and snapshot runs take its slot first
+                         (TryTakeInlineDailySlot, DarlingWorker.cs:5639). */
+                    if (pendingProcedureKeys is not null
+                        && _procedureStatsPlanCaches.TryGetValue(server.ServerId, out var procedurePlanCache))
+                    {
+                        if (committed)
+                        {
+                            procedurePlanCache.ConfirmPending(pendingProcedureKeys, DateTime.UtcNow);
+                        }
+                        else
+                        {
+                            procedurePlanCache.DiscardPending(pendingProcedureKeys);
+                        }
+                    }
+                }
+
                 storageMs += storageSlice.ElapsedMilliseconds;
+
+                /* The single item's write returned: land what the definition staged for it. A throw above
+                   never reaches here, and a cycle that throws saves no state at all. */
+                context.LandStagedItemState();
 
                 /* #4197 part b: advance the cache only AFTER WriteBatchAsync's COPY has returned — this
                    plain (non-fan-out) path's write is the batch commit itself, so "after the write
@@ -3569,38 +3971,6 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// The monitored target's own session id, off the OPEN connection as a property (#2864). SQL Server's
-    /// SPID via <c>SqlConnection.ServerProcessId</c>, PostgreSQL's backend pid via
-    /// <c>NpgsqlConnection.ProcessID</c>; null for any other provider.
-    ///
-    /// <para>A property read rather than <c>SELECT @@SPID</c> deliberately: the value is already on the
-    /// client after the handshake, and asking for it would add a round trip per collector per server per
-    /// cycle — on this fleet roughly 25,000 extra queries an hour to learn something already known. The
-    /// point of the number is joinability: waiting_tasks, dmv_blocking_snapshot and query_snapshots all
-    /// carry a session id, so recording ours turns "what was our own stalled session waiting on" from an
-    /// unanswerable question into a join.</para>
-    ///
-    /// <para>Best-effort by design. A provider that exposes no such property returns null, which reads as
-    /// "not available" — never as a session id of 0, which is a real SPID.</para>
-    /// </summary>
-    private static int? TryReadTargetSessionId(DbConnection connection)
-    {
-        /* A session id of 0 is never real — SQL Server assigns no SPID 0 to a user session, and both
-           providers report 0 from this property for a connection that has not completed the exchange
-           that populates it — so 0 is the provider's "not available" state, not a measurement. #2884
-           found it written to the store as though it were data, on exactly the abandoned cycles where
-           the id is the join key. Normalized to null here, at the source, so every consumer sees the
-           declared NOT-RECORDED convention instead of a real-looking placeholder. */
-        var raw = connection switch
-        {
-            SqlConnection sql => sql.ServerProcessId,
-            NpgsqlConnection npgsql => npgsql.ProcessID,
-            _ => 0,
-        };
-        return raw > 0 ? raw : null;
-    }
-
-    /// <summary>
     /// Writes the per-item app-log lines for probe failures, capped at
     /// <see cref="EnumeratedCollectorDriver.MaxLoggedProbeFailures"/> with the suppressed remainder
     /// reported as a count. The collection_log row already carries the summary note; this is where the
@@ -3682,10 +4052,26 @@ public sealed class DarlingCollectorRunner
             }
         }
 
+        /* A deadlock both of an Azure master registration's reads return is stored once: read the batch's
+           own identities (time and full graph text) back from the store ONCE, here, before the #3099 retry
+           loop below, and keep only the rows it does not already hold. A start-phase re-attempt reuses this
+           filtered list. Every other collector's definition skips this null check. */
+        if (definition is IStoredIdentityDedupedCollector<TRow> identityDedupe)
+        {
+            rows = await DropAlreadyStoredIdentityRowsAsync(
+                pgConnection, identityDedupe, rows, server, cancellationToken);
+
+            if (rows.Count == 0)
+            {
+                return 0;
+            }
+        }
+
         /* #3099: ONE re-attempt, gated on the COPY's START phase, and lossless because `rows` is still
            the parameter this method was handed. The gate is what makes it lossless rather than merely
            cheap: a start-phase fault sent no row, so a COPY ... FROM STDIN cannot have committed and the
-           store is byte-identical, and it ran no WritePayload, so no delta baseline moved. Both are
+           store is byte-identical, and it ran no WritePayload, so no counter-moved row's delta baseline moved (procedure_stats'
+           idle skip advances only UNCHANGED counters at read time, #5449, which is lossless). Both are
            forfeit past that point — see CopyBatchOnceAsync, which stamps the phase and carries the
            argument. StoreWriteReattempt.IsSafeToReattempt requires Start positively, so an unstamped
            fault and a data-phase fault both decline and cost a sample rather than authorising a duplicate
@@ -3843,6 +4229,71 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// The stored graphs of one server at a set of event times, bounded on <c>collection_time</c> (the
+    /// hypertable's partitioning column) for chunk exclusion. A null graph is never an identity.
+    /// </summary>
+    internal const string StoredDeadlockIdentitySql =
+        "SELECT deadlock_time, " + DeadlocksCollector.StoredGraphIdentitySql + " FROM deadlocks " +
+        "WHERE server_id = $1 AND deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> '' " +
+        "AND deadlock_time = ANY($2::timestamp[]) AND collection_time >= $3";
+
+    /// <summary>
+    /// The exact-identity pre-insert dedupe: reads the stored graphs of this server at the batch's own
+    /// identity times (one query) and drops any row whose microsecond time and full graph text a stored row
+    /// already carries, before the COPY. The <c>collection_time</c> floor is the earliest batch event time
+    /// minus one day: a deadlock cannot be collected before it happened, and the day absorbs the gap
+    /// between the target's clock and the store's. Called from <see cref="WriteBatchAsync{TRow}"/> BEFORE
+    /// the #3099 retry loop, so a start-phase re-attempt reuses the filtered list. A failed read fails the
+    /// batch rather than risk a duplicate.
+    /// </summary>
+    private async Task<List<TRow>> DropAlreadyStoredIdentityRowsAsync<TRow>(
+        NpgsqlConnection pgConnection,
+        IStoredIdentityDedupedCollector<TRow> dedupe,
+        List<TRow> rows,
+        ServerRuntime server,
+        CancellationToken cancellationToken)
+    {
+        var times = rows.Select(dedupe.GetIdentity)
+            .Where(identity => identity is not null)
+            .Select(identity => DateTime.SpecifyKind(identity!.Value.Time, DateTimeKind.Unspecified))
+            .Distinct()
+            .ToArray();
+
+        if (times.Length == 0)
+        {
+            return rows;
+        }
+
+        var collectionTimeFloor = DateTime.SpecifyKind(times.Min().AddDays(-1), DateTimeKind.Unspecified);
+        var stored = new HashSet<(DateTime Time, string Graph)>();
+
+        try
+        {
+            await using var command = new NpgsqlCommand(StoredDeadlockIdentitySql, pgConnection);
+            command.CommandTimeout = CommandTimeoutSeconds;
+            command.Parameters.AddWithValue(server.ServerId);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = times });
+            command.Parameters.AddWithValue(collectionTimeFloor);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                stored.Add((JobHistoryCollector.ToMicroseconds(reader.GetDateTime(0)), reader.GetString(1)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(
+                "Deadlock pre-insert dedupe read failed for server {ServerId} — failing this batch " +
+                "rather than risk storing a duplicate: {Message}",
+                server.ServerId, ex.Message);
+            throw;
+        }
+
+        return dedupe.DropAlreadyStored(rows, stored);
+    }
+
+    /// <summary>
     /// Records this batch's over-cap cached plans in <c>collect.oversized_plan_backlog</c> so the
     /// low-frequency sweep can go back for their content (#3392).
     ///
@@ -3969,7 +4420,8 @@ public sealed class DarlingCollectorRunner
 
     /// <summary>
     /// ONE attempt at the batch: the binary COPY, and for the diverting collectors the transaction that
-    /// wraps it and its dimension flush. Separate from <see cref="WriteBatchAsync"/> so the importer and
+    /// wraps it and its dimension flush (for query_stats, also the hour ledger's count, #4605, which commits
+    /// with the rows or not at all). Separate from <see cref="WriteBatchAsync"/> so the importer and
     /// the transaction are both disposed before the re-attempt runs — a retry that fired while the failed
     /// attempt's transaction was still in scope would re-enter with an aborted transaction on the
     /// connection and fail on 25P02 rather than on anything to do with the store.
@@ -3978,7 +4430,9 @@ public sealed class DarlingCollectorRunner
     /// is.</b> #3095's <c>StoreCopyPhase</c> transition sits inside the COPY block below, so
     /// <c>Start</c> means strictly "the importer never came back": no row started, so a
     /// <c>COPY ... FROM STDIN</c> cannot have committed, and <c>WritePayload</c> never ran, so no
-    /// <c>CollectorDeltaCalculator</c> baseline moved. <see cref="StoreWriteReattempt.IsSafeToReattempt"/>
+    /// <c>CollectorDeltaCalculator</c> baseline moved for a row whose counters moved (procedure_stats advances an
+    /// UNCHANGED row's baseline at read time to drop it as idle, and a row kept with its deltas computed carries them;
+    /// neither can be re-derived wrongly, #5449). <see cref="StoreWriteReattempt.IsSafeToReattempt"/>
     /// requires that value positively.</para>
     ///
     /// <para><b>Both properties are why the row loop below must never be re-run.</b> Past the transition a
@@ -4010,6 +4464,23 @@ public sealed class DarlingCollectorRunner
             writer.UseDimensions(diversionPlan, dimensions);
         }
 
+        /* #4605: a query_stats batch also adds its non-restart row count (rows written with a sample_interval_seconds
+           other than 0, a NULL included) to the hourly ledger, in the COPY's own transaction below. The count is the
+           writer's tally of the value it sends into that column, taken at the exact write and never re-derived. The
+           writer is built per attempt, so the tally starts from zero on every attempt and a failed attempt's rows
+           cannot be counted twice by the re-attempt. All rows of the batch carry the one storedCollectionTime below,
+           so a batch is one hour and one upsert.
+
+           The batch is a ledger batch by the table this COPY writes, not by the definition's CLR type: a definition
+           aimed at query_stats that is not the catalog's QueryStatsCollector (a one-off import or backfill) is counted
+           too, or fails loudly. IntervalPayloadIndex throws for a definition without the column, and the tally check
+           before the COPY completes catches any other overload. */
+        var ledgerBatch = string.Equals(definition.TargetTable, QueryStatsCollector.Instance.TargetTable, StringComparison.OrdinalIgnoreCase);
+        if (ledgerBatch)
+        {
+            writer.CountNonZeroAt(QueryStatsHourLedgerWriter.IntervalPayloadIndex(definition));
+        }
+
         /* #3953: a Query Store batch also maintains the latest-snapshot-per-interval table, in the COPY's own
            transaction behind a savepoint (QueryStoreIntervalLatest). Its two wider reads, the coverage row's
            creation and the hourly gap check, run HERE, before the transaction, so nothing inside it reads raw
@@ -4036,15 +4507,17 @@ public sealed class DarlingCollectorRunner
         var fencedServerId = queryStoreDatabases is not null ? server.ServerId : (int?)null;
         if (fencedServerId is { } beginServerId)
         {
-            _queryStoreWriteFence?.BeginWrite(beginServerId);
+            _queryStoreWriteFence?.BeginWrite(beginServerId, queryStoreDatabases);
         }
 
         var fenceSucceeded = false;
         try
         {
-            /* Only the diverting collectors and Query Store (#3953) need a transaction; everything else keeps the
-               pre-#1767 single-COPY commit and pays nothing. */
-            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null
+            /* Only the diverting collectors, Query Store (#3953) and the ledger's query_stats batches (#4605) need a
+               transaction; everything else keeps the pre-#1767 single-COPY commit and pays nothing. query_stats diverts
+               its text and plans today, so the ledger term does not add a transaction; it is named so that the ledger
+               upsert can never be left without the transaction its atomicity with the COPY depends on. */
+            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch
                 ? await pgConnection.BeginTransactionAsync(cancellationToken)
                 : null;
 
@@ -4065,7 +4538,8 @@ public sealed class DarlingCollectorRunner
                Start until Begin returns, and the transition sits INSIDE the block for that reason: Start has to
                mean strictly "the importer never came back", because that is the state whose two properties a
                consumer relies on — no row started, so a COPY ... FROM STDIN cannot have committed, and no
-               delta baseline moved, since CollectorDeltaCalculator advances inside WritePayload below. A
+               delta baseline moved for a row whose counters moved, since CollectorDeltaCalculator advances inside
+               WritePayload below (procedure_stats' idle skip advances unchanged counters at read time: lossless, #5449). A
                fault anywhere past this line forfeits both, so it must read as Data even where it happens to
                have sent nothing. The unsafe mislabel is the one that would report Start for a fault that had
                already sent rows; this ordering makes that unreachable rather than unlikely.
@@ -4120,6 +4594,14 @@ public sealed class DarlingCollectorRunner
                         rowsWritten++;
                     }
 
+                    /* #4605: every row must have written the interval as an integer for the tally to be the batch's
+                       count. A definition that moved the column to another overload would leave rows untallied, and an
+                       undercounted ledger is silent: fail the batch here instead, before the COPY completes. */
+                    if (ledgerBatch)
+                    {
+                        QueryStatsHourLedgerWriter.EnsureEveryRowTallied(definition.Name, rowsWritten, writer.CountedWrites);
+                    }
+
                     await importer.CompleteAsync(cancellationToken);
                 }
             }
@@ -4159,9 +4641,39 @@ public sealed class DarlingCollectorRunner
             {
                 if (diversionPlan.Count > 0)
                 {
-                    await PayloadDimensionWriter.FlushAsync(
+                    var absentDigests = await PayloadDimensionWriter.FlushAsync(
                         pgConnection, transaction, dimensions, storedCollectionTime, cancellationToken,
                         compressPlanContent: _compressPlanContent());
+
+                    /* #5158: digests this batch referenced without content that the store holds no plan for. The host
+                       forgets them so the next sighting renders the plan again. FlushAsync reports upper-case hex and
+                       Evict compares ignoring case. */
+                    if (absentDigests.Count > 0
+                        && definition is QueryStatsCollector
+                        && _queryStatsPlanCaches.TryGetValue(server.ServerId, out var absentCache))
+                    {
+                        absentCache.Evict(absentDigests);
+                    }
+
+                    if (absentDigests.Count > 0
+                        && definition is ProcedureStatsCollector
+                        && _procedureStatsPlanCaches.TryGetValue(server.ServerId, out var absentProcedureCache))
+                    {
+                        absentProcedureCache.Evict(absentDigests);
+                    }
+                }
+
+                /* #4605: the batch's count joins the hourly ledger on THIS transaction, after the COPY and the dimension
+                   flush and before the commit, so raw and the ledger commit together or not at all. No savepoint and no
+                   catch, deliberately: a fault here throws out of the batch, the transaction rolls back and the batch's
+                   rows are not stored, because rows the ledger never counted would make it smaller than the rollup. It
+                   sits in the unstamped region (#3095), so it is never re-attempted; the collector's next cycle is the
+                   retry. A count of 0 (a batch of restart rows only) writes nothing: the rollup has no row for that hour. */
+                if (ledgerBatch)
+                {
+                    await QueryStatsHourLedgerWriter.AddBatchAsync(
+                        pgConnection, transaction, server.ServerId, server.StorageName, storedCollectionTime,
+                        writer.NonZeroCounted, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
                 }
 
                 /* #3953: after the COPY and the dimension flush, in the unstamped region (#3095): a fault here is not
@@ -4322,6 +4834,21 @@ public sealed class DarlingCollectorRunner
             : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2";
 
     /// <summary>
+    /// The per-database watermark SQL for the Query Store cache's seed read (#4749): the bounded value, plus its
+    /// witness, which is the newest <c>collection_time</c> among the rows AT that value inside the bound. Same
+    /// predicates as <see cref="BuildServerWatermarkForDatabaseSql"/> (bounded, <c>collection_time</c> last as
+    /// $3), repeated in the inner query in the shape <see cref="BuildServerWatermarkInstanceIdSql"/> already
+    /// uses to pick the newest batch. The unaliased <c>MAX(</c>column<c>)</c> stays in the text: the tests that
+    /// count watermark reads match on it. Exposed for the same reason as its siblings, so a pin asserts the
+    /// SHIPPED string.
+    /// </summary>
+    internal static string BuildServerWatermarkWithWitnessForDatabaseSql(string tableName, string columnName, string databaseColumnName) =>
+        $"SELECT MAX({columnName}), MAX(collection_time) FROM {tableName} "
+        + $"WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3 "
+        + $"AND {columnName} = (SELECT MAX({columnName}) FROM {tableName} "
+        + $"WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3)";
+
+    /// <summary>
     /// The numeric (bigint identity) watermark SQL behind <see cref="GetLastCollectedInstanceIdAsync"/>
     /// (job_history's <c>instance_id</c>), exposed for the same reason as the timestamp builders above. Bounds
     /// on <c>collection_time</c> — job_history's partitioning column — never on <paramref name="columnName"/>
@@ -4411,9 +4938,12 @@ public sealed class DarlingCollectorRunner
                the caller's own clamp rather than a second round trip. Every OTHER caller passes null, which
                used to mean "read every chunk in retention, every cycle" — the ring-buffer cost #4197
                measures. It now means WatermarkPolicy.RecentWatermarkWindow's probe-then-confirm: bound on
-               the SAME partitioning column first (chunk exclusion prunes everything older), and only on a
-               miss fall back to the true unbounded MAX below. The value is identical either way — see
-               RecentWatermarkWindow's remarks for why a hit can never differ from the unbounded answer. */
+               the SAME partitioning column first (chunk exclusion prunes everything older), then, on a miss,
+               the week before it (#5515), and only on a second miss fall back to the true unbounded MAX below. A
+               hit is never NEWER than the unbounded answer, and equals it whenever the column rises with
+               collection_time (instance_id, event_time); see WatermarkPolicy.RecentWatermarkWindow's remarks. For
+               job_history's run_datetime, which does not, a hit can be OLDER than the unbounded MAX, which only
+               widens the caller's re-read; its natural-key dedupe drops the repeats. */
             var autoWindow = collectedSince is null;
             var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
 
@@ -4435,10 +4965,25 @@ public sealed class DarlingCollectorRunner
 
             if (autoWindow)
             {
-                /* The probe found no row in the window — a gap wider than RecentWatermarkWindow, or a
-                   genuinely empty table. Either way only the true unbounded MAX answers correctly; a null
-                   here would read as first-run, which is not scoped to the window the way it is for
-                   query_store's clamped callers. */
+                /* #5515: the probe found no row in RecentWatermarkWindow, which is every cycle's answer for a
+                   quiet server (no job run or trace event for hours). Before the whole slice, try the week:
+                   the SAME bounded statement with an older bound, so the chunks of seven days answer a server
+                   whose newest row is that recent, where the unbounded MAX opened every chunk in retention,
+                   compressed ones included (5,426 blocks a call on job_history). */
+                using var widened = new NpgsqlCommand(sql, connection);
+                widened.CommandTimeout = CommandTimeoutSeconds;
+                widened.Parameters.AddWithValue(serverId);
+                widened.Parameters.AddWithValue(DateTime.SpecifyKind(
+                    DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
+                var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
+                if (widenedResult is DateTime widenedDt)
+                {
+                    return widenedDt;
+                }
+
+                /* Still no row: a gap wider than the week, or a genuinely empty table. Either way only the true
+                   unbounded MAX answers correctly; a null here would read as first-run, which is not scoped to
+                   the window the way it is for query_store's clamped callers. */
                 using var fallback = new NpgsqlCommand(BuildServerWatermarkSql(tableName, columnName, bounded: false), connection);
                 fallback.CommandTimeout = CommandTimeoutSeconds;
                 fallback.Parameters.AddWithValue(serverId);
@@ -4502,8 +5047,8 @@ public sealed class DarlingCollectorRunner
 
             /* #4197: same probe-then-confirm as the sibling above — see its remarks. collectedSince
                non-null (query_store's clamped floor) is unchanged; null now means "bound to
-               RecentWatermarkWindow, fall back to the true unbounded pair only on a miss" instead of
-               "always unbounded". */
+               RecentWatermarkWindow, then WidenedWatermarkWindow (#5515), fall back to the true unbounded pair
+               only on a second miss" instead of "always unbounded". */
             var autoWindow = collectedSince is null;
             var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
 
@@ -4533,7 +5078,31 @@ public sealed class DarlingCollectorRunner
 
             if (autoWindow)
             {
-                /* Neither column had a row in the window — fall back to the true unbounded pair, the
+                /* #5515: neither column had a row in RecentWatermarkWindow — try the week first, the sibling's
+                   second rung, so a quiet server's pair read is answered by seven days of chunks instead of
+                   every chunk in retention. The same bounded statement with an older bound. */
+                using (var widened = new NpgsqlCommand(sql, connection))
+                {
+                    widened.CommandTimeout = CommandTimeoutSeconds;
+                    widened.Parameters.AddWithValue(serverId);
+                    widened.Parameters.AddWithValue(DateTime.SpecifyKind(
+                        DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
+                    using var widenedReader = await widened.ExecuteReaderAsync(cancellationToken);
+                    if (await widenedReader.ReadAsync(cancellationToken))
+                    {
+                        if (!widenedReader.IsDBNull(0))
+                        {
+                            return (widenedReader.GetDateTime(0), true);
+                        }
+
+                        if (!widenedReader.IsDBNull(1))
+                        {
+                            return (widenedReader.GetDateTime(1), false);
+                        }
+                    }
+                }
+
+                /* Neither column had a row in the week — fall back to the true unbounded pair, the
                    sibling's exact reasoning: this is not query_store's clamped path, so a miss here is not
                    necessarily a first run. */
                 using var fallback = new NpgsqlCommand(
@@ -4770,6 +5339,151 @@ public sealed class DarlingCollectorRunner
                 server.Config.DisplayName, databaseName);
 
             return false;
+        }
+    }
+
+    /// <summary>
+    /// One Query Store database's two deferred fetches, run right after that database's runtime-statistics read
+    /// and on the connection that read it: the plan XML first (#2210), then the statement text (#2150). Shared by
+    /// both places that read a Query Store database - the enumerated per-item read (SQL Server, Managed Instance)
+    /// and the per-database loop Azure SQL Database takes, where <c>QueryStoreCollector.RunsPerDatabase</c> is
+    /// <c>IsAzureSqlDb</c>. That loop used to read and flush without calling either fetch; every scheduled run
+    /// nulls the payload's inline text and plan (see <see cref="CollectorContext.FetchQueryTextSeparately"/>), so
+    /// every Azure SQL Database row was stored with neither statement text nor plan.
+    ///
+    /// <para><paramref name="databaseName"/> is the database THIS read targeted, never the registration's initial
+    /// catalog. The by-ids queries run <c>EXECUTE [db].sys.sp_executesql</c>, which Azure SQL Database accepts only
+    /// when the named database is the connection's current one, and the per-database connection is exactly that.</para>
+    ///
+    /// <para>Each fetch isolates its own failures (it logs and returns), so neither costs the database its runtime
+    /// statistics. A budget expiry is the exception and propagates to the caller's budget handling. The caller
+    /// clears the readings first (<see cref="ClearFetchPhaseStamps"/>) and reads them after.</para>
+    /// </summary>
+    private async Task FetchQueryStorePlansAndTextAsync<TRow>(
+        DbConnection targetConnection,
+        NpgsqlConnection storeConnection,
+        ServerRuntime server,
+        string databaseName,
+        string collectorName,
+        CollectorContext context,
+        int commandTimeoutSeconds,
+        List<TRow> batch,
+        CancellationToken cancellationToken)
+    {
+        /* #2210: this database's plan-XML fetch, right after its runtime-stats read. A separate
+           query on purpose - it ships in plan_id order, so a budget cut truncates a SUFFIX,
+           which is the only reason the watermark can advance from a cut pass at all. */
+        /* `is SqlConnection` rather than a bare cast, and it does two jobs (merge resolution
+           against #2213's provider seam): the connection here is a provider-neutral
+           DbConnection now, and this fetch is Query-Store-only, so the pattern narrows the
+           type the signature needs AND gates the engine in one expression that cannot drift
+           from either. The enumerated path serves PostgreSQL targets since #2213; query_store
+           declares TargetEngine = SqlServer so it never reaches here for one, but relying on
+           the catalog for that would be an invariant held somewhere else. */
+        if (context.CapturePlanXml && targetConnection is SqlConnection planFetchConnection)
+        {
+            /* #2312 investigation: timed so the log split can say whether the invariant
+               per-cycle cost lives HERE rather than in the payload - a 0-row cycle's
+               blended sql: could not distinguish them. */
+            /* #2854: stamped from finally. This one is the PARENT of the sub-split #2816
+               already fixed, which makes a bare stamp here worse than the defect it fixed:
+               probe/target/write stamp from their own handlers and report real values, so a
+               throwing fetch printed plan_fetch:0ms above non-zero children. PlanFetchOtherMs
+               then clamps a negative residual to zero and the line reads as precise while
+               being arithmetically impossible. */
+            var planFetchWatch = Stopwatch.StartNew();
+            try
+            {
+                await FetchAndStorePlansAsync(planFetchConnection, storeConnection,
+                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractPlanReferences(batch), cancellationToken);
+            }
+            finally
+            {
+                context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
+            }
+        }
+
+        /* #2150: and this database's statement-text fetch, for the same reason and with the
+           same shape - the payload no longer carries query_sql_text, because selecting it
+           inside the shipping TOP/ORDER BY made a Top-N Sort materialize nvarchar(max) text
+           for the whole qualifying set (measured 4.67s vs 0.45s time-to-first-row). Ships in
+           query_id order so a budget cut is a suffix, which is what lets the watermark
+           advance from a cut pass.
+
+           Gated on the same flag the payload branches on, so the two can never disagree
+           about who owns the text: if the column is nulled, this runs. */
+        if (context.FetchQueryTextSeparately && targetConnection is SqlConnection textFetchConnection)
+        {
+            /* #2312 investigation: same split as the plan fetch above. */
+            /* #2854: stamped from finally, same parent/child inconsistency as the plan fetch. */
+            var textFetchWatch = Stopwatch.StartNew();
+            try
+            {
+                await FetchAndStoreQueryTextAsync(textFetchConnection, storeConnection,
+                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractTextReferences(batch), cancellationToken);
+            }
+            finally
+            {
+                context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Zeroes the plan-fetch and text-fetch readings on a context that is reused from one database to the next.
+    /// Called before each database is read, by both the enumerated per-item read and the Azure per-database loop,
+    /// so a database whose fetch is skipped or faults early cannot hand the previous database's split to the log
+    /// line or to the run's fetch sums as its own.
+    /// </summary>
+    private static void ClearFetchPhaseStamps(CollectorContext context)
+    {
+        context.PerItemPlanFetchMs = 0;
+        context.PerItemTextFetchMs = 0;
+        context.PerItemPlanRenderedRows = 0;
+        context.PerItemPlanRenderedBytes = 0;
+
+        /* #2811: the sub-phases clear on the SAME rule as their parents, and for the same
+           reason - an item whose fetch faults before setting them must not print the previous
+           database's split as its own. A stale sub-split is worse than a stale total, because
+           it looks precise. */
+        context.PerItemPlanProbeMs = 0;
+        context.PerItemPlanTargetMs = 0;
+        context.PerItemPlanWriteMs = 0;
+        context.PerItemPlanChunks = 0;
+        context.PerItemPlanIdsAttempted = 0;
+        context.PerItemPlanProbeIds = 0;
+        context.PerItemTextProbeMs = 0;
+        context.PerItemTextTargetMs = 0;
+        context.PerItemTextWriteMs = 0;
+        context.PerItemTextChunks = 0;
+        context.PerItemTextIdsAttempted = 0;
+        context.PerItemTextProbeIds = 0;
+    }
+
+    /// <summary>
+    /// The plan-fetch and text-fetch sub-split lines for one database, each only when that fetch actually ran.
+    /// They ride their OWN lines rather than nesting inside the per-database row line, because that line is parsed
+    /// by tooling outside this repo and "don't break the parser" outranks "one line to grep". A text-only pass
+    /// prints one line and a collector that never fetches prints none. Debug, like the line they decompose (#3102).
+    /// </summary>
+    private void LogFetchPhaseSplits(ServerRuntime server, string collectorName, string databaseName, CollectorContext context)
+    {
+        if (context.PerItemPlanFetchMs > 0)
+        {
+            _logger?.LogDebug("  [{Server}] {Collector} [{Database}] plan_fetch:{PlanFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
+                server.Config.DisplayName, collectorName, databaseName, context.PerItemPlanFetchMs,
+                context.PerItemPlanProbeMs, context.PerItemPlanTargetMs, context.PerItemPlanWriteMs,
+                context.PlanFetchOtherMs, context.PerItemPlanChunks, context.PerItemPlanIdsAttempted,
+                context.PerItemPlanProbeIds);
+        }
+
+        if (context.PerItemTextFetchMs > 0)
+        {
+            _logger?.LogDebug("  [{Server}] {Collector} [{Database}] text_fetch:{TextFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
+                server.Config.DisplayName, collectorName, databaseName, context.PerItemTextFetchMs,
+                context.PerItemTextProbeMs, context.PerItemTextTargetMs, context.PerItemTextWriteMs,
+                context.TextFetchOtherMs, context.PerItemTextChunks, context.PerItemTextIdsAttempted,
+                context.PerItemTextProbeIds);
         }
     }
 
@@ -5118,8 +5832,11 @@ public sealed class DarlingCollectorRunner
                 IReadOnlyList<long> landed;
                 try
                 {
+                    /* #4348: the cycle's statement-filter session, so the writer's counters join the cycle's
+                       statement_scrub_* measurements. The writer drops a row the session could not judge. */
                     landed = await QueryStorePlanWriter.WriteAsync(
-                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, context.BeginStatementScrub(),
+                        cancellationToken);
                 }
                 finally
                 {
@@ -5480,8 +6197,11 @@ public sealed class DarlingCollectorRunner
                 IReadOnlyList<long> landed;
                 try
                 {
+                    /* #4348: the cycle's statement-filter session, so the writer's counters join the cycle's
+                       statement_scrub_* measurements. The writer drops a row the session could not judge. */
                     landed = await QueryStoreTextWriter.WriteAsync(
-                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, context.BeginStatementScrub(),
+                        cancellationToken);
                 }
                 finally
                 {
@@ -6054,7 +6774,8 @@ RETURNING s.state_key";
 
     /// <summary>
     /// The read behind <see cref="GetLastCollectedTimeForDatabaseAsync"/>, plus whether it succeeded: a null
-    /// from a failed read must never be cached as "no rows".
+    /// from a failed read must never be cached as "no rows". The Query Store cache's seed uses its twin,
+    /// <see cref="ReadLastCollectedTimeAndWitnessForDatabaseAsync"/>, which also returns the witness.
     /// </summary>
     internal async Task<(DateTime? Value, bool Succeeded)> ReadLastCollectedTimeForDatabaseAsync(
         int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
@@ -6066,8 +6787,9 @@ RETURNING s.state_key";
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             /* #4197: same probe-then-confirm as the server-scoped twins. collectedSince non-null (Azure
-               SQL DB's query_store clamp) is unchanged; null now bounds to RecentWatermarkWindow first and
-               falls back to the true unbounded read only on a miss, instead of skipping straight to it. */
+               SQL DB's query_store clamp) is unchanged; null now bounds to RecentWatermarkWindow first, then
+               (#5515) to WidenedWatermarkWindow, and falls back to the true unbounded read only on a second
+               miss, instead of skipping straight to it. */
             var autoWindow = collectedSince is null;
             var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
 
@@ -6091,6 +6813,23 @@ RETURNING s.state_key";
 
             if (autoWindow)
             {
+                /* #5515: the same second rung as the server-scoped twin. A database whose newest row is days old
+                   (a quiet Azure database's last deadlock or blocked-process report) missed the 6 h probe on
+                   every cycle and paid the unbounded read each time, per database; the week answers it. */
+                using (var widened = new NpgsqlCommand(sql, connection))
+                {
+                    widened.CommandTimeout = CommandTimeoutSeconds;
+                    widened.Parameters.AddWithValue(serverId);
+                    widened.Parameters.AddWithValue(databaseName);
+                    widened.Parameters.AddWithValue(DateTime.SpecifyKind(
+                        DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
+                    var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
+                    if (widenedResult is DateTime widenedDt)
+                    {
+                        return (widenedDt, true);
+                    }
+                }
+
                 using var fallback = new NpgsqlCommand(
                     BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: false), connection);
                 fallback.CommandTimeout = CommandTimeoutSeconds;
@@ -6117,6 +6856,48 @@ RETURNING s.state_key";
                 serverId, databaseName, tableName, columnName, ex.Message);
         }
         return (null, !failed);
+    }
+
+    /// <summary>
+    /// The seed read for the per-database Query Store watermark cache (#4749): the bounded read behind
+    /// <see cref="ReadLastCollectedTimeForDatabaseAsync"/> (same bound, same failure handling), plus the
+    /// witness, the newest <c>collection_time</c> among the rows at the returned value inside the bound. It is
+    /// the row's own stamp and never this read's time, which is an upper bound and would keep serving the
+    /// value after its row left the floor. A null value has a null witness, and a failed read reports
+    /// <c>Succeeded</c> false so a null from it is never cached as "no rows".
+    /// </summary>
+    internal async Task<(DateTime? Value, DateTime? Witness, bool Succeeded)> ReadLastCollectedTimeAndWitnessForDatabaseAsync(
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
+        DateTime collectedSince, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            using var command = new NpgsqlCommand(
+                BuildServerWatermarkWithWitnessForDatabaseSql(tableName, columnName, databaseColumnName), connection);
+            command.CommandTimeout = CommandTimeoutSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(databaseName);
+            /* Naive like every other timestamp bound in this store (#1969). */
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(collectedSince, DateTimeKind.Unspecified));
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken) && reader.GetValue(0) is DateTime value)
+            {
+                return (value, reader.GetValue(1) as DateTime?, true);
+            }
+
+            return (null, null, true);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(
+                "Per-database watermark read failed for server {ServerId} database {Database} on "
+                + "{Table}.{Column} — falling back to the collector's default window, which re-collects "
+                + "data already stored: {Message}",
+                serverId, databaseName, tableName, columnName, ex.Message);
+            return (null, null, false);
+        }
     }
 
     /// <summary>
@@ -6151,6 +6932,22 @@ RETURNING s.state_key";
                 if (result is not null && result != DBNull.Value)
                 {
                     return Convert.ToInt64(result);
+                }
+            }
+
+            /* #5515: the week between the recent window and the whole slice, as in GetLastCollectedTimeAsync. The
+               same bounded statement with an older bound. */
+            using (var widened = new NpgsqlCommand(
+                BuildServerWatermarkInstanceIdSql(tableName, columnName, bounded: true), connection))
+            {
+                widened.CommandTimeout = CommandTimeoutSeconds;
+                widened.Parameters.AddWithValue(serverId);
+                widened.Parameters.AddWithValue(DateTime.SpecifyKind(
+                    DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
+                var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
+                if (widenedResult is not null && widenedResult != DBNull.Value)
+                {
+                    return Convert.ToInt64(widenedResult);
                 }
             }
 
@@ -6230,7 +7027,120 @@ RETURNING s.state_key";
            reaches this same path — see the remarks on ServerWatermarkCache.InvalidateServer). */
         _watermarkCache.InvalidateServer(serverId);
         _databaseWatermarkCache.InvalidateServer(serverId);
+
+        /* #4961: the legacy session's record is read again at the next full pass, and the line about an older install's
+           session is logged again, once per connect. */
+        _legacyLongQuery?.OnServerReconnected(serverId);
     }
+
+    /// <summary>
+    /// The choice this install has made for each deadlock and blocked-process session in each Azure SQL Database it monitors
+    /// (#4961): the shared session, or its own. The ensure sets it and the per-database read takes its name from it. In
+    /// memory only: a restart starts every database at the shared session, and the first ensure sets it again.
+    /// </summary>
+    internal AlwaysOnXeChoices AlwaysOnChoices { get; } = new();
+
+    /// <summary>This install's own session of the capture, or null when the runner has no install id to make it from.</summary>
+    internal string? AlwaysOnOwnSessionName(AlwaysOnXeSessionKind kind) =>
+        AlwaysOnXeSessions.TryOwnNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallId, kind);
+
+    /// <summary>
+    /// The session a read of the capture names in one Azure SQL Database: this install's own when the ensure fell back to it
+    /// there, else the shared name.
+    /// </summary>
+    internal string AlwaysOnReadSessionName(ServerRuntime server, string databaseName, AlwaysOnXeSessionKind kind) =>
+        AlwaysOnChoices.NameFor(DarlingAlwaysOnXeSessions.ServerKey(server), databaseName, kind, AlwaysOnOwnSessionName(kind));
+
+    /// <summary>
+    /// Replaces the connection to one Azure SQL Database for the always-on sessions' ensure: the server and the database. The
+    /// ensure's decisions then run against what it returns, in place of a server. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, CancellationToken, Task<IAlwaysOnXeDatabase>>? AlwaysOnXeDatabaseForTests { get; set; }
+
+    /// <summary>
+    /// A test replaces each connection the always-on sessions' ensure would open to one Azure SQL Database, below
+    /// <see cref="AlwaysOnXeDatabaseForTests"/> (which wins when both are set): the server, the database, and the connection
+    /// string the open would use, so a test sees whether each statement goes over a connection with read-only intent (#4961).
+    /// Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, string, CancellationToken, Task<IAlwaysOnXeDatabase>>? AlwaysOnXeConnectionForTests { get; set; }
+
+    /// <summary>
+    /// Replaces the whole always-on ensure of one server, which otherwise opens a connection to it: a test counts the calls.
+    /// Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, CancellationToken, Task>? XeEnsureOverrideForTests { get; set; }
+
+    /// <summary>Replaces the engine target provider resolved for a run. Null in production.</summary>
+    internal Func<CollectorTargetInfo, ITargetProvider>? TargetProviderOverrideForTests { get; set; }
+
+    /// <summary>Replaces the Azure per-database list. Null in production.</summary>
+    internal Func<ServerRuntime, CancellationToken, Task<List<string>>>? AzureDatabaseListOverrideForTests { get; set; }
+
+    /// <summary>
+    /// Replaces the database list the long-query trace reads on Azure SQL Database. Called with <c>allDatabases</c> true
+    /// for every online database, false for the monitored ones narrowed by the given database scope. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, bool, IReadOnlyList<string>?, CancellationToken, Task<List<string>>>? LongQueryTraceListOverrideForTests { get; set; }
+
+    /// <summary>
+    /// Replaces the long-query trace's work in one Azure SQL Database database: called with <c>create</c> true to create
+    /// the session there, false to drop it. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, bool, string, CancellationToken, Task>? LongQueryTraceDatabaseOverrideForTests { get; set; }
+
+    /// <summary>
+    /// Replaces where the one-time legacy drop keeps its record (<see cref="ILegacyLongQueryRecords"/>), so a test that never
+    /// opens the store has one. Set before the first reconcile. Null in production.
+    /// </summary>
+    internal ILegacyLongQueryRecords? LegacyLongQueryRecordsForTests { get; set; }
+
+    private DarlingLegacyLongQuerySession? _legacyLongQuery;
+
+    /// <summary>
+    /// The one-time drop of the long-query session older versions shared between installs, and what it remembers of its
+    /// record for each registration (#4961). Built on first use, over the store.
+    /// </summary>
+    internal DarlingLegacyLongQuerySession LegacyLongQuery =>
+        LazyInitializer.EnsureInitialized(ref _legacyLongQuery, () => new DarlingLegacyLongQuerySession(LegacyLongQueryRecordsForTests ?? new StoreLegacyLongQueryRecords(_postgres)))!;
+
+    /// <summary>
+    /// Replaces the question the create path asks in the same batch as its existence check: whether the legacy session is in
+    /// the database (the empty name is the server). Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, CancellationToken, Task<bool>>? LegacyLongQueryPresentForTests { get; set; }
+
+    /// <summary>
+    /// Replaces one open-and-act step of the long-query trace's create, below
+    /// <see cref="LongQueryTraceDatabaseOverrideForTests"/>, which wins when both are set (#4961). Called with the server,
+    /// the database (empty for the server's own session), the connection string the step would open, the step, and the
+    /// session name. A test sees which connection each step uses, with or without read-only intent. The step's work is
+    /// not done. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, string, LongQueryTraceStep, string, CancellationToken, Task>? LongQueryTraceStepOverrideForTests { get; set; }
+
+    /// <summary>
+    /// Replaces what the read-only-intent ensure's <see cref="LongQueryTraceStep.Check"/> reads on the replica, with
+    /// <see cref="LongQueryTraceStepOverrideForTests"/> set (#4961): called with the server and the database, answers whether the
+    /// session's definition is visible and whether it runs there. Unset, the stand-in finds neither, as in a database that has
+    /// never had the session. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, LongQueryTraceReplicaState>? LongQueryTraceReplicaStateForTests { get; set; }
+
+    /// <summary>
+    /// The databases the long-query trace works in on Azure SQL Database. With <paramref name="allDatabases"/>, every
+    /// online database with no exclusions and no scope; otherwise the monitored ones, narrowed by
+    /// <paramref name="databaseScope"/>. A registration that names a database gets that database either way.
+    /// </summary>
+    internal async Task<List<string>> ListLongQueryTraceDatabasesAsync(ServerRuntime server, bool allDatabases, IReadOnlyList<string>? databaseScope, CancellationToken cancellationToken) =>
+        LongQueryTraceListOverrideForTests is { } listOverride
+            ? await listOverride(server, allDatabases, allDatabases ? null : databaseScope, cancellationToken)
+            : allDatabases
+                ? await GetAzureDatabaseListAsync(server, databaseScope: null, applyExclusions: false, cancellationToken)
+                : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
+
+    /// <summary>Called with the database name just before its batch is written, inside the loop's try. Null in production.</summary>
+    internal Action<string>? PerDatabaseWriteFaultForTests { get; set; }
 
     /// <summary>
     /// The databases one Azure SQL DB registration's per-database sweep covers.
@@ -6250,7 +7160,15 @@ RETURNING s.state_key";
     /// server into whichever registration ran the sweep — N registrations of N databases meant N² collection
     /// with every registration's history contaminated by its siblings'.</para>
     /// </summary>
-    internal async Task<List<string>> GetAzureDatabaseListAsync(ServerRuntime server, IReadOnlyList<string>? databaseScope, CancellationToken cancellationToken)
+    internal Task<List<string>> GetAzureDatabaseListAsync(ServerRuntime server, IReadOnlyList<string>? databaseScope, CancellationToken cancellationToken) =>
+        GetAzureDatabaseListAsync(server, databaseScope, applyExclusions: true, cancellationToken);
+
+    /// <summary>
+    /// <see cref="GetAzureDatabaseListAsync(ServerRuntime, IReadOnlyList{string}, CancellationToken)"/>, with a choice about the
+    /// server's excluded databases. The long-query trace's drop passes <paramref name="applyExclusions"/> false: a session
+    /// created before a database was excluded must still be dropped there.
+    /// </summary>
+    internal async Task<List<string>> GetAzureDatabaseListAsync(ServerRuntime server, IReadOnlyList<string>? databaseScope, bool applyExclusions, CancellationToken cancellationToken)
     {
         var targetDb = new SqlConnectionStringBuilder(server.ConnectionString).InitialCatalog;
 
@@ -6292,8 +7210,7 @@ RETURNING s.state_key";
         /* The query and the hop to master both come from the provider, so the enumeration set is defined
            in exactly one place per engine. What stays here is the failure policy below, which is the
            part that is genuinely Azure-specific. */
-        var (masterConnectionString, enumerationQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
-            server.ConnectionString, server.Config.ExcludedDatabases, databaseScope);
+        var (masterConnectionString, enumerationQuery) = AzureDatabaseListPlan(server, databaseScope, applyExclusions);
 
         var databases = new List<string>();
         try
@@ -6316,9 +7233,22 @@ RETURNING s.state_key";
         {
             _azureMasterInaccessibleSince[server.ServerId] = DateTime.UtcNow;
 
-            return FallbackDatabaseList(server, targetDb, reason: $"master DB inaccessible (SQL error {ex.Number})");
+            return FallbackDatabaseList(
+                server, targetDb, reason: $"master DB inaccessible (SQL error {ex.Number})",
+                errorNumber: ex.Number, serverMessage: ex.Message);
         }
     }
+
+    /// <summary>
+    /// The master hop and the enumeration query behind <see cref="GetAzureDatabaseListAsync(ServerRuntime, IReadOnlyList{string}, bool, CancellationToken)"/>.
+    /// The server's excluded databases are in the query only when <paramref name="applyExclusions"/> is true, so a drop that
+    /// passes false lists the databases the registration excludes too. Its own member so a test reads the query, not a stand-in
+    /// for the list.
+    /// </summary>
+    internal static (string ConnectionString, CollectorQuery Query) AzureDatabaseListPlan(
+        ServerRuntime server, IReadOnlyList<string>? databaseScope, bool applyExclusions) =>
+        SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
+            server.ConnectionString, applyExclusions ? server.Config.ExcludedDatabases : null, databaseScope);
 
     /// <summary>
     /// True while a recent master-inaccessible verdict still stands. It expires so a server whose
@@ -6331,7 +7261,7 @@ RETURNING s.state_key";
             return false;
         }
 
-        if (DateTime.UtcNow - deniedAt < AzureMasterRecheckInterval)
+        if (!CollectorCadence.IntervalElapsed(deniedAt, DateTime.UtcNow, AzureMasterRecheckInterval))
         {
             return true;
         }
@@ -6351,16 +7281,20 @@ RETURNING s.state_key";
     /// Set on the throttled path, which runs for every database-scoped collector on every cycle. Only
     /// forming the verdict is worth an Information line; re-reading it is not.
     /// </param>
-    private List<string> FallbackDatabaseList(ServerRuntime server, string? targetDb, string reason, bool quiet = false)
+    internal List<string> FallbackDatabaseList(
+        ServerRuntime server, string? targetDb, string reason, bool quiet = false,
+        int? errorNumber = null, string? serverMessage = null)
     {
         var fallback = SingleDbOrEmpty(targetDb);
 
         if (fallback.Count == 0)
         {
-            throw new InvalidOperationException(
-                $"{reason}, and this connection has no target database to fall back to (it resolves to " +
-                $"master). Set a database for '{server.Config.DisplayName}' so database-scoped collectors " +
-                $"have something to read.");
+            /* #5498: the firewall comes first. #5647: 40615 means the server's firewall did not allow the
+               client's IP address, which a missing database setting never causes, so the message leads with the
+               firewall and then offers the set-a-database fix for a client allowed only by a database-level rule
+               in a user database. Text only: the fallback itself is unchanged. */
+            throw new InvalidOperationException(AzureMasterFallbackMessage.Build(
+                reason, errorNumber, serverMessage, server.Config.DisplayName, "database"));
         }
 
         if (quiet)
@@ -6382,6 +7316,368 @@ RETURNING s.state_key";
             SqlServerTargetProvider.Instance, server, databaseName, cancellationToken);
 
     /// <summary>
+    /// #5158: the second half of a deferred query_stats read. The main query returned stats rows with no plan; this
+    /// gives each row its plan, rendering on the monitored server only the plans this host has not already committed.
+    ///
+    /// <para>A row whose identity (<see cref="QueryStatsPlanKey"/>) is in the host's cache carries the cached digest and
+    /// measured size, so the writer stores the digest and no plan text crosses the wire. A plan over the capture cap
+    /// is cached with a null digest: its rows carry the size and a NULL plan, and it is not rendered again. The
+    /// rest go to <see cref="QueryStatsCollector.BuildPlanFetchQuery"/>, one call (split above
+    /// <see cref="QueryStatsCollector.MaxPlanFetchKeys"/> keys), on the same connection as the main read. A plan
+    /// whose handle aged out between the two queries comes back with no plan and no size, the pairing the inline form
+    /// gives for the same case, and is not cached.</para>
+    ///
+    /// <para>A fetch that fails ships the rows without plans and does not fail the run: the plans not yet fetched
+    /// are fetched again next cycle. A chunk that fails keeps what the chunks before it already rendered (those
+    /// rows carry their plans, and their keys are returned as pending like any other); it caches nothing for the
+    /// failed chunk or any after it. A stop or the item budget expiring is not a fetch failure and propagates.
+    /// What this run rendered is returned as pending keys: they are confirmed after the batch commits, or discarded.</para>
+    ///
+    /// <para><b>Timing.</b> The fetch loop runs after the main read, inside the same <c>sql:</c> slice but outside
+    /// the drain, so it has its own stopwatch: <see cref="CollectorContext.PerItemPlanFetchMs"/> and the
+    /// <c>plan_fetch_ms</c> measurement carry it, beside <c>plans_rendered</c> and <c>plans_rendered_bytes</c>, which are
+    /// rendered from <see cref="CollectorContext.PerItemPlanRenderedRows"/> and
+    /// <see cref="CollectorContext.PerItemPlanRenderedBytes"/>. A run with misses records the loop's elapsed
+    /// milliseconds; a run with none records 0, because it ran no fetch.</para>
+    ///
+    /// <para><b>Accepted race.</b> A statement recompile between the main query and this fetch can render the new
+    /// plan and store its digest under the old identity (<c>creation_time</c>, <c>plan_generation_num</c>). That
+    /// pairing is wrong for that one run's row only: the old identity leaves <c>dm_exec_query_stats</c> with the
+    /// recompile, so nothing reads it again, and the cache prunes it after an hour. The inline form has the same
+    /// race in a smaller window.</para>
+    /// </summary>
+    private async Task<List<QueryStatsPlanKey>> FetchDeferredQueryStatsPlansAsync(
+        ITargetProvider provider,
+        DbConnection targetConnection,
+        ServerRuntime server,
+        CollectorContext context,
+        List<QueryStatsCollector.Row> rows,
+        CancellationToken cancellationToken)
+    {
+        var cache = _queryStatsPlanCaches.GetOrAdd(server.ServerId, static _ => new PlanDigestCache<QueryStatsPlanKey>());
+        var pending = new List<QueryStatsPlanKey>();
+        var now = DateTime.UtcNow;
+
+        cache.Prune(now - QueryStatsPlanCacheMaxAge);
+
+        var misses = new List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)>();
+        foreach (var row in rows)
+        {
+            if (QueryStatsPlanKey.TryCreate(server.ServerId, row) is not { } key)
+            {
+                continue;
+            }
+
+            if (cache.TryGet(key, now, out var hit))
+            {
+                /* The cached size rides along with the digest, so a reused row is the row it always was. A null
+                   digest is an over-cap plan: the size and no plan, the pairing the inline capture produces. */
+                row.KnownPlanDigest = hit.Digest;
+                row.QueryPlanXmlBytes = hit.Bytes;
+            }
+            else
+            {
+                misses.Add((key, row));
+            }
+        }
+
+        if (BetweenPlanPhasesForTests is { } hook)
+        {
+            await hook(cancellationToken);
+        }
+
+        var renderedRows = 0;
+        long renderedBytes = 0;
+        var fetchWatch = Stopwatch.StartNew();
+        if (misses.Count == 0)
+        {
+            /* Nothing to render: no fetch ran, so the stamps read 0 and the measurements say so. */
+            fetchWatch.Stop();
+            StampPlanFetch(context, 0, 0, 0);
+            return pending;
+        }
+
+        try
+        {
+            for (var offset = 0; offset < misses.Count; offset += QueryStatsCollector.MaxPlanFetchKeys)
+            {
+                var chunk = misses.GetRange(offset, Math.Min(QueryStatsCollector.MaxPlanFetchKeys, misses.Count - offset));
+                var query = QueryStatsCollector.BuildPlanFetchQuery(context, chunk.ConvertAll(m => m.Key.ToFetchKey()));
+
+                Dictionary<int, (string? PlanXml, long? Bytes)> fetched;
+                var unjudged = new HashSet<int>();
+                using (var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds))
+                using (var planReader = await command.ExecuteReaderAsync(cancellationToken))
+                {
+                    /* #4348: one filter session per fetch call; the digest below is taken from the FILTERED plan. */
+                    fetched = await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), cancellationToken, unjudged);
+                }
+
+                foreach (var (ord, result) in fetched)
+                {
+                    var (key, row) = chunk[ord];
+                    if (result.PlanXml is null && result.Bytes is null)
+                    {
+                        /* Aged out between the two queries: no plan and no size, and nothing worth caching. */
+                        continue;
+                    }
+
+                    row.QueryPlanXmlBytes = result.Bytes;
+                    renderedRows++;
+                    renderedBytes += result.Bytes ?? 0;
+
+                    if (result.PlanXml is null)
+                    {
+                        /* Over the cap: the size, a NULL plan, and an entry that stops the next run rendering it again. */
+                        cache.AddPending(key, null, result.Bytes, now);
+                    }
+                    else if (unjudged.Contains(ord))
+                    {
+                        /* #4348: the filter's budget ran out before or during this plan. This row stores the marker; nothing
+                           is cached and nothing is pending, so the next cycle fetches and filters the plan again with a
+                           fresh budget instead of answering from a cached marker digest. A plan withheld whole for its own
+                           sake (its judge threw, it cannot be parsed) is not in this set: it fails the same way every
+                           cycle, so it is recorded like any fetched plan and the next cycle's dedup sees it (A-L4). */
+                        row.QueryPlanXml = result.PlanXml;
+                        continue;
+                    }
+                    else
+                    {
+                        row.QueryPlanXml = result.PlanXml;
+                        var digest = Convert.ToHexString(
+                            PayloadDimensions.Digest(PgCollectorRowWriter.StripEmbeddedNuls(result.PlanXml)));
+                        cache.AddPending(key, digest, result.Bytes, now);
+                    }
+
+                    pending.Add(key);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException
+                                   && !cancellationToken.IsCancellationRequested)
+        {
+            _logger?.LogWarning(
+                ex,
+                "{Collector} on '{Server}': the plan fetch failed, so this run's rows ship without plans for the plans not yet stored; they are fetched again next cycle (#5158).",
+                QueryStatsCollector.Instance.Name, server.Config.DisplayName);
+        }
+        finally
+        {
+            fetchWatch.Stop();
+            StampPlanFetch(context, renderedRows, renderedBytes, fetchWatch.ElapsedMilliseconds);
+        }
+
+        return pending;
+    }
+
+    /// <summary>
+    /// #5158: records one deferred fetch on the context, then renders the run's measurements FROM the context, so the
+    /// stamp is the single source and the collection_log note only reads it. <c>PerItemPlanFetchMs</c> is "inside
+    /// <c>sql:</c>, not drain"; a procedure_stats change that shares these names will stamp the same fields.
+    /// </summary>
+    internal static void StampPlanFetch(CollectorContext context, int renderedRows, long renderedBytes, long fetchMs)
+    {
+        context.PerItemPlanRenderedRows = renderedRows;
+        context.PerItemPlanRenderedBytes = renderedBytes;
+        context.PerItemPlanFetchMs = fetchMs;
+        context.Measure("plans_rendered", context.PerItemPlanRenderedRows);
+        context.Measure("plans_rendered_bytes", context.PerItemPlanRenderedBytes);
+        context.Measure("plan_fetch_ms", context.PerItemPlanFetchMs);
+    }
+
+    /// <summary>
+    /// #5449: procedure_stats' plan phase. Runs one second target query for the first
+    /// <see cref="ProcedureStatsCollector.MaxPlansPerRun"/> kept rows with a parsable plan handle, on the main read's
+    /// connection and inside its budget, and merges each row's plan and identity onto it. Closes the main reader first (one
+    /// command at a time on the connection), as the deferred fetch does. A failed query ships every row without plans and
+    /// marks them all skipped, so the reuse pass counts no miss and caches nothing; the plans are fetched again next
+    /// cycle. A stop or the item budget expiring is not a phase failure and propagates. Returns the phase's milliseconds,
+    /// 0 when no query ran.
+    /// </summary>
+    internal async Task<long> RunProcedureStatsPlanPhaseAsync(
+        ITargetProvider provider,
+        DbDataReader mainReader,
+        DbConnection targetConnection,
+        ServerRuntime server,
+        CollectorContext context,
+        List<ProcedureStatsCollector.Row> rows,
+        CancellationToken cancellationToken)
+    {
+        var indexes = ProcedureStatsCollector.SelectPlanPhaseRows(rows, out var handles);
+        if (indexes.Count == 0)
+        {
+            ProcedureStatsCollector.ApplyPlanPhase(rows, indexes, new Dictionary<int, ProcedureStatsCollector.PlanPhaseResult>());
+            return 0;
+        }
+
+        await mainReader.CloseAsync();
+        var watch = Stopwatch.StartNew();
+        Dictionary<int, ProcedureStatsCollector.PlanPhaseResult>? results = null;
+        try
+        {
+            var query = ProcedureStatsCollector.BuildPlanPhaseQuery(context, handles);
+            using var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds);
+            using var phaseReader = await command.ExecuteReaderAsync(cancellationToken);
+            results = await ProcedureStatsCollector.ReadPlanPhaseAsync(phaseReader, context, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException
+                                   && !cancellationToken.IsCancellationRequested)
+        {
+            _logger?.LogWarning(
+                ex,
+                "{Collector} on '{Server}': the plan query failed, so this run's rows ship without plans; they are fetched again next cycle (#5449).",
+                ProcedureStatsCollector.Instance.Name, server.Config.DisplayName);
+        }
+
+        ProcedureStatsCollector.ApplyPlanPhase(rows, indexes, results);
+        return Math.Max(1L, watch.ElapsedMilliseconds);
+    }
+
+    /// <summary>
+    /// #5449: Off mode renders plans in the plan phase and has no reuse pass, so the run stamps what the phase rendered
+    /// (the rows that carry a plan or a size) and how long it took. A phase that failed leaves no row with a plan, so the
+    /// stamp reads zero rendered rows and still records the phase's milliseconds.
+    /// </summary>
+    internal static void StampProcedureStatsOffPlanPhase(
+        CollectorContext context, List<ProcedureStatsCollector.Row> rows, long planPhaseMs)
+    {
+        var renderedRows = 0;
+        long renderedBytes = 0;
+        foreach (var row in rows)
+        {
+            if (row.QueryPlanXml is not null || row.QueryPlanXmlBytes is not null)
+            {
+                renderedRows++;
+                renderedBytes += row.QueryPlanXmlBytes ?? 0;
+            }
+        }
+
+        StampPlanFetch(context, renderedRows, renderedBytes, planPhaseMs);
+    }
+
+    /// <summary>The cache a server's procedure_stats runs have filled so far, for a test to confirm and inspect.</summary>
+    internal PlanDigestCache<ProcedureStatsPlanKey>? ProcedureStatsPlanCacheForTests(int serverId) =>
+        _procedureStatsPlanCaches.TryGetValue(serverId, out var cache) ? cache : null;
+
+    /// <summary>
+    /// #5158: procedure_stats' plan reuse, after the main read. In shadow the rows already carry their inline plans (from the #5449 plan phase), and
+    /// this only measures whether each module plan's identity (<see cref="ProcedureStatsPlanKey"/>) would have been
+    /// recognized and right; nothing written changes. In on the rows carry no plan: recognized identities get their stored
+    /// digest, and on a cycle the cadence gate lets render, the others are rendered in one second query on this same
+    /// connection, inside the same wall-clock budget, at most <see cref="ProcedureStatsPlanReuse.MaxMissesPerRun"/>.
+    ///
+    /// <para>What this pass counts goes into the run's collection-log note beside <c>plans_rendered</c>:
+    /// <c>deferred_would_hit</c>, <c>deferred_false_hit</c> (the plan's shape changed, or could not be compared; split into <c>deferred_false_hit_shape</c>,
+    /// <c>_no_shape</c>, <c>_over_cap</c> and <c>_unparsed</c>, which sum to it), <c>deferred_same_shape</c> (the shape held; in the field
+    /// only the memory grant moved) and <c>deferred_miss</c> in shadow, <c>deferred_hit</c> and
+    /// <c>deferred_miss</c> in on. A failed second query ships the rows it covered without plans, caches nothing, and does
+    /// not fail the run. Returns the keys to confirm after the batch commits, or discard.</para>
+    /// </summary>
+    internal async Task<List<ProcedureStatsPlanKey>> ApplyProcedureStatsPlanReuseAsync(
+        ITargetProvider provider,
+        DbConnection targetConnection,
+        ServerRuntime server,
+        CollectorContext context,
+        List<ProcedureStatsCollector.Row> rows,
+        ProcedureStatsPlanFetchMode mode,
+        CancellationToken cancellationToken,
+        long planPhaseMs = 0)
+    {
+        var cache = _procedureStatsPlanCaches.GetOrAdd(server.ServerId, static _ => new PlanDigestCache<ProcedureStatsPlanKey>());
+        if (_procedureStatsPlanCacheModes.TryGetValue(server.ServerId, out var cachedUnderMode) && cachedUnderMode != mode)
+        {
+            cache.Clear();
+        }
+
+        _procedureStatsPlanCacheModes[server.ServerId] = mode;
+
+        var now = DateTime.UtcNow;
+        cache.Prune(now - ProcedureStatsPlanCacheMaxAge);
+
+        /* The mode the run was STAMPED with, passed in; never re-resolved from the live knob or capture setting. */
+        var shadow = mode == ProcedureStatsPlanFetchMode.Shadow;
+        var captureOrdinal = context.CapturePlanXml
+            ? _procedureStatsCaptureOrdinals.AddOrUpdate(server.ServerId, 1L, static (_, previous) => previous + 1)
+            : _procedureStatsCaptureOrdinals.GetOrAdd(server.ServerId, 0L);
+
+        ProcedureStatsPlanReuse.Outcome outcome;
+        /* #5449: the plan phase's own time is part of the run's plan time, in every mode. */
+        long fetchMs = planPhaseMs;
+        if (shadow)
+        {
+            outcome = ProcedureStatsPlanReuse.ApplyShadow(
+                server.ServerId, cache, rows, captureOrdinal, now,
+                (key, cause) => _logger?.LogWarning(
+                    "procedure_stats on server {ServerId}: a plan identity the cache recognized rendered a different plan this run (a false hit): {Key}. Why: {Reason} (#5158).",
+                    server.ServerId, key, ProcedureStatsPlanReuse.DescribeFalseHit(cause)));
+        }
+        else
+        {
+            if (BetweenPlanPhasesForTests is { } hook)
+            {
+                await hook(cancellationToken);
+            }
+
+            var fetchWatch = Stopwatch.StartNew();
+            var unjudgedOrdinals = new HashSet<int>();
+            outcome = await ProcedureStatsPlanReuse.ApplyOnAsync(
+                server.ServerId, cache, rows, context.CapturePlanXml, captureOrdinal, now,
+                async (handles, token) =>
+                {
+                    var query = ProcedureStatsCollector.BuildPlanFetchQuery(context, handles);
+                    using var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds);
+                    using var planReader = await command.ExecuteReaderAsync(token);
+                    return await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), token, unjudgedOrdinals);
+                },
+                cancellationToken,
+                unjudgedOrdinals);
+            fetchWatch.Stop();
+            fetchMs += fetchWatch.ElapsedMilliseconds;
+
+            if (outcome.FetchFailure is { } failure)
+            {
+                _logger?.LogWarning(
+                    failure,
+                    "{Collector} on '{Server}': the plan fetch failed, so this run's rows ship without plans for the plans not yet stored; they are fetched again next cycle (#5158).",
+                    ProcedureStatsCollector.Instance.Name, server.Config.DisplayName);
+            }
+        }
+
+        /* The same seam query_stats uses, so plans_rendered, plans_rendered_bytes and plan_fetch_ms come from one stamp.
+           Shadow issues no further query after the plan phase, so its fetch time is the plan phase's. */
+        StampPlanFetch(context, outcome.Rendered, outcome.RenderedBytes, fetchMs);
+        if (shadow)
+        {
+            context.Measure("deferred_would_hit", outcome.WouldHit);
+            context.Measure("deferred_false_hit", outcome.FalseHit);
+            context.Measure("deferred_false_hit_shape", outcome.FalseHitShape);
+            context.Measure("deferred_false_hit_no_shape", outcome.FalseHitNoShape);
+            context.Measure("deferred_false_hit_over_cap", outcome.FalseHitOverCap);
+            context.Measure("deferred_false_hit_unparsed", outcome.FalseHitUnparsed);
+            context.Measure("deferred_same_shape", outcome.SameShape);
+        }
+        else
+        {
+            context.Measure("deferred_hit", outcome.Hit);
+            context.Measure("deferred_over_cap", outcome.OverCap);
+        }
+
+        context.Measure("deferred_miss", outcome.Miss);
+
+        _logger?.LogInformation(
+            "procedure_stats on server {ServerId} ({Mode}, {Cycle} cycle): deferred: {Counters} rendered={Rendered}.",
+            server.ServerId,
+            shadow ? "shadow" : "on",
+            context.CapturePlanXml ? "capture" : "gated",
+            shadow
+                ? $"would_hit={outcome.WouldHit} false_hit={outcome.FalseHit} (shape={outcome.FalseHitShape} no_shape={outcome.FalseHitNoShape} over_cap={outcome.FalseHitOverCap} unparsed={outcome.FalseHitUnparsed}) same_shape={outcome.SameShape} miss={outcome.Miss}"
+                : $"hit={outcome.Hit} miss={outcome.Miss} over_cap={outcome.OverCap}",
+            outcome.Rendered);
+
+        return outcome.Pending;
+    }
+
+    /// <summary>
     /// The connection for a collector that reads the server as a whole — engine-resolved from the probed
     /// target, never constructed directly.
     /// <para>Extracted so it can be PINNED by test. This is the exact seam that broke: the non-per-database
@@ -6391,11 +7687,11 @@ RETURNING s.state_key";
     /// A test that opens nothing and only checks the returned TYPE is enough to catch it, which is why it is
     /// worth having.</para>
     /// </summary>
-    internal static DbConnection CreateTargetConnection(ServerRuntime server)
+    internal static DbConnection CreateTargetConnection(ServerRuntime server, ITargetProvider? provider = null)
     {
         ArgumentNullException.ThrowIfNull(server);
 
-        return TargetProviders.For(server.Target).CreateConnection(server.ConnectionString);
+        return (provider ?? TargetProviders.For(server.Target)).CreateConnection(server.ConnectionString);
     }
 
     /// <summary>

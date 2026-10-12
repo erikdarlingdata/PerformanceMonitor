@@ -79,10 +79,8 @@ public partial class MuteRuleEditDialog : Window
             SelectMetric(context.MetricName);
         if (!string.IsNullOrEmpty(context.DatabaseName))
             DatabasePatternBox.Text = context.DatabaseName;
-        if (!string.IsNullOrEmpty(context.QueryText))
-            QueryTextPatternBox.Text = context.QueryText.Length > 200
-                ? context.QueryText.Substring(0, 200)
-                : context.QueryText;
+        if (context.SeedQueryTextPattern(PerformanceMonitor.Common.SensitiveStatements.Text) is { } seededQueryText)
+            QueryTextPatternBox.Text = seededQueryText;
         if (!string.IsNullOrEmpty(context.WaitType))
             WaitTypePatternBox.Text = context.WaitType;
         if (!string.IsNullOrEmpty(context.JobName))

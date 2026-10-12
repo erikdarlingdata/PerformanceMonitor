@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -73,7 +74,7 @@ public sealed class OverviewLaneBucketingTests : IClassFixture<SharedDuckDbFixtu
         await BulkSeedMemoryAsync(windowStart, days, perDay, cadenceMinutes);
         await BulkSeedWaitAsync(windowStart, days, perDay, cadenceMinutes);
 
-        var cpu = await _dataService.GetCpuUtilizationAsync(ServerId, hoursBack: 24 * 7, utcOffsetMinutes: 0);
+        var cpu = await _dataService.GetCpuUtilizationAsync(ServerId, hoursBack: 24 * 7, serverClock: ServerClock.Utc);
         var memory = await _dataService.GetMemoryTrendAsync(ServerId, hoursBack: 24 * 7);
         var wait = await _dataService.GetTotalWaitTrendAsync(ServerId, hoursBack: 24 * 7);
 
@@ -110,7 +111,7 @@ public sealed class OverviewLaneBucketingTests : IClassFixture<SharedDuckDbFixtu
         await SeedWaitAsync(t2, "CXPACKET", deltaMs: 1500, deltaSignal: 150, deltaTasks: 5, interval: 300);
         await SeedWaitAsync(t3, "CXPACKET", deltaMs: 6000, deltaSignal: 600, deltaTasks: 20, interval: 300);
 
-        var cpu = await _dataService.GetCpuUtilizationAsync(ServerId, hoursBack: 3, utcOffsetMinutes: 0);
+        var cpu = await _dataService.GetCpuUtilizationAsync(ServerId, hoursBack: 3, serverClock: ServerClock.Utc);
         Assert.Equal(new[] { t1, t2, t3 }, cpu.Select(r => r.SampleTime).ToArray());
         Assert.Equal(new[] { 40, 55, 70 }, cpu.Select(r => r.SqlServerCpu).ToArray());
         Assert.Equal(new[] { 5, 6, 7 }, cpu.Select(r => r.OtherProcessCpu).ToArray());

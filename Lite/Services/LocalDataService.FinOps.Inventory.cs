@@ -17,12 +17,16 @@ public partial class LocalDataService
 {
     /// <summary>
     /// Gets the latest database size snapshot per server per file (cross-server).
+    /// <para>#5312: <paramref name="databaseNames"/> is the saved per-server database filter (null or empty = every database,
+    /// the statement as it always read). It narrows the OUTER rows only: the newest snapshot is still the server's newest, so a
+    /// filter never changes which snapshot is read.</para>
     /// </summary>
-    public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId)
+    public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
+        command.CommandText = $@"
 SELECT
     database_name,
     file_type_desc,
@@ -36,17 +40,20 @@ SELECT
     auto_growth_mb,
     is_percent_growth,
     growth_pct,
-    vlf_count
+    vlf_count,
+    file_id
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = (
     SELECT MAX(collection_time)
     FROM v_database_size_stats
     WHERE server_id = $1
-)
+){dbClause}
 ORDER BY database_name, file_type_desc, file_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<DatabaseSizeRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -57,7 +64,9 @@ ORDER BY database_name, file_type_desc, file_name";
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 FileTypeDesc = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 FileName = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                TotalSizeMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
+                /* NULL is the Hyperscale log file (the log service): it stays null, never 0, so the grid shows
+                   n/a (log service) instead of a size and the allocated totals leave it out. */
+                TotalSizeMb = reader.IsDBNull(3) ? null : Convert.ToDecimal(reader.GetValue(3)),
                 UsedSizeMb = reader.IsDBNull(4) ? null : Convert.ToDecimal(reader.GetValue(4)),
                 VolumeMountPoint = reader.IsDBNull(5) ? null : reader.GetString(5),
                 VolumeTotalMb = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6)),
@@ -66,7 +75,9 @@ ORDER BY database_name, file_type_desc, file_name";
                 AutoGrowthMb = reader.IsDBNull(9) ? null : Convert.ToDecimal(reader.GetValue(9)),
                 IsPercentGrowth = reader.IsDBNull(10) ? null : (bool?)(Convert.ToInt32(reader.GetValue(10)) == 1),
                 GrowthPct = reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)),
-                VlfCount = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12))
+                VlfCount = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)),
+                /* NULL is the one row another database on an Azure SQL Database server gets: it has no file id. */
+                FileId = reader.IsDBNull(13) ? null : Convert.ToInt32(reader.GetValue(13))
             });
         }
 
@@ -76,28 +87,36 @@ ORDER BY database_name, file_type_desc, file_name";
     /// <summary>
     /// Gets per-database total allocated and used space for the utilization size chart.
     /// Aggregates across all files per database for the selected server.
+    /// <para>#5312: <paramref name="databaseNames"/> is the saved database filter (null or empty = every database). The top
+    /// <paramref name="topN"/> is taken among the chosen databases; the newest snapshot is still the server's newest.</para>
     /// </summary>
-    public async Task<List<DatabaseSizeSummaryRow>> GetDatabaseSizeSummaryAsync(int serverId, int topN = 10)
+    public async Task<List<DatabaseSizeSummaryRow>> GetDatabaseSizeSummaryAsync(int serverId, int topN = 10, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = @"
+        /* $1 server, $2 topN, so the optional database list starts at $3. */
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 3, out var dbValues);
+        command.CommandText = $@"
 SELECT
     database_name,
     SUM(total_size_mb) AS total_mb,
-    SUM(used_size_mb) AS used_mb
+    /* Used is summed only over the files whose size counts, so used and allocated stay on one footing: the
+       Hyperscale log file (NULL size, the log service) is in neither. */
+    SUM(CASE WHEN total_size_mb IS NOT NULL THEN used_size_mb END) AS used_mb
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = (
     SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1
-)
+){dbClause}
 GROUP BY database_name
 ORDER BY total_mb DESC
 LIMIT $2";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = topN });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<DatabaseSizeSummaryRow>();
         using var reader = await command.ExecuteReaderAsync();

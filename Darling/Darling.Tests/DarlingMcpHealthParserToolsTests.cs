@@ -83,7 +83,11 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
                 .Where(x => x.GetCustomAttribute<DescriptionAttribute>() is not null)
                 .Select(x => (x.Name!, x.HasDefaultValue))
                 .ToArray();
-            Assert.Equal(new[] { "server_name", "hours_back", "limit", "as_of" }, p.Select(x => x.Item1).ToArray());
+            /* #5244 PR6: get_health_parser_severe_errors takes database_name, appended last. */
+            var expected = tool == "get_health_parser_severe_errors"
+                ? new[] { "server_name", "hours_back", "limit", "as_of", "database_name" }
+                : new[] { "server_name", "hours_back", "limit", "as_of" };
+            Assert.Equal(expected, p.Select(x => x.Item1).ToArray());
             Assert.All(p, x => Assert.True(x.Item2, $"{tool}.{x.Item1} must be optional"));
         }
     }
@@ -101,16 +105,6 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
         Assert.Contains("event_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("event_type = $4", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY event_time DESC", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void DatabaseNameMapSql_LatestNamePerId_FromSizeStatsView()
-    {
-        var sql = DarlingSystemHealthReader.DatabaseNameMapSql;
-        Assert.Contains("DISTINCT ON (database_id)", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM v_database_size_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_id, collection_time DESC", sql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -149,7 +143,6 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
 
     [Theory]
     [InlineData(nameof(DarlingSystemHealthReader.SystemHealthEventsByTypeSql))]
-    [InlineData(nameof(DarlingSystemHealthReader.DatabaseNameMapSql))]
     [InlineData(nameof(DarlingSystemHealthReader.LastCaptureSql))]
     [InlineData(nameof(DarlingSystemHealthReader.LastCaptureOfTypeSql))]
     public void Reads_ArePostgresDialect_PositionalParams(string sqlName)
@@ -342,19 +335,6 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
         Assert.Equal("CLEAN", r.State);
         Assert.True(r.EventTime.HasValue);
     }
-
-    [Fact]
-    public void SevereError_DatabaseNameResolution_MatchesViewer()
-    {
-        // Same rules as the viewer's ViewerDataService.ResolveDatabaseName: mapped id → name; 0/null → blank
-        // (no DB context); a real-but-unmapped id surfaces the raw id rather than silently blanking.
-        var map = new Dictionary<int, string> { [5] = "AdventureWorks", [1] = "master" };
-        Assert.Equal("AdventureWorks", DarlingSystemHealthReader.ResolveDatabaseName(5, map));
-        Assert.Equal("master", DarlingSystemHealthReader.ResolveDatabaseName(1, map));
-        Assert.Equal("", DarlingSystemHealthReader.ResolveDatabaseName(0, map));
-        Assert.Equal("", DarlingSystemHealthReader.ResolveDatabaseName(null, map));
-        Assert.Equal("database_id 7", DarlingSystemHealthReader.ResolveDatabaseName(7, map));
-    }
 }
 
 /// <summary>
@@ -405,10 +385,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             await PlantEvent(SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_io_subsystem.xml");
             await PlantEvent(SystemHealthParser.MemoryNodeOomEvent, "memory_node_oom.xml");
 
-            /* database_size_stats maps database_id 6 (the error_reported fixture's id) → a name for severe-error resolution. */
+            /* database_size_stats maps database_id 6 (the error_reported fixture's id) → a name for severe-error resolution.
+               The snapshot is taken at the error's own time (the fixture's fixed timestamp, whatever today's date): the
+               name history looks at most 14 days past the error for an id with no earlier snapshot (#5373). */
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id)
-VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), t, ServerId, ServerName, "ProdDb", 6);
+VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), new DateTime(2026, 7, 5, 12, 0, 5, 500, DateTimeKind.Utc), ServerId, ServerName, "ProdDb", 6);
 
             DarlingMcpTestData.AssertEnvelope(await DarlingMcpHealthParserTools.GetSchedulerIssues(postgres, ServerName), ServerName, "issues");
 
@@ -431,7 +413,9 @@ VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), t, ServerId, ServerNa
             Assert.True(conditions.GetProperty("source_observed").GetBoolean());
             Assert.Equal(t.ToString("o"), conditions.GetProperty("last_captured_at").GetString());
             Assert.True(conditions.GetProperty("events_in_window").GetInt32() > 0);
-            Assert.Contains("Events ARE being captured", conditions.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            /* #4966: the plant is minutes old against a 24-hour window, so the window is cut and the healthy-answer claim gives way. */
+            Assert.StartsWith($"{conditions.GetProperty("events_in_window").GetInt32()} ", conditions.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.EndsWith($". {McpHelpers.CutWindowNothingMessage}", conditions.GetProperty("message").GetString()!, StringComparison.Ordinal);
 
             var broker = JsonDocument.Parse(await DarlingMcpHealthParserTools.GetMemoryBroker(postgres, ServerName)).RootElement;
             Assert.Equal("empty", broker.GetProperty("status").GetString());

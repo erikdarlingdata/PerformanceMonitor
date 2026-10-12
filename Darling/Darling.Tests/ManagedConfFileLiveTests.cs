@@ -420,6 +420,62 @@ public sealed class ManagedConfFileLiveTests
         }
     }
 
+    /// <summary>
+    /// #5459: the same two-start proof as <see cref="SecondStart_UnchangedInputs_DoesNotRewriteFile_Gated"/>, with
+    /// the free space each start reads planted on either side of the 128 GiB edge of the WAL ladder (the runner's
+    /// disk cannot be steered there, and a runner standing next to an edge is what failed that test: the second
+    /// start derived another <c>max_wal_size</c>, so the body changed and the file was rewritten). The planted
+    /// movement is 400 MB, what a busy machine moves a volume by between two starts. The file must stay
+    /// byte-identical with an unchanged write time, and still hold the rung the first start wrote.
+    /// </summary>
+    [Fact]
+    public async Task SecondStart_FreeSpaceCrossesWalLadderEdge_DoesNotRewriteFile_Gated()
+    {
+        const long gib = 1024L * 1024 * 1024;
+        const long mib = 1024L * 1024;
+        var runtimeRoot = SkipUnlessRuntimeAvailable();
+        var root = Directory.CreateTempSubdirectory("darling-managedconf-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var config = new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory };
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+
+            var first = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot)
+            {
+                TestOnlyVolumeSpaceReader = _ => (128 * gib - 200 * mib, 512 * gib),
+            };
+            await first.EnsureRunningAsync(timeout.Token);
+            await first.StopIfStartedByThisProcessAsync();
+
+            var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+            var textAfterFirst = File.ReadAllText(managedPath);
+            var bytesAfterFirst = File.ReadAllBytes(managedPath);
+            var writeTimeAfterFirst = File.GetLastWriteTimeUtc(managedPath);
+            Assert.Contains("max_wal_size = '8192MB'", textAfterFirst, StringComparison.Ordinal);
+
+            var second = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot)
+            {
+                TestOnlyVolumeSpaceReader = _ => (128 * gib + 200 * mib, 512 * gib),
+            };
+            await second.EnsureRunningAsync(timeout.Token);
+            try
+            {
+                Assert.True(second.StartedByThisProcess);
+                Assert.Equal(bytesAfterFirst, File.ReadAllBytes(managedPath));
+                Assert.Equal(writeTimeAfterFirst, File.GetLastWriteTimeUtc(managedPath));
+            }
+            finally
+            {
+                await second.StopIfStartedByThisProcessAsync();
+            }
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
     private static int CountOccurrences(string text, string value)
     {
         var count = 0;

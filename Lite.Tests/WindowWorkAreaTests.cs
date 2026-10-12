@@ -26,6 +26,7 @@ namespace Lite.Tests;
 /// and an <c>Application</c> to instantiate, and the regression that matters is one app being fixed while its
 /// twin is not.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class WindowWorkAreaTests
 {
     /// <summary>A 1080p work area with a 40px taskbar, at the origin: the primary-monitor shape.</summary>

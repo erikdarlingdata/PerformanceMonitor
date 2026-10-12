@@ -48,7 +48,7 @@ public class ServerManager
     /// 3 engine_edition, 4 is_aws_rds, 5 has_msdb_access.
     /// </summary>
     internal const string DetectionQueryText = @"
-        SELECT
+        SELECT /* PerformanceMonitorLite */
             @@VERSION AS sql_version,
             CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')) AS major_version,
             DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) AS utc_offset_minutes,
@@ -63,7 +63,7 @@ public class ServerManager
     /// failing platform detection.
     /// </summary>
     internal const string ServerStartTimeQueryText =
-        "SELECT sqlserver_start_time FROM sys.dm_os_sys_info";
+        "SELECT /* PerformanceMonitorLite */ sqlserver_start_time FROM sys.dm_os_sys_info";
 
     public ServerManager(string configDirectory, ILogger<ServerManager>? logger = null)
     {
@@ -233,6 +233,19 @@ public class ServerManager
             RemoteCollectorService.GetServerNameForStorage(a),
             RemoteCollectorService.GetServerNameForStorage(b),
             StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <see cref="IsSameServer"/> without the letter case: the same address, database and read-only intent spelled
+    /// in another case is still the server already monitored. The import's duplicate check uses it, so a
+    /// servers.json that spells a host in capitals does not add a second copy.
+    /// </summary>
+    internal static bool IsSameServerIgnoringCase(ServerConnection a, ServerConnection b)
+    {
+        return string.Equals(
+            RemoteCollectorService.GetServerNameForStorage(a),
+            RemoteCollectorService.GetServerNameForStorage(b),
+            StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>The name a message uses for a server: its display name, else its address.</summary>
@@ -820,8 +833,9 @@ public class ServerManager
 
     /// <summary>
     /// Imports server connections from an external servers.json file.
-    /// Upserts by ServerName — existing servers are skipped, new ones are added
-    /// with their original GUIDs so Credential Manager entries still resolve.
+    /// A server this installation already monitors (the same address, database and read-only intent, in any
+    /// letter case) is skipped, and every other one is added with its original GUID so Credential Manager
+    /// entries still resolve. Another database on an address already here is a different server and is added.
     ///
     /// <para>An entry whose derived id a DIFFERENT server already holds is not added (#4789): both would collect
     /// into one DuckDB server_id, which is what <see cref="AddServer"/> refuses. It is counted apart from a skipped
@@ -850,10 +864,11 @@ public class ServerManager
         {
             foreach (var server in importedServers)
             {
-                // Skip if we already have a server with the same name
-                var existing = _servers.FirstOrDefault(s =>
-                    string.Equals(s.ServerName, server.ServerName, StringComparison.OrdinalIgnoreCase) &&
-                    s.ReadOnlyIntent == server.ReadOnlyIntent);
+                /* Skip if we already have this server: the same storage name (address, database, read-only
+                   intent), in any letter case. The database is part of the identity. Several monitored
+                   databases on one Azure SQL Database server share an address, and each of them is its own
+                   server, so comparing the address alone dropped every sibling after the first. */
+                var existing = _servers.FirstOrDefault(s => IsSameServerIgnoringCase(s, server));
 
                 if (existing != null)
                 {

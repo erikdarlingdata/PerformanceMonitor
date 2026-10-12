@@ -28,6 +28,7 @@ namespace Lite.Tests;
 /// filter that fires for only one of them. Darling's constants are public, so its suite compares them against
 /// Lite's inline text without parsing its own file.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class DrillDownDopProvenanceParityTests
 {
     private const string LiteFile = "Lite/Analysis/DrillDownCollector.Queries.cs";

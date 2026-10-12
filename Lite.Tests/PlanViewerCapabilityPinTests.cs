@@ -35,6 +35,7 @@ namespace Lite.Tests;
 /// Regenerate ONLY on a real surface change via <c>PM_PIN_REGEN=1</c>. Text-scans SOURCE, located from this
 /// file's compile-time path -- NO WPF / assembly load, like the other parity pins.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PlanViewerCapabilityPinTests
 {
     /* Probe = (stable capability name, a substring that proves it is still present). Substrings, not regex,

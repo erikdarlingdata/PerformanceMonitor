@@ -211,8 +211,10 @@ public sealed class AnalysisPassTokenThreadingTests
 
         /* 27 collect methods guard their read this way; the number is stated so deleting one is a
            decision. The other four have no catch at all and never had one — their reads propagate
-           straight to the pass, which is the same outcome by a shorter route. */
-        Assert.Equal(27, AnalysisSources()
+           straight to the pass, which is the same outcome by a shorter route.
+           29 since #5631: the plan-input check adds two (the plan comparison and the plan fetch), each letting the
+           pass's own abandonment through and swallowing a fault so the candidate stays, counted unverified. */
+        Assert.Equal(29, AnalysisSources()
             .Where(s => Path.GetFileName(s.File).StartsWith("DuckDbFactCollector.", StringComparison.Ordinal))
             .SelectMany(s => s.Code)
             .Count(line => classified.IsMatch(line)));
@@ -330,7 +332,7 @@ public sealed class AnalysisPassTokenThreadingTests
     [Fact]
     public async Task TheReadLockWaitIsAbandonableWhileAWriterHoldsIt()
     {
-        var initializer = new DuckDbInitializer(Path.Combine(Path.GetTempPath(), $"pm-lock-{Guid.NewGuid():N}.db"));
+        using var initializer = new DuckDbInitializer(Path.Combine(Path.GetTempPath(), $"pm-lock-{Guid.NewGuid():N}.db"));
 
         var writerHasIt = new ManualResetEventSlim(false);
         var releaseWriter = new ManualResetEventSlim(false);

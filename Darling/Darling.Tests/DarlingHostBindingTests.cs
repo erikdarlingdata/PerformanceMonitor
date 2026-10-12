@@ -86,6 +86,130 @@ public sealed class DarlingHostBindingTests
         Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
     }
 
+    /* ---- #5288: allowFrom as a CIDR LIST. Every entry must parse and match the listen's family; one wrong
+       entry degrades the WHOLE listener (Critical, loopback-only) instead of being dropped quietly. ---- */
+
+    [Theory]
+    [InlineData("192.168.1.205", "192.168.1.0/24,10.8.0.0/16")]        // two IPv4 ranges on a specific IPv4 listen
+    [InlineData("192.168.1.205", " 192.168.1.0/24 , 10.8.0.0/16 ")]    // whitespace around entries is trimmed
+    [InlineData("192.168.1.205", "192.168.1.0/24,192.168.1.0/24")]      // a duplicate is dropped, not refused
+    [InlineData("0.0.0.0", "10.8.0.0/16,192.168.1.5/32")]               // IPv4 wildcard, a /32 beside a /16
+    [InlineData("::", "2001:db8::/32,fd00::/8")]                        // IPv6 wildcard, two IPv6 ranges
+    [InlineData("2001:db8::5", "2001:db8::/32,fd00::/8")]               // a specific IPv6
+    public void ResolveBind_List_EveryEntryMatchesTheListenFamily_IsNetworkAndLoopback(string listen, string allowFrom)
+    {
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+
+        Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.NetworkExposed, decision.Reason);
+    }
+
+    [Theory]
+    [InlineData("192.168.1.205", "192.168.1.0/24,2001:db8::/32")]    // the SECOND entry is IPv6 on an IPv4 listen
+    [InlineData("192.168.1.205", "2001:db8::/32,192.168.1.0/24")]    // the FIRST entry is the wrong one
+    [InlineData("2001:db8::5", "2001:db8::/32,192.168.1.0/24")]      // an IPv4 entry on an IPv6 listen
+    [InlineData("0.0.0.0", "192.168.1.0/24,2001:db8::/32")]
+    public void ResolveBind_List_OneWrongFamilyEntry_IsAllowFromInvalid(string listen, string allowFrom)
+    {
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
+    }
+
+    [Theory]
+    [InlineData("::", "10.8.0.0/16")]                   // an IPv4 entry alone on a :: listen
+    [InlineData("::", "2001:db8::/32,10.8.0.0/16")]     // one IPv4 entry among IPv6 ones
+    [InlineData("::", "10.8.0.0/16,2001:db8::/32")]
+    public void ResolveBind_List_IPv6AnyListen_IPv4Entry_IsAllowFromInvalid(string listen, string allowFrom)
+    {
+        /* F6: Kestrel binds "::" dual-stack, so IPv4 clients DO arrive there (as IPv4-mapped IPv6 addresses,
+           which IsRemoteAddressAllowed unwraps) - and the family rule stays strict anyway: "::" takes IPv6
+           entries only. */
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
+    }
+
+    [Theory]
+    [InlineData("::", "::ffff:10.0.0.0/104")]                 // passes a family check on an IPv6 listen, can never match
+    [InlineData("::", "2001:db8::/32,::ffff:10.0.0.0/104")]
+    [InlineData("192.168.1.205", "192.168.1.0/24,")]           // a trailing comma: an empty entry
+    [InlineData("192.168.1.205", ",192.168.1.0/24")]
+    [InlineData("192.168.1.205", "192.168.1.0/24,,10.8.0.0/16")]
+    [InlineData("192.168.1.205", "192.168.1.0/24, ")]
+    [InlineData("192.168.1.205", "192.168.1.0/24,garbage")]
+    [InlineData("192.168.1.205", "192.168.1.0/24,10.8.0.0")]   // an address with no prefix
+    [InlineData("192.168.1.205", "192.168.1.0/24;10.8.0.0/16")]
+    public void ResolveBind_List_BadEntry_IsAllowFromInvalid(string listen, string allowFrom)
+    {
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
+    }
+
+    [Theory]
+    [InlineData("192.168.1.205", "192.168.010.0/24")]             // a leading zero reads as octal: another range
+    [InlineData("192.168.1.205", "010.0.0.0/8")]
+    [InlineData("192.168.1.205", "10/8")]                         // short forms are zero-padded
+    [InlineData("192.168.1.205", "10.1/16")]
+    [InlineData("192.168.1.205", "0x0A.0.0.0/8")]                 // 0x reads as hex
+    [InlineData("192.168.1.205", "1.2.3.04/32")]
+    [InlineData("192.168.1.205", "192.168.1.0/24,192.168.010.0/24")]   // refused wherever it sits in the list
+    [InlineData("192.168.1.205", "010.0.0.0/8,192.168.1.0/24")]
+    public void ResolveBind_List_NonCanonicalIPv4_IsAllowFromInvalid(string listen, string allowFrom)
+    {
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
+    }
+
+    [Theory]
+    [InlineData("::", "fe80::1%5/64")]
+    [InlineData("::", "2001:db8::/32,fe80::1%5/64")]
+    [InlineData("::", "fe80::1%x';calc;'/64")]
+    public void ResolveBind_List_IPv6ZoneIndex_IsAllowFromInvalid(string listen, string allowFrom)
+    {
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
+    }
+
+    [Theory]
+    [InlineData("DarlingMcpHostService.cs")]
+    [InlineData("DarlingWebHostService.cs")]
+    public void TheAllowFromInvalidCriticalLine_NamesTheCommaList_AndNoJsonArray(string fileName)
+    {
+        /* The comma string is the form that loads on every version, so it is the one the line recommends: a
+           service older than #5288 cannot deserialize a JSON array and fails to start, collection included. */
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", fileName);
+        var start = source.IndexOf(".AllowFromInvalid:", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the AllowFromInvalid case is gone, so this pin would read nothing");
+        var end = source.IndexOf("break;", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the AllowFromInvalid case has no break, so this pin would read nothing");
+        var line = source[start..end];
+
+        Assert.Contains("separated by commas", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("JSON array", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheDocumentedAllowFromInvalidLine_NamesTheCommaList_AndNoJsonArray()
+    {
+        var doc = RepoFile.ReadRepoFile("docs", "uat-onboarding.md");
+        var line = Array.Find(
+            doc.Split('\n'),
+            l => l.StartsWith("MCP network exposure requested but mcp.network.allowFrom", StringComparison.Ordinal));
+
+        Assert.NotNull(line);
+        Assert.Contains("separated by commas", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("JSON array", line, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ResolveBind_Exposed_Byo_IsLoopbackOnly_ManagedModeRequired()
     {
@@ -205,6 +329,62 @@ public sealed class DarlingHostBindingTests
     [Fact]
     public void IsRemoteAddressAllowed_NullRemote_FailsClosed()
         => Assert.False(DarlingHostBinding.IsRemoteAddressAllowed(null, IPNetwork.Parse("192.168.1.0/24")));
+
+    /* ---- #5288: the same check over a LIST - any entry admits, none refuses, loopback stays exempt ---- */
+
+    [Theory]
+    [InlineData("192.168.1.50", true)]   // first entry
+    [InlineData("10.8.3.4", true)]       // second entry
+    [InlineData("203.0.113.9", true)]    // a /32 entry
+    [InlineData("203.0.113.10", false)]  // the neighbor of the /32
+    [InlineData("192.168.2.1", false)]
+    [InlineData("10.9.0.1", false)]
+    [InlineData("2001:db8::1", false)]   // a native IPv6 remote against IPv4 entries
+    [InlineData("127.0.0.1", true)]      // loopback is in no entry and is always allowed
+    [InlineData("::1", true)]
+    public void IsRemoteAddressAllowed_List_AdmitsAnyEntry_RefusesTheRest(string remote, bool expected)
+        => Assert.Equal(expected, DarlingHostBinding.IsRemoteAddressAllowed(
+            IPAddress.Parse(remote), CidrAllowList.Parse("192.168.1.0/24,10.8.0.0/16,203.0.113.9/32")));
+
+    [Theory]
+    [InlineData("::ffff:192.168.1.50", true)]   // a mapped remote is unwrapped to IPv4 and matches an IPv4 entry
+    [InlineData("::ffff:10.8.3.4", true)]
+    [InlineData("::ffff:203.0.113.9", true)]
+    [InlineData("::ffff:10.9.0.1", false)]
+    [InlineData("::ffff:127.0.0.1", true)]      // mapped loopback
+    public void IsRemoteAddressAllowed_List_MappedRemote_MatchesIPv4Entry(string remote, bool expected)
+        => Assert.Equal(expected, DarlingHostBinding.IsRemoteAddressAllowed(
+            IPAddress.Parse(remote), CidrAllowList.Parse("192.168.1.0/24,10.8.0.0/16,203.0.113.9/32")));
+
+    [Theory]
+    [InlineData("10.8.1.1", true)]
+    [InlineData("2001:db8::7", true)]
+    [InlineData("2001:db9::1", false)]
+    [InlineData("::ffff:10.8.1.1", true)]
+    [InlineData("10.9.1.1", false)]
+    public void IsRemoteAddressAllowed_List_MixedFamilies_EachEntryAppliesToItsOwnFamily(string remote, bool expected)
+        => Assert.Equal(expected, DarlingHostBinding.IsRemoteAddressAllowed(
+            IPAddress.Parse(remote), CidrAllowList.Parse("10.8.0.0/16,2001:db8::/32")));
+
+    /* ---- IsAllowedHost's third argument: the ONE extra name each host admits (#4220 web, #5288 MCP) ---- */
+
+    [Theory]
+    [InlineData("monitor.example.com", "monitor.example.com", true)]
+    [InlineData("Monitor.EXAMPLE.com", "monitor.example.com", true)]          // case-insensitive, both ways
+    [InlineData("monitor.example.com", "MONITOR.Example.com", true)]
+    [InlineData("b\u00FCcher.example", "b\u00FCcher.example", true)]          // the decoded form HttpRequest.Host hands the guard
+    [InlineData("xn--bcher-kva.example", "b\u00FCcher.example", false)]       // compared AS GIVEN: each host converts its name first
+    [InlineData("evil.com", "monitor.example.com", false)]
+    [InlineData("monitor.example.com.evil.com", "monitor.example.com", false)] // exact, not a suffix or prefix match
+    [InlineData("monitor.example.com:5153", "monitor.example.com", false)]     // the caller splits the port off first
+    [InlineData("monitor.example.com", null, false)]                           // no extra name: unchanged
+    [InlineData("monitor.example.com", "", false)]
+    [InlineData("", "monitor.example.com", true)]                              // no Host at all is the guard's own rule (HTTP/1.0), not this name's
+    [InlineData(null, "monitor.example.com", true)]
+    [InlineData("localhost", "monitor.example.com", true)]                     // the guard's own list is untouched
+    [InlineData("192.168.1.205", "monitor.example.com", true)]
+    public void IsAllowedHost_ExtraName_IsAnExactCaseInsensitiveCompareOfWhatItIsGiven(string? host, string? extraAllowedHost, bool expected)
+        => Assert.Equal(expected, DarlingHostBinding.IsAllowedHost(host, IPAddress.Parse("192.168.1.205"), extraAllowedHost));
 
     /* ---- FixedTimeTokenEquals: only an exact match; empty/null never authorizes ---- */
 

@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// reads each collector's source and asserts the guard sits between the parse call and the first
 /// read of that content.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class PlanSync4512ParseErrorSurfacingTests
 {
     [Theory]

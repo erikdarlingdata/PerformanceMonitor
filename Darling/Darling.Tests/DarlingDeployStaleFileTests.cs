@@ -62,6 +62,7 @@ public sealed class DarlingDeployStaleFileTests
     private static readonly string[] s_functions =
     [
         "Test-DarlingRollbackBackupName",
+        "Get-DarlingServiceWrittenNames",
         "Format-DarlingBytes",
         "ConvertTo-DarlingManifestPath",
         "Join-DarlingInstallPath",
@@ -618,7 +619,8 @@ public sealed class DarlingDeployStaleFileTests
     {
         var script = InstallScript;
 
-        Assert.Contains("Get-ChildItem -LiteralPath $root -Filter 'darling.json.bak-*' -File -ErrorAction SilentlyContinue", script, StringComparison.Ordinal);
+        Assert.Contains("Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue", script, StringComparison.Ordinal);
+        Assert.Contains("Get-DarlingServiceWrittenRootFiles $root -BackupsOnly", script, StringComparison.Ordinal);
         Assert.DoesNotContain("Get-ChildItem -Path $root", script, StringComparison.Ordinal);
     }
 
@@ -1051,6 +1053,12 @@ public sealed class DarlingDeployStaleFileTests
         return full;
     }
 
+    /// <summary>Upper bound on one <c>powershell.exe</c> probe. A cold Windows PowerShell 5.1 start (plus
+    /// module auto-load) or a busy runner has exceeded 60 s with no output on a small probe, so the limit
+    /// leaves a wide margin. A probe that really hangs still fails at this limit rather than hanging the
+    /// job, because both output streams are drained concurrently.</summary>
+    private static readonly TimeSpan PowerShellExitLimit = TimeSpan.FromSeconds(180);
+
     /// <summary>Runs <paramref name="script"/> under Windows PowerShell 5.1 and returns its non-empty output
     /// lines. Written to a temp file rather than passed with -Command: the script under test is a set of
     /// whole function bodies, and quoting those through a command line fails for reasons that have nothing
@@ -1093,7 +1101,7 @@ public sealed class DarlingDeployStaleFileTests
             var stdoutTask = process!.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
 
-            var exited = process.WaitForExit(60_000);
+            var exited = process.WaitForExit(PowerShellExitLimit);
             if (!exited)
             {
                 try { process.Kill(entireProcessTree: true); }
@@ -1106,7 +1114,7 @@ public sealed class DarlingDeployStaleFileTests
             var stdout = stdoutTask.GetAwaiter().GetResult();
             var stderr = stderrTask.GetAwaiter().GetResult();
 
-            Assert.True(exited, $"powershell.exe did not exit within 60 seconds running the extracted functions. Output so far:\n{stdout}\n{stderr}");
+            Assert.True(exited, $"powershell.exe did not exit within {PowerShellExitLimit.TotalSeconds:0} seconds running the extracted functions. Output so far:\n{stdout}\n{stderr}");
             Assert.True(string.IsNullOrWhiteSpace(stderr), $"powershell.exe reported an error running the extracted functions:\n{stderr}");
 
             var lines = new List<string>();

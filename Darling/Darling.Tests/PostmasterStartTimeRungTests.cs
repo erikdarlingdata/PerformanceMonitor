@@ -292,6 +292,11 @@ public sealed class PostmasterStartTimeLivePostgresTests
             using (var sweep = new NpgsqlCommand(checkpointerSql, connection))
             {
                 sweep.Parameters.AddWithValue(metricTime);
+                /* #4834: the statement binds three parameters, the hour's longest sync and its sample's time beside the
+                   metric time. This test has no sampler behind it, so both are NULL, typed the way SweepAsync binds them
+                   because a NULL carries no type of its own and PostgreSQL rejects a statement whose bind count differs. */
+                sweep.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = DBNull.Value });
+                sweep.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DBNull.Value });
                 Assert.Equal(1, await sweep.ExecuteNonQueryAsync(ct));
             }
 

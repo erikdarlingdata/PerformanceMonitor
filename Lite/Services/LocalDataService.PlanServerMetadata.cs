@@ -9,6 +9,7 @@
 using System;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.PlanAnalysis;
 
 namespace PerformanceMonitorLite.Services;
@@ -92,7 +93,9 @@ SELECT p.edition, p.product_version, p.product_level, p.cpu_count, p.physical_me
         WHERE d.server_id = $1
         AND   d.database_name = $2
         AND   d.capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1 AND database_name = $2)
-        LIMIT 1) AS is_parameterization_forced
+        LIMIT 1) AS is_parameterization_forced,
+       p.engine_edition,
+       p.vcore_count
 FROM v_server_properties AS p
 WHERE p.server_id = $1
 ORDER BY p.collection_time DESC
@@ -119,13 +122,23 @@ LIMIT 1";
             using var reader = await command.ExecuteReaderAsync();
             if (!await reader.ReadAsync()) return null;
 
+            /* On an Azure SQL Database the Server Context card's Hardware row names the vCores (n/a for a DTU objective or an
+               elastic pool) and no RAM: the stored physical_memory_mb is the HOST's. The stored cpu_count there is the
+               database's own scheduler count and is not what the card shows. Every other edition reads as it always did. */
+            int? engineEdition = reader.IsDBNull(16) ? null : Convert.ToInt32(reader.GetValue(16));
+            int? vcoreCount = reader.IsDBNull(17) ? null : Convert.ToInt32(reader.GetValue(17));
+            int? storedCpuCount = reader.IsDBNull(3) ? null : reader.GetInt32(3);
+            long? storedPhysicalMemoryMb = reader.IsDBNull(4) ? null : ToInt64(reader.GetValue(4));
+
             return new ServerMetadata
             {
                 Edition = reader.IsDBNull(0) ? null : reader.GetString(0),
                 ProductVersion = reader.IsDBNull(1) ? null : reader.GetString(1),
                 ProductLevel = reader.IsDBNull(2) ? null : reader.GetString(2),
-                CpuCount = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
-                PhysicalMemoryMB = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4)),
+                CpuCount = storedCpuCount ?? 0,
+                PhysicalMemoryMB = ServerHardwareScope.OwnPhysicalMemoryMb(engineEdition, storedPhysicalMemoryMb) ?? 0L,
+                EngineEdition = engineEdition,
+                VcoreCount = vcoreCount,
                 MaxDop = reader.IsDBNull(5) ? 0 : Convert.ToInt32(Convert.ToDouble(reader.GetValue(5))),
                 CostThresholdForParallelism = reader.IsDBNull(6) ? 0 : Convert.ToInt32(Convert.ToDouble(reader.GetValue(6))),
                 MaxServerMemoryMB = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7)),

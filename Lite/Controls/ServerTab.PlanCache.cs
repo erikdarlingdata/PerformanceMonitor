@@ -35,7 +35,7 @@ public partial class ServerTab : UserControl
     {
         ApplyTheme(PlanCacheChart);
         PlanCacheChart.Refresh();
-        _planCacheHover = new ChartHoverHelper(PlanCacheChart, "MB");
+        _planCacheHover = new ChartHoverHelper(PlanCacheChart, "MB", displayZone: GetPickerZone);
     }
 
     /// <summary>
@@ -78,15 +78,14 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         double globalMax = 0;
         if (data.Count > 0)
         {
             var ordered = data.OrderBy(d => d.CollectionTime).ToList();
-            var times = ordered.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+            var times = ordered.Select(d => d.CollectionTime.ToOADate()).ToArray();
 
             var singleUse = ordered.Select(d => d.SingleUseSizeMb).ToArray();
             var singlePlot = PlanCacheChart.Plot.Add.TimeSeries(times, singleUse);
@@ -105,7 +104,7 @@ public partial class ServerTab : UserControl
             globalMax = Math.Max(singleUse.DefaultIfEmpty(0).Max(), multiUse.DefaultIfEmpty(0).Max());
         }
 
-        PlanCacheChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        PlanCacheChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         PlanCacheChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(PlanCacheChart);
         PlanCacheChart.Plot.YLabel("Plan Cache Size (MB)");
@@ -127,6 +126,7 @@ public partial class ServerTab : UserControl
             PlanCacheBloatLevelText.Text = "--";
             PlanCacheBloatLevelText.Foreground = System.Windows.Media.Brushes.Gray;
             PlanCacheRecommendationText.Text = "";
+            PlanCacheCollectedText.Text = "--";
             return;
         }
 
@@ -138,6 +138,8 @@ public partial class ServerTab : UserControl
         PlanCacheRecommendationText.Text = bloat.Recommendation;
 
         PlanCacheTotalPlansText.Text = summary.TotalPlans.ToString("N0");
+        /* #4966: the summary totals are one snapshot (the newest in the range); say when it was collected. */
+        PlanCacheCollectedText.Text = SnapshotCollectedText(summary.CollectionTime, GetPickerZone(), "--");
 
         /* oldest_plan_create_time comes from a DMV (sys.dm_exec_query_stats.creation_time) in the monitored
            server's local clock, which the viewer — having no per-server offset for this DMV column —

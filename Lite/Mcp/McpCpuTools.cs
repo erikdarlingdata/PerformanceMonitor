@@ -31,14 +31,14 @@ public sealed class McpCpuTools
             if (bucketError != null) return bucketError;
 
             /* sample_time is THIS server's local wall clock (#1262), so the window needs THIS server's
-               offset — not the desktop tab's. See McpServerLocalWindow. Since v63 (#3653 item 13) the offset
+               clock — not the desktop tab's. See McpServerLocalWindow. Since v63 (#3653 item 13) the offset
                drives only the pre-rung fallback arm of the window: a row carrying sample_time_utc is selected
                by that stored UTC instant, offset-free. The emitted sample_time stays the server-local stamp
                (bucketed in SQL since #3960 — the tool used to average every sample to the minute here), the
                frame this tool has always published. */
-            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
 
-            var points = await dataService.GetCpuBucketsAsync(resolved.ServerId, hours_back, windowEnd, utcOffsetMinutes, bucketMinutes);
+            var points = await dataService.GetCpuBucketsAsync(resolved.ServerId, hours_back, windowEnd, serverClock, bucketMinutes);
             if (points.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "cpu_utilization")

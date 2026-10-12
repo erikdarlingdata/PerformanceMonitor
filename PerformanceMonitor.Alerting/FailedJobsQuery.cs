@@ -60,7 +60,7 @@ public static class FailedJobsQuery
     public const string Sql = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT TOP (50)
+SELECT TOP (50) /* PerformanceMonitorLite */
     job_name = j.name,
     job_id = CONVERT(varchar(36), j.job_id),
     run_datetime =

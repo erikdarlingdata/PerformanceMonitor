@@ -37,6 +37,7 @@ param get_health_parser_scheduler_issues.server_name 28
 
 tool get_health_parser_severe_errors 480
 param get_health_parser_severe_errors.as_of 167
+param get_health_parser_severe_errors.database_name 46
 param get_health_parser_severe_errors.hours_back 41
 param get_health_parser_severe_errors.limit 38
 param get_health_parser_severe_errors.server_name 28

@@ -15,6 +15,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using Microsoft.Win32;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Services;
 using ScottPlot;
@@ -33,6 +34,10 @@ public partial class QueryStatsHistoryWindow : Window
     private readonly int _hoursBack;
     private readonly string? _connectionString;
     private readonly string? _queryText;
+    /// <summary>The zone the tab shows times in: the tick labels and the hover read it each time they draw, and the summary reads it when the history loads.</summary>
+    private readonly Func<TimeZoneInfo> _displayZone;
+    /// <summary>The opening tab's own server clock (#4766), read each time a server wall-clock column draws, so those columns stay on that server's clock while another server's tab is selected.</summary>
+    private readonly Func<ServerClock> _serverClock;
     private readonly PlanNavigationController _planActions;
     private List<QueryStatsHistoryRow> _historyData = new();
     private ChartHoverHelper? _chartHover;
@@ -40,7 +45,7 @@ public partial class QueryStatsHistoryWindow : Window
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
 
-    public QueryStatsHistoryWindow(LocalDataService dataService, int serverId, string databaseName, string queryHash, int hoursBack, string? queryText = null, string? connectionString = null)
+    public QueryStatsHistoryWindow(LocalDataService dataService, int serverId, string serverName, string databaseName, string queryHash, int hoursBack, string? queryText, string? connectionString, Func<TimeZoneInfo> displayZone, Func<ServerClock> serverClock)
     {
         InitializeComponent();
         _dataService = dataService;
@@ -50,15 +55,18 @@ public partial class QueryStatsHistoryWindow : Window
         _hoursBack = hoursBack;
         _queryText = queryText;
         _connectionString = connectionString;
+        _displayZone = displayZone;
+        _serverClock = serverClock;
 
         _planActions = new PlanNavigationController(
             this,
             async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
-                this, xml, label, qt, await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId)),
-            (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
+                this, xml, label, qt, await System.Threading.Tasks.Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId))),
+            /* #4348: the re-run's plan comes from the monitored server, not the collected rows, so it is judged here. */
+            async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
-                productName: "SQL Server Performance Monitor Lite"),
-            "the monitored server");
+                productName: "SQL Server Performance Monitor Lite")),
+            serverName);
 
         _filterManager = new DataGridFilterManager<QueryStatsHistoryRow>(HistoryDataGrid);
         DataGridFilterColumns.AddFilterButtons(HistoryDataGrid, Filter_Click);
@@ -74,16 +82,28 @@ public partial class QueryStatsHistoryWindow : Window
     {
         try
         {
-            _historyData = await _dataService.GetQueryStatsHistoryAsync(_serverId, _databaseName, _queryHash, _hoursBack);
+            /* #5457: off the UI thread: the read takes the store read lock, which an archive or compaction pass can hold. */
+            _historyData = await System.Threading.Tasks.Task.Run(() => _dataService.GetQueryStatsHistoryAsync(_serverId, _databaseName, _queryHash, _hoursBack));
+            /* #4766: the grid words each row's times in this window's own zone, as the chart and the summary below do,
+               not in whichever server's tab is selected when the row is drawn (this window stays open after another
+               tab is selected). The columns that hold the server's own wall clock are converted on the opening tab's
+               clock for the same reason. Set before the rows reach the grid. */
+            foreach (var row in _historyData)
+            {
+                row.Zone = _displayZone;
+                row.Clock = _serverClock;
+            }
+
             _filterManager!.UpdateData(_historyData);
 
             if (_historyData.Count > 0)
             {
                 var totalExec = _historyData.Sum(r => r.DeltaExecutions);
                 var totalCpu = _historyData.Sum(r => r.DeltaCpuMs);
-                var first = _historyData.First().CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes);
-                var last = _historyData.Last().CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes);
-                SummaryText.Text = $"{_historyData.Count} samples from {first:MM/dd HH:mm} to {last:MM/dd HH:mm} | " +
+                var zone = _displayZone();
+                var first = ServerTimeHelper.FormatInstant(_historyData.First().CollectionTime, zone, "MM/dd HH:mm");
+                var last = ServerTimeHelper.FormatInstant(_historyData.Last().CollectionTime, zone, "MM/dd HH:mm");
+                SummaryText.Text = $"{_historyData.Count} samples from {first} to {last} | " +
                                    $"Total Executions: {totalExec:N0} | Total CPU: {totalCpu:N1} ms";
             }
             else
@@ -95,7 +115,7 @@ public partial class QueryStatsHistoryWindow : Window
         }
         catch (Exception ex)
         {
-            SummaryText.Text = $"Error loading history: {ex.Message}";
+            SummaryText.Text = $"Error loading history: {DuckDbMemoryLimitSetting.Describe(ex)}";
         }
     }
 
@@ -114,7 +134,7 @@ public partial class QueryStatsHistoryWindow : Window
         var tag = selected?.Tag?.ToString() ?? "AvgCpuMs";
         var label = selected?.Content?.ToString() ?? "Avg CPU (ms)";
 
-        var xs = _historyData.Select(r => r.CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes).ToOADate()).ToArray();
+        var xs = _historyData.Select(r => r.CollectionTime.ToOADate()).ToArray();
         var ys = _historyData.Select(r => GetMetricValue(r, tag)).ToArray();
 
         var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);
@@ -124,15 +144,15 @@ public partial class QueryStatsHistoryWindow : Window
 
         var unit = tag.Contains("Ms") ? "ms" : "";
         if (_chartHover == null)
-            _chartHover = new ChartHoverHelper(HistoryChart, unit);
+            _chartHover = new ChartHoverHelper(HistoryChart, unit, displayZone: _displayZone);
         else
             _chartHover.Unit = unit;
         _chartHover.Clear();
         _chartHover.Add(scatter, label);
 
-        /* #1831: the DateChange variant routes labels through the shared formatter, which converts
-           for the display mode — plain DateTimeTicksBottom() rendered raw server time. */
-        HistoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        /* #4766: X is the collection time as stored, the naive-UTC instant. The display mode reaches only the
+           text: the tick labels here, the hover, and the summary's first and last times. */
+        HistoryChart.Plot.Axes.DateTimeTicksBottomUtc(_displayZone);
         ApplyTheme(HistoryChart);
 
         HistoryChart.Refresh();
@@ -167,7 +187,7 @@ public partial class QueryStatsHistoryWindow : Window
             // Try DuckDB first — plan may already be cached from collection
             try
             {
-                plan = await _dataService.GetCachedQueryPlanAsync(_serverId, _queryHash);
+                plan = await System.Threading.Tasks.Task.Run(() => _dataService.GetCachedQueryPlanAsync(_serverId, _queryHash));
             }
             catch
             {
@@ -177,7 +197,7 @@ public partial class QueryStatsHistoryWindow : Window
             // Fall back to live server if DuckDB didn't have it
             if (string.IsNullOrEmpty(plan) && !string.IsNullOrEmpty(_connectionString))
             {
-                plan = await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash);
+                plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash));
                 source = "live server";
             }
 
@@ -186,6 +206,9 @@ public partial class QueryStatsHistoryWindow : Window
                 MessageBox.Show("No query plan found in collected data or the live plan cache for this query hash.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
+
+            /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
+            if (WithheldPlanGuard.RefuseSave(plan)) return;
 
             var dialog = new SaveFileDialog
             {
@@ -201,7 +224,7 @@ public partial class QueryStatsHistoryWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -280,10 +303,10 @@ public partial class QueryStatsHistoryWindow : Window
     {
         if (string.IsNullOrEmpty(_queryHash)) return null;
         string? plan = null;
-        try { plan = await _dataService.GetCachedQueryPlanAsync(_serverId, _queryHash); }
+        try { plan = await System.Threading.Tasks.Task.Run(() => _dataService.GetCachedQueryPlanAsync(_serverId, _queryHash)); }
         catch { /* DuckDB lookup failed — fall through to the live server */ }
         if (string.IsNullOrEmpty(plan) && !string.IsNullOrEmpty(_connectionString))
-            plan = await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash);
+            plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash));
         return plan;
     }
 
@@ -291,7 +314,10 @@ public partial class QueryStatsHistoryWindow : Window
         => await _planActions.ViewPlanAsync(FetchPlanAsync, $"Est Plan - {_queryHash}", _queryText);
 
     private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
-        => await _planActions.GetActualPlanAsync(_queryText, _databaseName, $"Actual Plan - {_queryHash}");
+        /* #5639: the stored plan feeds the data-modification check, read before the prompt (read-only). An empty or
+           all-zero hash names no particular query, so no plan is looked up by it: the check shows the warning. */
+        => await _planActions.GetActualPlanAsync(_queryText, _databaseName, $"Actual Plan - {_queryHash}",
+            fetchPlanXml: QueryModificationDetector.IsUsableQueryHash(_queryHash) ? FetchPlanAsync : null);
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
 }

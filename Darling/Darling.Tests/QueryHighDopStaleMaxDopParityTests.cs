@@ -57,6 +57,7 @@ namespace Darling.Tests;
 /// a number or retuning a literal in one guard without the other fails. Its filter, <c>lite</c>, covers
 /// Darling's test tree — exactly the edits that could weaken this file.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class QueryHighDopStaleMaxDopParityTests
 {
     /// <summary>

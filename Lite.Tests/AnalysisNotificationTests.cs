@@ -169,6 +169,33 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
     }
 
     [Fact]
+    public void BuildContext_WithheldBlockingChain_KeysTheSameAsTheLivePath()
+    {
+        /* #4348 / #5320: a chain whose statement was withheld is keyed on the database, the visible side and the
+           lock mode. The analysis path must pass the drill-down row's lock_mode, or one chain gets two dedup
+           keys (this one, and the live alert's and get_blocking's). */
+        var marker = WithheldStatementMarker.Text;
+        var finding = MakeFinding("blfp000000000002", category: "blocking_events", rootFactKey: "BLOCKING_EVENTS",
+            drillDown: new Dictionary<string, object>
+            {
+                ["top_blocking_chains"] = new List<object>
+                {
+                    new
+                    {
+                        database = "DB", contentious_object = "", blocked_sql = marker,
+                        blocking_sql = "UPDATE dbo.t SET c = 1", wait_time_ms = 5000L, lock_mode = "X"
+                    }
+                }
+            });
+
+        var context = FindingMessageFormatter.BuildContext(finding, notifyThreshold: 1.5);
+
+        var live = Assert.Single(BlockingIncidentGrouper.Group(finding.ServerName,
+            [new BlockingIncidentGrouper.BlockedEvent("DB", "", marker, "UPDATE dbo.t SET c = 1", 5000, "X")]));
+        Assert.Equal(live.Incident.DedupKey, Assert.Single(context.Incidents!).DedupKey);
+    }
+
+    [Fact]
     public void BuildContext_CpuDrillDown_EmitsDistinctQueryHashIncidents()
     {
         var finding = MakeFinding("cpufp00000000001", rootFactKey: "CPU_SPIKE",

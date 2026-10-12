@@ -98,7 +98,11 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
         Assert.Contains("Widen hours_back", noRecentText, StringComparison.Ordinal);
         Assert.DoesNotContain("EVER", noRecentText, StringComparison.Ordinal);
 
-        /* 3. both sides collected, nothing regressed: the ONE good-news answer. */
+        /* 3. both sides collected, nothing regressed: the ONE good-news answer. The store must hold the whole span the
+           read compares (#4966): the probe checks from the baseline's start, 7 days before the window, so a row older
+           than that (outside both windows, another query) shows the span covered. Without it the window is cut, and
+           the all-clear rightly gives way to the cut sentence. */
+        await SeedAsync(baseNow.AddDays(-10), executions: 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3, queryId: 99);
         await SeedAsync(baseNow.AddMinutes(-30), executions: 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 1);
 
         var clear = Root(await McpQueryTools.GetQueryStoreRegressions(service, _serverManager, ServerName, 24));

@@ -184,7 +184,10 @@ public sealed class QueryStoreTrendRoutingTests
         /* The partition seam: rollup buckets strictly BELOW $4 (load-bearing against a refresh landing
            between the probe and the read), raw points at or above it. */
         Assert.Contains("bucket >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("bucket <= $3", sql, StringComparison.Ordinal);
+        /* The window end is exclusive too: a bucket is stamped at its START, so `bucket <= $3` would take the
+           whole hour that begins at an end falling on the hour. */
+        Assert.Contains("bucket < $3", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("bucket <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("bucket < $4", sql, StringComparison.Ordinal);
         Assert.Contains("interval_start_time_utc >= $4", sql, StringComparison.Ordinal);
 
@@ -200,16 +203,17 @@ public sealed class QueryStoreTrendRoutingTests
     /// #3653 (measurement A8): the two point classes are rated over two denominators. A rollup point is one
     /// corrected-hourly bucket and is divided by the bucket WIDTH — the same literal the query-stats hourly
     /// tier divides by, bound to the constant rather than restated so a bucket change cannot leave this SQL
-    /// saying 3,600 — and a raw point (a Query Store interval placed at its start; the store holds no interval
-    /// length for it) keeps the spacing to the previous point. The pre-#3653 shape LAGged every point, so a
-    /// bucket with no rows — a quiet hour — made the next bucket's denominator 7,200 and halved its rate; that
-    /// shape is pinned by absence (no bare <c>LAG ... AS interval_seconds</c>), the class-gated CASE by
-    /// presence. The live test in <c>QueryStoreTrendRoutingLiveTests</c> proves the arithmetic on a store.
+    /// saying 3,600 — and a raw point (a Query Store interval placed at its start) is rated over its own
+    /// stored length (#4765), keeping the spacing to the previous point only where the row stored no end.
+    /// The pre-#3653 shape LAGged every point, so a bucket with no rows — a quiet hour — made the next
+    /// bucket's denominator 7,200 and halved its rate; that shape is pinned by absence (no bare
+    /// <c>LAG ... AS interval_seconds</c>), the class-gated CASE by presence. The live test in
+    /// <c>QueryStoreTrendRoutingLiveTests</c> proves the arithmetic on a store.
     /// </summary>
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void RollupTrendSql_RatesRollupPointsOverTheBucketWidth_AndRawPointsOverTheirSpacing(bool withDatabaseFilter)
+    public void RollupTrendSql_RatesRollupPointsOverTheBucketWidth_AndRawPointsOverTheirOwnLength(bool withDatabaseFilter)
     {
         var sql = QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter);
 
@@ -217,7 +221,7 @@ public sealed class QueryStoreTrendRoutingTests
         Assert.Contains("TRUE AS from_rollup FROM rollup_points", sql, StringComparison.Ordinal);
         Assert.Contains("FALSE AS from_rollup FROM raw_points", sql, StringComparison.Ordinal);
         Assert.Contains(
-            "CASE WHEN from_rollup\n             THEN " + DurationTrendRouting.HourlyBucketSecondsSql + "\n             ELSE extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))\n        END AS interval_seconds",
+            "CASE WHEN from_rollup\n             THEN " + DurationTrendRouting.HourlyBucketSecondsSql + "\n             ELSE COALESCE(own_interval_seconds, extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))))\n        END AS interval_seconds",
             sql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
         Assert.Equal(TimescaleSupport.HourlyBucket.TotalSeconds, double.Parse(DurationTrendRouting.HourlyBucketSecondsSql, System.Globalization.CultureInfo.InvariantCulture));
 
@@ -264,8 +268,8 @@ public sealed class QueryStoreTrendRoutingTests
     [Fact]
     public void RawFallbackSql_KeepsItsSlab_Deliberately()
     {
-        Assert.Contains("collection_time >= $2 - interval '1 day'", DarlingTrendReader.QueryStoreDurationTrendSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $3 + interval '30 days'", DarlingTrendReader.QueryStoreDurationTrendSql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $2 - interval '1 day'", DarlingTrendReader.QueryStoreDurationTrendFilteredSql, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3 + interval '30 days'", DarlingTrendReader.QueryStoreDurationTrendFilteredSql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2 - interval '1 day'", ViewerDataService.QueryStoreDurationTrendSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3 + interval '30 days'", ViewerDataService.QueryStoreDurationTrendSql, StringComparison.Ordinal);
     }
@@ -281,7 +285,7 @@ public sealed class QueryStoreTrendRoutingTests
     [Fact]
     public void BothApps_ServeTheBuilderOutput_DifferingOnlyByTheDatabaseFilter()
     {
-        Assert.Equal(QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: false), DarlingTrendReader.QueryStoreDurationTrendRollupSql);
+        Assert.Equal(QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true), DarlingTrendReader.QueryStoreDurationTrendRollupFilteredSql);
         Assert.Equal(QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true), ViewerDataService.QueryStoreDurationTrendRollupSql);
 
         /* Strip the filter lines from the viewer's copy and the two must be byte-identical. */
@@ -289,12 +293,13 @@ public sealed class QueryStoreTrendRoutingTests
         var stripped = viewerSql
             .Replace("\n    AND   ($5::text[] IS NULL OR database_name = ANY($5))", "", StringComparison.Ordinal)
             .Replace("\n            AND   ($5::text[] IS NULL OR database_name = ANY($5))", "", StringComparison.Ordinal);
-        Assert.Equal(DarlingTrendReader.QueryStoreDurationTrendRollupSql, stripped);
+        Assert.Equal(QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: false), stripped);
 
         /* Every arm of the viewer's copy carries the filter: the rollup scan, the identified-interval arm,
            and the legacy arm — three occurrences, or one arm silently ignores the user's selection. */
         var occurrences = viewerSql.Split("$5::text[] IS NULL").Length - 1;
         Assert.Equal(3, occurrences);
-        Assert.DoesNotContain("$5", DarlingTrendReader.QueryStoreDurationTrendRollupSql, StringComparison.Ordinal);
+        Assert.Equal(viewerSql, DarlingTrendReader.QueryStoreDurationTrendRollupFilteredSql);
+        Assert.DoesNotContain("$5", QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: false), StringComparison.Ordinal);
     }
 }

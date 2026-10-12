@@ -27,10 +27,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// window actually reached — the most expensive row in a month may have happened this morning. The floor is a
 /// property of the TIER, not of the result set, and has to be asked for separately.</para>
 ///
-/// <para><b>Why a one-chunk probe.</b> Bounded on both sides ($2 start, $3 end) exactly like the window it is
-/// asked about, so TimescaleDB prunes every chunk outside it and the scan stops at the first row of the oldest
-/// surviving chunk rather than reading the window. Unfiltered by database or module: the floor is the tier's,
-/// so a filter on the caller's real read must not narrow it.</para>
+/// <para><b>Why the floor is not bounded below.</b> A floor found inside the window called a quiet start a cut: a
+/// server with older rows, quiet for the first hours of the window, read as holding less than the window. The
+/// floor is the oldest row at or before the window's end, the same question <see cref="DataWindowFloor"/> asks for
+/// the Custom Views panels. It is one walk of the table's <c>(server_id, collection_time)</c> index in time order,
+/// so TimescaleDB stops at the first row it meets instead of reading the retention window. It is still null when
+/// the window itself holds nothing: a bounded existence check, cheap the same way, keeps that answer for the
+/// callers that report an empty window. Unfiltered by database or module: the floor is the tier's, so a filter on
+/// the caller's real read must not narrow it.</para>
 ///
 /// <para><b>Why this lives in Storage.</b> The desktop viewer's Queries grids (<c>ViewerDataService</c>) and
 /// the MCP tools (<c>DarlingDataReader</c>) both need the identical probe over the identical SQL, and the
@@ -58,22 +62,118 @@ public static class RawWindowFloor
     };
 
     /// <summary>
-    /// The probe SQL for <paramref name="table"/> — #2364's <c>QueryStoreWindowFloorSql</c> shape verbatim,
-    /// the table name the only thing that varies. $1 server_id, $2/$3 window (naive UTC).
+    /// The probe SQL for <paramref name="table"/>, the table name the only thing that varies. $1 server_id,
+    /// $2/$3 window (naive UTC). The window's start bounds only the existence check, never the floor.
+    /// #5449: <c>procedure_stats</c> has its own shape (<see cref="ProcedureFloorSql"/>); the two query views' text is unchanged.
     /// </summary>
-    public static string FloorSql(Table table) => $"""
-        SELECT MIN(collection_time)
-        FROM {TableName(table)}
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+    public static string FloorSql(Table table) => table == Table.ProcedureStats ? ProcedureFloorSql() : $"""
+        SELECT o.t
+        FROM
+        (
+            SELECT f.collection_time AS t
+            FROM {PgSchemaGenerator.CollectSchema}.{TableName(table)} AS f
+            WHERE f.server_id = $1
+            AND   f.collection_time <= $3
+            ORDER BY f.collection_time
+            LIMIT 1
+        ) AS o
+        WHERE EXISTS
+        (
+            SELECT 1
+            FROM {PgSchemaGenerator.CollectSchema}.{TableName(table)} AS w
+            WHERE w.server_id = $1
+            AND   w.collection_time >= $2
+            AND   w.collection_time <= $3
+        )
         """;
 
     /// <summary>
-    /// The oldest <c>collection_time</c> <paramref name="table"/> actually has inside
-    /// [<paramref name="startUtc"/>, <paramref name="endUtc"/>] for <paramref name="serverId"/>. Null when the
-    /// window holds nothing at all, which the caller reports as "nothing was read" rather than as an absence
-    /// of activity.
+    /// #5449: the <c>procedure_stats</c> probe. The table stores a row only for a procedure that did work in a cycle (or a first
+    /// sighting or a counter reset), so a window the collector covered while every procedure sat idle holds no row, and a row-only
+    /// probe would answer null (nothing was read) where an older store, which kept the idle rows, answered the table's oldest row.
+    /// A SUCCESS run of the collector in <c>collection_log</c> inside the window proves the store covered it, so it satisfies the
+    /// existence check too (the <c>OR EXISTS</c>).
+    ///
+    /// <para>The floor is the earlier of the oldest row and the first run the retention cut left standing. The cut is found from the
+    /// log, because SQL cannot read the raw tier's policy (TimescaleDB 4 days, a plain store 30, or a custom one): G is the newest
+    /// SUCCESS run that stored rows (<c>rows_collected &gt; 0</c>) inside the window and before the oldest row. Those rows are gone,
+    /// so retention dropped them, and coverage starts after G. With no row left at or before $3 (busy long ago, idle since) the
+    /// "before the oldest row" bound is infinity, so G is the newest busy run in the window, not the oldest run. With no G, nothing stored was ever dropped, and the floor is
+    /// the oldest run. Idle runs (<c>rows_collected = 0</c>) are never a G: they stored nothing to lose, so they say nothing
+    /// about the cut and a window of them reads as covered back to the oldest run. $1 server_id, $2/$3 window (naive UTC).</para>
+    /// </summary>
+    private static string ProcedureFloorSql() => $"""
+        SELECT o.t
+        FROM
+        (
+            SELECT LEAST(
+                (
+                    SELECT MIN(f.collection_time)
+                    FROM {PgSchemaGenerator.CollectSchema}.procedure_stats AS f
+                    WHERE f.server_id = $1
+                    AND   f.collection_time <= $3
+                ),
+                (
+                    SELECT MIN(c.collection_time)
+                    FROM {PgSchemaGenerator.CollectSchema}.collection_log AS c
+                    WHERE c.server_id = $1
+                    AND   c.collector_name = 'procedure_stats'
+                    AND   c.status = 'SUCCESS'
+                    AND   c.collection_time <= $3
+                    AND   c.collection_time >
+                    COALESCE(
+                    (
+                        SELECT g.collection_time
+                        FROM {PgSchemaGenerator.CollectSchema}.collection_log AS g
+                        WHERE g.server_id = $1
+                        AND   g.collector_name = 'procedure_stats'
+                        AND   g.status = 'SUCCESS'
+                        AND   g.rows_collected > 0
+                        AND   g.collection_time >= $2
+                        AND   g.collection_time <
+                        COALESCE(
+                        (
+                            SELECT MIN(f2.collection_time)
+                            FROM {PgSchemaGenerator.CollectSchema}.procedure_stats AS f2
+                            WHERE f2.server_id = $1
+                            AND   f2.collection_time <= $3
+                        ), 'infinity'::timestamp)
+                        ORDER BY g.collection_time DESC
+                        LIMIT 1
+                    ), '-infinity'::timestamp)
+                )
+            ) AS t
+        ) AS o
+        WHERE EXISTS
+        (
+            SELECT 1
+            FROM {PgSchemaGenerator.CollectSchema}.procedure_stats AS w
+            WHERE w.server_id = $1
+            AND   w.collection_time >= $2
+            AND   w.collection_time <= $3
+        )
+        OR EXISTS
+        (
+            SELECT 1
+            FROM {PgSchemaGenerator.CollectSchema}.collection_log AS c
+            WHERE c.server_id = $1
+            AND   c.collector_name = 'procedure_stats'
+            AND   c.status = 'SUCCESS'
+            AND   c.collection_time >= $2
+            AND   c.collection_time <= $3
+        )
+        """;
+
+    /// <summary>
+    /// The oldest <c>collection_time</c> <paramref name="table"/> holds for <paramref name="serverId"/> at or before
+    /// <paramref name="endUtc"/>, so it can sit before <paramref name="startUtc"/> when the rows reach back past the
+    /// window. Null when the window [<paramref name="startUtc"/>, <paramref name="endUtc"/>] holds nothing at all,
+    /// which the caller reports as "nothing was read" rather than as an absence of activity.
+    ///
+    /// <para>There is deliberately no short-window skip in here (#4966). The desktop viewer's three floor probes return null at once
+    /// for a window no longer than <see cref="DurationTrendRouting.TruncationSlack"/>, because no coverage note can show for one.
+    /// Darling's MCP tools call this method too and read its null as "nothing was read", so a skip here would make a short MCP
+    /// window report that nothing was read. The skip lives in the viewer's methods, ahead of this call.</para>
     /// </summary>
     /// <param name="commandTimeoutSeconds">The caller's deadline class — the MCP read deadline by default; the
     /// viewer passes its interactive one.</param>
@@ -97,8 +197,11 @@ public static class RawWindowFloor
         return value is DateTime dt ? dt : null;
     }
 
-    /// <summary>The window actually served: the floor when the tier had one, the requested start otherwise.</summary>
-    public static DateTime EffectiveStart(DateTime? floor, DateTime requestedStartUtc) => floor ?? requestedStartUtc;
+    /// <summary>The window actually served: the floor when it sits after the requested start, the requested start
+    /// otherwise. A floor before the start means the rows reach back past the window, so the window was served
+    /// whole; the served start never precedes the one asked for.</summary>
+    public static DateTime EffectiveStart(DateTime? floor, DateTime requestedStartUtc) =>
+        floor is DateTime f && f > requestedStartUtc ? f : requestedStartUtc;
 
     /// <summary>
     /// Whether the floor sits far enough past the requested start to call the window <c>window_truncated</c> —

@@ -43,8 +43,8 @@ public class AlertHistorySourceTests : IDisposable
 
     private async Task<DuckDBConnection> InitializeDatabaseAsync()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeFromTemplateAsync();
 
         var connection = new DuckDBConnection($"Data Source={_dbPath}");
         await connection.OpenAsync(TestContext.Current.CancellationToken);

@@ -145,19 +145,19 @@ public sealed class RdsResumePersistenceTests
             case "plans":
             {
                 var ingestor = new RdsPlanIngestor(store, logs, resume: resume);
-                return () => ingestor.IngestAsync(1, "s", Host, csv, CancellationToken.None);
+                return () => ingestor.IngestAsync(1, "s", Host, csv, cancellationToken: CancellationToken.None);
             }
 
             case "deadlocks":
             {
                 var ingestor = new RdsDeadlockIngestor(store, logs, resume: resume);
-                return () => ingestor.IngestAsync(1, "s", Host, false, csv, CancellationToken.None);
+                return () => ingestor.IngestAsync(1, "s", Host, false, csv, cancellationToken: CancellationToken.None);
             }
 
             default:
             {
                 var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, logs, resume: resume);
-                return () => ingestor.IngestAsync(1, "s", Host, false, csv, CancellationToken.None);
+                return () => ingestor.IngestAsync(1, "s", Host, false, csv, cancellationToken: CancellationToken.None);
             }
         }
     }
@@ -450,7 +450,7 @@ public sealed class RdsResumeStoreLiveTests
             var first = new RdsPlanIngestor(
                 postgres, new RdsLogSource(_ => client), resume: runner.RdsResumeStoreFor("pg_plan_capture"));
 
-            await first.IngestAsync(TestServerId, "s", Host, false, TestContext.Current.CancellationToken);
+            await first.IngestAsync(TestServerId, "s", Host, false, cancellationToken: TestContext.Current.CancellationToken);
 
             using (var connection = new NpgsqlConnection(connectionString))
             {
@@ -471,7 +471,7 @@ public sealed class RdsResumeStoreLiveTests
             var restarted = new RdsPlanIngestor(
                 postgres, new RdsLogSource(_ => client), resume: runner.RdsResumeStoreFor("pg_plan_capture"));
 
-            await restarted.IngestAsync(TestServerId, "s", Host, false, TestContext.Current.CancellationToken);
+            await restarted.IngestAsync(TestServerId, "s", Host, false, cancellationToken: TestContext.Current.CancellationToken);
 
             Assert.Equal(Newest, client.Downloads[0].LogFileName);
             Assert.Equal("M1", client.Downloads[0].Marker);

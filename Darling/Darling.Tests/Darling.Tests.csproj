@@ -15,6 +15,18 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- #5596: WPF builds one WeakEventTable per STA thread that touches a WeakEventManager, and each table
+         registers a ProcessExit handler. At exit that handler runs on the main thread, and when the table's
+         own thread is gone it asks the dead dispatcher to purge the table with a 300 ms timeout nobody ever
+         answers: about 0.3 seconds per STA test thread, spent after the run has returned. About fifty test files
+         start their own STA thread, so the exit stage grew past the 11 seconds xUnit v3 gives a process after the
+         run returns, and the runner printed "Foreground threads were left running" with exit code 1 and 0 failed
+         tests. This WPF switch (WindowsBase, BaseAppContextSwitches) makes the handler purge the table directly.
+         WpfExitSwitchTests pins that the switch is set, and that the runtime still knows its name. -->
+    <RuntimeHostConfigurationOption Include="Switch.MS.Internal.DoNotInvokeInWeakEventTableShutdownListener" Value="true" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="xunit.v3" />
     <!-- #4128: a live HTTP proof of the web host's gates (Host-allowlist, network-mode token/CIDR) through
          a real Kestrel TestServer pipeline, rather than the source-order pins above. -->
@@ -49,21 +61,34 @@
 
   <ItemGroup>
     <!-- system_health event samples for SystemHealthParser (one per feeder event; shapes per sp_HealthParser xpath). -->
+    <None Include="Fixtures\FinOpsIndexAnalysis\golden.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The shared time range grammar cases (#5562); the web harness reads the same file. -->
+    <None Include="Fixtures\time-range-cases.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <!-- real, scrubbed system_health event captures for SystemHealthParserRealEventTests -->
     <None Include="Fixtures\SystemHealth\real\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <!-- Deadlock graph parser/layout golden samples (real sql2025 captures + synthetic edge cases). -->
     <None Include="Fixtures\Deadlocks\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Statement-filter XML walk fixtures (#4348): plan XML carrying canary values. -->
+    <None Include="Fixtures\StatementScrub\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\FinOpsInventory\golden.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\FinOpsRecommendations\golden.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\FinOpsApplicationConnections\golden.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\FinOpsOptimization\golden.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\FinOpsStorageGrowth\golden.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\column-value-filter-cases.json" CopyToOutputDirectory="PreserveNewest" />
     <!-- #4534: PerformanceStudio's own .sqlplan fixtures for the warning-origin decider, copied from its
          public repo (table_variable_plan, convert_implicit_plan, udf_plan). Real captures rather than a
          synthetic plan, so the "every operator warning knows its operator" pin runs against the same
          shapes PerformanceStudio's own test relies on. -->
     <None Include="Fixtures\OriginPlans\*.sqlplan" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\FinOpsDatabaseResources\golden.json" CopyToOutputDirectory="PreserveNewest" />
     <!-- #2538: a REAL auto_explain block, captured from a PostgreSQL container with auto_explain
          loaded. Real rather than hand-written because the parser's whole job is the log's exact
          shape - the tab-indented continuation, the %Q query id in the prefix, the JSON body - and a
          fixture I typed would agree with whatever I believed that shape was. 
          Named .txt rather than .log because *.log is gitignored - correctly, and a fixture is not a log. -->
+    <None Include="Fixtures\FinOpsUtilization\golden.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\auto_explain_real_block.txt" CopyToOutputDirectory="PreserveNewest" />
     <!-- The SHIPPED bring-your-own-Postgres provisioning script, copied beside the test binary so
          ProvisionRolesAclDriftTests can parse the REAL file (never a stale second copy) from
@@ -94,6 +119,11 @@
          thing that keeps CI's cluster shaped like the product's as the catalog grows. -->
     <None Include="..\..\.github\workflows\build.yml" Link="Fixtures\build.yml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\.github\workflows\nightly.yml" Link="Fixtures\nightly.yml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #5616: the shard scripts both workflows call. The cut, the chunking and the per-chunk runs moved out of the
+         workflow steps into them, so the pins that read those steps (CiShardCommandLineBudgetTests,
+         CiShardHangReportTests) read these copies. -->
+    <None Include="..\..\.github\scripts\run-darling-pg-shard.ps1" Link="Fixtures\run-darling-pg-shard.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\.github\scripts\run-lite-shard.ps1" Link="Fixtures\run-lite-shard.ps1" CopyToOutputDirectory="PreserveNewest" />
     <!-- #3072: Darling/README.md, copied beside the test binary so ReadmeDerivedCountPinTests parses
          the REAL file. Its collector-inventory, V1-table, hypertable and worker-sizing figures are
          restatements of CollectorCatalog.All / TimescaleSupport.HypertableCount, and prose cannot call

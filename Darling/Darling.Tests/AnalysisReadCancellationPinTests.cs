@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// public method, not a private catch site called directly), with no rig and no store, on a port nothing
 /// listens on.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AnalysisReadCancellationPinTests
 {
     private static NpgsqlDataSource DeadStore() =>

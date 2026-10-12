@@ -121,7 +121,9 @@ public sealed class MigrationUpgradeLadderLiveTests
         /* Scratch database, dropped and recreated per run — the fixture creates schemas, hypertables,
            roles-adjacent grants, and the version table, none of which may leak between runs. The
            darling role is cluster-level and idempotently ensured (rung SQL grants to it). */
-        await using (var admin = new NpgsqlConnection(baseConnectionString))
+        /* #5549: unpooled, because this connection runs the FORCE drop. A pooled one would hand the backend that ran it
+           to the next test, and a TimescaleDB job run on that backend crashed it with 0xC0000005. */
+        await using (var admin = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(baseConnectionString)))
         {
             await admin.OpenAsync();
             await using (var role = new NpgsqlCommand(
@@ -138,6 +140,8 @@ public sealed class MigrationUpgradeLadderLiveTests
             var scratchForPool = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = scratchDatabase };
             NpgsqlConnection.ClearPool(new NpgsqlConnection(scratchForPool.ConnectionString));
 
+            /* No TimescaleDB job worker is left in the database the FORCE drop below kills (#5480). */
+            await ScratchPostgres.QuiesceTimescaleJobsAsync(baseConnectionString, scratchDatabase);
             await using (var drop = new NpgsqlCommand(
                 $"DROP DATABASE IF EXISTS {scratchDatabase} WITH (FORCE)", admin))
             {

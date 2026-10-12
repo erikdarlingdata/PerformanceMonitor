@@ -12,6 +12,7 @@ using System.Data.Common;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -22,13 +23,12 @@ namespace PerformanceMonitor.Collectors;
 /// joins sys.master_files + sys.dm_os_volume_stats (the exclusion filter splices at BOTH the
 /// cursor and outer SELECT — same parameters referenced twice).
 ///
-/// <para>Azure SQL DB takes an entirely database-scoped query on the EXISTING connection: the
-/// connected database's own <c>sys.database_files</c> and <c>FILEPROPERTY(SpaceUsed)</c>, which MS
-/// Learn documents as the canonical way to read file space on that platform and which need only the
-/// <c>public</c> role. Nothing on that path reads <c>master</c>, <c>sys.master_files</c> (not
-/// documented for Azure SQL DB at all) or <c>sys.dm_os_volume_stats</c> (SQL Server only) — see
-/// <see cref="RunsPerDatabase"/> for why the enumeration that used to precede it was the actual
-/// bug.</para>
+/// <para>Azure SQL DB takes an entirely database-scoped query, run once per database (#5498,
+/// <see cref="RunsPerDatabase"/>): the connected database's own <c>sys.database_files</c> and
+/// <c>FILEPROPERTY(SpaceUsed)</c>, which MS Learn documents as the canonical way to read file space on that
+/// platform and which need only the <c>public</c> role. Nothing on that path reads <c>master</c>,
+/// <c>sys.master_files</c> (not documented for Azure SQL DB at all) or <c>sys.dm_os_volume_stats</c> (SQL
+/// Server only).</para>
 ///
 /// <para>Deliberately NOT <c>sys.dm_db_file_space_usage</c>, which looks like the natural Azure
 /// choice: on Basic/S0/S1 service objectives AND on any database in an elastic pool it requires
@@ -46,9 +46,13 @@ public sealed class DatabaseSizeStatsCollector : CollectorDefinitionBase<Databas
 
     /// <summary>
     /// <c>DatabaseId</c>, <c>FileId</c> and <c>PhysicalName</c> are nullable because the Azure
-    /// sibling arm (#2643) deliberately emits them as NULL: <c>sys.resource_stats</c> has no
+    /// sibling arm (#2643, removed by #5498; stored rows keep the shape) deliberately emitted them as NULL: <c>sys.resource_stats</c> has no
     /// per-file breakdown, so a sibling row carries a database name and a total size and honestly
     /// nothing else. Both stores hold the columns nullable (#3262).
+    ///
+    /// <para><c>TotalSizeMb</c> is nullable for one row: the LOG file of an Azure SQL Database Hyperscale
+    /// database, whose size is not allocated storage (the log lives in the log service). See
+    /// <see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>.</para>
     /// </summary>
     public readonly record struct Row(
         string DatabaseName,
@@ -57,7 +61,7 @@ public sealed class DatabaseSizeStatsCollector : CollectorDefinitionBase<Databas
         string FileTypeDesc,
         string FileName,
         string? PhysicalName,
-        decimal TotalSizeMb,
+        decimal? TotalSizeMb,
         decimal? UsedSizeMb,
         decimal? AutoGrowthMb,
         decimal? MaxSizeMb,
@@ -118,7 +122,7 @@ BEGIN
     BEGIN TRY
         SET @sql = N'EXECUTE ' + QUOTENAME(@db_name) + N'.sys.sp_executesql N''
 INSERT #file_space (database_id, file_id, used_size_mb, current_size_mb)
-SELECT
+SELECT /* PerformanceMonitorLite */
     DB_ID(),
     df.file_id,
     CONVERT(decimal(19,2), FILEPROPERTY(df.name, N''''SpaceUsed'''') * 8.0 / 1024.0),
@@ -142,7 +146,7 @@ END;
 CLOSE db_cursor;
 DEALLOCATE db_cursor;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     database_name = d.name,
     database_id = d.database_id,
     file_id = mf.file_id,
@@ -206,34 +210,42 @@ OPTION(RECOMPILE);
 /* Trailing result set = the payload path's probe-failure contract (#1851,
    EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync). Always returned, normally empty; the host
    reads zero rows and attaches no note. */
-SELECT
+SELECT /* PerformanceMonitorLite */
     name,
     error_text
 FROM @probe_failures
 ORDER BY
     name;";
 
-    /* #2643: TWO sources, and the second one cannot be referenced unless it exists.
+    /* sys.database_files is database-scoped, so this query reports the CONNECTED database and nothing else.
+       That is by design since #5498: the host runs it once per database (RunsPerDatabase), so every database
+       on an Azure logical server reports its own real files. Before, a master-only sys.resource_stats arm
+       tried to report the siblings from the one master connection (#2643), but that view lags database
+       creation by about an hour and carries no per-file breakdown; see the note above the final SELECT.
 
-       sys.database_files is database-scoped, so on Azure SQL DB this collector reported the connected
-       database and nothing else. Correct, and indistinguishable from a collector that found only master:
-       a reporter with fifty databases pointed the Viewer at master, saw master's two files, and filed it.
-
-       sys.resource_stats is a MASTER-ONLY view carrying storage_in_megabytes per database with roughly
-       fourteen days of history. Verified against a live Azure SQL Database rather than taken from
-       documentation - so the sizes ARE reachable from one connection, and only the per-FILE breakdown is
-       not. That shows in the projection: file_id NULL and a file_name that says so, never a fabricated
-       file.
-
-       The second arm runs through sp_executesql, and that is not stylistic. sys.resource_stats does not
-       EXIST in a user database, and name resolution happens at PARSE time - so a plain UNION guarded by
-       WHERE DB_NAME() = N'master' still fails with 208 on every user database, which is the common case.
-       Measured: it did, immediately, the first time this was run from somewhere other than master.
-
-       A table variable rather than two branches each repeating the file SELECT: the file rows are
-       collected identically either way, and duplicating that projection is how the two copies drift. */
+       A table variable rather than a bare SELECT so the final projection stays the single place that fixes
+       the payload's column order. */
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+/* Hyperscale keeps its transaction log in the log service, and sys.database_files still lists a LOG row for it,
+   sized at about 1 TB (1,046,528 MB) - the ceiling on the log's ACTIVE portion, not storage the database holds
+   or pays for. Hyperscale bills allocated DATA storage only (Microsoft Learn, 'What is the Hyperscale service
+   tier?'), so that row's size, growth and ceiling are not reported: a NULL here becomes 'n/a (log service)' in
+   every reader and stays out of every allocated total. The data file keeps its real size.
+
+   DATABASEPROPERTYEX needs only the current database, so this adds no permission to the Azure path. Learn's
+   DATABASEPROPERTYEX page describes Edition as 'the database edition or service tier' and its list of returned
+   values does not name Hyperscale; the tier string itself is the one Learn shows for
+   sys.database_service_objectives.edition (which needs dbmanager, so it is not usable here). CONVERT because
+   DATABASEPROPERTYEX returns sql_variant, the same way Recovery is read below. */
+DECLARE
+    @is_hyperscale bit =
+        CASE
+            WHEN CONVERT(nvarchar(64), DATABASEPROPERTYEX(DB_NAME(), N'Edition')) = N'Hyperscale'
+            THEN 1
+            ELSE 0
+        END;
 
 DECLARE
     @database_sizes TABLE
@@ -261,7 +273,7 @@ DECLARE
 
 INSERT
     @database_sizes
-SELECT
+SELECT /* PerformanceMonitorLite */
     database_name = DB_NAME(),
     database_id = DB_ID(),
     file_id = df.file_id,
@@ -269,17 +281,25 @@ SELECT
     file_name = df.name,
     physical_name = df.physical_name,
     total_size_mb =
-        CONVERT(decimal(19,2), df.size * 8.0 / 1024.0),
+        CASE
+            WHEN ls.is_log_service = 1
+            THEN CONVERT(decimal(19,2), NULL)
+            ELSE CONVERT(decimal(19,2), df.size * 8.0 / 1024.0)
+        END,
     used_size_mb =
         CONVERT(decimal(19,2), FILEPROPERTY(df.name, N'SpaceUsed') * 8.0 / 1024.0),
     auto_growth_mb =
         CASE
+            WHEN ls.is_log_service = 1
+            THEN CONVERT(decimal(19,2), NULL)
             WHEN df.is_percent_growth = 1
             THEN CONVERT(decimal(19,2), NULL)
             ELSE CONVERT(decimal(19,2), df.growth * 8.0 / 1024.0)
         END,
     max_size_mb =
         CASE
+            WHEN ls.is_log_service = 1
+            THEN CONVERT(decimal(19,2), NULL)
             WHEN df.max_size = -1
             THEN CONVERT(decimal(19,2), -1)
             WHEN df.max_size = 268435456
@@ -299,45 +319,43 @@ SELECT
     volume_free_mb =
         CONVERT(decimal(19,2), NULL),
     is_percent_growth =
-        df.is_percent_growth,
+        CASE
+            WHEN ls.is_log_service = 1
+            THEN CONVERT(bit, NULL)
+            ELSE df.is_percent_growth
+        END,
     growth_pct =
-        CASE WHEN df.is_percent_growth = 1 THEN df.growth ELSE NULL END,
+        CASE
+            WHEN ls.is_log_service = 0
+            AND  df.is_percent_growth = 1
+            THEN df.growth
+            ELSE NULL
+        END,
     vlf_count =
         CASE WHEN df.type = 1 /*LOG*/ THEN (SELECT CONVERT(integer, COUNT_BIG(*)) FROM sys.dm_db_log_info(DB_ID()) AS li WHERE li.file_id = df.file_id) ELSE NULL END
-FROM sys.database_files AS df;
-
-/* The sibling databases, on the one connection that can see them. Newest sample per database: the older
-   ones are a growth series worth having later, and taking them all would multiply every database by the
-   retention window. The connected database is excluded because the arm above already reported it with
-   real files. */
-IF DB_NAME() = N'master'
-BEGIN
-    INSERT
-        @database_sizes
-    (
-        database_name, file_type_desc, file_name, total_size_mb, state_desc
-    )
-    EXEC sys.sp_executesql N'
-SELECT
-    rs.database_name,
-    file_type_desc = N''ROWS'',
-    file_name = N''(whole database)'',
-    total_size_mb = CONVERT(decimal(19,2), rs.storage_in_megabytes),
-    state_desc = N''ONLINE''
-FROM
+FROM sys.database_files AS df
+CROSS APPLY
 (
+    /* The one place that decides which row is the log service's: the LOG row (type 1) of a Hyperscale
+       database. Used space and the VLF count stay as collected - neither feeds an allocated total. */
     SELECT
-        r.database_name,
-        r.storage_in_megabytes,
-        rn = ROW_NUMBER() OVER (PARTITION BY r.database_name ORDER BY r.end_time DESC)
-    FROM sys.resource_stats AS r
-    WHERE r.database_name <> DB_NAME()
-    AND   r.storage_in_megabytes IS NOT NULL
-) AS rs
-WHERE rs.rn = 1;';
-END;
+        is_log_service =
+            CASE
+                WHEN @is_hyperscale = 1
+                AND  df.type = 1 /*LOG*/
+                THEN CONVERT(bit, 1)
+                ELSE CONVERT(bit, 0)
+            END
+) AS ls;
 
-SELECT
+/* #5498: no sibling arm. Siblings used to be read here from master's resource-stats view, but that view
+   ingests a new database only about an hour after it is created (#3262), and the collector runs rarely, so
+   a fresh logical server stored master's two files and nothing else (the 3.10 release test: 45 minutes,
+   two user databases, master only). The host now connects to EACH database (RunsPerDatabase) and every
+   database reports its own real files, so the master-only view is not read at all: reading it beside the
+   per-database runs would store every database twice. */
+
+SELECT /* PerformanceMonitorLite */
     ds.database_name,
     ds.database_id,
     ds.file_id,
@@ -359,7 +377,6 @@ SELECT
     ds.vlf_count
 FROM @database_sizes AS ds
 ORDER BY
-    CASE WHEN ds.file_id IS NULL THEN 1 ELSE 0 END,
     ds.database_name,
     ds.file_id
 OPTION(RECOMPILE);";
@@ -369,21 +386,20 @@ OPTION(RECOMPILE);";
     public override string TargetTable => "database_size_stats";
 
     /// <summary>
-    /// Never per-database. On Azure SQL DB this used to be true, which made the host ENUMERATE
-    /// databases first — and that enumeration connects to <c>master</c>, which is the one database an
-    /// Azure login reaching the server through a DATABASE-level firewall rule cannot open (#1631,
-    /// TrudAX's error 40615). The enumeration bought nothing here: the query below is entirely
-    /// database-scoped (<c>sys.database_files</c> + <c>FILEPROPERTY</c>, both satisfied by the
-    /// <c>public</c> role), the connection already points at the database being monitored, and on Azure
-    /// SQL DB a contained user can only see its own database anyway — so the sibling databases the
-    /// enumeration went to <c>master</c> to discover were never readable from this connection.
+    /// Per-database on Azure SQL DB (#5498), the same gate database_scoped_config, index_object_stats and
+    /// query_store use. The query is database-scoped, so one connection to master reported master's two files
+    /// and nothing else: the siblings came from master's <c>sys.resource_stats</c>, which ingests a new
+    /// database only about an hour after it exists (#3262), so a fresh logical server stored master alone (the
+    /// 3.10 Azure release test). Connecting to each database reports every database's real files at once.
     ///
-    /// <para>Running once on the existing connection removes <c>master</c> from this collector's path
-    /// completely, rather than relying on the enumeration's fallback to recover from an error it did not
-    /// need to provoke. #1634's fallback still protects the collectors that genuinely must enumerate
-    /// (the per-database XE readers); this one simply stops asking.</para>
+    /// <para>#1631 made this false because the enumeration connects to <c>master</c>, which a login admitted by a
+    /// DATABASE-level firewall rule cannot open (error 40615). That is handled by the host now: a
+    /// registration that names a database sweeps that database alone and never touches master (#2220), and a
+    /// logical-server registration is connected to master anyway, so it had nothing to lose.</para>
+    ///
+    /// <para>On every other target the one connection reads every database through the cursor.</para>
     /// </summary>
-    public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
+    public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
 
     /// <summary>
     /// This collector's on-prem batch returns its per-database probe failures after the payload (#1851).
@@ -404,7 +420,8 @@ OPTION(RECOMPILE);";
     {
         if (context.Target.IsAzureSqlDb)
         {
-            /* Database exclusion happens in the host's database enumeration on Azure. */
+            /* Database exclusion happens in the host's database enumeration on Azure; this text runs once in
+               each enumerated database (RunsPerDatabase). */
             return new CollectorQuery(AzureSqlDbQueryText);
         }
 
@@ -447,10 +464,10 @@ OPTION(RECOMPILE);";
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            /* Ordinals 1, 2 and 5 are NULL on every Azure sibling row (#2643's arm omits what
-               sys.resource_stats cannot measure), and an unguarded read here killed the whole
-               collection — master's own rows included — the moment the first sibling row appeared
-               (#3262). */
+            /* Ordinals 1, 2 and 5 are never NULL in what this statement reads today (#5498 removed the
+               sibling arm that emitted them as NULL), but the guards stay: an unguarded read here once
+               killed the whole collection the moment the first NULL row appeared (#3262), and the store
+               still holds those rows. */
             rows.Add(new Row(
                 reader.GetString(0),
                 reader.IsDBNull(1) ? null : Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
@@ -458,7 +475,9 @@ OPTION(RECOMPILE);";
                 reader.GetString(3),
                 reader.GetString(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.GetDecimal(6),
+                /* Ordinal 6 is NULL on the Hyperscale log row (the log service is not allocated storage);
+                   an unguarded GetDecimal here would kill the whole batch the way #3262 did. */
+                reader.IsDBNull(6) ? null : reader.GetDecimal(6),
                 reader.IsDBNull(7) ? null : reader.GetDecimal(7),
                 reader.IsDBNull(8) ? null : reader.GetDecimal(8),
                 reader.IsDBNull(9) ? null : reader.GetDecimal(9),

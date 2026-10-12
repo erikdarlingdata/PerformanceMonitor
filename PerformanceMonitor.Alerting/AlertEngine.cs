@@ -411,19 +411,24 @@ public sealed class AlertEngine
 
         await EnsureWatermarksSeededAsync(key, ct);
 
-        await CheckCpuAsync(snapshot, key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckBlockingAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckDeadlocksAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckPoisonWaitsAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckLongRunningQueriesAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckTempDbSpaceAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckPvsPressureAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckFileGrowthAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckAnomalousJobsAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckDatabaseStateAsync(key, serverName, now, alertCooldown, suppressed, ct);
-        await CheckForcePlanFailuresAsync(key, serverName, now, alertCooldown, suppressed, ct);
+        await CheckCpuAsync(snapshot, key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        /* On an Azure SQL Database master target, blocking and deadlock events for databases monitored as
+           their own targets alert on those targets; the user's excluded list is extended with them here. */
+        IReadOnlyList<string> blockingDeadlockExcluded = snapshot.SeparatelyMonitoredDatabases is { Count: > 0 } separate
+            ? _settings.ExcludedDatabases.Concat(separate).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+            : _settings.ExcludedDatabases;
+        await CheckBlockingAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, blockingDeadlockExcluded, ct);
+        await CheckDeadlocksAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, blockingDeadlockExcluded, ct);
+        await CheckPoisonWaitsAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckLongRunningQueriesAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckTempDbSpaceAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckPvsPressureAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckFileGrowthAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckAnomalousJobsAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        bool failedJobConditionPresent = await CheckFailedJobsAsync(snapshot, key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
+        await CheckDatabaseStateAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckForcePlanFailuresAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
 
         return new AlertSweepResult(true, lowDiskConditionPresent, failedJobConditionPresent);
     }
@@ -733,15 +738,12 @@ public sealed class AlertEngine
     public const int ActiveMaintenanceProbeMaxRows = 50;
 
     private async Task CheckCpuAsync(
-        AlertServerSnapshot snapshot, string key, string serverName,
+        AlertServerSnapshot snapshot, string key, string serverName, int? serverId,
         DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         /* Mode selection INSIDE the engine — ServerSummaryItem.CpuPercentForAlert semantics
            (Lite LocalDataService.Overview.cs:143-144): Total → TotalCpuPercent ?? CpuPercent;
-           SqlOnly → CpuPercent. */
-        var alertCpuValue = _settings.CpuAlertMode == CpuAlertMode.TotalServer
-            ? (snapshot.TotalCpuPercent ?? snapshot.SqlCpuPercent)
-            : snapshot.SqlCpuPercent;
+           SqlOnly → CpuPercent. Applied per observation (CpuValueFor). */
         string cpuMetricLabel = _settings.CpuAlertMode == CpuAlertMode.TotalServer ? "Total CPU" : "SQL CPU"; /* :64 */
 
         if (!_settings.CpuEnabled)
@@ -753,19 +755,6 @@ public sealed class AlertEngine
             return;
         }
 
-        if (!alertCpuValue.HasValue)
-        {
-            /* NO-DATA FREEZES THE GATE — never a breach, never a clear. The pre-#3282 code fell through to
-               its resolve arm here, so a CPU sample that simply went missing announced a recovery nobody
-               measured, rendered "<server>: Total CPU back to %" because the value it interpolated was
-               null. Freezing is the same call CustomAlertEvaluator makes on a null scalar, and the same
-               reason every per-check catch in this class logs and skips: resolving on absent evidence
-               fabricates a recovery exactly as firing on it fabricates an alert. */
-            return;
-        }
-
-        bool breaching = alertCpuValue.Value >= _settings.CpuThresholdPercent;      /* :65-67 */
-
         /* The observation is the ring-buffer SAMPLE, identified by snapshot.CpuSampleTimeUtc: the sweep runs
            on s_alertSweepInterval (30 s) while that sample advances about once a minute, so without the
            instant the SAME sample would advance the streak on consecutive sweeps and CpuBreachSamples would
@@ -775,116 +764,286 @@ public sealed class AlertEngine
            second arm behind the same gate. The instant is the row's UTC twin where the store has one and the
            target's local stamp before V134 (#3744); the gate compares it for EQUALITY, so which clock stamped
            it is not a gate input — see ObservePersistenceAsync for why order was the wrong test. */
-        var (outcome, incidentOpen) = await ObservePersistenceAsync(
-            _cpuPersistence, CpuPersistenceMetric, key, snapshot.CpuSampleTimeUtc, breaching,
-            CpuBreachSamples, CpuClearSamples);
-
-        if (incidentOpen && breaching)
+        var observations = SelectCpuObservations(snapshot, key, now);
+        var events = new List<(bool IsFire, double Value, DateTime? ReadingUtc)>();
+        foreach (var obs in observations)
         {
-            if (!suppressed && CooldownElapsed(_lastCpuAlert, key, now, alertCooldown)) /* :72 */
+            var sampleValue = CpuValueFor(obs);
+            if (!sampleValue.HasValue)
             {
-                var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "High CPU" }; /* :74 */
-                bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
-                _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
+                /* NO-DATA FREEZES THE GATE — never a breach, never a clear. The pre-#3282 code fell through to
+                   its resolve arm here, so a CPU sample that simply went missing announced a recovery nobody
+                   measured, rendered "<server>: Total CPU back to %" because the value it interpolated was
+                   null. Freezing is the same call CustomAlertEvaluator makes on a null scalar, and the same
+                   reason every per-check catch in this class logs and skips: resolving on absent evidence
+                   fabricates a recovery exactly as firing on it fabricates an alert. */
+                continue;
+            }
 
-                /* #3495: name the active backup on the card. Everything the annotation needs was knowable
-                   at fire time from the same active-session surface the operator ended up reading by hand
-                   (get_active_queries' underlying table — the query_snapshots read the LRQ alert already
-                   rides), so this is one read of data the store already holds on the same sweep: no new
-                   collector, no new cadence. Inside the fire branch deliberately — cooldown-bounded, so a
-                   quiet sweep pays nothing — and taken for muted fires too, so the history row carries the
-                   same detail the delivered card would have.
+            bool breaching = sampleValue.Value >= _settings.CpuThresholdPercent;      /* :65-67 */
+            var (outcome, incidentOpen) = await ObservePersistenceAsync(
+                _cpuPersistence, CpuPersistenceMetric, key, obs.Instant, breaching,
+                CpuBreachSamples, CpuClearSamples);
 
-                   ANNOTATION, NEVER SUPPRESSION: the threshold compare, the persistence gate, the tiers and
-                   the fire above are all decided before this read exists; it can only ever ADD a line.
-
-                   Every filter is off and the exclusion list empty, on purpose: the LRQ alert's noise
-                   opt-outs exist to keep maintenance OFF that alert (excludeBackups drops BACKUPTHREAD/
-                   BACKUPIO waits), and this probe wants exactly the population those filters remove — the
-                   backup filtered out of the long-running alert is precisely what this line names. An
-                   excluded DATABASE stays visible too: the exclusion setting governs alert noise, and a
-                   backup of an excluded database still burns this server's CPU. Threshold 0 = every session
-                   in the latest fresh snapshot; the read's own 10-minute staleness floor still applies, so a
-                   dead collector cannot dress an old backup up as a live one. The #3653 (Q5) opt-out knob is
-                   passed as None for the same reason the five filters are off: an operator excludes their
-                   permanent background requests from the LONG-RUNNING alert, and a backup run by an excluded
-                   service login is still the thing burning this server's CPU.
-
-                   Log-and-degrade: a failed annotation read costs the card its maintenance line and NOTHING
-                   else — the alert already fired above this read in every sense that matters, and the empty
-                   string leaves cpuDetailText byte-identical to the pre-#3495 card. Counted on #3013's
-                   surface because it IS a store read the alert pass swallowed; Warning rather than Error
-                   because the CONDITION was evaluated correctly — only the annotation went blind. */
-                string maintenanceDetail = "";
-                var maintenanceClock = Stopwatch.StartNew();
-                try
+            if (incidentOpen && breaching)
+            {
+                /* Consecutive fire candidates collapse to the last one: one announcement per batch, carrying
+                   the newest breaching reading. The cooldown inside FireCpuAsync still decides delivery. */
+                if (events.Count > 0 && events[^1].IsFire)
                 {
-                    var activeSessions = await _readAdapter.GetLongRunningQueriesAsync(
-                        key,
-                        thresholdMinutes: 0,
-                        maxResults: ActiveMaintenanceProbeMaxRows,
-                        excludeSpServerDiagnostics: false,
-                        excludeWaitFor: false,
-                        excludeBackups: false,
-                        excludeMiscWaits: false,
-                        excludeCdc: false,
-                        Array.Empty<string>(),
-                        LongRunningQueryExclusions.None,
-                        ct);
-                    maintenanceDetail = AlertContextBuilders.BuildActiveMaintenanceDetail(activeSessions.Sessions);
+                    events[^1] = (true, sampleValue.Value, obs.UtcInstant);
                 }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                else
                 {
-                    throw;
+                    events.Add((true, sampleValue.Value, obs.UtcInstant));
                 }
-                catch (Exception ex)
-                {
-                    _logger?.LogWarning("Could not read active sessions for the High CPU card's maintenance annotation on {Server} after {ElapsedMs} ms — the alert fires without it: {Message}",
-                        serverName, maintenanceClock.ElapsedMilliseconds, ex.Message);
-                    _readFailures?.RecordReadFailure(key, "CPU maintenance annotation", maintenanceClock.ElapsedMilliseconds);
-                }
-
-                var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {_settings.CpuThresholdPercent}%{maintenanceDetail}"; /* :89 + #3495 */
-
-                /* :91-98 — ShortMessage = the toast body of :84 minus the server-name prefix. The numerics
-                   are REQUIRED, not optional (#1830): the ported no-numerics form left the history stores
-                   parsing "87% (Total CPU)", which fails on the parenthesized label, so every High CPU row
-                   stored current_value 0 in Lite AND Darling while the toast/email/webhook text stayed
-                   correct. alertCpuValue.HasValue is guaranteed here — the null arm above returns.
-
-                   #3653 (A8e): CPU used to pass NO context, and so no tier — every row rendered amber by
-                   name, a 100% fire indistinguishable from an 80% one while the card beside it was red. The
-                   context now exists for exactly one member: the grade (GradeCpuFire — the CPU health
-                   band's Critical bar). Details stay empty and DetailText stays the hand-built block above,
-                   byte-identical, so every channel renders what it rendered before plus the tier. Set on
-                   BOTH the context and the outcome for the reason the deadlock and Poison Wait sites give:
-                   Lite's deliverer persists only the context, Darling's folds the outcome in. */
-                var cpuGrade = GradeCpuFire(alertCpuValue.Value);
-                var delivery = await FireAsync(new AlertOutcome(
-                    key, serverName, "High CPU",
-                    $"{alertCpuValue:F0}% ({cpuMetricLabel})",
-                    $"{_settings.CpuThresholdPercent}%",
-                    Context: new AlertContext { SeverityOverride = cpuGrade }, DetailText: cpuDetailText,
-                    NumericCurrentValue: alertCpuValue, NumericThresholdValue: _settings.CpuThresholdPercent,
-                    Muted: isMuted, Severity: cpuGrade,
-                    ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {_settings.CpuThresholdPercent}%)"), ct);
-                AfterFire("High CPU", _lastCpuAlert, key, now, alertCooldown, delivery);
+            }
+            else if (outcome == PersistenceOutcome.Resolve)                          /* :101 */
+            {
+                events.Add((false, sampleValue.Value, obs.UtcInstant));
             }
         }
-        else if (outcome == PersistenceOutcome.Resolve)                              /* :101 */
+
+        /* A resolve that a fire immediately follows IN THIS BATCH is cancelled with that fire (#5642). Each edge
+           used to land on its own 30 s sweep with its own clock, so the cooldown had run out between them and the
+           sequence arrived in order. Replayed together against one `now`, [fire, resolve, fire] delivered the
+           first fire, then "CPU Resolved", then had the cooldown swallow the second fire: the last word was an
+           all-clear while the gate was firing. So [fire, resolve, fire] sends one fire, the LATER one; [resolve, fire] from a
+           firing start sends nothing (the incident never closed); [fire, resolve] still sends both (a real spike
+           while we were watching). Consecutive fires that remain collapse to the later one. */
+        events = CancelResolveBeforeFire(events);
+
+        foreach (var (isFire, eventValue, readingUtc) in events)
         {
-            /* The FALLING EDGE now comes from the gate rather than from a single sample dropping under the
-               bar, which is the other half of #3282: the pre-gate code resolved on the first clear sample,
-               so a 93%-for-two-minutes excursion produced a fire and a resolve 147 seconds apart and an
-               operator got both before either meant anything. The gate fires this exactly once, after
-               CpuClearSamples consecutive clears. Still gated on !suppressed, exactly as before. */
-            if (!suppressed)
+            if (isFire)
             {
+                await FireCpuAsync(key, serverName, serverId, now, alertCooldown, suppressed, eventValue, cpuMetricLabel, readingUtc, ct);
+            }
+            else if (!suppressed)
+            {
+                /* The FALLING EDGE comes from the gate rather than from a single sample dropping under the
+                   bar, which is the other half of #3282: the pre-gate code resolved on the first clear sample,
+                   so a 93%-for-two-minutes excursion produced a fire and a resolve 147 seconds apart and an
+                   operator got both before either meant anything. The gate fires this exactly once, after
+                   CpuClearSamples consecutive clears. Still gated on !suppressed, exactly as before. */
                 await NotifyResolutionAsync(new AlertResolution(
                     key, serverName, "High CPU",
                     "CPU Resolved",                                                 /* :110 */
-                    $"{serverName}: {cpuMetricLabel} back to {alertCpuValue:F0}%"), ct); /* :111 */
+                    $"{serverName}: {cpuMetricLabel} back to {eventValue:F0}%"), ct); /* :111 */
             }
+        }
+    }
+
+    /// <summary>
+    /// The CPU edges one sweep sends, after a resolve that a fire immediately follows is dropped together with
+    /// that fire (#5642): <c>[fire, resolve, fire]</c> becomes the later <c>[fire]</c>, <c>[resolve, fire]</c> becomes
+    /// nothing, <c>[fire, resolve]</c> is unchanged. Two fires left adjacent collapse to the later one.
+    /// </summary>
+    internal static List<(bool IsFire, double Value, DateTime? ReadingUtc)> CancelResolveBeforeFire(List<(bool IsFire, double Value, DateTime? ReadingUtc)> events)
+    {
+        var kept = new List<(bool IsFire, double Value, DateTime? ReadingUtc)>(events.Count);
+        foreach (var edge in events)
+        {
+            if (edge.IsFire && kept.Count > 0 && !kept[^1].IsFire)
+            {
+                /* Drop the resolve; the fire behind it, when there is one, becomes THIS fire, so the delivered
+                   event carries the newest breaching reading and its instant, not the earlier fire's. With no
+                   fire behind it ([resolve, fire]) nothing remains: the incident never closed. */
+                kept.RemoveAt(kept.Count - 1);
+                if (kept.Count > 0 && kept[^1].IsFire)
+                {
+                    kept[^1] = edge;
+                }
+            }
+            else if (edge.IsFire && kept.Count > 0)
+            {
+                kept[^1] = edge;
+            }
+            else
+            {
+                kept.Add(edge);
+            }
+        }
+
+        return kept;
+    }
+
+    private double? CpuValueFor(CpuObservation obs) =>
+        _settings.CpuAlertMode == CpuAlertMode.TotalServer ? (obs.Total ?? obs.Sql) : obs.Sql;
+
+    /// <summary>The CPU persistence gate's lookback (#5642): the PostgreSQL check's bound, so a reconnect
+    /// backfill folds at most this far back.</summary>
+    internal static readonly TimeSpan CpuSampleLookback = TimeSpan.FromMinutes(15);
+
+    /// <summary>The most samples one sweep feeds the CPU gate (#5642): the PostgreSQL check's bound.</summary>
+    internal const int CpuSampleBatchLimit = 32;
+
+    /// <summary>The age carrier's label on a High CPU alert (#5642): the reading the gate fired on. The
+    /// percentage on the card is the last BREACHING reading of the batch, which is not always the newest sample
+    /// (a clear sample can follow it in the same batch), so the line says "CPU reading", not "Newest CPU sample":
+    /// the value and the instant describe one measurement.</summary>
+    internal const string CpuReadingSource = "CPU reading";
+
+    private readonly record struct CpuObservation(double? Sql, double? Total, DateTime? Instant, DateTime? UtcInstant);
+
+    /// <summary>
+    /// The observations the CPU gate sees this sweep (#5642), oldest first. Every sample of the host's recent
+    /// list that was collected while we were watching (at or after <see cref="AlertServerSnapshot.WatchingSinceUtc"/>)
+    /// and is newer than the persisted watermark goes through the gate one by one, so three readings over the
+    /// line fire as soon as the third lands, however the collector batched them. Bounded to
+    /// <see cref="CpuSampleLookback"/> and <see cref="CpuSampleBatchLimit"/>; a sample later than now is ignored.
+    /// NO REPLAY: older, backfilled samples are never judged one by one (a spike that ended before a restart
+    /// or reconnect must not alert, an episode already announced must not be announced again), and a snapshot
+    /// with no <see cref="AlertServerSnapshot.WatchingSinceUtc"/> has no sample that is individually eligible; they collapse
+    /// to the single latest sample, which is today's path with today's equality reasoning (see
+    /// <see cref="ObservePersistenceAsync"/>). A persisted watermark LATER than the newest sample (a frame or
+    /// clock skew, or a pre-V134 local stamp east of UTC) takes that path too, which re-anchors it once.
+    /// </summary>
+    private IReadOnlyList<CpuObservation> SelectCpuObservations(AlertServerSnapshot snapshot, string key, DateTime now)
+    {
+        var singleUtc = snapshot.CpuSampleUtcOnly
+            ?? (snapshot.RecentCpuSamples is { Count: > 0 } recentForAge ? recentForAge.Max(s => s.SampleTimeUtc) : (DateTime?)null);
+        var single = new[] { new CpuObservation(snapshot.SqlCpuPercent, snapshot.TotalCpuPercent, snapshot.CpuSampleTimeUtc, singleUtc) };
+        if (snapshot.RecentCpuSamples is not { Count: > 0 } recent)
+        {
+            return single;
+        }
+
+        /* An UNKNOWN watching-since collapses to the single newest sample (#5642), the same path a missing list
+           takes: unknown is never "every sample eligible". A host that cannot say when it began watching cannot
+           tell the samples collected while it watched from the backfilled history of a spike that ended before
+           it started, and judging those one by one would open an incident nobody saw happen. */
+        if (snapshot.WatchingSinceUtc is not { } watchingSince)
+        {
+            return single;
+        }
+
+        var floor = now - CpuSampleLookback;
+        if (watchingSince > floor)
+        {
+            floor = watchingSince;
+        }
+
+        var inBounds = recent
+            .Where(s => s.SampleTimeUtc <= now)
+            .OrderBy(s => s.SampleTimeUtc)
+            .ToList();
+        if (inBounds.Count == 0)
+        {
+            return single;
+        }
+
+        DateTime? watermark = _cpuPersistence.TryGetValue(key, out var prior) ? prior.LastObservedSampleUtc : null;
+        if (watermark.HasValue && watermark.Value > inBounds[^1].SampleTimeUtc)
+        {
+            return single;
+        }
+
+        var live = inBounds
+            .Where(s => s.SampleTimeUtc >= floor && (!watermark.HasValue || s.SampleTimeUtc > watermark.Value))
+            .TakeLast(CpuSampleBatchLimit)
+            .Select(s => new CpuObservation(s.SqlCpuPercent, s.TotalCpuPercent, s.SampleTimeUtc, s.SampleTimeUtc))
+            .ToList();
+        return live.Count == 0 ? single : live;
+    }
+
+    private async Task FireCpuAsync(
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed,
+        double alertCpuValue, string cpuMetricLabel, DateTime? readingUtc, CancellationToken ct)
+    {
+        if (!suppressed && CooldownElapsed(_lastCpuAlert, key, now, alertCooldown)) /* :72 */
+        {
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "High CPU" }; /* :74 */
+            bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
+            _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
+
+            /* #3495: name the active backup on the card. Everything the annotation needs was knowable
+               at fire time from the same active-session surface the operator ended up reading by hand
+               (get_active_queries' underlying table — the query_snapshots read the LRQ alert already
+               rides), so this is one read of data the store already holds on the same sweep: no new
+               collector, no new cadence. Inside the fire branch deliberately — cooldown-bounded, so a
+               quiet sweep pays nothing — and taken for muted fires too, so the history row carries the
+               same detail the delivered card would have.
+
+               ANNOTATION, NEVER SUPPRESSION: the threshold compare, the persistence gate, the tiers and
+               the fire above are all decided before this read exists; it can only ever ADD a line.
+
+               Every filter is off and the exclusion list empty, on purpose: the LRQ alert's noise
+               opt-outs exist to keep maintenance OFF that alert (excludeBackups drops BACKUPTHREAD/
+               BACKUPIO waits), and this probe wants exactly the population those filters remove — the
+               backup filtered out of the long-running alert is precisely what this line names. An
+               excluded DATABASE stays visible too: the exclusion setting governs alert noise, and a
+               backup of an excluded database still burns this server's CPU. Threshold 0 = every session
+               in the latest fresh snapshot; the read's own 10-minute staleness floor still applies, so a
+               dead collector cannot dress an old backup up as a live one. The #3653 (Q5) opt-out knob is
+               passed as None for the same reason the five filters are off: an operator excludes their
+               permanent background requests from the LONG-RUNNING alert, and a backup run by an excluded
+               service login is still the thing burning this server's CPU.
+
+               Log-and-degrade: a failed annotation read costs the card its maintenance line and NOTHING
+               else — the alert already fired above this read in every sense that matters, and the empty
+               string leaves cpuDetailText byte-identical to the pre-#3495 card. Counted on #3013's
+               surface because it IS a store read the alert pass swallowed; Warning rather than Error
+               because the CONDITION was evaluated correctly — only the annotation went blind. */
+            string maintenanceDetail = "";
+            var maintenanceClock = Stopwatch.StartNew();
+            try
+            {
+                var activeSessions = await _readAdapter.GetLongRunningQueriesAsync(
+                    key,
+                    thresholdMinutes: 0,
+                    maxResults: ActiveMaintenanceProbeMaxRows,
+                    excludeSpServerDiagnostics: false,
+                    excludeWaitFor: false,
+                    excludeBackups: false,
+                    excludeMiscWaits: false,
+                    excludeCdc: false,
+                    Array.Empty<string>(),
+                    LongRunningQueryExclusions.None,
+                    ct);
+                maintenanceDetail = AlertContextBuilders.BuildActiveMaintenanceDetail(activeSessions.Sessions);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Could not read active sessions for the High CPU card's maintenance annotation on {Server} after {ElapsedMs} ms — the alert fires without it: {Message}",
+                    serverName, maintenanceClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "CPU maintenance annotation", maintenanceClock.ElapsedMilliseconds);
+            }
+
+            var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {_settings.CpuThresholdPercent}%{maintenanceDetail}"; /* :89 + #3495 */
+
+            /* :91-98 — ShortMessage = the toast body of :84 minus the server-name prefix. The numerics
+               are REQUIRED, not optional (#1830): the ported no-numerics form left the history stores
+               parsing "87% (Total CPU)", which fails on the parenthesized label, so every High CPU row
+               stored current_value 0 in Lite AND Darling while the toast/email/webhook text stayed
+               correct. alertCpuValue.HasValue is guaranteed here — the null arm above returns.
+
+               #3653 (A8e): CPU used to pass NO context, and so no tier — every row rendered amber by
+               name, a 100% fire indistinguishable from an 80% one while the card beside it was red. The
+               context now exists for exactly one member: the grade (GradeCpuFire — the CPU health
+               band's Critical bar). Details stay empty and DetailText stays the hand-built block above,
+               byte-identical, so every channel renders what it rendered before plus the tier. Set on
+               BOTH the context and the outcome for the reason the deadlock and Poison Wait sites give:
+               Lite's deliverer persists only the context, Darling's folds the outcome in. */
+            var cpuGrade = GradeCpuFire(alertCpuValue);
+            var cpuContext = AlertSampleAge.Stamp(new AlertContext { SeverityOverride = cpuGrade }, CpuReadingSource, readingUtc, now);
+            /* #5642: the context holds no Details, so the typed field alone would not reach a text channel; the
+               hand-built text carries the age line (AlertDetailText.SampleAgeLine, appended once), and the
+               channel renderers print the typed field only when the prose does not already carry it. */
+            cpuDetailText = AlertDetailText.WithSampleAge(cpuDetailText, cpuContext) ?? cpuDetailText;
+            var delivery = await FireAsync(new AlertOutcome(
+                key, serverName, "High CPU",
+                $"{alertCpuValue:F0}% ({cpuMetricLabel})",
+                $"{_settings.CpuThresholdPercent}%",
+                Context: cpuContext, DetailText: cpuDetailText,
+                NumericCurrentValue: alertCpuValue, NumericThresholdValue: _settings.CpuThresholdPercent,
+                Muted: isMuted, Severity: cpuGrade,
+                ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {_settings.CpuThresholdPercent}%)"), ct);
+            AfterFire("High CPU", _lastCpuAlert, key, now, alertCooldown, delivery);
         }
     }
 
@@ -943,10 +1102,13 @@ public sealed class AlertEngine
     /// for which hosts supply none): the persistence is then weaker, but the alert still fires, and silence
     /// is the one failure a monitoring product cannot distinguish from health.</para>
     ///
-    /// <para>Where two samples land between sweeps the older one is skipped, so a sustained excursion can
-    /// need one extra sample to reach the bar. That undercounts and therefore UNDER-fires, which is the
-    /// correct direction for an alert that pages — the same reasoning <c>PostgresAlertEvaluator</c>'s
-    /// poison-wait window states for its own partial coverage.</para>
+    /// <para><b>Where two samples land between sweeps, the CPU arm feeds BOTH (#5642).</b> The collector lands
+    /// its samples in batches, so counting only the newest row of a batch made "three samples" mean three
+    /// collection passes, and an excursion of five minutes could page ten minutes late. The CPU check now hands
+    /// this method every new sample of the host's recent list, oldest first (<c>SelectCpuObservations</c>), so
+    /// the bar is K consecutive SAMPLES again. Equality still decides what is fresh; the order of the list is
+    /// the only order the gate relies on. Samples collected before the connection began (a restart or
+    /// reconnect backfill) are never fed one by one, so nothing is judged twice.</para>
     ///
     /// <para><b>The write is skipped when nothing moved.</b> Value equality on the record is what makes
     /// that safe: on the vast majority of sweeps nothing about the subject changes, and a store write per
@@ -1019,7 +1181,8 @@ public sealed class AlertEngine
     /* ---------------- blocking (Lite AlertEngine.cs:116-194) ---------------- */
 
     private async Task CheckBlockingAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed,
+        IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
         List<BlockedProcessAlertRow>? blockingRows = null;
         int effectiveBlockingCount = 0;
@@ -1043,12 +1206,17 @@ public sealed class AlertEngine
 
                 /* :118-127 — with excluded databases configured and the raw count at/over the
                    threshold, recount only rows outside the excluded set (no-database rows pass). */
-                if (_settings.ExcludedDatabases.Count > 0
+                if (excludedDatabases.Count > 0
                     && effectiveBlockingCount >= _settings.BlockingCountThreshold)
                 {
-                    effectiveBlockingCount = blockingRows
+                    /* The recount applies the raw count's own rule to the same row set: XE rows when any
+                       exist, otherwise every row. */
+                    var recountRows = xeCount > 0
+                        ? blockingRows.Where(r => r.Source == BlockedProcessAlertRow.XeReportSource)
+                        : blockingRows;
+                    effectiveBlockingCount = recountRows
                         .Count(r => string.IsNullOrEmpty(r.DatabaseName) ||
-                            !_settings.ExcludedDatabases.Any(e =>
+                            !excludedDatabases.Any(e =>
                                 string.Equals(e, r.DatabaseName, StringComparison.OrdinalIgnoreCase)));
                 }
             }
@@ -1091,20 +1259,21 @@ public sealed class AlertEngine
         {
             blockingOccurrences = await ObserveOccurrencesAsync(
                 key, BlockingWatermarkMetric,
-                AlertContextBuilders.BlockingIncidents(serverName, blockingRows, _settings.ExcludedDatabases),
+                AlertContextBuilders.BlockingIncidents(fingerprintServer, blockingRows, excludedDatabases),
                 now);
         }
 
         if (blockingDecision.Fire)                                                  /* :155 */
         {
-            var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Blocking Detected" }; /* :157 */
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Blocking Detected" }; /* :157 */
             bool isMuted = _isAlertMuted(muteCtx);                                  /* :158 */
             _lastBlockingAlert[key] = now;                                          /* :159 */
 
             /* :172-173 — Lite's BuildBlockingContextAsync refetches the same rows; the engine
                reuses this sweep's fetch (identical query/window). */
             var blockingContext = AlertContextBuilders.BuildBlockingContext(
-                serverName, blockingRows, _settings.ExcludedDatabases, blockingOccurrences.Decorate);
+                fingerprintServer, blockingRows, excludedDatabases, blockingOccurrences.Decorate);
+            blockingContext = AlertSampleAge.Stamp(blockingContext, "blocked process", AlertSampleAge.Newest(blockingRows!.Select(r => r.EventTime)), now);
             var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
 
             /* :175-183 — SendDetectedAlertAsync's #1141/#1236 delivery-mode fan-out is an
@@ -1161,7 +1330,7 @@ public sealed class AlertEngine
            processes it can't answer for blocking snapshots either, and firing a wait alert with no
            incident content is worse than skipping the sweep (state untouched, same as every other
            check's failure shape). */
-        await CheckBlockingWaitAsync(key, serverName, now, alertCooldown, suppressed, blockingRows, ct);
+        await CheckBlockingWaitAsync(key, serverName, serverId, fingerprintServer, now, alertCooldown, suppressed, blockingRows, excludedDatabases, ct);
     }
 
     /* ---------------- per-fingerprint occurrence counters (#2216) ---------------- */
@@ -1318,8 +1487,8 @@ public sealed class AlertEngine
     /// </para>
     /// </summary>
     private async Task CheckBlockingWaitAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed,
-        List<BlockedProcessAlertRow>? blockingRows, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed,
+        List<BlockedProcessAlertRow>? blockingRows, IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
         int thresholdSeconds = _settings.BlockingWaitSecondsThreshold;
         bool enabled = _settings.BlockingEnabled && thresholdSeconds > 0;
@@ -1444,7 +1613,7 @@ public sealed class AlertEngine
         {
             if (!suppressed && CooldownElapsed(_lastBlockingWaitAlert, key, now, alertCooldown))
             {
-                var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Blocking Wait Time" };
+                var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Blocking Wait Time" };
                 bool isMuted = _isAlertMuted(muteCtx);
                 _lastBlockingWaitAlert[key] = now;                                  /* stamped even when muted */
 
@@ -1454,10 +1623,11 @@ public sealed class AlertEngine
                    context_json sees is which arm admitted this delivery and the numbers it was judged on;
                    the blocked-process rows may be absent (a DMV-only episode has no report), and the item
                    exists regardless, so the context is never null on a fire from this arm. */
-                var blockingContext = AlertContextBuilders.BuildBlockingContext(serverName, blockingRows, _settings.ExcludedDatabases)
+                var blockingContext = AlertContextBuilders.BuildBlockingContext(fingerprintServer, blockingRows, excludedDatabases)
                     ?? new AlertContext();
                 blockingContext.Details.Insert(0, AlertContextBuilders.BuildBlockingWaitGateItem(
                     current, thresholdSeconds, singleSnapshot ? BlockingWaitFiredBySingleSnapshot : BlockingWaitFiredByConsecutive));
+                AlertSampleAge.Stamp(blockingContext, "blocking wait", current.SnapshotTime, now);
                 var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
 
                 /* REAL numerics (#1830): the display text is prose ("745s across 3 blocked session(s)"),
@@ -1493,7 +1663,8 @@ public sealed class AlertEngine
     /* ---------------- deadlocks (Lite AlertEngine.cs:196-271) ---------------- */
 
     private async Task CheckDeadlocksAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed,
+        IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
         List<DeadlockAlertRow>? deadlockRows = null;
         int effectiveDeadlockCount = 0;
@@ -1510,11 +1681,11 @@ public sealed class AlertEngine
 
                 /* :198-205 — recount excluding deadlocks whose processes ALL ran in excluded
                    databases (graph-XML parse via the shared IsDeadlockExcluded). */
-                if (_settings.ExcludedDatabases.Count > 0
+                if (excludedDatabases.Count > 0
                     && effectiveDeadlockCount >= _settings.DeadlockCountThreshold)
                 {
                     effectiveDeadlockCount = deadlockRows
-                        .Count(r => !AlertContextBuilders.IsDeadlockExcluded(r, _settings.ExcludedDatabases));
+                        .Count(r => !AlertContextBuilders.IsDeadlockExcluded(r, excludedDatabases));
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1551,19 +1722,19 @@ public sealed class AlertEngine
         {
             deadlockOccurrences = await ObserveOccurrencesAsync(
                 key, DeadlockWatermarkMetric,
-                AlertContextBuilders.DeadlockIncidents(serverName, deadlockRows, _settings.ExcludedDatabases),
+                AlertContextBuilders.DeadlockIncidents(fingerprintServer, deadlockRows, excludedDatabases),
                 now);
         }
 
         if (deadlockDecision.Fire)                                                  /* :232 */
         {
-            var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Deadlocks Detected" }; /* :234 */
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Deadlocks Detected" }; /* :234 */
             bool isMuted = _isAlertMuted(muteCtx);                                  /* :235 */
             _lastDeadlockAlert[key] = now;                                          /* :236 */
 
             /* :249-250 — context from this sweep's fetch. */
             var deadlockContext = AlertContextBuilders.BuildDeadlockContext(
-                serverName, deadlockRows, _settings.ExcludedDatabases, deadlockOccurrences.Decorate);
+                fingerprintServer, deadlockRows, excludedDatabases, deadlockOccurrences.Decorate);
 
             /* #3653 (A8e): GRADE the fire the gate already decided on. Until now this alert carried no tier,
                so every row rendered by NAME — red for one deadlock and red for a hundred — while the fleet
@@ -1582,6 +1753,7 @@ public sealed class AlertEngine
                by construction, the Poison Wait precedent). */
             deadlockContext ??= new AlertContext();
             deadlockContext.SeverityOverride = GradeDeadlockFire(effectiveDeadlockCount, _settings.DeadlockRateThresholds);
+            AlertSampleAge.Stamp(deadlockContext, "deadlock", AlertSampleAge.Newest(deadlockRows!.Select(r => r.NewestSampleUtc)), now);
             var detailText = AlertContextBuilders.ContextToDetailText(deadlockContext);
 
             /* :252-260 — ShortMessage = the toast body of :244. Numerics carried explicitly (#1830):
@@ -1653,7 +1825,7 @@ public sealed class AlertEngine
     /// retired shape announced "Cleared" on that same silence.</para>
     /// </summary>
     private async Task CheckPoisonWaitsAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.PoisonWaitEnabled)                                           /* :274 */
         {
@@ -1689,7 +1861,7 @@ public sealed class AlertEngine
 
                     /* :288-293 — mute keys on the worst (highest severity, then most accumulated wait)
                        firing wait type; same documented limitation as Lite. */
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Poison Wait", WaitType = worst.WaitType };
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Poison Wait", WaitType = worst.WaitType };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastPoisonWaitAlert[key] = now;                                /* :294 */
                     _lastPoisonWaitCollectionTime[key] = newestCollectionTime;
@@ -1704,6 +1876,7 @@ public sealed class AlertEngine
                        context above already keys on — an alert-notebook reader can branch on it without
                        parsing the detail heading or the prose. */
                     var poisonContext = new AlertContext { SeverityOverride = worst.Severity, WaitType = worst.WaitType };
+                    AlertSampleAge.Stamp(poisonContext, "wait stats", newestCollectionTime, now);
                     foreach (var finding in findings)
                     {
                         poisonContext.Details.Add(new AlertDetailItem
@@ -1776,7 +1949,7 @@ public sealed class AlertEngine
     /* ---------------- long-running queries (Lite AlertEngine.cs:341-411) ---------------- */
 
     private async Task CheckLongRunningQueriesAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.LongRunningQueryEnabled)                                     /* :342 */
         {
@@ -1815,7 +1988,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var lrqOccurrences = await ObserveOccurrencesAsync(
-                key, LongRunningQueryWatermarkMetric, AlertContextBuilders.LongRunningQueryIncidents(serverName, longRunning), now);
+                key, LongRunningQueryWatermarkMetric, AlertContextBuilders.LongRunningQueryIncidents(fingerprintServer, longRunning), now);
             readClock.Restart();
             if (longRunning.Count > 0)
             {
@@ -1825,12 +1998,13 @@ public sealed class AlertEngine
                     var worst = longRunning[0];                                     /* :353 */
                     var elapsedMinutes = worst.ElapsedSeconds / 60;                 /* :354 — integer division, exactly Lite */
                     /* :355-356 — the query-text preview feeds ShortMessage (the toast body). */
-                    var preview = AlertContextBuilders.TruncateText(worst.QueryText, 80);
+                    var preview = AlertContextBuilders.TruncateStatement(worst.QueryText, 80);
                     var previewSuffix = string.IsNullOrEmpty(preview) ? "" : $" — {preview}";
 
                     var muteCtx = new AlertMuteContext                              /* :358-364 */
                     {
                         ServerName = serverName,
+                        ServerId = serverId,
                         MetricName = "Long-Running Query",
                         DatabaseName = worst.DatabaseName,
                         QueryText = worst.QueryText
@@ -1903,7 +2077,7 @@ public sealed class AlertEngine
                        — the clock-to-itself rule, applied on the operation's EXIT as well as its entry. */
                     readClock.Restart();
 
-                    var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(serverName, longRunning, lrqOccurrences.Decorate, agentJobNames); /* :379 + #3497 */
+                    var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(fingerprintServer, longRunning, lrqOccurrences.Decorate, agentJobNames); /* :379 + #3497 */
 
                     /* #3653 (A5, Q5): the knob's own evidence on the card — how many sessions it removed this
                        evaluation, split by the arm that removed them — so an operator can see it working and
@@ -1933,6 +2107,7 @@ public sealed class AlertEngine
                         lrqContext.Details.Add(AlertContextBuilders.BuildLongRunningQueryExcludedDatabasesItem(_settings.ExcludedDatabases, read.ExcludedByDatabase));
                     }
 
+                    lrqContext = AlertSampleAge.Stamp(lrqContext, "query snapshot", AlertSampleAge.Newest(longRunning.Select(q => q.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */
 
                     /* :382-392. ShortMessage = the toast body of :374. */
@@ -1977,7 +2152,7 @@ public sealed class AlertEngine
     /* ---------------- tempdb space (Lite AlertEngine.cs:413-473) ---------------- */
 
     private async Task CheckTempDbSpaceAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.TempDbSpaceEnabled)                                          /* :414 */
         {
@@ -2022,7 +2197,7 @@ public sealed class AlertEngine
             {
                 if (!suppressed && CooldownElapsed(_lastTempDbSpaceAlert, key, now, alertCooldown)) /* :423 */
                 {
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "tempdb Space" }; /* :425 */
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "tempdb Space" }; /* :425 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :426 */
                     _lastTempDbSpaceAlert[key] = now;                               /* :427 */
 
@@ -2043,6 +2218,7 @@ public sealed class AlertEngine
                        a Warning the operator configured at TempDbSpaceThresholdPercent, honestly labelled. */
                     tempDbContext ??= new AlertContext();
                     tempDbContext.SeverityOverride = AlertSeverityLevel.Warning;
+                    AlertSampleAge.Stamp(tempDbContext, "tempdb", tempDb.CollectionTimeUtc, now);
                     var detailText = AlertContextBuilders.ContextToDetailText(tempDbContext); /* :441 */
 
                     /* :443-453. ShortMessage = the toast body of :435. */
@@ -2093,7 +2269,7 @@ public sealed class AlertEngine
     /// suppression gates. False when the check is disabled or the read failed.
     /// </returns>
     private async Task<bool> CheckLowDiskAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.LowDiskEnabled)                                              /* :476 */
         {
@@ -2114,7 +2290,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var lowDiskOccurrences = await ObserveOccurrencesAsync(
-                key, VolumeFreeSpaceWatermarkMetric, AlertContextBuilders.VolumeFreeSpaceIncidents(serverName, breached), now);
+                key, VolumeFreeSpaceWatermarkMetric, AlertContextBuilders.VolumeFreeSpaceIncidents(fingerprintServer, breached), now);
             readClock.Restart();
             if (breached.Count > 0)
             {
@@ -2127,18 +2303,19 @@ public sealed class AlertEngine
                     && LowDiskAlertGate.ShouldAlert(worst.FreePercent, lastLowDiskPercent)
                     && CooldownElapsed(_lastLowDiskAlert, key, now, alertCooldown))
                 {
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Volume Free Space" }; /* :499 */
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Volume Free Space" }; /* :499 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :500 */
                     _lastLowDiskAlert[key] = now;                                   /* :501 */
                     _lastAlertedLowDiskPercent[key] = worst.FreePercent;            /* :502 */
 
-                    var lowDiskContext = AlertContextBuilders.BuildVolumeFreeSpaceContext(serverName, breached, lowDiskOccurrences.Decorate); /* :515 */
+                    var lowDiskContext = AlertContextBuilders.BuildVolumeFreeSpaceContext(fingerprintServer, breached, lowDiskOccurrences.Decorate); /* :515 */
                     /* :516-522 — #1136: grade WARNING normally, CRITICAL when critically low. */
                     if (lowDiskContext is not null && LowDiskAlertGate.IsCriticallyLow(
                         worst.FreePercent, worst.FreeGb, _settings.DiskCriticalFreePercent, _settings.DiskCriticalFreeGb))
                     {
                         lowDiskContext.SeverityOverride = AlertSeverityLevel.Critical;
                     }
+                    lowDiskContext = AlertSampleAge.Stamp(lowDiskContext, "volume", AlertSampleAge.Newest(breached.Select(v => v.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(lowDiskContext); /* :523 */
 
                     /* :525-535. ShortMessage = the toast body of :510. */
@@ -2204,7 +2381,7 @@ public sealed class AlertEngine
     /// deliberately avoided. Level-triggered with a resolved transition when no database breaches.
     /// </summary>
     private async Task CheckPvsPressureAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.PvsEnabled || _settings.PvsThresholdPercent <= 0)
         {
@@ -2223,7 +2400,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var pvsOccurrences = await ObserveOccurrencesAsync(
-                key, PvsWatermarkMetric, AlertContextBuilders.PvsPressureIncidents(serverName, breached), now);
+                key, PvsWatermarkMetric, AlertContextBuilders.PvsPressureIncidents(fingerprintServer, breached), now);
             readClock.Restart();
             if (breached.Count > 0)
             {
@@ -2235,12 +2412,13 @@ public sealed class AlertEngine
                     && PvsAlertGate.ShouldAlert(worst.PvsPercent, lastPvsPercent)
                     && CooldownElapsed(_lastPvsAlert, key, now, alertCooldown))
                 {
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Version Store (PVS)" };
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Version Store (PVS)" };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastPvsAlert[key] = now;
                     _lastAlertedPvsPercent[key] = worst.PvsPercent;
 
-                    var pvsContext = AlertContextBuilders.BuildPvsPressureContext(serverName, breached, pvsOccurrences.Decorate);
+                    var pvsContext = AlertContextBuilders.BuildPvsPressureContext(fingerprintServer, breached, pvsOccurrences.Decorate);
+                    pvsContext = AlertSampleAge.Stamp(pvsContext, "PVS", AlertSampleAge.Newest(breached.Select(v => v.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(pvsContext);
 
                     var delivery = await FireAsync(new AlertOutcome(
@@ -2328,7 +2506,7 @@ public sealed class AlertEngine
     /// silence.</para>
     /// </summary>
     private async Task CheckFileGrowthAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.FileGrowthEnabled)
         {
@@ -2350,7 +2528,7 @@ public sealed class AlertEngine
 
             var fileGrowthOccurrences = await ObserveOccurrencesAsync(
                 key, FileGrowthWatermarkMetric,
-                AlertContextBuilders.FileGrowthIncidents(serverName, breached), now);
+                AlertContextBuilders.FileGrowthIncidents(fingerprintServer, breached), now);
             readClock.Restart();
 
             if (breached.Count > 0)
@@ -2382,7 +2560,7 @@ public sealed class AlertEngine
 
                 if (!suppressed && anyNewObservation && CooldownElapsed(_lastFileGrowthAlert, key, now, alertCooldown))
                 {
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Database File Growth" };
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Database File Growth" };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastFileGrowthAlert[key] = now;
 
@@ -2404,14 +2582,15 @@ public sealed class AlertEngine
                     }
 
                     var context = AlertContextBuilders.BuildFileGrowthContext(
-                        serverName, breached, fileGrowthOccurrences.Decorate);
+                        fingerprintServer, breached, fileGrowthOccurrences.Decorate);
+                    context = AlertSampleAge.Stamp(context, "file growth", AlertSampleAge.Newest(breached.Select(f => f.ObservedAtUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(context);
 
                     /* The headline names the file, its size and its share of the volume — the three facts that
                        decide whether this is worth getting up for. The rise is in the card. */
                     var headline =
                         $"{worst.DatabaseName}.{worst.FileName} is {worst.TotalSizeGb:F1} GB "
-                        + $"({worst.VolumePercent:F0}% of {worst.VolumeMountPoint}), "
+                        + $"({(worst.VolumeTotalMb is double worstTotal && worstTotal > 0 ? $"{worst.VolumePercent:F0}% of {(string.IsNullOrEmpty(worst.VolumeMountPoint) ? "(unknown)" : worst.VolumeMountPoint)}" : "volume unknown")}), "
                         + $"grew {worst.GrowthGb:F1} GB in {worst.GrowthWindowMinutes:F0} min";
 
                     /* The threshold line states the rate AND the window it was averaged over, in the same unit
@@ -2494,7 +2673,7 @@ public sealed class AlertEngine
     /* ---------------- anomalous Agent jobs (Lite AlertEngine.cs:557-632) ---------------- */
 
     private async Task CheckAnomalousJobsAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.LongRunningJobEnabled)                                       /* :558 */
         {
@@ -2535,7 +2714,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var jobOccurrences = await ObserveOccurrencesAsync(
-                key, AnomalousJobWatermarkMetric, AlertContextBuilders.AnomalousJobIncidents(serverName, anomalousJobs), now);
+                key, AnomalousJobWatermarkMetric, AlertContextBuilders.AnomalousJobIncidents(fingerprintServer, anomalousJobs), now);
             readClock.Restart();
             if (anomalousJobs.Count > 0)
             {
@@ -2543,14 +2722,15 @@ public sealed class AlertEngine
                 var worst = anomalousJobs[0];                                       /* :578 */
                 var jobKey = $"{key}:{worst.JobId}:{worst.StartTime:O}";            /* :579 */
 
-                if (!suppressed && (!_lastLongRunningJobAlert.TryGetValue(jobKey, out var lastJob) || now - lastJob >= alertCooldown)) /* :581 */
+                if (!suppressed && CooldownElapsed(_lastLongRunningJobAlert, jobKey, now, alertCooldown)) /* :581 */
                 {
                     var currentMinutes = worst.CurrentDurationSeconds / 60;         /* :583 — feeds ShortMessage (the toast body) */
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Long-Running Job", JobName = worst.JobName }; /* :585 */
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Long-Running Job", JobName = worst.JobName }; /* :585 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :586 */
                     _lastLongRunningJobAlert[jobKey] = now;                         /* :587 */
 
-                    var jobContext = AlertContextBuilders.BuildAnomalousJobContext(serverName, anomalousJobs, jobOccurrences.Decorate); /* :600 */
+                    var jobContext = AlertContextBuilders.BuildAnomalousJobContext(fingerprintServer, anomalousJobs, jobOccurrences.Decorate); /* :600 */
+                    jobContext = AlertSampleAge.Stamp(jobContext, "running job", AlertSampleAge.Newest(anomalousJobs.Select(j => j.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(jobContext);                     /* :601 */
 
                     /* :603-613. ShortMessage = the toast body of :595. */
@@ -2605,7 +2785,7 @@ public sealed class AlertEngine
     /// server is offline/Azure SQL DB, or the fetch failed.
     /// </returns>
     private async Task<bool> CheckFailedJobsAsync(
-        AlertServerSnapshot snapshot, string key, string serverName,
+        AlertServerSnapshot snapshot, string key, string serverName, int? serverId, string fingerprintServer,
         DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.FailedJobEnabled || _failedJobsFetcher is null)              /* :639 */
@@ -2634,7 +2814,7 @@ public sealed class AlertEngine
                an arrival. The list is UNCAPPED while the render below is capped, so a fingerprint outside the
                displayed top N keeps its total instead of restarting. */
             var failedJobOccurrences = await ObserveOccurrencesAsync(
-                key, FailedJobWatermarkMetric, AlertContextBuilders.FailedJobIncidents(serverName, failedJobs), now);
+                key, FailedJobWatermarkMetric, AlertContextBuilders.FailedJobIncidents(fingerprintServer, failedJobs), now);
 
             /* No ClearOccurrencesAsync counterpart, and that is not an omission: a failed job is an EVENT,
                not a condition that resolves, so this check has no else-branch to clear from. The accumulator's
@@ -2652,14 +2832,14 @@ public sealed class AlertEngine
                     var mostRecent = failedJobs[0]; /* ORDER BY run_datetime DESC — :672 */
                     var jobNames = string.Join(", ", failedJobs.Select(j => j.JobName).Distinct().Take(3)); /* :673 */
 
-                    var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Failed Agent Job", JobName = mostRecent.JobName }; /* :675 */
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Failed Agent Job", JobName = mostRecent.JobName }; /* :675 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :676 */
                     DateTime? priorWatermark = hasWatermark ? lastFailure : null;   /* #4752: what a fire nobody received puts back in memory */
                     _lastFailedJobAlert[key] = now;                                 /* :677 */
                     _lastAlertedFailedJobTime[key] = newestFailure;                 /* :678 */
 
                     var failedJobContext = AlertContextBuilders.BuildFailedJobContext(
-                        serverName, failedJobs, failedJobOccurrences.Decorate,
+                        fingerprintServer, failedJobs, failedJobOccurrences.Decorate,
                         windowEndUtc: now, lookbackMinutes: _settings.FailedJobLookbackMinutes); /* :695 */
                     var detailText = AlertContextBuilders.ContextToDetailText(failedJobContext);               /* :696 */
 
@@ -2740,18 +2920,18 @@ public sealed class AlertEngine
     /// its state returns to expected. Severity is graded at the fire site
     /// (<see cref="DatabaseStateTokens.SeverityFor"/>): CRITICAL for the integrity-failure states,
     /// WARNING otherwise. The shared <see cref="IAlertEngineSettings.ExcludedDatabases"/> list is
-    /// honoured (parity with the other database-scoped alerts). The read is not freshness-gated (a
-    /// standing condition).
+    /// honoured (parity with the other database-scoped alerts). A null read is "no verdict" and changes
+    /// nothing here (no fire, no resolve); otherwise the read has no freshness limit (a standing condition).
     /// </summary>
     private async Task CheckDatabaseStateAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.DatabaseStateEnabled)
         {
             return;
         }
 
-        List<DatabaseStateInfo> deviations;
+        List<DatabaseStateInfo>? deviations;
         var readClock = Stopwatch.StartNew();
         try
         {
@@ -2767,6 +2947,12 @@ public sealed class AlertEngine
                failed fetch (that would fabricate a recovery), and never fire on absent evidence. */
             _logger?.LogError("Failed to check database state for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "database state", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        if (deviations is null)
+        {
+            /* No verdict this pass (see IAlertReadAdapter.GetDatabaseStatesAsync): fire nothing, resolve nothing. */
             return;
         }
 
@@ -2833,6 +3019,7 @@ public sealed class AlertEngine
                 var muteCtx = new AlertMuteContext
                 {
                     ServerName = serverName,
+                    ServerId = serverId,
                     MetricName = DatabaseStateTokens.MetricName,
                     DatabaseName = dbName
                 };
@@ -2861,6 +3048,7 @@ public sealed class AlertEngine
                     }
                 });
 
+                AlertSampleAge.Stamp(stateContext, "database state", db.NewestSampleUtc, now);
                 var detailText = AlertContextBuilders.ContextToDetailText(stateContext);
 
                 var delivery = await FireAsync(new AlertOutcome(
@@ -2983,7 +3171,7 @@ public sealed class AlertEngine
     /// to silence.</para>
     /// </summary>
     private async Task CheckForcePlanFailuresAsync(
-        string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.ForcePlanFailureEnabled)
         {
@@ -3064,6 +3252,7 @@ public sealed class AlertEngine
                 var muteCtx = new AlertMuteContext
                 {
                     ServerName = serverName,
+                    ServerId = serverId,
                     MetricName = ForcePlanTokens.MetricName,
                     DatabaseName = failure.DatabaseName
                 };
@@ -3095,6 +3284,7 @@ public sealed class AlertEngine
                     }
                 });
 
+                AlertSampleAge.Stamp(context, "query store", failure.ObservedAtUtc, now);
                 var detailText = AlertContextBuilders.ContextToDetailText(context);
 
                 var delivery = await FireAsync(new AlertOutcome(
@@ -3153,11 +3343,16 @@ public sealed class AlertEngine
     /// can key it structurally instead of concatenating a string. Every existing caller is string-keyed and
     /// infers unchanged; the database-state family keys by (server, database, state), where a string key
     /// would need a delimiter no <c>sysname</c> can contain — and SQL Server permits <c>|</c>.</para>
+    ///
+    /// <para>#4732: a stamp AHEAD of <paramref name="now"/> (the wall clock stepped back since it was written) is
+    /// replaced by <paramref name="now"/> in <paramref name="lastFired"/> and counted from there, by
+    /// <see cref="LastFiredStamp.TryGet"/>, so the repeat is due one cooldown after the first check that sees the
+    /// step, not the step plus the cooldown. A cooldown of zero or less still never holds.</para>
     /// </summary>
     private static bool CooldownElapsed<TKey>(
         ConcurrentDictionary<TKey, DateTime> lastFired, TKey key, DateTime now, TimeSpan cooldown)
         where TKey : notnull =>
-        !lastFired.TryGetValue(key, out var last) || now - last >= cooldown;
+        !LastFiredStamp.TryGet(lastFired, key, now, out var last) || now - last >= cooldown;
 
     /// <summary>
     /// The tier a "Deadlocks Detected" fire wears (#3653, A8e): Critical when the window's deadlock RATE
@@ -3219,11 +3414,22 @@ public sealed class AlertEngine
     ///
     /// <para>Returns what the channels did (#4752): the deliverer's <see cref="IAlertDeliverer.DeliverAndReportAsync"/>
     /// answer, so a family can tell "every channel failed" from "delivered" and retry the first
-    /// (<see cref="AfterFire"/>). Delivery itself is unchanged. <c>null</c> — Lite's deliverer, a per-event
-    /// split, a throw outside the channels — is "unreported" and reads as delivered.</para>
+    /// (<see cref="AfterFire"/>). Delivery itself is unchanged. A per-event split reports the one delivery
+    /// <see cref="FailedSendBackoff.ReportForSplit"/> picks (#4822). <c>null</c> — a split in which no send was
+    /// attempted, a throw outside the channels — is "unreported" and reads as delivered.</para>
     /// </summary>
     private async Task<AlertDelivery?> FireAsync(AlertOutcome outcome, CancellationToken ct)
     {
+        /* #5320 (part of #4348): the statement filter runs on every fire, before the log line and before any
+           deliverer sees the outcome. Mute rules were evaluated by the family on the RAW text and arrive as
+           outcome.Muted, so a rule keyed on a statement still matches; only what leaves the process (the log,
+           the channels, the history row) is filtered. Both deliverers re-derive their text from the context, so
+           the context is rewritten, not just DetailText. */
+        /* #5484: when the start-up warm-up is still running, wait for it here, asynchronously (Lite fires from its UI
+           thread), so the filter's own blocking wait finds the warm-up done or the 3 s deadline passed. */
+        await SensitiveStatements.WhenWarmAsync();
+        outcome = AlertStatementFilter.MarkJudged(AlertStatementFilter.Apply(outcome));
+
         _logger?.LogWarning(
             "{Line}",
             AlertFiringLog.Fired(

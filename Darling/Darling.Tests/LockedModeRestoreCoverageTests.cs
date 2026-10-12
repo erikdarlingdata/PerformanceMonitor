@@ -57,6 +57,8 @@ namespace Darling.Tests;
 /// exercised against synthetic input, because a parser that matched nothing would report every step as safe
 /// and every lock file as covered — and would do it in green.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class LockedModeRestoreCoverageTests
 {
     private static readonly string[] s_buildSegments = { ".github", "workflows", "build.yml" };
@@ -448,7 +450,7 @@ public sealed class LockedModeRestoreCoverageTests
     public void TheMessageExclusion_MovesTheAnchor_AndTheVerdictComesFromWhereItLands()
     {
         var step = RestoreSteps(ReadRepoFileLf(s_buildSegments), ".github/workflows/build.yml")
-            .Single(candidate => candidate.Contains("set -euo pipefail", StringComparison.Ordinal));
+            .Single(candidate => candidate.Contains("- name: Restore dependencies", StringComparison.Ordinal));
 
         var lines = step.Split('\n');
         var mentioned = Array.FindIndex(lines, MentionsRestore);

@@ -32,6 +32,7 @@ namespace Lite.Tests;
 /// version is its app assembly's, its rung is the DuckDB initializer's, because a Lite payload carrying
 /// Darling's constants would be precisely wrong on the SKU boundary this tool exists to see across.
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class ServiceBuildSurfaceTests
 {
     [Fact]

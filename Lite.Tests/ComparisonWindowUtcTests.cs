@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -36,16 +37,14 @@ public sealed class ComparisonWindowUtcTests
     /// (ruling item 3: after a slicer drag, the baseline is the dragged window shifted back, not the whole
     /// preset range).
     /// </summary>
-    [Theory]
-    [InlineData(300)]   // UTC+5
-    [InlineData(-420)]  // UTC-7
-    public void ShiftComparisonRange_MatchesGridsUtcWindow_ShiftedByOneOrSevenDays(int utcOffsetMinutes)
+    [Fact]
+    public void ShiftComparisonRange_MatchesGridsUtcWindow_ShiftedByOneOrSevenDays()
     {
         // The same derivation CompareToCombo_SelectionChanged and the six ServerTab.Refresh.cs call sites
-        // now use for "current": server-local pickers converted back to UTC by LocalDataService.GetQueriesTabWindowUtc.
-        var fromServerLocal = new DateTime(2026, 3, 10, 9, 0, 0, DateTimeKind.Unspecified);
-        var toServerLocal = new DateTime(2026, 3, 10, 17, 0, 0, DateTimeKind.Unspecified);
-        var (currentStartUtc, currentEndUtc) = LocalDataService.GetQueriesTabWindowUtc(24, fromServerLocal, toServerLocal, utcOffsetMinutes);
+        // now use for "current": the tab's held UTC pair, handed to LocalDataService.GetQueriesTabWindowUtc as it is (#4766).
+        var fromUtc = new DateTime(2026, 3, 10, 9, 0, 0, DateTimeKind.Unspecified);
+        var toUtc = new DateTime(2026, 3, 10, 17, 0, 0, DateTimeKind.Unspecified);
+        var (currentStartUtc, currentEndUtc) = LocalDataService.GetQueriesTabWindowUtc(24, fromUtc, toUtc);
 
         var yesterday = ServerTab.ShiftComparisonRange(1, currentStartUtc, currentEndUtc);
         Assert.NotNull(yesterday);
@@ -114,11 +113,13 @@ public sealed class ComparisonWindowUtcTests
             $"the adjacent banner call uses (found {pairedCalls.Count}) -- a divergent tuple means the comparison " +
             "and the banner could disagree about the window again (#4284).");
 
-        // CompareToCombo_SelectionChanged routes its three comparison refreshes through the same
-        // GetQueriesTabWindowUtc tuple the grid reads use, not a bare DateTime.UtcNow/fromDate pair.
-        Assert.Contains(
-            "var (currentStart, currentEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);",
-            comparisonSource);
+        // #5371: CompareToCombo_SelectionChanged no longer builds a window of its own: it asks the refresh
+        // coordinator for the visible tab, whose reads are the six Refresh.cs calls pinned above (the SAME
+        // GetQueriesTabWindowUtc tuple as the grid beside each). So nothing in the handler may call a comparison
+        // read with a window it made up (a bare DateTime.UtcNow/fromDate pair).
+        Assert.False(Regex.IsMatch(comparisonSource, @"Refresh(?:QueryStats|ProcStats|QueryStore)ComparisonAsync\((?!DateTime currentStart)"),
+            "ServerTab.Comparison.cs calls a comparison read directly (#5371): it must go through the coordinator's pass, " +
+            "which reads each comparison over the grid's own UTC window (#4284).");
     }
 
     private static string ControlsFile(string name) => Path.Combine(ControlsDir(), name);

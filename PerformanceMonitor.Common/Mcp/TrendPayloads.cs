@@ -79,7 +79,8 @@ internal sealed record PerfmonBucketPoint(
 
 /// <summary>
 /// The wire shapes of the bucketed trends both SKUs serve with the same fields — <c>get_file_io_trend</c> and
-/// <c>get_lock_wait_trend</c> (#3897), and the wait, CPU, tempdb, memory and perfmon trends (#3960). Built here,
+/// <c>get_lock_wait_trend</c> (#3897), the wait, CPU, tempdb, memory and perfmon trends (#3960), and one row of
+/// <c>get_perfmon_stats</c>' latest snapshot, which states a rate the way the perfmon trend does. Built here,
 /// once, from the records above, so Lite and Darling cannot publish different keys, orders or sentences for the
 /// same read: the parity their tool bodies used to keep by copying is now kept by construction.
 /// </summary>
@@ -105,13 +106,15 @@ internal static class TrendPayloads
 
     /// <summary>
     /// <c>get_file_io_trend</c>'s data envelope. <paramref name="scope"/> is the database the read was narrowed
-    /// to (per-file grain), null for the per-(database, file type) grain. The <c>series</c> legend's totals are
+    /// to (per-file grain), null for the per-(database, file type) grain. <paramref name="databaseEcho"/> (#5244) is the
+    /// <c>database_name</c> the answer reports when it differs from <paramref name="scope"/>: Darling's "the chosen
+    /// databases" for a read limited to two or more databases, which keeps the per-database grain. The <c>series</c> legend's totals are
     /// summed from the served points, so the legend and the lines cannot disagree about a series; its file counts
     /// come from the ranking.
     /// </summary>
     public static string FileIoTrend(
         string serverName, int hoursBack, string? scope, IReadOnlyList<FileIoSeries> series, IReadOnlyList<FileIoPoint> points,
-        int bucketMinutes, bool requested, int autoBudget, object discontinuities)
+        int bucketMinutes, bool requested, int autoBudget, object discontinuities, string? databaseEcho = null)
     {
         var charted = ChartedFor(series.Count);
         var folded = series.Count - charted;
@@ -134,7 +137,7 @@ internal static class TrendPayloads
         {
             ["server"] = serverName,
             ["hours_back"] = hoursBack,
-            ["database_name"] = scope,
+            ["database_name"] = databaseEcho ?? scope,
             ["series_grain"] = perFile ? "file" : "database_file_type",
             ["bucket"] = TrendBuckets.Word(bucketMinutes),
             ["bucket_minutes"] = bucketMinutes,
@@ -448,7 +451,10 @@ internal static class TrendPayloads
     /// gauge always carried; anything cumulative publishes the bucket's LAST reading as <c>value</c> and its deltas
     /// summed over the seconds they accrued as <c>delta_value</c> / <c>sample_interval_seconds</c>, so the
     /// per-second figure is still delta over interval and a bucket whose every collection was unknowable still says
-    /// so with an interval of 0; a RATE adds <c>peak_per_second</c>, its busiest single collection.
+    /// so with an interval of 0; a RATE adds <c>per_second</c>, that delta over those seconds through the division
+    /// both desktop charts rate a point with (<see cref="DeltaSeriesShaping.PerSecond"/>, null where the interval is
+    /// 0 or missing), and <c>peak_per_second</c>, its busiest single collection. Both rates are rounded by
+    /// <see cref="RoundRate"/>, so a nonzero delta never publishes as a rate of 0, even over a bucket a day wide.
     /// </summary>
     public static string PerfmonTrend(
         string serverName, string counterName, int hoursBack, IReadOnlyList<PerfmonBucketPoint> points,
@@ -491,8 +497,8 @@ internal static class TrendPayloads
         return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
     }
 
-    /// <summary>One perfmon point in its counter kind's shape: the peak key only where the kind has one, so a caller
-    /// never reads a null peak as a measured absence.</summary>
+    /// <summary>One perfmon point in its counter kind's shape: the per-second and peak keys only where the kind has
+    /// them, so a caller never reads a null as a measured absence.</summary>
     private static Dictionary<string, object?> PerfmonPoint(PerfmonBucketPoint p, DeltaBasis basis)
     {
         if (basis == DeltaBasis.Level)
@@ -518,10 +524,64 @@ internal static class TrendPayloads
 
         if (basis == DeltaBasis.PerSecond)
         {
-            point["peak_per_second"] = p.PeakPerSecond is { } peak ? Math.Round(peak, 4) : null;
+            point["per_second"] = DeltaSeriesShaping.PerSecond(delta, seconds) is { } rate ? RoundRate(rate) : null;
+            point["peak_per_second"] = p.PeakPerSecond is { } peak ? RoundRate(peak) : null;
         }
 
         return point;
+    }
+
+    /// <summary>
+    /// One row of <c>get_perfmon_stats</c>' latest snapshot, both SKUs. <c>value</c> is the stored counter (a rate
+    /// counter's running total, a gauge's reading), <c>delta_value</c> its change over the last collection interval
+    /// (null on a gauge, which stores none), and <c>counter_kind</c> the stored type's word
+    /// (<see cref="PerfmonCounterTypes.Word"/>). A row the desktop charts plot per second
+    /// (<see cref="DeltaSeriesShaping.BasisFor(string?, int?)"/>: a rate type, or a row with no stored type whose
+    /// name says <c>/sec</c>) adds <c>per_second</c>: its delta over the seconds since the previous collection
+    /// (<see cref="DeltaSeriesShaping.PerSecond"/>, rounded by <see cref="RoundRate"/>), null when no delta was
+    /// knowable. No other row has the key, as with <see cref="PerfmonTrend"/>'s rate-only keys, so a reader never
+    /// takes a gauge's null for an unknown rate.
+    /// </summary>
+    public static Dictionary<string, object?> PerfmonLatestRow(
+        string counterName, string instanceName, long value, long? deltaValue, long? sampleIntervalSeconds, int? cntrType)
+    {
+        var row = new Dictionary<string, object?>
+        {
+            ["counter_name"] = counterName,
+            ["instance_name"] = instanceName,
+            ["value"] = value,
+            ["delta_value"] = deltaValue,
+            ["cntr_type"] = cntrType,
+            ["counter_kind"] = PerfmonCounterTypes.Word(cntrType),
+        };
+
+        if (DeltaSeriesShaping.BasisFor(counterName, cntrType) == DeltaBasis.PerSecond)
+        {
+            row["per_second"] = DeltaSeriesShaping.PerSecond(deltaValue, sampleIntervalSeconds) is { } rate
+                ? RoundRate(rate)
+                : null;
+        }
+
+        return row;
+    }
+
+    /// <summary>
+    /// A per-second figure as a perfmon payload publishes it: four decimals, and two significant digits where four
+    /// decimals would keep fewer. A rate under 0.001 is a count or two over a long span (one count in a day-wide bucket
+    /// of 86,400 s is 0.0000116 a second), and four decimals print it as 0.0001, or as 0 once it is under 0.00005, which
+    /// says nothing happened. Only a true 0 publishes as 0. Every rate <see cref="PerfmonTrend"/> and
+    /// <see cref="PerfmonLatestRow"/> publish is rounded here, so Lite and Darling publish the same number for the same
+    /// count over the same span.
+    /// </summary>
+    internal static double RoundRate(double rate)
+    {
+        if (rate == 0 || !double.IsFinite(rate))
+        {
+            return rate;
+        }
+
+        var decimals = Math.Clamp(1 - (int)Math.Floor(Math.Log10(Math.Abs(rate))), 4, 15);
+        return Math.Round(rate, decimals);
     }
 
     /// <summary>A cumulative counter's delta and the seconds it accrued over, one class at a time: the rated

@@ -66,6 +66,8 @@ public sealed class CollectionCaveatsTests : IDisposable
 
     public void Dispose()
     {
+        _seedConn?.Dispose();
+        _duckDb?.Dispose();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* best-effort cleanup */ }
     }
@@ -213,7 +215,7 @@ public sealed class CollectionCaveatsTests : IDisposable
     private async Task<DuckDbInitializer> InitializeAsync()
     {
         _duckDb = new DuckDbInitializer(_dbPath);
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         return _duckDb;
     }
 

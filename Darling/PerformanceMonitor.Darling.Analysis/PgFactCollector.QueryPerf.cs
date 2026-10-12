@@ -8,9 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.PlanAnalysis;
 
@@ -121,31 +125,41 @@ AND   v.delta_execution_count > 0";
         }
     }
 
+    /// <summary>
+    /// How many parameter-sensitive plans the fact counts and how many the read reports: the <c>LIMIT</c> this
+    /// statement carried until the compiled-before-the-window test moved to the reader (#4821), which has to run
+    /// BEFORE the cap for the cap to keep the same plans.
+    /// </summary>
+    internal const int ParameterSensitivityMaxOffenders = 20;
+
     public const string ParameterSensitivitySql = @"
-WITH svr AS
+WITH newest AS
 (
     -- creation_time is the MONITORED SERVER's local wall clock -- QueryStatsCollector ships the
     -- dm_exec_query_stats value verbatim -- while the window bound is naive UTC off DateTime.UtcNow.
-    -- De-skewing the column by the collected offset is what lets the compiled-before-the-window test
-    -- compare a single frame. Untranslated, a negative offset admits exactly the in-window plans this
-    -- predicate exists to exclude, and a positive one discards plans that legitimately predate the
-    -- window; either way a wide min/max worker-time spread stops being evidence of parameter
-    -- sensitivity and becomes an artefact of plan age. COALESCE to 0 because server_properties is an
-    -- on-load collector, so an absent offset is the state every server passes through on its first
-    -- cycle -- refusing the read there would pre-empt the two answers that outrank any window. The
-    -- CTE returns exactly one row, so no plan is lost to it.
-    SELECT COALESCE
-    (
-        (
-            SELECT sp.utc_offset_minutes
-            FROM server_properties AS sp
-            WHERE sp.server_id = $1
-            AND   sp.utc_offset_minutes IS NOT NULL
-            ORDER BY sp.collection_time DESC
-            LIMIT 1
-        ),
-        0
-    ) AS offset_minutes
+    -- The compiled-before-the-window test has to compare a single frame, so the reader converts each plan's
+    -- creation_time to UTC through the server's ServerClock (#4821): the zone where the newest snapshot
+    -- reports one, its fixed offset otherwise. One offset for every plan put a plan compiled before the
+    -- zone's last daylight saving change an hour off, and a wide min/max worker-time spread stops being
+    -- evidence of parameter sensitivity when plan age is off. This CTE is that newest snapshot's zone id
+    -- and offset from the SAME server_properties row, handed back on every row. The SQL keeps the newest
+    -- offset only as a rough filter an hour wider than the window bound; the reader applies the exact test
+    -- and the cap. svr below is exactly one row even when server_properties has not
+    -- been collected yet (an on-load collector, so an absent offset is the state every server passes
+    -- through on its first cycle -- refusing the read there would pre-empt the two answers that outrank
+    -- any window): offset 0 and no zone, which is UTC.
+    SELECT sp.utc_offset_minutes, sp.time_zone_id
+    FROM server_properties AS sp
+    WHERE sp.server_id = $1
+    AND   sp.utc_offset_minutes IS NOT NULL
+    ORDER BY sp.collection_time DESC
+    LIMIT 1
+),
+svr AS
+(
+    SELECT
+        COALESCE((SELECT utc_offset_minutes FROM newest), 0) AS offset_minutes,
+        (SELECT time_zone_id FROM newest) AS time_zone_id
 ),
 latest AS
 (
@@ -154,7 +168,7 @@ latest AS
         query_plan_hash,
         database_name,
         execution_count,
-        creation_time - make_interval(mins => svr.offset_minutes) AS creation_time_utc,
+        creation_time,
         min_worker_time,
         max_worker_time,
         min_grant_kb,
@@ -166,7 +180,7 @@ latest AS
             PARTITION BY database_name, query_hash, query_plan_hash
             ORDER BY collection_time DESC
         ) AS rn
-    FROM v_query_stats, svr
+    FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
@@ -177,16 +191,18 @@ SELECT
     max_worker_time,
     max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
     max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
-    CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence
-FROM latest
+    CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
+    creation_time AS creation_time_local,
+    svr.offset_minutes,
+    svr.time_zone_id
+FROM latest, svr
 WHERE rn = 1
 AND   min_worker_time >= 10000
 AND   max_worker_time >= 250000
 AND   execution_count >= 20
-AND   creation_time_utc <= $2
+AND   creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'
 AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
-ORDER BY worker_ratio DESC
-LIMIT 20";
+ORDER BY worker_ratio DESC";
 
     /// <summary>
     /// Detects parameter-sensitive cached plans: a single query_plan_hash whose
@@ -206,6 +222,8 @@ LIMIT 20";
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
+            var windowStart = AsNaive(context.TimeRangeStart);
+            ServerClock? clock = null;
             var offenderCount = 0;
             var worstRatio = 0.0;
             var worstMinWorker = 0L;
@@ -216,7 +234,15 @@ LIMIT 20";
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
             {
-                // Rows arrive ordered by worker_ratio DESC — the first row is the worst offender.
+                /* #4821: the compiled-before-the-window test on each plan's own converted creation time. Every
+                   row carries the same newest-snapshot zone and offset, so the clock is built once. */
+                clock ??= ServerLocalTimes.ClockFrom(
+                    reader.IsDBNull(7) ? null : reader.GetString(7),
+                    reader.IsDBNull(6) ? null : reader.GetInt32(6));
+                if (!ServerLocalTimes.CreatedByWindowStart(clock, reader.IsDBNull(5) ? null : reader.GetDateTime(5), windowStart))
+                    continue;
+
+                // Rows arrive ordered by worker_ratio DESC — the first row kept is the worst offender.
                 if (offenderCount == 0)
                 {
                     worstMinWorker = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
@@ -226,6 +252,8 @@ LIMIT 20";
                     worstSpillDivergence = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4));
                 }
                 offenderCount++;
+                if (offenderCount >= ParameterSensitivityMaxOffenders)
+                    break;
             }
 
             if (offenderCount == 0) return;
@@ -258,19 +286,21 @@ LIMIT 20";
     }
 
     /// <summary>The PLAN_REGRESSION comparison window, in days — how far back a query's "best known" plan
-    /// may have been observed.</summary>
-    internal const int PlanRegressionWindowDays = 14;
+    /// may have been observed. One definition with the builder's (<see cref="PlanRegressionDaily.WindowDays"/>): a window
+    /// that outgrew the days the builder fills would leave every read short of built days and on the full scan.</summary>
+    internal const int PlanRegressionWindowDays = PlanRegressionDaily.WindowDays;
 
     /// <summary>
     /// How far BELOW the comparison window the chunk-exclusion bound sits (#2387). `last_execution_time`
     /// is the monitored server's clock and `collection_time` is the store's; a monitored server running
     /// ahead can report an execution time later than the collection that carried it. A day absorbs any
-    /// plausible drift while still excluding all but ~15 days of a store that may hold months.
+    /// plausible drift while still excluding all but ~15 days of a store that may hold months. One definition with the
+    /// builder's (<see cref="PlanRegressionDaily.PlanRegressionSkewMarginDays"/>), which closes a day by the same margin.
     /// </summary>
-    internal const int PlanRegressionSkewMarginDays = 1;
+    internal const int PlanRegressionSkewMarginDays = PlanRegressionDaily.PlanRegressionSkewMarginDays;
 
     /* PG port: any_value() below is standard SQL:2023, in Postgres since 16 — the product's
-       minimum supported PG is 17, so it stays verbatim (DuckDB and PG agree on its semantics:
+       minimum supported PG is 16, so it stays verbatim (DuckDB and PG agree on its semantics:
        an arbitrary non-null value from the group). */
     public const string PlanRegressionSql = PlanRegressionRawPrefix + PlanRegressionSuffix;
 
@@ -306,7 +336,7 @@ WITH deduped AS
     -- DISTINCT ON needs the same global sort and measured WORSE (49.8s). Raising work_mem is not the
     -- answer either -- 512MB took it from 25.6s to 59.3s. Do not revert to any of those.
     --
-    -- ASSUMPTION, written down because PostgreSQL does not contract it: the seven aggregates below each
+    -- ASSUMPTION, written down because PostgreSQL does not contract it: the eight aggregates below each
     -- sort their own group, so taking [1] from each is only coherent if they all resolve a TIE -- two rows
     -- equal on BOTH collection_time and execution_count -- to the same physical row. PostgreSQL shares one
     -- sort across aggregates carrying an identical ORDER BY, so in practice they do; that is implementation
@@ -330,6 +360,8 @@ WITH deduped AS
         (array_agg(execution_count ORDER BY collection_time DESC, execution_count DESC))[1] AS execution_count,
         (array_agg(avg_cpu_time_us ORDER BY collection_time DESC, execution_count DESC))[1] AS avg_cpu_time_us,
         (array_agg(avg_duration_us ORDER BY collection_time DESC, execution_count DESC))[1] AS avg_duration_us,
+        -- #5631: rows per call, for the output check; the same pick as the aggregates around it.
+        (array_agg(avg_rowcount ORDER BY collection_time DESC, execution_count DESC))[1] AS avg_rowcount,
         (array_agg(last_execution_time ORDER BY collection_time DESC, execution_count DESC))[1] AS last_execution_time,
         (array_agg(is_forced_plan ORDER BY collection_time DESC, execution_count DESC))[1] AS is_forced_plan,
         (array_agg(force_failure_count ORDER BY collection_time DESC, execution_count DESC))[1] AS force_failure_count
@@ -365,6 +397,11 @@ plan_agg AS
         SUM(execution_count) AS execs,
         SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
         SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
+        -- #5631: rows returned per call, execution-weighted over the same intervals as cpu_per_exec. NULL when any
+        -- interval has no avg_rowcount, so a missing count can never read as a small one.
+        CASE WHEN COUNT(*) = COUNT(avg_rowcount)
+             THEN SUM(avg_rowcount::numeric * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0)
+        END AS rows_per_exec,
         MAX(last_execution_time) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count
@@ -405,6 +442,11 @@ WITH plan_agg AS
         SUM(execution_count) AS execs,
         SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
         SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
+        -- #5631: rows returned per call, execution-weighted over the same intervals as cpu_per_exec. NULL when any
+        -- interval has no avg_rowcount, so a missing count can never read as a small one.
+        CASE WHEN COUNT(*) = COUNT(avg_rowcount)
+             THEN SUM(avg_rowcount::numeric * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0)
+        END AS rows_per_exec,
         MAX(last_execution_time) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count
@@ -416,6 +458,114 @@ WITH plan_agg AS
     GROUP BY database_name, query_id, plan_id, replica_role
 ),
 ";
+
+    /// <summary>
+    /// PLAN_REGRESSION over per-day totals for the closed days and the interval table for the rest (#5448):
+    /// <see cref="PlanRegressionTableSql"/> with its <c>plan_agg</c> replaced by the sum of two reads, so everything from
+    /// <c>plan_dedup</c> down is the shared <see cref="PlanRegressionSuffix"/> and cannot drift. $1 server_id, $2 M, $3 the
+    /// built days (<see cref="PlanRegressionDaily.BuiltDaysSql"/>, date[]), $4 the live floor and $5 M - 1 day, both
+    /// timestamps (see <see cref="PlanRegressionLiveFloor"/>).
+    ///
+    /// <para><b>The window edge moves in whole days.</b> This read's edge is M, the start of the day the exact edge falls
+    /// in, for both halves; the exact-bound read it replaces cut mid-day. It is the same function of the same snapshots
+    /// whenever the edge is day-aligned (the parity tests pin that), and differs by less than a day otherwise, which is
+    /// why the drill-down reads the same M (<c>AnalysisContext.PlanRegressionWindowStart</c>). A built day was built from
+    /// <c>last_execution_time</c> in the day, <c>first_execution_time</c> and <c>collection_time</c> a day below it, so the
+    /// two routes differ only for a snapshot collected more than a day before its interval's last execution.</para>
+    ///
+    /// <para><b>One snapshot for both.</b> The built days and this read are two statements, and the trigger can mark a
+    /// day late, and the builder can rebuild one, between them. The fact therefore runs both in one REPEATABLE READ READ
+    /// ONLY transaction: they see the same built set and the same totals, so a day is read from the totals only if the
+    /// totals the read sees are the ones that made it valid. The live floor stays a bound parameter ($4, worked out from
+    /// the built days the first statement returned), so the planner knows it and a hypertable drops the old chunks while
+    /// it plans, as the numbers in #5448 were measured. A late row that lands after the snapshot is not in it, and the
+    /// next builder pass rebuilds the day.</para>
+    /// </summary>
+    internal const string PlanRegressionDailySql = PlanRegressionDailyPrefix + PlanRegressionSuffix;
+
+    private const string PlanRegressionDailyPrefix = @"
+WITH plan_agg AS
+(
+    -- #5448: closed days from collect.plan_regression_daily (summed totals, so days recombine exactly), every other day
+    -- from the interval table with the daily builder's own aggregate. A row is in exactly one half: its day
+    -- (last_execution_time::date) is in the built set or it is not.
+    SELECT
+        database_name,
+        query_id,
+        plan_id,
+        replica_role,
+        any_value(query_plan_hash) AS query_plan_hash,
+        SUM(execs) AS execs,
+        SUM(cpu_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS cpu_per_exec,
+        SUM(dur_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS dur_per_exec,
+        -- #5631: rows per call. A day with no rowcount_sum (an interval had none, or the day awaits its rebuild after the
+        -- column was added) makes the whole plan's figure NULL, the same rule the other two reads apply.
+        CASE WHEN COUNT(*) = COUNT(rowcount_sum)
+             THEN SUM(rowcount_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0)
+        END AS rows_per_exec,
+        MAX(last_exec) AS last_exec,
+        bool_or(is_forced_plan) AS is_forced_plan,
+        MAX(force_failure_count) AS force_failure_count
+    FROM
+    (
+        SELECT
+            d.database_name, d.query_id, d.plan_id, d.replica_role, d.query_plan_hash,
+            d.execs, d.cpu_us_sum, d.dur_us_sum, d.rowcount_sum, d.last_exec, d.is_forced_plan, d.force_failure_count
+        FROM plan_regression_daily AS d
+        WHERE d.server_id = $1::integer
+        AND   d.day = ANY($3::date[])
+
+        UNION ALL
+
+        SELECT
+            l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash,
+            SUM(l.execution_count),
+            SUM(l.avg_cpu_time_us::numeric * l.execution_count),
+            SUM(l.avg_duration_us::numeric * l.execution_count),
+            CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN COALESCE(SUM(l.avg_rowcount::numeric * l.execution_count), 0) END, -- #5631: COALESCE as in BuildDaySql, so a group whose execution counts are all NULL is 0 rows, not NULL.
+            MAX(l.last_execution_time),
+            bool_or(l.is_forced_plan),
+            MAX(l.force_failure_count)
+        FROM query_store_interval_latest AS l
+        WHERE l.server_id = $1::integer
+        AND   l.last_execution_time >= $2::timestamp
+        AND   l.collection_time >= $5::timestamp
+        AND   l.first_execution_time >= $4::timestamp
+        AND   l.last_execution_time::date <> ALL($3::date[])
+        GROUP BY l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash
+    ) AS u
+    GROUP BY database_name, query_id, plan_id, replica_role
+),
+";
+
+    /// <summary>
+    /// M: the start of the day the comparison window's exact edge (<paramref name="rawWindowStart"/>) falls in (#5448).
+    /// </summary>
+    internal static DateTime PlanRegressionWindowFloor(DateTime rawWindowStart) =>
+        DateTime.SpecifyKind(rawWindowStart.Date, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// The live read's <c>first_execution_time</c> floor (#5448): one day below the first day, from
+    /// <paramref name="windowFloor"/> on, that is NOT built. A live row's day is that day or later, and one Query Store
+    /// interval spans at most a day, so its first execution is at or above the floor. With every day from the window's
+    /// start built up to some last one, the floor sits one day below the day after it, so a read still sees whatever
+    /// comes after the built days (a skewed server's future-dated rows).
+    /// </summary>
+    internal static DateTime PlanRegressionLiveFloor(DateTime windowFloor, IReadOnlyCollection<DateOnly> builtDays)
+    {
+        var built = new HashSet<DateOnly>(builtDays);
+        var day = DateOnly.FromDateTime(windowFloor);
+        while (built.Contains(day))
+        {
+            day = day.AddDays(1);
+        }
+
+        return DateTime.SpecifyKind(day.ToDateTime(TimeOnly.MinValue).AddDays(-1), DateTimeKind.Unspecified);
+    }
+
+    /// <summary>Test seam (#5448): runs between the PLAN_REGRESSION built-days read and the daily read, so a test can change the
+    /// store from another connection at exactly the point a snapshot has to hold. Null in production.</summary>
+    internal static readonly System.Threading.AsyncLocal<Func<System.Threading.CancellationToken, System.Threading.Tasks.Task>?> TestOnlyAfterBuiltDaysRead = new();
 
     /// <summary>Everything from <c>plan_dedup</c> down, shared by both PLAN_REGRESSION reads.</summary>
     private const string PlanRegressionSuffix = @"plan_dedup AS
@@ -430,10 +580,20 @@ WITH plan_agg AS
         SUM(execs) AS execs,
         SUM(cpu_per_exec * execs) / NULLIF(SUM(execs), 0) AS cpu_per_exec,
         SUM(dur_per_exec * execs) / NULLIF(SUM(execs), 0) AS dur_per_exec,
+        -- #5631: NULL when any plan_id of the hash group has no rows figure.
+        CASE WHEN COUNT(*) = COUNT(rows_per_exec)
+             THEN SUM(rows_per_exec * execs) / NULLIF(SUM(execs), 0)
+        END AS rows_per_exec,
         MAX(last_exec) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
-        MAX(force_failure_count) AS force_failure_count
+        MAX(force_failure_count) AS force_failure_count,
+        -- #5630: one plan_id per hash group, so the caller can read the two plans' compiled parameter values. The
+        -- group's newest-run plan stands for the latest group, its most-executed plan for the best group; ties
+        -- break on plan_id so the pick is the same on every read.
+        (array_agg(plan_id ORDER BY last_exec DESC, plan_id DESC))[1] AS newest_plan_id,
+        (array_agg(plan_id ORDER BY execs DESC, plan_id DESC))[1] AS busiest_plan_id
     FROM plan_agg
+    /*SEC*/
     GROUP BY database_name, query_id, replica_role, query_plan_hash
     HAVING SUM(execs) >= 25
 ),
@@ -462,6 +622,9 @@ compared AS
         l.force_failure_count AS force_failure_count,
         b.cpu_per_exec AS best_cpu,
         b.dur_per_exec AS best_dur,
+        -- #5631: rows per call of the two plans, for the output check.
+        l.rows_per_exec AS latest_rows,
+        b.rows_per_exec AS best_rows,
         -- #2138: CPU is the PRIMARY signal — duration alone is confounded by blocking, IO waits, and
         -- machine contention that no plan choice caused, so it must not fire a plan-regression verdict
         -- by itself. A CPU regression scores at its own ratio; a duration-dominant one fires only when
@@ -481,7 +644,10 @@ compared AS
         l.database_name,
         -- #3953: when the best plan last ran, so the advice can state its age. The window reaches a full 14 days
         -- on both SKUs, so a best plan can be two weeks old.
-        b.last_exec AS best_last_exec
+        b.last_exec AS best_last_exec,
+        -- #5630: the plans to compare, and the key for the statement text.
+        l.newest_plan_id AS latest_plan_id,
+        b.busiest_plan_id AS best_plan_id
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -490,29 +656,49 @@ compared AS
       AND b.cheapness = 1
     WHERE l.recency = 1
     AND   l.query_plan_hash <> b.query_plan_hash
+),
+candidates AS
+(
+    SELECT *
+    FROM compared
+    WHERE regression_factor >= 2
+    -- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
+    -- near-zero-cost queries whose ratios are all sampling jitter; magnitude ranking stays with
+    -- regression_factor and the scorer.
+    AND   latest_total_cpu_us >= 10000000
+    -- #5630: 100, not 20. The caller drops the queries whose two plans were compiled for different inputs
+    -- (PlanInputComparison) and keeps the worst 20 of what is left, so the cut moved after that check.
+    ORDER BY regression_factor DESC
+    LIMIT 100
 )
 SELECT
-    query_id,
-    latest_cpu,
-    latest_dur,
-    latest_is_forced,
-    force_failure_count,
-    best_cpu,
-    best_dur,
-    regression_factor,
+    c.query_id,
+    c.latest_cpu,
+    c.latest_dur,
+    c.latest_is_forced,
+    c.force_failure_count,
+    c.best_cpu,
+    c.best_dur,
+    c.regression_factor,
     -- #3902: appended, so the ordinals above are untouched. With query_id it names each offender for the
     -- regressed-queries drill-down (AnalysisContext.PlanRegressionOffenders).
-    database_name,
+    c.database_name,
     -- #3953: appended for the same reason.
-    best_last_exec
-FROM compared
-WHERE regression_factor >= 2
--- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
--- near-zero-cost queries whose ratios are all sampling jitter; magnitude ranking stays with
--- regression_factor and the scorer.
-AND   latest_total_cpu_us >= 10000000
-ORDER BY regression_factor DESC
-LIMIT 20";
+    c.best_last_exec,
+    -- #5630: appended for the same reason. The two plans to compare, then the statement text (the table is keyed
+    -- on (server, database, query_id), so it cannot fan a row out).
+    c.latest_plan_id,
+    c.best_plan_id,
+    x.query_sql_text,
+    -- #5631: appended for the same reason. Rows per call of the newer and the cheaper plan; NULL when unknown.
+    c.latest_rows,
+    c.best_rows
+FROM candidates AS c
+LEFT JOIN query_store_text AS x
+  ON  x.server_id = $1
+  AND x.database_name = c.database_name
+  AND x.query_id = c.query_id
+ORDER BY c.regression_factor DESC";
 
     /// <summary>
     /// Detects plan regressions: a query whose currently-active plan has per-execution
@@ -529,7 +715,10 @@ LIMIT 20";
            than a list some earlier pass stamped on a reused context. */
         context.PlanRegressionOffenders = null;
         context.PlanRegressionReadsIntervalTable = null;
+        context.PlanRegressionWindowStart = null;
 
+        /* #5448: the built-days read and the daily read share this transaction (see PlanRegressionDailySql). */
+        NpgsqlTransaction? snapshot = null;
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
@@ -546,17 +735,152 @@ LIMIT 20";
                 connection, context.ServerId, collectionBound, FactCommandTimeoutSeconds, _logger, context.CancellationToken);
             context.PlanRegressionReadsIntervalTable = readsTable;
 
-            using var cmd = new NpgsqlCommand(readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays)));
-            cmd.Parameters.AddWithValue(collectionBound);
+            /* #5448: the closed days that are fully built, only when the table is the source. Any failure is an empty
+               set: the read below then runs PlanRegressionTableSql on its exact bounds, as it did before the daily
+               totals existed. That failure is logged in the helper and is NOT a collection caveat: the exact read is
+               whole, so nothing is missing, and if it fails too its own catch records it, once. A cancelled pass is
+               not swallowed. */
+            var rawWindowStart = AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays));
+            var windowFloor = PlanRegressionWindowFloor(rawWindowStart);
+            var builtDays = new List<DateOnly>();
             if (readsTable)
             {
-                /* $4, the table's partitioning column: the same value, bare, for the same reason. */
-                cmd.Parameters.AddWithValue(collectionBound);
+                /* One REPEATABLE READ READ ONLY transaction for the built-days read and the daily read: both see the same
+                   built set and the same totals, and the live floor below stays a bound parameter. */
+                snapshot = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, context.CancellationToken);
+                await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, snapshot) { CommandTimeout = FactCommandTimeoutSeconds })
+                {
+                    await readOnly.ExecuteNonQueryAsync(context.CancellationToken);
+                }
+
+                builtDays = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
+                    connection, snapshot, context.ServerId, windowFloor, FactCommandTimeoutSeconds, _logger,
+                    ex => AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken), context.CancellationToken);
+                if (builtDays.Count == 0)
+                {
+                    /* No built day, or the read failed (which leaves this transaction aborted): the exact-bound read runs
+                       outside it, on an ordinary statement. */
+                    await snapshot.DisposeAsync();
+                    snapshot = null;
+                }
+                else if (TestOnlyAfterBuiltDaysRead.Value is { } afterBuiltDays)
+                {
+                    await afterBuiltDays(context.CancellationToken);
+                }
             }
 
-            var offenderCount = 0;
+            var readsDays = builtDays.Count > 0;
+
+            using var cmd = new NpgsqlCommand(
+                readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection, snapshot)
+            { CommandTimeout = FactCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(context.ServerId);
+            if (readsDays)
+            {
+                /* $2 M, $3 the built days, $4 the live floor, $5 M - 1 day (the collection bound, bare for #2387). */
+                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, windowFloor);
+                cmd.Parameters.Add(new NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date,
+                    Value = builtDays.ToArray()
+                });
+                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, PlanRegressionLiveFloor(windowFloor, builtDays));
+                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, windowFloor.AddDays(-1));
+            }
+            else
+            {
+                cmd.Parameters.AddWithValue(rawWindowStart);
+                cmd.Parameters.AddWithValue(collectionBound);
+                if (readsTable)
+                {
+                    /* $4, the table's partitioning column: the same value, bare, for the same reason. */
+                    cmd.Parameters.AddWithValue(collectionBound);
+                }
+            }
+
+            /* #5558: Query Store on a secondary copy is the primary's content, and rows from the days this node was
+               primary stay in the window, so the read skips those databases. The marker sits in the suffix all three
+               variants share, so they cannot drift; bound after every other parameter. */
+            PgSecondaryReplicaScope.Apply(cmd, context, "PLAN_REGRESSION", "database_name", "WHERE");
+
+            /* #5630: read the candidates first (the worst 100 by factor), then judge them, because judging reads plans
+               and a second command cannot run while this reader is open. */
+            var candidates = new List<PlanRegressionCandidate>();
+            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            {
+                while (await reader.ReadAsync(context.CancellationToken))
+                {
+                    candidates.Add(new PlanRegressionCandidate(
+                        DatabaseName: reader.GetString(8),
+                        QueryId: ToInt64(reader.GetValue(0)),
+                        LatestCpu: reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1)),
+                        LatestIsForced: !reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3)),
+                        ForceFailures: reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4)),
+                        BestCpu: reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5)),
+                        Factor: reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
+                        BestLastExec: reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9)),
+                        LatestPlanId: reader.IsDBNull(10) ? null : ToInt64(reader.GetValue(10)),
+                        BestPlanId: reader.IsDBNull(11) ? null : ToInt64(reader.GetValue(11)),
+                        StatementText: reader.IsDBNull(12) ? null : reader.GetString(12),
+                        LatestRows: reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
+                        BestRows: reader.IsDBNull(14) ? null : Convert.ToDouble(reader.GetValue(14))));
+                }
+            }
+
+            /* The snapshot has done its job: the plan reads below are ordinary statements, so one that fails cannot abort it. */
+            if (snapshot is not null)
+            {
+                await snapshot.DisposeAsync();
+                snapshot = null;
+            }
+
+            /* #5630: drop the queries whose two plans were not compiled for the same inputs, keep the worst 20 of the
+               rest. Everything that reads the list downstream (the offenders, the regressed-queries drill-down, the
+               force-plan targets built from it) sees only the kept queries. The drill-down names a query by
+               (database, query_id) and not by replica, so a query one replica's row excludes is out for every replica
+               (an excluded query must not reach a force): a query is judged whole, every replica row of it, the first
+               time its key comes up, so the exclusion is known before any row of it is kept and the cut to 20 counts
+               only rows that stay. */
+            var kept = new List<PlanRegressionCandidate>();
+            var excludedKeys = new HashSet<PlanRegressionOffender>();
+            var judgedKeys = new HashSet<PlanRegressionOffender>();
+            var judgements = new Dictionary<int, PlanInputJudgement>();
+            var planReads = new PlanReadFailures();
+            /* Two replica rows of one query can be two candidates over the same two plans: one read and one comparison, as Lite's. */
+            var planOutcomes = new Dictionary<(string Database, long Latest, long Best), PlanInputOutcome>();
+            for (var i = 0; i < candidates.Count; i++)
+            {
+                if (kept.Count >= PlanRegressionMaxOffenders)
+                    break;
+
+                var candidate = candidates[i];
+                var queryKey = new PlanRegressionOffender(candidate.DatabaseName, candidate.QueryId);
+                if (judgedKeys.Add(queryKey))
+                {
+                    for (var j = i; j < candidates.Count; j++)
+                    {
+                        if (candidates[j].DatabaseName != queryKey.DatabaseName || candidates[j].QueryId != queryKey.QueryId)
+                            continue;
+
+                        var verdict = await JudgePlanRegressionInputsAsync(connection, context, candidates[j], planReads, planOutcomes);
+                        if (verdict.Exclude)
+                        {
+                            excludedKeys.Add(queryKey);
+                            break;
+                        }
+
+                        judgements[j] = verdict;
+                    }
+                }
+
+                if (excludedKeys.Contains(queryKey))
+                    continue;
+
+                kept.Add(candidate with { Unverified = judgements[i].Unverified, InputBasis = judgements[i].Basis });
+            }
+
+            var offenderCount = kept.Count;
+            var unverified = kept.Count(k => k.Unverified);
             var worstFactor = 0.0;
             var worstQueryId = 0L;
             var worstLatestCpu = 0.0;
@@ -564,41 +888,60 @@ LIMIT 20";
             var worstDimension = 1;
             var worstLatestForced = 0;
             var worstForceFailures = 0L;
+            var worstInputBasis = 0;
             DateTime? worstBestLastExec = null;
             var offenders = new List<PlanRegressionOffender>();
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            while (await reader.ReadAsync(context.CancellationToken))
+            for (var i = 0; i < kept.Count; i++)
             {
+                var row = kept[i];
                 // Rows arrive ordered by regression_factor DESC — the first row is the worst offender.
-                if (offenderCount == 0)
+                if (i == 0)
                 {
-                    worstQueryId = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
-                    var latestCpu = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-                    worstLatestForced = (!reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3))) ? 1 : 0;
-                    worstForceFailures = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
-                    var bestCpu = reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5));
-                    worstFactor = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7));
-
-                    worstLatestCpu = latestCpu;
-                    worstBestCpu = bestCpu;
-                    worstBestLastExec = reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9));
+                    worstQueryId = row.QueryId;
+                    worstLatestForced = row.LatestIsForced ? 1 : 0;
+                    worstForceFailures = row.ForceFailures;
+                    worstFactor = row.Factor;
+                    worstLatestCpu = row.LatestCpu;
+                    worstBestCpu = row.BestCpu;
+                    worstBestLastExec = row.BestLastExec;
+                    worstInputBasis = row.InputBasis;
                     // Which CASE branch fired, not which raw ratio is larger (review catch on #2138):
                     // CPU has PRECEDENCE in the scoring, so a row with cpu 2.5x and duration 10x is a
                     // CPU-detected regression at 2.5 — comparing magnitudes would mislabel it duration.
-                    var cpuRatio = bestCpu > 0 ? latestCpu / bestCpu : 0.0;
+                    var cpuRatio = row.BestCpu > 0 ? row.LatestCpu / row.BestCpu : 0.0;
                     worstDimension = cpuRatio >= 2 ? 1 : 2; // 1 = cpu, 2 = duration
                 }
-                offenderCount++;
 
                 /* #3902: both keys are join keys of the comparison above, so neither is ever NULL here. Two
                    replicas of one query are two rows and one offender. */
-                var offender = new PlanRegressionOffender(reader.GetString(8), ToInt64(reader.GetValue(0)));
+                var offender = new PlanRegressionOffender(row.DatabaseName, row.QueryId);
                 if (!offenders.Contains(offender))
                     offenders.Add(offender);
             }
 
             context.PlanRegressionOffenders = offenders;
+
+            /* #5448: M is recorded only now, after the read has succeeded. A read that threw leaves "not known" (null), as the
+               AnalysisContext doc says, so the drill-down does not start at an edge no fact read from. */
+            context.PlanRegressionWindowStart = readsDays ? windowFloor : null;
+
+            /* #5630: plan reads that failed are one event for the pass, not one per candidate. The fact already carries
+               them (the kept candidates are counted unverified), so the family is recorded as not read only when there is
+               no fact to carry them. Only the exception's type is logged: a plan holds customer values. */
+            if (planReads.FirstFailure is Exception planReadFailure)
+            {
+                if (offenderCount == 0)
+                {
+                    context.RecordCollectionFailure(
+                        CollectionFailure.FamilyOf(nameof(CollectPlanRegressionFactsAsync)), nameof(CollectPlanRegressionFactsAsync),
+                        ClassifyOutcome(planReadFailure), planReadFailure);
+                }
+
+                _logger?.LogWarning(
+                    "[PgFactCollector] The PLAN_REGRESSION input check could not read the plans of {FailedReads} candidate(s) on server {ServerId} ({ExceptionType}); they are kept unverified",
+                    planReads.Count, context.ServerId, planReadFailure.GetType().Name);
+            }
 
             if (offenderCount == 0) return;
 
@@ -620,6 +963,15 @@ LIMIT 20";
                     ["force_failure_count"] = worstForceFailures,
                     /* #3953: 1 when this pass read the latest-snapshot interval table, 0 for the raw slice. */
                     ["plan_regression_source"] = readsTable ? 1 : 0,
+                    /* #5630: queries left out as a change of input (the statement recompiles on every call, the newer
+                       plan's cost followed a 10x bigger output, or the two plans were compiled for different values over
+                       unchanged statistics, #5631), and kept queries that could not be checked (a plan or the
+                       statement text is missing, or was withheld by the statement filter). */
+                    ["cross_input_excluded_count"] = excludedKeys.Count,
+                    ["inputs_unverified_count"] = unverified,
+                    /* #5631: how the worst kept offender's two plans were compared: 1 compiled for the same parameter
+                       values, 2 compiled for different values after a statistics update, 0 not checked. */
+                    ["worst_input_basis"] = worstInputBasis,
                 }
             };
 
@@ -639,6 +991,149 @@ LIMIT 20";
                not "no data". An abandonment is NOT swallowed here (#2443). */
             ReportCollectionFailure(ex, context);
         }
+        finally
+        {
+            /* After the reader and the connection's other locals are gone; a rollback, nothing here wrote. */
+            if (snapshot is not null)
+            {
+                await snapshot.DisposeAsync();
+            }
+        }
+    }
+
+    /// <summary>How many offenders the PLAN_REGRESSION fact reports: the worst of what the input check leaves (#5630).</summary>
+    internal const int PlanRegressionMaxOffenders = 20;
+
+    /// <summary>One row of the PLAN_REGRESSION read, with the keys to the two plans and the statement text (#5630).</summary>
+    private sealed record PlanRegressionCandidate(
+        string DatabaseName,
+        long QueryId,
+        double LatestCpu,
+        bool LatestIsForced,
+        long ForceFailures,
+        double BestCpu,
+        double Factor,
+        DateTime? BestLastExec,
+        long? LatestPlanId,
+        long? BestPlanId,
+        string? StatementText,
+        double? LatestRows,
+        double? BestRows,
+        bool Unverified = false,
+        int InputBasis = 0);
+
+    /// <summary>The plan reads of one PLAN_REGRESSION pass that failed: how many, and the first exception (#5630).</summary>
+    private sealed class PlanReadFailures
+    {
+        public int Count { get; private set; }
+
+        public Exception? FirstFailure { get; private set; }
+
+        public void Add(Exception ex)
+        {
+            Count++;
+            FirstFailure ??= ex;
+        }
+    }
+
+    /// <summary>What the input check decided about one candidate: leave it out, or keep it (checked or not).</summary>
+    private readonly record struct PlanInputJudgement(PlanInputOutcome Outcome, bool Unverified)
+    {
+        public bool Exclude => PlanInputComparison.IsDrop(Outcome);
+
+        public int Basis => PlanInputComparison.InputBasis(Outcome);
+    }
+
+    /// <summary>
+    /// The stored plan XML for two plan_ids of one database (#5630): the plan map reaches the plan dimension, which holds
+    /// text or gzip bytes. A plan the map or the dimension does not hold is absent from the result.
+    /// $1 server_id, $2 database_name, $3 plan_ids.
+    /// </summary>
+    internal const string PlanRegressionPlansSql = @"
+SELECT m.plan_id, d.query_plan_xml, d.query_plan_gz
+FROM collect.query_store_plan_map AS m
+LEFT JOIN query_plan_dim AS d
+  ON d.digest = m.digest
+WHERE m.server_id = $1
+AND   m.database_name = $2
+AND   m.plan_id = ANY($3)";
+
+    /// <summary>
+    /// Decides whether one PLAN_REGRESSION candidate is a real plan regression or only a change of input (#5630, #5631).
+    /// The shared rule (<see cref="PlanInputComparison"/>) judges in order: a statement with OPTION (RECOMPILE) is out; a
+    /// newer plan that returns 10x the rows per call or more, with the regression gone per row, is out (its cost followed its
+    /// output); neither of those reads a plan. Otherwise the two stored plans are read, and a pair compiled for different
+    /// parameter values over unchanged statistics is out, while the same values, or different values after a statistics
+    /// update, are kept. Anything that cannot be checked (a plan or the statement text is missing, unreadable or withheld, or
+    /// the read failed) keeps the candidate, as before, and counts as unverified. A pair of plans already judged in this pass
+    /// (<paramref name="planOutcomes"/>) is not read again. Only the outcome leaves
+    /// <see cref="PlanInputComparison"/>: no value is logged or stored.
+    /// </summary>
+    private async Task<PlanInputJudgement> JudgePlanRegressionInputsAsync(
+        NpgsqlConnection connection, AnalysisContext context, PlanRegressionCandidate candidate, PlanReadFailures planReads,
+        Dictionary<(string Database, long Latest, long Best), PlanInputOutcome> planOutcomes)
+    {
+        var text = candidate.StatementText;
+        var textUnknown = string.IsNullOrWhiteSpace(text) || WithheldStatementMarker.IsMarker(text);
+
+        /* The statement and the rows per call decide the first two drops, so no plan is read for them. */
+        var early = PlanInputComparison.JudgeBeforePlans(text, candidate.Factor, candidate.LatestRows, candidate.BestRows);
+        if (PlanInputComparison.IsDrop(early))
+            return new PlanInputJudgement(early, Unverified: false);
+
+        if (candidate.LatestPlanId is not long latestId || candidate.BestPlanId is not long bestId)
+            return new PlanInputJudgement(PlanInputOutcome.KeepUnverified, Unverified: true);
+
+        var pairKey = (candidate.DatabaseName, latestId, bestId);
+        if (planOutcomes.TryGetValue(pairKey, out var cachedOutcome))
+            return JudgementFor(cachedOutcome);
+
+        string? latestXml = null;
+        string? bestXml = null;
+        try
+        {
+            using var cmd = new NpgsqlCommand(PlanRegressionPlansSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(candidate.DatabaseName);
+            cmd.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Bigint,
+                Value = new[] { latestId, bestId }
+            });
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
+            {
+                var planId = ToInt64(reader.GetValue(0));
+                var xml = PayloadDimensions.ResolveContent(
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : (byte[])reader.GetValue(2));
+                if (planId == latestId)
+                    latestXml = xml;
+                if (planId == bestId)
+                    bestXml = xml;
+            }
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* The check could not run, so the candidate stays, as it did before the check existed. The caller records the
+               failure once for the pass (#2826), so a broken connection is one event, not one per candidate. */
+            if (planReads.Count == 0)
+                ReportCollectionFailure(ex, context, nameof(CollectPlanRegressionFactsAsync), record: false);
+            planReads.Add(ex);
+            planOutcomes[pairKey] = PlanInputOutcome.KeepUnverified;
+            return new PlanInputJudgement(PlanInputOutcome.KeepUnverified, Unverified: true);
+        }
+
+        var outcome = PlanInputComparison.JudgePlans(latestXml, bestXml);
+        planOutcomes[pairKey] = outcome;
+        return JudgementFor(outcome);
+
+        PlanInputJudgement JudgementFor(PlanInputOutcome planOutcome) =>
+            PlanInputComparison.IsDrop(planOutcome)
+                ? new PlanInputJudgement(planOutcome, Unverified: false)
+                /* A kept pair is unverified when the plans could not be compared, or when the statement text was missing or
+                   withheld (the OPTION (RECOMPILE) check could not run). */
+                : new PlanInputJudgement(planOutcome, Unverified: planOutcome == PlanInputOutcome.KeepUnverified || textUnknown);
     }
 
     public const string ProcedureStatsSql = @"

@@ -158,7 +158,7 @@ public sealed class RollupTileDescriptionTests
         Assert.Contains(
             @"el(""div"", { class: ""num"", text: fmtInt(num), ""aria-describedby"": lblId })",
             ag, StringComparison.Ordinal);
-        Assert.Contains(@"el(""div"", { class: ""lbl"", id: lblId, text: lbl })", ag, StringComparison.Ordinal);
+        Assert.Contains(@"el(""div"", { class: ""lbl"", id: lblId, text: countLabel(num, lbl) })", ag, StringComparison.Ordinal);
 
         /* The scope decision, pinned. The fleet tile takes a sub-line and a title because that rollup
            qualifies one of its numbers with coverage and hovers a long note; these three counts qualify

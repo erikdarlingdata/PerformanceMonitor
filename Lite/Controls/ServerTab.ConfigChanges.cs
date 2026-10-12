@@ -65,8 +65,9 @@ public partial class ServerTab : UserControl
     {
         var data = await Task.Run(() => _dataService.GetServerConfigChangesAsync(_serverId, hoursBack, fromDate, toDate));
         _serverConfigChangesFilterMgr!.UpdateData(data);
-        ServerConfigChangesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowEngineGap(ServerConfigChangesNoDataMessage, "server_config", data.Count, keepsOwnEmptyText: true);
         ServerConfigChangesCountIndicator.Text = data.Count > 0 ? $"{data.Count} change(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.ServerConfig, ServerConfigChangesWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     private async System.Threading.Tasks.Task LoadDatabaseConfigChangesAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -75,33 +76,27 @@ public partial class ServerTab : UserControl
         _databaseConfigChangesFilterMgr!.UpdateData(data);
         DatabaseConfigChangesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         DatabaseConfigChangesCountIndicator.Text = data.Count > 0 ? $"{data.Count} change(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.DatabaseConfig, DatabaseConfigChangesWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     private async System.Threading.Tasks.Task LoadTraceFlagChangesAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         var data = await Task.Run(() => _dataService.GetTraceFlagChangesAsync(_serverId, hoursBack, fromDate, toDate));
         _traceFlagChangesFilterMgr!.UpdateData(data);
-        TraceFlagChangesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ShowEngineGap(TraceFlagChangesNoDataMessage, "trace_flags", data.Count, keepsOwnEmptyText: true);
         TraceFlagChangesCountIndicator.Text = data.Count > 0 ? $"{data.Count} change(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.TraceFlags, TraceFlagChangesWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     /// <summary>The per-sub-tab Refresh button reloads the active Configuration Changes sub-tab over the
-    /// toolbar's current window (mirrors the other tabs' toolbar-driven refresh).</summary>
+    /// toolbar's current window (mirrors the other tabs' toolbar-driven refresh). It skips RefreshVisibleTabAsync, so it
+    /// learns the engine edition and the collector history itself before the loader words its empty state.</summary>
     private async void ConfigChangesRefresh_Click(object sender, RoutedEventArgs e)
     {
-        var hoursBack = GetHoursBack();
-        DateTime? fromDate = null, toDate = null;
-        if (IsCustomRange)
-        {
-            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-            if (fromLocal.HasValue && toLocal.HasValue)
-            {
-                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-            }
-        }
+        var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
+        await RefreshEngineEditionAsync();
+        await RefreshCollectorRunsAsync();
         await RefreshConfigChangesAsync(hoursBack, fromDate, toDate);
     }
 }

@@ -42,7 +42,7 @@ public sealed class SessionStatsCollector : CollectorDefinitionBase<SessionStats
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     program_name =
         ISNULL(des.program_name, N''),
     connection_count =

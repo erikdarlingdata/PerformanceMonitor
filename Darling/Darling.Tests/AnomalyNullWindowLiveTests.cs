@@ -98,7 +98,7 @@ public sealed class AnomalyNullWindowLiveTests
             /* now: truncated to whole seconds (the lane rule) — this becomes the "as_of" anchor for
                every pass; history runs back HistoryDays from it. */
             var now = DateTime.SpecifyKind(
-                new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)),
+                new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond),
                 DateTimeKind.Unspecified);
             var historyStart = now.AddDays(-HistoryDays);
 

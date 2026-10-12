@@ -33,7 +33,7 @@ public sealed class AlertEngineTests
 
     /* ---------------- fakes ---------------- */
 
-    private sealed class FakeSettings : IAlertEngineSettings
+    internal sealed class FakeSettings : IAlertEngineSettings
     {
         /* Lite's App.xaml.cs defaults for thresholds; per-alert enables default OFF here so each
            test switches on exactly the check it pins (a disabled check must not even fetch). */
@@ -99,7 +99,7 @@ public sealed class AlertEngineTests
         public CpuAlertMode CpuAlertMode { get; set; } = CpuAlertMode.TotalServer;
     }
 
-    private sealed class FakeReadAdapter : IAlertReadAdapter
+    internal sealed class FakeReadAdapter : IAlertReadAdapter
     {
         public List<BlockedProcessAlertRow> Blocking { get; } = new();
         public List<DeadlockAlertRow> Deadlocks { get; } = new();
@@ -223,10 +223,13 @@ public sealed class AlertEngineTests
         public List<DatabaseStateInfo> DatabaseStates { get; } = new();
         public int DatabaseStateFetches { get; private set; }
 
-        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default)
+        /// <summary>When true the store has no verdict: the read returns null instead of a list.</summary>
+        public bool DatabaseStatesNoVerdict { get; set; }
+
+        public Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default)
         {
             DatabaseStateFetches++;
-            return Task.FromResult(new List<DatabaseStateInfo>(DatabaseStates));
+            return Task.FromResult<List<DatabaseStateInfo>?>(DatabaseStatesNoVerdict ? null : new List<DatabaseStateInfo>(DatabaseStates));
         }
 
         /* #2157: plantable rows + a fetch counter, mirroring the database-state seam above so the
@@ -269,7 +272,7 @@ public sealed class AlertEngineTests
         }
     }
 
-    private sealed class FakeStateStore : IAlertStateStore
+    internal sealed class FakeStateStore : IAlertStateStore
     {
         public Dictionary<(string Key, string Metric), int> EdgeWatermarks { get; } = new();
         public Dictionary<string, DateTime> FailedJobWatermarks { get; } = new();
@@ -363,7 +366,7 @@ public sealed class AlertEngineTests
         }
     }
 
-    private sealed class RecordingDeliverer : IAlertDeliverer
+    internal sealed class RecordingDeliverer : IAlertDeliverer
     {
         public List<AlertOutcome> Outcomes { get; } = new();
 
@@ -389,7 +392,7 @@ public sealed class AlertEngineTests
     }
 
     /// <summary>One engine + fakes + a controllable clock per test.</summary>
-    private sealed class Harness
+    internal sealed class Harness
     {
         public FakeSettings Settings { get; } = new();
         public FakeReadAdapter Adapter { get; } = new();
@@ -452,17 +455,19 @@ public sealed class AlertEngineTests
         public static AlertServerSnapshot Snapshot(
             double? sqlCpu = null, double? totalCpu = null,
             bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false,
-            DateTime? cpuSampleTime = null, bool noCpuSampleTime = false) =>
+            DateTime? cpuSampleTime = null, bool noCpuSampleTime = false,
+            IReadOnlyList<string>? separatelyMonitored = null) =>
             new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed,
                 noCpuSampleTime
                     ? null
-                    : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)));
+                    : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)),
+                SeparatelyMonitoredDatabases: separatelyMonitored);
 
         /// <summary>The instant distinct sample times are counted from — arbitrary, only the ordering matters.</summary>
         public static readonly DateTime SampleBase = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
     }
 
-    private static BlockedProcessAlertRow BlockingRow(
+    internal static BlockedProcessAlertRow BlockingRow(
         int blockedSpid, string source = BlockedProcessAlertRow.XeReportSource, string database = "StackOverflow") => new()
     {
         EventTime = new DateTime(2026, 7, 1, 11, 55, 0),
@@ -484,6 +489,77 @@ public sealed class AlertEngineTests
         DeadlockGraphXml =
             $@"<deadlock><victim-list><victimProcess id=""process1""/></victim-list><process-list><process id=""process1"" spid=""55"" currentdbname=""{database}""><inputbuf>UPDATE Users SET Reputation = 1</inputbuf></process><process id=""process2"" spid=""60"" currentdbname=""{database}""><inputbuf>UPDATE Badges SET Name = 'x'</inputbuf></process></process-list><resource-list><keylock objectname=""{database}.dbo.Users""><owner id=""process2"" mode=""X""/><waiter id=""process1"" mode=""U""/></keylock></resource-list></deadlock>"
     };
+
+    /// <summary>F14: the engine hands the snapshot's store id to the mute check, so an id-keyed rule silences
+    /// that server's alert and NOT a same-named sibling's (a blank display name falls back to the host, so
+    /// two registrations can read identically).</summary>
+    [Fact]
+    public async Task IdKeyedMuteRule_SuppressesThatServersAlert_AndNotASameNamedSiblings()
+    {
+        var rule = new MuteRule { ServerId = 7, ServerName = Name, MetricName = "Poison Wait" };
+        var muted = new List<bool>();
+
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.PoisonWaitEnabled = true;
+            h.IsMuted = ctx => rule.MatchesAt(ctx, h.Now);
+            h.Adapter.PoisonWaits.Add(Poison(6_000_000, waitType: "RESOURCE_SEMAPHORE", waits: 100));
+            var snapshot = Harness.Snapshot() with { ServerId = id };
+            await h.Build().EvaluateServerAsync(snapshot);
+            muted.Add(Assert.Single(h.Deliverer.Outcomes).Muted);
+        }
+
+        Assert.Equal(new[] { true, false }, muted);
+    }
+
+    /// <summary>F14: two registrations sharing a display name read alike in both snapshots; the dedup keys
+    /// must still differ (the fingerprint takes the store id), while the mute context and the alert row keep
+    /// the display name. A unique name is unchanged: the store id never reaches its key.</summary>
+    [Fact]
+    public async Task DeadlockDedupKey_SeparatesServersSharingADisplayName_AndLeavesTheMuteContextAlone()
+    {
+        var keys = new List<string>();
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.DeadlockEnabled = true;
+            AlertMuteContext? muteAsked = null;
+            h.IsMuted = ctx => { muteAsked = ctx; return false; };
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+            var snapshot = new AlertServerSnapshot(Key, "host1", true, null, null, false, false, Harness.SampleBase)
+            { ServerId = id, ServerNameIsShared = true };
+            await h.Build().EvaluateServerAsync(snapshot);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            keys.Add(Assert.Single(fired.Context!.Incidents!).DedupKey);
+            Assert.Equal("host1", muteAsked!.ServerName);
+            Assert.Equal("host1", fired.ServerName);
+        }
+
+        Assert.NotEqual(keys[0], keys[1]);
+    }
+
+    [Fact]
+    public async Task DeadlockDedupKey_ForNamedServers_IsUnchangedByTheStoreId()
+    {
+        var expected = AlertFingerprint.ForObjects(
+            "Prod SQL 1", AlertFingerprint.Deadlock,
+            DeadlockObjectExtractor.FromGraphXml(DeadlockRow().DeadlockGraphXml))!.DedupKey;
+
+        foreach (var id in new int?[] { 7, 8 })
+        {
+            var h = new Harness();
+            h.Settings.DeadlockEnabled = true;
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+            var snapshot = new AlertServerSnapshot(Key, "Prod SQL 1", true, null, null, false, false, Harness.SampleBase)
+            { ServerId = id };
+            await h.Build().EvaluateServerAsync(snapshot);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Equal(expected, Assert.Single(fired.Context!.Incidents!).DedupKey);
+        }
+    }
 
     /* ---------------- master switch ---------------- */
 
@@ -1160,6 +1236,121 @@ public sealed class AlertEngineTests
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
         Assert.Equal("1", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
     }
+
+    /* ---------------- Azure SQL Database master target: databases monitored as their own targets ---------------- */
+
+    private static readonly string[] Gp = ["GP"];
+
+    private static AlertServerSnapshot MasterSnapshot(IReadOnlyList<string>? separatelyMonitored = null) =>
+        Harness.Snapshot(isAzureSqlDb: true, separatelyMonitored: separatelyMonitored);
+
+    private static Harness MasterHarness()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingCountThreshold = 1;
+        h.Settings.DeadlockEnabled = true;
+        h.Settings.DeadlockCountThreshold = 1;
+        return h;
+    }
+
+    [Fact]
+    public async Task AzureMaster_EventsForASeparatelyMonitoredDatabase_DoNotAlert()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(55, database: "GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+    }
+
+    [Fact]
+    public async Task AzureMaster_TheSameEvents_AlertWhenTheDatabaseIsNotSeparatelyMonitored()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(55, database: "GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(null));
+
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+    }
+
+    [Fact]
+    public async Task AzureMaster_EventsForADatabaseNotInTheList_StillAlert()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(55, database: "HS"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+    }
+
+    [Fact]
+    public async Task AzureMaster_Blocking_CountAndWatermarkCoverOnlyTheUnlistedDatabases()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(1, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(2, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(3, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(4, database: "HS"));
+        h.Adapter.Blocking.Add(BlockingRow(5, database: "HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        var outcome = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Equal("2", outcome.CurrentValue);
+        Assert.Equal("2 blocking session(s)", outcome.ShortMessage);
+        Assert.Equal(2, h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)]);
+    }
+
+    [Fact]
+    public async Task AzureMaster_Deadlocks_CountAndWatermarkCoverOnlyTheUnlistedDatabases()
+    {
+        var h = MasterHarness();
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("GP"));
+        h.Adapter.Deadlocks.Add(DeadlockRow("HS"));
+        h.Adapter.Deadlocks.Add(DeadlockMixedRow("GP", "HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        var outcome = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+        Assert.Equal("2", outcome.CurrentValue);
+        Assert.Equal("2 deadlock(s) in the last hour", outcome.ShortMessage);
+        Assert.Equal(2, h.StateStore.EdgeWatermarks[(Key, AlertEngine.DeadlockWatermarkMetric)]);
+    }
+
+    [Fact]
+    public async Task AzureMaster_Blocking_RecountKeepsThePreferenceForExtendedEventRows()
+    {
+        var h = MasterHarness();
+        h.Adapter.Blocking.Add(BlockingRow(1, database: "HS"));
+        h.Adapter.Blocking.Add(BlockingRow(2, database: "HS"));
+        h.Adapter.Blocking.Add(BlockingRow(3, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(4, database: "GP"));
+        h.Adapter.Blocking.Add(BlockingRow(5, source: BlockedProcessAlertRow.DmvSnapshotSource, database: "HS"));
+
+        await h.Build().EvaluateServerAsync(MasterSnapshot(Gp));
+
+        Assert.Equal("2", Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected").CurrentValue);
+    }
+
+    private static DeadlockAlertRow DeadlockMixedRow(string first, string second) => new()
+    {
+        VictimProcessId = "process1",
+        VictimSqlText = "UPDATE Users SET Reputation = 1",
+        DeadlockGraphXml =
+            $@"<deadlock><victim-list><victimProcess id=""process1""/></victim-list><process-list><process id=""process1"" spid=""55"" currentdbname=""{first}""><inputbuf>UPDATE Users SET Reputation = 1</inputbuf></process><process id=""process2"" spid=""60"" currentdbname=""{second}""><inputbuf>UPDATE Badges SET Name = 'x'</inputbuf></process></process-list><resource-list><keylock objectname=""{first}.dbo.Users""><owner id=""process2"" mode=""X""/><waiter id=""process1"" mode=""U""/></keylock></resource-list></deadlock>"
+    };
 
     /* ---------------- blocking wait time (#1839; gated by #3653 A5, ruling Q4) ---------------- */
 
@@ -3682,6 +3873,27 @@ public sealed class AlertEngineTests
         Assert.Contains(AlertContextBuilders.FileGrowthRiseUnit, fired.ThresholdValue, StringComparison.Ordinal);
     }
 
+    /// <summary>An Azure SQL Database file has no volume: the fired headline says so, instead of a made-up
+    /// "0% of" an empty mount point.</summary>
+    [Fact]
+    public async Task FileGrowth_AFileWithAnUnknownVolume_FiresWithoutAMadeUpPercentOfNothing()
+    {
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        var engine = h.Build();
+        var f = GrowingFile(20_480, 60);
+        f.VolumeMountPoint = null;
+        f.VolumeTotalMb = null;
+        f.VolumeFreeMb = null;
+        h.Adapter.Files.Add(f);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("volume unknown", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("0% of", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("of )", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// The other half of the same property: a rate a tenth under the bar is silent on both lookbacks — including
     /// the day-long one, where the per-window reading paged on 12 GB in a day because 12,288 is more than 10,240.
@@ -4482,7 +4694,7 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
-        public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+        public Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
 
         /// <summary>
@@ -5174,6 +5386,31 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task DatabaseState_NoVerdict_LeavesAnActiveDatabaseActive_FiresNothingAndResolvesNothing()
+    {
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "OFFLINE", ExpectedState = "ONLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The store cannot judge this pass: null, which is not an empty list. The active database stays
+           active, so nothing fires and nothing resolves, even though the double's own list is now empty. */
+        h.Adapter.DatabaseStatesNoVerdict = true;
+        h.Adapter.DatabaseStates.Clear();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        /* A real verdict of "no deviations" does resolve it. */
+        h.Adapter.DatabaseStatesNoVerdict = false;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Contains(h.Resolutions, r => r.MetricName == "Database State" && r.Message.Contains("Payments"));
+    }
+
+    [Fact]
     public async Task DatabaseState_PendingCriticalFirstObservation_FiresCriticalWithNoBaselineMessage()
     {
         /* A critical first observation has no baseline (empty expected) — the store returns it as pending;
@@ -5256,6 +5493,14 @@ public sealed class AlertEngineTests
             EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
             WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null, AnyChannelConfigured: true),
         muted: true, trayChannelPresent: false);
+
+    /// <summary>An email inside its incident cooldown: reported as throttled, so <c>Sent</c> is false and
+    /// there is no <c>SendError</c> (#4822).</summary>
+    private static AlertDelivery ThrottledNothingSent() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.Throttled, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
 
     [Fact]
     public void TheDeliveryShapes_TheRetryReads_AreWhatTheChannelsProduce()
@@ -6422,6 +6667,63 @@ public sealed class AlertEngineTests
         Assert.False(FailedSendBackoff.EveryChannelFailed(DeliveredByWebhook()));
         Assert.False(FailedSendBackoff.EveryChannelFailed(MutedNothingAttempted()));
         Assert.False(FailedSendBackoff.EveryChannelFailed(null));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_EverySendFailed_ReportsAFailedOne()
+    {
+        var first = FailedByEmail();
+
+        var report = FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { first, FailedByWebhook(), FailedByEmail() });
+
+        Assert.Same(first, report);
+        Assert.True(FailedSendBackoff.EveryChannelFailed(report));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_OneSendReachedAChannel_ReportsIt_WhereverItSits()
+    {
+        /* The split reached a channel, so the engine must not try it again: a retry would page it a second
+           time down the channel that worked. A partial failure (one channel delivered) counts as reaching one. */
+        var delivered = DeliveredByWebhook();
+        var partial = FailedByEmailButDeliveredByWebhook();
+
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByEmail(), delivered, FailedByWebhook() }));
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { delivered, FailedByEmail() }));
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByEmail(), delivered }));
+        Assert.Same(partial, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByWebhook(), partial }));
+        Assert.False(FailedSendBackoff.EveryChannelFailed(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { FailedByEmail(), delivered })));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_NothingAttemptedOrThrottled_ReportsNothing()
+    {
+        Assert.Null(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { MutedNothingAttempted(), ThrottledNothingSent() }));
+        Assert.Null(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { ThrottledNothingSent() }));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_AFailedSendBesideThrottledOnes_ReportsTheFailure()
+    {
+        var failed = FailedByWebhook();
+
+        var report = FailedSendBackoff.ReportForSplit(
+            new AlertDelivery?[] { ThrottledNothingSent(), failed, MutedNothingAttempted() });
+
+        Assert.Same(failed, report);
+        Assert.True(FailedSendBackoff.EveryChannelFailed(report));
+    }
+
+    [Fact]
+    public void FailedSendBackoff_ReportForSplit_SkipsNullEntries_AndAnEmptySplitReportsNothing()
+    {
+        var failed = FailedByEmail();
+        var delivered = DeliveredByWebhook();
+
+        Assert.Same(failed, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { null, failed, null }));
+        Assert.Same(delivered, FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { null, failed, delivered }));
+        Assert.Null(FailedSendBackoff.ReportForSplit(new AlertDelivery?[] { null, null }));
+        Assert.Null(FailedSendBackoff.ReportForSplit(Array.Empty<AlertDelivery?>()));
     }
 
     private static int CountOccurrences(string haystack, string needle)

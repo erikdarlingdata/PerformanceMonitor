@@ -25,11 +25,12 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// dictionary keys and row shapes, the same per-finding catch-and-keep error posture, and the
 /// same partial-file split (Blocking / Config / Plans / Queries / Storage). Lite's analysis SQL
 /// was deliberately written in the PG-shared dialect and the V4 passthrough <c>v_&lt;table&gt;</c>
-/// views exist precisely so these queries run VERBATIM — every query string here is
-/// byte-identical to Lite's.
+/// views exist so these queries can run VERBATIM, and most do. Where a query differs from Lite's, its own
+/// comment says why (for example, the parameter-sensitivity drill-down resolves statement text in a second
+/// read by digest).
 ///
 /// <para>
-/// The documented PG-port deviations, none of which touch a query's text (the PgFactCollector
+/// The documented PG-port deviations that do not touch a query's text (the PgFactCollector
 /// AN2a conventions):
 /// <list type="bullet">
 /// <item><description>/* PG port: Lite wraps every read in <c>_duckDb.AcquireReadLock()</c> —
@@ -52,7 +53,7 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// No query uses <c>NOW()</c>/<c>CURRENT_TIMESTAMP</c> (every window bound is a parameter), no
 /// <c>QUALIFY</c> appears, and the one <c>any_value()</c> use (the plan-regression drill-down,
 /// same as the fact collector's plan-regression detector) is standard SQL:2023, in Postgres
-/// since 16 (the product's minimum PG is 17) — all pinned by the AN3 tests.
+/// since 16 (the product's minimum PG is 16) — all pinned by the AN3 tests.
 /// </para>
 /// </summary>
 public sealed partial class PgDrillDownCollector : IDrillDownCollector
@@ -104,6 +105,7 @@ public sealed partial class PgDrillDownCollector : IDrillDownCollector
         TopCpuQueriesSql,
         TopSpillingQueriesSql,
         ParameterSensitiveSql,
+        ParameterSensitiveTextSql,
         RegressedQueriesSql,
         RegressedQueriesTableSql,
         BadActorDetailSql,

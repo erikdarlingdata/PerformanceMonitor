@@ -33,6 +33,15 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
     private double _lastPixelX = double.NaN;
     private bool _needsReanchor = true;
 
+    /// <summary>
+    /// The display zone when the lanes' X is the UTC instant (#4766), else <c>null</c>: X is then the server-time
+    /// value the app plotted and the tooltip goes through <see cref="UiTimeContext.ConvertForDisplay"/> as before.
+    /// With a zone, the tooltip time is the instant in that zone with the UTC offset added when the wall time
+    /// happens twice (<see cref="DisplayZone.Format"/>). Read on every mouse move, so a display-mode switch shows
+    /// on the next move. Set it before the lanes are wired.
+    /// </summary>
+    public Func<TimeZoneInfo>? DisplayZoneProvider { get; set; }
+
     public CorrelatedCrosshairManager()
     {
         _tooltipText = new TextBlock
@@ -264,8 +273,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
         _tooltipText.Inlines.Clear();
         var time = DateTime.FromOADate(xValue);
-        var displayTime = UiTimeContext.ConvertForDisplay(time);
-        _tooltipText.Inlines.Add(new Run(displayTime.ToString("yyyy-MM-dd HH:mm:ss")));
+        _tooltipText.Inlines.Add(new Run(FormatCrosshairTime(time, DisplayZoneProvider)));
         if (_comparisonLabel != null)
             _tooltipText.Inlines.Add(new Run($"  (dashed = {_comparisonLabel})") { Foreground = DimBrush });
 
@@ -432,6 +440,17 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
             }
         }
     }
+
+    /// <summary>
+    /// The time line of the crosshair tooltip for the plotted X <paramref name="plottedX"/>. With no zone, X is the
+    /// app's server-time value and the line is the display-mode conversion of it, as it has always been. With a
+    /// zone, X is the UTC instant: the line is that instant in the zone, and the zone's offset follows it when the
+    /// wall time happens twice.
+    /// </summary>
+    internal static string FormatCrosshairTime(DateTime plottedX, Func<TimeZoneInfo>? displayZone)
+        => displayZone is null
+            ? UiTimeContext.ConvertForDisplay(plottedX).ToString("yyyy-MM-dd HH:mm:ss")
+            : DisplayZone.Format(plottedX, displayZone(), "yyyy-MM-dd HH:mm:ss");
 
     public void Dispose()
     {

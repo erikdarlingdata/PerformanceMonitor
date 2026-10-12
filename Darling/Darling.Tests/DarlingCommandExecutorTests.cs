@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -81,8 +82,8 @@ public sealed class DarlingCommandExecutorTests
         {
             WasCalled = true;
             ReceivedCustomRetentionDays = customRetentionDays;
-            return Task.FromResult(new CommandOutcome(true, "purge complete",
-                "{\"success\":true,\"tablesPurged\":3,\"rowsPurged\":42}"));
+            return Task.FromResult(new CommandOutcome(true, "purge started",
+                "{\"success\":true,\"started\":true,\"customRetentionDays\":null}"));
         }
 
         public Task<CommandOutcome> FetchPlanAsync(int serverId, PlanFetchRequest request, CancellationToken cancellationToken)
@@ -285,6 +286,26 @@ public sealed class DarlingCommandExecutorTests
         Assert.Contains("ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL", perServer.Sql, StringComparison.Ordinal);
         Assert.Equal(7, perServer.Parameters![0]);
         Assert.Equal("wait_stats", perServer.Parameters![1]);
+    }
+
+    [Fact]
+    public void ResolvePlan_CollectorWrites_BindTheCatalogsSpellingNotTheTypedOne()
+    {
+        /* The store's unique indexes compare collector_name exactly, so a typed 'Wait_Stats' would be a second row beside the
+           viewer's 'wait_stats'. Every collector-scoped write binds the catalog key, scoped or fleet-wide. */
+        var toggle = DarlingCommandExecutor.ResolvePlan(Command("enable_collector", args: "{\"collector_name\":\"Wait_Stats\"}"));
+        Assert.Equal("wait_stats", toggle.Parameters![0]);
+        var toggleServer = DarlingCommandExecutor.ResolvePlan(Command("disable_collector", target: 7, args: "{\"collector_name\":\"WAIT_STATS\"}"));
+        Assert.Equal("wait_stats", toggleServer.Parameters![1]);
+
+        foreach (var (target, runAt) in new (int?, string)[] { (null, "02:00"), (7, "02:00"), (null, "default"), (7, "default"), (7, "none") })
+        {
+            var plan = DarlingCommandExecutor.ResolvePlan(Command(
+                "set_collector_run_at", target, "{\"collector_name\":\"Index_Object_Stats\",\"run_at\":\"" + runAt + "\"}"));
+            Assert.Equal(CommandKind.StoreWrite, plan.Kind);
+            Assert.Contains("index_object_stats", plan.Parameters!.OfType<string>());
+            Assert.DoesNotContain("Index_Object_Stats", plan.Parameters!.OfType<string>());
+        }
     }
 
     [Fact]
@@ -546,6 +567,27 @@ public sealed class DarlingCommandExecutorTests
         Assert.Equal("SQL Server 2022", ProbeVersionLabelOf(sqlServer));
         Assert.Equal("PostgreSQL 18", ProbeVersionLabelOf(postgres));
         Assert.Equal("Aurora PostgreSQL 16", ProbeVersionLabelOf(aurora));
+    }
+
+    /// <summary>
+    /// The same seam for the two Azure platforms: an Azure SQL Database reports major 12 (SQL Server 2014's
+    /// number) and edition 5, and the reply the executor really serializes carries <c>engineEdition</c>, which
+    /// the shared reader turns into the platform's name instead of a SQL Server year. As above, the reader's
+    /// own tests parse hand-written JSON, so this is the place the writer's key and the reader's key must agree.
+    /// </summary>
+    [Fact]
+    public void MapProbeResult_FeedsTheSharedProbeVersionLabelReader_AnAzureEditionReadsAsThePlatform()
+    {
+        var azureSqlDatabase = new ConnectionProbeResult(
+            Success: true, MajorVersion: 12, EngineEdition: 5, EngineEditionDescription: "Azure SQL Database",
+            IsAzureSqlDb: true, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: false, Error: null);
+
+        var managedInstance = new ConnectionProbeResult(
+            Success: true, MajorVersion: 16, EngineEdition: 8, EngineEditionDescription: "Azure SQL Managed Instance",
+            IsAzureSqlDb: false, IsAzureManagedInstance: true, IsAwsRds: false, HasMsdbAccess: true, Error: null);
+
+        Assert.Equal("Azure SQL Database", ProbeVersionLabelOf(azureSqlDatabase));
+        Assert.Equal("Azure SQL Managed Instance", ProbeVersionLabelOf(managedInstance));
     }
 
     /// <summary>Runs a probe result through the executor's reply serializer and the viewer's shared reader —

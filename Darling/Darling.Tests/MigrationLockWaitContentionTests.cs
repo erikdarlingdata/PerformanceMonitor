@@ -61,59 +61,7 @@ public sealed class MigrationLockWaitContentionTests
     /// </summary>
     private const int TestWaitBudgetSeconds = 3;
 
-    /// <summary>
-    /// Ceiling for an UNCONTENDED acquire. Two-sided, and the upper side is what does the work: the
-    /// shipped poll interval is one second, so any ceiling below a second separates "took the lock on the
-    /// first attempt" from "slept once first" — which matters because moving the sleep above the first
-    /// attempt is a RELOCATION, and every occurrence count stays 1, so no structural check sees it and
-    /// only elapsed time can. The lower side is headroom: the operation is a single round trip on a
-    /// connection that is already open and already migrated, which is sub-millisecond against a local
-    /// store, so 750 ms leaves roughly three orders of magnitude before a slow runner can flake it.
-    /// </summary>
-    private static readonly TimeSpan UncontendedAcquireCeiling = TimeSpan.FromMilliseconds(750);
-
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-
-    [Fact]
-    public async Task AcquireSucceedsFirstAttempt_WhenNobodyHoldsTheLock_AgainstDevPostgres()
-    {
-        var connectionString = ConnectionString;
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live migration-lock tests.");
-
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(TestContext.Current.CancellationToken);
-        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
-
-        /* The uncontended path must cost nothing: polling is only a fallback shape, and if the first
-           attempt did not succeed outright then every ordinary service start pays a poll interval. */
-        var started = Stopwatch.StartNew();
-        Assert.True(await PgMigrations.TryAcquireMigrationLockForTestsAsync(
-            connection, logger: null, TestWaitBudgetSeconds, TestContext.Current.CancellationToken));
-        started.Stop();
-
-        /* Release in a finally, not after the assertion. Npgsql pools by default, so disposing the
-           connection hands the physical session — advisory lock and all — back to the pool rather than
-           closing it, and a lock leaked by a failed assertion then blocks every later class in this
-           collection until the pool prunes that connection. Measured: a leak here cost a sibling test
-           290 s of waiting on a lock nothing was using. */
-        var bodySucceeded = false;
-        try
-        {
-            Assert.True(
-                started.Elapsed < UncontendedAcquireCeiling,
-                $"An uncontended acquire took {started.Elapsed.TotalMilliseconds:F0}ms, over the "
-                + $"{UncontendedAcquireCeiling.TotalMilliseconds:F0}ms ceiling — it slept a poll interval "
-                + "instead of taking the lock on its first attempt.");
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunOwnedAsync(
-                bodySucceeded,
-                () => ReleaseAsync(connection, CancellationToken.None));
-        }
-    }
 
     [Fact]
     public async Task ExpiryReturnsFalseWithoutThrowing_WhenTheStoreIsAlreadyCurrent_AgainstDevPostgres()

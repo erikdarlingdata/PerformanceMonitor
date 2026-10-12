@@ -583,6 +583,74 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         Assert.True(cpu.Metadata["mean_deviation_sigma"] >= cpu.Metadata["fire_threshold"], "a fired fact's mean cleared the same cutoff");
     }
 
+    /// <summary>
+    /// #4731: two rows tied on the tile's peak value report the LATER collection time, on every run - the peak
+    /// time orders by value, then collection_time DESC, as Darling's array_agg does. It was arg_max on the value
+    /// alone, so a tie fell to whichever tied row the scan reached first; both storage orders are exercised so
+    /// the answer cannot ride on insertion order.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DetectCpuAnomalies_TwoRowsTiedOnThePeak_ReportTheLaterCollectionTime_WhicheverIsStoredFirst(bool laterRowStoredFirst)
+    {
+        await SeedBaselineCpu(10, variance: 2);
+        for (int i = 0; i < 16; i++)
+            await SeedCpuAsync(_analysisStart.AddMinutes(i * 15), 70);
+
+        // Both tied rows sit inside ONE wall-clock hour tile (the tile is the target-local hour, not the
+        // analysis-window offset), 10 minutes apart, well inside the 4 h window.
+        var hourTop = _analysisStart.AddHours(2);
+        hourTop = hourTop.Date.AddHours(hourTop.Hour);
+        var earlier = hourTop.AddMinutes(10);
+        var later = hourTop.AddMinutes(20);
+        if (laterRowStoredFirst)
+        {
+            await SeedCpuAsync(later, 90);
+            await SeedCpuAsync(earlier, 90);
+        }
+        else
+        {
+            await SeedCpuAsync(earlier, 90);
+            await SeedCpuAsync(later, 90);
+        }
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+
+        var cpu = Assert.Single(anomalies, f => f.Key == "ANOMALY_CPU_SPIKE");
+        Assert.Equal(90.0, cpu.Metadata["peak_cpu"]);
+        Assert.Equal((double)later.Ticks, cpu.Metadata["peak_time_ticks"]);
+    }
+
+    /// <summary>
+    /// #4731: a sample with no CPU value is never the tile's peak time. DuckDB compares the arg_max key's STRUCT
+    /// field by field and treats a NULL field as LARGER than any value, so without the aggregate's
+    /// <c>FILTER (WHERE sqlserver_cpu_utilization IS NOT NULL)</c> a NULL row would beat the real peak and the fact
+    /// would report ITS time - while the peak value beside it (a MAX, which ignores NULLs) is the real peak's. The
+    /// NULL row is stored LATER than the peak, so neither "earlier row wins" nor "later row wins" can hide it.
+    /// </summary>
+    [Fact]
+    public async Task DetectCpuAnomalies_ASampleWithNoValueNextToTheRealPeak_IsNeverThePeakTime()
+    {
+        await SeedBaselineCpu(10, variance: 2);
+        for (int i = 0; i < 16; i++)
+            await SeedCpuAsync(_analysisStart.AddMinutes(i * 15), 70);
+
+        // Both rows sit inside ONE wall-clock hour tile, 10 minutes apart, well inside the 4 h window.
+        var hourTop = _analysisStart.AddHours(2);
+        hourTop = hourTop.Date.AddHours(hourTop.Hour);
+        var peak = hourTop.AddMinutes(10);
+        var noValue = hourTop.AddMinutes(20);
+        await SeedCpuAsync(peak, 90);
+        await SeedCpuWithoutValueAsync(noValue);
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+
+        var cpu = Assert.Single(anomalies, f => f.Key == "ANOMALY_CPU_SPIKE");
+        Assert.Equal(90.0, cpu.Metadata["peak_cpu"]);
+        Assert.Equal((double)peak.Ticks, cpu.Metadata["peak_time_ticks"]);
+    }
+
     [Fact]
     public async Task DetectIoAnomalies_ReadsThePeakAndMeanPair_OneHotFileRowDoesNotFire_ASustainedWindowDoes()
     {
@@ -741,6 +809,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         Assert.Equal(1.0, profile.Metadata["is_new"]);
         Assert.Equal(AnomalyThresholds.NoBaselineRatio, profile.Metadata["ratio"]);
         Assert.Equal(3200.0, profile.Metadata["current_ms_per_sec"], precision: 6);
+        Assert.DoesNotContain(profile.Metadata.Keys, k => k.StartsWith("bar_excluded_", StringComparison.Ordinal));
         Assert.Equal((15 * 10.0 + 3200.0) / 16, profile.Metadata["avg_ms_per_sec"], precision: 6);
         Assert.True(profile.Metadata["avg_ms_per_sec"] < AnomalyThresholds.WaitProfileFallbackMsPerSec, "the mean sits under the bar the peak cleared — the arm is peak-only by ruling");
     }
@@ -941,6 +1010,23 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         await cmd.ExecuteNonQueryAsync();
     }
 
+    /// <summary>Seeds a CPU sample whose <c>sqlserver_cpu_utilization</c> is NULL - a row with no reading.</summary>
+    private async Task SeedCpuWithoutValueAsync(DateTime time)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO cpu_utilization_stats
+            (collection_id, collection_time, server_id, server_name, sample_time,
+             sqlserver_cpu_utilization, other_process_cpu_utilization)
+            VALUES ($1, $2, $3, 'TestServer', $4, NULL, 2)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+        cmd.Parameters.Add(new DuckDBParameter { Value = time });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = time });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
     /// <summary>Seeds one perfmon row. deltaValue is the PER-INTERVAL delta; the detector divides it by
     /// intervalSeconds (#3527), so at the default 10s interval the per-second rate is deltaValue / 10.
     /// intervalSeconds = 0 plants the unknowable-delta marker the reads must skip.</summary>
@@ -960,6 +1046,86 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         cmd.Parameters.Add(new DuckDBParameter { Value = deltaValue });
         cmd.Parameters.Add(new DuckDBParameter { Value = intervalSeconds });
         await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task SeedEngineEditionAsync(int engineEdition)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO server_properties
+            (collection_id, collection_time, server_id, server_name,
+             edition, product_version, product_level, engine_edition)
+            VALUES ($1, $2, $3, 'TestServer', 'Edition', '12.0.2000.8', 'RTM', $4)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+        cmd.Parameters.Add(new DuckDBParameter { Value = _analysisStart.AddHours(-1) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = engineEdition });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Untrusted wait baseline; the window holds REMOTE_BLOCK_IO at 1,000 ms/s plus an optional second wait.</summary>
+    private async Task<IReadOnlyList<Fact>> RunYoungBaselineRemoteBlockIoAsync(int engineEdition, long extraWaitMsPerSec)
+    {
+        await SeedThinBaselineWaitRates();
+        await SeedBaselineCpu(10, variance: 2); // HasBaselineData canary
+        await SeedEngineEditionAsync(engineEdition);
+        for (int i = 0; i < 16; i++)
+        {
+            var t = _analysisStart.AddMinutes(i * 15);
+            await SeedWaitStatAsync(t, "REMOTE_BLOCK_IO", 900_000, sampleIntervalSeconds: 900);
+            if (extraWaitMsPerSec > 0)
+                await SeedWaitStatAsync(t, "PAGEIOLATCH_SH", extraWaitMsPerSec * 900, sampleIntervalSeconds: 900);
+        }
+        var baseline = await _baselineProvider.GetBaselineAsync(ServerId, MetricNames.WaitMsPerSec, _analysisStart);
+        Assert.False(baseline.IsTrustworthy, "the fixture must land on the absolute-bar arm");
+        return await _detector.DetectAnomaliesAsync(CreateContext());
+    }
+
+    [Fact]
+    public async Task DetectWaitAnomalies_AzureSqlDatabase_YoungBaseline_OnlyRemoteBlockIo_DoesNotFire()
+    {
+        var anomalies = await RunYoungBaselineRemoteBlockIoAsync(PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition, 0);
+        Assert.DoesNotContain(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
+    }
+
+    [Fact]
+    public async Task DetectWaitAnomalies_AzureSqlDatabase_YoungBaseline_OtherWaitOverBar_FiresWithAllTypesPeak()
+    {
+        var anomalies = await RunYoungBaselineRemoteBlockIoAsync(PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition, 300);
+        var profile = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
+        Assert.Equal(1.0, profile.Metadata["is_new"]);
+        Assert.Equal(1300.0, profile.Metadata["current_ms_per_sec"], precision: 6);
+        Assert.Equal(1.0, profile.Metadata["bar_excluded_REMOTE_BLOCK_IO"]);
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task DetectWaitAnomalies_OtherEditions_YoungBaseline_OnlyRemoteBlockIo_StillFires(int engineEdition)
+    {
+        var anomalies = await RunYoungBaselineRemoteBlockIoAsync(engineEdition, 0);
+        var profile = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
+        Assert.Equal(1.0, profile.Metadata["is_new"]);
+        Assert.Equal(1000.0, profile.Metadata["current_ms_per_sec"], precision: 6);
+        Assert.DoesNotContain(profile.Metadata.Keys, k => k.StartsWith("bar_excluded_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task DetectWaitAnomalies_AzureSqlDatabase_TrustedBaseline_RemoteBlockIoSurge_StillFires()
+    {
+        await SeedBaselineWaitRates();
+        await SeedBaselineCpu(10, variance: 2);
+        await SeedEngineEditionAsync(PerformanceMonitor.Common.ServerHardwareScope.AzureSqlDatabaseEngineEdition);
+        for (int i = 0; i < 16; i++)
+            await SeedWaitStatAsync(_analysisStart.AddMinutes(i * 15), "REMOTE_BLOCK_IO", i == 7 ? 2_880_000 : 1_350_000, sampleIntervalSeconds: 900);
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+
+        var profile = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
+        Assert.Equal(0.0, profile.Metadata["is_new"]);
+        Assert.Equal(3200.0, profile.Metadata["current_ms_per_sec"], precision: 6);
+        Assert.DoesNotContain(profile.Metadata.Keys, k => k.StartsWith("bar_excluded_", StringComparison.Ordinal));
     }
 
     /// <summary>Seeds one wait_stats row. <paramref name="sampleIntervalSeconds"/> null (the default, every

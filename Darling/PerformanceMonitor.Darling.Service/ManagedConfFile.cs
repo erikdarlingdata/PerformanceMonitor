@@ -95,6 +95,13 @@ internal static class ManagedConfFile
     /// Every value <see cref="Render"/> needs, gathered by the caller (<c>DarlingManagedPostgres</c>, which
     /// alone holds the Windows-only readers) so this type and <see cref="Render"/> stay pure and portable: no
     /// P/Invoke, no file I/O, callable from a plain unit test with literal numbers.
+    ///
+    /// <para><paramref name="InForceMaxWalSizeMb"/> (#5459) is the <c>max_wal_size</c> the file already on disk
+    /// carries, in whole MB, or null when there is no such file, it is a hand edit, or it has no whole-MB figure.
+    /// <see cref="RenderBody"/> keeps that rung while it is still within the verdict tolerance of the free-space
+    /// reading (<see cref="DarlingManagedPostgres.IsWalSizeWithinDriftOf"/>), so a volume standing next to a
+    /// ladder edge does not render a different body from one start to the next. It is an input rather than
+    /// something <see cref="RenderBody"/> reads, to keep the render pure: the same inputs, the same bytes.</para>
     /// </summary>
     internal readonly record struct RenderInputs(
         int FormulaVersion,
@@ -108,7 +115,8 @@ internal static class ManagedConfFile
         long DataVolumeTotalBytes,
         bool DataVolumeAuthoritative,
         int Port,
-        string? EffectivePreloadList);
+        string? EffectivePreloadList,
+        long? InForceMaxWalSizeMb = null);
 
     /// <summary>One parse of an existing <see cref="FileName"/>: whether it carries a recognizable
     /// <see cref="BodyHashPrefix"/> line at all, the hash it declares, and the body text that line's hash is
@@ -170,9 +178,9 @@ internal static class ManagedConfFile
     }
 
     /// <summary>
-    /// The body alone: one <c>key = 'value'</c> line per setting the v1 through v17 blocks set today, in the
+    /// The body alone: one <c>key = 'value'</c> line per setting the v1 through v18 blocks set today, in the
     /// order each key is FIRST introduced (v1 before v2 before v3 ...), holding the value each key has LAST —
-    /// exactly what PostgreSQL itself would read from those seventeen blocks appended in order to one file. Every
+    /// exactly what PostgreSQL itself would read from those eighteen blocks appended in order to one file. Every
     /// value is single-quoted and escaped (<c>DarlingManagedPostgres.EscapeConfValue</c>): PostgreSQL accepts a
     /// quoted string for a numeric or boolean GUC too, and quoting uniformly means no value's own content (a
     /// path with a backslash, say) needs a second escaping rule here.
@@ -206,7 +214,7 @@ internal static class ManagedConfFile
         if (inputs.DataVolumeAuthoritative)
         {
             blocks.Append(DarlingManagedPostgres.BuildWalSizingConfAppend(
-                inputs.DataVolumeFreeBytes, inputs.DataVolumeTotalBytes, inputs.PostgresMajor));
+                inputs.DataVolumeFreeBytes, inputs.DataVolumeTotalBytes, inputs.PostgresMajor, inputs.InForceMaxWalSizeMb));
         }
 
         /* v13 (#3899): the preload list is the MERGE of what's in force plus timescaledb and
@@ -233,6 +241,14 @@ internal static class ManagedConfFile
         /* v17: a fixed log_line_prefix, appended in the same order as the legacy blocks above. */
         blocks.Append(DarlingManagedPostgres.BuildLogLinePrefixConfAppend());
 
+        /* v18 (part of #5097): auto_explain. Its preload line is the MERGE of the effective list plus
+           pg_stat_statements and auto_explain, so ReduceToLastOccurrence lets it win over v13's, and a list
+           that already names auto_explain renders identically on every start. */
+        blocks.Append(DarlingManagedPostgres.BuildSlowPlanConfAppend(inputs.EffectivePreloadList));
+
+        /* Planner page cost: no legacy block and no marker; this file is the only place the setting is written. */
+        blocks.Append(DarlingManagedPostgres.BuildPlannerPageCostConfAppend());
+
         var (order, values) = ReduceToLastOccurrence(blocks.ToString());
         var body = new StringBuilder();
         foreach (var key in order)
@@ -246,13 +262,26 @@ internal static class ManagedConfFile
     }
 
     /// <summary>
+    /// The owned keys no legacy <c>postgresql.conf</c> block ever wrote, with the value <see cref="RenderBody"/>
+    /// derives for each: only <c>darling-managed.conf</c> carries them. <see cref="RenderWithValues"/> writes
+    /// that value when the before-snapshot has none, and <see cref="ManagedConfFileSettings.Compare"/> is given
+    /// the same map so Step A's verification accepts exactly that addition and nothing else.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> ManagedOnlyKeys =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [DarlingManagedPostgres.RandomPageCostSetting] = DarlingManagedPostgres.RandomPageCostValue,
+        };
+
+    /// <summary>
     /// Renders <c>darling-managed.conf</c> the way Step A's post-start verification needs (#4336):
     /// the SAME owned keys and order <see cref="RenderBody"/> would produce for
     /// <paramref name="inputs"/>, but each owned key's VALUE comes from <paramref name="values"/> — the raw
     /// text <c>pg_file_settings</c> reports as <c>applied</c> for that key — instead of the freshly derived
     /// one. An owned key <see cref="RenderBody"/> would have written that is missing from
     /// <paramref name="values"/> is dropped from the body entirely (it stays at whatever default is already
-    /// in force; Step A never invents a value the snapshot did not report). <paramref name="extraKeys"/>
+    /// in force; Step A never invents a value the snapshot did not report), except a <see cref="ManagedOnlyKeys"/>
+    /// key, which is written at its derived value. <paramref name="extraKeys"/>
     /// (#4336) carries the keys the rewritten <c>postgresql.conf</c> lost that this render does not own —
     /// for example v12's <c>min_wal_size</c> when the disk reading is not authoritative this start — each
     /// written from <paramref name="values"/>'s snapshot value, in the order given, after every owned key;
@@ -267,7 +296,7 @@ internal static class ManagedConfFile
         IReadOnlyList<string>? extraKeys = null)
     {
         var derivedBody = RenderBody(inputs);
-        var (order, _) = ReduceToLastOccurrence(derivedBody);
+        var (order, derivedValues) = ReduceToLastOccurrence(derivedBody);
 
         var body = new StringBuilder();
         var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -277,6 +306,16 @@ internal static class ManagedConfFile
             {
                 body.Append(key).Append(" = '")
                     .Append(DarlingManagedPostgres.EscapeConfValue(snapshotValue))
+                    .Append("'\n");
+                written.Add(key);
+            }
+            else if (ManagedOnlyKeys.ContainsKey(key))
+            {
+                /* No legacy block ever wrote this key, so a legacy store's snapshot never has it. Dropping it here
+                   would leave the migrated file one line short of what the next start renders, and that start
+                   would rewrite the file. Its derived value is written instead. */
+                body.Append(key).Append(" = '")
+                    .Append(DarlingManagedPostgres.EscapeConfValue(derivedValues[key]))
                     .Append("'\n");
                 written.Add(key);
             }
@@ -355,6 +394,33 @@ internal static class ManagedConfFile
         }
 
         return new ParsedManagedConf(false, null, normalized);
+    }
+
+    /// <summary>
+    /// The <c>max_wal_size</c> an existing <see cref="FileName"/> carries, in whole MB (#5459), for
+    /// <see cref="RenderInputs.InForceMaxWalSizeMb"/>. Null for a hand edit (<see cref="IsHandEdited"/>), which
+    /// never has its values carried forward, and for a file with no <c>max_wal_size</c> line or one that is not
+    /// a whole number of megabytes (v4's fixed <c>4GB</c>, which the file carries when no disk reading was
+    /// authoritative).
+    /// </summary>
+    internal static long? ReadInForceMaxWalSizeMb(string existingFileText)
+    {
+        if (IsHandEdited(existingFileText))
+        {
+            return null;
+        }
+
+        var (_, values) = ReduceToLastOccurrence(ParseExisting(existingFileText).Body);
+        if (!values.TryGetValue("max_wal_size", out var value))
+        {
+            return null;
+        }
+
+        var match = System.Text.RegularExpressions.Regex.Match(
+            value, @"^(\d{1,9})MB$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        return match.Success
+            ? long.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)
+            : null;
     }
 
     /// <summary>

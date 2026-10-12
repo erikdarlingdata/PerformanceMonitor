@@ -23,8 +23,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (<c>UpdateMemorySummary</c> / <c>UpdateMemoryChart</c> / <c>UpdateMemoryGrantCharts</c> /
 /// <c>UpdateMemoryPressureEventsChart</c>) and the clerk picker from Lite's <c>ServerTab.Pickers.cs</c>
 /// (<c>PopulateMemoryClerkPicker</c> … <c>UpdateMemoryClerksChartFromPickerAsync</c>), reads rewired to
-/// <see cref="ViewerDataService"/> Postgres. The only render-body changes: the time axis runs every point
-/// through <see cref="ViewerTimeHelper.ForDisplay"/> (where Lite shifts by its per-server
+/// <see cref="ViewerDataService"/> Postgres. The only render-body changes: the time axis plots every point
+/// at its naive-UTC instant and labels it in <see cref="ViewerTimeHelper.CurrentDisplayZone"/> (where Lite shifts by its per-server
 /// <c>UtcOffsetMinutes</c>), and Lite's per-chart context menu / "Show Active Queries at This Time"
 /// drill-down + <c>Task.Run</c> query wrappers are dropped (the viewer's reads are genuinely async and it
 /// has no drill-down surfaces yet); the hover tooltips are kept. The clerk picker mirrors the wait/perfmon
@@ -39,7 +39,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// LOCAL wall clock and needs the per-batch de-skew (#1262), the pressure <c>sample_time</c> is naive UTC —
 /// <c>MemoryPressureEventsCollector</c> stamps it from <c>SYSUTCDATETIME()</c> and
 /// <c>CollectorTimestampFrameTests</c> pins that it must. So the chart windows AND plots on raw
-/// <c>sample_time</c> through <see cref="ViewerTimeHelper.ForDisplay"/>, which takes naive-UTC input, and
+/// <c>sample_time</c> as the UTC instant (it is naive UTC already), and
 /// needs no de-skew of its own: the CPU read's correction assumes the newest sample is ~1 minute old, true
 /// for the dense CPU ring buffer and not for the sparse resource-monitor one, and would be wrong here even
 /// if the frame called for it.</para>
@@ -77,11 +77,11 @@ public partial class ViewerServerTab
         ApplyTheme(MemoryPressureEventsChart);
         MemoryPressureEventsChart.Refresh();
 
-        _memoryHover = new ChartHoverHelper(MemoryChart, "GB");
-        _memoryClerksHover = new ChartHoverHelper(MemoryClerksChart, "MB");
-        _memoryGrantSizingHover = new ChartHoverHelper(MemoryGrantSizingChart, "MB");
-        _memoryGrantActivityHover = new ChartHoverHelper(MemoryGrantActivityChart, "");
-        _memoryPressureEventsHover = new ChartHoverHelper(MemoryPressureEventsChart, "events");
+        _memoryHover = new ChartHoverHelper(MemoryChart, "GB", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _memoryClerksHover = new ChartHoverHelper(MemoryClerksChart, "MB", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _memoryGrantSizingHover = new ChartHoverHelper(MemoryGrantSizingChart, "MB", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _memoryGrantActivityHover = new ChartHoverHelper(MemoryGrantActivityChart, "", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _memoryPressureEventsHover = new ChartHoverHelper(MemoryPressureEventsChart, "events", displayZone: ViewerTimeHelper.CurrentDisplayZone);
     }
 
     /// <summary>
@@ -94,16 +94,24 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        using var readFanOut = ViewerReadFanOut.Of(6);
+        /* Seven reads in flight: the six feeds below and the pressure chart's data-start probe (#4966). */
+        using var readFanOut = ViewerReadFanOut.Of(7);
 
         var latestTask = _dataService.GetLatestMemoryStatsAsync(_server.ServerId);
         var trendTask = _dataService.GetMemoryTrendAsync(_server.ServerId, startUtc, endUtc);
         var grantTrendTask = _dataService.GetMemoryGrantTrendAsync(_server.ServerId, startUtc, endUtc);
         var clerkTypesTask = _dataService.GetDistinctMemoryClerkTypesAsync(_server.ServerId, startUtc, endUtc);
         var grantChartTask = _dataService.GetMemoryGrantChartDataAsync(_server.ServerId, startUtc, endUtc);
+        /* #4966: the chart's data-start probe starts beside its read and takes the same window, worked out once above. It stays OUT of
+           the join below, so a probe that throws costs the chart's note (DataStartAnswerAsync catches it at the banner step) and not
+           the chart's rows. */
+        var pressureDataStartTask = _dataService.GetMemoryPressureEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
         var pressureTask = _dataService.GetMemoryPressureEventsAsync(_server.ServerId, startUtc, endUtc);
 
-        await Task.WhenAll(latestTask, trendTask, grantTrendTask, clerkTypesTask, grantChartTask, pressureTask);
+        /* #5022: a join that throws skips the banner step below, so the probe would go unawaited. The helper watches it then, and a probe
+           that fails later is a warning and not an unobserved-exception Error. */
+        await AwaitReadWatchingProbeAsync(
+            Task.WhenAll(latestTask, trendTask, grantTrendTask, clerkTypesTask, grantChartTask, pressureTask), pressureDataStartTask, "Memory Pressure Events");
 
         /* The six are done, and this method reads the store twice more below — the clerk chart and the
            whole Plan Cache sub-tab, which declares its own fan-out. Release here or those inherit this
@@ -113,7 +121,9 @@ public partial class ViewerServerTab
         RenderMemorySummary(latestTask.Result);
         RenderMemoryChart(trendTask.Result, grantTrendTask.Result, startUtc, endUtc);
         RenderMemoryGrantCharts(grantChartTask.Result, startUtc, endUtc);
-        RenderMemoryPressureEventsChart(pressureTask.Result);
+        RenderMemoryPressureEventsChart(pressureTask.Result, startUtc, endUtc);
+        await ShowMemoryPressureEventsDataStartAsync(MemoryPressureEventsTruncationBanner, pressureDataStartTask, startUtc, pressureTask.Result);
+        await ShowEngineGapAsync(MemoryPressureEventsNoDataMessage, "memory_pressure_events", pressureTask.Result.Count);
         PopulateMemoryClerkPicker(clerkTypesTask.Result);
         await UpdateMemoryClerksChartFromPickerAsync();
 
@@ -125,6 +135,13 @@ public partial class ViewerServerTab
     /// <summary>The Overview summary strip — Lite's <c>UpdateMemorySummary</c> verbatim.</summary>
     private void RenderMemorySummary(MemoryStatsRow? stats)
     {
+        /* On an Azure SQL Database the first two figures are the database's memory limit and the room left under it, not the
+           host's RAM, so they are named that way (the same words the FinOps utilization card uses). The names follow the
+           registry's edition (_server.EngineEdition), the value the page-file and memory-state lines below read, so one panel
+           never names a figure one way and shows its neighbor the other. */
+        PhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabTotalLabel(_server.EngineEdition);
+        AvailablePhysicalMemoryLabel.Text = ServerHardwareScope.MemoryTabAvailableLabel(_server.EngineEdition);
+
         if (stats == null)
         {
             PhysicalMemoryText.Text = "--";
@@ -137,6 +154,7 @@ public partial class ViewerServerTab
             AvailablePageFileText.Text = "--";
             MemoryStateText.Text = "--";
             SqlMemoryModelText.Text = "--";
+            MemoryCollectedText.Text = HistoryTime.SnapshotCollected(null, "--");
             return;
         }
 
@@ -146,10 +164,13 @@ public partial class ViewerServerTab
         TargetServerMemoryText.Text = FormatMb(stats.TargetServerMemoryMb);
         BufferPoolText.Text = FormatMb(stats.BufferPoolMb);
         PlanCacheText.Text = FormatMb(stats.PlanCacheMb);
-        TotalPageFileText.Text = FormatMb(stats.TotalPageFileMb);
-        AvailablePageFileText.Text = FormatMb(stats.AvailablePageFileMb);
-        MemoryStateText.Text = stats.SystemMemoryState;
-        SqlMemoryModelText.Text = stats.SqlMemoryModel;
+        TotalPageFileText.Text = PageFileText(stats.TotalPageFileMb, _server.EngineEdition);
+        AvailablePageFileText.Text = PageFileText(stats.AvailablePageFileMb, _server.EngineEdition);
+        MemoryStateText.Text = SystemMemoryStateText(stats.SystemMemoryState, _server.EngineEdition);
+        SqlMemoryModelText.Text = MemoryModelText(stats.SqlMemoryModel);
+        /* #4966: the strip draws the newest snapshot of the whole store, not the chart window below it, so it says when that
+           snapshot was collected. */
+        MemoryCollectedText.Text = HistoryTime.SnapshotCollected(stats.CollectionTime, "--");
     }
 
     private static string FormatMb(double mb)
@@ -158,9 +179,33 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
+    /// A Memory Overview page-file figure. On an Azure SQL Database the memory collector has no page-file source and
+    /// stores 0 in both page-file columns, which is an unknown and not a size, so the figure reads n/a there. Anywhere
+    /// else it is the stored figure, as it always was.
+    /// </summary>
+    internal static string PageFileText(double pageFileMb, int engineEdition) =>
+        engineEdition == ServerHardwareScope.AzureSqlDatabaseEngineEdition ? ServerHardwareScope.NotApplicable : FormatMb(pageFileMb);
+
+    /// <summary>
+    /// The Memory Overview's memory state. On an Azure SQL Database the memory collector has no memory-state source and
+    /// stores the constant "Available", which is not a reading, so the state reads n/a there. Anywhere else it is the
+    /// stored state, as it always was.
+    /// </summary>
+    internal static string SystemMemoryStateText(string storedState, int engineEdition) =>
+        engineEdition == ServerHardwareScope.AzureSqlDatabaseEngineEdition ? ServerHardwareScope.NotApplicable : storedState;
+
+    /// <summary>
+    /// The Memory Overview's memory model. On an Azure SQL Database the memory collector has no model to report and stores
+    /// "N/A", which the Overview shows the way it shows its other figures that do not apply: as n/a. Every other value is
+    /// shown as stored.
+    /// </summary>
+    internal static string? MemoryModelText(string? model) =>
+        string.Equals(model, "N/A", StringComparison.OrdinalIgnoreCase) ? ServerHardwareScope.NotApplicable : model;
+
+    /// <summary>
     /// The Overview memory trend — Lite's <c>UpdateMemoryChart</c>: Total Server Memory, Target Memory
     /// (dashed), Buffer Pool, and the Memory Grants overlay, all MB→GB. The grant overlay draws a flat
-    /// zero line when no grant data exists. Times run through <see cref="ViewerTimeHelper.ForDisplay"/>.
+    /// zero line when no grant data exists. Times are plotted as the UTC instant.
     /// </summary>
     private void RenderMemoryChart(List<MemoryTrendPoint> data, List<MemoryGrantTrendPoint> grantData, DateTime startUtc, DateTime endUtc)
     {
@@ -168,19 +213,19 @@ public partial class ViewerServerTab
         _memoryHover?.Clear();
         ApplyTheme(MemoryChart);
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
 
         if (data.Count == 0)
         {
-            MemoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            MemoryChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             MemoryChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
             ReapplyAxisColors(MemoryChart);
             MemoryChart.Refresh();
             return;
         }
 
-        var times = data.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+        var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var totalMem = data.Select(d => d.TotalServerMemoryMb / 1024.0).ToArray();
         var targetMem = data.Select(d => d.TargetServerMemoryMb / 1024.0).ToArray();
         var bufferPool = data.Select(d => d.BufferPoolMb / 1024.0).ToArray();
@@ -208,7 +253,7 @@ public partial class ViewerServerTab
         double[] grantTimes, grantMb;
         if (grantData.Count > 0)
         {
-            grantTimes = grantData.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+            grantTimes = grantData.Select(d => d.CollectionTime.ToOADate()).ToArray();
             grantMb = grantData.Select(d => d.TotalGrantedMb / 1024.0).ToArray();
         }
         else
@@ -223,7 +268,7 @@ public partial class ViewerServerTab
         ChartStyle.StyleScatter(grantPlot);
         _memoryHover?.Add(grantPlot, "Memory Grants");
 
-        MemoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(MemoryChart);
         MemoryChart.Plot.YLabel("Memory (GB)");
@@ -238,8 +283,8 @@ public partial class ViewerServerTab
     /// <summary>
     /// The Memory Grants sub-tab's two charts — Lite's <c>UpdateMemoryGrantCharts</c>: sizing
     /// (available/granted/used MB) and activity (grantees/waiters/timeouts/forced grants) per resource
-    /// pool, each pool×metric on a cycling <c>SeriesColors</c> color. Times run through
-    /// <see cref="ViewerTimeHelper.ForDisplay"/>.
+    /// pool, each pool×metric on a cycling <c>SeriesColors</c> color. Times are plotted as the UTC
+    /// instant.
     /// </summary>
     private void RenderMemoryGrantCharts(List<MemoryGrantChartPoint> data, DateTime startUtc, DateTime endUtc)
     {
@@ -250,14 +295,14 @@ public partial class ViewerServerTab
         ApplyTheme(MemoryGrantSizingChart);
         ApplyTheme(MemoryGrantActivityChart);
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
 
         if (data.Count == 0)
         {
             foreach (var c in new[] { MemoryGrantSizingChart, MemoryGrantActivityChart })
             {
-                c.Plot.Axes.DateTimeTicksBottomDateChange();
+                c.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
                 c.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
                 ReapplyAxisColors(c);
                 c.Refresh();
@@ -285,7 +330,7 @@ public partial class ViewerServerTab
         foreach (var poolId in poolIds)
         {
             var poolData = data.Where(d => d.PoolId == poolId).OrderBy(d => d.CollectionTime).ToList();
-            var times = poolData.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+            var times = poolData.Select(d => d.CollectionTime.ToOADate()).ToArray();
 
             foreach (var metric in sizingMetrics)
             {
@@ -304,7 +349,7 @@ public partial class ViewerServerTab
             }
         }
 
-        MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryGrantSizingChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(MemoryGrantSizingChart);
         MemoryGrantSizingChart.Plot.YLabel("Memory (MB)");
@@ -326,7 +371,7 @@ public partial class ViewerServerTab
         foreach (var poolId in poolIds)
         {
             var poolData = data.Where(d => d.PoolId == poolId).OrderBy(d => d.CollectionTime).ToList();
-            var times = poolData.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+            var times = poolData.Select(d => d.CollectionTime.ToOADate()).ToArray();
 
             foreach (var metric in activityMetrics)
             {
@@ -342,7 +387,7 @@ public partial class ViewerServerTab
             }
         }
 
-        MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryGrantActivityChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(MemoryGrantActivityChart);
         MemoryGrantActivityChart.Plot.YLabel("Count");
@@ -355,24 +400,20 @@ public partial class ViewerServerTab
     /// The Memory Pressure Events sub-tab — Lite's <c>UpdateMemoryPressureEventsChart</c>: hour-bucketed
     /// stacked bars of pressure events, SQL Server (process) vs OS (system) side-by-side and stacked by
     /// severity (medium = indicator 2, severe = indicator ≥ 3). Bar geometry copied verbatim from Lite;
-    /// the X range is the toolbar's settable window and every bar/bound runs through
-    /// <see cref="ViewerTimeHelper.ForDisplay"/> (see the class remarks on pressure sample_time).
+    /// the X range is the toolbar's settable window and every bar/bound is the UTC
+    /// instant (see the class remarks on pressure sample_time).
     /// </summary>
-    private void RenderMemoryPressureEventsChart(List<MemoryPressureEventRow> data)
+    private void RenderMemoryPressureEventsChart(List<MemoryPressureEventRow> data, DateTime startUtc, DateTime endUtc)
     {
         ClearChart(MemoryPressureEventsChart);
         _memoryPressureEventsHover?.Clear();
         ApplyTheme(MemoryPressureEventsChart);
 
-        var (startUtc, endUtc) = GetWindowUtc();
-        double xMin = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        double xMax = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        /* #4966: the window is the load's, worked out once for the read, the probe, this axis and the banner. */
+        double xMin = startUtc.ToOADate();
+        double xMax = endUtc.ToOADate();
 
-        /* Only count rows where SQL Server reported actual pressure (indicator >= 2 matches sp_pressuredetector). */
-        var pressureRows = data
-            .Where(d => d.MemoryIndicatorsProcess >= 2 || d.MemoryIndicatorsSystem >= 2)
-            .OrderBy(d => d.SampleTime)
-            .ToList();
+        var pressureRows = PressureRowsDrawn(data);
 
         bool hasData = false;
         int maxBarCount = 0;
@@ -404,7 +445,7 @@ public partial class ViewerServerTab
                 int sqlSevere = g.Count(d => d.MemoryIndicatorsProcess >= 3);
                 int osMedium = g.Count(d => d.MemoryIndicatorsSystem == 2);
                 int osSevere = g.Count(d => d.MemoryIndicatorsSystem >= 3);
-                double x = ViewerTimeHelper.ForDisplay(g.Key).ToOADate();
+                double x = g.Key.ToOADate();
 
                 if (sqlMedium > 0)
                     sqlMediumBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = 0, Value = sqlMedium, Size = barSize, FillColor = sqlMediumColor, LineWidth = 0 });
@@ -452,7 +493,7 @@ public partial class ViewerServerTab
             }
         }
 
-        MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryPressureEventsChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(MemoryPressureEventsChart);
         MemoryPressureEventsChart.Plot.YLabel("Pressure Events per Hour");
@@ -466,6 +507,32 @@ public partial class ViewerServerTab
         MemoryPressureEventsChart.Refresh();
     }
 
+    /// <summary>
+    /// The samples the pressure chart draws, oldest first: only those where SQL Server reported actual pressure (an indicator of 2 or
+    /// more, which matches sp_pressuredetector). The chart and the "Showing since" note take their events from here, so the note never
+    /// names a sample the chart leaves out.
+    /// </summary>
+    internal static List<MemoryPressureEventRow> PressureRowsDrawn(IEnumerable<MemoryPressureEventRow> data) =>
+        data
+            .Where(d => d.MemoryIndicatorsProcess >= 2 || d.MemoryIndicatorsSystem >= 2)
+            .OrderBy(d => d.SampleTime)
+            .ToList();
+
+    /// <summary>
+    /// Raises or hides the "Showing since" banner of the Memory Pressure Events chart (#4966), as Lite's chart has it. The chart draws
+    /// bars only where pressure was recorded, so a span with no data read as a span with no pressure. The read filters on each event's
+    /// own time, so the event rule applies (<see cref="ShowEventDataStartAsync"/>): the note names the earlier of the coverage start
+    /// the probe found and the earliest event the chart draws (<see cref="PressureRowsDrawn"/>; the read has no row cap). A server's first
+    /// collection stores the ring buffer's history, so an event can come from before the coverage, and the note then names that event. A
+    /// probe that throws costs this note and not the chart.
+    /// </summary>
+    /// <param name="banner">The chart's banner.</param>
+    /// <param name="probe">The chart's data-start probe, started beside its read.</param>
+    /// <param name="startUtc">The start of the window the chart just drew, the same one its read and its probe took.</param>
+    /// <param name="rows">The rows the read returned.</param>
+    internal static Task ShowMemoryPressureEventsDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc, IEnumerable<MemoryPressureEventRow> rows) =>
+        ShowEventDataStartAsync(banner, probe, "Memory Pressure Events", startUtc, PressureRowsDrawn(rows).Select(r => (DateTime?)r.SampleTime));
+
     /* ========== Memory Clerks Picker (mirrors ViewerServerTab.Perfmon.cs) ========== */
 
     private void PopulateMemoryClerkPicker(List<string> clerkTypes)
@@ -477,6 +544,7 @@ public partial class ViewerServerTab
             DisplayName = c,
             IsSelected = previouslySelected.Contains(c) || (topClerks != null && topClerks.Contains(c))
         }).ToList();
+        _memoryClerkRefresh?.Invalidate();
         RefreshMemoryClerkListOrder();
     }
 
@@ -519,6 +587,7 @@ public partial class ViewerServerTab
             item.IsSelected = topClerks.Contains(item.DisplayName);
         }
         _isUpdatingMemoryClerkSelection = false;
+        _memoryClerkRefresh?.Invalidate();
         RefreshMemoryClerkListOrder();
         _ = UpdateMemoryClerksChartFromPickerAsync();
     }
@@ -529,15 +598,28 @@ public partial class ViewerServerTab
         var visible = (MemoryClerksList.ItemsSource as IEnumerable<SelectableItem>)?.ToList() ?? _memoryClerkItems;
         foreach (var item in visible) item.IsSelected = false;
         _isUpdatingMemoryClerkSelection = false;
+        _memoryClerkRefresh?.Invalidate();
         RefreshMemoryClerkListOrder();
         _ = UpdateMemoryClerksChartFromPickerAsync();
     }
 
+    private PickerRefreshCoalescer? _memoryClerkRefresh;
+
+    /* The checkbox is INSIDE this list, so the re-order cannot run in its toggle event (WPF: "Cannot modify
+       the Visual children ... a tree walk is in progress"); one deferred refresh covers a burst of toggles. */
     private void MemoryClerk_CheckChanged(object sender, RoutedEventArgs e)
     {
         if (_isUpdatingMemoryClerkSelection) return;
-        RefreshMemoryClerkListOrder();
-        _ = UpdateMemoryClerksChartFromPickerAsync();
+        (_memoryClerkRefresh ??= new PickerRefreshCoalescer(
+            a => Dispatcher.BeginInvoke(a, System.Windows.Threading.DispatcherPriority.Background),
+            () =>
+            {
+                RefreshMemoryClerkListOrder();
+                _ = UpdateMemoryClerksChartFromPickerAsync();
+            },
+            // A regenerated container's first Checked must not start another refresh: skip when the
+            // selection is what the last pass applied.
+            () => PickerRefreshCoalescer.SignatureOf(_memoryClerkItems.Where(i => i.IsSelected).Select(i => i.DisplayName)))).Request();
     }
 
     /// <summary>
@@ -559,14 +641,14 @@ public partial class ViewerServerTab
             _memoryClerksHover?.Clear();
 
             var (startUtc, endUtc) = GetWindowUtc();
-            double xMin = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-            double xMax = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+            double xMin = startUtc.ToOADate();
+            double xMax = endUtc.ToOADate();
 
             if (selected.Count == 0)
             {
                 MemoryClerksTotalText.Text = "--";
                 MemoryClerksTopText.Text = "--";
-                MemoryClerksChart.Plot.Axes.DateTimeTicksBottomDateChange();
+                MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
                 MemoryClerksChart.Plot.Axes.SetLimitsX(xMin, xMax);
                 ReapplyAxisColors(MemoryClerksChart);
                 MemoryClerksChart.Refresh();
@@ -587,7 +669,7 @@ public partial class ViewerServerTab
             {
                 if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
-                var times = trend.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
+                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
                 var values = trend.Select(t => t.MemoryMb).ToArray();
 
                 var plot = MemoryClerksChart.Plot.Add.TimeSeries(times, values);
@@ -611,7 +693,7 @@ public partial class ViewerServerTab
                 }
             }
 
-            MemoryClerksChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             MemoryClerksChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ReapplyAxisColors(MemoryClerksChart);
             MemoryClerksChart.Plot.YLabel("Memory (MB)");

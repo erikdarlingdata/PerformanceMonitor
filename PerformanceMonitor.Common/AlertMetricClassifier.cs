@@ -178,8 +178,11 @@ namespace PerformanceMonitor.Common
                commit accepted "historical alert-history rows keep the old name", so archived rows still
                carry it — and matching here is ordinal, so those rows were falling through to the bare
                :F2 default and rendering a percentage with no unit. Nothing writes the old name any
-               more; it is kept solely so already-stored rows format like the new ones. */
-            "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job" => $"{value:F1}%",
+               more; it is kept solely so already-stored rows format like the new ones.
+               "Collection Falling Behind" (#4732) stores the share of due collector slots that were skipped, and the
+               share that fires it (5): both are percentages, and the grid showed them as a bare 97.30 and 5.00. */
+            "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job"
+                or "Collection Falling Behind" => $"{value:F1}%",
 
             /* Poison wait carries milliseconds — since #3539 A4 the wait ACCUMULATED over the ten-minute
                window on both engines (before that, SQL Server's average ms per wait; rows from then still
@@ -187,6 +190,15 @@ namespace PerformanceMonitor.Common
                elapsed minutes. */
             "Poison Wait" => $"{value:F0} ms",
             "Long-Running Query" => $"{value:F0} m",
+
+            /* #5450: "Collection Gap At Start" carries the whole minutes the service was not collecting before
+               this start, and the 15 that gates it: a measurement, so a number with its unit rather than a
+               state-only dash. */
+            "Collection Gap At Start" => $"{value:F0} m",
+
+            /* #5450: "Collection Gaps In History" carries the whole hours of the audited day that were flagged,
+               a count with its unit; the threshold arrives as 0, so it renders "0 h" like the other counts. */
+            "Collection Gaps In History" => $"{value:F0} h",
 
             /* #1839 total blocked wait — seconds, whole (the numeric is already seconds, not ms). */
             "Blocking Wait Time" => $"{value:F0} s",
@@ -318,11 +330,15 @@ namespace PerformanceMonitor.Common
 
                        "Web TLS Certificate Expiring" (#3514) — the current value is the certificate's expiry
                        DATE ("expires 2026-... (in 10 days)" / "expired 2026-..."), a date rather than a
-                       measurement, and the fire site passes the 0 sentinel for both numeric columns. */
+                       measurement, and the fire site passes the 0 sentinel for both numeric columns.
+
+                       "MCP TLS Certificate Expiring" (#5288) — the same alert for the MCP endpoint's
+                       certificate, fired by the same code over the same shape of value. */
                     or "Collection Stopped"
                     or "Compression Job Stuck"
                     or "Store Runtime Upgrade"
                     or "Web TLS Certificate Expiring"
+                    or "MCP TLS Certificate Expiring"
 
                     /* #3816, the same split as "Compression Job Stuck" one family over: a refresh or
                        retention policy's stuck reason is elapsed minutes when a run HUNG and a scheduler

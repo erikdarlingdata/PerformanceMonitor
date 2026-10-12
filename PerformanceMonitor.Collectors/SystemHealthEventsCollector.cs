@@ -26,7 +26,7 @@ namespace PerformanceMonitor.Collectors;
 /// <para>Reads the <c>system_health</c> ring buffer the same way <see cref="DeadlocksCollector"/>
 /// reads its own session: <c>TRY_CAST(target_data AS xml)</c> from sys.dm_xe_session_targets +
 /// sys.dm_xe_sessions, <c>.nodes()</c> to split events, an <c>event_time</c> watermark so the rolling
-/// ring buffer is never re-grabbed (10-minute fallback on first run), storing the raw
+/// ring buffer is never re-grabbed (CollectorContext.EventFallbackWindow on first run), storing the raw
 /// <c>evt.query('.')</c> event node verbatim. Unlike the deadlock collector there is NO session
 /// lifecycle: <c>system_health</c> is created and started by the Database Engine and must not be
 /// altered (MS Learn), so the host just reads it.</para>
@@ -112,7 +112,7 @@ FROM
     FROM @system_health AS sh
 ) AS rb
 CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event') AS q(evt)
-WHERE evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time
+WHERE evt.exist('@timestamp[. > sql:variable(""@cutoff_time"")]') = 1
 AND   evt.value('(@name)[1]', 'sysname') IN
       (
           N'sp_server_diagnostics_component_result',
@@ -154,9 +154,9 @@ OPTION(RECOMPILE);";
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
-        /* Use the most recent event_time from the host store as the cutoff, or fall back to a
-           10-minute window on first run (mirrors DeadlocksCollector). */
-        var cutoffTime = context.Watermark ?? context.CollectionTime.AddMinutes(-10);
+        /* Use the most recent event_time from the host store as the cutoff, or fall back to
+           CollectorContext.EventFallbackWindow on first run (mirrors DeadlocksCollector). */
+        var cutoffTime = context.Watermark ?? context.CollectionTime - CollectorContext.EventFallbackWindow;
 
         return new CollectorQuery(QueryText, new List<CollectorParameter>
         {
@@ -174,6 +174,10 @@ OPTION(RECOMPILE);";
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
+        /* #4348: the event node goes through the statement filter's XML walk where it first enters a row. A named
+           value (the sql_text action's statement, an error message that echoes one) becomes the placeholder in
+           place and the rest of the event keeps its shape, so the stage-2 parse still reads the other fields. */
+        var scrub = context.BeginStatementScrub();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -181,7 +185,7 @@ OPTION(RECOMPILE);";
             {
                 EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
                 EventType = reader.IsDBNull(1) ? null : reader.GetString(1),
-                EventXml = reader.IsDBNull(2) ? null : reader.GetString(2),
+                EventXml = reader.IsDBNull(2) ? null : scrub.Xml(reader.GetString(2)),
             });
         }
 

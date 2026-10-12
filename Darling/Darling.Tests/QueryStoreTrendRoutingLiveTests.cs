@@ -133,7 +133,8 @@ public sealed class QueryStoreTrendRoutingLiveTests
            #3653 A8: a rollup point is rated over its own bucket width, so the window's first bucket HAS a
            rate — 21 executions over the bucket's 3,600 seconds. Before #3653 this point was unrated (its LAG
            had no predecessor), which was the LAG idiom's rule applied to a point whose denominator was known
-           all along; the raw-only route below still opens unrated, because its first point IS a LAG point. */
+           all along; the raw-only route below still opens unrated, because its first point IS a LAG point (these
+           seeds store no interval end, #4765). */
         Assert.Equal(hour10, points[0].CollectionTime);
         Assert.True(points[0].HasRate);
         Assert.Equal(21d / 3600d, points[0].ExecutionsPerSecond!.Value, 6);
@@ -146,8 +147,7 @@ public sealed class QueryStoreTrendRoutingLiveTests
         Assert.Equal(((40d * 100d + 25d * 200d) / 1000d) / 3600d, points[1].Value!.Value, 6);
 
         /* 12:00 — the raw tail: interval T deduped to its final snapshot (9, not 3+9), placed at its
-           interval start, rated over the seam to the last rollup bucket (the raw class keeps the spacing
-           denominator — query_store_stats stores no interval length). */
+           interval start, rated over the seam to the last rollup bucket (these seeds store no interval end, so the raw class keeps the spacing denominator, #4765). */
         Assert.Equal(hour12, points[2].CollectionTime);
         Assert.Equal(9d / 3600d, points[2].ExecutionsPerSecond!.Value, 6);
 
@@ -250,11 +250,13 @@ public sealed class QueryStoreTrendRoutingLiveTests
     /// half its true value; a rollup point is now rated over its own bucket width, so it reads 25 / 3,600
     /// whatever sits beside it, and the quiet hour is what it is: no point.
     ///
-    /// <para>The raw-only route on the SAME fixture is asserted beside it as the stated residual: its points
-    /// are Query Store intervals placed at their start, the store holds no interval length for them, and the
-    /// spacing denominator still halves the point after the quiet interval (25 / 7,200). That is reported on
-    /// the <c>rated</c> CTE, not hidden, and this assertion is the one that goes red when a stored interval
-    /// length lets the raw class stop lying too.</para>
+    /// <para>#4765: the raw class stopped lying about a quiet interval too. Every interval here stores its end,
+    /// so a raw point (a Query Store interval placed at its start) is rated over its own one hour, not over
+    /// the spacing to the previous stored point: the raw-only route reads 25 / 3,600 for the interval after
+    /// the quiet hour (it read 25 / 7,200), and the window's first point has a rate (it opened unrated). The
+    /// rollup route's raw tail is asserted the same way, on an interval that follows a quiet hour INSIDE the
+    /// tail (15:00, after a quiet 14:00). A row that stored no end keeps the spacing:
+    /// <see cref="DurationTrend_ARowWithNoStoredEnd_KeepsTheGapToThePreviousInterval"/>.</para>
     /// </summary>
     [Fact]
     public async Task DurationTrend_AQuietHourDoesNotHalveTheNextBucketsRate()
@@ -279,19 +281,26 @@ public sealed class QueryStoreTrendRoutingLiveTests
         var hour11 = hour10.AddHours(1);   /* QUIET: nothing is seeded here */
         var hour12 = hour10.AddHours(2);
         var hour13 = hour10.AddHours(3);
-        var hour14 = hour10.AddHours(4);
+        var hour15 = hour10.AddHours(5);   /* 14:00 is QUIET too, inside the raw tail: nothing is seeded there */
+        var hour16 = hour10.AddHours(6);
+        var oneHour = TimeSpan.FromHours(1);
 
-        /* 10:00 — interval P: 7 then 21, collected in its own hour. */
+        /* 10:00 — interval P: 7 then 21, collected in its own hour. Every interval stores its end (#4765),
+           one hour after its start, the way the collector stores it for a 60-minute Query Store interval. */
         await SeedSnapshotsAsync(connection, intervalId: 4100, queryId: 70, intervalStart: hour10,
-            avgDurationUs: 100, [(hour10.AddMinutes(5), 7L), (hour10.AddMinutes(20), 21L)], ct);
+            avgDurationUs: 100, [(hour10.AddMinutes(5), 7L), (hour10.AddMinutes(20), 21L)], ct, intervalLength: oneHour);
 
         /* 12:00 — interval N: 5 then 25, collected in its own hour. The bucket after the quiet hour. */
         await SeedSnapshotsAsync(connection, intervalId: 4102, queryId: 72, intervalStart: hour12,
-            avgDurationUs: 200, [(hour12.AddMinutes(20), 5L), (hour12.AddMinutes(40), 25L)], ct);
+            avgDurationUs: 200, [(hour12.AddMinutes(20), 5L), (hour12.AddMinutes(40), 25L)], ct, intervalLength: oneHour);
 
         /* 13:00 — interval T: the raw tail (not materialized below), 3 then 9. */
         await SeedSnapshotsAsync(connection, intervalId: 4103, queryId: 73, intervalStart: hour13,
-            avgDurationUs: 300, [(hour13.AddMinutes(5), 3L), (hour13.AddMinutes(20), 9L)], ct);
+            avgDurationUs: 300, [(hour13.AddMinutes(5), 3L), (hour13.AddMinutes(20), 9L)], ct, intervalLength: oneHour);
+
+        /* 15:00 — interval U: the raw tail again, after a quiet 14:00, 4 then 12. */
+        await SeedSnapshotsAsync(connection, intervalId: 4105, queryId: 75, intervalStart: hour15,
+            avgDurationUs: 400, [(hour15.AddMinutes(5), 4L), (hour15.AddMinutes(20), 12L)], ct, intervalLength: oneHour);
 
         await EnsureAggregatesWithoutRefreshPoliciesAsync(connection, ct);
         await RefreshRangeAsync(connection, TimescaleSupport.QueryStoreStatsIntervalHourlyView, hour10, hour13, ct);
@@ -305,10 +314,10 @@ public sealed class QueryStoreTrendRoutingLiveTests
         Assert.Equal(hour10, route.RollupFloorUtc);
 
         var points = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
-            postgres, TestServerId, hour10.AddHours(-1), hour14, route, ct);
+            postgres, TestServerId, hour10.AddHours(-1), hour16, route, ct);
 
-        /* Three points — the quiet hour is absent, not a zero. */
-        Assert.Equal(new[] { hour10, hour12, hour13 }, points.Select(p => p.CollectionTime).ToArray());
+        /* Four points — the quiet hours are absent, not zeros. */
+        Assert.Equal(new[] { hour10, hour12, hour13, hour15 }, points.Select(p => p.CollectionTime).ToArray());
 
         /* 10:00 — first bucket, rated over its bucket width: 21 / 3,600. */
         Assert.Equal(21d / 3600d, points[0].ExecutionsPerSecond!.Value, 6);
@@ -318,19 +327,28 @@ public sealed class QueryStoreTrendRoutingLiveTests
         Assert.Equal(25d / 3600d, points[1].ExecutionsPerSecond!.Value, 6);
         Assert.Equal(((25d * 200d) / 1000d) / 3600d, points[1].Value!.Value, 6);
 
-        /* 13:00 — the raw tail, spacing to the 12:00 bucket = 3,600: 9 / 3,600. */
+        /* 13:00 — the raw tail, rated over its own stored hour: 9 / 3,600. */
         Assert.Equal(9d / 3600d, points[2].ExecutionsPerSecond!.Value, 6);
 
-        /* The raw-only route on the same rows: its first point opens unrated (a LAG point with no
-           predecessor), and the point after the quiet interval is rated over 7,200 — the residual the raw
-           class keeps until the store holds a Query Store interval length. */
-        var rawPoints = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
-            postgres, TestServerId, hour10.AddHours(-1), hour14, ct);
+        /* 15:00 — #4765, THE raw-class assertion: interval U follows a quiet 14:00 inside the tail, so the
+           spacing to the previous point is 7,200 seconds. It is rated over its own stored hour instead:
+           12 / 3,600, not 12 / 7,200. */
+        Assert.Equal(12d / 3600d, points[3].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(((12d * 400d) / 1000d) / 3600d, points[3].Value!.Value, 6);
 
-        Assert.Equal(new[] { hour10, hour12, hour13 }, rawPoints.Select(p => p.CollectionTime).ToArray());
-        Assert.False(rawPoints[0].HasRate);
-        Assert.Equal(25d / 7200d, rawPoints[1].ExecutionsPerSecond!.Value, 6);
+        /* The raw-only route on the same rows: every interval stored its end, so each point is rated over
+           its own hour. The window's first point HAS a rate now (a LAG point with no predecessor would open
+           unrated), and the point after the quiet interval reads 25 / 3,600, not 25 / 7,200. */
+        var rawPoints = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
+            postgres, TestServerId, hour10.AddHours(-1), hour16, ct);
+
+        Assert.Equal(new[] { hour10, hour12, hour13, hour15 }, rawPoints.Select(p => p.CollectionTime).ToArray());
+        Assert.True(rawPoints[0].HasRate);
+        Assert.Equal(21d / 3600d, rawPoints[0].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(25d / 3600d, rawPoints[1].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(((25d * 200d) / 1000d) / 3600d, rawPoints[1].Value!.Value, 6);
         Assert.Equal(9d / 3600d, rawPoints[2].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(12d / 3600d, rawPoints[3].ExecutionsPerSecond!.Value, 6);
 
         /* The MCP payload over the same window: every rollup point rated, so unrated_points is 0 here. */
         var payload = JsonDocument.Parse(await DarlingMcpTrendTools.GetQueryStoreDurationTrend(
@@ -342,24 +360,169 @@ public sealed class QueryStoreTrendRoutingLiveTests
     }
 
     /// <summary>
+    /// #4765, the other half: a row that stored no interval end (collected before the column existed) has no
+    /// length of its own, so it keeps the seconds since the previous stored interval, exactly as it did
+    /// before, and only that row does. The store is plain PostgreSQL (the raw-only route, the one every
+    /// store without a rollup reads), and the fixture mixes three kinds of interval:
+    /// <list type="bullet">
+    /// <item>P (10:00) and N (12:00) store no end: P opens the window unrated, and N reads 25 / 7,200 over
+    /// the quiet 11:00, as it always did.</item>
+    /// <item>T (13:00) stores an end 30 minutes after its start, deliberately NOT the hour that the spacing
+    /// to N would give, so 9 / 1,800 can only come from the stored end.</item>
+    /// <item>V (15:00) stores no end and follows a quiet 14:00: it reads 12 / 7,200 (the spacing to T), not a
+    /// length borrowed from the interval before it.</item>
+    /// </list>
+    /// </summary>
+    [Fact]
+    public async Task DurationTrend_ARowWithNoStoredEnd_KeepsTheGapToThePreviousInterval()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #4765 no-stored-end test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, TestServerId, ServerName, ct);
+
+        var hour10 = new DateTime(2026, 3, 4, 10, 0, 0, DateTimeKind.Unspecified);
+        var hour12 = hour10.AddHours(2);
+        var hour13 = hour10.AddHours(3);
+        var hour15 = hour10.AddHours(5);
+        var hour16 = hour10.AddHours(6);
+
+        /* No end: rows collected before the column existed. */
+        await SeedSnapshotsAsync(connection, intervalId: 4200, queryId: 80, intervalStart: hour10,
+            avgDurationUs: 100, [(hour10.AddMinutes(5), 7L), (hour10.AddMinutes(20), 21L)], ct);
+        await SeedSnapshotsAsync(connection, intervalId: 4202, queryId: 82, intervalStart: hour12,
+            avgDurationUs: 200, [(hour12.AddMinutes(20), 5L), (hour12.AddMinutes(40), 25L)], ct);
+
+        /* An end, 30 minutes after the start. */
+        await SeedSnapshotsAsync(connection, intervalId: 4203, queryId: 83, intervalStart: hour13,
+            avgDurationUs: 300, [(hour13.AddMinutes(5), 3L), (hour13.AddMinutes(20), 9L)], ct,
+            intervalLength: TimeSpan.FromMinutes(30));
+
+        /* No end again, after a quiet 14:00. */
+        await SeedSnapshotsAsync(connection, intervalId: 4205, queryId: 85, intervalStart: hour15,
+            avgDurationUs: 400, [(hour15.AddMinutes(5), 4L), (hour15.AddMinutes(20), 12L)], ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var points = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
+            postgres, TestServerId, hour10.AddHours(-1), hour16, ct);
+
+        Assert.Equal(new[] { hour10, hour12, hour13, hour15 }, points.Select(p => p.CollectionTime).ToArray());
+
+        /* P: first point, nothing to difference against and no end: unrated, never a fabricated 0. */
+        Assert.False(points[0].HasRate);
+
+        /* N: no end, so the spacing to P over the quiet hour, as before the column existed. */
+        Assert.Equal(25d / 7200d, points[1].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(((25d * 200d) / 1000d) / 7200d, points[1].Value!.Value, 6);
+
+        /* T: its own stored 30 minutes, not the 3,600 seconds since N. */
+        Assert.Equal(9d / 1800d, points[2].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(((9d * 300d) / 1000d) / 1800d, points[2].Value!.Value, 6);
+
+        /* V: no end, so the spacing to T (13:00 to 15:00). */
+        Assert.Equal(12d / 7200d, points[3].ExecutionsPerSecond!.Value, 6);
+    }
+
+    /// <summary>
+    /// #4765: an interval's length is counted in WHOLE seconds. The read truncates the start and the end each to
+    /// its second before it subtracts, so a stored fraction of a second moves the length by up to a second in
+    /// either direction: a true 3,599.000002 seconds reads 3,600, a true 58.2 reads 59, and a true 0.8 reads 0,
+    /// which leaves the point unrated (a NULL rate, never a divide by zero). Query Store intervals are whole
+    /// minutes, so the product never stores a fraction and the read stays as it is; this pins what it does with
+    /// one, so changing it is a decision and not an accident. The same expression is in all four Darling SQL
+    /// texts (<see cref="QueryStoreTrendIntervalRateTests"/> pins them identical), so the MCP reader's raw read
+    /// stands for them here; Lite's DuckDB twin is pinned by running it, in <c>Lite.Tests</c>. PostgreSQL
+    /// <c>timestamp</c> keeps microseconds, so every seeded instant is a whole number of them.
+    /// </summary>
+    [Fact]
+    public async Task DurationTrend_AFractionalSecondLength_IsRatedOverWholeSeconds()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #4765 fractional-second test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, TestServerId, ServerName, ct);
+
+        var hour10 = new DateTime(2026, 3, 4, 10, 0, 0, DateTimeKind.Unspecified);
+        var hour11 = hour10.AddHours(1);
+        var hour12 = hour10.AddHours(2);
+        var hour13 = hour10.AddHours(3);
+
+        /* 3,599.000002 seconds long: starts 0.999999 s past 10:00 and ends 3,600.000001 s past it. The whole
+           seconds are 0 and 3,600, so it reads 3,600. */
+        var start1 = hour10.AddTicks(9_999_990);
+        await SeedSnapshotsAsync(connection, intervalId: 4300, queryId: 90, intervalStart: start1,
+            avgDurationUs: 1_000, [(hour10.AddMinutes(5), 10L), (hour10.AddMinutes(20), 30L)], ct,
+            intervalLength: TimeSpan.FromTicks(35_990_000_020));
+
+        /* 58.2 seconds long: starts 0.9 s past 11:00 and ends 59.1 s past it. The whole seconds are 0 and 59,
+           so it reads 59. */
+        var start2 = hour11.AddTicks(9_000_000);
+        await SeedSnapshotsAsync(connection, intervalId: 4301, queryId: 91, intervalStart: start2,
+            avgDurationUs: 2_000, [(hour11.AddMinutes(5), 40L), (hour11.AddMinutes(20), 118L)], ct,
+            intervalLength: TimeSpan.FromTicks(582_000_000));
+
+        /* 0.8 seconds long: starts 0.1 s past 12:00 and ends 0.9 s past it. Both are second 0, so it reads 0. */
+        var start3 = hour12.AddTicks(1_000_000);
+        await SeedSnapshotsAsync(connection, intervalId: 4302, queryId: 92, intervalStart: start3,
+            avgDurationUs: 3_000, [(hour12.AddMinutes(5), 2L), (hour12.AddMinutes(20), 5L)], ct,
+            intervalLength: TimeSpan.FromTicks(8_000_000));
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var points = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
+            postgres, TestServerId, hour10.AddHours(-1), hour13, ct);
+
+        Assert.Equal(3, points.Count);
+
+        /* Over 3,600 whole seconds, not the true 3,599.000002: 30 executions x 1,000us = 30 ms. */
+        Assert.Equal(30d / 3600d, points[0].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(30d / 3600d, points[0].Value!.Value, 6);
+
+        /* Over 59 whole seconds, not the true 58.2: 118 executions x 2,000us = 236 ms. */
+        Assert.Equal(118d / 59d, points[1].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(236d / 59d, points[1].Value!.Value, 6);
+
+        /* A length that truncates to 0 has no denominator: unrated, and it does NOT fall back to the gap to the
+           previous interval (the length is stored, it is just under a second). */
+        Assert.False(points[2].HasRate);
+    }
+
+    /// <summary>
     /// Plants one interval as explicit (collection time, cumulative count) snapshots — the placement of
     /// snapshots relative to bucket boundaries IS what this class tests, so each is spelled out and the
-    /// expectations read straight off the seed.
+    /// expectations read straight off the seed. <paramref name="intervalLength"/> stores the interval's end
+    /// (start plus that length, #4765); left null the row stores no end, as one collected before the column.
     /// </summary>
     private static async Task SeedSnapshotsAsync(
         NpgsqlConnection connection, long intervalId, long queryId, DateTime intervalStart,
         long avgDurationUs, (DateTime When, long Count)[] snapshots, CancellationToken ct,
-        int serverId = TestServerId, string serverName = ServerName)
+        int serverId = TestServerId, string serverName = ServerName, TimeSpan? intervalLength = null)
     {
         const string sql = @"
 INSERT INTO collect.query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name, module_name, query_hash,
      query_id, plan_id, execution_type_desc, replica_role,
      runtime_stats_interval_id, interval_start_time_utc, first_execution_time,
-     execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us)
+     execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us,
+     interval_end_time_utc)
 VALUES
     ((extract(epoch FROM $1)::bigint * 100000) + $2, $1, $3, $4, 'RoutingDb', 'dbo.GetOrders', '0xROUTE',
-     $5, $5, 'Regular', 'PRIMARY', $2, $6, $6, $7, $8, $8, 900, 400)";
+     $5, $5, 'Regular', 'PRIMARY', $2, $6, $6, $7, $8, $8, 900, 400, $9::timestamp)";
 
         foreach (var (when, count) in snapshots)
         {
@@ -372,6 +535,9 @@ VALUES
             command.Parameters.AddWithValue(intervalStart);
             command.Parameters.AddWithValue(count);
             command.Parameters.AddWithValue(avgDurationUs);
+            /* NULL for a row that predates the end column (#4765): the read then keeps the spacing to the
+               previous stored interval. */
+            command.Parameters.AddWithValue(intervalLength is { } length ? intervalStart + length : DBNull.Value);
             await command.ExecuteNonQueryAsync(ct);
         }
     }

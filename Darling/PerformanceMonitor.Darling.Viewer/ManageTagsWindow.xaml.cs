@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -80,9 +81,6 @@ public sealed class ServerCheckItem : INotifyPropertyChanged
 /// </summary>
 public partial class ManageTagsWindow : Window
 {
-    /// <summary>Four levels of nesting: a node at depth 0..2 may have children; depth 3 (the 4th) may not.</summary>
-    private const int MaxDepth = 4;
-
     private readonly ViewerDataService _dataService;
     private readonly IReadOnlyList<DarlingServer> _servers;
 
@@ -244,7 +242,7 @@ public partial class ManageTagsWindow : Window
     private void UpdateButtons()
     {
         var hasSelection = _selectedNode is not null;
-        NewChildButton.IsEnabled = hasSelection && _selectedNode!.Depth < MaxDepth - 1;
+        NewChildButton.IsEnabled = hasSelection && _selectedNode!.Depth < ServerTagRules.MaxDepth - 1;
         RenameButton.IsEnabled = hasSelection;
         ColourButton.IsEnabled = hasSelection;
         DeleteButton.IsEnabled = hasSelection;
@@ -417,7 +415,7 @@ public partial class ManageTagsWindow : Window
             return;
         }
 
-        if (_selectedNode.Depth >= MaxDepth - 1)
+        if (_selectedNode.Depth >= ServerTagRules.MaxDepth - 1)
         {
             MessageBox.Show(this, "Tags can nest at most four levels deep.", "Manage Tags",
                 MessageBoxButton.OK, MessageBoxImage.Information);
@@ -513,8 +511,19 @@ public partial class ManageTagsWindow : Window
         var childNote = descendants > 0 ? $" and its {descendants} child tag(s)" : string.Empty;
         var assignNote = assignments > 0 ? $" This removes {assignments} server assignment(s)." : string.Empty;
 
+        string ruleNote;
+        try
+        {
+            ruleNote = ServerTagCoverage.DeleteWarning(await _dataService.GetServerTagDeleteImpactAsync(_selectedNode.Tag.Id));
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Error("ManageTags", "Delete impact read failed", ex);
+            ruleNote = string.Empty;
+        }
+
         var confirm = MessageBox.Show(this,
-            $"Delete ‘{_selectedNode.Tag.Name}’{childNote}?{assignNote} Collected data is not affected.",
+            $"Delete ‘{_selectedNode.Tag.Name}’{childNote}?{assignNote} Collected data is not affected.{ruleNote}",
             "Delete Tag", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
         if (confirm != MessageBoxResult.OK)
         {

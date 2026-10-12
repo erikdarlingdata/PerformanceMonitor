@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Lite.Tests.Helpers;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace Lite.Tests;
@@ -28,6 +29,18 @@ namespace Lite.Tests;
 /// made anything else impossible. It does not: <c>sys.resource_stats</c> is a master-only view carrying
 /// <c>storage_in_megabytes</c> per database, verified against a live Azure SQL Database.
 /// </para>
+///
+/// <para>
+/// A sibling row reports data space only, and both of its sizes come from that one view: the ALLOCATED data space
+/// (<c>allocated_storage_in_megabytes</c>) is <c>total_size_mb</c>, like every other row in the store, and the data
+/// space USED (<c>storage_in_megabytes</c>) is <c>used_size_mb</c>. The arm first stored the used figure as the
+/// total, so a sibling read 119 MB where its allocation was 10,240 MB and no free space could be worked out.
+/// </para>
+///
+/// <para>
+/// #5498 retired the arm that this history describes (see the first two tests); the reader tests below stay because
+/// stored sibling rows keep their shape and the reader still has to survive that shape.
+/// </para>
 /// </summary>
 public class AzureDatabaseSizeSiblingTests
 {
@@ -36,86 +49,35 @@ public class AzureDatabaseSizeSiblingTests
             .GetField("AzureSqlDbQueryText", BindingFlags.NonPublic | BindingFlags.Static)!
             .GetValue(null)!;
 
+    /// <summary>
+    /// #5498: the sibling arm is gone. It read master's <c>sys.resource_stats</c>, which ingests a new database only
+    /// about an hour after it exists, so a fresh Azure logical server stored master's two files and nothing for its
+    /// user databases (the 3.10 release test). The host now runs the file query in EACH database, so reading the view
+    /// as well would store every database twice, once with real files and once as a sizeless "(whole database)" row.
+    /// </summary>
     [Fact]
-    public void TheAzureQueryReadsBothTheConnectedDatabaseAndItsSiblings()
+    public void TheAzureQueryReadsOnlyTheConnectedDatabase_TheHostRunsItInEachDatabase()
     {
-        Assert.Contains("sys.database_files", AzureSql, StringComparison.Ordinal);
-        Assert.Contains("sys.resource_stats", AzureSql, StringComparison.Ordinal);
+        Assert.Contains("FROM sys.database_files AS df", AzureSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("sys.resource_stats", AzureSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("IF DB_NAME() = N'master'", AzureSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("(whole database)", AzureSql, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// The sibling read goes through <c>sp_executesql</c>, and that is the load-bearing detail.
-    ///
-    /// <para><c>sys.resource_stats</c> does not EXIST in a user database, and SQL Server resolves names at
-    /// PARSE time — so a plain <c>UNION</c> guarded by <c>WHERE DB_NAME() = N'master'</c> still fails with
-    /// <b>error 208 on every user database</b>, which is the common case. That is not a theory: the first
-    /// version of this shipped exactly that shape, and running it from a user database returned 208
-    /// immediately. Deferring the reference until the branch runs is the only thing that fixes it.</para>
+    /// #5498, the enumeration the issue names: on Azure SQL DB (engine edition 5) the collector runs per database,
+    /// the gate database_scoped_config, index_object_stats and query_store use, so the host connects to every
+    /// database on the logical server. Every other target keeps its single connection and cursor.
     /// </summary>
     [Fact]
-    public void TheSiblingReadIsDeferred_BecauseTheViewDoesNotExistInAUserDatabase()
+    public void OnAzureSqlDatabaseTheCollectorRunsOncePerDatabase()
     {
-        Assert.Contains("IF DB_NAME() = N'master'", AzureSql, StringComparison.Ordinal);
-        Assert.Contains("EXEC sys.sp_executesql", AzureSql, StringComparison.Ordinal);
+        var azure = new CollectorTargetInfo { IsAzureSqlDb = true };
 
-        /* The reference must be INSIDE the deferred string, not in the outer batch where parsing reaches
-           it regardless of the branch. */
-        var execIndex = AzureSql.IndexOf("EXEC sys.sp_executesql", StringComparison.Ordinal);
-        var viewIndex = AzureSql.IndexOf("sys.resource_stats", StringComparison.Ordinal);
-
-        Assert.True(viewIndex > execIndex,
-            "sys.resource_stats is referenced in the outer batch — parsing reaches it on a user database and fails 208 before any guard runs.");
-    }
-
-    /// <summary>
-    /// A sibling row is honest about being a database rather than a file. <c>sys.resource_stats</c> has no
-    /// per-file breakdown, so the row says so: a NULL <c>file_id</c> and a name that reads as a database.
-    /// A fabricated file name would make the grid look complete and be wrong.
-    /// </summary>
-    [Fact]
-    public void ASiblingRowIsLabelledAsAWholeDatabase_NotAFabricatedFile()
-    {
-        Assert.Contains("file_name = N''(whole database)''", AzureSql, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// <c>used_size_mb</c> is not projected for a sibling, and the omission is the point: the table
-    /// variable defaults it to NULL. Zero would say the database is empty, which is a measurement nobody
-    /// took.
-    /// </summary>
-    [Fact]
-    public void TheSiblingInsertOmitsWhatItCannotMeasure()
-    {
-        /* Sliced from the INSERT's own column list, not from the first parenthesis after the IF — that one
-           belongs to DB_NAME(), and the first version of this assertion happily tested the string "(". */
-        var insert = AzureSql[AzureSql.IndexOf("IF DB_NAME() = N'master'", StringComparison.Ordinal)..];
-        var listStart = insert.IndexOf("@database_sizes", StringComparison.Ordinal);
-        var open = insert.IndexOf('(', listStart);
-        var columnList = insert[open..insert.IndexOf(')', open)];
-
-        Assert.DoesNotContain("used_size_mb", columnList, StringComparison.Ordinal);
-        Assert.DoesNotContain("auto_growth_mb", columnList, StringComparison.Ordinal);
-        Assert.Contains("total_size_mb", columnList, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// The connected database is excluded from the sibling arm — the file arm already reported it, with
-    /// real files. Without this every Azure entry reports its own database twice, once properly and once
-    /// as a sizeless "(whole database)" row.
-    /// </summary>
-    [Fact]
-    public void TheConnectedDatabaseIsNotReportedTwice()
-        => Assert.Contains("r.database_name <> DB_NAME()", AzureSql, StringComparison.Ordinal);
-
-    /// <summary>
-    /// Newest sample per database. <c>sys.resource_stats</c> keeps roughly fourteen days at five-minute
-    /// grain, so without this every database arrives a few thousand times.
-    /// </summary>
-    [Fact]
-    public void OnlyTheNewestSamplePerDatabaseIsTaken()
-    {
-        Assert.Contains("ROW_NUMBER() OVER (PARTITION BY r.database_name ORDER BY r.end_time DESC)", AzureSql, StringComparison.Ordinal);
-        Assert.Contains("WHERE rs.rn = 1", AzureSql, StringComparison.Ordinal);
+        Assert.True(DatabaseSizeStatsCollector.Instance.RunsPerDatabase(azure));
+        Assert.False(DatabaseSizeStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo()));
+        Assert.False(DatabaseSizeStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureManagedInstance = true }));
+        Assert.True(DatabaseScopedConfigCollector.Instance.RunsPerDatabase(azure));
     }
 
     /// <summary>
@@ -129,9 +91,12 @@ public class AzureDatabaseSizeSiblingTests
     /// file rows included, permanently.
     ///
     /// <para>The reader is driven over the arm's documented shape: a real file row for the connected
-    /// database first (the ORDER BY puts sibling rows last), then a sibling row that carries only
-    /// what the arm can measure. Both rows must come back, and the sibling's absent measurements
-    /// must arrive as nulls rather than exceptions.</para>
+    /// database first (the ORDER BY puts sibling rows last), then a sibling row that carries what the arm
+    /// can measure: its allocated size, its used space, and nothing else. Every row must come back, and the
+    /// sibling's absent measurements must arrive as nulls rather than exceptions. A third row has the shape
+    /// every stored sibling row had before the sizes were mapped to allocated and used (the used space
+    /// empty): history in the store, and the same shape a real file takes when its used-space probe fails,
+    /// so the reader still has to read it.</para>
     /// </summary>
     [Fact]
     public async Task TheReaderSurvivesTheSiblingRow_TheArmDeliberatelyEmits()
@@ -146,6 +111,13 @@ public class AzureDatabaseSizeSiblingTests
             new object[]
             {
                 "testdb1", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
+                10240.00m, 119.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+                "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+                DBNull.Value,
+            },
+            new object[]
+            {
+                "testdb2", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
                 23.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
                 "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
                 DBNull.Value,
@@ -154,7 +126,7 @@ public class AzureDatabaseSizeSiblingTests
         var rows = await DatabaseSizeStatsCollector.Instance.ReadAsync(
             reader, CollectorTestContext.Make(new RecordingCollectorDeltaCalculator()), CancellationToken.None);
 
-        Assert.Equal(2, rows.Count);
+        Assert.Equal(3, rows.Count);
 
         /* The connected database's real file row is untouched by the guards. */
         Assert.Equal("master", rows[0].DatabaseName);
@@ -168,9 +140,15 @@ public class AzureDatabaseSizeSiblingTests
         Assert.Null(rows[1].FileId);
         Assert.Null(rows[1].PhysicalName);
         Assert.Equal("(whole database)", rows[1].FileName);
-        Assert.Equal(23.00m, rows[1].TotalSizeMb);
-        Assert.Null(rows[1].UsedSizeMb);
+        Assert.Equal(10240.00m, rows[1].TotalSizeMb);
+        Assert.Equal(119.00m, rows[1].UsedSizeMb);
+        Assert.Null(rows[1].AutoGrowthMb);
         Assert.Equal("ONLINE", rows[1].StateDesc);
+
+        /* The row in the old shape still reads: its size, and no used space. */
+        Assert.Equal("testdb2", rows[2].DatabaseName);
+        Assert.Equal(23.00m, rows[2].TotalSizeMb);
+        Assert.Null(rows[2].UsedSizeMb);
     }
 
     /// <summary>
@@ -186,6 +164,13 @@ public class AzureDatabaseSizeSiblingTests
             new object[]
             {
                 "testdb1", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
+                10240.00m, 119.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+                "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+                DBNull.Value,
+            },
+            new object[]
+            {
+                "testdb2", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
                 23.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
                 "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
                 DBNull.Value,
@@ -194,9 +179,10 @@ public class AzureDatabaseSizeSiblingTests
         var deltas = new RecordingCollectorDeltaCalculator();
         var rows = await DatabaseSizeStatsCollector.Instance.ReadAsync(
             reader, CollectorTestContext.Make(deltas), CancellationToken.None);
+        Assert.Equal(2, rows.Count);
 
         var writer = new RecordingCollectorRowWriter();
-        DatabaseSizeStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, CollectorTestContext.Make(deltas));
+        DatabaseSizeStatsCollector.Instance.WritePayload(rows[0], writer, CollectorTestContext.Make(deltas));
 
         Assert.Equal(DatabaseSizeStatsCollector.Instance.PayloadColumns.Count, writer.Values.Count);
         Assert.Equal("testdb1", writer.Values[0]);
@@ -204,7 +190,14 @@ public class AzureDatabaseSizeSiblingTests
         Assert.Null(writer.Values[2]);    /* file_id */
         Assert.Equal("(whole database)", writer.Values[4]);
         Assert.Null(writer.Values[5]);    /* physical_name */
-        Assert.Equal(23.00m, writer.Values[6]);
+        Assert.Equal(10240.00m, writer.Values[6]);    /* total_size_mb: the allocated data space */
+        Assert.Equal(119.00m, writer.Values[7]);      /* used_size_mb: the data space used */
+
+        /* A row in the old shape is written with its used space as a null, not skipped and not defaulted to 0. */
+        var oldShape = new RecordingCollectorRowWriter();
+        DatabaseSizeStatsCollector.Instance.WritePayload(rows[1], oldShape, CollectorTestContext.Make(deltas));
+        Assert.Equal(23.00m, oldShape.Values[6]);
+        Assert.Null(oldShape.Values[7]);
     }
 
     /// <summary>

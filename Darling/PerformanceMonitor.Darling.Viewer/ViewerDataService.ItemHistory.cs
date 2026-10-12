@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -294,6 +295,57 @@ public sealed partial class ViewerDataService
         return rows;
     }
 
+    /// <summary>
+    /// #5449: the collector's SUCCESS runs for <c>procedure_stats</c> over a window, ascending. The per-procedure history chart
+    /// reads them to plot a 0 for each run that stored nothing for the procedure (the collector keeps no row for a procedure
+    /// that did no work in a cycle). The same <c>collection_log</c> runs the bucketed trend's <c>ProcedureCollectionsCte</c> reads; it uses
+    /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>. The log time and the run's logged
+    /// <c>duration_ms</c> come back together: the log row is written after the run, so the 0 for a quiet run is placed at the log
+    /// time minus the duration (<see cref="ViewerProcedureHistoryIdleRuns.IdleRunTimes"/>). $1 server_id, $2 window start,
+    /// $3 window end (naive UTC).
+    /// </summary>
+    public const string ProcStatsRunTimesSql = """
+        SELECT collection_time, duration_ms
+        FROM collect.collection_log
+        WHERE server_id = $1
+        AND   collector_name = 'procedure_stats'
+        AND   status = 'SUCCESS'
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        ORDER BY collection_time
+        """;
+
+    /// <summary>
+    /// #5449: the rows the per-procedure history CHART plots: <paramref name="history"/> plus a zero row at each collector run
+    /// that stored nothing for this procedure between its first and last stored row (<see cref="ViewerProcedureHistoryIdleRuns"/>).
+    /// An older store kept a zero row for a quiet minute, so without these a newer store's chart draws a line across it. The
+    /// grid keeps listing the stored rows.
+    /// </summary>
+    public async Task<List<ViewerProcedureStatsHistoryRow>> GetProcedureStatsHistoryChartRowsAsync(
+        int serverId, IReadOnlyList<ViewerProcedureStatsHistoryRow> history, CancellationToken cancellationToken = default)
+    {
+        if (history.Count == 0)
+        {
+            return new List<ViewerProcedureStatsHistoryRow>();
+        }
+
+        var ordered = history.OrderBy(r => r.CollectionTime).ToList();
+        var runs = new List<ViewerProcedureHistoryIdleRuns.Run>();
+        await using var command = _dataSource.CreateCommand(ProcStatsRunTimesSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(ordered[0].CollectionTime, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(ordered[^1].CollectionTime, DateTimeKind.Unspecified) });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            runs.Add(new ViewerProcedureHistoryIdleRuns.Run(reader.GetDateTime(0), reader.IsDBNull(1) ? 0 : reader.GetInt32(1)));
+        }
+
+        var idle = ViewerProcedureHistoryIdleRuns.IdleRunTimes(ordered.Select(r => r.CollectionTime).ToList(), runs);
+        return ViewerProcedureHistoryIdleRuns.ChartRows(ordered, idle);
+    }
+
     // ══════════════════════════════ Query Store history ══════════════════════════════
 
     /// <summary>
@@ -311,6 +363,13 @@ public sealed partial class ViewerDataService
     /// already projected so a reader can tell those rows apart. Collapsing them would change what this
     /// drilldown displays, which is a product call rather than an arithmetic fix — left to #1841 tier 2 along
     /// with storing the real interval identity. Mirrors Lite's GetQueryStoreHistoryAsync.</para>
+    ///
+    /// <para>The window that shows it did add these rows up, though: its summary's Total Executions summed
+    /// execution_count over the list, which counts an interval collected N times about N times (#5306). A
+    /// total over this list takes <see cref="ViewerQueryStoreHistoryRow.TotalExecutions"/>, which keeps the
+    /// latest snapshot of each interval first. That is why the projection ends with runtime_stats_interval_id and
+    /// replica_role: they are the rest of the identity the aggregate reads dedup on, and are not shown in the grid.
+    /// The grid itself still lists every snapshot.</para>
     /// </summary>
     public const string QueryStoreHistorySql = """
         SELECT
@@ -363,7 +422,9 @@ public sealed partial class ViewerDataService
             plan_forcing_type,
             compatibility_level,
             query_hash,
-            query_plan_hash
+            query_plan_hash,
+            runtime_stats_interval_id,
+            replica_role
         FROM query_store_stats
         WHERE server_id = $1
         AND   database_name = $2
@@ -443,6 +504,8 @@ public sealed partial class ViewerDataService
                 CompatibilityLevel = ReadInt(reader, 47),
                 QueryHash = reader.IsDBNull(48) ? "" : reader.GetString(48),
                 QueryPlanHash = reader.IsDBNull(49) ? "" : reader.GetString(49),
+                RuntimeStatsIntervalId = reader.IsDBNull(50) ? null : ReadLong(reader, 50),
+                ReplicaRole = reader.IsDBNull(51) ? null : reader.GetString(51),
             });
         }
 

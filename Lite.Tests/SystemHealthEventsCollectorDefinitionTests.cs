@@ -63,7 +63,9 @@ public sealed class SystemHealthEventsCollectorDefinitionTests
         Assert.Contains("N'system_health'", text, StringComparison.Ordinal);
         Assert.Contains("RingBufferTarget/event", text, StringComparison.Ordinal);
         Assert.Contains("evt.query('.')", text, StringComparison.Ordinal);
-        Assert.Contains("> @cutoff_time", text, StringComparison.Ordinal);
+        /* The time filter runs inside the XQuery; a .value() cast in WHERE shreds every event first. */
+        Assert.Contains("WHERE evt.exist('@timestamp[. > sql:variable(\"@cutoff_time\")]') = 1", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time", text, StringComparison.Ordinal);
 
         /* Server-scoped only — this collector never reaches Azure SQL DB (gated by AppliesTo), so no
            database-scoped DMV variant exists. */

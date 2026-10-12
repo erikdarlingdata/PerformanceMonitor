@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Analysis;
@@ -428,6 +429,56 @@ public sealed class McpAnalysisFindingsCommandTests : IClassFixture<SharedDuckDb
                 Assert.False(f.GetProperty("advice_truncated").GetBoolean());
             });
         }
+    }
+
+    /// <summary>#5558: rows for one group where this node's copy is SECONDARY (or PRIMARY), written for the tool's server.</summary>
+    private async Task SeedAgAsync(DateTime at, string localRole)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        async Task Exec(string sql, params object[] values)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = sql;
+            foreach (var v in values) cmd.Parameters.Add(new DuckDBParameter { Value = v });
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        await Exec("INSERT INTO ag_replica_states (collection_id, collection_time, server_id, server_name, ag_name, replica_server_name, role_desc, is_local) VALUES ($1,$2,$3,'n',$4,$5,$6,$7)",
+            -55_810_001L, at, _serverId, "AG1", "NODE1", localRole, true);
+        await Exec("INSERT INTO ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name, database_name, replica_server_name, is_local) VALUES ($1,$2,$3,'n',$4,$5,$6,$7)",
+            -55_810_002L, at, _serverId, "AG1", "SecDb", "NODE1", true);
+    }
+
+    /// <summary>
+    /// #5558: get_analysis_findings carries the one-sentence secondary-copy note beside a non-empty list and inside the
+    /// empty answer, so a short list is not read as a clean bill of health; a primary (or no AG rows) carries none.
+    /// </summary>
+    [Fact]
+    public async Task GetAnalysisFindings_CarriesTheSecondaryReplicaNote_OnlyWhenThisNodeHoldsASecondaryCopy()
+    {
+        var now = DateTime.UtcNow;
+        var analysisService = new AnalysisService(_duckDb);
+
+        /* Nothing stored, no AG rows: the plain empty answer, no note. */
+        var plainEmpty = JsonDocument.Parse(await McpAnalysisTools.GetAnalysisFindings(analysisService, _serverManager, "TestServer", 24));
+        Assert.Equal("empty", plainEmpty.RootElement.GetProperty("status").GetString());
+        Assert.DoesNotContain("secondary copy", plainEmpty.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        /* A secondary copy, still no findings: the empty answer names the skipped database. */
+        await SeedAgAsync(now.AddMinutes(-1), "SECONDARY");
+        var emptyWithNote = JsonDocument.Parse(await McpAnalysisTools.GetAnalysisFindings(analysisService, _serverManager, "TestServer", 24));
+        Assert.Contains(AgReplicaScope.SkippedNote(1)!, emptyWithNote.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        /* With a finding stored the field rides on the payload. */
+        var context = new AnalysisContext { ServerId = _serverId, ServerName = "TestServer", TimeRangeStart = now.AddHours(-4), TimeRangeEnd = now };
+        await new FindingStore(_duckDb).InsertFindingsAsync(new List<AnalysisFinding>
+        {
+            MakeFinding(920001, now, 1.0, "SOS_SCHEDULER_YIELD", "ag_note_hash", remediation: null),
+        }, context);
+        var withNote = JsonDocument.Parse(await McpAnalysisTools.GetAnalysisFindings(analysisService, _serverManager, "TestServer", 24));
+        Assert.Equal(AgReplicaScope.SkippedNote(1), withNote.RootElement.GetProperty("secondary_replica_note").GetString());
     }
 
     private AnalysisFinding MakeFinding(

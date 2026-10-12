@@ -8,10 +8,16 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Media;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
+using PerformanceMonitorLite.Analysis;
+using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -105,32 +111,47 @@ LIMIT 1";
             }
         }
 
+        /* An Azure SQL Database master registration also covers databases monitored as their own targets: their
+           blocking and deadlocks show on their own cards, so master's card skips them (the list analysis uses).
+           A null or empty list leaves today's SQL untouched. */
+        var separate = AnalysisService.ResolveSeparatelyMonitoredDatabases(serverId);
+
         /* Blocking count in last hour - uses XE blocked process reports */
         using (var cmd = connection.CreateCommand())
         {
             /* Prefer the blocked-process-report; fall back to the always-on DMV snapshot (AWS RDS). */
             cmd.CommandText = @"
 SELECT COALESCE(NULLIF(
-    (SELECT COUNT(*) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2), 0),
-    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND event_time >= $2))";
+    (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2" + SeparatelyMonitoredScope.BprFilter(separate, 3)) + @" AS ev), 0),
+    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND event_time >= $2" + SeparatelyMonitoredScope.BprFilter(separate, 3) + @"))";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
+            SeparatelyMonitoredScope.AddParameters(cmd, separate);
             var result = await cmd.ExecuteScalarAsync();
             blockingCount = result != null ? Convert.ToInt32(result) : 0;
         }
 
         /* Deadlock count in last hour */
-        using (var cmd = connection.CreateCommand())
+        if (separate is { Count: > 0 })
         {
-            cmd.CommandText = @"
-SELECT COUNT(*)
-FROM v_deadlocks
-WHERE server_id = $1
-AND   deadlock_time >= $2";
-            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
-            var result = await cmd.ExecuteScalarAsync();
-            deadlockCount = result != null ? Convert.ToInt32(result) : 0;
+            /* One row per stored identity, minus deadlocks wholly inside the separately monitored databases. */
+            var now = DateTime.UtcNow;
+            deadlockCount = (int)await SeparatelyMonitoredScope.CountDeadlocksAsync(
+                connection, serverId, now.AddHours(-1), now.AddDays(1), inclusiveEnd: true, separate, System.Threading.CancellationToken.None);
+        }
+        else
+        {
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = @"
+SELECT " + StoredEventCopies.DeadlockDistinctCount + @"
+FROM v_deadlocks AS dl
+WHERE server_id = $1 AND deadlock_time >= $2";
+                cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-1) });
+                var result = await cmd.ExecuteScalarAsync();
+                deadlockCount = result != null ? Convert.ToInt32(result) : 0;
+            }
         }
 
         /* Last collection time from collection_log — hot table first (#3895). A miss on both leaves the CPU
@@ -310,8 +331,46 @@ public static class ServerCardStatusRules
 public class ServerSummaryItem
 {
     public string DisplayName { get; set; } = "";
+
+    /// <summary>What a screen reader announces for an Overview card item: the server's name, not the type name.</summary>
+    public override string ToString() => DisplayName;
+
     public string ServerName { get; set; } = "";
     public int ServerId { get; set; }
+
+    /// <summary>
+    /// True when this card is <paramref name="server"/>'s card. The card was loaded under the server's storage
+    /// server id (<see cref="RemoteCollectorService.GetServerId"/>), and that id is what identifies the server.
+    /// The host name does not: several monitored databases on one Azure SQL Database server share one
+    /// <see cref="ServerName"/> and differ only in database, so a name match picks the first of them for every card.
+    /// </summary>
+    internal bool IsCardFor(ServerConnection server) =>
+        ServerId == RemoteCollectorService.GetServerId(server);
+
+    /// <summary>The server in <paramref name="servers"/> this card belongs to, or null. What a double-click on the
+    /// card opens.</summary>
+    internal ServerConnection? FindServer(IEnumerable<ServerConnection> servers) =>
+        servers.FirstOrDefault(IsCardFor);
+
+    /// <summary>
+    /// Sets the silenced bell on every card that belongs to <paramref name="server"/> and on no other. Returns true
+    /// when at least one card actually changed, so a quiet poll does not rebind the Overview.
+    /// </summary>
+    internal static bool StampSilenced(IEnumerable<ServerSummaryItem> cards, ServerConnection server, bool silenced)
+    {
+        var changed = false;
+        foreach (var card in cards)
+        {
+            if (card.IsCardFor(server) && card.IsSilenced != silenced)
+            {
+                card.IsSilenced = silenced;
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
     public bool? IsOnline { get; set; }
 
     /// <summary>True when a whole-server alert silence is active for this server (#2031) — drives the card's
@@ -416,6 +475,28 @@ public class ServerSummaryItem
             LastCollectionTime, registeredAtUtc, RetentionService.OldestRetainedInstant(nowUtc), nowUtc);
 
     /// <summary>
+    /// The clock of the server this card is for, stamped by the overview refresh: the server's own collected clock,
+    /// else its open tab's, else the machine's (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>),
+    /// the chain Alert History and Job History use. <see cref="LastCollectionDisplay"/> converts on it in Server
+    /// mode, so the card reads the same wall clock as that server's alert and job rows. Null on a hand-built item,
+    /// which then takes the active server's clock.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
+    /// The Last Collect time as the card words it: <paramref name="lastCollectionUtc"/> (naive UTC) in the selected
+    /// "Show timestamps in" mode on <paramref name="clock"/> (the same zone choice as the Alert History and Job History
+    /// rows), as "HH:mm:ss" when that wall time falls on today's date in the same zone, and with its date
+    /// ("yyyy-MM-dd HH:mm:ss") otherwise, so a collection from nine days ago does not read as one from this morning.
+    /// </summary>
+    internal static string FormatLastCollect(DateTime lastCollectionUtc, TimeDisplayMode mode, ServerClock? clock, DateTime nowUtc)
+    {
+        var zone = ServerTimeHelper.DisplayZoneFor(mode, clock ?? ServerTimeHelper.ActiveServerClock);
+        var isToday = DisplayZone.ToDisplay(lastCollectionUtc, zone).Date == DisplayZone.ToDisplay(nowUtc, zone).Date;
+        return ServerTimeHelper.FormatInstant(lastCollectionUtc, zone, isToday ? "HH:mm:ss" : "yyyy-MM-dd HH:mm:ss");
+    }
+
+    /// <summary>
     /// The Last Collect row. Names its band in words when the collection is not current, because a colour
     /// alone is what this row already had against it: it was a bare "HH:mm:ss" in the plain foreground
     /// brush, so a timestamp from four hours ago looked exactly like one from four seconds ago and nothing
@@ -430,7 +511,7 @@ public class ServerSummaryItem
             if (!LastCollectionTime.HasValue)
                 return CollectionFreshness == ServerFreshness.Offline ? "None retained (stopped)" : "Never";
 
-            var stamp = ServerTimeHelper.FormatServerTime(LastCollectionTime, "HH:mm:ss");
+            var stamp = FormatLastCollect(LastCollectionTime.Value, ServerTimeHelper.CurrentDisplayMode, Clock, DateTime.UtcNow);
             return CollectionFreshness switch
             {
                 ServerFreshness.Stale => $"{stamp} (stale)",

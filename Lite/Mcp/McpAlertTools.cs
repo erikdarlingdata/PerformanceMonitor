@@ -136,6 +136,11 @@ public sealed class McpAlertTools
                     routing = routing?.Route,
                     routing_reason = routing?.Reason,
                     detail_text = r.DetailText,
+                    /* #5642: the newest sample the alert judged and how old it was when the alert fired, read off the
+                       persisted context (computed once at fire time, never from the clock now). Null on a row with
+                       no sample time: written before the field existed, or from a source that has none. The shared
+                       wire type, the one Darling's get_alert_history publishes, so the two SKUs cannot drift. */
+                    newest_sample = AlertNewestSampleWire.FromContextJson(r.ContextJson),
                 };
             }).ToList();
 
@@ -148,8 +153,8 @@ public sealed class McpAlertTools
                    that shaped the population together with how much it removed. */
                 alerts_returned = page.Count,
                 truncated,
-                oldest_returned_alert_time = page.Min(r => r.AlertTime).ToString("o"),
-                newest_returned_alert_time = page.Max(r => r.AlertTime).ToString("o"),
+                oldest_returned_alert_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.AlertTime)),
+                newest_returned_alert_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.AlertTime)),
                 order = "alert_time_desc",
                 dismissed_excluded = !include_dismissed,
                 dismissed_excluded_count = dismissedExcludedCount,

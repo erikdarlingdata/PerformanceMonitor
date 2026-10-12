@@ -134,7 +134,7 @@ AND   (server_id, collection_time) IN (
     /* ProcedureStatsCollector keys on plan_handle, falling back to database.schema.object when the
        handle is null; the SQL builds the SAME string (a null part formats as empty, as C# string
        interpolation does) so DISTINCT ON partitions by the key the collector will present. Latest row
-       per key, because a TOP (150) drops and readmits plans between passes. */
+       per key, because a plan that leaves the ten-minute window readmits as a first sighting (the main query keeps every candidate since #5449, so a cap no longer churns it). */
     public const string ProcedureStatsSeedSql = @"
 SELECT DISTINCT ON (server_id, delta_key)
        server_id, delta_key,

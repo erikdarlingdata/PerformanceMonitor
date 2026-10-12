@@ -36,7 +36,7 @@ public sealed class PgTargetGrowthTests
     /* ── the constants ── */
 
     [Fact]
-    public void TheBars_AreTheBriefsValues_AllUnmeasured_AndNoneIsASqlServerConstant()
+    public void TheBars_AreTheBriefsValues_MeasuredNotMoved_TheBoostsUnmeasured_AndNoneIsASqlServerConstant()
     {
         Assert.Equal(14, PgTargetScorer.GrowthLookbackDays);
         Assert.Equal(GiB, PgTargetScorer.GrowthConcerningBytes);
@@ -49,17 +49,28 @@ public sealed class PgTargetGrowthTests
         Assert.Equal(2.0 * GiB, AnomalyThresholds.PgDatabaseGrowthFallbackBytesPerDay);
         Assert.True(AnomalyThresholds.PgDatabaseGrowthFallbackBytesPerDay > AnomalyThresholds.PgDatabaseGrowthFloorBytesPerDay);
 
-        /* Every bar says unmeasured in the block above it, and names the table to calibrate against. */
+        /* #4404: the six bars were measured over 14 days (2026-10-06) and stand as written, so each says measured in the
+           block above it (PgTargetMeasuredLineageTests pins the date and population); the two co-fire boosts are severity
+           lifts the read did not grade and still say unmeasured. */
         var scorer = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "PgTargetScorer.Growth.cs").Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
-        foreach (var name in new[] { "GrowthLookbackDays", "GrowthConcerningBytes", "GrowthConcerningFraction", "GrowthCriticalBytes", "GrowthCriticalFraction", "GrowthMinimumSamples", "GrowthBloatCoFireBoost", "GrowthAnomalyCoFireBoost" })
+        foreach (var name in new[] { "GrowthLookbackDays", "GrowthConcerningBytes", "GrowthConcerningFraction", "GrowthCriticalBytes", "GrowthCriticalFraction", "GrowthMinimumSamples" })
         {
             var at = Array.FindIndex(scorer, l => l.Contains($" {name} = ", StringComparison.Ordinal));
             Assert.True(at > 0, name);
-            var block = string.Join('\n', scorer[Math.Max(0, at - 12)..at]);
-            Assert.Contains("unmeasured", block, StringComparison.Ordinal);
-            Assert.DoesNotContain("<b>measured</b>", block, StringComparison.Ordinal);
+            var block = string.Join('\n', scorer[Math.Max(0, at - 16)..at]);
+            Assert.Contains("measured: confirmed, not moved", block, StringComparison.Ordinal);
+            Assert.DoesNotContain("unmeasured", block, StringComparison.Ordinal);
         }
-        Assert.DoesNotContain("[\"threshold_lineage\"] = 1", string.Join('\n', scorer), StringComparison.Ordinal);
+        foreach (var name in new[] { "GrowthBloatCoFireBoost", "GrowthAnomalyCoFireBoost" })
+        {
+            var at = Array.FindIndex(scorer, l => l.Contains($" {name} = ", StringComparison.Ordinal));
+            Assert.True(at > 0, name);
+            var block = string.Join('\n', scorer[Math.Max(0, at - 6)..at]);
+            Assert.Contains("unmeasured", block, StringComparison.Ordinal);
+        }
+        /* The family stamps measured on its one exit and never the old chosen 0 (the boosts are not bars). */
+        Assert.Contains("[\"threshold_lineage\"] = 1;", string.Join('\n', scorer), StringComparison.Ordinal);
+        Assert.DoesNotContain("[\"threshold_lineage\"] = 0", string.Join('\n', scorer), StringComparison.Ordinal);
 
         var thresholds = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "Baselines", "AnomalyThresholds.cs");
         foreach (var name in new[] { "PgDatabaseGrowthFloorBytesPerDay", "PgDatabaseGrowthFallbackBytesPerDay" })
@@ -97,7 +108,7 @@ public sealed class PgTargetGrowthTests
     }
 
     [Fact]
-    public void TheFact_GradesTheBestNamedDatabaseOrTheInstanceTotal_StampsTheSubject_AndAlwaysLineageZero()
+    public void TheFact_GradesTheBestNamedDatabaseOrTheInstanceTotal_StampsTheSubject_AndAlwaysLineageOne()
     {
         /* appdb 2 GiB / 20 %: bytes 0.5556, pct 0.8333 → 0.5556. reporting 1.2 GiB / 5 %: under the fraction line.
            The total 3.2 GiB / 4 %: under the line. The database leads. */
@@ -107,7 +118,7 @@ public sealed class PgTargetGrowthTests
         var expectedBytes = 0.5 + 0.5 * (2.0 * GiB - GiB) / (9.0 * GiB);
         Assert.Equal(expectedBytes, PgTargetScorer.ScoreBase(fact), precision: 9);
         Assert.Equal(PgTargetScorer.GrowthSubjectDatabase, fact.Metadata[PgTargetScorer.GrowthGradedSubjectKey]);
-        Assert.Equal(0, fact.Metadata["threshold_lineage"]);
+        Assert.Equal(1, fact.Metadata["threshold_lineage"]);
 
         /* The instance leads: three databases each 900 MiB / 15 % (under the bytes line alone), the total 2.7 GiB / 15 %. */
         var instance = Growth(
@@ -122,7 +133,7 @@ public sealed class PgTargetGrowthTests
         var quiet = Growth(("appdb", 10 * GiB, 10 * GiB + 500 * MiB), total: (20 * GiB, 20 * GiB + 500 * MiB));
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(quiet));
         Assert.Equal(0, quiet.Metadata[PgTargetScorer.GrowthGradedSubjectKey]);
-        Assert.Equal(0, quiet.Metadata["threshold_lineage"]);
+        Assert.Equal(1, quiet.Metadata["threshold_lineage"]);
 
         /* No total (an unsized database NULLs it): the databases alone decide, and nothing is summed to stand in. */
         var noTotal = Growth(("appdb", 10 * GiB, 12 * GiB), total: null);
@@ -131,11 +142,11 @@ public sealed class PgTargetGrowthTests
     }
 
     [Fact]
-    public void TheWithheldShapes_ScoreZero_WithTheirReason_AndLineageZero()
+    public void TheWithheldShapes_ScoreZero_WithTheirReason_AndLineageOne()
     {
         var insufficient = Withheld(PgTargetScorer.GrowthReasonInsufficientSamples, seen: 3, unsized: 0);
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(insufficient));
-        Assert.Equal(0, insufficient.Metadata["threshold_lineage"]);
+        Assert.Equal(1, insufficient.Metadata["threshold_lineage"]);
         var allUnsized = Withheld(PgTargetScorer.GrowthReasonAllUnsized, seen: 3, unsized: 3);
         Assert.Equal(0.0, PgTargetScorer.ScoreBase(allUnsized));
         /* Amplifiers never lift a withheld fact: FactScorer skips them at base 0. */
@@ -279,8 +290,9 @@ public sealed class PgTargetGrowthTests
         Assert.Contains("and 138 GB at its latest (336 hourly samples, 14 days apart at the ends)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("a straight-line extrapolation of the lookback's slope, not a forecast", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("The instance total moved from 200 GB to 240 GB", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("The line is chosen, not measured", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("threshold_lineage = 0 on this fact", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The line is measured against the dogfood fleet", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("chosen, not measured", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("threshold_lineage = 1 on this fact", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("This database crossed it.", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("Next by growth: reporting (1 GB, 4.2%)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("Population: 2 databases seen in the lookback, 0 unsized, 2 with at least 3 samples, 1 over the line.", block.Investigation, StringComparison.Ordinal);
@@ -322,7 +334,11 @@ public sealed class PgTargetGrowthTests
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.DatabaseGrowth, Lookup(insufficient))!;
         Assert.Equal("Database growth has sized databases, but none has 3 hourly samples in the lookback yet", block.Headline);
         Assert.Contains("a withheld trend never reads as zero growth", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("threshold_lineage = 0 on this fact", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("threshold_lineage = 1 on this fact", block.Investigation, StringComparison.Ordinal);
+        // The card shows only when the minimum DID bind for this target: it must say what the minimum is for, never
+        // that it "does not bind" (#4404 review F3).
+        Assert.Contains("a floor on store age", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("does not bind", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("Nothing to do but wait for the collector", block.Remediation, StringComparison.Ordinal);
 
         var unsized = Withheld(PgTargetScorer.GrowthReasonAllUnsized, seen: 2, unsized: 2);

@@ -33,6 +33,7 @@ namespace PerformanceMonitorLite.Tests;
 /// parse destroys the only record of the user's real configuration. The copy has to exist BEFORE the write,
 /// and the original has to survive making it.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class SettingsFileGuardTests
 {
     /// <summary>A settings.json a user would recognize: real keys, one syntax error.</summary>

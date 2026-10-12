@@ -36,6 +36,7 @@ namespace PerformanceMonitorLite.Tests;
 /// silently never does. Darling.Tests pins the identical expectations against live Postgres on the same
 /// query shape.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class EmptyEnumerationInventoryTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = 4343;
@@ -396,13 +397,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             1, "ROWS", databaseName + "_data", "C:\\data\\" + databaseName + ".mdf", 128.00m);
 
     /// <summary>The Azure sibling shape (#2643): NULL database_id / file_id / physical_name, a file_name
-    /// that says it is a whole database, and a real size — exactly what the arm projects.</summary>
+    /// that says it is a whole database, the allocated data space as total_size_mb and the data space
+    /// used as used_size_mb. Exactly what the arm projects.</summary>
     private async Task SeedSiblingSizeAsync(string databaseName, DateTime collectionTimeUtc) =>
         await ExecAsync(@"
 INSERT INTO database_size_stats
     (collection_id, collection_time, server_id, server_name, database_name, database_id,
-     file_id, file_type_desc, file_name, physical_name, total_size_mb)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+     file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             _nextId++, collectionTimeUtc, ServerId, "TestSrv", databaseName, null,
-            null, "ROWS", "(whole database)", null, 23.00m);
+            null, "ROWS", "(whole database)", null, 128.00m, 23.00m);
 }

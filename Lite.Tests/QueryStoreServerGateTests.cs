@@ -35,6 +35,8 @@ namespace Lite.Tests;
 /// stall collection for every other server, which is the #2148 wedge arriving through a lock instead of a
 /// hang.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
+[Collection("timing")]
 public sealed class QueryStoreServerGateTests
 {
     /// <summary>THE POINT: a second acquirer is refused while the first holds the gate.</summary>

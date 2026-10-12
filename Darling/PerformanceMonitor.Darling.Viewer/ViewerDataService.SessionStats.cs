@@ -44,7 +44,8 @@ public sealed record SessionStatsPoint(
     string? TopApplicationName,
     int? TopApplicationConnections,
     string? TopHostName,
-    int? TopHostConnections) : ISessionStatsPoint;
+    int? TopHostConnections,
+    DateTime? LatestCollectionTime = null) : ISessionStatsPoint;
 
 public sealed partial class ViewerDataService
 {
@@ -65,77 +66,7 @@ public sealed partial class ViewerDataService
     /// a bucket that merged nothing at its one collection's own raw time (ruling item 3). $4 the bucket
     /// width in minutes.</para>
     /// </summary>
-    public static readonly string SessionStatsSql = $"""
-        WITH raw AS
-        (
-            SELECT
-                collection_time,
-                GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
-                total_sessions,
-                running_sessions,
-                sleeping_sessions,
-                background_sessions,
-                dormant_sessions,
-                idle_sessions_over_30min,
-                sessions_waiting_for_memory,
-                databases_with_connections,
-                top_application_name,
-                top_application_connections,
-                top_host_name,
-                top_host_connections
-            FROM v_session_summary_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-        ),
-        agg AS
-        (
-            SELECT
-                bucket_start,
-                AVG(COALESCE(total_sessions, 0)) AS total_sessions,
-                AVG(COALESCE(running_sessions, 0)) AS running_sessions,
-                AVG(COALESCE(sleeping_sessions, 0)) AS sleeping_sessions,
-                AVG(COALESCE(background_sessions, 0)) AS background_sessions,
-                AVG(COALESCE(dormant_sessions, 0)) AS dormant_sessions,
-                AVG(COALESCE(idle_sessions_over_30min, 0)) AS idle_sessions_over_30min,
-                AVG(COALESCE(sessions_waiting_for_memory, 0)) AS sessions_waiting_for_memory,
-                AVG(COALESCE(databases_with_connections, 0)) AS databases_with_connections,
-                MIN(collection_time) AS first_collection_time,
-                COUNT(*) AS collection_count
-            FROM raw
-            GROUP BY bucket_start
-        ),
-        latest AS
-        (
-            SELECT DISTINCT ON (bucket_start)
-                bucket_start,
-                top_application_name,
-                top_application_connections,
-                top_host_name,
-                top_host_connections
-            FROM raw
-            ORDER BY bucket_start, collection_time DESC
-        )
-        SELECT
-            agg.bucket_start,
-            agg.total_sessions,
-            agg.running_sessions,
-            agg.sleeping_sessions,
-            agg.background_sessions,
-            agg.dormant_sessions,
-            agg.idle_sessions_over_30min,
-            agg.sessions_waiting_for_memory,
-            agg.databases_with_connections,
-            latest.top_application_name,
-            latest.top_application_connections,
-            latest.top_host_name,
-            latest.top_host_connections,
-            agg.first_collection_time,
-            agg.collection_count
-        FROM agg
-        JOIN latest ON latest.bucket_start = agg.bucket_start
-        ORDER BY agg.bucket_start
-        """;
+    public static readonly string SessionStatsSql = ServerTrendSql.SessionSummary;
 
     /// <summary>
     /// The server-wide session-summary trend over the window, bucketed to <see cref="TrendBudget.Chart"/>'s
@@ -156,7 +87,7 @@ public sealed partial class ViewerDataService
 
         var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, int Total, int Running, int Sleeping,
             int Background, int Dormant, int Idle, int WaitingForMemory, int DatabasesWithConnections,
-            string? TopAppName, int? TopAppConnections, string? TopHostName, int? TopHostConnections)>();
+            string? TopAppName, int? TopAppConnections, string? TopHostName, int? TopHostConnections, DateTime LatestCollectionTime)>();
         var everyBucketSingleton = true;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -181,7 +112,8 @@ public sealed partial class ViewerDataService
                 reader.IsDBNull(9) ? null : reader.GetString(9),
                 reader.IsDBNull(10) ? null : reader.GetInt32(10),
                 reader.IsDBNull(11) ? null : reader.GetString(11),
-                reader.IsDBNull(12) ? null : reader.GetInt32(12)));
+                reader.IsDBNull(12) ? null : reader.GetInt32(12),
+                reader.GetDateTime(15)));
         }
 
         var result = new List<SessionStatsPoint>(rows.Count);
@@ -200,7 +132,8 @@ public sealed partial class ViewerDataService
                 row.TopAppName,
                 row.TopAppConnections,
                 row.TopHostName,
-                row.TopHostConnections));
+                row.TopHostConnections,
+                row.LatestCollectionTime));
         }
 
         return result;

@@ -42,6 +42,22 @@ namespace PerformanceMonitor.Collectors;
 public static class AzureSweepScope
 {
     /// <summary>
+    /// The listed databases without the ones monitored as their own servers, for a collector whose read skips them
+    /// (<see cref="ICollectorDefinition{TRow}.SkipsSeparatelyMonitoredDatabases"/>). Returns the list itself when
+    /// there is nothing to skip.
+    /// </summary>
+    public static List<string> WithoutSeparatelyMonitored(List<string> databases, IReadOnlyCollection<string> separatelyMonitored)
+    {
+        if (separatelyMonitored.Count == 0)
+        {
+            return databases;
+        }
+
+        var skip = new HashSet<string>(separatelyMonitored, StringComparer.OrdinalIgnoreCase);
+        return databases.FindAll(database => !skip.Contains(database));
+    }
+
+    /// <summary>
     /// The single database this registration names, or an EMPTY list when it names none.
     ///
     /// <para>Empty is not "no databases" — it means "this registration is of the logical server, so the

@@ -26,7 +26,7 @@ public partial class LocalDataService
 {
     /// <summary>
     /// The baseline discontinuities inside the window every other trend read here takes
-    /// (<c>GetTimeRange</c>: hours back from now, a server-local custom range, or an MCP <c>as_of</c> anchor),
+    /// (<c>GetTimeRange</c>: hours back from now, a custom range of naive-UTC bounds, or an MCP <c>as_of</c> anchor),
     /// oldest first; empty when none. The pair read runs only when a marker row came back.
     /// </summary>
     public async Task<IReadOnlyList<BaselineDiscontinuity>> GetBaselineDiscontinuitiesAsync(
@@ -34,7 +34,7 @@ public partial class LocalDataService
     {
         using var connection = await OpenConnectionAsync();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         var rows = new List<BaselineDiscontinuities.MarkerRow>();
         using (var command = connection.CreateCommand())

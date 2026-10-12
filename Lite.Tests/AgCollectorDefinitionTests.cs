@@ -37,7 +37,7 @@ public sealed class AgCollectorDefinitionTests
     private const string ExpectedReplicaQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     ag_name = ag.name,
     replica_server_name = ar.replica_server_name,
     role_desc = ars.role_desc,
@@ -64,7 +64,7 @@ OPTION(RECOMPILE);";
     private const string ExpectedDatabaseQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     ag_name = ag.name,
     database_name = d.name,
     replica_server_name = ar.replica_server_name,

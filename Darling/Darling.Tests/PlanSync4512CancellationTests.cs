@@ -88,15 +88,38 @@ public sealed class PlanSync4512CancellationTests
             $"the walk should have stopped at or just past statement 3, but saw statement {highestStatementSeen}");
     }
 
-    /// <summary>(b), async side: same mid-walk cancellation on <see cref="ShowPlanParser.ParseAsync"/>.</summary>
+    /// <summary>
+    /// (b), async side: same mid-walk cancellation on <see cref="ShowPlanParser.ParseAsync"/>, cancelled the same way
+    /// as the synchronous sibling above: from <see cref="ShowPlanParser.OnStatementParsedForTest"/> at statement 3. The
+    /// test used to arm <c>cts.CancelAfter(50)</c> against a 35,000-statement walk and assumed the walk outlasted 50 ms;
+    /// on a fast machine it finished first and the call threw nothing ("No exception was thrown"). The hook cancels
+    /// from inside the walk, so the cancellation always lands while statements remain, whatever the machine's speed,
+    /// and the walk is asserted to stop at it.
+    /// </summary>
     [Fact]
     public async System.Threading.Tasks.Task ParseAsyncCancelledDuringTheWalkThrowsOperationCanceledException()
     {
-        var xml = ManyStatementsPlan(35_000);
+        var xml = ManyStatementsPlan(50);
         using var cts = new CancellationTokenSource();
-        cts.CancelAfter(50);
+        var highestStatementSeen = 0;
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ShowPlanParser.ParseAsync(xml, cts.Token));
+        ShowPlanParser.OnStatementParsedForTest.Value = count =>
+        {
+            highestStatementSeen = count;
+            if (count == 3)
+                cts.Cancel();
+        };
+        try
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ShowPlanParser.ParseAsync(xml, cts.Token));
+        }
+        finally
+        {
+            ShowPlanParser.OnStatementParsedForTest.Value = null;
+        }
+
+        Assert.True(highestStatementSeen <= 4,
+            $"the walk should have stopped at or just past statement 3, but saw statement {highestStatementSeen}");
     }
 
     /// <summary>

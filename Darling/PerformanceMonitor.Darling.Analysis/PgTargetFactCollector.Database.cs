@@ -90,17 +90,20 @@ ORDER BY coalesce(SUM(GREATEST(raw_temp_bytes, 0)), 0) DESC";
     /// <summary>
     /// How many deadlock reports the LOG capture holds for the window — the exemplar count that rides beside
     /// the counter on <c>PG_DEADLOCK_RATE</c>, never the rate itself. <c>$1</c> server_id, <c>$2</c>/<c>$3</c>
-    /// window (naive UTC). Bounded on <c>collection_time</c> (the indexed, chunk-partitioning column; the log
-    /// tail runs every five minutes, so a report is "captured in the window" up to one cadence after it
-    /// happened), and a plain <c>count(*)</c> because a captured graph IS an observation — the collector
+    /// window (naive UTC), <c>$4</c> the <see cref="PerformanceMonitor.Darling.Storage.EventWindowFloor"/> for <c>$2</c>.
+    /// Windowed on when the report HAPPENED (<c>occurred_at</c>, which the deadlock grid and the MCP reader use), falling
+    /// back to <c>collection_time</c> for a report whose timestamp the parser could not read (the column is nullable),
+    /// with the floor on <c>collection_time</c> beside it as the chunk-excluding bound (no upper side, so a report
+    /// collected a cadence late still counts). A plain <c>count(*)</c> because a captured graph IS an observation — the collector
     /// looked at the log and found this many — where the counter above is a difference.
     /// </summary>
     public const string PgTargetDeadlockExemplarCountSql = @"
 SELECT CAST(count(*) AS integer) AS exemplar_count
 FROM pg_deadlocks
 WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3";
+AND   COALESCE(occurred_at, collection_time) >= $2
+AND   COALESCE(occurred_at, collection_time) <= $3
+AND   collection_time >= $4";
 
     /// <summary>
     /// The ONE <c>pg_database_stats</c> read of the pass, emitting three facts (filled by lane 6 — #3542 step 6,
@@ -324,6 +327,7 @@ AND   collection_time <= $3";
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
             var exemplars = await cmd.ExecuteScalarAsync(context.CancellationToken);
             if (exemplars is not null && exemplars is not DBNull)

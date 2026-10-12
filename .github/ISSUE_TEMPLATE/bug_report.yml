@@ -85,8 +85,18 @@ body:
     id: errors
     attributes:
       label: Error Messages / Log Output
-      description: Paste any error messages or relevant log entries. Dashboard logs are in %LOCALAPPDATA%\PerformanceMonitor\Logs\; Lite logs are in %LOCALAPPDATA%\PerformanceMonitorLite-Data\logs\ (on versions before the data-root move, %LOCALAPPDATA%\PerformanceMonitorLite\logs\).
+      description: Paste any error messages or relevant log entries. Dashboard logs are in %LOCALAPPDATA%\PerformanceMonitor\Logs\; Lite logs are in %LOCALAPPDATA%\PerformanceMonitorLite-Data\logs\ (on versions before the data-root move, %LOCALAPPDATA%\PerformanceMonitorLite\logs\); Darling logs are in %ProgramData%\PerformanceMonitorDarling\logs\.
       render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: diagnostics-bundle
+    attributes:
+      label: Diagnostics bundle (Darling)
+      description: |
+        Run `PerformanceMonitor.Darling.Service.exe --diagnostics-bundle darling-bundle.json` from an elevated prompt in the service folder (Windows). On Linux, run `./PerformanceMonitor.Darling.Service --diagnostics-bundle darling-bundle.json`; for compose, run it with `docker compose exec` and copy the file out with `docker compose cp`.
+        Drag the file here (rename it to .txt if GitHub refuses .json). Host, server and database names in it are replaced with aliases, and secrets are removed. Open it and check it before you attach it.
     validations:
       required: false
 

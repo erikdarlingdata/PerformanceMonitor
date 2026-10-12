@@ -36,13 +36,14 @@ namespace Darling.Tests;
 /// loop is supposed to record — not the accumulator's own unit tests, and not a hand-called <c>Record</c>
 /// standing in for the wiring.
 ///
-/// <para><b>Serialization:</b> <see cref="DarlingWebEndpoints"/> keeps the accumulator in a process-lifetime
-/// static (<c>s_readLatency</c>), set by every <see cref="DarlingWebEndpoints.MapAll"/> call. Running this
-/// class's own methods concurrently with each other (xUnit parallelizes across CLASSES by default, not
-/// methods within one) would let one test's <c>MapAll</c> call stomp another's before its request lands, so
-/// every fact in this file has its own accumulator instance CAPTURED before the request — <see cref="BuildServer"/>
-/// returns it — rather than reading the shared static back, which sidesteps that race entirely without
-/// needing a <c>[Collection]</c> lock against any OTHER class's own <c>MapAll</c> call.</para>
+/// <para><b>Why each fact's samples are its own:</b> every <see cref="DarlingWebEndpoints.MapAll"/> call
+/// records into the accumulator IT was given, and the fact drains that same instance, so no other server set up
+/// at the same time (six test classes call <c>MapAll</c>, and xUnit runs classes in parallel) can take its
+/// samples. Until #4782 the endpoints kept the accumulator in a process-wide static that every <c>MapAll</c> call
+/// overwrote. This file captured its own instance and said that sidestepped the race, but the dispatch never
+/// read the captured instance, so a server another class built between <see cref="BuildServer"/> and the request
+/// took the sample. <see cref="ReadLatencyPerServerRecordingTests"/> pins the per-server recording directly,
+/// with no database.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class ReadLatencyWebRecordingTests
@@ -195,6 +196,36 @@ public sealed class ReadLatencyWebRecordingTests
         Assert.Equal(1, sample.Count);
     }
 
+    [Fact]
+    public async Task ADispatchEntryThatNotesAFallback_RecordsOneWebSample_WithOutcomeFallbackRaw()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the read-latency web-recording pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        const string routeName = "__test_fallback_raw";
+        using var seam = new ExtraDispatchEntryScope(
+            (routeName, (_, _, _) =>
+            {
+                ReadScope.NoteFallback(ReadFallback.FallbackRaw, "test dispatch entry", null);
+                return Task.FromResult("{\"ok\":true}");
+            }));
+
+        var readLatency = new ReadLatencyAccumulator();
+        var server = await BuildServer(postgres, readLatency);
+
+        var response = await Send(server, "/api/read/" + routeName);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var sample = Assert.Single(readLatency.Drain(), d => d.Surface == ReadSurface.Web && d.Route == routeName);
+        Assert.Equal(ReadOutcome.FallbackRaw, sample.Outcome);
+    }
+
     /// <summary>
     /// Sets <see cref="DarlingWebEndpoints.TestOnlyExtraDispatchEntry"/> for the scope's lifetime and
     /// clears it on <see cref="Dispose"/>. The entry is held per async flow (#4782): only this fact, and the
@@ -202,7 +233,7 @@ public sealed class ReadLatencyWebRecordingTests
     /// time in another flow builds its own <c>BuildReadDispatch</c> without it. Disposing still clears it, so
     /// a later step in this fact's own flow never sees a leftover.
     /// </summary>
-    private sealed class ExtraDispatchEntryScope : IDisposable
+    internal sealed class ExtraDispatchEntryScope : IDisposable
     {
         public ExtraDispatchEntryScope((string Name, DarlingWebEndpoints.ReadToolHandler Handler) entry)
         {

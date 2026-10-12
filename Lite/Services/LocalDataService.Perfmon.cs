@@ -33,7 +33,8 @@ SELECT
     cntr_value,
     delta_cntr_value,
     collection_time,
-    cntr_type
+    cntr_type,
+    sample_interval_seconds
 FROM v_perfmon_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
@@ -53,7 +54,8 @@ ORDER BY counter_name";
                 /* NULL stays NULL: a gauge row stores no delta (v62), and a 0 here would be #3642's fabricated zero. */
                 DeltaValue = reader.IsDBNull(3) ? null : reader.GetInt64(3),
                 CollectionTime = reader.GetDateTime(4),
-                CntrType = reader.IsDBNull(5) ? null : reader.GetInt32(5)
+                CntrType = reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                SampleIntervalSeconds = reader.IsDBNull(6) ? null : reader.GetInt32(6)
             });
         }
 
@@ -71,7 +73,7 @@ ORDER BY counter_name";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT DISTINCT counter_name
@@ -108,7 +110,7 @@ ORDER BY counter_name";
     /// </summary>
     public async Task<List<string>> GetDistinctPerfmonCountersForPickerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, DateTime? nowUtc = null)
     {
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         var effectiveNow = nowUtc ?? DateTime.UtcNow;
         var windowLength = endTime - startTime;
@@ -131,7 +133,7 @@ ORDER BY counter_name";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 SELECT
@@ -281,7 +283,7 @@ ORDER BY counter_name, 2";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
         var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
@@ -371,6 +373,10 @@ public class PerfmonRow
     /// <summary>The DMV's <c>cntr_type</c> as stored (v62, #3653 A7): the id every reader classifies by through
     /// <c>PerfmonCounterTypes</c>; <c>null</c> on a row written before the rung.</summary>
     public int? CntrType { get; set; }
+
+    /// <summary>The seconds <see cref="DeltaValue"/> covers under the three-state rule (0 = no delta knowable, null
+    /// on a gauge): the denominator of a rate row's per-second figure.</summary>
+    public int? SampleIntervalSeconds { get; set; }
 }
 
 public class PerfmonTrendPoint

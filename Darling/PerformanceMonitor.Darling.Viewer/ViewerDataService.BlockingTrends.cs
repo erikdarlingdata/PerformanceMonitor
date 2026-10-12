@@ -19,7 +19,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>One incident-count-per-minute bucket for the Blocking Trends charts (mirror of Lite's
 /// <c>TrendPoint</c>); shared by the blocking-incident and deadlock trend charts, which spike-plot it.</summary>
-public sealed record BlockingTrendPoint(DateTime Time, int Count);
+/// <remarks>#5244: <c>Source</c> is the arm that answered, "blocked-process-report" or "DMV snapshot" (the blocking trend only; the deadlock trend leaves it null).</remarks>
+public sealed record BlockingTrendPoint(DateTime Time, int Count, string? Source = null);
 
 /// <summary>One LCK% wait's per-second rate at a collection (mirror of Lite's <c>LockWaitTrendPoint</c>),
 /// grouped by wait type for the Blocking Trends lock-wait chart.
@@ -70,7 +71,7 @@ public sealed partial class ViewerDataService
     /// </summary>
     public const string BlockingTrendSql = """
         WITH bpr AS (
-            SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
+            SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'blocked-process-report' AS source
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $5
@@ -78,23 +79,24 @@ public sealed partial class ViewerDataService
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
-            SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
+            SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'DMV snapshot' AS source
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             GROUP BY DATE_TRUNC('minute', event_time)
         )
-        SELECT bucket, incident_count FROM bpr
+        SELECT bucket, incident_count, source FROM bpr
         UNION ALL
-        SELECT bucket, incident_count FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
+        SELECT bucket, incident_count, source FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
         ORDER BY bucket
         """;
 
     /// <summary>
     /// Deadlock count per minute — Lite's <c>GetDeadlockTrendAsync</c> ported to Postgres. Buckets on
-    /// the deadlock's own <c>deadlock_time</c> while windowing on the collection prefix. Reads
-    /// <c>v_deadlocks</c>. $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// the deadlock's own <c>deadlock_time</c> and windows on it too, so a count and its bucket agree. Reads
+    /// <c>v_deadlocks</c>. $1 server_id, $2 window start, $3 window end (naive UTC). $4 is the
+    /// <see cref="EventWindowFloor"/> for $2 (no upper bound, so a late-collected deadlock still counts).
     /// </summary>
     public const string DeadlockTrendSql = """
         SELECT
@@ -106,8 +108,9 @@ public sealed partial class ViewerDataService
                 COUNT(*) AS deadlock_count
             FROM v_deadlocks
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            AND   deadlock_time >= $2
+            AND   deadlock_time <= $3
+            AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', deadlock_time)
         ) sub
         ORDER BY bucket
@@ -172,11 +175,13 @@ public sealed partial class ViewerDataService
     /// #3540 trend family every row is unconditionally "rated" — a bucket's total is simply the SUM of
     /// its rows' durations, and <c>collection_count</c> can never be 0 for a bucket the GROUP BY produced.
     /// SUM of the bigint duration is <c>numeric</c> in Postgres, CAST back to bigint for the typed reader.
+    /// Grouped on <c>rtrim(wait_type)</c>, so a wait stored with and without the trailing space the collector
+    /// trimmed from #4884 on is one series under the clean name.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes.
     /// </summary>
     public const string WaitingTaskTrendSql = $$"""
         SELECT
-            wait_type,
+            rtrim(wait_type) AS wait_type,
             GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
             CAST(SUM(wait_duration_ms) AS bigint) AS total_wait_ms,
             MIN(collection_time) AS first_collection_time,
@@ -187,9 +192,9 @@ public sealed partial class ViewerDataService
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
         GROUP BY
-            wait_type, 2
+            rtrim(wait_type), 2
         ORDER BY
-            wait_type, 2
+            rtrim(wait_type), 2
         """;
 
     /// <summary>
@@ -243,13 +248,14 @@ public sealed partial class ViewerDataService
     /// <summary>Deadlock-per-minute buckets for one server over the window (Blocking Trends).</summary>
     public async Task<List<BlockingTrendPoint>> GetDeadlockTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-        => await ReadCountTrendAsync(DeadlockTrendSql, serverId, startUtc, endUtc, cancellationToken: cancellationToken);
+        => await ReadCountTrendAsync(DeadlockTrendSql, serverId, startUtc, endUtc, boundEventWindow: true, cancellationToken: cancellationToken);
 
     /// <summary>
     /// The blocking and deadlock trends share a (bucket timestamp, COUNT(*)) shape, so one reader maps
     /// both. COUNT(*) is bigint in Postgres, read via GetInt64 and narrowed to the record's int.
     /// The blocking trend applies the #1319 database filter (both CTEs carry database_name); the deadlock
     /// trend is server-global (v_deadlocks has no database_name column), so it leaves the filter off.
+    /// Both bind the <see cref="EventWindowFloor"/> last (<c>boundEventWindow</c>).
     /// </summary>
     private async Task<List<BlockingTrendPoint>> ReadCountTrendAsync(
         string sql, int serverId, DateTime startUtc, DateTime endUtc,
@@ -278,7 +284,8 @@ public sealed partial class ViewerDataService
         {
             items.Add(new BlockingTrendPoint(
                 reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : (int)reader.GetInt64(1)));
+                reader.IsDBNull(1) ? 0 : (int)reader.GetInt64(1),
+                reader.FieldCount > 2 && !reader.IsDBNull(2) ? reader.GetString(2) : null));
         }
 
         return items;
@@ -340,6 +347,28 @@ public sealed partial class ViewerDataService
 
         return items;
     }
+
+    /// <summary>
+    /// Where this server's waiting_tasks coverage starts for the range, through the shared probe
+    /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its
+    /// first row in the range if that is earlier. Current Waits compares it with the range's start and shows
+    /// "Showing since" when a custom range reaches back past what the store covers. A quiet stretch, when nothing
+    /// waited, does not raise it. Null when the range holds no row and no logged run, and when the range lies wholly
+    /// before the coverage (the run log outlives the table, so a logged run there makes the server count though its
+    /// rows are purged, and its coverage starts after the range ends).
+    /// </summary>
+    public Task<DateTime?> GetWaitingTasksDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("waiting_tasks"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>
+    /// Where this server's wait_stats coverage starts for the window, through the shared probe (<see cref="DataWindowFloor"/>), for the
+    /// Lock Wait Trend's "Showing since" note (#4966): the chart draws a flat zero where the store holds no wait_stats rows. Null when the
+    /// window holds no row and no logged run, and when it lies wholly before the coverage.
+    /// </summary>
+    public Task<DateTime?> GetLockWaitTrendDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("wait_stats"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>
     /// Waiting-task total duration by wait type for one server over the window (Current Waits).

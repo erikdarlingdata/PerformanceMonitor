@@ -48,6 +48,9 @@ internal sealed class BlockingPairRow
     public string BlockingClientApp { get; set; } = string.Empty;
     /// <summary>The contended object (schema.object where resolvable) — the blocked row's contentious_object.</summary>
     public string ContentiousObject { get; init; } = string.Empty;
+
+    /// <summary>This row's <see cref="PairRowKey"/> (#5361).</summary>
+    public PairRowKey Key => new(EventTime, BlockedSpid, BlockedEcid, BlockingSpid, BlockingEcid);
 }
 
 /// <summary>
@@ -62,6 +65,10 @@ internal readonly record struct SessionKey(int? MonitorLoop, int Spid, int Ecid)
 /// <summary>One level (one blocked/blocker edge) of a reconstructed chain, for drill-down.</summary>
 internal sealed class ChainLevel
 {
+    /// <summary>The event time of the pair-row this level was built from (#5361). With the two spid:ecid pairs it is the
+    /// level's <see cref="Key"/>: the drill-downs read the pair-rows without statement text and fetch the whole text of
+    /// only the levels they show, by this key.</summary>
+    public DateTime EventTime { get; init; }
     public int Level { get; init; }
     public int BlockingSpid { get; init; }
     public int BlockingEcid { get; init; }
@@ -84,7 +91,18 @@ internal sealed class ChainLevel
     public string BlockingClientApp { get; init; } = string.Empty;
     /// <summary>The contended object for this edge — the blocked side's contentious_object.</summary>
     public string ContentiousObject { get; init; } = string.Empty;
+
+    /// <summary>The key that finds this level's pair-row again (#5361): the same five values as
+    /// <see cref="BlockingPairRow.Key"/>, from the row the level was built from.</summary>
+    public PairRowKey Key => new(EventTime, BlockedSpid, BlockedEcid, BlockingSpid, BlockingEcid);
 }
+
+/// <summary>
+/// The event key of one pair-row (#5361): its event time and both sides' spid:ecid, with a missing spid or ecid
+/// read as 0 exactly as <c>Read</c> maps it. Two rows of one source with the same key are the same event, so the
+/// drill-downs fetch statement text by it, for the levels they show, after the reconstruction picked the rows.
+/// </summary>
+internal readonly record struct PairRowKey(DateTime EventTime, int BlockedSpid, int BlockedEcid, int BlockingSpid, int BlockingEcid);
 
 /// <summary>A single reconstructed blocking chain, rooted at an apex head blocker.</summary>
 internal sealed class ReconstructedChain
@@ -436,6 +454,7 @@ internal static class BlockingChainReconstructor
 
                 levels.Add(new ChainLevel
                 {
+                    EventTime = row.EventTime,
                     Level = level + 1,
                     BlockingSpid = node.Spid,
                     BlockingEcid = node.Ecid,

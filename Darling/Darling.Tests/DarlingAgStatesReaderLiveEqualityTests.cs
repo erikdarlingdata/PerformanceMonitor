@@ -179,7 +179,7 @@ public sealed class DarlingAgStatesReaderLiveEqualityTests
         var bodySucceeded = false;
         try
         {
-            var now = Micro(DateTime.UtcNow);
+            var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await SeedAsync(connection, now, ct);
 
             var sentinelIds = new HashSet<int>(AllNames.Select(Id));
@@ -328,7 +328,7 @@ public sealed class DarlingAgStatesReaderLiveEqualityTests
         var bodySucceeded = false;
         try
         {
-            var now = Micro(DateTime.UtcNow);
+            var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await SeedAsync(connection, now, ct);
             var sentinelIds = new HashSet<int>(AllNames.Select(Id));
 
@@ -443,7 +443,7 @@ public sealed class DarlingAgStatesReaderLiveEqualityTests
         command.Parameters.AddWithValue(serverName);
         command.Parameters.AddWithValue(serverName);
         command.Parameters.AddWithValue(enabled);
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(LiveClock.Now());
         await command.ExecuteNonQueryAsync(ct);
     }
 

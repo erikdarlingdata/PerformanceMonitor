@@ -165,7 +165,8 @@ public sealed class EmailSendCore
                 ? _repeatBudget.Evaluate(
                     metricName, serverName, decision, window,
                     aggregateRepeats: deliveryMode == AlertNotificationMode.Summary,
-                    incidents: context?.Incidents)
+                    incidents: context?.Incidents,
+                    serverKey: serverId)
                 : null;
 
             if (budget is not null && budget.ShouldSend)
@@ -188,8 +189,8 @@ public sealed class EmailSendCore
                    (base URL unset, or the dashboard disabled) renders neither body's link, same as today. */
                 var triageUrl = TriageLink.Build(
                     _settings.TriageBaseUrl, serverName, metricName, DateTime.UtcNow,
-                    WebhookAlertService.DerivePagerDutyDedupKey(
-                        string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, render.Context));
+                    WebhookAlertService.DerivePagerDutyDedupKeyForSend(
+                        string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, render.Context, _settings));
 
                 var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
                     metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding,

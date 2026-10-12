@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-16"?>
+<ShowPlanXML xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" Version="1.564" Build="16.0.4210.1" xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+  <BatchSequence>
+    <Batch>
+      <Statements>
+        <StmtSimple StatementCompId="1" StatementEstRows="1" StatementId="1" StatementOptmLevel="TRIVIAL" StatementSubTreeCost="0.0032831" StatementText="UPDATE dbo.settings SET value = N'CANARY-one' WHERE id = @id" ParameterizedText="(@1 nvarchar(4000),@2 int)UPDATE [dbo].[settings] set [value] = @1 WHERE [id]=@2" StatementType="UPDATE" QueryHash="0x1111111111111111" QueryPlanHash="0x2222222222222222" RetrievedFromCache="true">
+          <StatementSetOptions ANSI_NULLS="true" ANSI_PADDING="true" ANSI_WARNINGS="true" ARITHABORT="true" CONCAT_NULL_YIELDS_NULL="true" NUMERIC_ROUNDABORT="false" QUOTED_IDENTIFIER="true" />
+          <QueryPlan CachedPlanSize="16" CompileTime="1" CompileCPU="1" CompileMemory="96">
+            <RelOp AvgRowSize="9" EstimateCPU="0.0001581" EstimateIO="0.003" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="1" LogicalOp="Update" NodeId="0" Parallel="false" PhysicalOp="Clustered Index Update" EstimatedTotalSubtreeCost="0.0032831">
+              <OutputList />
+              <Update DMLRequestSort="false" ActualRebinds="0">
+                <Object Database="[db1]" Schema="[dbo]" Table="[settings]" Index="[PK_settings]" IndexKind="Clustered" Storage="RowStore" />
+                <SetPredicate>
+                  <ScalarOperator ScalarString="[db1].[dbo].[settings].[value] = N'CANARY-one'">
+                    <Assign>
+                      <ColumnReference Database="[db1]" Schema="[dbo]" Table="[settings]" Column="value" />
+                      <ScalarOperator ScalarString="N'CANARY-one'">
+                        <Const ConstValue="N'CANARY-one'" />
+                      </ScalarOperator>
+                    </Assign>
+                  </ScalarOperator>
+                </SetPredicate>
+                <RelOp AvgRowSize="9" EstimateCPU="0.0001581" EstimateIO="0.003" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="1" LogicalOp="Clustered Index Seek" NodeId="1" Parallel="false" PhysicalOp="Clustered Index Seek" EstimatedTotalSubtreeCost="0.0031">
+                  <OutputList />
+                  <IndexScan Ordered="true" ScanDirection="FORWARD" ForcedIndex="false" ForceSeek="false" NoExpandHint="false" Storage="RowStore">
+                    <DefinedValues />
+                    <Object Database="[db1]" Schema="[dbo]" Table="[settings]" Index="[PK_settings]" IndexKind="Clustered" Storage="RowStore" />
+                    <SeekPredicates>
+                      <SeekPredicateNew>
+                        <SeekKeys>
+                          <Prefix ScanType="EQ">
+                            <RangeColumns>
+                              <ColumnReference Database="[db1]" Schema="[dbo]" Table="[settings]" Column="id" />
+                            </RangeColumns>
+                            <RangeExpressions>
+                              <ScalarOperator ScalarString="CONVERT_IMPLICIT(int,[@2],0)">
+                                <Convert DataType="int" Style="0" Implicit="true">
+                                  <ScalarOperator>
+                                    <Identifier>
+                                      <ColumnReference Column="@2" />
+                                    </Identifier>
+                                  </ScalarOperator>
+                                </Convert>
+                              </ScalarOperator>
+                            </RangeExpressions>
+                          </Prefix>
+                        </SeekKeys>
+                      </SeekPredicateNew>
+                    </SeekPredicates>
+                  </IndexScan>
+                </RelOp>
+              </Update>
+            </RelOp>
+            <Warnings>
+              <PlanAffectingConvert ConvertIssue="Seek Plan" Expression="CONVERT_IMPLICIT(nvarchar(4000),[db1].[dbo].[settings].[value],0) = N'lit-ssf'" />
+            </Warnings>
+            <ParameterList>
+              <ColumnReference Column="@2" ParameterDataType="int" ParameterCompiledValue="(7)" ParameterRuntimeValue="(7)" />
+              <ColumnReference Column="@1" ParameterDataType="nvarchar(4000)" ParameterCompiledValue="N'CANARY-compiled'" ParameterRuntimeValue="N'CANARY-runtime'" />
+            </ParameterList>
+          </QueryPlan>
+        </StmtSimple>
+        <StmtSimple StatementCompId="2" StatementEstRows="1" StatementId="2" StatementOptmLevel="TRIVIAL" StatementSubTreeCost="0.0032831" StatementText="SELECT name FROM dbo.people WHERE name = @n" StatementType="SELECT" QueryHash="0x3333333333333333" QueryPlanHash="0x4444444444444444" RetrievedFromCache="true">
+          <StatementSetOptions ANSI_NULLS="true" ANSI_PADDING="true" ANSI_WARNINGS="true" ARITHABORT="true" CONCAT_NULL_YIELDS_NULL="true" NUMERIC_ROUNDABORT="false" QUOTED_IDENTIFIER="true" />
+          <QueryPlan CachedPlanSize="16" CompileTime="1" CompileCPU="1" CompileMemory="96">
+            <RelOp AvgRowSize="9" EstimateCPU="0.0001581" EstimateIO="0.003" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row" EstimateRows="1" LogicalOp="Clustered Index Seek" NodeId="0" Parallel="false" PhysicalOp="Clustered Index Seek" EstimatedTotalSubtreeCost="0.0032831">
+              <OutputList>
+                <ColumnReference Database="[db1]" Schema="[dbo]" Table="[people]" Column="name" />
+              </OutputList>
+              <IndexScan Ordered="true" ScanDirection="FORWARD" ForcedIndex="false" ForceSeek="false" NoExpandHint="false" Storage="RowStore">
+                <DefinedValues>
+                  <DefinedValue>
+                    <ColumnReference Database="[db1]" Schema="[dbo]" Table="[people]" Column="name" />
+                  </DefinedValue>
+                </DefinedValues>
+                <Object Database="[db1]" Schema="[dbo]" Table="[people]" Index="[PK_people]" IndexKind="Clustered" Storage="RowStore" />
+                <Predicate>
+                  <ScalarOperator ScalarString="[db1].[dbo].[people].[name]=N'CANARY-two'">
+                    <Compare CompareOp="EQ">
+                      <ScalarOperator>
+                        <Identifier>
+                          <ColumnReference Database="[db1]" Schema="[dbo]" Table="[people]" Column="name" />
+                        </Identifier>
+                      </ScalarOperator>
+                      <ScalarOperator>
+                        <Const ConstValue="N'CANARY-two'" />
+                      </ScalarOperator>
+                    </Compare>
+                  </ScalarOperator>
+                </Predicate>
+              </IndexScan>
+            </RelOp>
+            <Warnings>
+              <PlanAffectingConvert ConvertIssue="Seek Plan" Expression="CONVERT_IMPLICIT(nvarchar(4000),[db1].[dbo].[people].[name],0) = N'lit-ssf'" />
+            </Warnings>
+            <ParameterList>
+              <ColumnReference Column="@n" ParameterDataType="nvarchar(50)" ParameterCompiledValue="N'CANARY-keep'" ParameterRuntimeValue="N'plain-runtime'" />
+            </ParameterList>
+          </QueryPlan>
+        </StmtSimple>
+      </Statements>
+    </Batch>
+  </BatchSequence>
+</ShowPlanXML>

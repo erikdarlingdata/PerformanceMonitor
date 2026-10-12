@@ -30,6 +30,7 @@ namespace PerformanceMonitorLite.Tests;
 /// endpoint to have lost. If that case ever starts producing a Problem, the reporting becomes noise on
 /// every clean install and gets ignored exactly when it matters.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class McpSettingsGuardTests
 {
     private static string NewTempDir(string tag)

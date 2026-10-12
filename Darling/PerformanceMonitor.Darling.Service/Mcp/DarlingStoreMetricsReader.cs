@@ -1582,6 +1582,9 @@ LIMIT $1";
     /// <c>postmaster_start_time</c> (V139, #3955) rides along so <see cref="CheckpointerReading.From"/> can tell an
     /// interval that spans a restart; it is NULL on a row written before the rung, which the rule reads as no
     /// evidence on the newer row and as "compare its time" on the older one.
+    /// <c>checkpoint_longest_sync_ms</c> and <c>checkpoint_longest_sync_at</c> (V156, #4834) are the hour's longest
+    /// single sync; <see cref="CheckpointerReading.From"/> reads them off the NEWER row only, and a NULL pair (a row
+    /// from before the rung, or an hour the sampler took no difference in) is no evidence.
     /// </summary>
     public const string CheckpointerPairSql = $@"
 SELECT
@@ -1590,7 +1593,9 @@ SELECT
     checkpoint_sync_ms,
     checkpoints_requested,
     postmaster_start_time,
-    checkpoints_timed
+    checkpoints_timed,
+    checkpoint_longest_sync_ms,
+    checkpoint_longest_sync_at
 FROM collect.store_metrics
 WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}'
 AND   checkpoint_write_ms IS NOT NULL
@@ -1607,7 +1612,11 @@ LIMIT $1";
     /// <param name="Timed">(V140, #4037) The cumulative COUNT of TIMED checkpoints as the server reported it,
     /// null on a row written before the rung. <see cref="CheckpointerReading.From"/> reads a null on either
     /// sample as no evidence for the average-per-checkpoint arm, never as zero.</param>
-    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null, long? Timed = null);
+    /// <param name="LongestSyncMs">(V156, #4834) The hour's longest single checkpoint sync in milliseconds, as the sweep
+    /// stored it with this row; null on a row written before the rung or in an hour the sampler took no difference in.</param>
+    /// <param name="LongestSyncAt">(V156, #4834) The naive-UTC time of the minute sample that saw it; null with
+    /// <paramref name="LongestSyncMs"/>.</param>
+    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null, long? Timed = null, long? LongestSyncMs = null, DateTime? LongestSyncAt = null);
 
     /// <summary>
     /// Whether the pair yielded an interval (#3783). Five states rather than a nullable delta, for the reason
@@ -1676,6 +1685,13 @@ LIMIT $1";
     /// the rung — <see cref="IsPressure"/> then has no denominator for the average arm and states no pressure
     /// from sync alone, never falling back to the old summed-sync rule.</param>
     /// <param name="CumulativeTimed">The newest row's raw timed-checkpoint counter. Null when Absent or the row predates V140.</param>
+    /// <param name="LongestSyncMs">(V156, #4834) The longest single checkpoint sync inside the interval, in milliseconds,
+    /// as the worker's once-a-minute sample found it and the sweep stored it on the NEWER row. Null unless
+    /// <see cref="CheckpointerDeltaStatus.Observed"/> (a restart-spanning interval's sync includes the shutdown
+    /// checkpoint), and null on a row from before the rung or in an hour the sampler took no difference in - no
+    /// evidence, never zero. <see cref="IsPressure"/> judges it against the same per-checkpoint bar.</param>
+    /// <param name="LongestSyncAtUtc">(V156, #4834) The time of the minute sample that saw it, UTC; null with
+    /// <paramref name="LongestSyncMs"/>.</param>
     public sealed record CheckpointerReading(
         CheckpointerDeltaStatus Status,
         DateTime? ObservedAt,
@@ -1690,7 +1706,9 @@ LIMIT $1";
         bool PostmasterRestarted = false,
         DateTime? PostmasterStartTime = null,
         long? Timed = null,
-        long? CumulativeTimed = null)
+        long? CumulativeTimed = null,
+        long? LongestSyncMs = null,
+        DateTime? LongestSyncAtUtc = null)
     {
         /// <summary>The reading when the series holds no checkpointer row — every field null.</summary>
         public static CheckpointerReading Absent { get; } =
@@ -1763,6 +1781,16 @@ LIMIT $1";
                 ? newestTimed - previousTimed
                 : null;
 
+            /* (V156, #4834) The hour's longest single sync rides on the NEWER row, and counts only as the pair it is
+               stored as; the older row's pair described the hour before this interval. */
+            long? longestMs = null;
+            DateTime? longestAt = null;
+            if (newest.LongestSyncMs is long storedMs && newest.LongestSyncAt is DateTime storedAt)
+            {
+                longestMs = storedMs;
+                longestAt = DateTime.SpecifyKind(storedAt, DateTimeKind.Utc);
+            }
+
             return new CheckpointerReading(
                 CheckpointerDeltaStatus.Observed, observedAt, previousAt, Math.Round(span, 1),
                 newest.WriteMs - previous.WriteMs,
@@ -1770,7 +1798,8 @@ LIMIT $1";
                 newest.Requested - previous.Requested,
                 newest.WriteMs, newest.SyncMs, newest.Requested,
                 PostmasterRestarted: false, PostmasterStartTime: startedAt,
-                Timed: timedDelta, CumulativeTimed: newest.Timed);
+                Timed: timedDelta, CumulativeTimed: newest.Timed,
+                LongestSyncMs: longestMs, LongestSyncAtUtc: longestAt);
         }
 
         /// <summary>(V140, #4037) Checkpoints inside the interval, timed plus requested — the average arm's
@@ -1796,12 +1825,18 @@ LIMIT $1";
         /// <see cref="Timed"/> null; the average arm then states no pressure from sync alone rather than falling
         /// back to the old sum, and the requested arm still fires on any requested checkpoint. Zero checkpoints
         /// in the interval judges neither arm. False on every other status — an unmeasured interval is not a
-        /// finding, and that includes one that spans a postmaster restart (#3955).
+        /// finding, and that includes one that spans a postmaster restart (#3955). Since V156 (#4834) a third arm:
+        /// the interval's LONGEST single sync, stored on the newer row, held more than the same bar - an average
+        /// spreads one long sync over the interval's short ones, so a store whose one 23.5 s sync averaged 5.9 s
+        /// read as clean while the alert fired on it. A NULL longest sync (a row from before the rung, or an hour
+        /// the sampler took no difference in) is no evidence and leaves the other two arms to decide exactly as
+        /// they did.
         /// </summary>
         public bool IsPressure =>
             Status == CheckpointerDeltaStatus.Observed
             && ((Requested is long requested && requested > 0)
-                || (AverageSyncMsPerCheckpoint is double average && average > DarlingSelfAlertEvaluator.CheckpointSyncBarMs));
+                || (AverageSyncMsPerCheckpoint is double average && average > DarlingSelfAlertEvaluator.CheckpointSyncBarMs)
+                || (LongestSyncMs is long longest && longest > DarlingSelfAlertEvaluator.CheckpointSyncBarMs));
     }
 
     /// <summary>
@@ -1825,7 +1860,9 @@ LIMIT $1";
             var sample = new CheckpointerSample(
                 reader.GetDateTime(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3),
                 reader.IsDBNull(4) ? null : reader.GetDateTime(4),
-                reader.IsDBNull(5) ? null : reader.GetInt64(5));
+                reader.IsDBNull(5) ? null : reader.GetInt64(5),
+                reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                reader.IsDBNull(7) ? null : reader.GetDateTime(7));
             if (newest is null)
             {
                 newest = sample;
@@ -1844,9 +1881,10 @@ LIMIT $1";
     /// <c>PerServerBytes</c> is null when the server count is unknown or zero (a delta over no servers is
     /// not a rate). <c>MetricTime</c> is the time of the snapshot the day's point was read from (#4734), null when
     /// the point carried none. <c>SpanDays</c> is the whole days between the two points the delta spans: always 1
-    /// on a point <see cref="ComputeDailyGrowth"/> returns, because a wider pair is left out, and carried so the
-    /// payload says so. <c>Partial</c> is true for the day still in progress, whose point is the latest snapshot so
-    /// far and not a full day's growth.</summary>
+    /// on a point <see cref="ComputeDailyGrowth"/> returns, because a pair whose days are not consecutive, or
+    /// whose two snapshots are not about a day apart (#4734), is left out, and carried so the payload says so.
+    /// <c>Partial</c> is true for the day still in progress, whose point is the latest snapshot so far and not a
+    /// full day's growth.</summary>
     public sealed record DailyGrowthPoint(
         DateTime Day,
         long DeltaBytes,
@@ -1963,6 +2001,16 @@ ORDER BY object_kind, object_name, metric_time DESC";
         return rows;
     }
 
+    /// <summary>The shortest time between two daily points' snapshots that still reads as one day's growth
+    /// (#4734): half a day, where a span starts to round to one day. A shorter pair is left out, except for
+    /// today's partial point, which is short by nature.</summary>
+    internal static readonly TimeSpan MinDailyGrowthSpan = TimeSpan.FromHours(12);
+
+    /// <summary>The time between two daily points' snapshots at which a pair stops reading as one day's growth
+    /// (#4734): a day and a half, where a span starts to round to two days. A pair this far apart or more is
+    /// left out, today's partial point included.</summary>
+    internal static readonly TimeSpan MaxDailyGrowthSpan = TimeSpan.FromHours(36);
+
     /// <summary>
     /// The whole-store daily growth series from the store-kind daily points, ordered by day: each day's
     /// byte delta from the previous day's settled point, plus the per-server rate (delta divided by THAT
@@ -1980,9 +2028,21 @@ ORDER BY object_kind, object_name, metric_time DESC";
     /// would overstate what onboarding a server costs. The day after that one compares with the first day
     /// back and is right. Each point carries the time of its own snapshot and the days it spans.</para>
     ///
+    /// <para><b>Consecutive days are not always a day apart (#4734).</b> Each day's point is that day's LAST
+    /// snapshot. If the service stopped at 00:30 on one day and ran again until 23:59 the next, the two points
+    /// are on consecutive calendar days and about 47 hours apart, and the pair still reads as one day's growth,
+    /// with the per-server rate built on it. So when both points carry the time of their own snapshot, the
+    /// pair is kept only when those two times are at least <see cref="MinDailyGrowthSpan"/> and under
+    /// <see cref="MaxDailyGrowthSpan"/> apart (a span that rounds to one day; today's partial point is exempt from
+    /// the lower bound, below); otherwise it is left out, like a calendar gap is. The calendar-day test above
+    /// still applies to every pair, so a whole day with no point between two close-in-time snapshots is still a
+    /// gap; when either point has no time it is the only test.</para>
+    ///
     /// <para><b>Today is partial.</b> The day's point is its LAST snapshot, and the last snapshot of the day
     /// still in progress (the UTC date of <paramref name="asOfUtc"/>) is only the latest so far, so its delta
-    /// covers part of a day. It is kept, marked <c>Partial</c>, and never shown as a full day's growth.</para>
+    /// covers part of a day. It is kept, marked <c>Partial</c>, and never shown as a full day's growth. A
+    /// partial day is short by nature, so only the upper bound of the span applies to it: a pair
+    /// <see cref="MaxDailyGrowthSpan"/> or more apart is left out even for today.</para>
     /// </summary>
     public static List<DailyGrowthPoint> ComputeDailyGrowth(
         IReadOnlyList<StoreMetricDailyPoint> storePoints, DateTime? asOfUtc = null)
@@ -2005,6 +2065,21 @@ ORDER BY object_kind, object_name, metric_time DESC";
                 continue;
             }
 
+            var partial = current.Day.Date >= today;
+
+            /* #4734: consecutive calendar days can still be nearly two days apart, because each point is the
+               day's LAST snapshot. Measure the span from the two snapshots' own times. A point with no time
+               leaves nothing to measure, and the day's midnight bucket is not a snapshot time to measure from,
+               so that pair stays judged by its calendar days alone. */
+            if (previous.MetricTime is { } previousAt && current.MetricTime is { } currentAt)
+            {
+                var elapsed = currentAt - previousAt;
+                if (elapsed >= MaxDailyGrowthSpan || (elapsed < MinDailyGrowthSpan && !partial))
+                {
+                    continue;
+                }
+            }
+
             if (previous.TotalBytes is not { } before || current.TotalBytes is not { } after)
             {
                 continue;
@@ -2016,7 +2091,7 @@ ORDER BY object_kind, object_name, metric_time DESC";
                 : null;
 
             growth.Add(new DailyGrowthPoint(
-                current.Day, delta, perServer, current.MetricTime, spanDays, Partial: current.Day.Date >= today));
+                current.Day, delta, perServer, current.MetricTime, spanDays, Partial: partial));
         }
 
         return growth;

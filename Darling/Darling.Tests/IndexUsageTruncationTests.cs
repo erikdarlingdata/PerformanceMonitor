@@ -59,7 +59,7 @@ public sealed class IndexUsageTruncationTests
     public void TheQueryCarriesANullTolerantDatabasePredicate_AndABoundCap()
     {
         SqlTextPin.AssertExpresses(
-            "($2::text IS NULL OR database_name = $2::text)",
+            "($2::text[] IS NULL OR database_name = ANY($2))",
             ReaderSql,
             "there is no way to ask about one database");
         SqlTextPin.AssertExpresses("LIMIT $3", ReaderSql, "the cap is no longer the caller's to set");
@@ -79,7 +79,7 @@ public sealed class IndexUsageTruncationTests
 
         SqlTextPin.AssertExpresses("SELECT count(*)", countSql, "the count is not a count");
         SqlTextPin.AssertExpresses(
-            "($2::text IS NULL OR database_name = $2::text)",
+            "($2::text[] IS NULL OR database_name = ANY($2))",
             countSql,
             "the count is over a different population than the rows");
 
@@ -99,7 +99,7 @@ public sealed class IndexUsageTruncationTests
         {
             "WHERE server_id = $1",
             "collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)",
-            "($2::text IS NULL OR database_name = $2::text)",
+            "($2::text[] IS NULL OR database_name = ANY($2))",
         })
         {
             Assert.Contains(clause, ReaderSql, StringComparison.Ordinal);

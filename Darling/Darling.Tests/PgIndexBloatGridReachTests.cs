@@ -539,7 +539,9 @@ public sealed class PgIndexBloatGridReachTests
 
         Assert.True(composite > 0, "fanout is gone - remap this pin rather than deleting it");
 
-        var fanout = tabs[composite..Math.Min(tabs.Length, composite + 2_000)];
+        /* The whole function body (to the first closing brace at column 0), not a fixed window: fanout grows. */
+        var fanoutEnd = tabs.IndexOf("\n}\n", composite, StringComparison.Ordinal);
+        var fanout = tabs[composite..(fanoutEnd > 0 ? fanoutEnd : tabs.Length)];
 
         Assert.Contains("getPath(res.data, spec.noteKey)", fanout, StringComparison.Ordinal);
         Assert.Contains("noticeStrip(note)", fanout, StringComparison.Ordinal);

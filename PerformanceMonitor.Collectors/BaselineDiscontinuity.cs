@@ -186,10 +186,15 @@ public static class BaselineDiscontinuities
     /// The rendered sentence, one spelling for the two desktop viewers and the web page:
     /// <c>baseline discontinuity at 2026-09-20 03:12 (restart)</c>. <paramref name="displayAt"/> is the instant
     /// ALREADY converted to the surface's display clock — this method does not know which clock a surface shows
-    /// and must not guess.
+    /// and must not guess. <paramref name="offsetSuffix"/> is the caller's UTC offset for that instant when its
+    /// wall time happens twice in the display zone (the repeated autumn hour; <c>DisplayZone.AmbiguousOffsetSuffix</c>
+    /// answers it, #4766): it follows the time after one space, <c>baseline discontinuity at 2026-11-01 01:30 -04:00
+    /// (restart)</c>, so the two markers a repeated hour holds read differently. <c>null</c> (the default) leaves
+    /// the sentence exactly as it was; this method takes the text and does not decide when to add it.
     /// </summary>
-    public static string Sentence(DateTime displayAt, string reason)
-        => "baseline discontinuity at " + displayAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " (" + reason + ")";
+    public static string Sentence(DateTime displayAt, string reason, string? offsetSuffix = null)
+        => "baseline discontinuity at " + displayAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)
+            + (offsetSuffix is null ? "" : " " + offsetSuffix) + " (" + reason + ")";
 
     /// <summary>The payload projection — <see cref="BaselineDiscontinuityPayload"/> per item, oldest first, the store's frame with no zone suffix.</summary>
     public static IReadOnlyList<BaselineDiscontinuityPayload> ToPayload(IReadOnlyList<BaselineDiscontinuity> items)

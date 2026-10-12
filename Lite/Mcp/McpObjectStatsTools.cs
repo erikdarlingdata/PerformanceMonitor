@@ -33,7 +33,8 @@ public sealed class McpObjectStatsTools
     public static async Task<string> GetTableIndexSizes(
         LocalDataService dataService,
         ServerManager serverManager,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -41,11 +42,29 @@ public sealed class McpObjectStatsTools
         try
         {
             /* Over-fetch by one so truncation is observed, not inferred from a full page (#3541 A3's rule). */
-            var rows = await dataService.GetObjectSizeGrowthAsync(resolved.ServerId, TableSizesTop + 1);
+            /* #5244: database_name appended LAST (H1). A blank is "no filter"; any other value is kept exactly (no trim). The cap and the
+               over-fetch row follow the filter, so the page is the largest tables of the chosen database; the history block stays the
+               server's own span. */
+            var names = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
+            var rows = await dataService.GetObjectSizeGrowthAsync(resolved.ServerId, TableSizesTop + 1, names);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
-                    ?? McpHelpers.Status("unavailable", "No object size data available. Index/object stats are collected daily.");
+                /* A filter that matches no table is a different answer from a server that collects no index stats (Darling's twin
+                   words it the same, minus the count of the server's other rows, which Lite has no read for). */
+                if (names != null && (await dataService.GetObjectSizeGrowthAsync(resolved.ServerId, 1)).Count > 0)
+                {
+                    return McpHelpers.StatusForDatabase("empty",
+                        $"No table size rows for {McpDatabaseSelection.Scope(names)} on {resolved.ServerName} at the latest snapshot, "
+                        + "though the server has index rows in its other databases. Check the database name against get_database_sizes: "
+                        + "the filter matches exactly, and an excluded or renamed database looks identical to one with no tables.",
+                        McpDatabaseSelection.Describe(names));
+                }
+
+                /* #5244: every answer shape says which database it was limited to (null for every database). */
+                return McpHelpers.WithDatabase(
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats"),
+                           McpDatabaseSelection.Describe(names))
+                    ?? McpHelpers.StatusForDatabase("unavailable", "No object size data available. Index/object stats are collected daily.", McpDatabaseSelection.Describe(names));
             }
 
             var truncated = rows.Count > TableSizesTop;
@@ -83,6 +102,7 @@ public sealed class McpObjectStatsTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                database_name = McpDatabaseSelection.Describe(names),
                 history = new
                 {
                     earliest_snapshot = span.EarliestSnapshotTime.ToString("o"),
@@ -154,12 +174,13 @@ public sealed class McpObjectStatsTools
             var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
 
             /* The stamps below are THIS server's local wall clock in the store, so putting them in the
-               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
-               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
-               because the WPF grids read the same rows and render them through ServerTimeHelper — that
-               surface has its own frame defect and its own issue, and folding the two together would fix
-               one by breaking the other. */
-            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+               naive-UTC frame every other field on this payload uses needs THIS server's clock, not the
+               desktop tab's, and converts each stamp at its own instant so one from before a daylight
+               saving change is not an hour off (#4793). See McpServerLocalWindow. De-skewed HERE and not
+               inside LocalDataService because the WPF grids read the same rows and render them through
+               ServerTimeHelper — that surface has its own frame defect and its own issue, and folding the
+               two together would fix one by breaking the other. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
 
             var rows = await dataService.GetIndexUsageAsync(resolved.ServerId, limit, database);
             if (rows.Count == 0)
@@ -207,7 +228,7 @@ public sealed class McpObjectStatsTools
                 user_lookups = r.UserLookups,
                 total_reads = r.TotalReads,
                 user_updates = r.UserUpdates,
-                last_user_access = r.LastUserAccess?.AddMinutes(-utcOffsetMinutes).ToString("o")
+                last_user_access = r.LastUserAccess is { } lastAccess ? serverClock.ToUtc(lastAccess).ToString("o") : null
             });
 
             return JsonSerializer.Serialize(new
@@ -238,7 +259,8 @@ public sealed class McpObjectStatsTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Maximum rows to return. Default 75.")] int limit = ObjectLockingTop)
+        [Description("Maximum rows to return. Default 75.")] int limit = ObjectLockingTop,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -251,13 +273,59 @@ public sealed class McpObjectStatsTools
             /* #4198: limit + 1 as the fetch, the extra row as the OBSERVED truncation signal (#3653's
                dialect) -- McpHelpers.BoundPage trims the page back to `limit`, so objects_returned below is
                always a count of the page and never of the over-fetch. Darling's twin mirrors this. */
-            var fetched = await dataService.GetIndexLockingAsync(resolved.ServerId, limit + 1);
+            /* #5231: database_name appended LAST (#5244 H1). GetIndexLockingAsync already filters on one
+               name (the FinOps tab's picker), so the argument is passed straight through; a blank is "no
+               filter", the same reading get_index_usage gives it. */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
+            var fetched = await dataService.GetIndexLockingAsync(resolved.ServerId, limit + 1, database);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
+
+            /* #5372 M2: with a database chosen the optimized-locking note covers only that database, as Darling's
+               twin does, so the same call carries the note in both apps or in neither. */
+            var optimizedLockingNote = await dataService.GetOptimizedLockingNoteAsync(resolved.ServerId, database);
+            var inScope = database is null ? "" : $" in database '{database}'";
 
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
-                    ?? McpHelpers.Status("unavailable", "No locking/contention data recorded. Index/object stats are collected daily.");
+                /* #5372 M2: a chosen database with no contention is a DIFFERENT answer from a server with none (the
+                   server instructions: `empty` is "looked, found nothing", `unavailable` is "could have it, does
+                   not"), so a filtered empty read looks at the whole server once (limit 1, the same anchor), the
+                   probe get_index_usage runs above and Darling's twin runs. */
+                if (database is not null
+                    && (await dataService.GetIndexLockingAsync(resolved.ServerId, 1)).Count > 0)
+                {
+                    return McpHelpers.Status("empty",
+                        $"No lock/latch contention{inScope} on {resolved.ServerName} at the latest snapshot, though other databases on "
+                        + "the server have some. Check the database name against get_database_sizes "
+                        + "— the filter matches exactly, and an excluded or renamed database looks identical to one with no contention."
+                        + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
+                        optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
+                }
+
+                var notCollected = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats");
+                if (notCollected is not null) return notCollected;
+
+                /* #5372 (r2 Low): a latest snapshot that holds index rows, none of them contended, is a TRUE negative:
+                   the collector looked and found nothing, so the word is `empty` (the server instructions' "looked,
+                   found nothing"). `unavailable` is kept for a server with no snapshot at all, data it could have
+                   and does not have now. The same sentence shape as Darling's twin. */
+                if ((await dataService.GetIndexUsageMatchCountAsync(resolved.ServerId)) > 0)
+                {
+                    return McpHelpers.Status("empty",
+                        "No lock/latch contention"
+                        + (database is null ? "" : $"{inScope} or in any other database")
+                        + $" on {resolved.ServerName} at the latest snapshot."
+                        + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
+                        optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
+                }
+
+                return McpHelpers.Status("unavailable",
+                        (database is null
+                            ? "No locking/contention data recorded."
+                            : $"No locking/contention data recorded for database '{database}', or for any other database on this server.")
+                        + " Index/object stats are collected daily."
+                        + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
+                        optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
             }
 
             var result = rows.Select(r => new
@@ -293,11 +361,13 @@ public sealed class McpObjectStatsTools
                 /* #4198: no separate match-count query (unlike get_index_usage) -- BoundPage's over-fetch
                    only OBSERVES "more than limit", not how many more, so the note says that and no more. */
                 note = truncated
-                    ? $"TRUNCATED: more than {rows.Count:N0} indexes have lock/latch contention at the latest "
+                    ? $"TRUNCATED: more than {rows.Count:N0} indexes have lock/latch contention{inScope} at the latest "
                       + "snapshot. Rows are ordered by total wait time (row lock + page lock + page latch + "
                       + "page I/O latch) descending, so the highest-contention indexes are returned first; "
                       + "raise limit to see more."
-                    : "Complete: every index with lock/latch contention at the latest snapshot is included.",
+                    : $"Complete: every index with lock/latch contention{inScope} at the latest snapshot is included.",
+                optimized_locking_note = optimizedLockingNote,
+                separately_monitored_note = PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 objects = result
             }, McpHelpers.JsonOptions);
         }

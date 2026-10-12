@@ -251,7 +251,7 @@ public sealed class DarlingMcpFleetSweepToolsTests
         Assert.Contains("DarlingMcpFleetSweepTools.GetSweepReports(pg, logger,", source, StringComparison.Ordinal);
         /* #4214 part 2: BuildReadDispatch also threads postgresConfig (get_store_host's own config seat),
            so the literal grew a second argument; still the same logger-by-closure call MapAll makes. */
-        Assert.Contains("BuildReadDispatch(logger, postgresConfig)", source, StringComparison.Ordinal);
+        Assert.Contains("BuildReadDispatch(logger, postgresConfig, registryState)", source, StringComparison.Ordinal);
 
         /* The delegate itself did NOT grow a seat — the ~100-entry table stays three-parameter,
            which is the whole reason the logger rides by closure. */

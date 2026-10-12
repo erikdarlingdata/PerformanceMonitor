@@ -54,6 +54,17 @@ internal sealed class StandInUnixModes : IUnixDirectoryModes
 
     public void Set(string directory, UnixFileMode mode) => _modes[Key(directory)] = mode;
 
+    private readonly Dictionary<string, UnixFileOwner> _owners = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The user id the stand-in reports the service as running under (#5366).</summary>
+    public uint EffectiveUserId { get; set; } = 1000;
+
+    /// <summary>Reports <paramref name="path"/> as owned by <paramref name="userId"/> with <paramref name="links"/> names
+    /// (#5366). A path never reported has no owner to check, as on a platform whose stat layout is not known.</summary>
+    public void ReportOwner(string path, uint userId, ulong links = 1) => _owners[Key(path)] = new UnixFileOwner(userId, links);
+
+    public UnixFileOwner? OwnerOf(string path) => _owners.TryGetValue(Key(path), out var owner) ? owner : null;
+
     /// <summary>A file someone else wrote that the file check trusts, which is the point: owner-only on Unix (a 0600
     /// file whose owner managed code cannot see), and the temp directory's inherited ACL on Windows.</summary>
     public static void WriteOwnerOnly(string path, string text)

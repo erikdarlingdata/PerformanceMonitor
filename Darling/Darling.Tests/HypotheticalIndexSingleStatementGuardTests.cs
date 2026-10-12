@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// rather than leaving a reader to take it on trust.
 /// </para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class HypotheticalIndexSingleStatementGuardTests
 {
     /// <summary>

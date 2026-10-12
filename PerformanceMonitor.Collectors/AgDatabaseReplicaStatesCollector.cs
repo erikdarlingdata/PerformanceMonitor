@@ -128,7 +128,7 @@ public sealed class AgDatabaseReplicaStatesCollector : CollectorDefinitionBase<A
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     ag_name = ag.name,
     database_name = d.name,
     replica_server_name = ar.replica_server_name,

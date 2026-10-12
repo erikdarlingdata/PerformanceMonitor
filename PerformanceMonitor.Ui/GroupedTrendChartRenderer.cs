@@ -33,12 +33,25 @@ internal sealed class GroupedTrendChartRenderer
 
     private readonly ChartRenderHelper _chartHelper;
     private readonly Func<DateTime, DateTime> _project;
+    private readonly Func<TimeZoneInfo>? _displayZone;
 
-    internal GroupedTrendChartRenderer(ChartRenderHelper chartHelper, Func<DateTime, DateTime> project)
+    /// <param name="chartHelper">The app's chart clear/legend helper.</param>
+    /// <param name="project">Turns a stored UTC sample time into the app's plotted X.</param>
+    /// <param name="displayZone">
+    /// Set by an app whose chart X is the UTC instant (#4766): every sample is then plotted at its own UTC time
+    /// (<paramref name="project"/> is not applied) and the bottom axis prints whole wall-clock times of the zone
+    /// (<see cref="AxesExtensions.DateTimeTicksBottomUtc"/>). Omitted, the renderer plots <paramref name="project"/>'s
+    /// value and draws the axis exactly as it always has.
+    /// </param>
+    internal GroupedTrendChartRenderer(ChartRenderHelper chartHelper, Func<DateTime, DateTime> project, Func<TimeZoneInfo>? displayZone = null)
     {
         _chartHelper = chartHelper;
         _project = project;
+        _displayZone = displayZone;
     }
+
+    /// <summary>The X a sample at <paramref name="sampleUtc"/> plots at: its UTC time when a display zone was passed, else the app's projection of it.</summary>
+    private double PlotX(DateTime sampleUtc) => _displayZone is null ? _project(sampleUtc).ToOADate() : sampleUtc.ToOADate();
 
     /// <summary>
     /// Renders one grouped per-second trend: when the window has no data, a flat labelled zero-line across
@@ -70,7 +83,7 @@ internal sealed class GroupedTrendChartRenderer
             zeroLine.LegendText = emptyLegend;
             zeroLine.Color = ScottPlot.Color.FromHex(SeriesColors[0]);
             zeroLine.MarkerSize = 0;
-            chart.Plot.Axes.DateTimeTicksBottomDateChange();
+            chart.Plot.Axes.DateTimeTicksBottomFor(_displayZone);
             chart.Plot.Axes.SetLimitsX(xMin, xMax);
             ChartStyle.ReapplyAxisColors(chart);
             chart.Plot.YLabel(yLabel);
@@ -92,7 +105,7 @@ internal sealed class GroupedTrendChartRenderer
         foreach (var group in byGroup)
         {
             var points = group.OrderBy(time).ToList();
-            var times = points.Select(d => _project(time(d)).ToOADate()).ToArray();
+            var times = points.Select(d => PlotX(time(d))).ToArray();
             var values = points.Select(value).ToArray();
 
             var plot = chart.Plot.Add.TimeSeries(times, values);
@@ -105,7 +118,7 @@ internal sealed class GroupedTrendChartRenderer
             if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
         }
 
-        chart.Plot.Axes.DateTimeTicksBottomDateChange();
+        chart.Plot.Axes.DateTimeTicksBottomFor(_displayZone);
         chart.Plot.Axes.SetLimitsX(xMin, xMax);
         ChartStyle.ReapplyAxisColors(chart);
         chart.Plot.YLabel(yLabel);

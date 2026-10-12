@@ -76,11 +76,10 @@ public sealed class CollectionHealthWindowTests : IClassFixture<SharedDuckDbFixt
         await SeedLogAsync("cpu_utilization", inWindowLate, "SUCCESS");
         await SeedLogAsync("wait_stats", afterEnd, "SUCCESS");
 
-        /* GetTimeRange subtracts UtcOffsetMinutes from a custom from/to (server-time -> UTC); feed
-           server-time bounds so the read lands exactly on [start,end] UTC regardless of the machine tz. */
-        var offset = ServerTimeHelper.UtcOffsetMinutes;
-        var fromDate = start.AddMinutes(offset);
-        var toDate = end.AddMinutes(offset);
+        /* A custom from/to is a naive-UTC pair (#4766) and GetTimeRange returns it as it came, so the bounds are
+           the UTC instants themselves and the read lands exactly on [start,end] whatever the machine's zone. */
+        var fromDate = start;
+        var toDate = end;
 
         /* hoursBack=4 would (old bug) sweep everything >= now-4h, pulling in afterEnd (now-30m); the
            custom To bound must exclude it. */

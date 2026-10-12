@@ -116,7 +116,7 @@ public sealed class SharedBaselineCacheTests : IClassFixture<SharedDuckDbFixture
     public void TheTier_IsOnePerStore()
     {
         Assert.Same(BaselineCache.For(_duckDb), BaselineCache.For(_duckDb));
-        var other = new DuckDbInitializer(Path.Combine(Path.GetTempPath(), "LiteTests_3941_" + Guid.NewGuid().ToString("N")[..8], "other.duckdb"));
+        using var other = new DuckDbInitializer(Path.Combine(Path.GetTempPath(), "LiteTests_3941_" + Guid.NewGuid().ToString("N")[..8], "other.duckdb"));
         Assert.NotSame(BaselineCache.For(_duckDb), BaselineCache.For(other));
     }
 

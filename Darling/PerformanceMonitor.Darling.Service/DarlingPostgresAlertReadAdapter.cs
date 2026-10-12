@@ -51,7 +51,8 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
             autovacuum_freeze_max_age,
             autovacuum_multixact_freeze_max_age,
             MAX(frozen_xid_age) OVER (PARTITION BY database_name) AS window_peak_xid_age,
-            MAX(min_multixid_age) OVER (PARTITION BY database_name) AS window_peak_multixact_age
+            MAX(min_multixid_age) OVER (PARTITION BY database_name) AS window_peak_multixact_age,
+            collection_time AS newest_sample_utc
         FROM pg_wraparound_stats
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -96,7 +97,7 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
     /// </summary>
     internal const string XminSql = """
         WITH latest AS (
-            SELECT source, holder, xmin_age, detail
+            SELECT source, holder, xmin_age, detail, collection_time
             FROM pg_xmin_horizon
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -136,7 +137,8 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
             w.observations_total,
             l.detail,
             w.observations_above_threshold,
-            c.captures_in_window
+            c.captures_in_window,
+            l.collection_time AS newest_sample_utc
         FROM latest AS l
         CROSS JOIN window_stats AS w
         CROSS JOIN captures AS c
@@ -150,7 +152,7 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
     internal const string SlotSql = """
         WITH latest AS (
             SELECT DISTINCT ON (slot_name)
-                slot_name, wal_status, is_active, retained_wal_bytes, inactive_since
+                slot_name, wal_status, is_active, retained_wal_bytes, inactive_since, collection_time
             FROM collect.pg_replication_slot_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -170,7 +172,8 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
             l.is_active,
             l.retained_wal_bytes,
             GREATEST(l.retained_wal_bytes - e.first_retained, 0) AS growth_bytes,
-            l.inactive_since
+            l.inactive_since,
+            l.collection_time AS newest_sample_utc
         FROM latest AS l
         JOIN earliest AS e ON e.slot_name = l.slot_name
         """;
@@ -310,7 +313,9 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
                    answer consistently off one query. 0 reads as "no window data" -> FreezingIsKeepingUp
                    false, the conservative default. */
                 reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                reader.IsDBNull(6) ? 0 : reader.GetInt64(6)));
+                reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                /* ordinal 7: the row's collection_time, the instant the alert's age line is counted from (#5642). */
+                AsUtc(reader, 7)));
         }
 
         return rows;
@@ -345,7 +350,9 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
                evaluator's floor keeps that from firing, the same conservative default the wraparound
                window peaks take. */
             reader.IsDBNull(6) ? 0 : (int)reader.GetInt64(6),
-            reader.IsDBNull(7) ? 0 : (int)reader.GetInt64(7));
+            reader.IsDBNull(7) ? 0 : (int)reader.GetInt64(7),
+            /* ordinal 8: the winning row's collection_time (#5642). */
+            AsUtc(reader, 8));
     }
 
     public async Task<List<PostgresSlotAlertInfo>> GetReplicationSlotRiskAsync(
@@ -365,11 +372,18 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
                 !reader.IsDBNull(2) && reader.GetBoolean(2),
                 reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
-                reader.IsDBNull(5) ? null : reader.GetDateTime(5)));
+                reader.IsDBNull(5) ? null : reader.GetDateTime(5),
+                /* ordinal 6: this slot's latest collection_time (#5642). */
+                AsUtc(reader, 6)));
         }
 
         return rows;
     }
+
+    /// <summary>A store timestamp column read as a UTC instant, or null (#5642). The store keeps naive UTC, so the
+    /// Kind is stamped, never converted.</summary>
+    private static DateTime? AsUtc(NpgsqlDataReader reader, int ordinal) =>
+        reader.IsDBNull(ordinal) ? null : DateTime.SpecifyKind(reader.GetDateTime(ordinal), DateTimeKind.Utc);
 
     /// <summary>Naive-UTC now, Kind-Unspecified - the product's PG timestamp discipline (the same
     /// helper DarlingAlertReadAdapter carries). Kind=Utc binds infer timestamptz and shift the freshness

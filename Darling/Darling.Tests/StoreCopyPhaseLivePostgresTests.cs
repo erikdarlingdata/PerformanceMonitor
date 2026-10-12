@@ -229,8 +229,8 @@ public class StoreCopyPhaseLivePostgresTests
     /// deadline is a bare <see cref="TimeoutException"/> carrying
     /// <see cref="StoreCopyStartDeadline.BreachMessage"/>. Remove the bound and this test does not fail
     /// slowly or ambiguously: it waits for the connection's timeout and then fails on the type. The
-    /// elapsed range is asserted on both sides as well, so a deadline accidentally written in
-    /// milliseconds cannot satisfy the type and message alone.</para>
+    /// elapsed floor is asserted as well, so a deadline accidentally written in
+    /// milliseconds cannot satisfy the type and message alone (#5602: the ceiling is the type and message).</para>
     ///
     /// <para><b>It really does cost the sweep deadline in wall clock</b>, and that is the price of driving
     /// the SHIPPED private body rather than a copy: the production call site takes
@@ -295,13 +295,17 @@ public class StoreCopyPhaseLivePostgresTests
            from the re-attempt gate, and would be reported as an orderly stop. */
         Assert.IsNotAssignableFrom<OperationCanceledException>(fault);
 
-        /* It fired on its own clock rather than the connection's. Both sides: the upper bound is what says
-           Npgsql's timeout did not do this, and the lower bound is what a deadline written in
-           milliseconds would fail. */
-        Assert.InRange(
-            clock.Elapsed,
-            StoreCopyStartDeadline.Deadline - TimeSpan.FromSeconds(1),
-            TimeSpan.FromSeconds(commandTimeoutSeconds));
+        /* It fired on its own clock rather than the connection's. #5602: the LOWER bound only, as a clock check.
+           What a deadline written in milliseconds would fail is this floor, and load can only lengthen an
+           elapsed time, never shorten it, so it cannot flake. The upper bound this used to carry (the
+           connection's command timeout) is now held by the work: Npgsql's own timeout arrives as an
+           NpgsqlException wrapping a TimeoutException, which the exact-type and exact-message assertions above
+           already reject, so a late-firing deadline on a loaded runner no longer fails and the bug the upper
+           bound was written for, "the connection's bound ended the stall", still does. */
+        Assert.True(
+            clock.Elapsed >= StoreCopyStartDeadline.Deadline - TimeSpan.FromSeconds(1),
+            $"The start phase gave up after {clock.Elapsed.TotalSeconds:F1}s, before the sweep deadline "
+            + $"({StoreCopyStartDeadline.Deadline.TotalSeconds:F0}s) less a second: the deadline is not the sweep deadline.");
 
         /* And the consequences the phase axis carries, on this fault: it is a transport fault, it is
            start-phase, so the gate accepts it — a re-attempt after a start-phase stall is exactly-once and

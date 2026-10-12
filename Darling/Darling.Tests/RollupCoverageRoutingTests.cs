@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
 namespace Darling.Tests;
@@ -202,7 +203,7 @@ public sealed class RollupCoverageRoutingTests
             TimescaleSupport.QueryStoreStatsHourlyView, TimescaleSupport.QueryStoreStatsDailyView,
         })
         {
-            Assert.Contains($"(SELECT min(bucket) FROM collect.{view})", sql, StringComparison.Ordinal);
+            Assert.Contains($"(SELECT {TimescaleSupport.ColdFloorMarker} min(bucket) FROM collect.{view})", sql, StringComparison.Ordinal);
 
             /* And every routed view must resolve to a raw table, or its ladder would have no floor to fall to. */
             Assert.NotNull(RollupCoverage.RawTableFor(view));
@@ -746,5 +747,99 @@ public sealed class RollupCoverageRoutingTests
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// #5329: the routing the Top Queries reader derives from what the store measured, with the io rollup ABSENT (not on
+    /// the store, even with a stale floor cached for its name), EMPTY (present, no floor), PARTIAL (a floor after the
+    /// window's start) and COVERING (a floor at or before it). The window starts ten days back and raw keeps four.
+    /// </summary>
+    [Theory]
+    [InlineData("absent", TopRanking.Reads, HourlyRoute.Raw)]
+    [InlineData("absent", TopRanking.Cpu, HourlyRoute.Stitched)]
+    [InlineData("empty", TopRanking.Reads, HourlyRoute.Raw)]
+    [InlineData("empty", TopRanking.Duration, HourlyRoute.Stitched)]
+    [InlineData("partial", TopRanking.Reads, HourlyRoute.Io)]      // io (6 days) reaches further back than raw (4 days)
+    [InlineData("partial", TopRanking.Executions, HourlyRoute.Stitched)]
+    [InlineData("covering", TopRanking.Reads, HourlyRoute.Io)]
+    [InlineData("covering", TopRanking.Cpu, HourlyRoute.Io)]
+    [InlineData("covering", TopRanking.Duration, HourlyRoute.Io)]
+    [InlineData("covering", TopRanking.Executions, HourlyRoute.Io)]
+    public void TheQueriesReader_RoutesOnTheIoRollupsAvailabilityAndFloor(string io, TopRanking ranking, HourlyRoute expected)
+    {
+        var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal)
+        {
+            [TimescaleSupport.QueryStatsHourlyView] = DaysAgo(30),
+        };
+        switch (io)
+        {
+            case "absent":
+                floors[TimescaleSupport.QueryStatsIoHourlyView] = DaysAgo(30);   /* a stale floor under a name the store does not have */
+                break;
+            case "partial":
+                floors[TimescaleSupport.QueryStatsIoHourlyView] = DaysAgo(6);
+                break;
+            case "covering":
+                floors[TimescaleSupport.QueryStatsIoHourlyView] = DaysAgo(30);
+                break;
+        }
+
+        var availability = io == "absent" ? RollupAvailability.WithoutIoHourlies : RollupAvailability.All;
+        var coverage = new RollupCoverage(
+            floors,
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_stats"] = DaysAgo(4) },
+            availability);
+
+        Assert.Equal(expected, DarlingDataReader.ChooseQueriesHourlyRoute(availability, coverage, ranking, DaysAgo(10)));
+    }
+
+    /// <summary>
+    /// #5329 lane B2: the same table for the Top Procedures reader, over <c>procedure_stats_io_hourly</c> and
+    /// <c>procedure_stats</c>'s oldest row. Each case also plants the QUERIES io floor the other way round, so a procedures
+    /// route that read the queries relation's floor would answer differently and fail.
+    /// </summary>
+    [Theory]
+    [InlineData("absent", TopRanking.Reads, HourlyRoute.Raw)]
+    [InlineData("absent", TopRanking.Cpu, HourlyRoute.Stitched)]
+    [InlineData("empty", TopRanking.Reads, HourlyRoute.Raw)]
+    [InlineData("empty", TopRanking.Duration, HourlyRoute.Stitched)]
+    [InlineData("partial", TopRanking.Reads, HourlyRoute.Io)]      // io (6 days) reaches further back than raw (4 days)
+    [InlineData("partial", TopRanking.Executions, HourlyRoute.Stitched)]
+    [InlineData("partialShallow", TopRanking.Reads, HourlyRoute.Raw)]   // raw (4 days) reaches further back than io (2 days)
+    [InlineData("covering", TopRanking.Reads, HourlyRoute.Io)]
+    [InlineData("covering", TopRanking.Cpu, HourlyRoute.Io)]
+    [InlineData("covering", TopRanking.Duration, HourlyRoute.Io)]
+    [InlineData("covering", TopRanking.Executions, HourlyRoute.Io)]
+    public void TheProceduresReader_RoutesOnTheIoRollupsAvailabilityAndFloor(string io, TopRanking ranking, HourlyRoute expected)
+    {
+        var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal)
+        {
+            [TimescaleSupport.ProcedureStatsHourlyView] = DaysAgo(30),
+            /* the queries io rollup says the opposite of every case below: covering, where procedures is not */
+            [TimescaleSupport.QueryStatsIoHourlyView] = DaysAgo(30),
+        };
+        switch (io)
+        {
+            case "absent":
+                floors[TimescaleSupport.ProcedureStatsIoHourlyView] = DaysAgo(30);   /* a stale floor under a name the store does not have */
+                break;
+            case "partial":
+                floors[TimescaleSupport.ProcedureStatsIoHourlyView] = DaysAgo(6);
+                break;
+            case "partialShallow":
+                floors[TimescaleSupport.ProcedureStatsIoHourlyView] = DaysAgo(2);
+                break;
+            case "covering":
+                floors[TimescaleSupport.ProcedureStatsIoHourlyView] = DaysAgo(30);
+                break;
+        }
+
+        var availability = io == "absent" ? RollupAvailability.WithoutIoHourlies : RollupAvailability.All;
+        var coverage = new RollupCoverage(
+            floors,
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["procedure_stats"] = DaysAgo(4), ["query_stats"] = DaysAgo(4) },
+            availability);
+
+        Assert.Equal(expected, DarlingDataReader.ChooseProceduresHourlyRoute(availability, coverage, ranking, DaysAgo(10)));
     }
 }

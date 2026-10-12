@@ -263,6 +263,50 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
     }
 
     /// <summary>
+    /// Compaction merges this table one day at a time since #5410, so the archive holds day files
+    /// (<c>YYYYMMDD_query_store_stats.parquet</c>) and their parts next to the older month files. The repair's
+    /// two globs match both, so a split pair inside a day file is found and repaired like one in a month file,
+    /// and the other files keep their bytes.
+    /// </summary>
+    [Fact]
+    public async Task Archive_RepairsTheSlicesInADayFile_AndLeavesTheMonthAndOtherDayFilesAlone()
+    {
+        var wholeMonth = Path.Combine(_archivePath, "202609_query_store_stats.parquet");
+        var dayOne = Path.Combine(_archivePath, "20260927_query_store_stats.parquet");
+        var dayTwo = Path.Combine(_archivePath, "20260928_query_store_stats.parquet");
+        var dayTwoPart = Path.Combine(_archivePath, "20260928_query_store_stats_pt001.parquet");
+        await WriteCleanArchiveAsync(wholeMonth, firstQueryId: 100);
+        await WriteCleanArchiveAsync(dayOne, firstQueryId: 10);
+        await WriteLegacyArchiveAsync(dayTwo);
+        await WriteCleanArchiveAsync(dayTwoPart, firstQueryId: 30);
+        var untouched = new[] { wholeMonth, dayOne, dayTwoPart };
+        var bytesBefore = untouched.Select(File.ReadAllBytes).ToArray();
+
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+
+        var survey = await service.SurveyAsync();
+        Assert.Equal(
+            [Path.GetFileName(dayOne), Path.GetFileName(dayTwo), Path.GetFileName(dayTwoPart), Path.GetFileName(wholeMonth)],
+            survey.Archive.Select(a => Path.GetFileName(a.Path)).ToArray());
+        Assert.Equal(1, survey.ArchiveRowsRemoved);
+
+        var result = await service.RepairAsync();
+        Assert.Equal(1, result.RowsRemoved);
+        Assert.Empty(result.Failures);
+
+        var rows = await QueryArchiveAsync(dayTwo, "SELECT query_id, execution_count, avg_duration_us FROM read_parquet('{0}') ORDER BY query_id");
+        Assert.Equal(2, rows.Count);
+        Assert.Equal([1L, 125L, 1871L], rows[0]);
+        Assert.Equal([2L, 55L, 500L], rows[1]);
+
+        for (var i = 0; i < untouched.Length; i++)
+        {
+            Assert.Equal(bytesBefore[i], File.ReadAllBytes(untouched[i]));
+        }
+        Assert.Empty(Directory.GetFiles(_archivePath, "*.repair-tmp"));
+    }
+
+    /// <summary>
     /// A file that fails verification must leave the ORIGINAL intact — no backup copy is kept, so
     /// verify-before-promote IS the safety.
     ///
@@ -515,7 +559,8 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
            the UI's exclusivity for the whole of a large archive rewrite. */
         Assert.Contains("using (_duckDb.AcquireReadLock(cancellationToken))", source, StringComparison.Ordinal);
         var readLock = source.IndexOf("using (_duckDb.AcquireReadLock(cancellationToken))", StringComparison.Ordinal);
-        var copyToTemp = source.IndexOf("COMPRESSION ZSTD)\";", StringComparison.Ordinal);
+        /* The COPY is located by its shared option list (#5381), which replaced the spelled-out "COMPRESSION ZSTD)". */
+        var copyToTemp = source.IndexOf("ParquetCompaction.ArchiveCopyOptions})\";", StringComparison.Ordinal);
         Assert.True(copyToTemp > readLock, "the rewrite-to-temp belongs under the read lock, not the write lock");
     }
 

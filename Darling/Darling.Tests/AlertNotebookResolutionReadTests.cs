@@ -193,7 +193,9 @@ public sealed class AlertNotebookResolutionReadTests
     [Fact]
     public void FirstAlertAfterSql_ScopesToTheServerOnlyWhenOneIsKnown()
     {
-        Assert.DoesNotContain("server_id =", DarlingAlertReader.FirstAlertAfterSql(serverScoped: false, excludesAlertTime: false), StringComparison.Ordinal);
+        /* The display-name join names `s.server_id = a.server_id`; the scope is the predicate after WHERE. */
+        var unscoped = DarlingAlertReader.FirstAlertAfterSql(serverScoped: false, excludesAlertTime: false);
+        Assert.DoesNotContain("server_id =", unscoped[unscoped.IndexOf("WHERE", StringComparison.Ordinal)..], StringComparison.Ordinal);
         Assert.Contains("server_id = $4", DarlingAlertReader.FirstAlertAfterSql(serverScoped: true, excludesAlertTime: false), StringComparison.Ordinal);
     }
 
@@ -228,5 +230,39 @@ public sealed class AlertNotebookResolutionReadTests
             null!, serverId: null, fleetLevelStore: false, "High CPU", Anchor, now, matchedRow: null, ct));
         Assert.Empty(await AlertNotebookEndpoint.ReadStatusRowsAsync(
             null!, serverId: 7, fleetLevelStore: false, "High CPU", now, now, matchedRow: null, ct));
+    }
+
+    /* ═══════ the qualified select list needs the joined FROM: every SQL that selects it ═══════ */
+
+    [Fact]
+    public void EverySqlSelectingTheQualifiedAlertColumns_ReadsFromTheAliasedJoinedTable()
+    {
+        var all = new List<string>();
+        foreach (var type in new[] { typeof(DarlingAlertReader), typeof(PerformanceMonitor.Darling.Viewer.ViewerDataService) })
+        {
+            foreach (var field in type.GetFields(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
+            {
+                if (field.IsLiteral && field.GetValue(null) is string text && text.Contains("COALESCE(s.display_name, a.server_name)", StringComparison.Ordinal)
+                    && text.Contains("FROM ", StringComparison.Ordinal))
+                {
+                    all.Add(text);
+                }
+            }
+        }
+
+        foreach (var scoped in new[] { false, true })
+        {
+            foreach (var excludes in new[] { false, true })
+            {
+                all.Add(DarlingAlertReader.FirstAlertAfterSql(scoped, excludes));
+            }
+        }
+
+        Assert.True(all.Count >= 8, "expected the page reads, the viewer reads and the four first-row-after shapes");
+        foreach (var sql in all)
+        {
+            Assert.Contains("FROM config_alert_log a", sql, StringComparison.Ordinal);
+            Assert.Contains("LEFT JOIN servers s ON s.server_id = a.server_id", sql, StringComparison.Ordinal);
+        }
     }
 }

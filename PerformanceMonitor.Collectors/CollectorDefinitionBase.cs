@@ -81,6 +81,8 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
 
     public virtual bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
+    public virtual bool SkipsSeparatelyMonitoredDatabases => false;
+
     public abstract CollectorQuery BuildQuery(CollectorContext context);
 
     public virtual CollectorQuery? BuildSupplementalQuery(CollectorContext context) => null;

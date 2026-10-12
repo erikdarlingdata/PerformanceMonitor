@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
@@ -55,6 +56,37 @@ public sealed class FailedSendBackoff
     /// </summary>
     public static bool EveryChannelFailed(AlertDelivery? delivery) =>
         delivery is { Sent: false, SendError: not null };
+
+    /// <summary>
+    /// The one delivery a Per-event split reports (#4822), from the N it sent: the first that reached a channel
+    /// (<see cref="AlertDelivery.Sent"/>), so the alert is not sent again; otherwise the first for which
+    /// <see cref="EveryChannelFailed"/> holds, so the engine tries it again while the incidents a channel
+    /// throttled stay throttled; otherwise <c>null</c>, as before, because nothing was attempted. <c>null</c>
+    /// entries are skipped.
+    /// </summary>
+    public static AlertDelivery? ReportForSplit(IReadOnlyList<AlertDelivery?> deliveries)
+    {
+        AlertDelivery? failed = null;
+        foreach (var delivery in deliveries)
+        {
+            if (delivery is null)
+            {
+                continue;
+            }
+
+            if (delivery.Sent)
+            {
+                return delivery;
+            }
+
+            if (failed is null && EveryChannelFailed(delivery))
+            {
+                failed = delivery;
+            }
+        }
+
+        return failed;
+    }
 
     /// <summary>
     /// Counts one more failed send for (<paramref name="family"/>, <paramref name="key"/>) and returns how long to

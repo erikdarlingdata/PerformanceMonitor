@@ -81,6 +81,8 @@ public sealed class BlockingTrendEmptyToolTests : IClassFixture<SharedDuckDbFixt
             await McpBlockingTools.GetBlockingTrend(service, _serverManager, ServerName, 4)).RootElement;
 
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        /* #5244: the empty answer names no collector, and says so with the same key a data answer uses (get_blocking_stats gives null too). */
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("source").ValueKind);
         var text = root.GetProperty("message").GetString()!;
         Assert.Contains("NOT an all-clear", text, StringComparison.Ordinal);
         Assert.Contains("EVER", text, StringComparison.Ordinal);
@@ -116,6 +118,8 @@ public sealed class BlockingTrendEmptyToolTests : IClassFixture<SharedDuckDbFixt
             await McpBlockingTools.GetBlockingTrend(service, _serverManager, ServerName, 4)).RootElement;
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
+        /* #5244: the empty answer names no collector, and says so with the same key a data answer uses (get_blocking_stats gives null too). */
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("source").ValueKind);
         var text = root.GetProperty("message").GetString()!;
         Assert.Contains("genuine all-clear", text, StringComparison.Ordinal);
 
@@ -177,6 +181,8 @@ public sealed class BlockingTrendEmptyToolTests : IClassFixture<SharedDuckDbFixt
             await McpBlockingTools.GetDeadlockTrend(service, _serverManager, ServerName, 4)).RootElement;
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
+        /* The deadlock trend has no collector choice, so it carries no source key. */
+        Assert.False(root.TryGetProperty("source", out _));
         var text = root.GetProperty("message").GetString()!;
         Assert.Contains("genuine all-clear", text, StringComparison.Ordinal);
         Assert.DoesNotContain("EVER", text, StringComparison.Ordinal);

@@ -291,7 +291,7 @@ public class StoreLogSeverityLocaleTests
 
     /// <summary>A stand-in value for a conf factory's parameter, or a failure naming the signature this scan
     /// cannot fill — never a skip, which would drop the block from the scan without saying so.</summary>
-    private static object Placeholder(MethodInfo factory, ParameterInfo parameter)
+    private static object? Placeholder(MethodInfo factory, ParameterInfo parameter)
     {
         if (parameter.ParameterType == typeof(int))
         {
@@ -309,6 +309,15 @@ public class StoreLogSeverityLocaleTests
         if (parameter.ParameterType == typeof(string) && parameter.Name == "effectivePreloadList")
         {
             return "timescaledb";
+        }
+
+        /* #5459: BuildWalSizingConfAppend restates the max_wal_size already in force so a restart near a WAL size
+           step does not rewrite the file. A fresh store has no file in force, and that is the path the block's text
+           comes from, so null is the right stand-in. Keyed on type and name, so a different long? parameter still
+           fails loudly here. */
+        if (parameter.ParameterType == typeof(long?) && parameter.Name == "inForceMaxWalSizeMb")
+        {
+            return null;
         }
 
         Assert.Fail(

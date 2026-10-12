@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Analysis;
 
@@ -110,15 +112,20 @@ AND blocking_spid <> 0";
     /// </summary>
     internal static async Task AppendDmvSnapshotRowsAsync(
         Func<DuckDBCommand> createCommand, List<BlockingPairRow> rows, int serverId, DateTime start, DateTime end,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool includeText = true)
     {
         var dmv = new List<BlockingPairRow>();
         using (var cmd = createCommand())
         {
+            /* #5361: includeText false is the drill-down's text-free read (empty text, fetched afterwards for the
+               levels it shows); the fact collector and the viewer keep the whole text. */
+            var textColumns = includeText
+                ? "blocked_sql_text, blocking_sql_text"
+                : "''::VARCHAR AS blocked_sql_text, ''::VARCHAR AS blocking_sql_text";
             cmd.CommandText = $@"
 SELECT
     {LeadingColumns},
-    blocked_sql_text, blocking_sql_text,
+    {textColumns},
     {IdentityColumns},
     contentious_object,
     {TrailingIdentityColumns}
@@ -137,5 +144,75 @@ LIMIT 5000";
         }
 
         BlockingPairRowMerge.MergeInto(rows, dmv);
+    }
+
+    /// <summary>The most levels one text read asks for: each key is five parameters, and a long OR/IN list is slow to plan.</summary>
+    private const int ChainLevelTextBatch = 200;
+
+    /// <summary>
+    /// Reads the whole statement text of the pair-rows behind the chain levels a drill-down shows (#5361), by event key,
+    /// from one source: the blocked process reports (<paramref name="dmvSource"/> false, through
+    /// <see cref="StoredEventCopies"/> like every read of that table) or the DMV snapshots. Returns each key's blocked and
+    /// blocking text, NULL read as empty text as <see cref="Read"/> does; a key whose row is gone is absent. A missing
+    /// spid or ecid reads as 0 on both sides, exactly as <see cref="Read"/> maps it. When more than one row of a key is
+    /// stored, the one with the longest wait is read, which is the row the reconstruction keeps for an edge.
+    /// </summary>
+    internal static async Task<Dictionary<PairRowKey, (string BlockedSql, string BlockingSql)>> ReadChainLevelTextAsync(
+        Func<DuckDBCommand> createCommand, bool dmvSource, int serverId, IReadOnlyCollection<PairRowKey> keys,
+        CancellationToken cancellationToken)
+    {
+        var text = new Dictionary<PairRowKey, (string BlockedSql, string BlockingSql)>();
+        var list = keys.ToList();
+        for (var offset = 0; offset < list.Count; offset += ChainLevelTextBatch)
+        {
+            var batch = list.GetRange(offset, Math.Min(ChainLevelTextBatch, list.Count - offset));
+            using var cmd = createCommand();
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = batch.Min(k => k.EventTime) });
+            cmd.Parameters.Add(new DuckDBParameter { Value = batch.Max(k => k.EventTime) });
+            var tuples = new List<string>(batch.Count);
+            var next = 4;
+            foreach (var key in batch)
+            {
+                tuples.Add($"(${next}::TIMESTAMP, ${next + 1}::INTEGER, ${next + 2}::INTEGER, ${next + 3}::INTEGER, ${next + 4}::INTEGER)");
+                next += 5;
+                cmd.Parameters.Add(new DuckDBParameter { Value = key.EventTime });
+                cmd.Parameters.Add(new DuckDBParameter { Value = key.BlockedSpid });
+                cmd.Parameters.Add(new DuckDBParameter { Value = key.BlockedEcid });
+                cmd.Parameters.Add(new DuckDBParameter { Value = key.BlockingSpid });
+                cmd.Parameters.Add(new DuckDBParameter { Value = key.BlockingEcid });
+            }
+
+            var where = "server_id = $1 AND event_time >= $2 AND event_time <= $3 AND "
+                + "(event_time, COALESCE(blocked_spid, 0), COALESCE(blocked_ecid, 0), blocking_spid, COALESCE(blocking_ecid, 0)) IN ("
+                + string.Join(", ", tuples) + ")";
+            var source = dmvSource
+                ? $"v_dmv_blocking_snapshots WHERE {where}"
+                : $"{StoredEventCopies.BlockedProcessReports(where)} AS ev";
+            cmd.CommandText = $@"
+SELECT
+    event_time,
+    COALESCE(blocked_spid, 0),
+    COALESCE(blocked_ecid, 0),
+    blocking_spid,
+    COALESCE(blocking_ecid, 0),
+    blocked_sql_text,
+    blocking_sql_text
+FROM {source}
+ORDER BY wait_time_ms DESC NULLS LAST";
+
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var key = new PairRowKey(
+                    reader.GetDateTime(0), Convert.ToInt32(reader.GetValue(1)), Convert.ToInt32(reader.GetValue(2)),
+                    Convert.ToInt32(reader.GetValue(3)), Convert.ToInt32(reader.GetValue(4)));
+                /* Longest wait first, so TryAdd keeps that row. */
+                text.TryAdd(key, (reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
+                    reader.IsDBNull(6) ? string.Empty : reader.GetString(6)));
+            }
+        }
+
+        return text;
     }
 }

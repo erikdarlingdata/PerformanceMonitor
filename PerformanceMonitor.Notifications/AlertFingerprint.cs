@@ -105,6 +105,48 @@ public static class AlertFingerprint
             Database: string.IsNullOrWhiteSpace(database) ? null : database);
     }
 
+    /// <summary>
+    /// The server string to hash into a dedup key. It is <paramref name="serverName"/> unchanged EXCEPT when
+    /// another registration carries the same display name (<paramref name="nameIsShared"/>) and the server has
+    /// a store id: then it is <c>name#id</c>.
+    ///
+    /// <para><b>Why only a shared name.</b> The display name is not unique: two databases registered with blank
+    /// names on one Azure SQL Database logical server both display as the host, and two registrations can be
+    /// typed with the same name. The same incident then hashed to the same key and a pager or webhook merged
+    /// two real incidents. A server whose name is unique is already distinct by name, and changing its key
+    /// would re-deliver every live incident on it and open a fresh PagerDuty incident, so its key stays
+    /// byte-identical, whether the name is blank-on-host, host-equal or typed.</para>
+    ///
+    /// <para><b>Stability.</b> The id is the deterministic store id (a hash of the canonical storage
+    /// identity), so a registration's key is the same across restarts. It changes when the server joins or
+    /// leaves a same-named group, which is exactly when its name becomes, or stops being, ambiguous.</para>
+    /// </summary>
+    public static string ServerIdentity(string serverName, int? serverId, bool nameIsShared) =>
+        nameIsShared && serverId.HasValue
+            ? serverName + "#" + serverId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : serverName;
+
+    /// <summary>
+    /// The display names that more than one registration carries, compared ordinal (a name differing only by
+    /// case is a different name to every consumer of the key). The one helper both sides call over the same
+    /// population, so the alert path and the MCP <c>dedup_key</c> filter cannot disagree on which servers
+    /// get a suffix.
+    /// </summary>
+    public static IReadOnlySet<string> SharedDisplayNames(IEnumerable<string> displayNames)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var shared = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in displayNames)
+        {
+            if (name is not null && !seen.Add(name))
+            {
+                shared.Add(name);
+            }
+        }
+
+        return shared;
+    }
+
     /// <summary>SHA-256 of <paramref name="input"/> as lowercase hex (64 chars). Public for tests.</summary>
     public static string Hash(string input)
     {

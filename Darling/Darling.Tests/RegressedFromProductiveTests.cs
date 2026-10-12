@@ -98,7 +98,8 @@ public sealed class RegressedFromProductiveTests
             CollectorHealthClassifier.Healthy,
             CollectorHealthClassifier.Classify(
                 row.TotalRuns, row.SuccessCount, row.ErrorCount, 0, row.ExtensionMissingCount, 0,
-                2.0, 0.02, 1));
+                2.0, 0.02, 1,
+                null, 0)); // 0: a count-only fixture, no run history
     }
 
     /// <summary>The second direction: the same status with nothing ever produced keeps the benign band.</summary>
@@ -244,7 +245,7 @@ public sealed class RegressedFromProductiveTests
     [InlineData("DarlingDataReader.CollectionHealthSql")]
     [InlineData("DarlingFleetReader.FleetCollectionHealthSql")]
     [InlineData("ViewerDataService.CollectionHealthSql")]
-    [InlineData("ViewerDataService.FleetCollectionHealthSql")]
+    [InlineData("ViewerDataService.FleetCollectionHealthByServerSql")]
     public void EveryBandingRead_SelectsBothRegressionInstants(string which)
     {
         var sql = which switch
@@ -252,7 +253,7 @@ public sealed class RegressedFromProductiveTests
             "DarlingDataReader.CollectionHealthSql" => DarlingDataReader.CollectionHealthSql,
             "DarlingFleetReader.FleetCollectionHealthSql" => DarlingFleetReader.FleetCollectionHealthSql,
             "ViewerDataService.CollectionHealthSql" => ViewerDataService.CollectionHealthSql,
-            "ViewerDataService.FleetCollectionHealthSql" => ViewerDataService.FleetCollectionHealthSql,
+            "ViewerDataService.FleetCollectionHealthByServerSql" => ViewerDataService.FleetCollectionHealthByServerSql,
             _ => throw new ArgumentOutOfRangeException(nameof(which), which, "unmapped banding read"),
         };
 

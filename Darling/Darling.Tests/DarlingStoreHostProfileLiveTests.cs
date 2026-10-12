@@ -40,7 +40,7 @@ namespace Darling.Tests;
 /// <c>max_wal_size</c> for <see cref="HostSettingVerdict.OperatorOverride"/> goes through <c>ALTER SYSTEM</c>,
 /// which file attribution alone resolves — no reload needed there either.</para>
 /// </summary>
-[Collection("live-postgres")]
+[Collection("pg-cluster-roles")]
 public sealed class DarlingStoreHostProfileLiveTests
 {
     [Fact]

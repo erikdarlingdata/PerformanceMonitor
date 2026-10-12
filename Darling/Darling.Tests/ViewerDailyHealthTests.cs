@@ -163,7 +163,8 @@ public sealed class ViewerCollectionHealthSqlTests
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY collector_name", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collector_name", sql, StringComparison.Ordinal);
+        /* The final order is the aggregate's own collector_name, qualified because the keyed lookups (#4955) join it. */
+        Assert.Contains("ORDER BY h.collector_name", sql, StringComparison.Ordinal);
 
         /* Success / error / permission buckets feed the row's HealthStatus banding. The success bucket
            is NARROWED (#2926): an abandonment written before #2803 gave abandonment its own status is
@@ -456,7 +457,7 @@ public sealed class ViewerDailyHealthRowTests
            formatted local time round-trips back to the stored instant on any machine. */
         var storedUtc = new DateTime(2026, 7, 3, 3, 30, 0, DateTimeKind.Unspecified);
         var row = new CollectionLogRow { CollectionTime = storedUtc };
-        var expected = storedUtc.ToLocalTime().ToString("g");
+        var expected = storedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
         Assert.Equal(expected, row.CollectionTimeFormatted);
     }
 }
@@ -827,7 +828,7 @@ public sealed class ViewerDailyHealthLivePostgresTests
     private static async Task InsertDeadlockAsync(NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc)
     {
         using var command = new NpgsqlCommand(
-            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time) VALUES ($1, $2, $3, $4, $2)",
             connection);
         command.Parameters.AddWithValue(1L);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
@@ -839,7 +840,7 @@ public sealed class ViewerDailyHealthLivePostgresTests
     private static async Task InsertBlockedProcessAsync(NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc)
     {
         using var command = new NpgsqlCommand(
-            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time) VALUES ($1, $2, $3, $4, $2)",
             connection);
         command.Parameters.AddWithValue(1L);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));

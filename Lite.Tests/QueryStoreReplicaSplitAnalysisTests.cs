@@ -77,7 +77,7 @@ public sealed class QueryStoreReplicaSplitAnalysisTests : IClassFixture<SharedDu
        14 days BEFORE TimeRangeStart (the days-old "best plan" baseline has to be in range), so the
        good plan's last execution sits 5 days back and the bad plan's at the end of the window. */
     private static readonly DateTime PeriodEnd =
-        DateTime.SpecifyKind(new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
+        DateTime.SpecifyKind(new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond), DateTimeKind.Unspecified);
     private static readonly DateTime PeriodStart = PeriodEnd.AddHours(-4);
 
     private static AnalysisContext Context() => new()

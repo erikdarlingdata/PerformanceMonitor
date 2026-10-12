@@ -90,7 +90,7 @@ DECLARE
     @ag_role nvarchar(20) = N'Standalone';
 
 IF OBJECT_ID(N'sys.dm_os_host_info', N'V') IS NOT NULL
-    EXEC sys.sp_executesql N'SELECT @os = host_distribution FROM sys.dm_os_host_info',
+    EXEC sys.sp_executesql N'SELECT /* PerformanceMonitorLite */ @os = host_distribution FROM sys.dm_os_host_info',
         N'@os nvarchar(256) OUTPUT', @os = @host_os OUTPUT;
 
 IF @host_os IS NULL
@@ -106,7 +106,7 @@ IF CONVERT(integer, ISNULL(SERVERPROPERTY(N'IsHadrEnabled'), 0)) = 1
 BEGIN
     DECLARE @ag_detected nvarchar(20);
     EXEC sys.sp_executesql N'
-        SELECT @r = CASE
+        SELECT /* PerformanceMonitorLite */ @r = CASE
             WHEN MAX(CASE WHEN ars.role = 1 THEN 1 ELSE 0 END) = 1 THEN N''Primary''
             WHEN MAX(CASE WHEN ars.role = 2 THEN 1 ELSE 0 END) = 1 THEN N''Secondary''
             ELSE N''Standalone'' END
@@ -160,7 +160,7 @@ OR CONVERT(integer, SERVERPROPERTY(N'EngineEdition')) IN (5, 8)
 BEGIN
     BEGIN TRY
         EXEC sys.sp_executesql
-            N'SELECT @tz = CURRENT_TIMEZONE_ID();',
+            N'SELECT /* PerformanceMonitorLite */ @tz = CURRENT_TIMEZONE_ID();',
             N'@tz nvarchar(128) OUTPUT', @tz = @time_zone_id OUTPUT;
     END TRY
     BEGIN CATCH
@@ -168,7 +168,7 @@ BEGIN
     END CATCH;
 END;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     server_name =
         CONVERT(nvarchar(128), SERVERPROPERTY(N'ServerName')),
     edition =
@@ -268,7 +268,7 @@ BEGIN
         DECLARE
             @ifi_sql nvarchar(max) =
                 N'
-        SELECT TOP (1)
+        SELECT /* PerformanceMonitorLite */ TOP (1)
             @ifi_out =
                 CASE
                     WHEN ss.instant_file_initialization_enabled = N''Y''
@@ -302,7 +302,7 @@ BEGIN
     END CATCH;
 END;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     lock_pages_in_memory = @lpim,
     instant_file_initialization_enabled = @ifi,
     memory_dump_count = @dumps;";

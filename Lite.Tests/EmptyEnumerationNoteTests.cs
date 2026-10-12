@@ -180,18 +180,43 @@ public class EmptyEnumerationNoteTests
         /* The read-side guard that keeps this note out of the Collection Health "last error" surface. A
            broadening to error_message IS NOT NULL would turn every quiet enumeration cycle into a fake
            last-error — the note is deliberately visible ONLY in the raw collection-log detail grid. */
-        var source = File.ReadAllText(FindRepoFile(
-            Path.Combine("Lite", "Services", "LocalDataService.CollectionHealth.cs")));
+        var sql = LocalDataService.CollectionHealthSql;
 
-        /* #1855 replaced the value-MAX with a newest-first rank, so the gate now reads as the status
-           re-check on the rank-1 row. It is the SAME claim: the column can only ever be filled from a
-           failing run. Without the re-check the rank falls through to the newest row of any class when
-           no failure carried text, and a SUCCESS row's note would land here. */
+        /* #1855 replaced the value-MAX with a newest-first pick, and #5371 made it a keyed lookup: the
+           failing rows at the newest failing-with-text instant. The gate is the failing-status set on the
+           lookup's own rows - the SAME claim as before: the column can only ever be filled from a failing
+           run. Without it a SUCCESS row's note, sitting at the newest instant, would land here. */
         /* EXTENSION_MISSING joined the failing-status set with #3240 for twin-parity with Darling's
            reads (Lite's SQL Server collectors never write it, so the branch is inert on this SKU).
            Still a STATUS gate — the broadening this pin refuses is to message PRESENCE. */
-        Assert.Contains("MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) AS last_error", source);
-        Assert.DoesNotContain("error_message IS NOT NULL", source);
+        Assert.Contains("failed.error_message AS last_error", sql);
+        Assert.Contains("AND   f.status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING')", sql);
+        AssertEveryTextTestSitsBesideAStatusGate(sql);
+    }
+
+    /// <summary>
+    /// The old pin refused the substring "error_message IS NOT NULL" outright. The keyed lookups need the
+    /// test (it is what makes the newest-instant aggregate skip a failure written with no text), so the
+    /// refusal is narrowed to what it was really guarding: a presence test with no STATUS gate in front of it.
+    /// </summary>
+    private static void AssertEveryTextTestSitsBesideAStatusGate(string sql)
+    {
+        var at = 0;
+        var seen = 0;
+        while ((at = sql.IndexOf("error_message IS NOT NULL", at, StringComparison.Ordinal)) >= 0)
+        {
+            var before = sql.Substring(Math.Max(0, at - 160), Math.Min(160, at));
+            Assert.True(
+                before.Contains("status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING')", StringComparison.Ordinal)
+                || before.Contains("status = 'SUCCESS'", StringComparison.Ordinal),
+                $"error_message IS NOT NULL at {at} has no status gate in front of it: ...{before}");
+            at += 1;
+            seen++;
+        }
+
+        /* The positive control for the loop above: the read carries these tests, so a loop that matched
+           nothing cannot pass. */
+        Assert.True(seen >= 4, $"expected the four gated text tests, saw {seen}");
     }
 
     /* ── #1837 health visibility: the note gets its own column, and it is NOT an error ── */
@@ -205,10 +230,12 @@ public class EmptyEnumerationNoteTests
            is still a STATUS gate — #1855's rank orders on whether the status-gated CASE came back empty,
            never on message presence alone (the pin above), so no read here can key on the fact that a
            row has text without first asking what kind of row it is. */
-        var source = File.ReadAllText(FindRepoFile(
-            Path.Combine("Lite", "Services", "LocalDataService.CollectionHealth.cs")));
+        var source = LocalDataService.CollectionHealthSql;
 
-        Assert.Contains("MAX(CASE WHEN note_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS last_note", source);
+        /* #5371: the newest note is a keyed lookup (it was note_rank = 1), gated on SUCCESS on the lookup's
+           own rows - the same STATUS gate, never message presence alone. */
+        Assert.Contains("noted.error_message AS last_note", source);
+        Assert.Contains("AND   t.status = 'SUCCESS'", source);
         Assert.Contains("COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count", source);
     }
 

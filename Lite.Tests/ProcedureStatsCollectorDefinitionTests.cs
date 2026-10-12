@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -157,47 +158,41 @@ public sealed class ProcedureStatsCollectorDefinitionTests
     }
 
     [Fact]
-    public void BuildQuery_PlanCaptureOn_Standard_SplicesWholeModuleTextPlanOnceAfterRank()
+    public void BuildQuery_PlanCaptureOn_StillNumbersOnly_AndThePlanPhaseSplicesTheWholeModuleTextPlanOnce()
     {
-        /* #1959: the render happens ONCE, OUTSIDE the ranked derived table, against at most 150
-           survivors - not once per branch below the TOP, which rendered module-grain plans for every
-           candidate the TOP then discarded (the field-measured 25-second overnight tails). The handle
-           round-trips from the varchar(130) the payload already carries, so no raw column threads
-           through the branches. Whole-module grain stays keyed on literal 0, -1. */
-        var plan = ProcedureStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, capturePlanXml: true));
-        var collapsed = Collapse(plan.Text);
+        /* #5449: the main query is numbers only on every host, capture on or off: it carries no plan clause and no
+           derived table. #1959's one-render rule now lives in the plan phase: the apply runs ONCE, over a VALUES list
+           of at most MaxPlansPerRun handles aliased ranked, so the render never happens per candidate. The handle
+           round-trips from the varchar(130) the payload carries; whole-module grain stays keyed on literal 0, -1. */
+        var context = CollectorTestContext.Make(s_deltas, capturePlanXml: true);
+        var main = Collapse(ProcedureStatsCollector.Instance.BuildQuery(context).Text);
+        Assert.DoesNotContain("query_plan", main, StringComparison.Ordinal);
+        Assert.DoesNotContain("dm_exec_text_query_plan", main, StringComparison.Ordinal);
+        Assert.DoesNotContain("ASranked", main, StringComparison.Ordinal);
+        Assert.Contains("sys.dm_exec_trigger_stats", main, StringComparison.Ordinal);
+        Assert.Contains("sys.dm_exec_function_stats", main, StringComparison.Ordinal);
+
+        var collapsed = Collapse(ProcedureStatsCollector.BuildPlanPhaseQuery(context, new[] { new byte[] { 0x06, 0x00 } }).Text);
 
         Assert.Single(Regex.Matches(collapsed, Regex.Escape(PlanXmlSizeGuardedFragment)));
         Assert.Single(Regex.Matches(collapsed, Regex.Escape("sys.dm_exec_text_query_plan(CONVERT(varbinary(64),ranked.plan_handle,1),0,-1)AStqp")));
         Assert.DoesNotContain("dm_exec_text_query_plan(s.plan_handle", collapsed, StringComparison.Ordinal);
-
-        /* The apply must sit AFTER the ranked derived table closes - rendering below the TOP is the
-           exact defect this shape exists to prevent. */
         Assert.True(
             collapsed.IndexOf("dm_exec_text_query_plan", StringComparison.Ordinal)
-                > collapsed.IndexOf(")ASranked", StringComparison.Ordinal),
-            "the plan render moved back inside the ranked derived table - below the TOP");
-
-        /* Existing shape untouched: still three DMV branches and the dynamic-SQL body. */
-        Assert.Contains("sys.dm_exec_trigger_stats", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("sys.dm_exec_function_stats", plan.Text, StringComparison.Ordinal);
+                > collapsed.IndexOf(")ASranked(ord,plan_handle)", StringComparison.Ordinal),
+            "the plan render moved off the VALUES list");
     }
 
     [Fact]
-    public void BuildQuery_PlanCaptureOn_Azure_SplicesWholeModuleTextPlan()
+    public void BuildQuery_Azure_PlanCaptureOn_IsTheSameNumbersOnlyText()
     {
-        var plan = ProcedureStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, isAzureSqlDb: true, capturePlanXml: true));
-        var collapsed = Collapse(plan.Text);
+        var capture = ProcedureStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, isAzureSqlDb: true, capturePlanXml: true));
+        var off = ProcedureStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, isAzureSqlDb: true));
 
-        Assert.Contains(PlanXmlSizeGuardedFragment, collapsed, StringComparison.Ordinal);
-        Assert.Contains("sys.dm_exec_text_query_plan(CONVERT(varbinary(64),ranked.plan_handle,1),0,-1)AStqp", collapsed, StringComparison.Ordinal);
-        Assert.True(
-            collapsed.IndexOf("dm_exec_text_query_plan", StringComparison.Ordinal)
-                > collapsed.IndexOf(")ASranked", StringComparison.Ordinal),
-            "the plan render moved back inside the ranked derived table - below the TOP");
-        Assert.Contains("WHERE s.database_id = DB_ID()", plan.Text, StringComparison.Ordinal);
-        /* Azure keeps its single-proc shape — no trigger/function branches. */
-        Assert.DoesNotContain("dm_exec_trigger_stats", plan.Text, StringComparison.Ordinal);
+        Assert.Equal(off.Text, capture.Text);
+        Assert.Contains("WHERE s.database_id = DB_ID()", capture.Text, StringComparison.Ordinal);
+        /* Azure keeps its single-proc shape - no trigger/function branches. */
+        Assert.DoesNotContain("dm_exec_trigger_stats", capture.Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -206,16 +201,20 @@ public sealed class ProcedureStatsCollectorDefinitionTests
         var deltas = new RecordingCollectorDeltaCalculator();
         var context = CollectorTestContext.Make(deltas, capturePlanXml: true);
 
-        /* Flag on = the SELECT carries the trailing query_plan_xml column at ordinal 27, then #3392's
-           query_plan_xml_bytes at 28. */
-        var row = MakeSqlRow(planHandle: "0x0600");
-        var row29 = row
-            .Append((object)"<ShowPlanXML>proc</ShowPlanXML>")
-            .Append((object)9_000_000L)
-            .ToArray();
-
-        using var reader = new FakeCollectorDataReader(row29);
+        using var reader = new FakeCollectorDataReader(MakeSqlRow(planHandle: "0x0600"));
         var rows = await ProcedureStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        /* #5449: the main read carries no plan; the plan phase puts the plan (ordinal 1) and #3392's
+           query_plan_xml_bytes (ordinal 2) onto the row by position. */
+        Assert.Null(Assert.Single(rows).QueryPlanXml);
+        var indexes = ProcedureStatsCollector.SelectPlanPhaseRows(rows, out _);
+        ProcedureStatsCollector.ApplyPlanPhase(
+            rows,
+            indexes,
+            new Dictionary<int, ProcedureStatsCollector.PlanPhaseResult>
+            {
+                [0] = new("<ShowPlanXML>proc</ShowPlanXML>", 9_000_000L, null, null, null),
+            });
 
         var writer = new RecordingCollectorRowWriter();
         ProcedureStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
@@ -223,9 +222,9 @@ public sealed class ProcedureStatsCollectorDefinitionTests
         Assert.Equal(37, writer.Values.Count);
         Assert.Equal("<ShowPlanXML>proc</ShowPlanXML>", writer.Values[34]);   /* query_plan_xml payload slot */
         Assert.Equal(9_000_000L, writer.Values[35]);                          /* #3392: query_plan_xml_bytes */
-        Assert.Equal(0, writer.Values[36]);                                   /* #3540: interval — the fake reports 0, the unknowable marker */
+        Assert.Equal(0, writer.Values[36]);                                   /* #3540: interval - the fake reports 0, the unknowable marker */
 
-        /* #3392: 9 MB is over the cap, so this row IS a backlog candidate — and the offsets it hands back
+        /* #3392: 9 MB is over the cap, so this row IS a backlog candidate - and the offsets it hands back
            are the module-grain literals the plan apply passes, never per-statement values this DMV family
            does not have. A deferred fetch with different offsets would be a different plan. */
         var observation = ProcedureStatsCollector.Instance.DescribeOversizedPlan(rows[0]);
@@ -250,8 +249,12 @@ public sealed class ProcedureStatsCollectorDefinitionTests
             MakeSqlRow(planHandle: null));
         var rows = await ProcedureStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
+        /* #5449: the read returns rows in rank order (a tie breaks by plan_handle), so find each by its handle. */
+        var withHandle = rows.Single(r => r.PlanHandle == "0x0600");
+        var withoutHandle = rows.Single(r => r.PlanHandle is null);
+
         var writer = new RecordingCollectorRowWriter();
-        ProcedureStatsCollector.Instance.WritePayload(rows[0], writer, context);
+        ProcedureStatsCollector.Instance.WritePayload(withHandle, writer, context);
         Assert.Equal(37, writer.Values.Count);
         Assert.Null(writer.Values[34]);   /* query_plan_xml null when the flag is off */
         Assert.Null(writer.Values[35]);   /* #3392: and no measurement either */
@@ -259,14 +262,14 @@ public sealed class ProcedureStatsCollectorDefinitionTests
 
         /* No measurement is not an oversized plan: null is "nobody measured", which is what a
            plan-capture-off host and an aged-out handle both produce. */
-        Assert.Null(ProcedureStatsCollector.Instance.DescribeOversizedPlan(rows[0]));
+        Assert.Null(ProcedureStatsCollector.Instance.DescribeOversizedPlan(withHandle));
         Assert.All(deltas.Calls, c => Assert.Equal("0x0600", c.Key));
         Assert.Equal(
             new[] { "proc_stats_exec", "proc_stats_worker", "proc_stats_elapsed", "proc_stats_reads", "proc_stats_writes", "proc_stats_phys_reads", "proc_stats_spills" },
             deltas.Calls.Select(c => c.Group).ToArray());
 
         deltas.Calls.Clear();
-        ProcedureStatsCollector.Instance.WritePayload(rows[1], writer, context);
+        ProcedureStatsCollector.Instance.WritePayload(withoutHandle, writer, context);
         Assert.All(deltas.Calls, c => Assert.Equal("SO.dbo.usp_GetUser", c.Key));
     }
 

@@ -45,25 +45,40 @@ public sealed class RawTablesLeaveCatalogSweepLiveTests
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4427 pins.");
 
         var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default);
-
-        /* Max Auto Prepare=0: see RawPurgeTriggerLiveTests — RunRetentionPurgeJobSql is multi-statement and
-           this rig's connection reuse can trip Npgsql's auto-prepare cache on it. */
-        var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { MaxAutoPrepare = 0 }.ConnectionString;
-        var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync();
-        await PgMigrations.MigrateAsync(connection, default);
-
-        var enabled = await TimescaleSupport.TryEnableAsync(connection, null, default);
-        Assert.SkipWhen(!enabled, "The live #4427 pins need TimescaleDB.");
-        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, default);
-        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, default);
-
-        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection) { CommandTimeout = SetupTimeoutSeconds })
+        NpgsqlConnection? connection = null;
+        /* A skip (no TimescaleDB) or a failed setup throws before the caller owns the store, so the opener drops it
+           here. Left alone it would survive to the process-exit drain, which the test runner waits only 10 s for. */
+        try
         {
-            await stop.ExecuteNonQueryAsync();
-        }
+            /* Max Auto Prepare=0: see RawPurgeTriggerLiveTests — RunRetentionPurgeJobSql is multi-statement and
+               this rig's connection reuse can trip Npgsql's auto-prepare cache on it. */
+            var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { MaxAutoPrepare = 0 }.ConnectionString;
+            connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync();
+            await PgMigrations.MigrateAsync(connection, default);
 
-        return (connection, scratch);
+            var enabled = await TimescaleSupport.TryEnableAsync(connection, null, default);
+            Assert.SkipWhen(!enabled, "The live #4427 pins need TimescaleDB.");
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, default);
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, default);
+
+            await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                await stop.ExecuteNonQueryAsync();
+            }
+
+            return (connection, scratch);
+        }
+        catch
+        {
+            if (connection is not null)
+            {
+                await connection.DisposeAsync();
+            }
+
+            await scratch.DisposeAsync();
+            throw;
+        }
     }
 
     private static async Task ArmRawJobAsync(NpgsqlConnection connection, string relation)
@@ -199,6 +214,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -277,6 +293,7 @@ FROM generate_series(2, 20) AS n", connection) { CommandTimeout = SetupTimeoutSe
                 await cleanupCommand.ExecuteNonQueryAsync(cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -318,9 +335,9 @@ FROM generate_series(2, 20) AS n", connection) { CommandTimeout = SetupTimeoutSe
 
             var report = await DarlingWorker.BuildRawTablePurgeNowReportAsync(connection, customRetentionDays: 1, passStartUtc, null, default);
 
-            var rawEntry = Assert.Single(report, entry => (string)entry.GetType().GetProperty("relation")!.GetValue(entry)! == Raw);
-            var outcome = (string)rawEntry.GetType().GetProperty("outcome")!.GetValue(rawEntry)!;
-            var note = (string)rawEntry.GetType().GetProperty("note")!.GetValue(rawEntry)!;
+            var rawEntry = Assert.Single(report, entry => entry.Relation == Raw);
+            var outcome = rawEntry.Outcome;
+            var note = rawEntry.Note;
 
             /* THE PIN: the trigger held on the interior hole, and the report says so plainly, plus the
                custom-retention (1 day, shorter than the 4-day gated horizon) note. */
@@ -338,6 +355,7 @@ FROM generate_series(2, 20) AS n", connection) { CommandTimeout = SetupTimeoutSe
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -407,6 +425,7 @@ FROM generate_series(2, 20) AS n", connection) { CommandTimeout = SetupTimeoutSe
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -456,9 +475,9 @@ FROM generate_series(2, 20) AS n", connection) { CommandTimeout = SetupTimeoutSe
 
             var report = await DarlingWorker.BuildRawTablePurgeNowReportAsync(connection, customRetentionDays: null, passStartUtc, null, default);
 
-            var rawEntry = Assert.Single(report, entry => (string)entry.GetType().GetProperty("relation")!.GetValue(entry)! == Raw);
-            var outcome = (string)rawEntry.GetType().GetProperty("outcome")!.GetValue(rawEntry)!;
-            var note = (string)rawEntry.GetType().GetProperty("note")!.GetValue(rawEntry)!;
+            var rawEntry = Assert.Single(report, entry => entry.Relation == Raw);
+            var outcome = rawEntry.Outcome;
+            var note = rawEntry.Note;
 
             /* THE PIN: a real, freshly-written 'ran' record exists, but it predates passStartUtc, so it must
                not be reported as this pass's outcome. */
@@ -475,6 +494,7 @@ FROM generate_series(2, 20) AS n", connection) { CommandTimeout = SetupTimeoutSe
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 }

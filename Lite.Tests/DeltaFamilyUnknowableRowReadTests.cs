@@ -305,10 +305,14 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
     /// zero into a confident 0.00 ms/sec. Four collections five minutes apart: t1/t2 are pre-v61 collections
     /// (NULL interval) — t1 has no prior and is UNRATED (a point with null rates, #3541 A12: kept rather than
     /// dropped so a lone collection is never an empty series and the MCP payload's effective_start is the
-    /// first collection the store held), t2 divides by the LAG's 300 s. t3 is a restart: every row stores 0,
+    /// first collection the store held), t2 divides by its 300 s gap to t1. t3 is a restart: every row stores 0,
     /// so MAX is 0 and the collection is likewise unrated — never 0.00 ms/sec. t4 is a steady pass with a plan
-    /// the TOP (150) just readmitted (its row stores 0 beside a 0 delta) beside a measured row (120 s), so MAX
-    /// is 120 — the stored interval wins over the LAG's 300 — and the readmitted plan adds nothing to the sums.
+    /// the TOP (150) just readmitted (its row stores 0 beside a 0 delta) beside a row that stored 120 s. A point's
+    /// seconds are the gap to the previous point on the run axis (#5449), and 120 s means the run before t4 began
+    /// 120 s earlier and stored no rows: an idle SUCCESS run in the log (the log stamps a run's START, so t3's and
+    /// t4's own runs are logged just before their rows, and the idle run is the one with no stored collection before
+    /// the next run). The idle run is a 0-work point over its 180 s gap to t3, and t4 divides by its 120 s gap to it
+    /// (1200 ms / 120 s = 10.0). The readmitted plan adds nothing to the sums.
     /// </summary>
     [Fact]
     public async Task ProcedureDurationTrend_LeavesTheUnknowableCollectionUnrated_PrefersTheStoredInterval_KeepsPreV61History()
@@ -324,9 +328,15 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
         await SeedProcedureAsync(t4, "usp_A", deltaExecutions: 24, deltaElapsedUs: 1_200_000, interval: 120);
         await SeedProcedureAsync(t4, "usp_New", deltaExecutions: 0, deltaElapsedUs: 0, interval: 0);
 
+        /* The log: t3's and t4's runs at their start (just before the rows they stored), and the idle run 120 s before t4. */
+        var idleRun = t4.AddSeconds(-120);
+        await SeedRunAsync(t3.AddSeconds(-1));
+        await SeedRunAsync(idleRun);
+        await SeedRunAsync(t4.AddSeconds(-1));
+
         var points = await _dataService.GetProcedureDurationTrendAsync(ServerId, hoursBack: 3);
 
-        Assert.Equal(new[] { t1, t2, t3, t4 }, points.Select(p => p.CollectionTime).ToArray());
+        Assert.Equal(new[] { t1, t2, t3, idleRun, t4 }, points.Select(p => p.CollectionTime).ToArray());
 
         /* t1 (no prior) and t3 (restart marker): present, unrated — null, never 0. */
         Assert.False(points[0].HasRate);
@@ -336,13 +346,45 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
         Assert.Null(points[2].Value);
         Assert.Null(points[2].ExecutionCount);
 
-        /* t2 (pre-v61): 600 ms / 300 s = 2.0 ms/sec; 30 / 300 = 0.1 executions/sec. */
+        /* t2 (pre-v61): 600 ms / the 300 s gap to t1 = 2.0 ms/sec; 30 / 300 = 0.1 executions/sec. */
         Assert.Equal(2.0, points[1].Value!.Value, precision: 6);
         Assert.Equal(0.1, points[1].ExecutionsPerSecond!.Value, precision: 6);
 
-        /* t4: the STORED 120 s — 1200 / 120 = 10.0, not the LAG's 1200 / 300 = 4.0; 24 / 120 = 0.2. */
-        Assert.Equal(10.0, points[3].Value!.Value, precision: 6);
-        Assert.Equal(0.2, points[3].ExecutionsPerSecond!.Value, precision: 6);
+        /* The idle run: no work over its 180 s gap to t3, a measured 0. */
+        Assert.Equal(0.0, points[3].Value!.Value, precision: 6);
+        Assert.Equal(0.0, points[3].ExecutionsPerSecond!.Value, precision: 6);
+
+        /* t4: the 120 s gap to the idle run — 1200 / 120 = 10.0, not 1200 / 300 = 4.0; 24 / 120 = 0.2. */
+        Assert.Equal(10.0, points[4].Value!.Value, precision: 6);
+        Assert.Equal(0.2, points[4].ExecutionsPerSecond!.Value, precision: 6);
+    }
+
+    /// <summary>
+    /// #5449: the same four collections with NO collection log (an imported or old archive): the axis is the stored
+    /// collections alone, so t4 divides by its 300 s gap to t3 (1200 ms / 300 s = 4.0), not by the 120 s it stored,
+    /// which only a logged idle run can place. t1 and t3 stay unrated, t2 is 2.0.
+    /// </summary>
+    [Fact]
+    public async Task ProcedureDurationTrend_WithNoCollectionLog_RatesOverTheStoredCollectionsAlone()
+    {
+        var t1 = Truncate(DateTime.UtcNow.AddHours(-2));
+        var t2 = t1.AddMinutes(5);
+        var t3 = t2.AddMinutes(5);
+        var t4 = t3.AddMinutes(5);
+
+        await SeedProcedureAsync(t1, "usp_A", deltaExecutions: 5, deltaElapsedUs: 100_000, interval: null);
+        await SeedProcedureAsync(t2, "usp_A", deltaExecutions: 30, deltaElapsedUs: 600_000, interval: null);
+        await SeedProcedureAsync(t3, "usp_A", deltaExecutions: 0, deltaElapsedUs: 0, interval: 0);
+        await SeedProcedureAsync(t4, "usp_A", deltaExecutions: 24, deltaElapsedUs: 1_200_000, interval: 120);
+        await SeedProcedureAsync(t4, "usp_New", deltaExecutions: 0, deltaElapsedUs: 0, interval: 0);
+
+        var points = await _dataService.GetProcedureDurationTrendAsync(ServerId, hoursBack: 3);
+
+        Assert.Equal(new[] { t1, t2, t3, t4 }, points.Select(p => p.CollectionTime).ToArray());
+        Assert.False(points[0].HasRate);
+        Assert.Equal(2.0, points[1].Value!.Value, precision: 6);
+        Assert.False(points[2].HasRate);
+        Assert.Equal(4.0, points[3].Value!.Value, precision: 6);   /* no log = the stored collections are the axis: 1200 ms / the 300 s gap to t3 */
     }
 
     /// <summary>
@@ -539,6 +581,23 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
              delta_execution_count, delta_worker_time, delta_elapsed_time, sample_interval_seconds)
             VALUES ($1, $2, $3, $4, 'AppDb', 'dbo', $5, 'PROCEDURE', 0, 0, 0, 0, 0, 0, $6, 0, $7, $8)";
         foreach (var v in new object[] { _nextId--, at, ServerId, ServerName, objectName, deltaExecutions, deltaElapsedUs, IntervalValue(interval) })
+        {
+            cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        }
+
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>One SUCCESS run of the procedure collector in the collection log, stamped at the run's start (#5449).</summary>
+    private async Task SeedRunAsync(DateTime startedAt)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO collection_log
+            (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+            VALUES ($1, $2, $3, 'procedure_stats', $4, 0, 'SUCCESS', 0)";
+        foreach (var v in new object[] { _nextId--, ServerId, ServerName, startedAt })
         {
             cmd.Parameters.Add(new DuckDBParameter { Value = v });
         }

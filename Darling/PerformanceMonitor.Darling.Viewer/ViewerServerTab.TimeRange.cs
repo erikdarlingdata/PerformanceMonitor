@@ -11,8 +11,6 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Media;
 using System.Windows.Threading;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
@@ -21,32 +19,31 @@ namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
 /// The per-server toolbar's time-window + auto-refresh + time-display state (the header row added above
-/// the inner tab strip), mirroring Lite's <c>ServerTab.TimeRange.cs</c>: the custom-range pickers are read
-/// in the CURRENT display mode (Server/Local/UTC — <see cref="ViewerTimeHelper"/>, ported from Lite's
-/// <c>TimeDisplayModeBox</c>) and inverted back to the store's naive-UTC bounds here
-/// (<see cref="ViewerTimeHelper.DisplayToNaiveUtc(System.DateTime)"/>). This replaces the old hardcoded
-/// 24-hour <c>s_dataWindow</c>: every inner-tab load reads <see cref="GetWindowUtc"/> (preset
-/// 1h/4h/12h/24h/7d or a custom From/To), the auto-refresh cadence comes from the toolbar instead of
-/// MainWindow's fleet-refresh timer, and the display-mode picker re-renders the visible tab so every
-/// timestamp honors the chosen mode.
+/// the inner tab strip), mirroring Lite's <c>ServerTab.TimeRange.cs</c>. The window is the shared
+/// <see cref="TimeRangePicker"/> (#5562): rolling presets from 5 minutes, calendar periods, or a typed or
+/// calendar-picked range, held as a <see cref="TimeRangeSpec"/> that the picker draws in this tab's display zone
+/// (Server/Local/UTC, <see cref="ViewerTimeHelper.DisplayZoneFor"/> on this tab's own server clock). A fixed range
+/// holds its two naive-UTC instants, so a display-mode switch only redraws the text (#4766) and a range that
+/// crosses a daylight saving change keeps the instants it names. Every inner-tab load reads <see cref="GetWindowUtc"/>
+/// (<see cref="ViewerTimeRangeWindow"/> does the arithmetic), the auto-refresh cadence comes from the toolbar instead
+/// of MainWindow's fleet-refresh timer, and the display-mode picker re-renders the visible tab so every timestamp
+/// honors the chosen mode. There is no reach limit on the desktop (#5562): a long period reads what the data holds,
+/// through the retention routers the long-window reads already use.
 /// </summary>
 public partial class ViewerServerTab
 {
-    /// <summary>The "Custom Range" slot in <c>TimeRangeCombo</c> (after 1h/4h/12h/24h/7d).</summary>
-    private const int CustomRangeIndex = 5;
-
-    /// <summary>Guards the range handlers while pickers/combo are set programmatically (Apply-to-all,
-    /// custom-range defaults) so one external change drives exactly one reload, not a cascade.</summary>
+    /// <summary>Guards the range handlers while the picker or the display-mode box is set programmatically (Apply-to-all,
+    /// the day drill, the default seed) so one external change drives exactly one reload, not a cascade.</summary>
     private bool _suppressRangeEvents;
 
     private DispatcherTimer? _autoRefreshTimer;
 
     /// <summary>
-    /// Raised when the user clicks "Apply to All": MainWindow broadcasts the selected range (index plus,
-    /// for a custom range, the From/To in the CURRENT display-mode wall clock) to every other open server
-    /// tab. The source tab is carried so the broadcast can skip it (it already holds the range).
+    /// Raised when the user clicks "Apply to All": MainWindow broadcasts the held range to every other open server
+    /// tab (<see cref="TimeRangePresets.ForBroadcast"/>: a calendar period goes as the instants it names). The
+    /// source tab is carried so the broadcast can skip it (it already holds the range).
     /// </summary>
-    public event Action<ViewerServerTab, int, DateTime?, DateTime?>? ApplyTimeRangeRequested;
+    public event Action<ViewerServerTab, TimeRangeSpec>? ApplyTimeRangeRequested;
 
     /// <summary>
     /// Raised when the user changes the toolbar's Server/Local/UTC display picker. MainWindow persists the
@@ -64,39 +61,36 @@ public partial class ViewerServerTab
     private ServerClock _serverClock =
         ServerClock.FixedOffset((int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes);
 
-    /// <summary>Preset combo index → hours back. Index 5 (custom) and any stray value fall to the
-    /// viewer's historical 24-hour default. Pure + static so the mapping is unit-testable.</summary>
-    internal static int TimeRangeIndexToHours(int index) => index switch
-    {
-        0 => 1,
-        1 => 4,
-        2 => 12,
-        3 => 24,
-        4 => 168,
-        _ => 24,
-    };
+    /// <summary>The zone the picker draws and reads typed times in: the current display mode's, on THIS tab's own
+    /// server clock rather than the process-wide one another tab may have set last.</summary>
+    private TimeZoneInfo TabDisplayZone => ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, _serverClock);
 
-    /// <summary>Populates the custom-range hour (00:00–23:00) and minute (:00/:15/:30/:45) combos,
-    /// matching Lite's <c>InitializeTimeComboBoxes</c>. Called from the constructor after
-    /// <c>InitializeComponent</c>.</summary>
-    private void InitializeTimeComboBoxes()
+    /// <summary>The range the toolbar holds (rolling, calendar period, fixed or since).</summary>
+    internal TimeRangeSpec HeldRange => RangePicker.Value;
+
+    /// <summary>Preset combo index → hours back, the legacy mapping the preferences file still uses
+    /// (<see cref="ViewerTimeRangeWindow.LegacyIndexToHours"/>). Index 5 (the old Custom slot) and any stray value fall to
+    /// the viewer's historical 24-hour default. Pure + static so the mapping is unit-testable.</summary>
+    internal static int TimeRangeIndexToHours(int index) => ViewerTimeRangeWindow.LegacyIndexToHours(index);
+
+    /// <summary>Wires the picker to this tab: its display zone and the range it starts on (the persisted default).
+    /// Called from the constructor after <c>InitializeComponent</c>.</summary>
+    private void InitializeRangePicker(ViewerPreferences preferences)
     {
-        var hours = new List<string>();
-        for (int h = 0; h < 24; h++)
+        RangePicker.ZoneProvider = () => TabDisplayZone;
+        RangePicker.Value = ViewerTimeRangeWindow.DefaultFor(preferences);
+    }
+
+    /// <summary>The picker raised a pick (preset, period, typed text or calendar): reload the active inner tab, which
+    /// reads the new window through <see cref="GetWindowUtc"/>.</summary>
+    private async void RangePicker_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
+    {
+        if (!IsLoaded || _suppressRangeEvents)
         {
-            hours.Add(DateTime.Today.AddHours(h).ToString("HH:00"));
+            return;
         }
 
-        FromHourCombo.ItemsSource = hours;
-        ToHourCombo.ItemsSource = hours;
-        FromHourCombo.SelectedIndex = 0;   // 00:00
-        ToHourCombo.SelectedIndex = 23;    // 23:00
-
-        var minutes = new List<string> { ":00", ":15", ":30", ":45" };
-        FromMinuteCombo.ItemsSource = minutes;
-        ToMinuteCombo.ItemsSource = minutes;
-        FromMinuteCombo.SelectedIndex = 0; // :00
-        ToMinuteCombo.SelectedIndex = 3;   // :45
+        await RefreshActiveInnerTabAsync();
     }
 
     /// <summary>Wires the auto-refresh timer (default 1 minute, matching the old fixed 60-second cadence)
@@ -124,156 +118,147 @@ public partial class ViewerServerTab
         await RefreshActiveInnerTabAsync();
     }
 
-    // ── Window computation ───────────────────────────────────────────────────────────
 
-    /// <summary>True when the user picked "Custom Range" AND both date pickers hold a value.</summary>
-    private bool IsCustomRange => TimeRangeCombo.SelectedIndex == CustomRangeIndex
-        && FromDatePicker?.SelectedDate != null
-        && ToDatePicker?.SelectedDate != null;
+    // ── Window computation ───────────────────────────────────────────────────────────
 
     /// <summary>
     /// The current window as store-native naive-UTC bounds, driving every inner-tab load (it replaces the
-    /// old fixed 24-hour <c>s_dataWindow</c>). A preset ends "now"; a valid custom range uses its From/To.
+    /// old fixed 24-hour <c>s_dataWindow</c>). A live range ends "now" and slides on every call; a fixed range or a
+    /// finished calendar period keeps its instants. A sub-hour span (5, 15, 30 minutes) flows through unchanged: the
+    /// reads take two instants and size their buckets in minutes.
     /// </summary>
     private (DateTime startUtc, DateTime endUtc) GetWindowUtc()
     {
-        if (IsCustomRange)
-        {
-            var (fromUtc, toUtc) = GetCustomRangeUtc();
-            if (fromUtc.HasValue && toUtc.HasValue)
-            {
-                return (fromUtc.Value, toUtc.Value);
-            }
-        }
-
-        var endUtc = DateTime.UtcNow;
-        return (endUtc.AddHours(-TimeRangeIndexToHours(TimeRangeCombo.SelectedIndex)), endUtc);
+        var (startUtc, endUtc, _) = ViewerTimeRangeWindow.Window(RangePicker.Value, DateTime.UtcNow, TabDisplayZone);
+        return (startUtc, endUtc);
     }
 
-    /// <summary>Hours-back for the reads that take an integer window (the Overview lanes + Collection
-    /// Health log). A custom range collapses to its rounded-up span so those surfaces still track it.</summary>
+    /// <summary>True when the window ends in the past (a fixed range, or a calendar period that has finished), so a read
+    /// that is start-only server-side must bound its end itself (the CPU chart). A window that slides with now is not.</summary>
+    private bool IsCustomRange => !ViewerTimeRangeWindow.Window(RangePicker.Value, DateTime.UtcNow, TabDisplayZone).IsLive;
+
+    /// <summary>Hours-back for the reads that take an integer window: the window's span rounded up to whole hours, at
+    /// least one (<see cref="ViewerTimeRangeWindow.HoursBack"/>).</summary>
     private int GetWindowHoursBack()
     {
-        if (IsCustomRange)
-        {
-            var (fromUtc, toUtc) = GetCustomRangeUtc();
-            if (fromUtc.HasValue && toUtc.HasValue)
-            {
-                var hours = (int)Math.Ceiling((toUtc.Value - fromUtc.Value).TotalHours);
-                return hours < 1 ? 1 : hours;
-            }
-        }
-
-        return TimeRangeIndexToHours(TimeRangeCombo.SelectedIndex);
+        var (startUtc, endUtc) = GetWindowUtc();
+        return ViewerTimeRangeWindow.HoursBack(startUtc, endUtc);
     }
 
-    /// <summary>Custom From/To as naive-UTC bounds for the Overview lanes (null,null when not a valid
-    /// custom range — the lanes then fall back to their hours-back window).</summary>
+    /// <summary>The window's two bounds for the Overview lanes, ALWAYS as the explicit pair: the lanes then plot exactly the
+    /// window (a 15-minute or a calendar-period window is not rounded to whole hours back from now).</summary>
     private (DateTime? fromUtc, DateTime? toUtc) GetOverviewCustomRange()
-        => IsCustomRange ? GetCustomRangeUtc() : (null, null);
-
-    /// <summary>Reads the custom From/To pickers as naive-UTC bounds, or (null,null) when either is unset.</summary>
-    private (DateTime? fromUtc, DateTime? toUtc) GetCustomRangeUtc()
     {
-        var fromDisplay = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-        var toDisplay = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-        if (!fromDisplay.HasValue || !toDisplay.HasValue)
-        {
-            return (null, null);
-        }
-
-        /* The pickers hold wall-clock time in the CURRENT display mode; invert to the store's naive-UTC
-           window bounds (the reads re-stamp them Unspecified). ViewerTimeHelper.DisplayToNaiveUtc uses the
-           active server offset applied before each load, so a Server-mode window maps to the right UTC. */
-        return (ViewerTimeHelper.DisplayToNaiveUtc(fromDisplay.Value), ViewerTimeHelper.DisplayToNaiveUtc(toDisplay.Value));
+        var (startUtc, endUtc) = GetWindowUtc();
+        return (startUtc, endUtc);
     }
 
-    private static DateTime? GetDateTimeFromPickers(DatePicker datePicker, ComboBox hourCombo, ComboBox minuteCombo)
+    private static readonly TimeSpan ScheduleOverridesMaxAge = TimeSpan.FromMinutes(5);
+
+    private IReadOnlyList<CollectorScheduleRow>? _scheduleOverrides;
+
+    private string? _noteCollector;
+
+    private DateTime _scheduleOverridesReadUtc;
+
+    /// <summary>Redraws the picker's resolved text from the clock, the zone and the notes. Run when the display zone moved
+    /// and on every refresh, so a range that slides with now shows the window it is reading.</summary>
+    private void RefreshRangePicker() => RangePicker.Refresh();
+
+    /// <summary>The main collector of the page on screen: the inner tab's header and, when that tab holds a sub-tab control, the
+    /// selected sub-tab's (<see cref="ViewerTimeRangeWindow.MainCollectorFor(string?, string?)"/>). Never widens the range.</summary>
+    private string? CurrentMainCollector()
     {
-        if (datePicker?.SelectedDate is not { } date)
+        if (InnerTabs?.SelectedItem is not TabItem top)
         {
             return null;
         }
 
-        int hour = hourCombo.SelectedIndex >= 0 ? hourCombo.SelectedIndex : 0;
-        int minute = minuteCombo.SelectedIndex >= 0 ? minuteCombo.SelectedIndex * 15 : 0;
-        return date.Date.AddHours(hour).AddMinutes(minute);
-    }
-
-    // ── Toolbar handlers ─────────────────────────────────────────────────────────────
-
-    private async void TimeRangeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!IsLoaded || _suppressRangeEvents)
+        string? sub = null;
+        if (top.Content is DependencyObject content && FindFirstTabControl(content) is { SelectedItem: TabItem selected })
         {
-            return;
+            sub = selected.Header as string;
         }
 
-        var isCustom = TimeRangeCombo.SelectedIndex == CustomRangeIndex;
-        var visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
+        return ViewerTimeRangeWindow.MainCollectorFor(top.Header as string, sub);
+    }
 
-        if (FromDatePicker != null)
+    private static TabControl? FindFirstTabControl(DependencyObject parent)
+    {
+        foreach (var child in LogicalTreeHelper.GetChildren(parent))
         {
-            FromDatePicker.Visibility = visibility;
-            FromHourCombo.Visibility = visibility;
-            FromMinuteCombo.Visibility = visibility;
-            ToLabel.Visibility = visibility;
-            ToDatePicker.Visibility = visibility;
-            ToHourCombo.Visibility = visibility;
-            ToMinuteCombo.Visibility = visibility;
-
-            if (isCustom && FromDatePicker.SelectedDate == null)
+            if (child is TabControl tabs)
             {
-                /* Seed a sensible default so switching to Custom shows a real window; the picker changes
-                   below drive the reload. Suppress so the two picker writes coalesce into one load. */
-                _suppressRangeEvents = true;
-                FromDatePicker.SelectedDate = DateTime.Today.AddDays(-1);
-                ToDatePicker.SelectedDate = DateTime.Today;
-                _suppressRangeEvents = false;
+                return tabs;
             }
 
-            if (!isCustom)
+            if (child is DependencyObject next && FindFirstTabControl(next) is { } found)
             {
-                /* #2154: a DatePicker's calendar dropdown is a POPUP, which lives outside the visual
-                   tree's visibility — collapsing the picker does not close an already-open dropdown,
-                   so backing out of Custom Range without picking a date left an orphaned floating
-                   calendar on screen. Close them explicitly alongside the collapse (Lite twin fix). */
-                FromDatePicker.IsDropDownOpen = false;
-                ToDatePicker.IsDropDownOpen = false;
+                return found;
             }
         }
 
-        /* Presets reload here; a custom range reloads off the picker changes (below), except the seeded
-           default above which is suppressed — so drive that one reload explicitly. */
-        if (!isCustom || FromDatePicker?.SelectedDate != null)
+        return null;
+    }
+
+    /// <summary>
+    /// Sets the picker's "collected every N minutes" note (#5562 R3) from the main collector of the inner tab on screen and
+    /// that collector's ACTUAL interval on this server (the schedule overrides, else the shipped default). A read that
+    /// fails leaves the shipped default; a tab with no main collector shows no note.
+    /// </summary>
+    private async Task UpdateSampleIntervalAsync()
+    {
+        try
         {
-            await RefreshActiveInnerTabAsync();
+            var collector = CurrentMainCollector();
+            if (!string.Equals(collector, _noteCollector, StringComparison.Ordinal))
+            {
+                /* A different top-level tab: the data-start note belonged to the last tab's surface, so it clears here and
+                   the new tab's own probe sets it again. */
+                _noteCollector = collector;
+                RecordDataStart(null);
+            }
+
+            IReadOnlyList<CollectorScheduleRow>? overrides = null;
+            if (collector is not null)
+            {
+                try
+                {
+                    /* The schedule table is small but the refresh runs every 30 seconds to 5 minutes per tab, so the rows are
+                       read at most every five minutes. */
+                    if (_scheduleOverrides is null || DateTime.UtcNow - _scheduleOverridesReadUtc > ScheduleOverridesMaxAge)
+                    {
+                        _scheduleOverrides = await _dataService.GetCollectorSchedulesAsync();
+                        _scheduleOverridesReadUtc = DateTime.UtcNow;
+                    }
+
+                    overrides = _scheduleOverrides;
+                }
+                catch (Exception ex)
+                {
+                    ViewerLogger.Warn("ViewerServerTab", $"time range note: could not read the collector schedule, using the shipped cadence | {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            RangePicker.SampleInterval = ViewerTimeRangeWindow.SampleIntervalFor(collector, _server.ServerId, overrides);
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Warn("ViewerServerTab", $"time range note failed | {ex.GetType().Name}: {ex.Message}");
         }
     }
 
-    private async void CustomDateRange_Changed(object sender, SelectionChangedEventArgs e)
+    /// <summary>
+    /// Sets the picker's "Data starts ..." note from a data-start probe a surface already awaited (#5562, the desktop twin
+    /// of the web's retention note): the same <c>floor</c> the surface's "Showing since" banner reads. No query of its own.
+    /// Every banner site reaches it through <see cref="UpdateTruncationBanner"/> and <see cref="ViewerDataStartNote.Feed"/>
+    /// (#5562 R7), for the tab on screen. A null floor (the probe found nothing, or failed) clears the note.
+    /// </summary>
+    internal void RecordDataStart(DateTime? floor)
     {
-        if (!IsLoaded || _suppressRangeEvents)
+        if (RangePicker.DataStartUtc != floor)
         {
-            return;
-        }
-
-        if (FromDatePicker?.SelectedDate != null && ToDatePicker?.SelectedDate != null)
-        {
-            await RefreshActiveInnerTabAsync();
-        }
-    }
-
-    private async void CustomTimeCombo_Changed(object sender, SelectionChangedEventArgs e)
-    {
-        if (!IsLoaded || _suppressRangeEvents)
-        {
-            return;
-        }
-
-        if (FromDatePicker?.SelectedDate != null && ToDatePicker?.SelectedDate != null)
-        {
-            await RefreshActiveInnerTabAsync();
+            RangePicker.DataStartUtc = floor;
         }
     }
 
@@ -334,17 +319,12 @@ public partial class ViewerServerTab
         };
     }
 
+
     private void ApplyTimeRangeToAll_Click(object sender, RoutedEventArgs e)
     {
-        DateTime? fromLocal = null;
-        DateTime? toLocal = null;
-        if (TimeRangeCombo.SelectedIndex == CustomRangeIndex)
-        {
-            fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-            toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-        }
-
-        ApplyTimeRangeRequested?.Invoke(this, TimeRangeCombo.SelectedIndex, fromLocal, toLocal);
+        /* A calendar period goes as the instants it names in THIS tab's zone, a fixed range as its held instants: every
+           other tab draws them in its own server's zone, so all of them window on the same period (#4766, #5562). */
+        ApplyTimeRangeRequested?.Invoke(this, TimeRangePresets.ForBroadcast(RangePicker.Value, DateTime.UtcNow, TabDisplayZone));
     }
 
     // ── Time-display mode (Server / Local / UTC) ─────────────────────────────────────
@@ -379,6 +359,11 @@ public partial class ViewerServerTab
             /* No collected offset yet (or a read hiccup): keep the clock the tab already has so Server mode
                degrades gracefully to ~Local until server_properties.utc_offset_minutes is populated. */
         }
+
+        /* The picker draws the held range in this tab's zone, and the clock is what may just have changed it (the
+           first read after a range was applied from another tab, or a server that moved zone), so draw it again. A
+           range that slides with now is redrawn from the clock too (#4766, #5562). */
+        RefreshRangePicker();
     }
 
     /// <summary>Pushes this tab's server clock onto the process-wide helper. Called before every render so
@@ -386,9 +371,8 @@ public partial class ViewerServerTab
     internal void ApplyServerClockToHelper() => ViewerTimeHelper.ActiveServerClock = _serverClock;
 
     /// <summary>
-    /// The Server/Local/UTC picker changed: apply this tab's offset, re-express the custom-range pickers
-    /// from the old mode into the new one (same absolute window, mirroring Lite's
-    /// <c>TimeDisplayMode_SelectionChanged</c>), set the new global mode, then persist (via
+    /// The Server/Local/UTC picker changed: apply this tab's clock, set the new global mode and draw the held
+    /// custom range in the new mode's zone (same instants, only the text changes), then persist (via
     /// <see cref="DisplayModeChanged"/>) and reload the visible tab so every timestamp and chart re-renders
     /// in the new mode. No-op while loading/suppressed or when the mode is unchanged.
     /// </summary>
@@ -409,37 +393,19 @@ public partial class ViewerServerTab
             return;
         }
 
-        var oldMode = ViewerTimeHelper.CurrentDisplayMode;
-
-        /* Server-mode conversions (and the picker re-conversion below) need this server's offset. */
+        /* Server-mode conversions (and the picker drawing below) need this server's clock. */
         await RefreshServerClockAsync();
         ApplyServerClockToHelper();
 
-        /* Re-express the custom-range pickers so the same absolute window stays selected across the switch.
-           Suppress range events while rewriting them so this drives exactly one reload (below), not a cascade. */
+        /* The same held instants stay selected across the switch: only the text the pickers show changes, so
+           nothing is parsed back and a range that crosses a daylight saving change returns to the instants it
+           had (#4766). Suppress range events while drawing them so this drives exactly one reload (below), not
+           a cascade. */
         _suppressRangeEvents = true;
         try
         {
-            var fromPicked = IsCustomRange ? GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo) : null;
-            var toPicked = IsCustomRange ? GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo) : null;
-            if (fromPicked.HasValue && toPicked.HasValue)
-            {
-                var fromUtc = ViewerTimeHelper.DisplayToNaiveUtc(fromPicked.Value, oldMode);
-                var toUtc = ViewerTimeHelper.DisplayToNaiveUtc(toPicked.Value, oldMode);
-                ViewerTimeHelper.CurrentDisplayMode = mode;
-                var fromNew = ViewerTimeHelper.ForDisplay(fromUtc);
-                var toNew = ViewerTimeHelper.ForDisplay(toUtc);
-                FromDatePicker!.SelectedDate = fromNew.Date;
-                FromHourCombo.SelectedIndex = fromNew.Hour;
-                FromMinuteCombo.SelectedIndex = fromNew.Minute / 15;
-                ToDatePicker!.SelectedDate = toNew.Date;
-                ToHourCombo.SelectedIndex = toNew.Hour;
-                ToMinuteCombo.SelectedIndex = toNew.Minute / 15;
-            }
-            else
-            {
-                ViewerTimeHelper.CurrentDisplayMode = mode;
-            }
+            ViewerTimeHelper.CurrentDisplayMode = mode;
+            RefreshRangePicker();
         }
         finally
         {
@@ -475,6 +441,11 @@ public partial class ViewerServerTab
                     break;
                 }
             }
+
+            /* The mode is process-wide, so a range this tab holds is drawn in the new mode's zone here too,
+               not left showing the old mode's text until the tab reloads (#4766). The picker reads the zone from
+               ViewerTimeHelper.CurrentDisplayMode, which the caller has already set to this mode. */
+            RefreshRangePicker();
         }
         finally
         {
@@ -483,159 +454,54 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
-    /// Applies a range chosen on another server tab (the "Apply to All" broadcast). Sets the pickers and
-    /// combo under the suppress guard so the copy doesn't cascade multiple reloads, then drives exactly
-    /// one reload of this tab's active inner tab.
+    /// Applies a range chosen on another server tab (the "Apply to All" broadcast). The range arrives as a spec whose
+    /// instants are already fixed where they must be (<see cref="TimeRangePresets.ForBroadcast"/>): this tab holds
+    /// it and draws it in ITS zone, so every tab windows on the same period whatever its server's clock (#4766). Sets
+    /// the picker under the suppress guard so the copy doesn't cascade multiple reloads, then, when this is the
+    /// visible tab, drives exactly one reload of its active inner tab. A hidden tab holds the range and reloads when it
+    /// is selected, so it never puts its own server's clock on the shared <see cref="ViewerTimeHelper"/> while another
+    /// tab is on screen.
     /// </summary>
-    public void ApplyExternalTimeRange(int index, DateTime? customFromLocal, DateTime? customToLocal)
+    public void ApplyExternalTimeRange(TimeRangeSpec range)
     {
         _suppressRangeEvents = true;
         try
         {
-            var isCustom = index == CustomRangeIndex && customFromLocal.HasValue && customToLocal.HasValue;
-            var visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
-
-            if (FromDatePicker != null)
-            {
-                FromDatePicker.Visibility = visibility;
-                FromHourCombo.Visibility = visibility;
-                FromMinuteCombo.Visibility = visibility;
-                ToLabel.Visibility = visibility;
-                ToDatePicker.Visibility = visibility;
-                ToHourCombo.Visibility = visibility;
-                ToMinuteCombo.Visibility = visibility;
-            }
-
-            if (isCustom)
-            {
-                FromDatePicker!.SelectedDate = customFromLocal!.Value.Date;
-                FromHourCombo.SelectedIndex = customFromLocal.Value.Hour;
-                FromMinuteCombo.SelectedIndex = customFromLocal.Value.Minute / 15;
-                ToDatePicker!.SelectedDate = customToLocal!.Value.Date;
-                ToHourCombo.SelectedIndex = customToLocal.Value.Hour;
-                ToMinuteCombo.SelectedIndex = customToLocal.Value.Minute / 15;
-            }
-
-            TimeRangeCombo.SelectedIndex = index;
+            RangePicker.Value = range;
         }
         finally
         {
             _suppressRangeEvents = false;
         }
 
-        _ = RefreshActiveInnerTabAsync();
+        /* Apply to All calls this on every open tab, hidden ones too. A reload writes this server's clock onto the
+           process-wide ViewerTimeHelper, so a hidden tab reloading here would leave ITS clock on the visible tab's
+           hover and ticks (the last one to finish wins). Only the visible tab reloads; a hidden one reloads when it
+           is selected (MainWindow's tab switch), and shows the range it now holds then. Same rule as
+           OnAutoRefreshTick (#4766). */
+        if (IsVisible)
+        {
+            _ = RefreshActiveInnerTabAsync();
+        }
     }
 
     /// <summary>
     /// Scopes the toolbar to an explicit naive-UTC <c>[from, to)</c> window — the Performance Calendar day
-    /// drill's "set the time window to that day" step. Selects "Custom Range", reveals the pickers, and writes
-    /// them in the active display mode (<see cref="ViewerTimeHelper.ForDisplay(System.DateTime)"/> inverts the
-    /// naive-UTC bounds to the picker wall-clock, so <see cref="GetWindowUtc"/> round-trips back to the same
-    /// window). Runs under <see cref="_suppressRangeEvents"/> so it drives no reload of its own — the caller
-    /// (the day drill) loads the target inner tab itself. Mirrors <see cref="ApplyExternalTimeRange"/>'s picker
-    /// manipulation, but from UTC and without the reload.
+    /// drill's "set the time window to that day" step. Holds the bounds as a fixed range and draws them in the active
+    /// display mode's zone, so <see cref="GetWindowUtc"/> returns exactly the window given. Runs under
+    /// <see cref="_suppressRangeEvents"/> so it drives no reload of its own — the caller (the day drill) loads the target
+    /// inner tab itself. Mirrors <see cref="ApplyExternalTimeRange"/>, without the reload.
     /// </summary>
     internal void SetToolbarWindowUtc(DateTime fromUtc, DateTime toUtc)
     {
-        var fromDisplay = ViewerTimeHelper.ForDisplay(fromUtc);
-        var toDisplay = ViewerTimeHelper.ForDisplay(toUtc);
-
         _suppressRangeEvents = true;
         try
         {
-            if (FromDatePicker != null)
-            {
-                FromDatePicker.Visibility = Visibility.Visible;
-                FromHourCombo.Visibility = Visibility.Visible;
-                FromMinuteCombo.Visibility = Visibility.Visible;
-                ToLabel.Visibility = Visibility.Visible;
-                ToDatePicker.Visibility = Visibility.Visible;
-                ToHourCombo.Visibility = Visibility.Visible;
-                ToMinuteCombo.Visibility = Visibility.Visible;
-
-                FromDatePicker.SelectedDate = fromDisplay.Date;
-                FromHourCombo.SelectedIndex = fromDisplay.Hour;
-                FromMinuteCombo.SelectedIndex = fromDisplay.Minute / 15;
-                ToDatePicker.SelectedDate = toDisplay.Date;
-                ToHourCombo.SelectedIndex = toDisplay.Hour;
-                ToMinuteCombo.SelectedIndex = toDisplay.Minute / 15;
-            }
-
-            TimeRangeCombo.SelectedIndex = CustomRangeIndex;
+            RangePicker.Value = TimeRangeSpec.FixedRange(fromUtc, toUtc);
         }
         finally
         {
             _suppressRangeEvents = false;
-        }
-    }
-
-    // ── Custom-range DatePicker calendar theming (viewer is fixed Dark) ───────────────
-
-    private void DatePicker_CalendarOpened(object sender, RoutedEventArgs e)
-    {
-        if (sender is not DatePicker datePicker)
-        {
-            return;
-        }
-
-        /* Defer so the popup's visual tree exists before we re-color it. */
-        Dispatcher.BeginInvoke(new Action(() =>
-        {
-            if (datePicker.Template.FindName("PART_Popup", datePicker) is Popup { Child: Calendar calendar })
-            {
-                ApplyDarkThemeToCalendar(calendar);
-            }
-        }));
-    }
-
-    private static void ApplyDarkThemeToCalendar(Calendar calendar)
-    {
-        var primaryBg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#111217")!);
-        var fg = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E4E6EB")!);
-        var borderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2a2d35")!);
-
-        calendar.Background = primaryBg;
-        calendar.Foreground = fg;
-        calendar.BorderBrush = borderBrush;
-        ApplyDarkThemeRecursively(calendar, primaryBg, fg);
-    }
-
-    private static void ApplyDarkThemeRecursively(DependencyObject parent, Brush primaryBg, Brush fg)
-    {
-        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
-        {
-            var child = VisualTreeHelper.GetChild(parent, i);
-
-            switch (child)
-            {
-                case CalendarItem calendarItem:
-                    calendarItem.Background = primaryBg;
-                    calendarItem.Foreground = fg;
-                    break;
-                case CalendarDayButton dayButton:
-                    dayButton.Background = Brushes.Transparent;
-                    dayButton.Foreground = fg;
-                    break;
-                case CalendarButton calButton:
-                    calButton.Background = Brushes.Transparent;
-                    calButton.Foreground = fg;
-                    break;
-                case Button button:
-                    button.Background = Brushes.Transparent;
-                    button.Foreground = fg;
-                    break;
-                case TextBlock textBlock:
-                    textBlock.Foreground = fg;
-                    break;
-                case Border { Background: SolidColorBrush bg } border when bg.Color is { R: > 200, G: > 200, B: > 200 }:
-                    border.Background = primaryBg;
-                    break;
-                case Grid { Background: SolidColorBrush gridBg } grid when gridBg.Color is { R: > 200, G: > 200, B: > 200 }:
-                    grid.Background = primaryBg;
-                    break;
-            }
-
-            ApplyDarkThemeRecursively(child, primaryBg, fg);
         }
     }
 }

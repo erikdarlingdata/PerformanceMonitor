@@ -102,11 +102,34 @@ AND   c.role_name IS NULL
 AND   c.name IN ('deadlock_timeout', 'log_lock_waits')";
 
     /// <summary>
-    /// The window's <c>lock_wait</c> family of <c>pg_log_events</c> (#3601) — the engine's own record of every lock
-    /// wait that outlived <c>deadlock_timeout</c>, EVENT grain, four line shapes: <c>still waiting for … after N ms</c>
-    /// (one per wait, written when the wait crosses the timeout — the COUNT of waits), <c>acquired … after N ms</c>
-    /// (the same wait ending — the wait's true end-to-end length), <c>avoided deadlock … after N ms</c> and
-    /// <c>detected deadlock … after N ms</c>.
+    /// The window's <c>lock_wait</c> family of <c>pg_log_events</c> (#3601) — the engine's own record of lock waits
+    /// that outlived <c>deadlock_timeout</c>, EVENT grain, four line shapes: <c>still waiting for … after N ms</c>
+    /// (written when a wait crosses the timeout, and written AGAIN each time the backend's latch wakes while it is
+    /// still waiting — PostgreSQL 18's <c>ProcSleep</c> — so one wait can leave several lines, each with a larger
+    /// <c>N</c>), <c>acquired … after N ms</c> (the same wait ending — the wait's true end-to-end length),
+    /// <c>avoided deadlock … after N ms</c> and <c>detected deadlock … after N ms</c>.
+    ///
+    /// <para><b>Each stored line counts once, in the window of its first sighting.</b> The resumed log read
+    /// re-reads an overlap, so the same line (<c>raw_line_hash</c>) can be stored by two passes. <c>in_window</c>
+    /// keeps one row per distinct line collected in the window, and <c>first_seen</c> drops a line that an earlier
+    /// pass already stored: a line is never collected before it occurred, so an earlier sighting can only lie in
+    /// <c>[occurred_at, $2)</c>, a range bounded by the line's own time (a NULL <c>occurred_at</c> searches all
+    /// history; it is rare and stays correct). This holds the same assumption <c>DarlingPgLogEventReader</c> makes:
+    /// the target's clock is not ahead of the store's.</para>
+    ///
+    /// <para><b>Each lock wait counts once, at the line that opens it.</b> <c>waits</c> keeps a <c>still waiting</c>
+    /// line only when no EARLIER line of the same wait exists anywhere in the table: same backend (the pid the message
+    /// names), same lock text, a strictly smaller <c>after N ms</c>, and an <c>occurred_at</c> within
+    /// <c>[L.occurred_at − (N + 1 s), L.occurred_at]</c>. A backend waits on one lock at a time and every line of a
+    /// wait lies between its start and the line's own time, so the probe is bounded by the line's own <c>N</c>; the
+    /// one-second pad covers whole-second <c>%t</c> stamps. Two separate waits by one backend are counted twice,
+    /// because the second wait's lines start after the first ended. A line with no parsable lock text, duration or
+    /// time counts as its own wait. <b>Residual, stated:</b> a re-wait by the same backend on the same lock text
+    /// that starts within one second after the previous wait's opening line folds into it, however that wait ended
+    /// (that previous wait then lasted under deadlock_timeout plus one second). The probe reads what was collected up to the opener candidate's own first
+    /// sighting (<c>first_collected</c>), because an earlier line of the same wait is read before it, in the same pass
+    /// or an earlier one. A wait whose earlier line was collected only after that is counted at its first line
+    /// collected in the window, which needs out-of-order collection; a single log file's read doesn't produce it.</para>
     ///
     /// <para><b>The duration is read off the message, not the <c>duration_ms</c> column.</b> Verified at source
     /// (<c>PgLockWaitEventParser</c>): the lock_wait parser stores the line with NO metrics lifted — <c>duration_ms</c>
@@ -122,51 +145,103 @@ AND   c.name IN ('deadlock_timeout', 'log_lock_waits')";
     /// and written just before it is this pass's. Stated, bounded by one collector cadence, and the same rule every
     /// PostgreSQL family applies to its table.</para>
     ///
+    /// <para><b>The output.</b> <c>still_waiting</c> is the count of WAITS; <c>acquired</c>, <c>deadlocks</c>,
+    /// <c>lines</c>, <c>max_wait_ms</c>, <c>acquired_wait_ms</c> and <c>last_event_at</c> are over the distinct lines
+    /// first sighted in the window; <c>top_relation</c> and <c>top_fingerprint</c> weigh each wait once, at its
+    /// opener.</para>
+    ///
     /// <para><b>The two denominators ride the row.</b> <c>log_captures</c> — SUCCESS runs of the <c>pg_log_events</c>
     /// collector in the window, from <c>collection_log</c> — tells "no lines" apart from "nobody was reading the log"
     /// (the collector is optional and needs the RDS log API or file access); without it a silent collector would
     /// read as a quiet server. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window.</para>
     /// </summary>
     public const string PgTargetLockWaitEventsSql = @"
-WITH events AS (
+WITH in_window AS (
+    SELECT DISTINCT ON (e.raw_line_hash)
+        e.raw_line_hash,
+        e.message,
+        e.occurred_at,
+        e.statement_fingerprint,
+        e.pid,
+        e.relation_name,
+        e.context,
+        e.duration_ms,
+        e.collection_time AS first_collected
+    FROM pg_log_events AS e
+    WHERE e.server_id = $1
+    AND   e.collection_time >= $2
+    AND   e.collection_time <= $3
+    AND   e.family = 'lock_wait'
+    AND   e.raw_line_hash IS NOT NULL
+    ORDER BY e.raw_line_hash, e.collection_time
+),
+first_seen AS (
+    SELECT w.*
+    FROM in_window AS w
+    WHERE w.occurred_at >= $2
+    OR    NOT EXISTS (
+              SELECT 1
+              FROM pg_log_events AS p
+              WHERE p.server_id = $1
+              AND   p.collection_time >= coalesce(w.occurred_at, '-infinity'::timestamp)
+              AND   p.collection_time < $2
+              AND   p.raw_line_hash = w.raw_line_hash)
+),
+lines AS (
     SELECT
-        message,
-        occurred_at,
-        statement_fingerprint,
-        coalesce(relation_name, substring(coalesce(context, '') from 'in relation ""([^""]+)""')) AS relation_name,
-        coalesce(duration_ms::DOUBLE PRECISION,
-                 NULLIF(substring(message from 'after ([0-9]+(?:\.[0-9]+)?) ms'), '')::DOUBLE PRECISION) AS wait_ms
-    FROM pg_log_events
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    AND   family = 'lock_wait'
+        f.raw_line_hash,
+        f.first_collected,
+        f.message,
+        f.occurred_at,
+        f.statement_fingerprint,
+        coalesce(f.relation_name, substring(coalesce(f.context, '') from 'in relation ""([^""]+)""')) AS relation_name,
+        coalesce(f.duration_ms::DOUBLE PRECISION,
+                 NULLIF(substring(f.message from 'after ([0-9]+(?:\.[0-9]+)?) ms'), '')::DOUBLE PRECISION) AS wait_ms,
+        coalesce(substring(f.message from '^process ([0-9]+) ')::INT, f.pid) AS wait_pid,
+        substring(f.message from '^process [0-9]+ still waiting for (.+) after [0-9.]+ ms') AS lock_text
+    FROM first_seen AS f
+),
+waits AS (
+    SELECT l.*
+    FROM lines AS l
+    WHERE l.message LIKE 'process % still waiting for %'
+    AND   NOT EXISTS (
+              SELECT 1
+              FROM pg_log_events AS p
+              WHERE p.server_id = $1
+              AND   p.family = 'lock_wait'
+              AND   p.collection_time >= l.occurred_at - (l.wait_ms + 1000) * INTERVAL '1 millisecond'
+              AND   p.collection_time <= l.first_collected
+              AND   p.occurred_at >= l.occurred_at - (l.wait_ms + 1000) * INTERVAL '1 millisecond'
+              AND   p.occurred_at <= l.occurred_at
+              AND   p.raw_line_hash <> l.raw_line_hash
+              AND   coalesce(substring(p.message from '^process ([0-9]+) ')::INT, p.pid) = l.wait_pid
+              AND   substring(p.message from '^process [0-9]+ still waiting for (.+) after [0-9.]+ ms') = l.lock_text
+              AND   NULLIF(substring(p.message from 'after ([0-9]+(?:\.[0-9]+)?) ms'), '')::DOUBLE PRECISION < l.wait_ms)
 ),
 shape AS (
     SELECT
-        COUNT(*) FILTER (WHERE message LIKE 'process % still waiting for %')                 AS still_waiting,
+        (SELECT COUNT(*) FROM waits)                                                         AS still_waiting,
         COUNT(*) FILTER (WHERE message LIKE 'process % acquired %')                          AS acquired,
         COUNT(*) FILTER (WHERE message LIKE 'process % detected deadlock %')                 AS deadlocks,
         COUNT(*)                                                                             AS lines,
         MAX(wait_ms)                                                                         AS max_wait_ms,
         coalesce(SUM(wait_ms) FILTER (WHERE message LIKE 'process % acquired %'), 0)         AS acquired_wait_ms,
         MAX(occurred_at)                                                                     AS last_event_at
-    FROM events
+    FROM lines
 ),
 top_relation AS (
     SELECT relation_name, COUNT(*) AS waits
-    FROM events
+    FROM waits
     WHERE relation_name IS NOT NULL
-    AND   message LIKE 'process % still waiting for %'
     GROUP BY relation_name
     ORDER BY waits DESC, relation_name
     LIMIT 1
 ),
 top_fingerprint AS (
     SELECT statement_fingerprint, COUNT(*) AS waits
-    FROM events
+    FROM waits
     WHERE statement_fingerprint IS NOT NULL
-    AND   message LIKE 'process % still waiting for %'
     GROUP BY statement_fingerprint
     ORDER BY waits DESC, statement_fingerprint
     LIMIT 1

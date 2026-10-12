@@ -156,7 +156,9 @@ public sealed class AlertToastCoordinator
 
             var conditionKey = ConditionKey(row);
             if (cooldown > TimeSpan.Zero
-                && _lastToast.TryGetValue(conditionKey, out var last)
+                /* #4732: a stamp ahead of the clock (it stepped back since the toast) is replaced by this reading, so the
+                   condition is held one cooldown from here, not the step plus the cooldown. */
+                && PerformanceMonitor.Common.LastFiredStamp.TryGet(_lastToast, conditionKey, nowUtc, out var last)
                 && nowUtc - last < cooldown)
             {
                 continue; /* same condition toasted too recently */

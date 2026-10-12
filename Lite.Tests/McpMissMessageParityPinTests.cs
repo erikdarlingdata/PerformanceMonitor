@@ -9,6 +9,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace Lite.Tests;
@@ -32,6 +33,8 @@ namespace Lite.Tests;
 /// message either server can produce, and a naive extension that tried to would pass vacuously the day
 /// somebody added an unshared one.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class McpMissMessageParityPinTests
 {
     /// <summary>
@@ -61,6 +64,26 @@ public sealed class McpMissMessageParityPinTests
         Assert.True(empty > gate, $"{relativePath} no longer keeps the empty miss as the last resort");
     }
 
+    /// <summary>
+    /// The gated-off arm's possible cause for running_jobs. It used to be a literal at each tool's call site,
+    /// and the two copies are exactly what drifts. Both tools now pass the one shared constant, so the text a
+    /// caller reads is identical on both SKUs; this pins that each call still passes it.
+    /// </summary>
+    [Theory]
+    [InlineData("Lite/Mcp/McpJobTools.cs")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpJobTools.cs")]
+    public void BothSkus_PassTheSharedRunningJobsCause(string relativePath)
+    {
+        var source = File.ReadAllText(Path.Combine(ParitySource.RepoRoot(), relativePath));
+
+        var call = source.IndexOf("GatedOffStatusAsync(", StringComparison.Ordinal);
+        var cause = call < 0 ? -1 : source.IndexOf("CollectorRuntimePrecondition.RunningJobsPossibleCauses", call, StringComparison.Ordinal);
+
+        Assert.True(call > 0, $"{relativePath} no longer calls GatedOffStatusAsync");
+        Assert.True(cause > call && !source[call..cause].Contains(';', StringComparison.Ordinal),
+            $"{relativePath} does not pass CollectorRuntimePrecondition.RunningJobsPossibleCauses to its GatedOffStatusAsync call");
+    }
+
     private const string LiteMcpDir = "Lite/Mcp";
     private const string DarlingMcpDir = "Darling/PerformanceMonitor.Darling.Service/Mcp";
 
@@ -78,6 +101,17 @@ public sealed class McpMissMessageParityPinTests
            the only shared miss sentence this list did not name. Darling's sentinel population gets its
            OWN sentences ahead of these three, so what is compared here stays the monitored-server text. */
         "This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.",
+
+        /* #4966: the covered-window variants of the quiet and all-clear CLAIMS, byte-identical on both SKUs. Each sits after
+           the message's own factual first sentence, which is kept on a cut window too. The cut-window claims are two
+           constants in Common (McpHelpers.CutWindowNothingMessage and CutWindowNothingReadMessage), pinned below. */
+        "The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.",
+        "this IS the all-clear for this read.",
+        "A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected.",
+        "This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist.",
+
+        /* #4966: the server-instructions sentence naming the three window keys (both apps' instructions carry it). */
+        "`window_truncated` true: the window starts before the store's data, not a cut page (`effective_start`, `truncation_note`).",
 
         /* get_memory_clerks */
         "This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks.",
@@ -126,7 +160,8 @@ public sealed class McpMissMessageParityPinTests
            window) no other read has. */
         "so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.",
         " hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
-        " hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
+        " hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
+        " Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
 
         /* get_lock_wait_trend (#2484). The all-clear sentence is get_wait_types' own, reused deliberately:
            both reads are looking at the same PERIODIC table and the advice is identical, so two spellings
@@ -168,12 +203,6 @@ public sealed class McpMissMessageParityPinTests
         "A few preconditions are the exception and SAY SO IN THEIR OWN MESSAGE: the fact that gates them is read once when the service connects to that server and cached for the connection's life",
         "telling somebody to retry a connect-scoped one without reconnecting sends them round a loop that never terminates",
 
-        /* The gated-off arm's GATE CANDIDATES (#2559). The message body itself comes from the shared
-           CollectorRuntimePrecondition and is byte-identical by construction, so it does not belong here —
-           but this sentence is supplied by each tool body at its own call site, lives twice, and is exactly
-           what drifts. A tree missing it is a tree whose get_running_jobs never grew the arm at all. */
-        "tables are not reachable to a monitoring login at all and no grant changes that.",
-
         /* The confidence DEFINITION (#3538 A6). The confidence_basis STRING itself is built by the shared
            StoryConfidence.DescribeBasis and is byte-identical by construction, so it does not belong here;
            what lives twice is the tool-description sentence teaching a caller what the number is — and
@@ -208,7 +237,7 @@ public sealed class McpMissMessageParityPinTests
            stamp), so what is compared is the literal text a caller receives. The dead rung keeps the
            "system_health session is started" sentence EngineCapabilityMissTests pins on both SKUs. */
         ". Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
-        "), so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.",
+        ", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.",
         " — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
         "No system_health events of ANY type have EVER been captured for ",
         ", so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
@@ -258,6 +287,35 @@ public sealed class McpMissMessageParityPinTests
         Assert.True(
             AppearsIn(DarlingMcpDir, fragment),
             $"Darling's MCP tools no longer contain the shared sentence: \"{fragment}\"");
+    }
+
+    /// <summary>
+    /// #4966: the sentence an empty answer carries over a CUT window instead of its quiet or all-clear claim. It lives
+    /// once in Common, which both apps compile, so this holds the literal and the constant to the agreed words; each
+    /// app's empty answers pick between it and their covered text at run time through <c>QuietUnlessCut</c>.
+    /// </summary>
+    [Fact]
+    public void TheCutWindowSentences_AreTheAgreedWords_AndReplaceTheQuietClaimOnlyWhenCut()
+    {
+        const string withStart = "Nothing in the part of the window the store covers; the store's data for this read starts at effective_start (see hints), so the stretch before it is not a report that nothing happened.";
+        const string withoutStart = "Nothing was read: the store holds no data for this read in the window (see hints.truncation_note), so this empty answer is not a report that nothing happened.";
+        Assert.Equal(withStart, McpHelpers.CutWindowNothingMessage);
+        Assert.Equal(withoutStart, McpHelpers.CutWindowNothingReadMessage);
+        Assert.True(AppearsIn("PerformanceMonitor.Common/Mcp", withStart), "the shared cut-window sentence left Common");
+        Assert.True(AppearsIn("PerformanceMonitor.Common/Mcp", withoutStart), "the shared nothing-read sentence left Common");
+
+        /* The notice picks the variant: a start to point at, or none. */
+        Assert.Equal(withStart, McpHelpers.CutWindowClaim("2026-09-10T12:00:00Z"));
+        Assert.Equal(withoutStart, McpHelpers.CutWindowClaim(null));
+
+        /* Only the claim clause is replaced: the factual first sentence survives on both branches. */
+        const string factual = "No query on S regressed in the last 24 hour(s). No query is more than 25% worse than its baseline";
+        const string claim = " — this IS the all-clear for this read.";
+        Assert.Equal(factual + claim, McpHelpers.QuietUnlessCut(false, "2026-09-10T12:00:00Z", factual, claim));
+        Assert.Equal(factual + ". " + withStart, McpHelpers.QuietUnlessCut(true, "2026-09-10T12:00:00Z", factual, claim));
+        Assert.Equal(factual + ". " + withoutStart, McpHelpers.QuietUnlessCut(true, null, factual, claim));
+        Assert.Equal(factual + ". " + withStart + " tail", McpHelpers.QuietUnlessCut(true, "x", factual, claim, " tail"));
+        Assert.Equal(factual + claim + " tail", McpHelpers.QuietUnlessCut(false, "x", factual, claim, " tail"));
     }
 
     /// <summary>

@@ -60,7 +60,7 @@ public sealed class AgentStatusCollector : CollectorDefinitionBase<AgentStatusCo
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     agent_running =
         CASE
             WHEN EXISTS

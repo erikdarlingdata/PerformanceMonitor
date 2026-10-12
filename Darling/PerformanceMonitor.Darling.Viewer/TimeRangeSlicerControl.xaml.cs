@@ -15,6 +15,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -24,9 +25,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// untouched). Its bucket timestamps are UTC (matching the Darling store's naive-UTC collection_time),
 /// so <see cref="SelectionStartUtc"/>/<see cref="SelectionEndUtc"/> and the <see cref="RangeChanged"/>
 /// payload are UTC and flow straight into the viewer's naive-UTC reads with no clock conversion. The
-/// only deviation from Lite is the two display strings (axis labels + range label): Lite's per-server
-/// <c>ServerTimeHelper.FormatServerTime</c> becomes <see cref="ViewerTimeHelper.ForDisplay"/> (the
-/// viewer's one machine-local convention).
+/// only deviation from Lite is the axis labels: Lite's per-server tick words become
+/// <see cref="ViewerTimeHelper.ForDisplay"/> (the viewer's mode-aware Server/Local/UTC text conversion). The range
+/// caption is worded exactly as Lite's is (#4766): <see cref="DisplayZone.Format"/> in the current display zone, so
+/// the two instants of a repeated autumn hour differ by their UTC offset.
 /// </summary>
 public partial class TimeRangeSlicerControl : UserControl
 {
@@ -35,6 +37,7 @@ public partial class TimeRangeSlicerControl : UserControl
     private DateTime? _requestedEndUtc;
     private string _metricLabel = "Sessions";
     private bool _isExpanded = true;
+    private string? _emptyText;
 
     // Overlay: per-item trend drawn on top of the aggregate area chart
     private List<(DateTime TimeUtc, double Value)>? _overlayData;
@@ -103,6 +106,7 @@ public partial class TimeRangeSlicerControl : UserControl
         _requestedStartUtc = requestedStartUtc;
         _requestedEndUtc = requestedEndUtc;
         _data = FillEmptyBuckets(data, requestedStartUtc, requestedEndUtc);
+        _emptyText = null;
         _metricLabel = metricLabel;
 
         if (prevStart.HasValue && prevEnd.HasValue && _data.Count >= 2)
@@ -118,6 +122,51 @@ public partial class TimeRangeSlicerControl : UserControl
 
         UpdateRangeLabel();
         Redraw();
+    }
+
+    /// <summary>
+    /// The window came back empty (Lite click-through F15): drops the previous window's bars and selection and says so over the
+    /// chart area only. The text is drawn on the canvas, so it never sits over the Time Range toggle or the quick-range chips,
+    /// and it is hidden with the canvas when the user collapses the slicer.
+    /// </summary>
+    public void ShowEmpty(string text)
+    {
+        _data = new List<TimeSliceBucket>();
+        _overlayData = null;
+        _requestedStartUtc = null;
+        _requestedEndUtc = null;
+        _rangeStart = 0;
+        _rangeEnd = 1.0;
+        _emptyText = text;
+        UpdateRangeLabel();
+        Redraw();
+    }
+
+    /// <summary>The empty-window text (null when the slicer holds data); exposed for the tests.</summary>
+    public string? EmptyText => _emptyText;
+
+    private void DrawEmptyText()
+    {
+        if (_emptyText is null) return;
+        var w = SlicerBorder.ActualWidth;
+        var h = SlicerBorder.ActualHeight;
+        if (w <= 0 || h <= 0) return;
+
+        var tb = new TextBlock
+        {
+            Text = _emptyText,
+            FontSize = 12,
+            FontStyle = FontStyles.Italic,
+            TextAlignment = TextAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+            MaxWidth = Math.Min(520, Math.Max(40, w - 16)),
+            Foreground = FindBrush("ForegroundDimBrush", "#C7CBD4"),
+            IsHitTestVisible = false,
+        };
+        tb.Measure(new Size(tb.MaxWidth, double.PositiveInfinity));
+        Canvas.SetLeft(tb, Math.Max(0, (w - tb.DesiredSize.Width) / 2));
+        Canvas.SetTop(tb, Math.Max(0, (h - tb.DesiredSize.Height) / 2));
+        SlicerCanvas.Children.Add(tb);
     }
 
     /// <summary>
@@ -203,7 +252,7 @@ public partial class TimeRangeSlicerControl : UserControl
     public void Redraw()
     {
         SlicerCanvas.Children.Clear();
-        if (_data.Count < 1) return;
+        if (_data.Count < 1) { DrawEmptyText(); return; }
 
         var w = SlicerBorder.ActualWidth;
         var h = SlicerBorder.ActualHeight;
@@ -373,8 +422,12 @@ public partial class TimeRangeSlicerControl : UserControl
     private void UpdateRangeLabel()
     {
         if (_data.Count == 0) { RangeLabel.Text = ""; return; }
-        var startDisplay = ViewerTimeHelper.ForDisplay(UtcAtNorm(_rangeStart)).ToString("yyyy-MM-dd HH:mm");
-        var endDisplay = ViewerTimeHelper.ForDisplay(UtcAtNorm(_rangeEnd)).ToString("yyyy-MM-dd HH:mm");
+        /* #4766: worded as Lite's slicer words it (DisplayZone.Format, invariant culture), so the two instants of the
+           repeated autumn hour read "01:30 -04:00" and "01:30 -05:00" instead of both "01:30". The tick labels stay
+           the plain wall time. */
+        var zone = ViewerTimeHelper.CurrentDisplayZone();
+        var startDisplay = DisplayZone.Format(UtcAtNorm(_rangeStart), zone, "yyyy-MM-dd HH:mm");
+        var endDisplay = DisplayZone.Format(UtcAtNorm(_rangeEnd), zone, "yyyy-MM-dd HH:mm");
         var spanHours = (UtcAtNorm(_rangeEnd) - UtcAtNorm(_rangeStart)).TotalHours;
         var spanLabel = spanHours >= 1 ? $"{spanHours:F0}h" : $"{spanHours * 60:F0}m";
         RangeLabel.Text = $"{startDisplay} → {endDisplay}  ({spanLabel})";

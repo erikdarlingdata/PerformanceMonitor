@@ -39,38 +39,34 @@ public partial class ViewerServerTab
 
         var label = $"Actual Plan - {stats.QueryHash}";
 
-        /* Fetch the stored ESTIMATED plan for modification detection — the viewer reads its own store (the
-           SERVICE re-resolves the query text by identifier when it executes). */
-        string? estimatedPlanXml = null;
-        try
+        /* #5639: an empty or all-zero hash names no particular query. The row's text can differ from the latest
+           stored text the SERVICE runs, so the flow reads that text (same SQL and database as the service); the
+           prompt, the modification check and the digest in the request all use it. */
+        if (!ViewerActualPlanFlow.TryCheckQueryStatsHash(Window.GetWindow(this)!, stats.QueryHash))
         {
-            estimatedPlanXml = await _dataService.GetQueryStatsPlanXmlAsync(_server.ServerId, stats.DatabaseName, stats.QueryHash);
+            return;
         }
-        catch
-        {
-            /* Detection degrades to the fail-safe uncertain path — no plan means "treat as modifying". */
-        }
-
-        var argsJson = ViewerDataService.BuildActualPlanArgs(stats.QueryHash, stats.DatabaseName);
 
         /* The Plan Viewer overlay's Cancel button cancels this token (shared with Fetch Live Plan). */
         _planLoadCts?.Dispose();
         _planLoadCts = new CancellationTokenSource();
 
-        var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
+        var capture = await ViewerActualPlanFlow.RequestActualPlanAsync(
             Window.GetWindow(this)!, _dataService, _server.ServerId, _server.DisplayName, stats.DatabaseName,
-            stats.QueryText, estimatedPlanXml, argsJson,
+            queryText: null, fetchPlanXml: null, argsJson: "",
             onStarted: () =>
             {
                 ShowPlanLoading(label);
                 PlanLoadingLabel.Text = $"Capturing actual plan (re-executing): {label}";
             },
             onFinished: null,
-            _planLoadCts.Token);
+            _planLoadCts.Token,
+            queryStatsHash: stats.QueryHash);
 
-        if (planXml != null)
+        if (capture != null)
         {
-            _ = OpenPlanTab(planXml, label, stats.QueryText); /* HidePlanLoading runs inside OpenPlanTab */
+            /* The plan tab gets the statement that ran, not the grid row's text. */
+            _ = OpenPlanTab(capture.PlanXml, label, capture.QueryText); /* HidePlanLoading runs inside OpenPlanTab */
         }
         else
         {
@@ -109,25 +105,17 @@ public partial class ViewerServerTab
 
         /* Best-effort stored ESTIMATED plan for modification detection; null degrades to the fail-safe
            "treat as modifying" consent (Regression rows have no single PlanId, so they take that path). */
-        string? estimatedPlanXml = null;
-        try
-        {
-            estimatedPlanXml = await _dataService.GetQueryStorePlanTextAsync(_server.ServerId, databaseName, queryId, planId);
-        }
-        catch
-        {
-            /* detection degrades to the fail-safe uncertain path */
-        }
-
         var argsJson = ViewerDataService.BuildActualPlanArgsForQueryStore(queryId, databaseName);
 
         /* The Plan Viewer overlay's Cancel button cancels this token (shared with Fetch Live Plan). */
         _planLoadCts?.Dispose();
         _planLoadCts = new CancellationTokenSource();
 
-        var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
+        var capture = await ViewerActualPlanFlow.RequestActualPlanAsync(
             Window.GetWindow(this)!, _dataService, _server.ServerId, _server.DisplayName, databaseName,
-            queryText, estimatedPlanXml, argsJson,
+            queryText,
+            () => _dataService.GetQueryStorePlanTextAsync(_server.ServerId, databaseName, queryId, planId), /* #5639: read before the prompt; a failed read counts as no plan */
+            argsJson,
             onStarted: () =>
             {
                 ShowPlanLoading(label);
@@ -136,9 +124,9 @@ public partial class ViewerServerTab
             onFinished: null,
             _planLoadCts.Token);
 
-        if (planXml != null)
+        if (capture != null)
         {
-            _ = OpenPlanTab(planXml, label, queryText); /* HidePlanLoading runs inside OpenPlanTab */
+            _ = OpenPlanTab(capture.PlanXml, label, capture.QueryText); /* HidePlanLoading runs inside OpenPlanTab */
         }
         else
         {

@@ -20,8 +20,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (LocalDataService.QueryStats.cs). <see cref="Value"/> is the per-second rate the chart plots
 /// (elapsed ms/sec for the duration trends, executions/sec for the execution-count trend);
 /// <see cref="ExecutionCount"/> carries the executions/sec rate the duration trends also compute
-/// (unused by the execution-count trend). CollectionTime is naive UTC — the chart converts it
-/// through <see cref="ViewerTimeHelper.ForDisplay"/>.
+/// (unused by the execution-count trend). CollectionTime is naive UTC — the chart plots it as X
+/// unconverted and draws it in <see cref="ViewerTimeHelper.CurrentDisplayZone"/> (#4766).
 /// </summary>
 public sealed class QueryTrendPoint
 {
@@ -115,7 +115,7 @@ public sealed partial class ViewerDataService
     /// Query-stats duration trend: elapsed ms/sec + executions/sec per BUCKET —
     /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/> over <c>query_stats</c> with the viewer's $4
     /// database filter (#4234; #3653 A11 before it). Until #4234 this read was the per-collection builder's
-    /// output (<see cref="DurationTrendRouting.QueryDurationTrendRawSql"/>), and a 7-day chart could hold as
+    /// output (the builder's <c>QueryDurationTrendRawSql</c>, since deleted), and a 7-day chart could hold as
     /// many rows as the window had collections — the issue's measured number for the sibling wait/perfmon
     /// charts this same fix applied to. The per-collection CTE and its three-state interval (the collection's
     /// STORED <c>sample_interval_seconds</c>, MAX over its rows, 0 → NULL so a restart pass is unrated, NULL →
@@ -145,7 +145,7 @@ public sealed partial class ViewerDataService
     /// Procedure-stats duration trend: elapsed ms/sec + executions/sec per BUCKET —
     /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/> over <c>procedure_stats</c> with the
     /// viewer's $4 database filter (#4234). Until #4234 this read was the per-collection builder's output
-    /// (<see cref="DurationTrendRouting.ProcedureDurationTrendRawSql"/>, itself an alias since #3653); see
+    /// (the builder's <c>ProcedureDurationTrendRawSql</c>, itself an alias since #3653, since deleted); see
     /// <see cref="QueryDurationTrendSql"/> for why the read is bucketed now and what stays the same.
     ///
     /// <para>#3540 (V128): the interval is the collection's STORED one where the rows have it — <c>MAX</c>
@@ -198,9 +198,17 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreDurationTrendRollupSql"/> and this shape runs only where it is affordable
     /// (no rollup: plain PostgreSQL, or nothing materialized yet). Its ±slab stays untouched on purpose —
     /// see <see cref="QueryStoreTrendRouting"/>.</para>
-    /// <para>The first placed interval in the window carries NULL rates, not 0 (#3653; #3642 on the MCP copy):
-    /// its LAG has nothing to difference against, so its rate is unknowable and the reader skips it. The
-    /// rollup route's builder has applied the same rule to its first bucket since #3642.</para>
+    /// <para><b>The rate is over the interval's own length (#4765).</b> An interval that stored its end
+    /// (<c>interval_end_time_utc</c>) is rated over end minus start. It used to be the seconds since the
+    /// previous STORED interval, and Query Store stores no row for an interval with no executions, so an
+    /// interval that followed a quiet one divided by the gap plus its own length and read too low. Only a row
+    /// that stored no end (collected before the column) keeps that gap, the way <c>sample_interval_seconds</c>
+    /// falls back to the gap for a pre-V128 collection (#3540). The three other copies of this expression
+    /// (the table twin, the MCP reader, the rollup route's raw class) are pinned identical to this one.</para>
+    /// <para>The first placed interval in the window carries NULL rates, not 0 (#3653; #3642 on the MCP copy),
+    /// unless it stored its end: a gap has nothing to difference against for the first point, so the rate of a
+    /// row with no end is unknowable and the reader skips it. The rollup route's builder has applied the same
+    /// rule to its first raw bucket since #3642.</para>
     /// </summary>
     public const string QueryStoreDurationTrendSql = """
         WITH placed AS
@@ -211,12 +219,14 @@ public sealed partial class ViewerDataService
                collapses this series and placement alone leaves it inflated. */
             SELECT
                 interval_start_time_utc AS point_time,
+                interval_end_time_utc,
                 execution_count,
                 avg_duration_us
             FROM
             (
                 SELECT
                     interval_start_time_utc,
+                    interval_end_time_utc,
                     execution_count,
                     avg_duration_us,
                     ROW_NUMBER() OVER
@@ -246,9 +256,12 @@ public sealed partial class ViewerDataService
             /* Arm 2 — rows collected before tier 2. No interval start exists and none can be
                reconstructed, so these keep the pre-tier-2 treatment byte for byte: un-deduped, placed at
                collection_time, still overstating. The split is on IS NULL / IS NOT NULL, so the two arms
-               partition the rows exactly — nothing counted twice, nothing dropped. */
+               partition the rows exactly — nothing counted twice, nothing dropped. The end is stated NULL:
+               a row placed at its collection time is not measured from an interval start, so it keeps
+               the gap to the previous point below (#4765). */
             SELECT
                 collection_time AS point_time,
+                CAST(NULL AS timestamp) AS interval_end_time_utc,
                 execution_count,
                 avg_duration_us
             FROM query_store_stats
@@ -264,7 +277,14 @@ public sealed partial class ViewerDataService
                 point_time,
                 SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
                 SUM(execution_count) AS total_executions,
-                extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS interval_seconds
+                /* #4765: the interval's OWN length, its stored end less its start. Query Store stores no row
+                   for an interval with no executions, so the gap to the previous stored point is the
+                   interval's length PLUS every quiet interval before it. Only a point whose rows stored no
+                   end (collected before the column) keeps that gap, as sample_interval_seconds does (#3540). */
+                COALESCE(
+                    extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))),
+                    extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))
+                ) AS interval_seconds
             FROM placed
             GROUP BY point_time
         )
@@ -310,12 +330,36 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2 the gate's own clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>), $3/$4 window
     /// end (naive UTC; $3 binds arm 1's placement filter, $4 binds arm 2's collection-time filter — both are
     /// the caller's unclamped <c>endUtc</c>), $5 database filter.
+    /// <para><b>The <c>first_execution_time</c> floor (#4605), on arm 2.</b> Neither the unique key (it leads
+    /// with <c>server_id</c>) nor <c>idx_query_store_interval_wide_first_exec</c> serves <c>collection_time</c> or
+    /// <c>interval_start_time_utc</c>, so both arms walked all of the server's rows. <c>first_execution_time</c>
+    /// is a key column of that unique key, so <c>first_execution_time &gt;= $2 - </c>
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> filters its entries before the heap, and it drops no
+    /// row: every stored row has
+    /// <c>first_execution_time &gt; collection_time - (IntervalSpanMargin + MaxCatchup)</c>, and
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). Arm 2 keeps that floor.</para>
+    /// <para><b>Arm 1's range comes from the window itself (#5523).</b> Its rows are placed by
+    /// <c>interval_start_time_utc</c> in [$2, $3], and <c>first_execution_time</c> lies inside the interval (the monitored
+    /// server's clock for both), so <c>first_execution_time &gt;= $2 - </c><see cref="QueryStoreIntervalWide.IntervalStartSlackSql"/>
+    /// and <c>first_execution_time &lt;= $3 + </c><see cref="QueryStoreIntervalWide.IntervalStartFirstExecMarginSql"/>
+    /// (an interval spans at most a day, plus the hour of slack) hold for every row it returns. The floor is safe because
+    /// <c>first_execution_time</c> is an end time inside the interval: Microsoft's documentation of
+    /// <c>sys.query_store_runtime_stats.first_execution_time</c> says "First execution time for the query plan within the
+    /// aggregation interval. This is the end time of the query execution." The collector-derived
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> floor ran 26 hours below $2, so the
+    /// <c>(server_id, first_execution_time)</c> scan read a day of the server's rows more than the window holds. Arm 2 is
+    /// placed by <c>collection_time</c> in [$2, $4], so it takes the upper twin of the other table reads,
+    /// <c>first_execution_time &lt;= $4 + </c><see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>. A static
+    /// readonly rather than a const because the interval literal is derived from that TimeSpan; <c>$$"""</c> keeps
+    /// <c>$1</c> literal.</para>
     /// </summary>
-    public const string QueryStoreDurationTrendTableSql = """
+    public static readonly string QueryStoreDurationTrendTableSql = $$"""
         WITH placed AS
         (
             SELECT
                 interval_start_time_utc AS point_time,
+                interval_end_time_utc,
                 execution_count,
                 avg_duration_us
             FROM query_store_interval_wide
@@ -323,6 +367,8 @@ public sealed partial class ViewerDataService
             AND   interval_start_time_utc >= $2
             AND   interval_start_time_utc <= $3
             AND   interval_start_time_utc IS NOT NULL
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.IntervalStartSlackSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
 
             UNION ALL
@@ -334,6 +380,7 @@ public sealed partial class ViewerDataService
                QueryStoreDurationTrendSql's own arm 2 apart from the source table. */
             SELECT
                 collection_time AS point_time,
+                CAST(NULL AS timestamp) AS interval_end_time_utc,
                 execution_count,
                 avg_duration_us
             FROM query_store_interval_wide
@@ -341,6 +388,8 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $2
             AND   collection_time <= $4
             AND   interval_start_time_utc IS NULL
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= $4 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
         raw AS
@@ -349,7 +398,14 @@ public sealed partial class ViewerDataService
                 point_time,
                 SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
                 SUM(execution_count) AS total_executions,
-                extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS interval_seconds
+                /* #4765: the interval's OWN length, its stored end less its start. Query Store stores no row
+                   for an interval with no executions, so the gap to the previous stored point is the
+                   interval's length PLUS every quiet interval before it. Only a point whose rows stored no
+                   end (collected before the column) keeps that gap, as sample_interval_seconds does (#3540). */
+                COALESCE(
+                    extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))),
+                    extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))
+                ) AS interval_seconds
             FROM placed
             GROUP BY point_time
         )
@@ -371,13 +427,16 @@ public sealed partial class ViewerDataService
     /// <c>first_collection_time</c> and <c>collection_count</c> are stated here rather than factored out for a
     /// builder of one caller. A static readonly rather than a const: the interpolated <see cref="TrendBucketSql.OriginSql"/>
     /// reference is not a compile-time constant. $1 server_id, $2/$3 window (naive UTC), $4 database filter, $5
-    /// the bucket width in minutes.</summary>
+    /// the bucket width in minutes. The database filter sits inside the aggregates (#5414 M1), as in
+    /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/>: a collection the chosen database had no rows in
+    /// still counts its seconds, so the rate is the true per-second rate over the bucket.</summary>
     public static readonly string ExecutionCountTrendSql = $"""
         WITH raw AS
         (
             SELECT
                 collection_time,
-                SUM(delta_execution_count) AS total_executions,
+                COALESCE(SUM(delta_execution_count) FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4)), 0) AS total_executions,
+                COUNT(*) FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4)) AS matched_rows,
                 CASE WHEN MAX(sample_interval_seconds) IS NULL
                      THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
                      ELSE NULLIF(MAX(sample_interval_seconds), 0)
@@ -386,7 +445,6 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
             GROUP BY collection_time
         ),
         rated AS
@@ -395,7 +453,8 @@ public sealed partial class ViewerDataService
                 collection_time,
                 CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
                 CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
-                CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
+                CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second,
+                matched_rows
             FROM raw
         )
         SELECT
@@ -404,6 +463,7 @@ public sealed partial class ViewerDataService
             MIN(collection_time) AS first_collection_time,
             COUNT(*) AS collection_count
         FROM rated
+        WHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)
         GROUP BY 1
         ORDER BY 1
         """;
@@ -421,7 +481,8 @@ public sealed partial class ViewerDataService
         DateTime? nowUtc = null, CancellationToken cancellationToken = default)
         => ReadRoutedDurationTrendAsync(
             QueryDurationTrendSql, QueryDurationTrendHourlySql, TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView,
-            static rollups => rollups.QueryGrainHourly, serverId, startUtc, endUtc, databaseNames, nowUtc, cancellationToken);
+            static rollups => rollups.QueryGrainHourly, serverId, startUtc, endUtc, databaseNames, nowUtc,
+            coverIdleHours: false, cancellationToken);
 
     /// <summary>Procedure-stats duration trend over the window — the procedure twin of
     /// <see cref="GetQueryDurationTrendAsync"/>, routed the same way over <c>procedure_stats_hourly</c>.</summary>
@@ -430,13 +491,17 @@ public sealed partial class ViewerDataService
         DateTime? nowUtc = null, CancellationToken cancellationToken = default)
         => ReadRoutedDurationTrendAsync(
             ProcedureDurationTrendSql, ProcedureDurationTrendHourlySql, TimescaleSupport.ProcedureStatsHourlyView, TimescaleSupport.ProcedureStatsDailyView,
-            static rollups => rollups.ProcedureGrainHourly, serverId, startUtc, endUtc, databaseNames, nowUtc, cancellationToken);
+            static rollups => rollups.ProcedureGrainHourly, serverId, startUtc, endUtc, databaseNames, nowUtc,
+            coverIdleHours: true, cancellationToken);
 
     /// <summary>
     /// The shared body of the two routed reads (#3653): probe what the store has and has materialized (the
     /// viewer's cached <see cref="GetRollupAvailabilityAsync"/>), resolve the tier, run that tier's SQL, and
     /// describe what came back. One method so the query and procedure trends cannot drift in how they route,
     /// read, or describe coverage — the MCP reader's <c>ReadRoutedDurationTrendAsync</c> arrangement.
+    /// <paramref name="coverIdleHours"/> (#5449, the procedure grain) adds the hours a collector run fell in with no
+    /// raw row as zero work (<see cref="DurationTrendRouting"/>'s idle hours): the procedure collector stores no row for an hour in
+    /// which no procedure worked.
     /// <paramref name="hourlyAvailable"/> picks the GRAIN's own availability flag off the probe: a store with
     /// the query rollup but not the procedure one (a failed ensure sweep, #1664's failure isolation) must
     /// route the procedure trend to raw, whatever the query grain is doing.
@@ -447,7 +512,7 @@ public sealed partial class ViewerDataService
     private async Task<QueryTrendSeries> ReadRoutedDurationTrendAsync(
         string rawSql, string hourlySql, string hourlyView, string dailyView, Func<RollupAvailability, bool> hourlyAvailable,
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, DateTime? nowUtc,
-        CancellationToken cancellationToken)
+        bool coverIdleHours, CancellationToken cancellationToken)
     {
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var tier = DurationTrendRouting.ResolveTier(
@@ -475,7 +540,7 @@ public sealed partial class ViewerDataService
             points = await ReadDurationTrendAsync(
                 string.Equals(hourlyFromClause, $"collect.{hourlyView} AS f", StringComparison.Ordinal)
                     ? hourlySql
-                    : DurationTrendRouting.BuildHourlyTrendSql(hourlyFromClause, withDatabaseFilter: true),
+                    : DurationTrendRouting.BuildHourlyTrendSql(hourlyFromClause, withDatabaseFilter: true, coverIdleHours),
                 serverId, startUtc, endUtc, databaseNames, cancellationToken);
             firstServedUtc = points.Count > 0 ? points[0].CollectionTime : null;
         }

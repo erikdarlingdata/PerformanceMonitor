@@ -78,7 +78,7 @@ public sealed class QueryStoreBackfillReadFailureWarningTests : IDisposable
         Assert.Empty(await _harness.CandidatesAsync());
         Assert.Single(_log.Warnings);
 
-        await ExecuteAsync("DROP TABLE query_store_stats");
+        await ExecuteAsync("DROP VIEW IF EXISTS v_query_store_stats; DROP TABLE query_store_stats");
         Assert.Empty(await _harness.CandidatesAsync());
         Assert.Equal(2, _log.Warnings.Count);
         Assert.All(_log.Warnings, w => Assert.Contains(ServerLabel, w, StringComparison.Ordinal));
@@ -105,7 +105,7 @@ public sealed class QueryStoreBackfillReadFailureWarningTests : IDisposable
         Assert.Null(await _harness.FloorAsync(DatabaseA));
         Assert.Equal(2, _log.Warnings.Count);
 
-        await ExecuteAsync("DROP TABLE query_store_stats");
+        await ExecuteAsync("DROP VIEW IF EXISTS v_query_store_stats; DROP TABLE query_store_stats");
         Assert.Null(await _harness.FloorAsync(DatabaseA));
         Assert.Equal(3, _log.Warnings.Count);
         Assert.Contains(DatabaseA, _log.Warnings[2], StringComparison.Ordinal);
@@ -125,8 +125,36 @@ public sealed class QueryStoreBackfillReadFailureWarningTests : IDisposable
         Assert.Single(_log.Warnings);
     }
 
+    [Fact]
+    public async Task ARunOfFailedGoneChecks_KeepsEveryCandidate_WarnsOnce_AndACompletedCheckEndsTheRun()
+    {
+        /* #5483: the gone-database check turns an error into "try every candidate", which brings the dropped-database
+           failures back, so it warns like the other backfill reads. */
+        List<string> candidates = ["first_db", "second_db"];
+        for (var i = 0; i < 3; i++)
+        {
+            Assert.Equal(candidates, await _harness.DropGoneAsync(candidates));
+        }
+
+        var first = Assert.Single(_log.Warnings);
+        Assert.Contains(ServerLabel, first, StringComparison.Ordinal);
+        Assert.Contains("checking which databases are gone failed", first, StringComparison.Ordinal);
+
+        /* A check that completes (no snapshot yet, so nothing is dropped) ends the run: no new Warning for it. */
+        await ExecuteAsync(CreateTableSql + "; CREATE TABLE database_states (server_id INTEGER, database_name VARCHAR, collection_time TIMESTAMP)");
+        Assert.Equal(candidates, await _harness.DropGoneAsync(candidates));
+        Assert.Single(_log.Warnings);
+
+        await ExecuteAsync("DROP TABLE database_states");
+        Assert.Equal(candidates, await _harness.DropGoneAsync(candidates));
+        Assert.Equal(2, _log.Warnings.Count);
+    }
+
+    // The floor read now consults the archive view, as a store does after InitializeAsync,
+    // so a "working store" here includes it.
     private const string CreateTableSql =
-        "CREATE TABLE query_store_stats (server_id INTEGER, database_name VARCHAR, collection_time TIMESTAMP, last_execution_time TIMESTAMP)";
+        "CREATE TABLE query_store_stats (server_id INTEGER, database_name VARCHAR, collection_time TIMESTAMP, last_execution_time TIMESTAMP); " +
+        "CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats";
 
     private async Task ExecuteAsync(string sql)
     {
@@ -140,6 +168,9 @@ public sealed class QueryStoreBackfillReadFailureWarningTests : IDisposable
     private sealed class Harness(DuckDbInitializer duckDb, ServerManager servers, ScheduleManager schedules, ILogger<RemoteCollectorService> logger)
         : RemoteCollectorService(duckDb, servers, schedules, logger)
     {
+        public Task<List<string>> DropGoneAsync(List<string> candidates) =>
+            DropGoneBackfillDatabasesAsync(ServerId, candidates, FloorLimit, CancellationToken.None, ServerLabel);
+
         public Task<List<string>> CandidatesAsync(CancellationToken cancellationToken = default) =>
             GetBackfillCandidateDatabasesAsync(ServerId, FloorLimit, new Dictionary<string, string>(StringComparer.Ordinal), cancellationToken, ServerLabel);
 

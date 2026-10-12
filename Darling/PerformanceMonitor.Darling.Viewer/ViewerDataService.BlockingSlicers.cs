@@ -10,6 +10,8 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Darling.Storage;
+using Npgsql;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -32,21 +34,24 @@ public sealed partial class ViewerDataService
     /// The XE blocked-process reports are the primary source; the DMV snapshot contributes only when the
     /// XE source has no buckets in the window. Columns feed the slicer's sort-driven metric overlay
     /// (events / total-wait-sec / distinct blockers / blocked / databases).
-    /// $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 database filter. The XE arm windows and
+    /// buckets on the report's own <c>event_time</c>; the DMV arm stays on <c>collection_time</c>, which IS its
+    /// event time. $5 is the <see cref="EventWindowFloor"/> for $2 (XE arm only; no upper bound).
     /// </summary>
     public const string BlockingSlicerSql = """
         WITH bpr AS (
             SELECT
-                date_trunc('hour', collection_time) AS bucket,
+                date_trunc('hour', event_time) AS bucket,
                 COUNT(*) AS event_count,
                 COALESCE(SUM(wait_time_ms), 0) / 1000.0 AS total_wait_sec,
                 COUNT(DISTINCT blocking_spid) AS distinct_blockers,
                 COUNT(DISTINCT blocked_spid) AS distinct_blocked,
                 COUNT(DISTINCT database_name) AS distinct_databases
             FROM v_blocked_process_reports
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
-            GROUP BY date_trunc('hour', collection_time)
+            GROUP BY date_trunc('hour', event_time)
         ),
         dmv AS (
             SELECT
@@ -77,6 +82,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -98,17 +104,19 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// Hourly deadlock-count buckets for the slicer — Lite's <c>GetDeadlockSlicerDataAsync</c> ported.
-    /// $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// $1 server_id, $2 window start, $3 window end (naive UTC). Windows and buckets on <c>deadlock_time</c>.
+    /// $4 is the <see cref="EventWindowFloor"/> for $2 (no upper bound).
     /// </summary>
     public const string DeadlockSlicerSql = """
         SELECT
-            date_trunc('hour', collection_time) AS bucket,
+            date_trunc('hour', deadlock_time) AS bucket,
             COUNT(*) AS deadlock_count
         FROM v_deadlocks
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        GROUP BY date_trunc('hour', collection_time)
+        AND   deadlock_time >= $2
+        AND   deadlock_time <= $3
+        AND   collection_time >= $4
+        GROUP BY date_trunc('hour', deadlock_time)
         ORDER BY bucket
         """;
 
@@ -120,6 +128,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(DeadlockSlicerSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

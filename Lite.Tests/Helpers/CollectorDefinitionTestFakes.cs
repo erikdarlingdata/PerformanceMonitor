@@ -49,7 +49,14 @@ internal sealed class FakeCollectorDataReader : DbDataReader
         return true;
     }
 
-    public override string GetString(int ordinal) => (string)CurrentSet[_rowIndex][ordinal];
+    /// <summary>When set, the managed thread id of every <c>GetString</c> call lands here (a test of where a row is read).</summary>
+    public System.Collections.Concurrent.ConcurrentBag<int>? GetStringThreads { get; set; }
+
+    public override string GetString(int ordinal)
+    {
+        GetStringThreads?.Add(Environment.CurrentManagedThreadId);
+        return (string)CurrentSet[_rowIndex][ordinal];
+    }
 
     public override long GetInt64(int ordinal) => (long)CurrentSet[_rowIndex][ordinal];
 

@@ -48,7 +48,9 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var dbs = await Task.Run(() => _dataService.GetIndexLockingDatabasesAsync(serverId));
+            /* #5312: the box lists only databases inside the saved database filter. */
+            var lockingFilter = SelectedDatabaseFilter();
+            var dbs = await Task.Run(() => _dataService.GetIndexLockingDatabasesAsync(serverId, lockingFilter));
             if (_loads.Superseded(nameof(PopulateLockingDbSelectorAsync), gen)) return;
             var items = new List<string> { "All databases" };
             items.AddRange(dbs);
@@ -77,12 +79,32 @@ public partial class FinOpsTab : UserControl
         try
         {
             var db = SelectedLockingDb();
-            var data = await Task.Run(() => _dataService.GetIndexLockingAsync(serverId, 200, db));
+            /* #5312: the saved database filter and the box both apply. */
+            var lockingFilter = SelectedDatabaseFilter();
+            var data = await Task.Run(() => _dataService.GetIndexLockingAsync(serverId, 200, db, lockingFilter));
             if (_loads.Superseded(nameof(LoadIndexLockingGridAsync), gen)) return;
             ApplyLockingHeat(data);
             _indexLockingFilterMgr!.UpdateData(data);
             NoIndexLockingMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             IndexLockingCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
+
+            /* Writers on an optimized-locking database wait on transaction-ID locks the grid's counters do not count. */
+            string? optimizedLockingNote = null;
+            try
+            {
+                optimizedLockingNote = await Task.Run(() => _dataService.GetOptimizedLockingNoteAsync(serverId, db, lockingFilter));
+            }
+            catch (Exception noteEx)
+            {
+                /* A failed flag read leaves the note collapsed; the grid above has loaded. */
+                AppLogger.Error("FinOps", $"Failed to load optimized locking note: {noteEx.Message}");
+            }
+            if (_loads.Superseded(nameof(LoadIndexLockingGridAsync), gen)) return;
+            var separatelyMonitoredNote = PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.ListNote(serverId);
+            LockingSeparatelyMonitoredNoteText.Text = separatelyMonitoredNote ?? "";
+            LockingSeparatelyMonitoredNoteText.Visibility = separatelyMonitoredNote is null ? Visibility.Collapsed : Visibility.Visible;
+            OptimizedLockingNoteText.Text = optimizedLockingNote ?? "";
+            OptimizedLockingNoteText.Visibility = optimizedLockingNote is null ? Visibility.Collapsed : Visibility.Visible;
         }
         catch (Exception ex)
         {

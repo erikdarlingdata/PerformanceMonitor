@@ -37,12 +37,25 @@ public partial class JobHistoryTab : UserControl
     private DateTime? _lastRefreshed;
     private readonly DispatcherTimer _staleDataTimer;
 
+    /// <summary>The rows the last read returned, before the Status, Category and column filters (#4966). The cap label
+    /// belongs to the read, so the column-filter handler, which only sees the grid, needs this to say whether the read was
+    /// cut at <see cref="RowCap"/>.</summary>
+    private int _lastReadRowCount;
+
     /// <summary>Raised with a short status message on load outcomes so the shell can show it.</summary>
     public event Action<string>? StatusChanged;
 
     public JobHistoryTab()
     {
         InitializeComponent();
+        /* #5562: the shared picker; the old combo defaulted to the last 24 hours and offered 7, 30 and 90 days, which are
+           one click away in the picker's presets (1w, 1mo) and a typed "90d". */
+        TimeRangePickerControl.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+        TimeRangePickerControl.Value = TimeRangePresets.Find("1d")!;
+        /* R8: the old "Last Year" (365 days). The parser has no year unit, so "1y" cannot be typed; this choice is the way to a year. */
+        TimeRangePickerControl.SetLongestChoice(ViewerTimeRangeWindow.JobHistoryLongestChoice, "Last Year");
+        /* #5565: a cross-server list has one fixed filter scope, so its filters survive a restart. */
+        ColumnFilterScope.SetServer(this, ColumnFilterScope.AllServers);
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
@@ -60,7 +73,36 @@ public partial class JobHistoryTab : UserControl
 
     /// <summary>The read's row cap (#4478) — the 2,000 <see cref="LoadJobsAsync"/> passes to
     /// <see cref="ViewerDataService.GetJobHistoryAsync"/>.</summary>
-    private const int RowCap = 2000;
+    internal const int RowCap = 2000;
+
+    /// <summary>
+    /// The "Showing since" note of the grid (#4966), through the event-surface step the server tab's grids share
+    /// (<see cref="ViewerServerTab.ShowEventDataStartAsync"/>). Job history is an event surface: the read windows on the run's
+    /// own time, and a server's first collection copies the history msdb already holds, so a run can sit long before the
+    /// coverage the probe found. The note names the earlier of the coverage start and the earliest run in <paramref name="read"/>.
+    /// The read lists the newest <see cref="RowCap"/> runs, so a full page names its oldest run whatever the store covers, with
+    /// no slack. <paramref name="read"/> is the read's own result, before the Status and Category filters: those narrow the grid
+    /// on the client and say nothing about where the data starts. The time prints in the zone the Run Time column does (the
+    /// display zone, see <see cref="ViewerJobHistoryRow.RunTimeLocal"/>). A step of its own so the tests run the tab's banner call.
+    /// The cap label beside the count (<see cref="PerformanceMonitor.Common.JobHistoryCap"/>) stays: it says how many runs the
+    /// page is cut to, and this note says the time that page reaches back to, so the tab says one thing about the cap.
+    /// </summary>
+    /// <param name="banner">The grid's banner.</param>
+    /// <param name="probe">The data-start probe the tab started beside its read.</param>
+    /// <param name="startUtc">The window's start: the one the read and the probe took.</param>
+    /// <param name="read">The runs the read returned.</param>
+    internal static Task ShowJobHistoryDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc, IEnumerable<ViewerJobHistoryRow> read) =>
+        ViewerServerTab.ShowEventDataStartAsync(banner, probe, "Job History", startUtc, read.Select(r => r.RunDateTimeUtc), RowCap);
+
+    /// <summary>Sets the picker's "Data starts ..." note from the data-start probe the tab already awaited (#5562 R7): the floor its
+    /// "Showing since" banner reads, fed by <see cref="ViewerServerTab.UpdateTruncationBanner"/>. No query of its own.</summary>
+    internal void RecordDataStart(DateTime? floor)
+    {
+        if (TimeRangePickerControl.DataStartUtc != floor)
+        {
+            TimeRangePickerControl.DataStartUtc = floor;
+        }
+    }
 
     private async Task LoadJobsAsync()
     {
@@ -76,11 +118,23 @@ public partial class JobHistoryTab : UserControl
 
         try
         {
-            var hoursBack = GetSelectedHoursBack();
+            var (windowStartUtc, windowEndUtc, windowIsLive) = ViewerTimeRangeWindow.Window(
+                TimeRangePickerControl.Value, DateTime.UtcNow, ViewerTimeHelper.CurrentDisplayZone());
             int? serverId = GetSelectedServerId();
-            var sinceUtc = DateTime.UtcNow.AddHours(-hoursBack);
+            /* #4966: the window's start is worked out once, and the read and the data-start probe both take it. The probe starts
+               beside the read; its answer is awaited only after the rows are on screen, so a probe that fails costs the note and
+               never the grid. */
+            var nowUtc = windowEndUtc;
+            var sinceUtc = windowStartUtc;
+            /* The read and the data-start probe run together: priced as two. */
+            using var readFanOut = ViewerReadFanOut.Of(2);
+            var dataStartTask = _dataService.GetJobHistoryDataStartAsync(serverId, sinceUtc, nowUtc);
 
-            var all = await _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap);
+            /* #5562 R6: a range that ended in the past sends its end to the read, so the end bound is applied before the row cap. */
+            var readTask = _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap, untilUtc: windowIsLive ? null : windowEndUtc);
+            await ViewerServerTab.AwaitReadWatchingProbeAsync(readTask, dataStartTask, "Job History");
+            var all = await readTask;
+            readFanOut.Release();
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             /* Populate the Server / Category combos from the full (pre status/category) result, then apply
@@ -109,14 +163,14 @@ public partial class JobHistoryTab : UserControl
 
             var displayCount = JobHistoryDataGrid.Items.Count;
             NoJobsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
+            RunTimeHeaderText.Text = TimeColumnTitle.For("Run Time", ViewerTimeHelper.CurrentDisplayMode); // D5: the column names its clock
 
             /* The cap applies to the UNFILTERED read (all.Count), not the client-side-filtered display count:
                a Status/Category filter narrowing the grid must not make the "newest 2,000" label disappear when
-               the underlying read still hit the cap. */
-            var capLabel = JobHistoryCap.Label(all.Count, RowCap);
-            JobCountIndicator.Text = displayCount == 0
-                ? ""
-                : capLabel.Length > 0 ? $"{displayCount} run(s) ({capLabel})" : $"{displayCount} run(s)";
+               the underlying read still hit the cap. The column-filter handler builds the same text from the same
+               row count (#4966). */
+            _lastReadRowCount = all.Count;
+            JobCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap);
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
@@ -125,6 +179,14 @@ public partial class JobHistoryTab : UserControl
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             LoadingMessage.Visibility = Visibility.Collapsed;
+
+            /* #4966: the rows are bound and the loading note is down; the probe is awaited last. This await settles it whether it
+               succeeded or faulted, without throwing, so the supersede check lands before the note is written and the step below awaits a finished
+               task. A probe that threw is logged by the step and hides the note. */
+            await ((Task)dataStartTask).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);
+            if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+
+            await ShowJobHistoryDataStartAsync(JobHistoryTruncationBanner, dataStartTask, sinceUtc, all);
         }
         catch (Exception ex)
         {
@@ -286,14 +348,6 @@ public partial class JobHistoryTab : UserControl
         CategoryFilterComboBox.SelectionChanged += Filter_SelectionChanged;
     }
 
-    private int GetSelectedHoursBack()
-    {
-        if (TimeRangeComboBox.SelectedItem is ComboBoxItem item && item.Tag is string tagStr)
-        {
-            return int.TryParse(tagStr, out var hours) ? hours : 24;
-        }
-        return 24;
-    }
 
     private int? GetSelectedServerId()
     {
@@ -371,7 +425,10 @@ public partial class JobHistoryTab : UserControl
         }
 
         _filterManager?.SetFilter(e.FilterState);
-        JobCountIndicator.Text = JobHistoryDataGrid.Items.Count > 0 ? $"{JobHistoryDataGrid.Items.Count} run(s)" : "";
+
+        /* The count follows the column filter, and keeps the cap label whenever the read hit the cap (#4966): this used
+           to rewrite it as a bare "N run(s)", which took the label off a count whose read was still cut. */
+        JobCountIndicator.Text = JobHistoryCap.CountText(JobHistoryDataGrid.Items.Count, _lastReadRowCount, RowCap);
     }
 
     private void FilterPopup_FilterCleared(object? sender, EventArgs e)
@@ -404,6 +461,14 @@ public partial class JobHistoryTab : UserControl
     #endregion
 
     #region Event Handlers
+
+    private async void TimeRangePicker_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
+    {
+        if (IsLoaded)
+        {
+            await LoadJobsAsync();
+        }
+    }
 
     private async void Filter_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {

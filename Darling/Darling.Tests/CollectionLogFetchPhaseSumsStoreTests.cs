@@ -282,8 +282,12 @@ public class CollectionLogFetchPhaseSumsStoreTests
            the quiet-database time above stops being recorded and this test would still pass on its own
            arithmetic - so the call site is pinned too. */
         var runner = RunnerSource();
-        var observeIndex = runner.IndexOf("fetchPhases.Observe(context);", StringComparison.Ordinal);
         var fanoutIndex = runner.IndexOf("fanout.Observe(item, itemSqlMs + itemStorageMs);", StringComparison.Ordinal);
+
+        /* The hook's own call: searched from the fan-out rollup down, because the Azure per-database loop
+           (query_store, which fetches plans and text there too) feeds the same accumulator from an earlier
+           place in the file and would otherwise be the first occurrence this finds. */
+        var observeIndex = runner.IndexOf("fetchPhases.Observe(context);", fanoutIndex, StringComparison.Ordinal);
         Assert.True(observeIndex > fanoutIndex,
             "The fetch-phase accumulation must sit beside the fan-out rollup in onItemComplete, which is the "
             + "hook that fires for EVERY completed item. Anywhere inside the batchCount > 0 block would drop "

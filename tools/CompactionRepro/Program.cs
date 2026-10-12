@@ -20,7 +20,7 @@ using PerformanceMonitorLite.Services;
  * Input sources (pick one):
  *   --source-file <path>   Split an existing monthly parquet into N per-cycle
  *                          chunks, then compact. Closest to a real backlog.
- *   --merge-files <a,b,..> Compact the given files directly (no split). Use this
+ *   --merge-files <a,b,..> Compact the given files (or every *.parquet in the given directory) directly (no split). Use this
  *                          to run against a reporter's actual archive files.
  *   --synthetic            Generate a query_snapshots-shaped source, then split.
  *
@@ -32,7 +32,10 @@ using PerformanceMonitorLite.Services;
  * Tuning knobs (defaults = ParquetCompaction's non-table-specific defaults):
  *   --memory-limit <str>   DuckDB memory_limit per merge connection. Default: 4GB
  *   --threads <int>        DuckDB threads per merge connection. Default: 2
- *   --row-group-size <int> Output ROW_GROUP_SIZE. Default: 8192
+ *   --row-group-size <int> Output ROW_GROUP_SIZE. Default: ParquetCompaction.DefaultRowGroupSize (2048)
+ *   --row-group-bytes-mb <int>  Output ROW_GROUP_SIZE_BYTES in MiB (0 = none). Default: the table's
+ *                          ParquetCompaction.RowGroupBytesFor (#5393: the daily table's byte bound)
+ *   (--threads defaults to ParquetCompaction.ThreadsFor(--table) when not given.)
  *   --max-batch-mb <int>   Per-batch on-disk input budget (MB). Default: 200
  *   --table <name>         Table name (drives exclude-column logic). Default: query_snapshots
  *
@@ -46,6 +49,15 @@ using PerformanceMonitorLite.Services;
  *   --synthetic-base-ops <n>  RelOps in a normal synthetic plan. Default: 130
  *   --synthetic-tail-ops <n>  RelOps in a tail (huge) synthetic plan. Default: 75000
  *   --synthetic-tail-every <n> Every Nth row gets a tail plan. Default: 500
+ *   --copies <int>         Write N renamed copies of every input file so a small store can fill a large
+ *                          batch budget. Default: 1 (inputs used as they are).
+ *   --repeat-plans <int>   Rewrite every input file with each *plan* VARCHAR column repeated N times
+ *                          (repeat(col, N)): real archive files compress about 37 to 1, so this builds
+ *                          the reporter-sized plan text a small store lacks. Default: 1 (none).
+ *                          Rewritten inputs use the archive COPY options (2,048-row groups), as
+ *                          ArchiveService writes them, not DuckDB's 122,880-row default.
+ *   --repeat-columns <a,b> The columns --repeat-plans repeats. Default: every VARCHAR column whose name
+ *                          contains "plan" (query_plan and live_query_plan for query_snapshots).
  *   --keep                 Don't delete the temp dir after the run.
  *
  * Examples:
@@ -84,8 +96,13 @@ if (!string.IsNullOrEmpty(sourceFile) && !File.Exists(sourceFile))
 
 var table = GetArg(args, "--table", "query_snapshots");
 var memoryLimit = GetArg(args, "--memory-limit", ParquetCompaction.DefaultMemoryLimit);
-var threads = int.Parse(GetArg(args, "--threads", ParquetCompaction.DefaultThreads.ToString()));
+var threads = int.Parse(GetArg(args, "--threads", ParquetCompaction.ThreadsFor(table).ToString()));
 var rowGroupSize = int.Parse(GetArg(args, "--row-group-size", ParquetCompaction.DefaultRowGroupSize.ToString()));
+var rowGroupBytesMb = long.Parse(GetArg(args, "--row-group-bytes-mb", (ParquetCompaction.RowGroupBytesFor(table) / (1024 * 1024)).ToString()));
+var rowGroupBytes = rowGroupBytesMb * 1024L * 1024L;
+var copies = int.Parse(GetArg(args, "--copies", "1"));
+var repeatPlans = int.Parse(GetArg(args, "--repeat-plans", "1"));
+var repeatColumns = GetArg(args, "--repeat-columns", "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 var maxBatchMb = int.Parse(GetArg(args, "--max-batch-mb", (ParquetCompaction.DefaultBatchInputBytes / (1024 * 1024)).ToString()));
 var maxBatchBytes = maxBatchMb * 1024L * 1024L;
 var numFiles = int.Parse(GetArg(args, "--num-files", "15"));
@@ -98,7 +115,10 @@ Directory.CreateDirectory(tempDir);
 
 var mergeFiles = string.IsNullOrEmpty(mergeFilesArg)
     ? new List<string>()
-    : mergeFilesArg.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+    : Directory.Exists(mergeFilesArg)
+        /* a directory: every parquet in it (a command line cannot carry hundreds of paths) */
+        ? Directory.GetFiles(mergeFilesArg, "*.parquet").Order(StringComparer.Ordinal).ToList()
+        : mergeFilesArg.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 foreach (var mf in mergeFiles)
 {
     if (!File.Exists(mf))
@@ -144,7 +164,7 @@ if (sweep)
 }
 else
 {
-    Console.WriteLine($"Settings: memory_limit={memoryLimit}, threads={threads}, ROW_GROUP_SIZE={rowGroupSize}, max-batch={maxBatchMb} MB");
+    Console.WriteLine($"Settings: memory_limit={memoryLimit}, threads={threads}, ROW_GROUP_SIZE={rowGroupSize}, ROW_GROUP_SIZE_BYTES={(rowGroupBytes > 0 ? rowGroupBytesMb + " MiB" : "none")}, max-batch={maxBatchMb} MB");
 }
 if (mergeFiles.Count == 0)
     Console.WriteLine($"Splitting source into {numFiles} chunks");
@@ -179,6 +199,15 @@ try
         Console.WriteLine($"      Wrote {sourcePaths.Count} files, {totalSourceBytes / 1024.0 / 1024.0:F1} MB total in {sw.ElapsedMilliseconds} ms");
     }
     Console.WriteLine();
+
+    if (copies > 1 || repeatPlans > 1)
+    {
+        var rsw = Stopwatch.StartNew();
+        sourcePaths = PrepareInputs(sourcePaths, tempDir, copies, repeatPlans, repeatColumns);
+        Console.WriteLine($"      Prepared {sourcePaths.Count} input files ({copies} copies, plans x{repeatPlans}), " +
+                          $"{sourcePaths.Sum(p => new FileInfo(p).Length) / 1024.0 / 1024.0:F1} MB on disk, in {rsw.ElapsedMilliseconds} ms");
+        Console.WriteLine();
+    }
 
     try
     {
@@ -260,7 +289,7 @@ try
                 if (File.Exists(outPath)) File.Delete(outPath);
 
                 var bsw = Stopwatch.StartNew();
-                ParquetCompaction.MergeBatchToFile(table, batches[i], outPath, spillDir, memLimit, thr, rgs);
+                ParquetCompaction.MergeBatchToFile(table, batches[i], outPath, spillDir, memLimit, thr, rgs, rowGroupBytes);
                 bsw.Stop();
 
                 process.Refresh();
@@ -353,6 +382,7 @@ try
     {
         var outBytes = single.Outputs.Sum(p => new FileInfo(p).Length);
         Console.WriteLine($"      Output:           {single.Outputs.Count} part file(s), {outBytes / 1024.0 / 1024.0:F1} MB total");
+        Console.WriteLine($"      Output row groups: {CountRowGroups(single.Outputs)}  (input row groups: {CountRowGroups(sourcePaths)})");
 
         /* Row-count round-trip: total output rows must equal total source rows. */
         var srcSqlList = string.Join(", ", sourcePaths.Select(p => $"'{p.Replace("'", "''").Replace("\\", "/")}'"));
@@ -399,7 +429,7 @@ static List<string> SplitSourceFile(string sourceFile, string outDir, int numChu
     /* Split a real monthly parquet into N chunks using row-number bucketing.
        Each chunk is written as ZSTD parquet matching the production per-cycle
        archive format (ArchiveService writes per-cycle files with FORMAT PARQUET,
-       COMPRESSION ZSTD and the DuckDB default row group size). Empty chunks are
+       COMPRESSION ZSTD and ArchiveRowGroupSize, 2,048 rows, since #5381). Empty chunks are
        skipped. This connection runs with DuckDB defaults (no memory_limit) — the
        merge connections set their own via ParquetCompaction. */
     var sourceSql = sourceFile.Replace("'", "''").Replace("\\", "/");
@@ -423,11 +453,62 @@ static List<string> SplitSourceFile(string sourceFile, string outDir, int numChu
         cmd.CommandText =
             $"COPY (SELECT * FROM read_parquet('{sourceSql}') " +
             $"  WHERE (collection_id % {numChunks}) = {i}) " +
-            $"TO '{path.Replace("'", "''")}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+            $"TO '{path.Replace("'", "''")}' ({ParquetCompaction.ArchiveCopyOptions})";
         cmd.ExecuteNonQuery();
         if (new FileInfo(path).Length > 0) paths.Add(path);
     }
     return paths;
+}
+
+/* Writes `copies` renamed copies of each input, each with every plan VARCHAR column repeated
+   `repeatPlans` times, using the archive COPY options. */
+static List<string> PrepareInputs(List<string> inputs, string outDir, int copies, int repeatPlans, string[] repeatColumns)
+{
+    var result = new List<string>();
+    using var con = new DuckDBConnection("DataSource=:memory:");
+    con.Open();
+    var n = 0;
+    foreach (var input in inputs)
+    {
+        var inSql = input.Replace("\\", "/").Replace("'", "''");
+        var select = "*";
+        if (repeatPlans > 1)
+        {
+            var cols = new List<string>();
+            using (var d = con.CreateCommand())
+            {
+                d.CommandText = $"DESCRIBE SELECT * FROM read_parquet('{inSql}')";
+                using var dr = d.ExecuteReader();
+                while (dr.Read())
+                    if (dr.GetString(1).Contains("VARCHAR", StringComparison.OrdinalIgnoreCase)
+                        && (repeatColumns.Length > 0
+                            ? repeatColumns.Contains(dr.GetString(0), StringComparer.OrdinalIgnoreCase)
+                            : dr.GetString(0).Contains("plan", StringComparison.OrdinalIgnoreCase)))
+                        cols.Add(dr.GetString(0));
+            }
+            if (cols.Count > 0)
+                select = $"* REPLACE ({string.Join(", ", cols.Select(c => $"repeat(\"{c}\", {repeatPlans}) AS \"{c}\""))})";
+        }
+        for (var c = 0; c < copies; c++)
+        {
+            var path = Path.Combine(outDir, $"in_{n++:D4}.parquet").Replace("\\", "/");
+            using var cmd = con.CreateCommand();
+            cmd.CommandText = $"COPY (SELECT {select} FROM read_parquet('{inSql}')) TO '{path.Replace("'", "''")}' ({ParquetCompaction.ArchiveCopyOptions})";
+            cmd.ExecuteNonQuery();
+            result.Add(path);
+        }
+    }
+    return result;
+}
+
+static long CountRowGroups(List<string> paths)
+{
+    using var con = new DuckDBConnection("DataSource=:memory:");
+    con.Open();
+    var list = string.Join(", ", paths.Select(p => $"'{p.Replace("'", "''").Replace("\\", "/")}'"));
+    using var cmd = con.CreateCommand();
+    cmd.CommandText = $"SELECT count(*) FROM (SELECT DISTINCT file_name, row_group_id FROM parquet_metadata([{list}]))";
+    return Convert.ToInt64(cmd.ExecuteScalar());
 }
 
 static string GetArg(string[] args, string key, string defaultValue)

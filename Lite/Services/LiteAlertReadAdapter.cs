@@ -63,7 +63,9 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         string serverKey, int hoursBack, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        var rows = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack), cancellationToken);
+        /* On collection_time, unlike the grids: the alert read is a delivery cursor ("rows collected since the
+           last sweep"), so a report collected late still alerts once it lands. */
+        var rows = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack, windowOnCollectionTime: true), cancellationToken);
         return new List<BlockedProcessAlertRow>(rows);
     }
 
@@ -93,7 +95,16 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         string serverKey, int hoursBack, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        var rows = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(serverId, hoursBack), cancellationToken);
+        /* On collection_time, as the blocked-process read above: a delivery cursor, so a late-collected deadlock
+           still alerts. */
+        var rows = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(serverId, hoursBack, windowOnCollectionTime: true), cancellationToken);
+        /* #5642: the row's own collection_time (a naive-UTC store stamp) is the newest-sample instant the alert's age
+           line reads. The DeadlockRow grid type carries it already; the shared DTO had no place for it. */
+        foreach (var row in rows)
+        {
+            row.NewestSampleUtc = DateTime.SpecifyKind(row.CollectionTime, DateTimeKind.Utc);
+        }
+
         return new List<DeadlockAlertRow>(rows);
     }
 
@@ -179,6 +190,13 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         }
 
         var jobs = await Task.Run(() => _dataService.GetAnomalousJobsAsync(serverId, multiplier), cancellationToken);
+        /* #5642: the snapshot time read above is the newest collection_time this check reads; the rows come from that
+           same newest snapshot, so it is each row's newest-sample instant for the alert's age line. */
+        foreach (var job in jobs)
+        {
+            job.NewestSampleUtc = DateTime.SpecifyKind(snapshotTime.Value, DateTimeKind.Utc);
+        }
+
         return new AnomalousJobsResult(SnapshotIsFresh: true, jobs);
     }
 
@@ -186,9 +204,10 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
     /// Databases deviating from their expected (baseline/override) state — delegates to
     /// <see cref="LocalDataService.GetDatabaseStateDeviationsAsync"/>, which also auto-seeds the
     /// first-observation baseline. Task.Run-wrapped like the other reads to keep DuckDB's synchronous
-    /// I/O off the WPF dispatcher (#1202).
+    /// I/O off the WPF dispatcher (#1202). Null passes through unchanged: it is "no verdict this pass" (see
+    /// <see cref="IAlertReadAdapter.GetDatabaseStatesAsync"/>).
     /// </summary>
-    public async Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(
+    public async Task<List<DatabaseStateInfo>?> GetDatabaseStatesAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
@@ -202,7 +221,9 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         string serverKey, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        return await Task.Run(() => _dataService.GetForcePlanFailuresAsync(serverId), cancellationToken);
+        /* #5377: the token reaches the read too, because it waits for a slot of the shared archive-read limiter
+           and a cancelled alert pass must leave that queue, not wait out its turn. */
+        return await Task.Run(() => _dataService.GetForcePlanFailuresAsync(serverId, cancellationToken), cancellationToken);
     }
 
     private int ResolveRunningJobsCadence(int serverId) =>

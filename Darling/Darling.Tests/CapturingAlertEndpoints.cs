@@ -40,15 +40,20 @@ internal sealed class CapturingWebhookEndpoint : IDisposable
     private readonly Task _accepting;
     private readonly int _statusCode;
     private readonly string _responseBody;
+    private readonly int[]? _statusSequence;
 
     /// <param name="statusCode">The status every response carries. 200 by default; a test that needs a channel
     /// to fail (#4750) passes a 4xx or 5xx, which the sender reports as an error string.</param>
     /// <param name="responseBody">The body every response carries, empty by default. The sender puts a failed
     /// post's body into its error text, so a test that needs that error to carry a URL (#4750) echoes one here.</param>
-    public CapturingWebhookEndpoint(int statusCode = 200, string responseBody = "")
+    /// <param name="statusSequence">The status of each response in the order the requests arrive, the last one
+    /// repeating once they run out, in place of <paramref name="statusCode"/>. A test that needs some sends of
+    /// one alert to fail and others to deliver (#4822) passes, say, <c>{ 500, 200 }</c>.</param>
+    public CapturingWebhookEndpoint(int statusCode = 200, string responseBody = "", int[]? statusSequence = null)
     {
         _statusCode = statusCode;
         _responseBody = responseBody;
+        _statusSequence = statusSequence;
         _listener = new TcpListener(IPAddress.Loopback, 0);
         _listener.Start();
         Url = $"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/hook";
@@ -73,9 +78,12 @@ internal sealed class CapturingWebhookEndpoint : IDisposable
                 using var stream = client.GetStream();
                 _bodies.Add(await ReadRequestBodyAsync(stream));
 
+                var statusCode = _statusSequence is { Length: > 0 }
+                    ? _statusSequence[Math.Min(_bodies.Count, _statusSequence.Length) - 1]
+                    : _statusCode;
                 var responseBody = Encoding.UTF8.GetBytes(_responseBody);
                 var response = Encoding.ASCII.GetBytes(
-                    $"HTTP/1.1 {_statusCode} {(_statusCode == 200 ? "OK" : "Error")}\r\nContent-Length: {responseBody.Length}\r\nConnection: close\r\n\r\n");
+                    $"HTTP/1.1 {statusCode} {(statusCode == 200 ? "OK" : "Error")}\r\nContent-Length: {responseBody.Length}\r\nConnection: close\r\n\r\n");
                 await stream.WriteAsync(response, _stop.Token);
                 await stream.WriteAsync(responseBody, _stop.Token);
                 await stream.FlushAsync(_stop.Token);

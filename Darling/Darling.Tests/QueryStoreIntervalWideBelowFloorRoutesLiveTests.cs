@@ -123,6 +123,7 @@ public sealed class QueryStoreIntervalWideBelowFloorRoutesLiveTests
 
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = TestTop });
         command.Parameters.Add(ViewerDataService.DatabaseFilterParameter(null));
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(TestTop) });  /* #5313: the round's candidate limit, bound last */
         await command.ExecuteNonQueryAsync(ct);
     }
 

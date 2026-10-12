@@ -168,9 +168,11 @@ WHERE collection_time >= $2";
         await connection.OpenAsync(context.CancellationToken);
 
         using var command = connection.CreateCommand();
+        /* Keyed on rtrim(wait_type): rows stored before the collectors trimmed wait names keep the DMV's
+           trailing space, and they are the same wait as the clean name (IgnoredWaitTypes.BuildExclusionClause). */
         command.CommandText = @"
 SELECT
-    wait_type,
+    rtrim(wait_type) AS wait_type,
     SUM(delta_waiting_tasks) AS total_waiting_tasks,
     SUM(delta_wait_time_ms) AS total_wait_time_ms,
     SUM(delta_signal_wait_time_ms) AS total_signal_wait_time_ms
@@ -179,7 +181,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
 AND   delta_wait_time_ms > 0
-GROUP BY wait_type
+GROUP BY rtrim(wait_type)
 ORDER BY SUM(delta_wait_time_ms) DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -242,17 +244,16 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
         await connection.OpenAsync(context.CancellationToken);
 
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        var scopeList = context.SeparatelyMonitoredDatabases;
+        var scopeFilter = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
+        command.CommandText = (@"
 WITH reports AS (
     SELECT
         wait_time_ms,
         blocking_spid,
         blocking_status,
-        time_bucket(INTERVAL '4 hours', collection_time, $2) AS bucket_start
-    FROM v_blocked_process_reports
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
+        time_bucket(INTERVAL '4 hours', event_time, $2) AS bucket_start
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3{SCOPE}") + @" AS ev
 ),
 buckets AS (
     SELECT COUNT(*) AS bucket_event_count
@@ -266,11 +267,12 @@ SELECT
     COUNT(DISTINCT blocking_spid) AS distinct_head_blockers,
     COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count,
     (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count
-FROM reports";
+FROM reports").Replace("{SCOPE}", scopeFilter);
 
         command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        SeparatelyMonitoredScope.AddParameters(command, scopeList);
 
         using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
         if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -312,7 +314,7 @@ FROM reports";
     }
 
     /// <summary>
-    /// Collects deadlock facts from the deadlocks table.
+    /// Collects deadlock facts from v_deadlocks, counting each stored deadlock once.
     /// Produces a single DEADLOCKS fact with count and rate.
     /// Value is deadlocks per OBSERVED hour (see <see cref="CollectBlockingFactsAsync"/> — same divisor,
     /// same reason, #3538 A2). <c>period_hours</c> nominal, <c>observed_hours</c> the divisor; an
@@ -326,22 +328,30 @@ FROM reports";
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
 
-        using var command = connection.CreateCommand();
-        command.CommandText = @"
-SELECT COUNT(*) AS deadlock_count
-FROM v_deadlocks
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3";
+        long deadlockCount;
+        if (context.SeparatelyMonitoredDatabases is { Count: > 0 } scopeList)
+        {
+            deadlockCount = await SeparatelyMonitoredScope.CountDeadlocksAsync(
+                connection, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                inclusiveEnd: true, scopeList, context.CancellationToken);
+        }
+        else
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+SELECT " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count
+FROM v_deadlocks AS dl
+WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3";
 
-        command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-        command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
-        command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+            command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
-        using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
-        if (!await reader.ReadAsync(context.CancellationToken)) return;
+            using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            deadlockCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+        }
 
-        var deadlockCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
         if (deadlockCount <= 0) return;
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
@@ -392,11 +402,7 @@ SELECT
     {BlockingPairRowQuery.IdentityColumns},
     contentious_object,
     {BlockingPairRowQuery.TrailingIdentityColumns}
-FROM v_blocked_process_reports
-WHERE server_id = $1
-AND   event_time >= $2
-AND   event_time <= $3
-{BlockingPairRowQuery.SpidFilter}
+FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + BlockingPairRowQuery.SpidFilter)} AS ev
 ORDER BY event_time DESC
 LIMIT 5000";
 
@@ -416,6 +422,12 @@ LIMIT 5000";
             await BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
                 connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
                 context.CancellationToken);
+
+            /* On an Azure SQL Database master target, pairs of databases monitored as their own targets are
+               skipped, so one chain does not page from both targets. A pair with no database stays. */
+            if (context.SeparatelyMonitoredDatabases is { Count: > 0 } scopeList)
+                rows.RemoveAll(r => !string.IsNullOrEmpty(r.DatabaseName)
+                    && scopeList.Contains(r.DatabaseName, StringComparer.OrdinalIgnoreCase));
 
             if (rows.Count == 0) return;
 

@@ -15,6 +15,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using Microsoft.Win32;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Services;
 using ScottPlot;
@@ -33,14 +34,20 @@ public partial class ProcedureHistoryWindow : Window
     private readonly string _objectName;
     private readonly int _hoursBack;
     private readonly string? _connectionString;
+    /// <summary>The zone the tab shows times in: the tick labels and the hover read it each time they draw, and the summary reads it when the history loads.</summary>
+    private readonly Func<TimeZoneInfo> _displayZone;
+    /// <summary>The opening tab's own server clock (#4766), read each time a server wall-clock column draws, so those columns stay on that server's clock while another server's tab is selected.</summary>
+    private readonly Func<ServerClock> _serverClock;
     private readonly PlanNavigationController _planActions;
     private List<ProcedureStatsHistoryRow> _historyData = new();
+    /* #5449: the rows the chart plots: _historyData plus a zero row at each collector run that stored nothing for this procedure. */
+    private List<ProcedureStatsHistoryRow> _chartData = new();
     private ChartHoverHelper? _chartHover;
     private DataGridFilterManager<ProcedureStatsHistoryRow>? _filterManager;
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
 
-    public ProcedureHistoryWindow(LocalDataService dataService, int serverId, string databaseName, string schemaName, string objectName, int hoursBack, string? connectionString = null)
+    public ProcedureHistoryWindow(LocalDataService dataService, int serverId, string serverName, string databaseName, string schemaName, string objectName, int hoursBack, string? connectionString, Func<TimeZoneInfo> displayZone, Func<ServerClock> serverClock)
     {
         InitializeComponent();
         _dataService = dataService;
@@ -50,15 +57,18 @@ public partial class ProcedureHistoryWindow : Window
         _objectName = objectName;
         _hoursBack = hoursBack;
         _connectionString = connectionString;
+        _displayZone = displayZone;
+        _serverClock = serverClock;
 
         _planActions = new PlanNavigationController(
             this,
             async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
-                this, xml, label, qt, await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId)),
-            (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
+                this, xml, label, qt, await System.Threading.Tasks.Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId))),
+            /* #4348: the re-run's plan comes from the monitored server, not the collected rows, so it is judged here. */
+            async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
-                productName: "SQL Server Performance Monitor Lite"),
-            "the monitored server");
+                productName: "SQL Server Performance Monitor Lite")),
+            serverName);
 
         _filterManager = new DataGridFilterManager<ProcedureStatsHistoryRow>(HistoryDataGrid);
         DataGridFilterColumns.AddFilterButtons(HistoryDataGrid, Filter_Click);
@@ -75,16 +85,28 @@ public partial class ProcedureHistoryWindow : Window
     {
         try
         {
-            _historyData = await _dataService.GetProcedureStatsHistoryAsync(_serverId, _databaseName, _schemaName, _objectName, _hoursBack);
+            /* #5457: off the UI thread: the read takes the store read lock, which an archive or compaction pass can hold. */
+            _historyData = await System.Threading.Tasks.Task.Run(() => _dataService.GetProcedureStatsHistoryAsync(_serverId, _databaseName, _schemaName, _objectName, _hoursBack));
+            /* #4766: the grid words each row's times in this window's own zone, as the chart and the summary below do,
+               not in whichever server's tab is selected when the row is drawn (this window stays open after another
+               tab is selected). The columns that hold the server's own wall clock are converted on the opening tab's
+               clock for the same reason. Set before the rows reach the grid. */
+            foreach (var row in _historyData)
+            {
+                row.Zone = _displayZone;
+                row.Clock = _serverClock;
+            }
+
             _filterManager!.UpdateData(_historyData);
 
             if (_historyData.Count > 0)
             {
                 var totalExec = _historyData.Sum(r => r.DeltaExecutions);
                 var totalCpu = _historyData.Sum(r => r.DeltaCpuMs);
-                var first = _historyData.First().CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes);
-                var last = _historyData.Last().CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes);
-                SummaryText.Text = $"{_historyData.Count} samples from {first:MM/dd HH:mm} to {last:MM/dd HH:mm} | " +
+                var zone = _displayZone();
+                var first = ServerTimeHelper.FormatInstant(_historyData.First().CollectionTime, zone, "MM/dd HH:mm");
+                var last = ServerTimeHelper.FormatInstant(_historyData.Last().CollectionTime, zone, "MM/dd HH:mm");
+                SummaryText.Text = $"{_historyData.Count} samples from {first} to {last} | " +
                                    $"Total Executions: {totalExec:N0} | Total CPU: {totalCpu:N1} ms";
             }
             else
@@ -92,17 +114,21 @@ public partial class ProcedureHistoryWindow : Window
                 SummaryText.Text = "No history data found for this procedure in the selected time range.";
             }
 
+            /* #5449: the chart also plots a 0 for each collector run that stored nothing for this procedure, so a quiet
+               minute is a 0 as it is on an older store, not a gap. The grid and summary keep the stored rows. */
+            var historyForChart = _historyData;
+            _chartData = await System.Threading.Tasks.Task.Run(() => _dataService.GetProcedureStatsHistoryChartRowsAsync(_serverId, historyForChart));
             UpdateChart();
         }
         catch (Exception ex)
         {
-            SummaryText.Text = $"Error loading history: {ex.Message}";
+            SummaryText.Text = $"Error loading history: {DuckDbMemoryLimitSetting.Describe(ex)}";
         }
     }
 
     private void UpdateChart()
     {
-        if (_historyData == null || _historyData.Count == 0)
+        if (_chartData == null || _chartData.Count == 0)
         {
             HistoryChart.Plot.Clear();
             HistoryChart.Refresh();
@@ -115,8 +141,8 @@ public partial class ProcedureHistoryWindow : Window
         var tag = selected?.Tag?.ToString() ?? "AvgCpuMs";
         var label = selected?.Content?.ToString() ?? "Avg CPU (ms)";
 
-        var xs = _historyData.Select(r => r.CollectionTime.AddMinutes(Services.ServerTimeHelper.UtcOffsetMinutes).ToOADate()).ToArray();
-        var ys = _historyData.Select(r => GetMetricValue(r, tag)).ToArray();
+        var xs = _chartData.Select(r => r.CollectionTime.ToOADate()).ToArray();
+        var ys = _chartData.Select(r => GetMetricValue(r, tag)).ToArray();
 
         var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);
         scatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("MetricTrend"));
@@ -125,15 +151,15 @@ public partial class ProcedureHistoryWindow : Window
 
         var unit = tag.Contains("Ms") ? "ms" : "";
         if (_chartHover == null)
-            _chartHover = new ChartHoverHelper(HistoryChart, unit);
+            _chartHover = new ChartHoverHelper(HistoryChart, unit, displayZone: _displayZone);
         else
             _chartHover.Unit = unit;
         _chartHover.Clear();
         _chartHover.Add(scatter, label);
 
-        /* #1831: the DateChange variant routes labels through the shared formatter, which converts
-           for the display mode — plain DateTimeTicksBottom() rendered raw server time. */
-        HistoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        /* #4766: X is the collection time as stored, the naive-UTC instant. The display mode reaches only the
+           text: the tick labels here, the hover, and the summary's first and last times. */
+        HistoryChart.Plot.Axes.DateTimeTicksBottomUtc(_displayZone);
         ApplyTheme(HistoryChart);
 
         HistoryChart.Refresh();
@@ -222,12 +248,15 @@ public partial class ProcedureHistoryWindow : Window
         btn.Content = "...";
         try
         {
-            var plan = await LocalDataService.FetchProcedurePlanOnDemandAsync(_connectionString, _databaseName, _schemaName, _objectName);
+            var plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchProcedurePlanOnDemandAsync(_connectionString, _databaseName, _schemaName, _objectName));
             if (string.IsNullOrEmpty(plan))
             {
                 MessageBox.Show("No plan found in the plan cache for this procedure. The plan may have been evicted.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
+
+            /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
+            if (WithheldPlanGuard.RefuseSave(plan)) return;
 
             var dialog = new SaveFileDialog
             {
@@ -241,7 +270,7 @@ public partial class ProcedureHistoryWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -260,7 +289,7 @@ public partial class ProcedureHistoryWindow : Window
     private async System.Threading.Tasks.Task<string?> FetchPlanAsync()
     {
         if (string.IsNullOrEmpty(_connectionString) || string.IsNullOrEmpty(_objectName)) return null;
-        return await LocalDataService.FetchProcedurePlanOnDemandAsync(_connectionString, _databaseName, _schemaName, _objectName);
+        return await LivePlanDisplay.FilterAsync(await LocalDataService.FetchProcedurePlanOnDemandAsync(_connectionString, _databaseName, _schemaName, _objectName));
     }
 
     private async void ViewPlan_Click(object sender, RoutedEventArgs e)

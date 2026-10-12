@@ -68,6 +68,14 @@ public partial class App : Application
            failure. */
         ViewerLogger.Initialize();
 
+        /* #5565: the grids' column filters survive a restart. The file holds logins, hosts and application names the
+           reader ticked, so it lives under LOCAL application data (as Lite's does), not the roaming profile that
+           viewer-preferences.json uses; a file an earlier build left in the roaming folder is moved over once. */
+        ColumnFilterStore.Install(
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PerformanceMonitorDarling", "column-filters.json"),
+            message => ViewerLogger.Warn("ColumnFilterStore", message),
+            Path.Combine(Path.GetDirectoryName(ViewerPreferencesStore.DefaultFilePath())!, "column-filters.json"));
+
         /* #3577: the operator's per-theme color overrides live beside viewer-settings.json, in the viewer's
            own per-user directory - LOCAL to this machine, never in the store or the control plane, because
            a color is a preference of the person at this screen and not a fact about the fleet. The path
@@ -138,6 +146,9 @@ public partial class App : Application
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
         TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+
+        /* F17: tabs and column headers made of panels get an accessible name equal to their visible text. */
+        PerformanceMonitor.Ui.AccessibleNames.Register();
 
         base.OnStartup(e);
 

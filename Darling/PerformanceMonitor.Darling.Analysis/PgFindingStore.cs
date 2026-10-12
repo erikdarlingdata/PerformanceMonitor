@@ -1001,7 +1001,9 @@ ORDER BY local_bucket, story_path_hash";
         command.Parameters.AddWithValue(finding.Category);
         command.Parameters.AddWithValue(finding.StoryPath);
         command.Parameters.AddWithValue(finding.StoryPathHash);
-        command.Parameters.AddWithValue(finding.StoryText);
+        /* #4348/#5320 Layer 0b: the story is judged where it is written, because the rows it was built from may
+           predate the collection-time filter. Clean text is the same instance, so the stored row is unchanged. */
+        command.Parameters.AddWithValue(DerivedStoreScrub.Text(finding.StoryText));
         command.Parameters.AddWithValue(finding.RootFactKey);
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Double, Value = (object?)finding.RootFactValue ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)finding.LeafFactKey ?? DBNull.Value });
@@ -1024,7 +1026,8 @@ ORDER BY local_bucket, story_path_hash";
         command.Parameters.Add(new NpgsqlParameter
         {
             NpgsqlDbType = NpgsqlDbType.Text,
-            Value = (object?)DrillDownSerializer.Serialize(finding.DrillDown) ?? DBNull.Value
+            /* #4348/#5320 Layer 0b: the evidence rows quote statement text from the source rows. */
+            Value = (object?)DerivedStoreScrub.Json(DrillDownSerializer.Serialize(finding.DrillDown)) ?? DBNull.Value
         });
 
         await command.ExecuteNonQueryAsync();

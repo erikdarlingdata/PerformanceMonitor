@@ -280,6 +280,27 @@ public sealed class DeltaSeriesShapingTests
         Assert.Equal(1.0, DeltaSeriesShaping.MaxFinite(new[] { 1.0, double.PositiveInfinity }, fallback: 0));
     }
 
+    /* ---- one row's per-second figure (the latest-snapshot tools) ------------------------------------------ */
+
+    /// <summary>A single row is rated by <see cref="DeltaSeriesShaping.Shape"/> itself: its delta over its stored
+    /// interval, and null wherever the chart would break its line. A lone row has no previous sample, so a NULL
+    /// interval gets no fallback.</summary>
+    [Fact]
+    public void PerSecond_IsTheDeltaOverTheStoredInterval_AndNullWhereTheChartBreaksItsLine()
+    {
+        Assert.Equal(0.22, DeltaSeriesShaping.PerSecond(66, 300)!.Value, precision: 10);
+        Assert.Equal(0.0, DeltaSeriesShaping.PerSecond(0, 300));     // idle is a measurement
+        Assert.Null(DeltaSeriesShaping.PerSecond(0, 0));             // the calculator's "no delta knowable"
+        Assert.Null(DeltaSeriesShaping.PerSecond(5, 0));             // the interval decides, not the delta
+        Assert.Null(DeltaSeriesShaping.PerSecond(66, null));         // no interval stored, no previous sample
+        Assert.Null(DeltaSeriesShaping.PerSecond(null, 300));        // no delta stored (a gauge row)
+        Assert.Null(DeltaSeriesShaping.PerSecond(66, -300));         // not a state the calculator writes
+
+        /* The same number the series shaping gives that point. */
+        var series = DeltaSeriesShaping.Shape(new[] { At(0, 0, 0), At(5, 66, 300) }, DeltaBasis.PerSecond);
+        Assert.Equal(series[1], DeltaSeriesShaping.PerSecond(66, 300));
+    }
+
     /* ---- the grid cells ----------------------------------------------------------------------------------- */
 
     /// <summary>The interval decides, not the delta's value: a 5 beside a 0 interval is as fabricated as a 0

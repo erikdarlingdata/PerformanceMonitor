@@ -112,7 +112,7 @@ public class DataImportService
                        in a Windows path — so escape it for the SQL literal the way every sibling COPY does
                        (ArchiveService, ParquetCompaction), instead of interpolating it raw. */
                     using var exportCmd = connection.CreateCommand();
-                    exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{DuckDbInitializer.EscapeSqlPath(parquetPath)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+                    exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{DuckDbInitializer.EscapeSqlPath(parquetPath)}' ({ParquetCompaction.ArchiveCopyOptions})";
                     exportCmd.ExecuteNonQuery();
 
                     tablesFlushed++;

@@ -43,6 +43,13 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
     private int _payloadIndex;
 
     /// <summary>
+    /// True between <see cref="BeginPayload"/> and <see cref="EndPayload"/>: the only span in which a written value is a
+    /// payload value. The host writes each row's prefix (collection id, collection_time, server_id, server_name) through
+    /// these same overloads before <see cref="BeginPayload"/>, so the hour-ledger tally (#4605) observes only inside it.
+    /// </summary>
+    private bool _inPayload;
+
+    /// <summary>
     /// Routes the large text payloads of this collector into the hash-keyed dimension tables instead
     /// of inline onto every row (#1767). The host sets this once per COPY batch, from the SAME
     /// schema it built <see cref="CopyCommandFor(ICollectorSchemaInfo)"/> from — the plan decides
@@ -61,9 +68,77 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
     /// <summary>
     /// Opens one row's payload run: the diversion plan is indexed by PAYLOAD column ordinal, so the
     /// counter must restart after the prefix columns (which the host writes through this same
-    /// writer). Call immediately before the definition's WritePayload.
+    /// writer). Call immediately before the definition's WritePayload. It also opens the window in which the
+    /// ledger tally (<see cref="CountNonZeroAt"/>) watches writes: the prefix's own integers, written through these same
+    /// overloads before this call, are not payload values and are never tallied (#4605).
     /// </summary>
-    public void BeginPayload() => _payloadIndex = 0;
+    public void BeginPayload()
+    {
+        _payloadIndex = 0;
+        _inPayload = true;
+    }
+
+    /// <summary>
+    /// The payload position whose integer value this writer tallies, or -1 when it tallies none (#4605). The hour
+    /// ledger needs, per batch, how many rows were written with a <c>sample_interval_seconds</c> other than 0, and the
+    /// writer is the one place that sees the value the COPY really sends into that column: counting here is counting
+    /// the write itself, not re-deriving the interval from the row, and the position comes from the same
+    /// <c>PayloadColumns</c> list the COPY's column list does (<see cref="QueryStatsHourLedgerWriter.IntervalPayloadIndex"/>),
+    /// so the two cannot disagree.
+    /// </summary>
+    private int _countedPayloadIndex = -1;
+
+    private long _countedNonZero;
+
+    private long _countedWrites;
+
+    /// <summary>
+    /// Starts tallying the integer values written at payload position <paramref name="payloadIndex"/>, from zero (#4605).
+    /// The host calls it once per COPY attempt, before the first row, on the attempt's own writer: a writer is built per
+    /// attempt, so a re-attempt starts from zero by construction and a failed attempt's tally cannot reach the next one.
+    /// </summary>
+    public void CountNonZeroAt(int payloadIndex)
+    {
+        if (payloadIndex < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(payloadIndex), payloadIndex, "A payload position is zero or more.");
+        }
+
+        _countedPayloadIndex = payloadIndex;
+        _countedNonZero = 0;
+        _countedWrites = 0;
+    }
+
+    /// <summary>
+    /// How many values written at the watched position were not 0 (#4605). A NULL counts: it is the rollup's own
+    /// <c>sample_interval_seconds IS DISTINCT FROM 0</c> population, which includes rows from before the column existed.
+    /// </summary>
+    public long NonZeroCounted => _countedNonZero;
+
+    /// <summary>
+    /// How many times the watched position was written as an integer (#4605). The host compares it with the rows it wrote:
+    /// a row that wrote the position through any other overload would be missing from <see cref="NonZeroCounted"/>, and an
+    /// undercounted ledger is the one error this tally must not make silently.
+    /// </summary>
+    public long CountedWrites => _countedWrites;
+
+    private void Observe(int index, int? value)
+    {
+        /* Only payload positions: the host writes its prefix through these same overloads before BeginPayload, and on a
+           fresh writer the first row's server_id (a Value(int)) would otherwise sit at position 1 or 2 (#4605). */
+        if (!_inPayload || index != _countedPayloadIndex)
+        {
+            return;
+        }
+
+        _countedWrites++;
+
+        /* Lifted comparison: a NULL is not 0, so it is counted, as the rollup counts it. */
+        if (value != 0)
+        {
+            _countedNonZero++;
+        }
+    }
 
     /// <summary>
     /// Closes one row's payload run and asserts the positional contract the whole binary COPY rests
@@ -75,6 +150,7 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
     /// </summary>
     public void EndPayload(int expectedPayloadColumns)
     {
+        _inPayload = false;
         if (_payloadIndex != expectedPayloadColumns)
         {
             throw new InvalidOperationException(
@@ -197,6 +273,59 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
         return this;
     }
 
+    /// <summary>
+    /// A payload the host already knows the store holds: when <paramref name="knownDigest"/> is set and
+    /// <paramref name="content"/> is null, the row's digest column gets that digest directly, with no plan
+    /// text and no dim insert, and the digest joins the batch's touch set so the flush keeps the dim row
+    /// alive. Anything else is exactly <see cref="Value(string?)"/>. <paramref name="knownDigest"/> is the
+    /// 64-character hex of the SHA-256 <see cref="PayloadDimensions.Digest"/> produced; a malformed one
+    /// throws rather than writing a digest that resolves to nothing, and so does a known digest at a position
+    /// with no diverted payload (a writer set up without the diversion plan).
+    /// </summary>
+    public ICollectorRowWriter PayloadOrDigest(string? content, string? knownDigest)
+    {
+        if (knownDigest is null || content is not null)
+        {
+            return Value(content);
+        }
+
+        var digest = ParseKnownDigest(knownDigest);
+        if (!_diversionPlan.TryGetValue(_payloadIndex, out var dimension))
+        {
+            throw new InvalidOperationException(
+                "A known payload digest needs a diverted payload position — this position has none, so the row would be written with no plan.");
+        }
+
+        var dimensions = _dimensions ?? throw new InvalidOperationException(
+            "A diversion plan is set but no dimension batch — call UseDimensions with both.");
+        NextPayloadIndex();
+        dimensions.AddTouch(dimension.DimTable, digest);
+        Target.Write(digest, NpgsqlDbType.Bytea);
+        return this;
+    }
+
+    private static byte[] ParseKnownDigest(string knownDigest)
+    {
+        byte[] digest;
+        try
+        {
+            digest = Convert.FromHexString(knownDigest);
+        }
+        catch (FormatException ex)
+        {
+            throw new ArgumentException("A known payload digest must be hex text.", nameof(knownDigest), ex);
+        }
+
+        if (digest.Length != PayloadDimensions.DigestLengthBytes)
+        {
+            throw new ArgumentException(
+                $"A known payload digest must be {PayloadDimensions.DigestLengthBytes} bytes, got {digest.Length}.",
+                nameof(knownDigest));
+        }
+
+        return digest;
+    }
+
     public ICollectorRowWriter Value(long value)
     {
         NextPayloadIndex();
@@ -213,14 +342,14 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
 
     public ICollectorRowWriter Value(int value)
     {
-        NextPayloadIndex();
+        Observe(NextPayloadIndex(), value);
         Target.Write(value, NpgsqlDbType.Integer);
         return this;
     }
 
     public ICollectorRowWriter Value(int? value)
     {
-        NextPayloadIndex();
+        Observe(NextPayloadIndex(), value);
         if (value is null) { Target.WriteNull(); } else { Target.Write(value.Value, NpgsqlDbType.Integer); }
         return this;
     }

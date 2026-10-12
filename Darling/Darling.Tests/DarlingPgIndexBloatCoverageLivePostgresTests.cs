@@ -92,7 +92,7 @@ public sealed class DarlingPgIndexBloatCoverageLivePostgresTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
-            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var newest = now.AddHours(-2);
             var older = now.AddHours(-26);
 

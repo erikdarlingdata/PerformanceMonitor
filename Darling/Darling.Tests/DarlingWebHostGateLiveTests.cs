@@ -21,7 +21,9 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -46,6 +48,19 @@ public sealed class DarlingWebHostGateLiveTests
     private static readonly IPAddress InCidrRemote = IPAddress.Parse("192.168.1.50");
     private static readonly IPAddress OutOfCidrRemote = IPAddress.Parse("10.0.0.9");
 
+    /// <summary>Adapts <see cref="CapturingTestLogger"/> (a plain <see cref="ILogger"/>) to the generic
+    /// <see cref="ILogger{TCategoryName}"/> <see cref="DarlingWebHostService"/>'s constructor requires.</summary>
+    private sealed class CapturingHostLogger(CapturingTestLogger inner) : ILogger<DarlingWebHostService>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => inner.BeginScope(state);
+
+        public bool IsEnabled(LogLevel logLevel) => inner.IsEnabled(logLevel);
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => inner.Log(logLevel, eventId, state, exception, formatter);
+    }
+
     /// <summary>
     /// Builds a <see cref="TestServer"/> running the REAL <c>DarlingWebHostService.ConfigurePipeline</c> —
     /// the exact method the production <c>TryStartServerAsync</c> calls right after <c>builder.Build()</c>,
@@ -53,7 +68,9 @@ public sealed class DarlingWebHostGateLiveTests
     /// the transport (TestServer instead of Kestrel sockets) and the store pool (a data source that is never
     /// opened, because none of these gates touch Postgres).
     /// </summary>
-    private static async Task<TestServer> BuildServer(bool networkMode, string? publicBaseUrlHost = null, DarlingWebOidcClient? oidcClient = null)
+    private static async Task<TestServer> BuildServer(
+        bool networkMode, string? publicBaseUrlHost = null, DarlingWebOidcClient? oidcClient = null,
+        bool requireTokenWhenLoopbackOnly = false, CapturingTestLogger? hostLogger = null, string accessToken = Token)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -70,8 +87,9 @@ public sealed class DarlingWebHostGateLiveTests
 
         var app = builder.Build();
 
+        // hostLogger is the host's own logger, the one the gates write their refusal lines to; the Host-refusal line test reads it.
         var host = new DarlingWebHostService(
-            NullLogger<DarlingWebHostService>.Instance,
+            hostLogger is null ? NullLogger<DarlingWebHostService>.Instance : new CapturingHostLogger(hostLogger),
             new WebRuntimeState(),
             new CollectorRuntimeState(),
             new WebTlsCertificateState(),
@@ -81,11 +99,19 @@ public sealed class DarlingWebHostGateLiveTests
             app,
             postgres,
             networkMode: networkMode,
-            networkListenIp: networkMode ? IPAddress.Parse(ListenIp) : null,
+            // #5288: the Host guard's listen address is decided exactly as TryStartServerAsync decides it, through
+            // ResolveHostGuardListenIp from the FINAL mode. The host parses the configured address before any degrade,
+            // so a start that degraded out of network mode (requireTokenWhenLoopbackOnly) still has it in hand and the
+            // resolver is what drops it; a start that never had a network block has none to hand over.
+            networkListenIp: DarlingMcpHostService.ResolveHostGuardListenIp(
+                networkMode, networkMode || requireTokenWhenLoopbackOnly ? IPAddress.Parse(ListenIp) : null),
             allowedCidr: IPNetwork.Parse(AllowedCidr),
-            accessToken: Token,
+            accessToken: accessToken,
             oidcClient: oidcClient,
-            publicBaseUrlHost: publicBaseUrlHost);
+            publicBaseUrlHost: publicBaseUrlHost,
+            // #5288: true only for a start that network mode degraded out of (TLS refused, token resolved); the
+            // never-network loopback-only server in the tests below leaves it false, exactly as the host does.
+            requireTokenWhenLoopbackOnly: requireTokenWhenLoopbackOnly);
 
         await app.StartAsync();
         return app.GetTestServer();
@@ -210,6 +236,26 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
     }
 
+    /// <summary>#5288: the line the Host guard logs for a refused name tells the operator which settings decide the
+    /// names it admits: the loopback names, the listen address (<c>web.network.listen</c>) and <c>web.publicBaseUrl</c>'s
+    /// host. The MCP listener's line names its own settings in the same shape
+    /// (<see cref="DarlingMcpHostGateLiveTests"/>). Read from the host's own logger through the real pipeline.</summary>
+    [Fact]
+    public async Task NetworkMode_ForeignHost_TheRefusalLogLine_NamesTheSettingsThatDecideTheAdmittedNames()
+    {
+        var hostLogger = new CapturingTestLogger();
+        using var server = await BuildServer(networkMode: true, publicBaseUrlHost: "monitor.example.com", hostLogger: hostLogger);
+        var ctx = await Send(server, "/", "evil.com", InCidrRemote, token: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+
+        var line = Assert.Single(hostLogger.Lines);
+        Assert.StartsWith("Warning: Web dashboard ", line, StringComparison.Ordinal);
+        Assert.Contains("the Host header 'evil.com' is not an address this endpoint binds", line, StringComparison.Ordinal);
+        Assert.Contains("web.network.listen when LAN-exposed", line, StringComparison.Ordinal);
+        Assert.Contains("web.publicBaseUrl's host", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("monitor.example.com", line, StringComparison.Ordinal);
+    }
+
     /// <summary>#4220: web.publicBaseUrl's host is admitted as one extra allowed Host value — a DNS name
     /// darling.sample.json suggests but that, before this, the guard refused unconditionally (it only ever
     /// compared against networkListenIp or the loopback names).</summary>
@@ -233,6 +279,67 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
     }
 
+    /// <summary>#5288 (#4220): an internationalized <c>web.publicBaseUrl</c> host is admitted for the Host a
+    /// browser sends. A browser always sends the punycode (<c>xn--</c>) form of the name, ASP.NET Core hands the
+    /// guard the DECODED form of that header (<c>b&#252;cher.example</c>), and <c>TriageLink.TryGetHost</c> returns
+    /// <c>Uri.Host</c>, which keeps whichever spelling the operator wrote in the URL. Both spellings of the URL
+    /// must therefore admit the one Host the browser sends, with or without a port. The URL goes through
+    /// <c>TriageLink.TryGetHost</c> here exactly as <c>TryStartServerAsync</c> does before it hands the host to
+    /// <c>ConfigurePipeline</c>.</summary>
+    [Theory]
+    [InlineData("https://xn--bcher-kva.example/", "xn--bcher-kva.example")]
+    [InlineData("https://b\u00FCcher.example/", "xn--bcher-kva.example")]
+    [InlineData("https://xn--bcher-kva.example:5153/", "xn--bcher-kva.example:5153")]
+    [InlineData("https://b\u00FCcher.example:5153/", "xn--bcher-kva.example:5153")]
+    public async Task NetworkMode_IdnPublicBaseUrlHost_IsAdmitted_ForThePunycodeHostABrowserSends(string publicBaseUrl, string hostHeader)
+    {
+        var publicBaseUrlHost = TriageLink.TryGetHost(publicBaseUrl);
+        Assert.NotNull(publicBaseUrlHost);
+
+        using var server = await BuildServer(networkMode: true, publicBaseUrlHost: publicBaseUrlHost);
+        var ctx = await Send(server, "/", hostHeader, InCidrRemote, token: Token);
+
+        Assert.True(
+            ctx.Response.StatusCode != StatusCodes.Status400BadRequest,
+            $"web.publicBaseUrl '{publicBaseUrl}' (host '{publicBaseUrlHost}') refused its own Host '{hostHeader}' with {ctx.Response.StatusCode}");
+    }
+
+    /// <summary>The IDN admission names exactly ONE host: another punycode name (<c>m&#252;nchen.example</c>), a
+    /// plain foreign name and the name with its non-ASCII letter dropped all still get 400.</summary>
+    [Theory]
+    [InlineData("xn--mnchen-3ya.example")]
+    [InlineData("evil.com")]
+    [InlineData("bcher.example")]
+    public async Task NetworkMode_IdnPublicBaseUrlHost_StillRefusesEveryOtherHost(string hostHeader)
+    {
+        var publicBaseUrlHost = TriageLink.TryGetHost("https://xn--bcher-kva.example/");
+        using var server = await BuildServer(networkMode: true, publicBaseUrlHost: publicBaseUrlHost);
+        var ctx = await Send(server, "/", hostHeader, InCidrRemote, token: Token);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>#5288: a malformed punycode label in <c>web.publicBaseUrl</c> (<c>xn--a</c> decodes to nothing)
+    /// must not fail start-up. The conversion that puts the name in the form the guard compares falls back to
+    /// the raw value, so the pipeline still builds, still refuses a foreign Host and still admits a loopback
+    /// one.</summary>
+    [Theory]
+    [InlineData("https://xn--a/")]
+    [InlineData("https://xn--bcher-kva-.example/")]
+    public async Task NetworkMode_MalformedPunycodePublicBaseUrlHost_DoesNotFailStartUp_AndAdmitsNothingExtra(string publicBaseUrl)
+    {
+        var publicBaseUrlHost = TriageLink.TryGetHost(publicBaseUrl);
+        Assert.NotNull(publicBaseUrlHost);
+
+        using var server = await BuildServer(networkMode: true, publicBaseUrlHost: publicBaseUrlHost);
+
+        var foreign = await Send(server, "/", "evil.com", InCidrRemote, token: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, foreign.Response.StatusCode);
+
+        var loopback = await Send(server, "/", "localhost", InCidrRemote, token: Token);
+        Assert.NotEqual(StatusCodes.Status400BadRequest, loopback.Response.StatusCode);
+    }
+
     /// <summary>The same rebinding guard runs in LOOPBACK mode too (#1576 fixed a loopback-only gap): a
     /// foreign Host is refused even though loopback registers no CIDR/token middleware at all.</summary>
     [Fact]
@@ -242,6 +349,240 @@ public sealed class DarlingWebHostGateLiveTests
         var ctx = await Send(server, "/", "evil.com", IPAddress.Loopback);
 
         Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288: network mode configured, then degraded to loopback-only because the TLS certificate was refused, token
+    /// resolved. The loopback-only server keeps the token-to-cookie gate (the host passes
+    /// <c>requireTokenWhenLoopbackOnly</c> for exactly that start): no credential on an <c>/api/*</c> path gets 401
+    /// and on a page route gets the login form, the right token is exchanged for a session cookie, and that cookie
+    /// then gets past the gate. Every client presented the token before the certificate lapsed, so nothing that
+    /// worked stops working.
+    /// </summary>
+    [Fact]
+    public async Task TlsRefusal_DegradedLoopbackServer_StillRequiresTheToken()
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var (api, apiBody) = await SendWithBody(server, "/api/fleet", "localhost", IPAddress.Loopback);
+        Assert.Equal(StatusCodes.Status401Unauthorized, api.Response.StatusCode);
+        Assert.Contains("\"error\"", apiBody, StringComparison.Ordinal);
+
+        var page = await Send(server, "/", "localhost", IPAddress.Loopback);
+        Assert.Equal(StatusCodes.Status200OK, page.Response.StatusCode);
+        Assert.Equal("text/html; charset=utf-8", page.Response.ContentType);
+
+        var wrong = await Send(server, "/api/fleet", "localhost", IPAddress.Loopback, token: "not-the-token");
+        Assert.Equal(StatusCodes.Status401Unauthorized, wrong.Response.StatusCode);
+
+        var exchange = await Send(server, "/", "localhost", IPAddress.Loopback, token: Token);
+        Assert.Equal(StatusCodes.Status302Found, exchange.Response.StatusCode);
+        var setCookie = Assert.Single(exchange.Response.Headers.SetCookie) ?? string.Empty;
+        var cookie = setCookie[..setCookie.IndexOf(';')];
+
+        // A path nothing maps answers 404 once the gate lets the request through; without the cookie it is the login form.
+        var withCookie = await Send(server, "/some/unmapped/path", "localhost", IPAddress.Loopback, cookie: cookie);
+        Assert.Equal(StatusCodes.Status404NotFound, withCookie.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// A token the operator configured gates a loopback-only dashboard too. The production start resolves it with
+    /// <see cref="DarlingWebHostService.ResolveLoopbackOnlyToken"/> and hands the answer to the pipeline as the access
+    /// token with the loopback-only token gate on; this builds the pipeline from the same answer: an API call with no
+    /// token is 401, a wrong token is 401, the right token is exchanged for a session cookie and the cookie passes.
+    /// </summary>
+    [Fact]
+    public async Task LoopbackOnly_ConfiguredToken_IsRequired_RightTokenPasses()
+    {
+        var resolved = DarlingWebHostService.ResolveLoopbackOnlyToken(
+            new WebNetworkConfig { Token = Token }, NullLogger.Instance);
+        Assert.False(resolved.Refuse);
+        Assert.Equal(Token, resolved.Token);
+
+        using var server = await BuildServer(
+            networkMode: false, requireTokenWhenLoopbackOnly: resolved.Token.Length > 0, accessToken: resolved.Token);
+
+        var (api, apiBody) = await SendWithBody(server, "/api/fleet", "localhost", IPAddress.Loopback);
+        Assert.Equal(StatusCodes.Status401Unauthorized, api.Response.StatusCode);
+        Assert.Contains("\"error\"", apiBody, StringComparison.Ordinal);
+
+        var wrong = await Send(server, "/api/fleet", "localhost", IPAddress.Loopback, token: "not-the-token");
+        Assert.Equal(StatusCodes.Status401Unauthorized, wrong.Response.StatusCode);
+
+        var exchange = await Send(server, "/", "localhost", IPAddress.Loopback, token: Token);
+        Assert.Equal(StatusCodes.Status302Found, exchange.Response.StatusCode);
+        var setCookie = Assert.Single(exchange.Response.Headers.SetCookie) ?? string.Empty;
+        var cookie = setCookie[..setCookie.IndexOf(';')];
+
+        var withCookie = await Send(server, "/some/unmapped/path", "localhost", IPAddress.Loopback, cookie: cookie);
+        Assert.Equal(StatusCodes.Status404NotFound, withCookie.Response.StatusCode);
+    }
+
+    /// <summary>No token configured, loopback-only: the dashboard is open to local browsers exactly as before.</summary>
+    [Fact]
+    public async Task LoopbackOnly_NoTokenConfigured_StaysOpen()
+    {
+        var resolved = DarlingWebHostService.ResolveLoopbackOnlyToken(
+            new WebNetworkConfig { Token = "   " }, NullLogger.Instance);
+        Assert.False(resolved.Refuse);
+        Assert.Equal("", resolved.Token);
+        Assert.Equal("", DarlingWebHostService.ResolveLoopbackOnlyToken(null, NullLogger.Instance).Token);
+
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: resolved.Token.Length > 0);
+        var ctx = await Send(server, "/some/unmapped/path", "localhost", IPAddress.Loopback);
+
+        Assert.Equal(StatusCodes.Status404NotFound, ctx.Response.StatusCode);
+    }
+
+    /// <summary>A configured token that cannot be decrypted stops the start (Critical line, no token in it) instead of
+    /// serving the loopback dashboard open.</summary>
+    [Fact]
+    public void LoopbackOnly_ConfiguredTokenThatCannotBeUsed_RefusesTheStart_WithOneCriticalLine()
+    {
+        var log = new CapturingTestLogger();
+        var resolved = DarlingWebHostService.ResolveLoopbackOnlyToken(
+            new WebNetworkConfig { EncryptedToken = "not-a-protected-blob" }, new CapturingHostLogger(log));
+
+        Assert.True(resolved.Refuse);
+        Assert.Equal("", resolved.Token);
+        Assert.Contains(log.Lines, l => l.Contains("Web dashboard token", StringComparison.Ordinal)
+            && l.Contains("refusing to serve", StringComparison.Ordinal));
+        Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
+    }
+
+    private static int FreeTcpPort()
+    {
+        var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    /// <summary>
+    /// Network mode with a token that is configured but cannot be used (a blob this host cannot decrypt, a variable
+    /// that is not set) does not start the dashboard at all, exactly as a loopback-only start does: the real start
+    /// returns false, logs one Critical line, and nothing answers on the loopback port.
+    /// </summary>
+    [Theory]
+    [InlineData("\"encryptedToken\": \"not-a-protected-blob\"")]
+    [InlineData("\"token\": \"env:DARLING_TEST_WEB_TOKEN_THAT_IS_NOT_SET\"")]
+    public async Task NetworkMode_ConfiguredTokenThatCannotBeUsed_DoesNotStart_AndNothingAnswersOnTheLoopbackPort(string tokenJson)
+    {
+        var port = FreeTcpPort();
+        var config = DarlingConfig.Parse(
+            ("{ 'postgres': { 'managed': true }, 'servers': [ { 'host': 'SQL2022' } ], 'web': { 'enabled': true, 'port': "
+            + port + ", 'network': { 'listen': '" + ListenIp + "', 'allowFrom': '" + AllowedCidr + "', " + tokenJson + " } } }")
+            .Replace('\'', '"'));
+        var log = new CapturingTestLogger();
+        var host = new DarlingWebHostService(
+            new CapturingHostLogger(log), new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+        var toggle = new DarlingHostBinding.EndpointToggle(true, port, DarlingHostBinding.EndpointToggleOrigin.File, false, false);
+        var tryStart = typeof(DarlingWebHostService).GetMethod(
+            "TryStartServerAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var started = true;
+        var answered = false;
+        try
+        {
+            started = await (Task<bool>)tryStart.Invoke(host, [config, toggle, System.Threading.CancellationToken.None])!;
+            try
+            {
+                using var client = new System.Net.Sockets.TcpClient();
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await client.ConnectAsync(IPAddress.Loopback, port, cts.Token);
+                answered = true;
+            }
+            catch (System.Net.Sockets.SocketException)
+            {
+            }
+        }
+        finally
+        {
+            await host.DisposeFailedStartAsync();
+        }
+
+        Assert.False(started, "a configured token that cannot be used must stop the start in network mode");
+        Assert.False(answered, "nothing may answer on the loopback port");
+        Assert.Contains(log.Lines, l => l.Contains("Web dashboard token", StringComparison.Ordinal)
+            && l.Contains("web dashboard not started", StringComparison.Ordinal));
+        Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
+    }
+
+    /// <summary>The start itself calls the resolver on a loopback-only bind and stops on a refusal, so the pipeline
+    /// tests above describe what production serves.</summary>
+    [Fact]
+    public void TryStartServerAsync_ResolvesTheLoopbackOnlyToken_AndStopsOnARefusal()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
+        var start = source.IndexOf("private async Task<bool> TryStartServerAsync(", StringComparison.Ordinal);
+        Assert.True(start > 0);
+        var body = source[start..];
+        var call = body.IndexOf("ResolveLoopbackOnlyToken(network, _logger)", StringComparison.Ordinal);
+        Assert.True(call > 0, "TryStartServerAsync must resolve a configured token on a loopback-only start");
+        var tail = body[call..];
+        Assert.Contains("if (loopbackToken.Refuse)", tail[..400], StringComparison.Ordinal);
+        Assert.Contains("accessToken = loopbackToken.Token;", tail[..700], StringComparison.Ordinal);
+    }
+
+    /// <summary>The Host guard still runs first on the token-keeping loopback-only server, so a foreign Host is 400
+    /// even with the right token.</summary>
+    [Fact]
+    public async Task TlsRefusal_DegradedLoopbackServer_ForeignHostIsStill400()
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+        var ctx = await Send(server, "/", "evil.com", IPAddress.Loopback, token: Token);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288: the degraded loopback-only server listens on loopback only, so its Host guard admits loopback names
+    /// only. A request that names the configured listen address is answered 400 even with the right token, because
+    /// nothing is listening there any more, while a loopback name with the same token is exchanged for a session
+    /// cookie (past every gate). The server is built through <c>ResolveHostGuardListenIp</c> with the final mode, the
+    /// way the host builds it.
+    /// </summary>
+    [Fact]
+    public async Task TlsRefusal_DegradedLoopbackServer_AdmitsLoopbackNamesOnly_NotTheListenAddress()
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var named = await Send(server, "/", ListenIp, IPAddress.Loopback, token: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, named.Response.StatusCode);
+
+        var loopbackName = await Send(server, "/", "localhost", IPAddress.Loopback, token: Token);
+        Assert.Equal(StatusCodes.Status302Found, loopbackName.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288: the web checks the CIDR before it looks at any credential, and keeps doing so: an address outside
+    /// <c>allowFrom</c> is answered 403 whatever it sends (no token, a wrong token, the right token), on a page
+    /// route and on an <c>/api/*</c> path alike. An in-list client with the wrong token is not refused with a 403.
+    /// </summary>
+    [Theory]
+    [InlineData("/", null)]
+    [InlineData("/", "not-the-token")]
+    [InlineData("/", Token)]
+    [InlineData("/api/fleet", null)]
+    [InlineData("/api/fleet", "not-the-token")]
+    [InlineData("/api/fleet", Token)]
+    public async Task OffListRemote_RightOrWrongToken_Both403(string path, string? token)
+    {
+        using var server = await BuildServer(networkMode: true);
+
+        var offList = await Send(server, path, ListenIp, IPAddress.Parse("203.0.113.50"), token: token);
+        Assert.Equal(StatusCodes.Status403Forbidden, offList.Response.StatusCode);
+
+        if (token == "not-the-token")
+        {
+            var inList = await Send(server, path, ListenIp, InCidrRemote, token: token);
+            Assert.NotEqual(StatusCodes.Status403Forbidden, inList.Response.StatusCode);
+        }
     }
 
     /// <summary>Loopback mode's own posture: no token middleware is registered at all, so a loopback Host
@@ -274,6 +615,19 @@ public sealed class DarlingWebHostGateLiveTests
 
         Assert.Equal(StatusCodes.Status401Unauthorized, ctx.Response.StatusCode);
         Assert.Equal("application/json; charset=utf-8", ctx.Response.ContentType);
+        Assert.Contains("\"error\"", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("<html", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>#5239 L2: the Manage Servers route is refused for an anonymous network-mode caller through the real
+    /// pipeline, the same as <c>/api/fleet</c>.</summary>
+    [Fact]
+    public async Task NetworkMode_NoToken_AdminServersPath_Returns401Json()
+    {
+        using var server = await BuildServer(networkMode: true);
+        var (ctx, body) = await SendWithBody(server, "/api/admin/servers", ListenIp, InCidrRemote);
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, ctx.Response.StatusCode);
         Assert.Contains("\"error\"", body, StringComparison.Ordinal);
         Assert.DoesNotContain("<html", body, StringComparison.OrdinalIgnoreCase);
     }
@@ -325,5 +679,109 @@ public sealed class DarlingWebHostGateLiveTests
 
         Assert.Equal(StatusCodes.Status401Unauthorized, ctx.Response.StatusCode);
         Assert.Contains("\"error\"", body, StringComparison.Ordinal);
+    }
+
+    /* ---- #5245: a single-value query key sent more than once is refused, never read as the joined "a,b" ---- */
+
+    private static DarlingWebOidcClient FakeOidcClient() => new(new DarlingWebOidcClient.ResolvedOptions(
+        "https://idp.example.test", "client-id", null, "openid", null, null,
+        Array.Empty<string>(), Array.Empty<string>()));
+
+    /// <summary>A request with the query string exactly as given (the helpers above build theirs from one token).</summary>
+    private static async Task<(HttpContext Context, string Body)> Fetch(TestServer server, string path, string rawQuery)
+    {
+        var ctx = await server.SendAsync(c =>
+        {
+            c.Request.Method = "GET";
+            c.Request.Path = path;
+            c.Request.QueryString = new QueryString(rawQuery);
+            c.Request.Headers.Host = ListenIp;
+            c.Connection.RemoteIpAddress = InCidrRemote;
+        });
+
+        return (ctx, await new StreamReader(ctx.Response.Body).ReadToEndAsync());
+    }
+
+    /// <summary>A token that itself contains a comma is the one a joined repeated key could equal: <c>?token=left&amp;token=right</c>
+    /// used to read as <c>left,right</c> and pass the gate. It is no token now, and the one-value form still passes.</summary>
+    [Fact]
+    public async Task NetworkMode_RepeatedTokenKey_IsNotAToken_AndTheSingleKeyStillPasses()
+    {
+        using var server = await BuildServer(networkMode: true, accessToken: "left,right");
+
+        var (repeated, _) = await Fetch(server, "/", "?token=left&token=right");
+        Assert.Equal(StatusCodes.Status200OK, repeated.Response.StatusCode);
+        Assert.Equal("text/html; charset=utf-8", repeated.Response.ContentType);
+        Assert.Equal(0, repeated.Response.Headers.SetCookie.Count);
+
+        var (single, _) = await Fetch(server, "/", "?token=left%2Cright");
+        Assert.Equal(StatusCodes.Status302Found, single.Response.StatusCode);
+        Assert.True(single.Response.Headers.SetCookie.Count > 0);
+    }
+
+    /// <summary>A repeated <c>?token=</c> is refused and still leaves one Token refusal line, as a wrong single token does:
+    /// the line says the key was sent more than once and holds neither token value (#5245).</summary>
+    [Theory]
+    [InlineData("/", StatusCodes.Status200OK)]
+    [InlineData("/api/fleet", StatusCodes.Status401Unauthorized)]
+    public async Task NetworkMode_RepeatedTokenKey_LeavesOneRefusalLine_WithNoTokenValue(string path, int expectedStatus)
+    {
+        var hostLogger = new CapturingTestLogger();
+        using var server = await BuildServer(networkMode: true, hostLogger: hostLogger);
+
+        var (ctx, _) = await Fetch(server, path, "?token=guess-one-value&token=guess-two-value");
+        Assert.Equal(expectedStatus, ctx.Response.StatusCode);
+
+        var line = Assert.Single(hostLogger.Lines);
+        Assert.StartsWith("Warning: Web dashboard ", line, StringComparison.Ordinal);
+        Assert.Contains("the ?token= key was sent more than once", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("guess-one-value", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("guess-two-value", line, StringComparison.Ordinal);
+        Assert.DoesNotContain(Token, line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OidcLogin_RepeatedReturnKey_IsRefusedBeforeTheProviderIsAsked()
+    {
+        using var server = await BuildServer(networkMode: true, oidcClient: FakeOidcClient());
+
+        var (repeated, body) = await Fetch(server, "/auth/oidc/login", "?return=%2Fa&return=%2Fb");
+        Assert.Equal(StatusCodes.Status400BadRequest, repeated.Response.StatusCode);
+        Assert.Contains("repeated a parameter", body, StringComparison.Ordinal);
+
+        /* One return key takes the old path: the discovery fetch (this IdP does not exist), not the refusal. */
+        var (_, singleBody) = await Fetch(server, "/auth/oidc/login", "?return=%2Fa");
+        Assert.DoesNotContain("repeated a parameter", singleBody, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("?error=a&error=b")]
+    [InlineData("?error=access_denied&error_description=a&error_description=b")]
+    [InlineData("?code=a&code=b&state=s")]
+    [InlineData("?code=a&state=s&state=t")]
+    public async Task OidcCallback_RepeatedKey_IsRefused(string rawQuery)
+    {
+        using var server = await BuildServer(networkMode: true, oidcClient: FakeOidcClient());
+
+        var (ctx, body) = await Fetch(server, "/auth/oidc/callback", rawQuery);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+        Assert.Contains("repeated a parameter", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>Each key once behaves as it always did: a provider error is the provider's 403, and a code with no
+    /// transaction behind it is the stale-attempt 400.</summary>
+    [Theory]
+    [InlineData("?error=access_denied&error_description=nope", StatusCodes.Status403Forbidden, "refused the sign-in")]
+    [InlineData("?code=a&state=s", StatusCodes.Status400BadRequest, "stale or was not started")]
+    public async Task OidcCallback_EachKeyOnce_BehavesAsBefore(string rawQuery, int expectedStatus, string expectedText)
+    {
+        using var server = await BuildServer(networkMode: true, oidcClient: FakeOidcClient());
+
+        var (ctx, body) = await Fetch(server, "/auth/oidc/callback", rawQuery);
+
+        Assert.Equal(expectedStatus, ctx.Response.StatusCode);
+        Assert.Contains(expectedText, body, StringComparison.Ordinal);
+        Assert.DoesNotContain("repeated a parameter", body, StringComparison.Ordinal);
     }
 }

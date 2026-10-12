@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// claims, and they are stated against this rung's own NUMBER — read out of the ladder rather than taken
 /// from <see cref="StorageVersion.SchemaVersion"/>, which is no longer it.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class BuiltinAlertPersistenceRungTests
 {
     /// <summary>This rung's number, DERIVED from the ladder entry that owns the name rather than written as
@@ -148,8 +149,9 @@ public sealed class BuiltinAlertPersistenceRungTests
     /// BATCH of samples rather than the latest one.
     ///
     /// <para>The batch is the load-bearing half and it is engine-specific. On SQL Server the 30-second
-    /// sweep is faster than the ~60-second sample, so "latest row, counted once when its instant moves"
-    /// loses nothing. Performance Insights is sampled at 60 seconds and <c>pg_cpu_utilization</c> is a
+    /// sweep is faster than the ~60-second sample, so a steady stream is seen sample by sample (#5642: the
+    /// shared engine also feeds a recent list sample by sample now, where it used to count only the latest
+    /// row when its instant moved). Performance Insights is sampled at 60 seconds and <c>pg_cpu_utilization</c> is a
     /// five-minute collector, so five points land together: counting only the newest would discard four in
     /// five and make three consecutive breaches take three BATCHES, about fifteen minutes. That is a
     /// saturation event reported long after it mattered, and it is exactly the failure the issue's own

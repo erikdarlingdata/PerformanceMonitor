@@ -75,6 +75,7 @@ namespace Darling.Tests;
 /// WRITER in this rung, so the sweep names none of the three checkpointer columns — a writer pin on one file,
 /// owned by exactly one lane (#3783), which retires it when it lands the row.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class QsCaptureModeRouteKnobToastRungTests
 {
     private const int RungVersion = 137;
@@ -517,6 +518,7 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
 /// dimension rows. Serialized against every other live class because it shares the store.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class QsCaptureModeRouteKnobToastLivePostgresTests
 {
     private const int ServerId = -137137;

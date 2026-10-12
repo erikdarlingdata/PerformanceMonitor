@@ -38,6 +38,7 @@ namespace Darling.Tests;
 /// A tool could pass either check alone — a dispatch entry that passes a token to a method with nowhere to put
 /// it, or a method with a token parameter nothing ever fills in — so both run.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class WebReadCancellationPinTests
 {
     /// <summary>
@@ -53,14 +54,14 @@ public sealed class WebReadCancellationPinTests
     /// <summary>
     /// An <see cref="HttpContext"/> whose request is already aborted, carrying query values for the few
     /// required text parameters (<c>get_query_trend</c>'s <c>query_hash</c> / <c>database_name</c>, and
-    /// <c>get_wait_trend</c>'s <c>wait_type</c>) so a dispatch entry with a synchronous "is this parameter
+    /// <c>get_wait_trend</c>'s <c>wait_type</c>, <c>get_alert_details</c>'s alert key) so a dispatch entry with a synchronous "is this parameter
     /// present" gate still reaches its store call instead of returning a missing-parameter envelope with
     /// nothing cancelled.
     /// </summary>
     private static HttpContext CancelledRequest()
     {
         var context = new DefaultHttpContext();
-        context.Request.QueryString = new QueryString("?query_hash=deadbeef&database_name=probe&counter_name=x&wait_type=CXPACKET");
+        context.Request.QueryString = new QueryString("?kind=query_hash&query_hash=deadbeef&database_name=probe&counter_name=x&wait_type=CXPACKET&metric=total_waits&query_id=1&sql_handle=0x01&collection_time=2026-01-01T00:00:00.000000Z&session_id=1&event_time=2026-01-01T00:00:00.000000Z&blocked_spid=1&blocking_spid=2&deadlock_time=2026-01-01T00:00:00.000000Z&server_id=1&metric_name=x&alert_time=2026-01-01T00:00:00Z");
         context.RequestAborted = new CancellationToken(canceled: true);
         return context;
     }

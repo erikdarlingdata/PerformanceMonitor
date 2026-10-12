@@ -464,6 +464,9 @@ public sealed class ViewerOverviewExplainsItselfTests
     private static string CodeBehind => ReadRepoFile(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml.cs"));
 
+    private static string OverviewCardViewSource => ReadRepoFile(Path.Combine(
+        "Darling", "PerformanceMonitor.Darling.Viewer", "OverviewCardView.cs"));
+
     /// <summary>
     /// The card's status actually carries the tooltip. <c>Background="Transparent"</c> is load-bearing rather than
     /// decorative: a TextBlock with a null Background hit-tests on its rendered glyphs alone, so the tooltip would
@@ -511,7 +514,9 @@ public sealed class ViewerOverviewExplainsItselfTests
         Assert.Contains("x:Name=\"OverviewAttentionCountText\"", Xaml, StringComparison.Ordinal);
 
         Assert.Contains("OverviewAttentionOnlyCheck_Changed(object sender", CodeBehind, StringComparison.Ordinal);
-        Assert.Contains("FleetRollup.AttentionFilterCountText(", CodeBehind, StringComparison.Ordinal);
+        /* #5352: the count line moved into OverviewCardView.CountText, which still delegates to the same helper. */
+        Assert.Contains("OverviewCardView.CountText(", CodeBehind, StringComparison.Ordinal);
+        Assert.Contains("FleetRollup.AttentionFilterCountText(", OverviewCardViewSource, StringComparison.Ordinal);
 
         /* The colour follows the sentence: this line says either "N servers need attention" or an all-clear, and
            painting the all-clear amber would be a colour contradicting its own text — the same defect in
@@ -528,7 +533,9 @@ public sealed class ViewerOverviewExplainsItselfTests
     [Fact]
     public void TheGrid_IsProjectedThroughTheFilter_AndNothingReadsTheBoundListBack()
     {
-        Assert.Contains("FleetRollup.NeedsAttention(_overviewCards)", CodeBehind, StringComparison.Ordinal);
+        /* #5352: the projection (needs-attention AND search) moved into OverviewCardView.Project. */
+        Assert.Contains("OverviewCardView.Project(_overviewCards, _overviewAttentionOnly,", CodeBehind, StringComparison.Ordinal);
+        Assert.Contains("FleetRollup.NeedsAttention(cards)", OverviewCardViewSource, StringComparison.Ordinal);
         Assert.Contains("_overviewCards = cards;", CodeBehind, StringComparison.Ordinal);
 
         Assert.DoesNotContain("OverviewItemsControl.ItemsSource is IEnumerable<ServerSummaryItem>", CodeBehind, StringComparison.Ordinal);

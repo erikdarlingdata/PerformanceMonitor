@@ -852,12 +852,25 @@ public static class FleetSweepEngine
     /// and a sweep failure must cost the fleet nothing but this sweep slot. Cancellation returns
     /// quietly; any other fault is one error line naming what was lost.</para>
     /// </summary>
+    public static Task RunAsync(
+        NpgsqlDataSource postgres,
+        IReadOnlyList<(int ServerId, string ServerName)> servers,
+        TimeSpan interval,
+        bool alertsEnabled,
+        ILogger logger,
+        CancellationToken cancellationToken)
+        => RunAsync(postgres, servers, interval, alertsEnabled, logger, null, cancellationToken);
+
+    /// <inheritdoc cref="RunAsync(NpgsqlDataSource, IReadOnlyList{ValueTuple{int, string}}, TimeSpan, bool, ILogger, CancellationToken)"/>
+    /// <param name="separatelyMonitored">#4925: per server id, the databases an Azure SQL Database master leaves to
+    /// their own targets (null or absent: read unscoped).</param>
     public static async Task RunAsync(
         NpgsqlDataSource postgres,
         IReadOnlyList<(int ServerId, string ServerName)> servers,
         TimeSpan interval,
         bool alertsEnabled,
         ILogger logger,
+        IReadOnlyDictionary<int, IReadOnlyList<string>?>? separatelyMonitored,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(postgres);
@@ -886,8 +899,10 @@ public static class FleetSweepEngine
             foreach (var (serverId, serverName) in servers.DistinctBy(s => s.ServerId))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                IReadOnlyList<string>? separate = null;
+                separatelyMonitored?.TryGetValue(serverId, out separate);
                 readings.Add(await ReadServerSignalsAsync(
-                    postgres, serverId, serverName, spanStartUtc, nowUtc, cancellationToken).ConfigureAwait(false));
+                    postgres, serverId, serverName, spanStartUtc, nowUtc, separate, logger, cancellationToken).ConfigureAwait(false));
             }
 
             var composition = Compose(
@@ -924,18 +939,33 @@ public static class FleetSweepEngine
     /// same half-open window). A fault is CAUGHT into the reading, because for a per-server read the
     /// honest rendering is a dead instrument on that server's card, not a lost sweep. Internal so the
     /// live read test can drive it against a scratch store.</summary>
-    internal static async Task<FleetSweepServerReading> ReadServerSignalsAsync(
+    internal static Task<FleetSweepServerReading> ReadServerSignalsAsync(
         NpgsqlDataSource postgres,
         int serverId,
         string serverName,
         DateTime spanStartUtc,
         DateTime spanEndUtc,
         CancellationToken cancellationToken)
+        => ReadServerSignalsAsync(postgres, serverId, serverName, spanStartUtc, spanEndUtc, null, null, cancellationToken);
+
+    /// <summary>#4925: <see cref="ReadServerSignalsAsync(NpgsqlDataSource, int, string, DateTime, DateTime, CancellationToken)"/>
+    /// for a target with a list of databases it leaves to their own targets.</summary>
+    internal static async Task<FleetSweepServerReading> ReadServerSignalsAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        string serverName,
+        DateTime spanStartUtc,
+        DateTime spanEndUtc,
+        IReadOnlyList<string>? separatelyMonitored,
+        ILogger? logger,
+        CancellationToken cancellationToken)
     {
         try
         {
+            /* #4925: an Azure SQL Database master counts only its own blocking and deadlocks. A scoping fault
+               is absorbed inside the read (logged, read unscoped), so the catch below sees store faults only. */
             var rows = await DarlingHealthReader.GetWindowSignalsAsync(
-                postgres, serverId, spanStartUtc, spanEndUtc, cancellationToken).ConfigureAwait(false);
+                postgres, serverId, spanStartUtc, spanEndUtc, separatelyMonitored, logger, cancellationToken).ConfigureAwait(false);
 
             var peakBlock = rows.Count == 0 ? 0L : rows.Max(r => r.MaxBlockDurationMs);
 

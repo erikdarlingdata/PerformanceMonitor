@@ -8,9 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -108,10 +112,29 @@ internal static class DarlingObjectStatsReader
         double ReservedMb, long TotalRows, long RowLockWaitCount, long RowLockWaitInMs, long PageLockWaitCount,
         long PageLockWaitInMs, long IndexLockPromotionCount, long PageLatchWaitInMs, long PageIoLatchWaitInMs);
 
-    /// <summary>One database file's latest size snapshot.</summary>
+    /// <summary>
+    /// #5311: the four counters of one index's locking detail pane, the ones the Locking list leaves out (row lock count,
+    /// page lock count, page latch wait count, page I/O latch wait count). <c>CollectionTime</c> is the snapshot's own
+    /// stamp, first for the reason <see cref="IndexLockingRow"/> carries it first.
+    /// </summary>
+    public sealed record IndexLockingDetailRow(
+        DateTime CollectionTime,
+        string DatabaseName, string SchemaName, string TableName, string? IndexName,
+        long RowLockCount, long PageLockCount, long PageLatchWaitCount, long PageIoLatchWaitCount);
+
+    /// <summary>One database file's latest size snapshot. <c>TotalSizeMb</c> is null for the LOG file of an Azure SQL
+    /// Database Hyperscale database (the log service): see <see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>.
+    /// <c>FileId</c> is null for the one row another database on an Azure SQL Database server gets, which holds
+    /// that database's data size only: see <see cref="PerformanceMonitor.Common.AzureSiblingDatabaseSize"/>.</summary>
     public sealed record DatabaseSizeRow(
-        DateTime CollectionTime, string DatabaseName, string? FileName, string? FileTypeDesc, double TotalSizeMb,
-        double? UsedSizeMb, double? AutoGrowthMb, double? MaxSizeMb, string? VolumeMountPoint, double? VolumeTotalMb, double? VolumeFreeMb);
+        DateTime CollectionTime, string DatabaseName, string? FileName, string? FileTypeDesc, double? TotalSizeMb,
+        double? UsedSizeMb, double? AutoGrowthMb, double? MaxSizeMb, string? VolumeMountPoint, double? VolumeTotalMb, double? VolumeFreeMb,
+        int? FileId = null)
+    {
+        /// <summary>True for the one row another database on an Azure SQL Database server gets: it holds the
+        /// database's data size, and its log size is not reported.</summary>
+        public bool IsAzureSiblingRow => PerformanceMonitor.Common.AzureSiblingDatabaseSize.IsSiblingRow(FileId, FileName);
+    }
 
     /* ─────────────────────────── table / index sizes + growth ─────────────────────────── */
 
@@ -120,6 +143,10 @@ internal static class DarlingObjectStatsReader
     /// Postgres: roll indexes up per (database, schema, table) at the latest snapshot, and read the same
     /// table's reserved size at the newest snapshot at/older-than the 7-day ($2) and 30-day ($3) cutoffs and
     /// at the store's earliest snapshot. Ranks by current reserved size descending, cap $4. $1 server_id.
+    /// <para>#5244: $5 is the database filter (a text[], NULL = every database; the shape of <see cref="DatabaseFilter.Clause"/>).
+    /// It sits on the four snapshot CTEs and NOT on <c>boundaries</c>, so the snapshot anchors, the store's span and
+    /// the 7-day and 30-day baselines stay the server's: a filtered and an unfiltered call read the same captures,
+    /// and the cap $4 applies after the filter, so the page is the largest N tables of the chosen databases.</para>
     /// <para><b>Baselines are projected RAW, not folded (#3541 A12).</b> The previous shape derived the growth
     /// columns in SQL through <c>COALESCE(p30, p7, oldest, current)</c>, so a baseline the store did not hold
     /// was silently replaced by a nearer one and labelled with the farther window's name — and a table in no
@@ -148,24 +175,28 @@ internal static class DarlingObjectStatsReader
                 COUNT(*) AS index_count
             FROM v_index_object_stats
             WHERE server_id = $1 AND collection_time = (SELECT latest_time FROM boundaries)
+            AND ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, schema_name, table_name
         ),
         past_7d AS (
             SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
             FROM v_index_object_stats
             WHERE server_id = $1 AND collection_time = (SELECT snapshot_7d_time FROM boundaries)
+            AND ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, schema_name, table_name
         ),
         past_30d AS (
             SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
             FROM v_index_object_stats
             WHERE server_id = $1 AND collection_time = (SELECT snapshot_30d_time FROM boundaries)
+            AND ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, schema_name, table_name
         ),
         oldest AS (
             SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
             FROM v_index_object_stats
             WHERE server_id = $1 AND collection_time = (SELECT earliest_time FROM boundaries)
+            AND ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, schema_name, table_name
         )
         SELECT
@@ -193,8 +224,16 @@ internal static class DarlingObjectStatsReader
         LIMIT $4
         """;
 
+    public static Task<List<ObjectSizeGrowthRow>> GetObjectSizeGrowthAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime cutoff7dUtc, DateTime cutoff30dUtc, int top, CancellationToken cancellationToken = default) =>
+        GetObjectSizeGrowthAsync(postgres, serverId, cutoff7dUtc, cutoff30dUtc, top, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>#5244: <see cref="GetObjectSizeGrowthAsync(NpgsqlDataSource,int,DateTime,DateTime,int,CancellationToken)"/> over
+    /// a SET of databases (<see cref="DatabaseFilter.All"/> = every database). Rows of the chosen databases only, capped after
+    /// the filter; the snapshot anchors stay the server's.</summary>
     public static async Task<List<ObjectSizeGrowthRow>> GetObjectSizeGrowthAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime cutoff7dUtc, DateTime cutoff30dUtc, int top, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime cutoff7dUtc, DateTime cutoff30dUtc, int top, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
     {
         var rows = new List<ObjectSizeGrowthRow>();
         await using var command = postgres.CreateCommand(ObjectSizeGrowthSql);
@@ -203,6 +242,7 @@ internal static class DarlingObjectStatsReader
         DarlingMcpReadParameters.AddTimestamp(command, cutoff7dUtc);
         DarlingMcpReadParameters.AddTimestamp(command, cutoff30dUtc);
         DarlingMcpReadParameters.AddInt(command, top);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -234,7 +274,7 @@ internal static class DarlingObjectStatsReader
     /// Per-index usage at the latest snapshot — Lite's <c>GetIndexUsageAsync</c> ported to Postgres:
     /// seeks/scans/lookups/updates with the Unused / Write-only / Active classification, unused-first then
     /// largest reserved. Counters are cumulative since the last restart.
-    /// <para>$1 server_id, $2 database filter (NULL = every database), $3 cap.</para>
+    /// <para>$1 server_id, $2 database filter (a text[], NULL = every database; #5245, the shape of <see cref="DatabaseFilter.Clause"/>), $3 cap.</para>
     /// <para>#2636: the ordering and the cap interact badly and a field report found the sharp edge. Unused
     /// sorts ahead of everything SERVER-WIDE, so on an instance with 200+ unused indexes concentrated in one
     /// legacy database, the entire capped result is consumed by that database and every Active index in every
@@ -242,35 +282,26 @@ internal static class DarlingObjectStatsReader
     /// healthy collection, full retention and zero returned rows, which reads exactly like a collection
     /// failure. The database filter is what makes the question answerable; the count below is what stops the
     /// answer being read as complete.</para>
-    /// <para><b><c>last_user_access</c> is de-skewed to naive UTC.</b> The four columns it is the
-    /// <c>GREATEST</c> of come straight off <c>sys.dm_db_index_usage_stats</c>
+    /// <para><b><c>last_user_access</c> comes back as the server's local clock and is converted to naive UTC in
+    /// C#.</b> The four columns it is the <c>GREATEST</c> of come straight off <c>sys.dm_db_index_usage_stats</c>
     /// (<c>IndexObjectStatsCollector</c> ships <c>us.last_user_seek</c> and its three siblings verbatim), so
-    /// the stored values are the monitored server's LOCAL wall clock. All four share one offset, so
-    /// subtracting after the <c>GREATEST</c> is equivalent to subtracting before it and costs one expression
-    /// instead of four. <c>GREATEST</c> ignoring NULLs is what is wanted here — an index used in only one of
-    /// the four ways still reports that one access — and subtracting an interval from the all-NULL case
-    /// keeps it NULL. This read returns NO other timestamp, which is why converting rather than labelling
-    /// matters more here than elsewhere: there is nothing else in the payload for a reader to notice a
-    /// disagreement against.</para>
-    /// <para><b>The de-skew is exact only inside the current DST period, and this is the read where that
-    /// matters most.</b> <c>server_properties.utc_offset_minutes</c> is
-    /// <c>DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())</c> — the offset in force AT COLLECTION TIME, one
-    /// current value. The other de-skewed reads describe current state (a running job, an open transaction,
-    /// a cleaner that ran seconds ago), so their timestamps and that offset sit on the same side of any
-    /// transition. These four do not: <c>sys.dm_db_index_usage_stats</c> persists since the instance
-    /// restarted, which on a stable production box is routinely months, so a large share of values predate
-    /// the most recent transition and come back <b>60 minutes early</b> — silently, and in the plausible
-    /// direction. This is not a theoretical exposure: any target in a DST-observing zone has it, a target
-    /// configured to UTC does not, and on AWS RDS the instance takes its time zone from a creation-time
-    /// parameter — so a non-UTC zone is an ordinary configuration rather than an exotic one, and "it is
-    /// RDS, so it is probably UTC" is not a safe assumption. #2932 records the measured offset behind the
-    /// four-hour figure quoted above. <c>sqlserver_start_time</c> on the same row is the bound on how far
-    /// back the affected values can reach.</para>
-    /// <para>Fixing it properly needs a ZONE rather than an offset — <c>CURRENT_TIMEZONE_ID()</c>
-    /// (SQL Server 2019+) collected alongside the offset, then <c>AT TIME ZONE</c> at the read boundary,
-    /// which handles transitions. That is a collected-column addition and a migration rung, so what is
-    /// carried here is the SCOPE of the claim, in the #2993 shape: this read places a timestamp exactly
-    /// when it falls inside the current DST period, and within an hour otherwise.</para>
+    /// the stored values are the monitored server's LOCAL wall clock. <c>GREATEST</c> ignoring NULLs is what is
+    /// wanted here — an index used in only one of the four ways still reports that one access — and it stays
+    /// NULL when all four are. <see cref="MapIndexUsageRow"/> then converts the result through the server's
+    /// <see cref="ServerClock"/> (<see cref="DarlingServerClockReader"/>): its time zone where SQL Server reports
+    /// one, else the newest collected offset. This read returns NO other timestamp, which is why converting
+    /// rather than labelling matters more here than elsewhere: there is nothing else in the payload for a
+    /// reader to notice a disagreement against.</para>
+    /// <para><b>The conversion follows the server's time zone, and this is the read where that matters most
+    /// (#4793).</b> <c>sys.dm_db_index_usage_stats</c> persists since the instance restarted, which on a stable
+    /// production box is routinely months, so a large share of values predate the most recent daylight saving
+    /// change. Subtracting the ONE newest offset put those values 60 minutes early — silently, and in the
+    /// plausible direction. Any target in a DST-observing zone had this, a target configured to UTC did not, and
+    /// on AWS RDS the instance takes its time zone from a creation-time parameter, so a non-UTC zone is an
+    /// ordinary configuration. #2932 records the measured offset behind the four-hour figure quoted above.
+    /// Known edge: the <c>GREATEST</c> of the four stored local times is taken before converting, which equals
+    /// converting each first except inside the repeated hour of a fall back, where a local time cannot say which
+    /// occurrence it was and takes the first.</para>
     /// <para>The alias deliberately does NOT carry a <c>_utc</c> suffix, unlike the other fifteen. This one
     /// is a projection alias rather than a column, and <c>ConsumedTimestampFrameDisciplineTests</c> reaches
     /// the payload field through the alias — a suffix here would make the field name and the alias diverge
@@ -279,15 +310,6 @@ internal static class DarlingObjectStatsReader
     /// than a suffix nothing checks.</para>
     /// </summary>
     public const string IndexUsageSql = """
-        WITH svr AS (
-            SELECT COALESCE((
-                SELECT sp.utc_offset_minutes
-                FROM server_properties AS sp
-                WHERE sp.server_id = $1
-                AND   sp.utc_offset_minutes IS NOT NULL
-                ORDER BY sp.collection_time DESC
-                LIMIT 1), 0) AS offset_minutes
-        )
         SELECT
             database_name,
             schema_name,
@@ -301,7 +323,7 @@ internal static class DarlingObjectStatsReader
             COALESCE(user_lookups, 0) AS user_lookups,
             COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) AS total_reads,
             COALESCE(user_updates, 0) AS user_updates,
-            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) - make_interval(mins => svr.offset_minutes) AS last_user_access,
+            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,
             CASE
                 WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
                      AND COALESCE(user_updates, 0) = 0 THEN 'Unused'
@@ -309,10 +331,10 @@ internal static class DarlingObjectStatsReader
                      AND COALESCE(user_updates, 0) > 0 THEN 'Write-only'
                 ELSE 'Active'
             END AS classification
-        FROM v_index_object_stats, svr
+        FROM v_index_object_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
-        AND   ($2::text IS NULL OR database_name = $2::text)
+        AND   ($2::text[] IS NULL OR database_name = ANY($2))
         ORDER BY
             CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 0 ELSE 1 END,
             reserved_mb DESC NULLS LAST,
@@ -336,56 +358,84 @@ internal static class DarlingObjectStatsReader
         FROM v_index_object_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
-        AND   ($2::text IS NULL OR database_name = $2::text)
+        AND   ($2::text[] IS NULL OR database_name = ANY($2))
         """;
 
     /// <summary>
     /// The rows the cap allowed. <paramref name="databaseName"/> null means every database — the shape the
-    /// tool had before #2636, kept so callers that genuinely want a server-wide sweep still get one.
+    /// tool had before #2636, kept so callers that genuinely want a server-wide sweep still get one. One name:
+    /// <see cref="GetIndexUsageAsync(NpgsqlDataSource,int,int,DatabaseFilter,CancellationToken)"/> with
+    /// <see cref="DatabaseFilter.One"/>.
+    /// </summary>
+    public static Task<List<IndexUsageRow>> GetIndexUsageAsync(
+        NpgsqlDataSource postgres, int serverId, int top, string? databaseName = null, CancellationToken cancellationToken = default) =>
+        GetIndexUsageAsync(postgres, serverId, top, DatabaseFilter.One(databaseName), cancellationToken);
+
+    /// <summary>
+    /// #5245: <see cref="GetIndexUsageAsync(NpgsqlDataSource,int,int,string,CancellationToken)"/> over a SET of databases.
+    /// <paramref name="databases"/> is <see cref="DatabaseFilter.All"/> for every database; otherwise the rows are
+    /// the unused-first, largest-first top <paramref name="top"/> of the CHOSEN databases only (the cap applies after
+    /// the filter, in SQL). The snapshot anchor stays the server's newest capture, so a filtered and an unfiltered
+    /// call read the same capture.
     /// </summary>
     public static async Task<List<IndexUsageRow>> GetIndexUsageAsync(
-        NpgsqlDataSource postgres, int serverId, int top, string? databaseName = null, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, int top, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<IndexUsageRow>();
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var command = postgres.CreateCommand(IndexUsageSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
-        command.Parameters.AddWithValue((object?)databaseName ?? DBNull.Value);
+        command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddInt(command, top);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new IndexUsageRow(
-                reader.IsDBNull(0) ? "" : reader.GetString(0),
-                reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? "" : reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? null : reader.GetString(4),
-                reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
-                reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
-                reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                reader.IsDBNull(12) ? null : reader.GetDateTime(12),
-                reader.IsDBNull(13) ? "" : reader.GetString(13)));
+            rows.Add(MapIndexUsageRow(reader, clock));
         }
 
         return rows;
     }
 
+    /// <summary>Maps one row of <see cref="IndexUsageSql"/> (14 columns, in the SELECT's order).</summary>
+    internal static IndexUsageRow MapIndexUsageRow(DbDataReader reader, ServerClock clock) =>
+        new(
+            reader.IsDBNull(0) ? "" : reader.GetString(0),
+            reader.IsDBNull(1) ? "" : reader.GetString(1),
+            reader.IsDBNull(2) ? "" : reader.GetString(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4),
+            reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
+            reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+            reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+            reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+            reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+            reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+            reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+            DarlingServerClockReader.ToUtc(clock, reader, 12),
+            reader.IsDBNull(13) ? "" : reader.GetString(13));
+
     /// <summary>
     /// How many index rows the same server and database filter match at the latest snapshot, ignoring the
-    /// cap (#2636).
+    /// cap (#2636). One name, or null for every database.
+    /// </summary>
+    public static Task<long> GetIndexUsageMatchCountAsync(
+        NpgsqlDataSource postgres, int serverId, string? databaseName = null, CancellationToken cancellationToken = default) =>
+        GetIndexUsageMatchCountAsync(postgres, serverId, DatabaseFilter.One(databaseName), cancellationToken);
+
+    /// <summary>
+    /// #5245: <see cref="GetIndexUsageMatchCountAsync(NpgsqlDataSource,int,string,CancellationToken)"/> over a SET of
+    /// databases: the count of the CHOSEN databases' rows, the population
+    /// <see cref="GetIndexUsageAsync(NpgsqlDataSource,int,int,DatabaseFilter,CancellationToken)"/> pages over.
+    /// <see cref="DatabaseFilter.All"/> is the server-wide count.
     /// </summary>
     public static async Task<long> GetIndexUsageMatchCountAsync(
-        NpgsqlDataSource postgres, int serverId, string? databaseName = null, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(IndexUsageMatchCountSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
-        command.Parameters.AddWithValue((object?)databaseName ?? DBNull.Value);
+        command.Parameters.Add(databases.Parameter());
 
         return await command.ExecuteScalarAsync(cancellationToken) is long count ? count : 0;
     }
@@ -396,7 +446,7 @@ internal static class DarlingObjectStatsReader
     /// Per-index locking / latch contention at the SERVER's latest capture — the viewer's
     /// <c>IndexLockingAllSql</c> projected to the columns get_object_locking surfaces: only rows with a
     /// nonzero lock/latch wait or promotion, most contended first. Counters are cumulative since the last
-    /// restart. $1 server_id, $2 cap.
+    /// restart. $1 server_id, $2 database filter (a text[], NULL = every database; #5245), $3 cap.
     ///
     /// <para><b>#3878: this read used to resolve "latest" PER <c>database_name</c></b> —
     /// <c>MAX(collection_time)</c> GROUPed BY the name string, joined back to the rows — which made every
@@ -426,6 +476,9 @@ internal static class DarlingObjectStatsReader
     /// <c>get_object_locking</c> publishes <c>captured_at</c>. A second <c>MAX(collection_time)</c> read to
     /// fetch the stamp would have been the dishonest alternative: it can resolve to the NEXT capture landing
     /// between the two queries, which is the rule <c>McpLatestSnapshotStampTests</c> pins per read.</para>
+    /// <para>#5372 L1: the order ends in a total one (lock promotions, then database, schema, table and index name, as
+    /// <c>get_index_usage</c> does), so two runs over a set that ties at the cap return the same rows. The rows listed
+    /// only for a lock promotion all sum to 0 and tie.</para>
     /// </summary>
     public const string IndexLockingSql = """
         SELECT
@@ -454,19 +507,76 @@ internal static class DarlingObjectStatsReader
             OR COALESCE(ios.page_io_latch_wait_in_ms, 0) > 0
             OR COALESCE(ios.index_lock_promotion_count, 0) > 0
         )
+        AND   ($2::text[] IS NULL OR ios.database_name = ANY($2))
         ORDER BY
             COALESCE(ios.row_lock_wait_in_ms, 0) + COALESCE(ios.page_lock_wait_in_ms, 0)
-            + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC
-        LIMIT $2
+            + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC,
+            COALESCE(ios.index_lock_promotion_count, 0) DESC,
+            ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST
+        LIMIT $3
         """;
 
+    /// <summary>
+    /// The newest stored <c>is_optimized_locking_on</c> flag per database on the server. The anchor is the newest
+    /// <c>capture_time</c> of the whole server, as <see cref="DarlingCurrentConfigReader.DatabaseConfigSql"/> reads
+    /// it: one collection run writes every database with one capture time, so that capture is the server's whole
+    /// snapshot, and a dropped database's old true flag does not outlive it. <c>capture_time</c> is projected so the
+    /// latest-anchor census sees the anchor. A NULL flag means unknown. $1 server_id, $2 database filter (a text[], NULL = every database; #5245: the
+    /// anchor stays the server's capture, only WHICH databases' flags count changes).
+    /// </summary>
+    public const string OptimizedLockingFlagsSql = """
+        SELECT is_optimized_locking_on, capture_time
+        FROM database_config
+        WHERE server_id = $1
+        AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)
+        AND   ($2::text[] IS NULL OR database_name = ANY($2))
+        """;
+
+    /// <summary>The shared optimized-locking note when any database's newest flag is true; null otherwise. #5245: with a
+    /// <paramref name="databases"/> selection only the CHOSEN databases' flags count, so the note never warns about a
+    /// database the page does not show.</summary>
+    public static Task<string?> GetOptimizedLockingNoteAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default) =>
+        GetOptimizedLockingNoteAsync(postgres, serverId, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>The note over a selection: see <see cref="GetOptimizedLockingNoteAsync(NpgsqlDataSource,int,CancellationToken)"/>;
+    /// only the <paramref name="databases"/> chosen count (#5245).</summary>
+    public static async Task<string?> GetOptimizedLockingNoteAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
+    {
+        var flags = new List<bool?>();
+        await using var command = postgres.CreateCommand(OptimizedLockingFlagsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(databases.Parameter());
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            flags.Add(reader.IsDBNull(0) ? null : reader.GetBoolean(0));
+        return OptimizedLockingNote.For(flags);
+    }
+
+    /// <summary>The server's latest-capture locking rows over every database, most contended first, at most
+    /// <paramref name="top"/>: <see cref="GetIndexLockingAsync(NpgsqlDataSource,int,int,DatabaseFilter,CancellationToken)"/>
+    /// with <see cref="DatabaseFilter.All"/>.</summary>
+    public static Task<List<IndexLockingRow>> GetIndexLockingAsync(
+        NpgsqlDataSource postgres, int serverId, int top, CancellationToken cancellationToken = default) =>
+        GetIndexLockingAsync(postgres, serverId, top, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// #5245: the server's latest-capture locking rows, most contended first, at most <paramref name="top"/>.
+    /// <paramref name="databases"/> is <see cref="DatabaseFilter.All"/> for every database; otherwise only the CHOSEN
+    /// databases' rows are ranked and capped, so the page is the top N of those databases. The snapshot anchor stays
+    /// the server's newest capture (a filter picks rows, it never picks a different capture), so a filtered and an
+    /// unfiltered call read the same instant. The names bind as one text[] and are never spliced into the statement.
+    /// </summary>
     public static async Task<List<IndexLockingRow>> GetIndexLockingAsync(
-        NpgsqlDataSource postgres, int serverId, int top, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, int top, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<IndexLockingRow>();
         await using var command = postgres.CreateCommand(IndexLockingSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddInt(command, top);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -493,6 +603,66 @@ internal static class DarlingObjectStatsReader
         return rows;
     }
 
+    /// <summary>
+    /// #5311: ONE index's four detail counters at the server's latest capture, for the web Locking page's detail pane
+    /// (the desktop's <c>ShowLockingDetail</c>). The index is named exactly by database ($2, the database filter's one
+    /// <c>text[]</c> parameter as the list read binds it), schema ($3), table ($4) and index name ($5; NULL names a heap,
+    /// which is why it compares with <c>IS NOT DISTINCT FROM</c>). Every name is a bound parameter, never part of the
+    /// statement text. The snapshot anchor is the list read's: the server's newest capture, so a detail row is the same
+    /// instant the list row it came from showed.
+    /// </summary>
+    public const string IndexLockingDetailSql = """
+        SELECT
+            ios.collection_time,
+            ios.database_name,
+            ios.schema_name,
+            ios.table_name,
+            ios.index_name,
+            COALESCE(ios.row_lock_count, 0) AS row_lock_count,
+            COALESCE(ios.page_lock_count, 0) AS page_lock_count,
+            COALESCE(ios.page_latch_wait_count, 0) AS page_latch_wait_count,
+            COALESCE(ios.page_io_latch_wait_count, 0) AS page_io_latch_wait_count
+        FROM v_index_object_stats ios
+        WHERE ios.server_id = $1
+        AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+        AND   ($2::text[] IS NULL OR ios.database_name = ANY($2))
+        AND   ios.schema_name = $3
+        AND   ios.table_name = $4
+        AND   ios.index_name IS NOT DISTINCT FROM $5
+        LIMIT 1
+        """;
+
+    /// <summary>
+    /// #5311: the one index <see cref="IndexLockingDetailSql"/> names, or null when the latest capture holds no such
+    /// index. <paramref name="database"/> must name a database (a blank name would be the "every database" filter, and
+    /// a selector never widens): the caller refuses a blank one.
+    /// </summary>
+    public static async Task<IndexLockingDetailRow?> GetIndexLockingDetailAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter database, string schema, string table, string? index,
+        CancellationToken cancellationToken = default)
+    {
+        if (database.IsAll) throw new ArgumentException("A detail read names one database.", nameof(database));
+        await using var command = postgres.CreateCommand(IndexLockingDetailSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(database.Parameter());
+        DarlingMcpReadParameters.AddText(command, schema);
+        DarlingMcpReadParameters.AddText(command, table);
+        DarlingMcpReadParameters.AddNullableText(command, index);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+        return new IndexLockingDetailRow(
+            reader.GetDateTime(0),
+            reader.IsDBNull(1) ? "" : reader.GetString(1),
+            reader.IsDBNull(2) ? "" : reader.GetString(2),
+            reader.IsDBNull(3) ? "" : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4),
+            reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+            reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+            reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+            reader.IsDBNull(8) ? 0 : reader.GetInt64(8));
+    }
+
     /* ─────────────────────────── database sizes ─────────────────────────── */
 
     /// <summary>
@@ -507,6 +677,8 @@ internal static class DarlingObjectStatsReader
     /// of planning against 2.6 ms of execution in the field, over 71 chunks. <see cref="GetLatestSnapshotTimeAsync"/>
     /// resolves the snapshot as its own round trip first, so this statement only ever binds a literal
     /// <c>collection_time</c> the planner can exclude every other chunk against at plan time.</para>
+    /// <para>#5244: $3 is the database filter (a text[], NULL = every database; the shape of <see cref="DatabaseFilter.Clause"/>).
+    /// The snapshot $2 stays the server's newest, so a filtered and an unfiltered call read the same capture.</para>
     /// </summary>
     public const string DatabaseSizeLatestSql = """
         SELECT
@@ -520,10 +692,12 @@ internal static class DarlingObjectStatsReader
             CAST(max_size_mb AS double precision) AS max_size_mb,
             volume_mount_point,
             CAST(volume_total_mb AS double precision) AS volume_total_mb,
-            CAST(volume_free_mb AS double precision) AS volume_free_mb
+            CAST(volume_free_mb AS double precision) AS volume_free_mb,
+            file_id
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   collection_time = $2
+        AND   ($3::text[] IS NULL OR database_name = ANY($3))
         ORDER BY database_name, file_type_desc, file_name
         """;
 
@@ -547,8 +721,14 @@ internal static class DarlingObjectStatsReader
         WHERE server_id = $1
         """;
 
+    public static Task<List<DatabaseSizeRow>> GetLatestDatabaseSizesAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default) =>
+        GetLatestDatabaseSizesAsync(postgres, serverId, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>#5244: <see cref="GetLatestDatabaseSizesAsync(NpgsqlDataSource,int,CancellationToken)"/> over a SET of databases
+    /// (<see cref="DatabaseFilter.All"/> = every database): the files of the chosen databases at the server's newest snapshot.</summary>
     public static async Task<List<DatabaseSizeRow>> GetLatestDatabaseSizesAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<DatabaseSizeRow>();
         var snapshotTime = await GetLatestSnapshotTimeAsync(postgres, serverId, cancellationToken);
@@ -561,6 +741,7 @@ internal static class DarlingObjectStatsReader
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddTimestamp(command, snapshotTime.Value);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -569,13 +750,16 @@ internal static class DarlingObjectStatsReader
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                /* NULL is the Hyperscale log file: it stays null, never 0. */
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
                 reader.IsDBNull(5) ? null : reader.GetDouble(5),
                 reader.IsDBNull(6) ? null : reader.GetDouble(6),
                 reader.IsDBNull(7) ? null : reader.GetDouble(7),
                 reader.IsDBNull(8) ? null : reader.GetString(8),
                 reader.IsDBNull(9) ? null : reader.GetDouble(9),
-                reader.IsDBNull(10) ? null : reader.GetDouble(10)));
+                reader.IsDBNull(10) ? null : reader.GetDouble(10),
+                /* NULL is the one row another database on an Azure SQL Database server gets: it has no file id. */
+                reader.IsDBNull(11) ? null : reader.GetInt32(11)));
         }
 
         return rows;
@@ -593,7 +777,7 @@ internal static class DarlingObjectStatsReader
     /// database-size history at all. <b>Neither probe bounds above by "now"</b> — this is a latest read, and
     /// the collector host's clock is not this reader's clock; a snapshot stamped a few minutes into this
     /// reader's future is still the latest snapshot that exists (#4245 follow-up).</summary>
-    private static async Task<DateTime?> GetLatestSnapshotTimeAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    internal static async Task<DateTime?> GetLatestSnapshotTimeAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         var windowStart = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
 

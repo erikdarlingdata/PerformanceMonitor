@@ -1,0 +1,400 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+/*
+ * Job History page (#4843): the web twin of the desktop viewer's Job History tab. SQL Agent job runs (steps and job
+ * outcomes) across the fleet, newest first, from get_job_history, with the viewer's filters: server, window,
+ * job, status and category, plus a row limit. Every filter is applied by the read itself, before its row limit.
+ *
+ * The filters live at MODULE scope, so the 60 s poll's rebuild of the page shows the same choices, the text being
+ * typed and the focus; the grid's sort is kept by the shared grid renderer. Every value from the read is drawn as
+ * text. The page says so when the window reaches past the history the store keeps, and when the row limit cut the list.
+ *
+ * Under the head, one line says what SQL Agent is doing now, from the read's own Agent fields (a named server's
+ * agent_running / agent_status_desc, or the fleet's agents_total / agents_running / agents_not_running; an empty answer carries them under hints): stopped in
+ * red, running, unknown when no recent snapshot backs it, or a plain "No SQL Agent service" for a server without one, with an
+ * "n of m servers" roll-up across the fleet.
+ */
+
+import { VIZ } from "../panels.js";
+import { pageRangePicker, windowOfSpec } from "../page-range.js";
+import { relativeSpec } from "../time-range.js";
+import { orderServers } from "../server-order.js";
+import { el, mount, clear, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, localTime, makeActivatable } from "../util.js";
+
+/** The default range, in hours. The range itself is the shared time range picker's (#5562). */
+export const DEFAULT_HOURS = 24;
+
+/** The run statuses the read accepts; an empty value is every status. */
+export const STATUSES = [
+  { value: "", label: "All statuses" },
+  { value: "Failed", label: "Failed" },
+  { value: "Succeeded", label: "Succeeded" },
+  { value: "Retry", label: "Retry" },
+  { value: "Canceled", label: "Canceled" },
+];
+
+/** The row limits on offer (the read takes at most 1000). */
+export const LIMITS = [100, 250, 500, 1000];
+
+/** The desktop grid's columns, in its order: Run Time, Server, Job, Category, Step, Status, Duration, Retries, Last Success, Message. */
+export const JOB_HISTORY_COLUMNS = [
+  { key: "run_time", label: "Run Time", format: "time" },
+  { key: "server", label: "Server" },
+  { key: "job_name", label: "Job" },
+  { key: "category", label: "Category" },
+  { key: "step", label: "Step" },
+  { key: "status", label: "Status" },
+  { key: "duration_formatted", label: "Duration", sortValue: (r) => r.duration_seconds },
+  { key: "retries", label: "Retries", format: "int" },
+  { key: "last_success", label: "Last Success", format: "time" },
+  { key: "message", label: "Message", wrap: true, render: messageCell },
+];
+
+/* The Message column (the morning walk, W2). A failed step's message can run to thousands of characters and sat in a
+   column the table squeezed to about 90 px, so each row grew 150-250 px tall. The cell now has a readable width and
+   shows the first few lines only; the whole message opens in the detail pane when the row is clicked. */
+function messageCell(r) {
+  const text = r && r.message != null ? String(r.message) : "";
+  return el("div", { class: "jh-message", title: text || null, text });
+}
+
+/* A run has no id in the read, so the open row is found again after a rebuild by what identifies it. */
+function runKey(r) {
+  return [r.run_time, r.server, r.job_name, r.step].join("|");
+}
+
+/* The run whose detail pane is open; kept at module scope so the 60 s rebuild reopens the same pane. */
+let openRunKey = null;
+
+function selectionInside(node) {
+  const sel = typeof window !== "undefined" && window.getSelection ? window.getSelection() : null;
+  return !!sel && !sel.isCollapsed && String(sel).length > 0 && !!sel.anchorNode && node.contains(sel.anchorNode);
+}
+
+/* The filter state, kept across the 60 s rebuild. `jobDraft` is the job text as typed, applied on Enter or when
+   the box loses focus; `job` is the text the last read used. */
+const state = { server: "", spec: relativeSpec(DEFAULT_HOURS * 3600000), status: "", category: "", limit: 100, job: "", jobDraft: "", jobFocused: false, jobCaret: null };
+/* The categories seen in any answer, so the Category choices survive a filter that narrows the next answer. */
+const seenCategories = new Set();
+/* The server choices from the last list_servers read, so the rebuild paints its select at once. */
+let knownServers = [];
+let pageSeq = 0;
+let loadSeq = 0;
+let pageAbort = null;
+let loadAbort = null;
+
+function serverRows(data) {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.servers)) return data.servers;
+  return [];
+}
+
+/* Agent history exists only on SQL Server targets; a server whose engine is not stamped yet stays on offer. */
+function isSqlServerTarget(r) {
+  return !/postgres/i.test(String(r && r.engine_kind ? r.engine_kind : ""));
+}
+
+/** The row class for the desktop grid's colour coding: failed and long-running red/amber, retry amber, canceled grey. */
+export function runRowClass(r) {
+  if (!r) return "";
+  if (r.status === "Failed") return "sev-Critical";
+  if (r.is_long_running === true || r.status === "Retry") return "sev-Warning";
+  if (r.status === "Canceled") return "band-Offline";
+  return "";
+}
+
+function select(label, options, value, onPick) {
+  const sel = el(
+    "select",
+    { class: "range-select-inline", "aria-label": label },
+    options.map((o) => el("option", { value: String(o.value), text: o.label }))
+  );
+  sel.value = String(value);
+  sel.addEventListener("change", () => onPick(sel.value));
+  return { sel, label: el("label", { class: "range-control" }, [el("span", { text: label }), sel]) };
+}
+
+function serverOptions() {
+  const opts = [{ value: "", label: "All servers" }, ...knownServers.map((r) => ({ value: r.server_name, label: r.display_name || r.server_name }))];
+  if (state.server && !opts.some((o) => o.value === state.server)) opts.push({ value: state.server, label: state.server });
+  return opts;
+}
+
+function categoryOptions() {
+  const names = [...seenCategories];
+  if (state.category && !seenCategories.has(state.category)) names.push(state.category);
+  names.sort((a, b) => a.localeCompare(b));
+  return [{ value: "", label: "All categories" }, ...names.map((n) => ({ value: n, label: n }))];
+}
+
+function fill(sel, options, value) {
+  clear(sel);
+  for (const o of options) sel.appendChild(el("option", { value: String(o.value), text: o.label }));
+  sel.value = String(value);
+}
+
+/** The read takes whole hours back from the end, so a range of 30 minutes comes back as the whole hour. The runs are newest first, so
+ *  the row limit drops only the OLDEST ones and cutting at the range's start cannot hide a run inside it; the end is bounded in
+ *  the reader (R6), never here. */
+export function trimRunsToStart(data, w) {
+  if (!w || !Array.isArray(data.runs)) return data;
+  return {
+    ...data,
+    runs: data.runs.filter((r) => {
+      const t = Date.parse(r && r.run_time);
+      return !Number.isFinite(t) || t >= w.startMs;
+    }),
+  };
+}
+
+/** The window the held range reads as of now, or the default one when it cannot resolve. */
+function currentWindow() {
+  return windowOfSpec(state.spec) || windowOfSpec(relativeSpec(DEFAULT_HOURS * 3600000));
+}
+
+/** The read's parameters for the current filters; an empty filter is left off so the read applies none. */
+export function readParams(w = currentWindow()) {
+  /* A finished range sends its end as `as_of` (#5562 R6). The reader bounds the runs by that end in SQL, before the row limit
+     (JobHistoryFilter.UntilUtc, DarlingJobHistoryReader.cs), so the newest runs the limit keeps are the range's own. */
+  const p = { hours: w.hours, limit: state.limit };
+  if (w.asOf) p.as_of = w.asOf;
+  if (state.server) p.server = state.server;
+  /* The text in the box is what the next read uses, so a rebuild or another filter's change never leaves typed text unapplied. */
+  state.job = state.jobDraft.trim();
+  if (state.job) p.job_name = state.job;
+  if (state.status) p.status = state.status;
+  if (state.category) p.category = state.category;
+  return p;
+}
+
+/** The notice for a window that reaches past the retained history, or null. */
+export function retainedNote(data) {
+  if (!data || data.window_truncated !== true) return null;
+  const from = typeof data.effective_start === "string" && data.effective_start ? localTime(data.effective_start) : null;
+  return from
+    ? "partial window: the store keeps job history from " + from + ", after the window's start, so earlier runs are not shown."
+    : "partial window: the store keeps less job history than the window asks for, so earlier runs are not shown.";
+}
+
+/** The notice for a list the row limit cut, or null. */
+export function limitNote(data) {
+  if (!data || data.truncated !== true) return null;
+  const shown = Array.isArray(data.runs) ? data.runs.length : data.shown;
+  return "Showing the newest " + shown + " runs; more matched. Raise the row limit or narrow the filters to see the rest.";
+}
+
+/** The description the tool serves for a server whose collector found no SQL Agent service (DarlingJobReader.NoAgentServiceDescription). */
+const NO_AGENT_SERVICE = "no SQL Agent service found";
+
+/**
+ * The Agent line for an answer, or null when the answer carries no Agent state. `src` is the answer (or an empty
+ * answer's hints); `serverName` is the server the page asked for, used when the answer does not name one. Returns
+ * { level: "stopped" | "running" | "unknown" | "none", text }. A server with no SQL Agent service is not a stopped one:
+ * it reads "none", drawn as a plain line, and never turns the roll-up red.
+ */
+export function agentLine(src, serverName) {
+  if (!src || typeof src !== "object") return null;
+  let total;
+  let running;
+  let notRunning;
+  if (typeof src.agents_total === "number") {
+    total = src.agents_total;
+    running = typeof src.agents_running === "number" ? src.agents_running : 0;
+    notRunning = Array.isArray(src.agents_not_running) ? src.agents_not_running : [];
+  } else if ("agent_running" in src) {
+    total = 1;
+    running = src.agent_running === true ? 1 : 0;
+    notRunning = src.agent_running === true ? [] : [{ server: src.server || serverName || "", agent_running: src.agent_running, agent_status_desc: src.agent_status_desc }];
+  } else return null;
+  if (total === 0) return null;
+  const noService = notRunning.filter((a) => a.agent_running == null && a.agent_status_desc === NO_AGENT_SERVICE).map((a) => a.server || "");
+  const stopped = notRunning.filter((a) => a.agent_running === false).map((a) => a.server || "");
+  const unknown = notRunning.filter((a) => a.agent_running !== false && !(a.agent_running == null && a.agent_status_desc === NO_AGENT_SERVICE)).map((a) => a.server || "");
+  const level = stopped.length ? "stopped" : unknown.length ? "unknown" : noService.length === total ? "none" : "running";
+  if (total === 1) {
+    if (level === "stopped") return { level, text: "SQL Agent is stopped" + (stopped[0] ? " on " + stopped[0] : "") };
+    if (level === "unknown") return { level, text: "Agent status unknown (no recent snapshot)" };
+    if (level === "none") return { level, text: "No SQL Agent service" + (noService[0] ? " on " + noService[0] : "") };
+    return { level, text: "SQL Agent running" };
+  }
+  let text = "Agent running on " + running + " of " + total + " servers";
+  if (stopped.length) text += "; stopped on " + stopped.join(", ");
+  if (unknown.length) text += "; status unknown on " + unknown.join(", ");
+  if (noService.length) text += "; no SQL Agent service on " + noService.join(", ");
+  return { level, text };
+}
+
+export function renderJobHistory(main) {
+  if (pageAbort) pageAbort.abort();
+  if (loadAbort) loadAbort.abort();
+  const controller = (pageAbort = new AbortController());
+  const mine = ++pageSeq;
+  const body = el("div", {}, [loadingStrip("Loading job history…")]);
+
+  const reload = () => load();
+  /* The picker's reach comes from the catalog (get_job_history reaches 168 hours): a longer range is greyed out with the reason. */
+  const rangePicker = pageRangePicker({
+    read: "get_job_history",
+    spec: state.spec,
+    label: "Window",
+    onChange: (spec) => {
+      state.spec = spec;
+      reload();
+    },
+  }).picker;
+  const win = { label: el("div", { class: "range-control" }, [el("span", { text: "Window" }), rangePicker.node]) };
+  const server = select("Server", serverOptions(), state.server, (v) => {
+    state.server = v;
+    reload();
+  });
+  const status = select("Status", STATUSES, state.status, (v) => {
+    state.status = v;
+    reload();
+  });
+  const category = select("Category", categoryOptions(), state.category, (v) => {
+    state.category = v;
+    reload();
+  });
+  const limit = select("Rows", LIMITS.map((n) => ({ value: n, label: String(n) })), state.limit, (v) => {
+    state.limit = Number(v);
+    reload();
+  });
+  const job = el("input", { type: "text", class: "range-select-inline", "aria-label": "Job name", placeholder: "exact job name", value: state.jobDraft });
+  job.value = state.jobDraft;
+  job.addEventListener("input", () => {
+    state.jobDraft = job.value;
+    state.jobCaret = [job.selectionStart, job.selectionEnd];
+  });
+  job.addEventListener("focus", () => {
+    state.jobFocused = true;
+  });
+  const apply = () => {
+    state.jobDraft = job.value;
+    if (state.jobDraft.trim() !== state.job) reload();
+  };
+  /* The rebuild removes this box, and the browser fires blur DURING the removal while the box is still connected,
+     so the check waits a turn: a removed box neither clears the focus nor reads again. */
+  job.addEventListener("blur", () => {
+    setTimeout(() => {
+      if (!job.isConnected) return;
+      state.jobFocused = false;
+      apply();
+    }, 0);
+  });
+  job.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") apply();
+  });
+  const jobLabel = el("label", { class: "range-control" }, [el("span", { text: "Job" }), job]);
+
+  const agentSlot = el("div", { class: "agent-line-slot" });
+  const showAgent = (src) => {
+    const line = agentLine(src, state.server);
+    mount(agentSlot, line ? el("div", { class: "agent-line agent-" + line.level, role: "status", text: line.text }) : []);
+  };
+
+  mount(main, [
+    el("div", { class: "page-head" }, [
+      el("h2", { text: "Job History" }),
+      el("div", { class: "spacer" }),
+      server.label,
+      win.label,
+      jobLabel,
+      status.label,
+      category.label,
+      limit.label,
+    ]),
+    agentSlot,
+    body,
+  ]);
+  if (state.jobFocused && typeof job.focus === "function") {
+    job.focus();
+    if (state.jobCaret && typeof job.setSelectionRange === "function") job.setSelectionRange(state.jobCaret[0], state.jobCaret[1]);
+  }
+
+  async function load() {
+    const ticket = ++loadSeq;
+    if (loadAbort) loadAbort.abort();
+    const signal = (loadAbort = new AbortController()).signal;
+    mount(body, loadingStrip("Loading job history…"));
+    try {
+      /* One window for the request and the trim: a live range's start moves with the clock, so a window recomputed after the reply would cut
+         later than the read began (#5562 review r1 L7). */
+      const w = currentWindow();
+      const res = await readToolWithinKeptHistory("get_job_history", readParams(w), signal);
+      if (ticket !== loadSeq) return;
+      if (res.kind === "aborted" || res.kind === "auth") return;
+      if (res.kind === "error") {
+        showAgent(null);
+        return mount(body, readErrorStrip(res.message));
+      }
+      const data = trimRunsToStart(res.data || {}, w);
+      const kept = keptWindowStrip(res);
+      showAgent(res.kind === "empty" ? res.hints : data);
+      if (res.kind === "empty") {
+        return mount(body, [kept, noticeFor(retainedNote(res.hints)), emptyStrip(res.message)]);
+      }
+      for (const r of data.runs || []) if (r.category) seenCategories.add(r.category);
+      fill(category.sel, categoryOptions(), state.category);
+      /* The detail pane (W2): a click, or Enter, on a run opens its whole message above the grid. */
+      const pane = el("div", { class: "jh-detail" });
+      const closeDetail = () => {
+        openRunKey = null;
+        mount(pane, []);
+      };
+      const openDetail = (r) => {
+        openRunKey = runKey(r);
+        const parts = [r.status, r.run_time ? localTime(r.run_time) : null, r.duration_formatted ? "took " + r.duration_formatted : null].filter(Boolean);
+        mount(pane, [
+          el("div", { class: "jh-detail-head" }, [
+            el("strong", { text: "Job run: " + [r.job_name, r.step].filter(Boolean).join(" / ") + (r.server ? " on " + r.server : "") }),
+            el("button", { type: "button", class: "jh-detail-close", text: "Close", onClick: closeDetail }),
+          ]),
+          el("div", { class: "muted", text: parts.join(" · ") }),
+          el("pre", { class: "jh-detail-message", text: r.message ? String(r.message) : "No message was recorded for this run." }),
+        ]);
+      };
+      const reopen = openRunKey ? (data.runs || []).find((r) => runKey(r) === openRunKey) : null;
+      if (reopen) openDetail(reopen);
+      else openRunKey = null;
+      const onRow = (r, tr) => {
+        if (!r) return;
+        tr.style.cursor = "pointer";
+        tr.setAttribute("title", "Show this run's whole message");
+        makeActivatable(tr, (e) => {
+          // A click that ends a text selection inside the row is the reader copying, not picking.
+          if (e && e.type === "click" && selectionInside(tr)) return;
+          openDetail(r);
+        });
+      };
+      mount(body, [
+        kept,
+        noticeFor(retainedNote(data)),
+        noticeFor(limitNote(data)),
+        el("div", { class: "muted", text: (data.runs || []).length + " runs shown" }),
+        pane,
+        VIZ.table(data, { id: "job-history", rowsKey: "runs", columns: JOB_HISTORY_COLUMNS, rowClass: runRowClass, onRow, emptyText: "No job runs matched in the requested time range." }),
+      ]);
+    } catch (e) {
+      if (ticket === loadSeq && e?.name !== "AbortError") mount(body, errorStrip("Could not render job history: " + (e && e.message ? e.message : String(e))));
+    }
+  }
+
+  /* The server choices are read beside the first load; a failed read leaves the cached list (or just All servers). */
+  (async () => {
+    const res = await readTool("list_servers", {}, controller.signal);
+    if (mine !== pageSeq || res.kind !== "data") return;
+    knownServers = orderServers(serverRows(res.data).filter(isSqlServerTarget));
+    fill(server.sel, serverOptions(), state.server);
+  })();
+  load();
+}
+
+function noticeFor(text) {
+  return text ? noticeStrip(text) : null;
+}

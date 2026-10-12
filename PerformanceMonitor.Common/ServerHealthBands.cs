@@ -1390,6 +1390,50 @@ namespace PerformanceMonitor.Common
         public const double WarningFailureRatePercent = 20.0;
 
         /// <summary>
+        /// #5646. The most runs the failure rate waits for before it bands WARNING. Two errors in the first
+        /// eight runs of a new target is 25%, which read WARNING until the tenth run landed even though the
+        /// collector had long since recovered. This is the ceiling of the floor, not the floor itself: a
+        /// collector that runs less often than this window can hold has a lower one
+        /// (<see cref="FailureRateRunFloor"/>).
+        /// </summary>
+        public const int MinimumRunsForFailureRate = 10;
+
+        /// <summary>
+        /// #5646. The length of the trailing window every collection-health read counts runs over: 7 days, in
+        /// minutes. Lite's per-server read, the Darling service's per-server read and fleet roll-up, and the
+        /// Viewer's reads all cut <c>now - 7 days</c>. <see cref="FailureRateRunFloor"/> divides it by a
+        /// collector's frequency to find how many runs a full window holds.
+        /// </summary>
+        public const int HealthWindowMinutes = 7 * 24 * 60;
+
+        /// <summary>
+        /// #5646. How many runs the window must hold before the failure rate alone bands a collector
+        /// WARNING: <see cref="MinimumRunsForFailureRate"/>, or fewer when a full health window
+        /// (<see cref="HealthWindowMinutes"/>) holds fewer at <paramref name="frequencyMinutes"/>, so the
+        /// floor is never one the collector cannot reach. A daily collector (1440 minutes) fills the window
+        /// with 7 runs, and a floor of 10 would exempt it from the rate for good. A frequency of 0 or less
+        /// (not on a schedule) keeps the full floor. The band (<see cref="Classify"/>) and the "recovered"
+        /// sentence (<see cref="FormatRecoveredNote"/>) both read it, so they cannot disagree.
+        /// </summary>
+        public static long FailureRateRunFloor(int frequencyMinutes)
+        {
+            if (frequencyMinutes <= 0)
+            {
+                return MinimumRunsForFailureRate;
+            }
+
+            var fullWindowRuns = (HealthWindowMinutes + (long)frequencyMinutes - 1) / frequencyMinutes;
+            return Math.Min(MinimumRunsForFailureRate, fullWindowRuns);
+        }
+
+        /// <summary>
+        /// #5646. How many of a collector's newest runs in a row must have succeeded before the failure rate
+        /// alone stops banding WARNING. A collector that alternates between failing and succeeding never has
+        /// this many in a row.
+        /// </summary>
+        public const int RecoveryTrailingSuccessRuns = 3;
+
+        /// <summary>
         /// A collector whose ABANDONED rate exceeds this percent bands WARNING (#2804). An abandoned cycle is
         /// the #2673 whole-server wall-clock budget giving up: it stores nothing and advances no watermark, so
         /// it is guaranteed data loss rather than a retryable fault.
@@ -2231,7 +2275,8 @@ namespace PerformanceMonitor.Common
             double hoursSinceLastSuccess,
             double hoursSinceLastRun,
             int frequencyMinutes,
-            string? latestRunNote = null)
+            string? latestRunNote,
+            long trailingSuccessRuns)
         {
             if (totalRuns == 0)
             {
@@ -2297,7 +2342,9 @@ namespace PerformanceMonitor.Common
             /* Below STALE/FAILING deliberately. A collector that has not succeeded in far too long is the
                louder fact and keeps its band; abandonment is the one that would otherwise have NO band at all,
                because a partially-abandoning collector still lands successes and so never ages into either. */
-            if (failureRatePercent > WarningFailureRatePercent || abandonRatePercent > WarningAbandonRatePercent)
+            if (FailureRateBandsWarning(
+                    totalRuns, errorCount, failureRatePercent, trailingSuccessRuns, frequencyMinutes)
+                || abandonRatePercent > WarningAbandonRatePercent)
             {
                 return Warning;
             }
@@ -2312,6 +2359,96 @@ namespace PerformanceMonitor.Common
             }
 
             return Healthy;
+        }
+
+        /// <summary>
+        /// #5646. Whether the 7-day failure rate alone bands WARNING. Three rules, each only ever quieter than
+        /// the plain rate: a MINIMUM-RUNS floor (<see cref="FailureRateRunFloor"/>: 10 runs, or fewer for a
+        /// collector that runs so rarely a full window holds fewer, such as 7 for a daily one), a RECOVERY rule
+        /// (<see cref="RecoveryTrailingSuccessRuns"/> successes in a row), and the exception to the floor: a
+        /// collector whose newest run did not succeed (<paramref name="trailingSuccessRuns"/> is 0) keeps the
+        /// plain rate, so a few-run collector whose runs all failed is never read as healthy by the floor.
+        /// <paramref name="trailingSuccessRuns"/> 0 is also what a row passes where no streak can exist (a
+        /// collector with no runs). The fleet roll-ups' plain aggregates cannot see the newest runs, so they
+        /// ask <see cref="RecoveryCouldChangeBand"/> which rows need the streak and read it for those alone
+        /// (#5666).
+        /// </summary>
+        private static bool FailureRateBandsWarning(
+            long totalRuns, long errorCount, double failureRatePercent, long trailingSuccessRuns, int frequencyMinutes)
+        {
+            if (failureRatePercent <= WarningFailureRatePercent)
+            {
+                return false;
+            }
+
+            if (trailingSuccessRuns >= RecoveryTrailingSuccessRuns)
+            {
+                return false;
+            }
+
+            return totalRuns >= FailureRateRunFloor(frequencyMinutes) || (trailingSuccessRuns <= 0 && errorCount > 0);
+        }
+
+        /// <summary>
+        /// #5666. Whether the newest-runs streak could move this row's band: the ladder says WARNING with no
+        /// streak and does not say WARNING with a full one. The fleet roll-ups band from aggregates alone, so they
+        /// read the streak only for the rows this returns true for, and none at all when no row does. Decided by
+        /// running <see cref="Classify"/> both ways rather than by restating its rules, so a later rule cannot
+        /// make this disagree with it. A row it returns true for may still band WARNING once the streak is
+        /// known (an alternating collector); it is never wrong in the other direction.
+        /// </summary>
+        public static bool RecoveryCouldChangeBand(
+            long totalRuns,
+            long successCount,
+            long errorCount,
+            long permissionDeniedCount,
+            long extensionMissingCount,
+            long abandonedCount,
+            double hoursSinceLastSuccess,
+            double hoursSinceLastRun,
+            int frequencyMinutes,
+            string? latestRunNote) =>
+            Classify(
+                totalRuns, successCount, errorCount, permissionDeniedCount, extensionMissingCount, abandonedCount,
+                hoursSinceLastSuccess, hoursSinceLastRun, frequencyMinutes, latestRunNote,
+                trailingSuccessRuns: 0) == Warning
+            && Classify(
+                totalRuns, successCount, errorCount, permissionDeniedCount, extensionMissingCount, abandonedCount,
+                hoursSinceLastSuccess, hoursSinceLastRun, frequencyMinutes, latestRunNote,
+                trailingSuccessRuns: RecoveryTrailingSuccessRuns) != Warning;
+
+        /// <summary>
+        /// #5646. The sentence a collector that RECOVERED carries beside its HEALTHY band, or null. Present
+        /// only where the recovery rule is what kept the band off WARNING: the row's band
+        /// (<paramref name="healthStatus"/>, the one it displays) is HEALTHY, the window holds enough runs for
+        /// the rate to count (<see cref="FailureRateRunFloor"/> at <paramref name="frequencyMinutes"/>, the same
+        /// floor the band uses), the rate is over the threshold, and the newest
+        /// <see cref="RecoveryTrailingSuccessRuns"/> runs all succeeded. A row any other rung bands (the abandon
+        /// rate, the lost-databases note, a stale or stopped collector, a regression) carries no such sentence,
+        /// because its band is not one the streak decided. <paramref name="lastFailureTime"/> is the newest
+        /// failure of the window (naive UTC).
+        /// </summary>
+        public static string? FormatRecoveredNote(
+            string healthStatus, long totalRuns, long errorCount, long trailingSuccessRuns, DateTime? lastFailureTime,
+            int frequencyMinutes)
+        {
+            if (!string.Equals(healthStatus, Healthy, StringComparison.Ordinal)
+                || totalRuns < FailureRateRunFloor(frequencyMinutes)
+                || errorCount <= 0
+                || trailingSuccessRuns < RecoveryTrailingSuccessRuns
+                || (double)errorCount / totalRuns * 100 <= WarningFailureRatePercent)
+            {
+                return null;
+            }
+
+            return lastFailureTime.HasValue
+                ? string.Format(
+                    CultureInfo.InvariantCulture,
+                    "recovered: the last {0} runs succeeded; last failure {1:yyyy-MM-dd HH:mm:ss} UTC",
+                    RecoveryTrailingSuccessRuns, lastFailureTime.Value)
+                : string.Format(
+                    CultureInfo.InvariantCulture,
+                    "recovered: the last {0} runs succeeded", RecoveryTrailingSuccessRuns);
         }
 
         /// <summary>
@@ -2376,11 +2513,41 @@ namespace PerformanceMonitor.Common
             long noteCount,
             long totalRuns,
             string? collectorName = null,
-            bool targetHasUserDatabases = false)
+            bool targetHasUserDatabases = false,
+            string? recoveredNote = null)
+        {
+            /* #5646: the recovery sentence rides beside the run note, in the same column on every surface. */
+            var runNote = FormatRunNote(lastNote, noteCount, totalRuns, collectorName, targetHasUserDatabases);
+            if (string.IsNullOrEmpty(recoveredNote))
+            {
+                return runNote;
+            }
+
+            return runNote.Length == 0 ? recoveredNote : recoveredNote + "; " + runNote;
+        }
+
+        private static string FormatRunNote(
+            string? lastNote,
+            long noteCount,
+            long totalRuns,
+            string? collectorName,
+            bool targetHasUserDatabases)
         {
             if (string.IsNullOrWhiteSpace(lastNote) || noteCount <= 0)
             {
                 return string.Empty;
+            }
+
+            /* A measuring collector leaves label=value counts on every run, and this note is only the NEWEST
+               run's. "(all N runs)" beside them reads as though the counts covered the window, so they are
+               labelled as the latest run's and carry no run-count qualifier at all. */
+            if (HasMeasurements(lastNote))
+            {
+                /* The note is the newest run that CARRIED one, and some measurers write counts only when
+                   something happened. Only when every run carried it is it the newest run's. */
+                return noteCount >= totalRuns && totalRuns > 0
+                    ? "latest run: " + lastNote
+                    : string.Format(CultureInfo.InvariantCulture, "latest noted run: {0} ({1} of {2} runs)", lastNote, noteCount, totalRuns);
             }
 
             /* >= rather than ==: the counts come from one GROUP BY over the same window, so they cannot
@@ -2406,6 +2573,52 @@ namespace PerformanceMonitor.Common
             return qualified
                 ? string.Format(CultureInfo.InvariantCulture, "{0} (all {1} runs, {2})", lastNote, totalRuns, HasUserDatabasesQualifier)
                 : string.Format(CultureInfo.InvariantCulture, "{0} (all {1} runs)", lastNote, totalRuns);
+        }
+
+        /// <summary>
+        /// Whether a run note ends in the <c>label=value</c> counts a collector definition's measurements
+        /// render to (<c>CollectorMeasurementNote.Compose</c>): the text after the last <c>"; "</c> (or the
+        /// whole note when there is no host note) is nothing but single-space-separated pairs, each a
+        /// snake_case label of up to 40 characters and a run of ASCII digits. Common cannot reference the
+        /// Collectors assembly that writes the notes, so this restates that grammar, and a test composes
+        /// real notes and checks that the two agree. Counts are non-negative by convention (nothing emits a
+        /// negative), so a leading <c>-</c> is not accepted.
+        /// </summary>
+        public static bool HasMeasurements(string? note)
+        {
+            if (string.IsNullOrWhiteSpace(note))
+            {
+                return false;
+            }
+
+            var cut = note.LastIndexOf("; ", StringComparison.Ordinal);
+            var tail = cut >= 0 ? note[(cut + 2)..] : note;
+            foreach (var token in tail.Split(' '))
+            {
+                var eq = token.IndexOf('=', StringComparison.Ordinal);
+                if (eq <= 0 || eq == token.Length - 1 || eq > 40 || token[0] is < 'a' or > 'z')
+                {
+                    return false;
+                }
+
+                for (var i = 0; i < eq; i++)
+                {
+                    if (token[i] is (< 'a' or > 'z') and (< '0' or > '9') and not '_')
+                    {
+                        return false;
+                    }
+                }
+
+                for (var i = eq + 1; i < token.Length; i++)
+                {
+                    if (!char.IsAsciiDigit(token[i]))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
         }
 
         /// <summary>

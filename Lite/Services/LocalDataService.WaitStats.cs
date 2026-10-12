@@ -18,6 +18,9 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>The characters of a statement the long-running-query alert prints (#5320: judged whole, then cut to this).</summary>
+    internal const int AlertStatementPreviewLength = 300;
+
     /// <summary>#4234: TTL memoization for <see cref="GetDistinctWaitTypesForPickerAsync"/> — see <see cref="LiteNameListCache"/>.</summary>
     private readonly LiteNameListCache _distinctWaitTypesCache = new();
 
@@ -45,12 +48,14 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
+        /* Keyed on rtrim(wait_type): a name stored with the DMV's trailing space before the collectors trimmed
+           it is the same wait, so its rows sum into the clean name's one row (see BuildExclusionClause). */
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
 SELECT
-    wait_type,
+    rtrim(wait_type) AS wait_type,
     SUM(delta_waiting_tasks) AS total_waiting_tasks,
     SUM(delta_wait_time_ms) AS total_wait_time_ms,
     SUM(delta_signal_wait_time_ms) AS total_signal_wait_time_ms,
@@ -60,7 +65,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
 {exclude}
-GROUP BY wait_type
+GROUP BY rtrim(wait_type)
 ORDER BY SUM(delta_wait_time_ms) DESC
 LIMIT $4";
 
@@ -123,19 +128,20 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
+        /* One clean name per wait, whichever spelling its rows were stored under (see GetWaitStatsAsync). */
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
 SELECT
-    wait_type,
+    rtrim(wait_type) AS wait_type,
     SUM(delta_wait_time_ms) AS total_delta
 FROM v_wait_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
 {exclude}
-GROUP BY wait_type
+GROUP BY rtrim(wait_type)
 ORDER BY SUM(delta_wait_time_ms) DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -164,7 +170,7 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
     /// </summary>
     public async Task<List<string>> GetDistinctWaitTypesForPickerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, DateTime? nowUtc = null)
     {
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         var effectiveNow = nowUtc ?? DateTime.UtcNow;
         var windowLength = endTime - startTime;
@@ -187,7 +193,7 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 WITH raw AS
@@ -208,7 +214,7 @@ WITH raw AS
         END AS interval_seconds
     FROM v_wait_stats
     WHERE server_id = $1
-    AND   wait_type = $2
+    AND   rtrim(wait_type) = rtrim($2)
     AND   collection_time >= $3
     AND   collection_time <= $4
 )
@@ -260,22 +266,24 @@ ORDER BY collection_time";
         return $@"
 WITH raw AS
 (
+    /* Keyed on rtrim(wait_type), so a name's rows stored with the DMV's trailing space are the same series
+       (see IgnoredWaitTypes.BuildExclusionClause). */
     SELECT
-        wait_type,
+        rtrim(wait_type) AS wait_type,
         collection_time,
         delta_wait_time_ms,
         delta_signal_wait_time_ms,
         delta_waiting_tasks,
         /* #3540: stored interval first, LAG only for pre-v60 rows — see GetWaitStatsTrendAsync. */
         CASE WHEN sample_interval_seconds IS NULL
-             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time))))
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY rtrim(wait_type) ORDER BY collection_time))))
              ELSE NULLIF(sample_interval_seconds, 0)
         END AS interval_seconds
     FROM v_wait_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
-    AND   wait_type IN ({typeParams})
+    AND   rtrim(wait_type) IN ({typeParams})
 ),
 rated AS
 (
@@ -327,7 +335,7 @@ ORDER BY wait_type, 2";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
         var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
@@ -400,7 +408,7 @@ ORDER BY wait_type, 2";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         /* #4234: bucketed to TrendBudget.Chart's point budget — this is the Overview lane's single aggregated
            wait line. seriesCount is always 1. */
@@ -571,7 +579,7 @@ ORDER BY accumulated_wait_ms DESC";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 WITH blocked_counts AS (
@@ -627,7 +635,7 @@ LEFT JOIN blocked_counts bc
 WHERE q.server_id = $1
 AND   q.collection_time >= $2
 AND   q.collection_time <= $3
-AND   q.wait_type = $4
+AND   rtrim(q.wait_type) = rtrim($4)
 ORDER BY q.wait_time_ms DESC
 LIMIT 500";
 
@@ -695,7 +703,7 @@ LIMIT 500";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 WITH blocked_counts AS (
@@ -887,7 +895,7 @@ LIMIT 2000";
                     SELECT
                         r.session_id,
                         r.database_name,
-                        SUBSTRING(r.query_text, 1, 300) AS query_text,
+                        r.query_text,
                         r.total_elapsed_time_ms / 1000 AS elapsed_seconds,
                         r.cpu_time_ms,
                         r.reads,
@@ -898,6 +906,7 @@ LIMIT 2000";
                         r.program_name,
                         r.login_name,
                         r.total_elapsed_time_ms,
+                        r.collection_time,
                         {exclusionSql.ProgramPrefixPredicate} AS excluded_by_program_prefix,
                         {exclusionSql.LoginPredicate} AS excluded_by_login,
                         {exclusionSql.DatabasePredicate} AS excluded_by_database
@@ -928,7 +937,8 @@ LIMIT 2000";
                     r.login_name,
                     CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_program_prefix) AS INTEGER) AS excluded_by_program_prefix_count,
                     CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS INTEGER) AS excluded_by_login_count,
-                    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS INTEGER) AS excluded_by_database_count
+                    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS INTEGER) AS excluded_by_database_count,
+                    r.collection_time AS newest_sample
                 FROM candidates AS r
                 WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login OR r.excluded_by_database)
                 ORDER BY r.total_elapsed_time_ms DESC
@@ -958,7 +968,9 @@ LIMIT 2000";
             {
                 SessionId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
                 DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                QueryText = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                /* #5320: the whole statement is judged, then cut to the alert's 300 characters here. The read used to cut
+                   in SQL (SUBSTRING), so a value early in a batch whose naming text sat past the 300th character read clean. */
+                QueryText = reader.IsDBNull(2) ? "" : McpHelpers.StatementPreview(reader.GetString(2), AlertStatementPreviewLength) ?? "",
                 ElapsedSeconds = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 CpuTimeMs = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 Reads = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
@@ -970,7 +982,10 @@ LIMIT 2000";
                    BuildLongRunningQueryContext renders the ("Program", ...) detail item the
                    Dashboard's alert already had. */
                 ProgramName = reader.IsDBNull(10) ? "" : reader.GetString(10),
-                LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11)
+                LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11),
+                /* #5642: the snapshot the row came from (the read keeps only the newest collection), for the alert's
+                   newest-sample age line. collection_time is a naive-UTC store stamp. */
+                NewestSampleUtc = reader.IsDBNull(15) ? null : DateTime.SpecifyKind(reader.GetDateTime(15), DateTimeKind.Utc)
             });
             /* The same three scalars on every row — read once is enough, and a read with no rows has nothing to
                fire and therefore nothing to render the counts beside (LongRunningQueryReadResult says why). */

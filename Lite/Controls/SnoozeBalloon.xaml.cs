@@ -11,6 +11,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using Hardcodet.Wpf.TaskbarNotification;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 
@@ -81,9 +82,20 @@ public partial class SnoozeBalloon : UserControl
             Reason = $"Snoozed from popup ({FormatDuration(duration)})"
         };
 
+        if (PendingRestoreNotice.Refuse("config_mute_rules"))
+        {
+            CloseBalloon();
+            return;
+        }
+
         try
         {
-            await _muteRuleService.AddRuleAsync(rule);
+            var saved = await _muteRuleService.AddRuleAsync(rule);
+            if (!saved)
+            {
+                AppLogger.Warn("SnoozeBalloon", "Snooze rule was not saved; see the earlier error");
+                PendingRestoreNotice.SaveFailed();
+            }
         }
         catch (Exception ex)
         {

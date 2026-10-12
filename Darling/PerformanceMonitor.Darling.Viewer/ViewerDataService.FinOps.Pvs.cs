@@ -17,7 +17,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>
-    /// Latest ADR persistent version store snapshot, one row per database (#1951). The Postgres twin of
+    /// Latest ADR persistent version store snapshot, one row per database (#1951). #5312: $2 is the saved database filter (a text[],
+    /// NULL = every database), applied after the newest-collection anchor, which stays the server's. The Postgres twin of
     /// Lite's <c>GetPvsStatsLatestAsync</c> — same columns, same order, same newest-collection pin, so the
     /// two front ends cannot drift.
     /// </summary>
@@ -45,6 +46,7 @@ AND   collection_time = (
     FROM v_pvs_stats
     WHERE server_id = $1
 )
+AND   ($2::text[] IS NULL OR database_name = ANY($2))
 ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name";
 
     /// <summary>
@@ -53,7 +55,8 @@ ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name";
     /// story matters; a 90-day retention series for every database of a big instance would swamp
     /// the plot and the read). Percent-of-database is computed per POINT from the same row's data
     /// file denominator, the exact ratio the grid shows, so the two surfaces cannot disagree.
-    /// Mirrors Lite's <c>GetPvsTrendAsync</c> — same columns, same top-N pin, same ordering.
+    /// Mirrors Lite's <c>GetPvsTrendAsync</c> — same columns, same top-N pin, same ordering. #5312: $3 is the saved database
+    /// filter (a text[], NULL = every database); the top five are the top five of the CHOSEN databases.
     /// </summary>
     public const string PvsTrendSql = @"
 WITH top_dbs AS (
@@ -65,6 +68,7 @@ WITH top_dbs AS (
         FROM v_pvs_stats
         WHERE server_id = $1
     )
+    AND   ($3::text[] IS NULL OR database_name = ANY($3))
     ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name
     LIMIT 5
 )
@@ -82,12 +86,13 @@ AND   p.collection_time >= $2
 ORDER BY p.database_name, p.collection_time";
 
     public async Task<List<PvsTrendPoint>> GetPvsTrendAsync(
-        int serverId, DateTime sinceUtc, CancellationToken cancellationToken = default)
+        int serverId, DateTime sinceUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(PvsTrendSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var items = new List<PvsTrendPoint>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -112,11 +117,12 @@ ORDER BY p.database_name, p.collection_time";
         return items;
     }
 
-    public async Task<List<PvsStatsRow>> GetPvsStatsLatestAsync(int serverId, CancellationToken cancellationToken = default)
+    public async Task<List<PvsStatsRow>> GetPvsStatsLatestAsync(int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(PvsStatsLatestSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var items = new List<PvsStatsRow>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

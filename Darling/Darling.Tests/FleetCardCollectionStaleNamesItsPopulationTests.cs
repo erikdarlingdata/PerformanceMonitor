@@ -48,6 +48,7 @@ namespace Darling.Tests;
 /// <see cref="TheMcpCard_DerivesTheFlagFromFreshnessAndNothingElse"/>, against the same four lines the
 /// arithmetic below exercises directly.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class FleetCardCollectionStaleNamesItsPopulationTests
 {
     private static readonly DateTime Now = new(2026, 9, 6, 12, 0, 0, DateTimeKind.Utc);

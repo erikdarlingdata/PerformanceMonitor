@@ -21,8 +21,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// read until #1921, when it gained a dedicated <c>GetQueryStoreItemTimelineAsync</c> for the same reason this
 /// file exists — a series drawn over the bars needs the bars' axis and dedup, which a raw per-collection grid
 /// read does not have. The two apps now carry the same structure for it. One deviation from Lite: Darling's
-/// <c>delta_*</c> columns are already per-collection-cycle deltas (Lite's history rows carry cumulative
-/// values it diffs row-over-row), so the per-interval magnitude is read directly — no C# differencing. Query
+/// <c>delta_*</c> columns are already per-collection-cycle deltas (Lite's history rows carry the same
+/// per-collection deltas, and since #5449 its overlay plots them as they are), so the per-interval magnitude is read directly — no C# differencing. Query
 /// Store keeps its per-execution averages, scaled by <c>execution_count</c> to a per-interval total the way
 /// the Query Store slicer aggregate does.
 /// </summary>

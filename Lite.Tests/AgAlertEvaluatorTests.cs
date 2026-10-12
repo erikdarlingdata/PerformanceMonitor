@@ -22,6 +22,7 @@ namespace Lite.Tests;
 public class AgAlertEvaluatorTests
 {
     private const int ServerId = 4242;
+    /* #5493: also the refire interval the sync-behind sweeps below pass (the shape of "Server Unreachable"). */
     private static readonly TimeSpan Cooldown = TimeSpan.FromMinutes(5);
 
     private static AgReplicaReading Replica(
@@ -93,12 +94,15 @@ public class AgAlertEvaluatorTests
         var lost = Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
         Assert.Equal(AgAlertPolicy.ReplicaDisconnectedMetric, lost.MetricName);
         Assert.False(lost.IsResolution);
+        Assert.Equal("AG1:NODE2", lost.Context?.AgReplicaIdentity);
 
         Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
 
         var back = Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }));
         Assert.Equal(AgAlertPolicy.ReplicaReconnectedMetric, back.MetricName);
         Assert.True(back.IsResolution);
+        /* Same incident identity as the firing, on both edges: the pair is one incident. */
+        Assert.Equal("AG1:NODE2", back.Context?.AgReplicaIdentity);
     }
 
     /* ---------------- #2426: the disconnect re-fire ---------------- */
@@ -289,7 +293,7 @@ public class AgAlertEvaluatorTests
     /* ---------------- sync fell behind ---------------- */
 
     [Fact]
-    public void SyncFellBehind_FiresOnce_ReFiresOnlyOnCooldown_ThenRecovers()
+    public void SyncFellBehind_FiresOnce_ReFiresOnlyOnTheRefireInterval_ThenRecovers()
     {
         var now = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
         var e = new AgAlertEvaluator(() => now);
@@ -307,6 +311,65 @@ public class AgAlertEvaluatorTests
         Assert.Equal("AG Sync Recovered", recovered.MetricName);
         Assert.True(recovered.IsResolution);
         Assert.Contains("Sales", recovered.DetailText, StringComparison.Ordinal);
+    }
+
+    /* #5493: "AG Sync Fell Behind" is a state alert, the shape "Server Unreachable" has (ConnectionAlertPolicy): one
+       alert on entry, a repeat only per connection_refire_minutes (the refire interval; zero is off). */
+
+    [Fact]
+    public void SyncFellBehind_WithRefireOff_AlertsOnceAcrossManyCooldowns()
+    {
+        var now = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+        var e = new AgAlertEvaluator(() => now);
+        var fires = 0;
+
+        for (var minute = 0; minute <= 60; minute++)
+        {
+            now = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc).AddMinutes(minute);
+            fires += e.EvaluateDatabases(ServerId, new[] { Database(lagSeconds: 600) }, 300, 0, TimeSpan.Zero).Count;
+        }
+
+        Assert.Equal(1, fires);
+    }
+
+    [Fact]
+    public void SyncFellBehind_WithRefireOn_RepeatsOnTheRefireInterval_AndSaysSo()
+    {
+        var start = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+        var now = start;
+        var e = new AgAlertEvaluator(() => now);
+        var firedAtMinute = new List<int>();
+        var details = new List<string>();
+
+        for (var minute = 0; minute <= 95; minute++)
+        {
+            now = start.AddMinutes(minute);
+            foreach (var alert in e.EvaluateDatabases(ServerId, new[] { Database(lagSeconds: 600) }, 300, 0, TimeSpan.FromMinutes(30)))
+            {
+                firedAtMinute.Add(minute);
+                details.Add(alert.DetailText);
+            }
+        }
+
+        Assert.Equal(new[] { 0, 30, 60, 90 }, firedAtMinute.ToArray());
+        Assert.DoesNotContain("Still behind", details[0], StringComparison.Ordinal);
+        Assert.StartsWith("Still behind (re-alerting every 30 min).", details[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SyncFellBehind_RecoveringAndFallingBehindAgain_IsANewOccurrenceWithItsOwnAlert()
+    {
+        var now = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+        var e = new AgAlertEvaluator(() => now);
+
+        Assert.Single(e.EvaluateDatabases(ServerId, new[] { Database(lagSeconds: 600) }, 300, 0, TimeSpan.Zero));
+        now = now.AddMinutes(1);
+        Assert.Single(e.EvaluateDatabases(ServerId, new[] { Database(lagSeconds: 0) }, 300, 0, TimeSpan.Zero));
+        now = now.AddMinutes(1);
+        var again = Assert.Single(e.EvaluateDatabases(ServerId, new[] { Database(lagSeconds: 600) }, 300, 0, TimeSpan.Zero));
+        Assert.Equal(AgAlertPolicy.SyncFellBehindMetric, again.MetricName);
+        now = now.AddMinutes(60);
+        Assert.Empty(e.EvaluateDatabases(ServerId, new[] { Database(lagSeconds: 600) }, 300, 0, TimeSpan.Zero));
     }
 
     [Fact]

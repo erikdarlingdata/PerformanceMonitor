@@ -48,6 +48,7 @@ public class AlertMetricClassifierTests
     [InlineData("AG Sync Recovered")]
     [InlineData("AG Data Movement Resumed")]
     [InlineData("Web TLS Certificate Renewed")]   // #3514
+    [InlineData("MCP TLS Certificate Renewed")]   // #5288
     public void IsResolution_True_ForEveryResolutionNotice(string metric)
     {
         Assert.True(AlertMetricClassifier.IsResolution(metric));
@@ -77,6 +78,8 @@ public class AlertMetricClassifierTests
     /* #3514: the active web-TLS-certificate alert stays actionable — its "Expiring" name carries none of the
        resolution words, and adding "Renewed" to the vocabulary must not drag it green. */
     [InlineData("Web TLS Certificate Expiring")]
+    /* #5288: and so does the MCP endpoint's twin. */
+    [InlineData("MCP TLS Certificate Expiring")]
     public void IsResolution_False_ForActionableAlerts(string metric)
     {
         Assert.False(AlertMetricClassifier.IsResolution(metric));

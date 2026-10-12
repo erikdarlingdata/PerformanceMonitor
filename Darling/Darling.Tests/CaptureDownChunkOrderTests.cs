@@ -126,7 +126,8 @@ public sealed class CaptureDownChunkOrderTests
             /* Eight days of one-minute blocked_process_report and five-minute deadlocks rows, plus a filler
                collector so the newest chunk holds rows the arms must skip past. All Kind-Unspecified: naive-UTC
                storage, see DarlingObservability.LogCollectionAsync. */
-            var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            /* #5608: the end of the window is a fixed point inside one chunk, so the chunk layout the plan is read against is the same at any hour. */
+            var utcNow = LiveClock.AnchoredEnd();
             await SeedHistoryAsync(connection, utcNow, ct);
 
             /* The two verdict rows. deadlocks: SESSION_MISSING three days ago, then a SUCCESS a minute ago — NOT

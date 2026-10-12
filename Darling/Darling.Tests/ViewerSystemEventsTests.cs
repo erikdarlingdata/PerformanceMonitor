@@ -50,20 +50,8 @@ public sealed class ViewerSystemEventsTests
         Assert.Contains("ORDER BY event_time DESC", sql, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void DatabaseNameMapSql_LatestNamePerId_FromSizeStatsView()
-    {
-        var sql = ViewerDataService.DatabaseNameMapSql;
-
-        Assert.Contains("DISTINCT ON (database_id)", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM v_database_size_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_id, collection_time DESC", sql, StringComparison.Ordinal);
-    }
-
     [Theory]
     [InlineData(nameof(ViewerDataService.SystemHealthEventsByTypeSql))]
-    [InlineData(nameof(ViewerDataService.DatabaseNameMapSql))]
     public void SystemEventsReads_PgDialect_PositionalParams_NoTSqlNamedParams(string sqlName)
     {
         var sql = (string)typeof(ViewerDataService).GetField(sqlName)!.GetValue(null)!;
@@ -383,31 +371,7 @@ public sealed class ViewerSystemEventsTests
         Assert.Single(result.SystemHealth);
     }
 
-    // ── Severe-Errors database_id resolution ──
-
-    [Fact]
-    public void ResolveDatabaseName_MappedId_ReturnsName()
-    {
-        var map = new Dictionary<int, string> { [5] = "AdventureWorks", [1] = "master" };
-        Assert.Equal("AdventureWorks", ViewerDataService.ResolveDatabaseName(5, map));
-        Assert.Equal("master", ViewerDataService.ResolveDatabaseName(1, map));
-    }
-
-    [Fact]
-    public void ResolveDatabaseName_NoContext_ZeroOrNull_IsBlank()
-    {
-        var map = new Dictionary<int, string> { [5] = "AdventureWorks" };
-        Assert.Equal(string.Empty, ViewerDataService.ResolveDatabaseName(0, map));
-        Assert.Equal(string.Empty, ViewerDataService.ResolveDatabaseName(null, map));
-    }
-
-    [Fact]
-    public void ResolveDatabaseName_RealButUnmappedId_SurfacesTheRawId_NotBlank()
-    {
-        var map = new Dictionary<int, string> { [5] = "AdventureWorks" };
-        // A database dropped before the latest size-stats snapshot: surface the id rather than silently blank.
-        Assert.Equal("database_id 7", ViewerDataService.ResolveDatabaseName(7, map));
-    }
+    // Severe-Errors database_id resolution (the name the id carried at the error's time) is pinned in DatabaseNameHistoryTests (#5373).
 
     // ── Row projection: machine-local event time + resolved DB passthrough ──
 

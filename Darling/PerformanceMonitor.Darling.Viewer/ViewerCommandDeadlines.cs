@@ -30,8 +30,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <para><b>What is NOT a regime here.</b> Export was the obvious fourth candidate and it does not
 /// exist: <c>PerformanceMonitor.Ui.DataGridExport</c> is synchronous, store-unaware, and iterates
 /// <c>grid.Items</c>, so every CSV/copy path formats rows a visible-tab load already paid for. The
-/// long-running operations a user knowingly waits minutes for (snapshot_now, analyze_now, purge_now,
-/// Get Actual Plan) are COMMANDS on the command plane below, not reads.</para>
+/// long-running operations a user knowingly waits minutes for (snapshot_now, analyze_now,
+/// Get Actual Plan; purge_now was one until #4825, and now starts in the background and answers at once) are COMMANDS on the command plane below, not reads.</para>
 ///
 /// <para><b>Why none of these is <c>StorageCommandDeadlines.McpReadSeconds</c>.</b> That constant is
 /// 30 s for the MCP read surface and its derivation does not transfer. The MCP's worst verified read

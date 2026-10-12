@@ -1,6 +1,8 @@
 # The ONE Darling path gate. Both Darling jobs in .github/workflows/build.yml — `Darling PostgreSQL
 # tests` and `Darling Linux build` — read this file through dorny/paths-filter's documented
-# `filters: <relative path>` form, so the two jobs cannot disagree about what reaches Darling.
+# `filters: <relative path>` form, so the two jobs cannot disagree about what reaches Darling. The build
+# job reads it a third time to learn whether the PostgreSQL shards run (#5459 cut 3b), and
+# .github/scripts/ci-select.py reads it to replay the failure corpus.
 #
 # A FILE rather than a list per job (#3116). The PG job's own filter named `Darling/**` and the two
 # workflows and nothing else, while the Linux job in the same file already listed shared libraries;
@@ -44,6 +46,15 @@ darling:
   # worker-sizing formula, so an edit to it has to reach the suite. The Linux job runs no tests and
   # carries this entry only by sharing the file; it costs that job one publish and one image build.
   - '.github/workflows/nightly.yml'
+  # #5616: the Darling PostgreSQL shard script and the Lite shard script are run by the shard jobs and
+  # parsed by Darling.Tests pins, so an edit to either has to reach the suite.
+  - '.github/scripts/run-darling-pg-shard.ps1'
+  - '.github/scripts/run-lite-shard.ps1'
+  # #5627: the Darling upgrade-shape workflow and its script. The workflow runs the install and upgrade scripts under
+  # Darling/tools (already covered above) over real releases, and Darling.Tests parses both files, so an edit to
+  # either has to reach the suite.
+  - '.github/workflows/darling-upgrade-shapes.yml'
+  - '.github/scripts/darling-upgrade-shapes.ps1'
 
 # Lite/** is deliberately ABSENT, though build.yml's own `darling` filter carries it. That entry
 # exists because Darling.Tests reads Lite source in its cross-app parity guards, and those guards run

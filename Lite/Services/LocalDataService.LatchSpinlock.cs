@@ -36,7 +36,7 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 WITH top_latches AS
@@ -122,7 +122,7 @@ ORDER BY latch_class, collection_time";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 WITH latest AS
@@ -188,7 +188,7 @@ LIMIT $4";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 WITH top_spinlocks AS
@@ -266,7 +266,7 @@ ORDER BY spinlock_name, collection_time";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 WITH latest AS
@@ -362,6 +362,10 @@ public class LatchStatsSnapshotRow
     /// <c>FileIoStatsRow</c> / resource-semaphore idiom).</summary>
     public bool IsUnknowable => SampleIntervalSeconds == 0;
 
+    /// <summary>#4966: when this row's snapshot was collected, to the second, in the display zone (the grid's Collected column,
+    /// which sorts by <see cref="CollectionTime"/>), so a reader can tell a stale latest-snapshot grid from a fresh one.</summary>
+    public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
+
     /// <summary>The grid's Interval (sec) cell — see <see cref="DeltaSeriesShaping.IntervalDisplay"/>.</summary>
     public string IntervalDisplay => DeltaSeriesShaping.IntervalDisplay(SampleIntervalSeconds);
 }
@@ -398,6 +402,10 @@ public class SpinlockStatsSnapshotRow
 
     /// <summary>True when the row's deltas are the unknowable marker — a stored interval of exactly 0.</summary>
     public bool IsUnknowable => SampleIntervalSeconds == 0;
+
+    /// <summary>#4966: when this row's snapshot was collected, to the second, in the display zone (the grid's Collected column,
+    /// which sorts by <see cref="CollectionTime"/>), so a reader can tell a stale latest-snapshot grid from a fresh one.</summary>
+    public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
 
     /// <summary>The grid's Interval (sec) cell — see <see cref="DeltaSeriesShaping.IntervalDisplay"/>.</summary>
     public string IntervalDisplay => DeltaSeriesShaping.IntervalDisplay(SampleIntervalSeconds);

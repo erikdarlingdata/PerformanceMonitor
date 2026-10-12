@@ -75,7 +75,8 @@ internal static class McpRuntimePrecondition
     /// <summary>
     /// The <c>precondition</c> envelope when the collector serving this read is not being invoked against
     /// this server while the server is collecting normally — i.e. its <c>AppliesTo</c> gate is off — or
-    /// <c>null</c> otherwise. Darling's twin (#2559).
+    /// <c>null</c> otherwise. Darling's twin (#2559). A collector that has never run and is not due yet gets
+    /// the <c>unavailable</c> envelope instead (see <see cref="CollectorRuntimePrecondition.GatedOffStatusWord"/>).
     ///
     /// <para>Call this AFTER <see cref="StatusAsync"/>, never instead of it: a collector that ran and
     /// recorded a denial has a specific sentence from the monitored server itself, which beats an inference
@@ -93,10 +94,11 @@ internal static class McpRuntimePrecondition
     {
         DateTime? collectorLastRunUtc;
         DateTime? serverLastCollectedUtc;
+        DateTime? serverFirstCollectedUtc;
 
         try
         {
-            (collectorLastRunUtc, serverLastCollectedUtc) =
+            (collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc) =
                 await dataService.GetCollectorLastRunAsync(serverId, collectorName);
         }
         catch (Exception)
@@ -105,9 +107,11 @@ internal static class McpRuntimePrecondition
         }
 
         var message = CollectorRuntimePrecondition.GatedOffMessage(
-            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc);
+            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
 
-        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
+        return message is null ? null : McpHelpers.Status(
+            CollectorRuntimePrecondition.GatedOffStatusWord(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc),
+            message);
     }
 
     /// <summary>

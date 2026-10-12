@@ -11,6 +11,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -114,7 +115,8 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
             Assert.DoesNotContain("widen", text, StringComparison.OrdinalIgnoreCase);
         }
 
-        /* Collected, but outside the asked-for window: a true negative, and widening IS the move. */
+        /* Collected, but outside the asked-for window: nothing was read from the window, so the answer is the
+           cut-window one (#4966) rather than "genuinely quiet". It is not the never-collected fault either. */
         await SeedLogAsync("query_store", DateTime.UtcNow.AddHours(-48));
 
         var quiet = await McpHealthTools.GetCollectionLog(service, _serverManager, ServerName, 1, 200);
@@ -122,7 +124,7 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
         Assert.Equal("empty", quietRoot.GetProperty("status").GetString());
         var quietText = quietRoot.GetProperty("message").GetString()!;
         Assert.DoesNotContain("EVER", quietText, StringComparison.Ordinal);
-        Assert.Contains("widen", quietText, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal($"No collector runs recorded for {ServerName} in the last 1 hour(s). {McpHelpers.CutWindowNothingReadMessage}", quietText);
     }
 
     [Fact]
@@ -339,6 +341,40 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
         Assert.Equal(
             minus20.ToString("o")[..19],
             root.GetProperty("runs")[2].GetProperty("collection_time").GetString()![..19]);
+    }
+
+    /// <summary>
+    /// #4966, #5015: where the page's rows stop (<c>oldest_returned_collection_time</c>) and where they start
+    /// (<c>newest_returned_collection_time</c>) describe the window the page covers, so both print as UTC with the
+    /// trailing Z like <c>effective_start</c> does, on the one-server form and the fleet form alike. The rows' own
+    /// times keep the store's naive form. The instants are the same ones the fields always named: only the zone
+    /// marker is new.
+    /// </summary>
+    [Fact]
+    public async Task TheReturnedBounds_EndInZ_OnBothForms()
+    {
+        var service = new LocalDataService(_duckDb);
+        var oldest = DateTime.UtcNow.AddMinutes(-30);
+        var newest = DateTime.UtcNow.AddMinutes(-10);
+        await SeedLogAsync("query_store", oldest);
+        await SeedLogAsync("deadlocks", newest);
+
+        var oneServer = JsonDocument.Parse(await McpHealthTools.GetCollectionLog(service, _serverManager, ServerName, 24, 10)).RootElement;
+        var fleet = JsonDocument.Parse(await McpHealthTools.GetCollectionLog(service, _serverManager, null, 24, 10)).RootElement;
+
+        foreach (var root in new[] { oneServer, fleet })
+        {
+            var oldestText = root.GetProperty("oldest_returned_collection_time").GetString()!;
+            Assert.EndsWith("Z", oldestText, StringComparison.Ordinal);
+            Assert.True(Math.Abs((DateTime.Parse(oldestText, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal) - oldest).TotalSeconds) < 2,
+                $"oldest_returned_collection_time {oldestText} should name the oldest run, {oldest:o}");
+            var newestText = root.GetProperty("newest_returned_collection_time").GetString()!;
+            Assert.EndsWith("Z", newestText, StringComparison.Ordinal);
+            Assert.True(Math.Abs((DateTime.Parse(newestText, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal) - newest).TotalSeconds) < 2,
+                $"newest_returned_collection_time {newestText} should name the newest run, {newest:o}");
+            /* A row's own time keeps the store's naive form: only the page's bounds name the window. */
+            Assert.False(root.GetProperty("runs")[0].GetProperty("collection_time").GetString()!.EndsWith('Z'));
+        }
     }
 
     private async Task<DuckDBConnection> SeedConnectionAsync()

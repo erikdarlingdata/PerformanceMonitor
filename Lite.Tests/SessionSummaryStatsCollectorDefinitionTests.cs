@@ -30,7 +30,7 @@ public sealed class SessionSummaryStatsCollectorDefinitionTests
     private const string ExpectedQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     total_sessions = CONVERT(integer, COUNT_BIG(*)),
     running_sessions =
         SUM

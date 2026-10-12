@@ -422,24 +422,20 @@ public sealed class DarlingEmptyEnumerationInventoryTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-            /* The fleet read is scoped to the CONFIG registry, not the collector-side servers table. */
-            await DarlingMcpTestData.ExecAsync(connection, ct, @"
-INSERT INTO config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE)
-ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
 
             await SeedLogAsync(connection, ct, FleetProbeCollector, MinutesAgo(30), EnumeratedCollectorDriver.EmptyEnumerationMessage);
             await SeedSizeAsync(connection, ct, "AdventureWorks", 7, MinutesAgo(25));
 
-            /* #1863's decision, extended: the fleet rollup projects the ordinal and NOT the value. It
-               groups server_id INTO the result, so there is no single server to probe an inventory for,
-               and its only caller counts bands — with last_note already NULL the formatter returns blank
-               whatever the flag says. A real value here would be a second cross-collector join across
-               every enabled server on a query the status bar re-runs on every aggregate-tab refresh,
-               which is the cost #1855 measured and declined. Asserted against live data that WOULD
-               qualify on the per-server read, so a fleet read that quietly grew the join fails here. */
+            /* #1863's decision, extended: the fleet rollup projects no inventory at all. It groups server_id
+               INTO the result, so there is no single server to probe an inventory for, and its callers (the
+               Overview cards and the status bar, through the by-server read) count bands — the formatter
+               returns blank whatever the flag says. A real value here would be a second cross-collector join
+               across every server on a query the status bar re-runs on every aggregate-tab refresh, which is
+               the cost #1855 measured and declined. Asserted against live data that WOULD qualify on the
+               per-server read, so a fleet read that quietly grew the join fails here. */
             await using var viewer = new ViewerDataService(cs!);
 
-            var fleet = (await viewer.GetFleetCollectionHealthAsync(ct))
+            var fleet = (await viewer.GetFleetCollectionHealthByServerAsync(ct))[ServerId]
                 .Where(h => h.CollectorName == FleetProbeCollector)
                 .ToList();
 
@@ -465,9 +461,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
     /* ── helpers ── */
 
     /// <summary>
-    /// The fleet read rolls up EVERY enabled server and its rows carry no server_id, so the fleet
-    /// assertions scope themselves by a collector name no real install has — the sentinel-server
-    /// discipline applied to the only key that projection exposes.
+    /// The fleet read rolls up EVERY server in the store, so the fleet assertions scope themselves by this
+    /// sentinel server's rows and by a collector name no real install has — the sentinel-server
+    /// discipline.
     /// </summary>
     private const string FleetProbeCollector = "inventory_fleet_probe";
 
@@ -506,17 +502,18 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             databaseName, databaseId, 1, "ROWS", databaseName + "_data", "C:\\data\\" + databaseName + ".mdf", 128.00m);
 
     /// <summary>The Azure sibling shape (#2643): NULL database_id / file_id / physical_name, a file_name
-    /// that says it is a whole database, and a real size — exactly what the arm projects.</summary>
+    /// that says it is a whole database, the allocated data space as total_size_mb and the data space
+    /// used as used_size_mb. Exactly what the arm projects.</summary>
     private static async Task SeedSiblingSizeAsync(
         NpgsqlConnection connection, CancellationToken ct,
         string databaseName, DateTime collectionTimeUtc) =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO database_size_stats
     (collection_id, collection_time, server_id, server_name, database_name, database_id,
-     file_id, file_type_desc, file_name, physical_name, total_size_mb)
-VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, NULL, $8)",
+     file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
+VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, NULL, $8, $9)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc), ServerId, ServerName,
-            databaseName, "ROWS", "(whole database)", 23.00m);
+            databaseName, "ROWS", "(whole database)", 128.00m, 23.00m);
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {

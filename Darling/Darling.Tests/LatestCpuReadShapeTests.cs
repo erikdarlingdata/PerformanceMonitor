@@ -339,7 +339,7 @@ LIMIT 1";
             /* Three polls per server one minute apart, each carrying one new ring-buffer sample: the steady
                state at the collector's one-minute frequency. The CPU values carry the poll ordinal so the row
                that comes back is identifiable rather than merely equal to the oracle's. */
-            var newestUtc = TruncateToSeconds(DateTime.UtcNow);
+            var newestUtc = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             for (var i = 0; i < s_offsetMinutes.Length; i++)
             {
                 for (var poll = 0; poll < 3; poll++)
@@ -398,6 +398,8 @@ LIMIT 1";
         {
             await DeleteSentinelsAsync(connection, cancellationToken);
 
+            /* The trap predicate compares against the store's own now(), which the test clock override cannot move (#5608),
+               so this seed stays on the real clock. */
             var newestUtc = TruncateToSeconds(DateTime.UtcNow);
 
             /* One server behind the store by more than the window, one in the store's own frame. */
@@ -445,7 +447,7 @@ LIMIT 1";
             /* One poll catching up on a ring-buffer backlog: thirty samples under ONE collection_time. They
                go in NEWEST-sample-first, so heap order runs opposite to sample order and a scan of the tied
                group hands back the OLDEST sample unless the tiebreak sorts it. */
-            var collectionTime = TruncateToSeconds(DateTime.UtcNow);
+            var collectionTime = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             for (var minutesAgo = 0; minutesAgo < 30; minutesAgo++)
             {
                 await InsertSampleAsync(

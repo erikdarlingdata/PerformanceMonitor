@@ -67,6 +67,7 @@ namespace Darling.Tests;
 /// that makes it safe. The assertion was passing for the wrong reason, which is worth less than a failure,
 /// and only a mutation aimed at the claim rather than at the fix could tell the two apart.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerFleetTimerGuardTests
 {
     /// <summary>The two <c>DispatcherTimer</c> ticks that run at <c>NocRefreshIntervalSeconds</c>.</summary>

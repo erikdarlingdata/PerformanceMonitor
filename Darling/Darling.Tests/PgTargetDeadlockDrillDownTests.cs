@@ -45,13 +45,14 @@ public sealed class PgTargetDeadlockDrillDownTests
     /* ───────────────────────── the read ───────────────────────── */
 
     [Fact]
-    public void TheExemplarSql_GroupsByShapeNotByHash_WindowsOnCollectionTime_AndBoundsEverythingInTheRead()
+    public void TheExemplarSql_GroupsByShapeNotByHash_WindowsOnOccurrenceWithTheCollectionTimeFallback_AndBoundsEverythingInTheRead()
     {
         var sql = PgTargetDrillDownCollector.PgTargetDeadlockExemplarsSql;
         Assert.Contains("FROM pg_deadlocks", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("AND   collection_time >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("AND   collection_time <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   COALESCE(occurred_at, collection_time) >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   COALESCE(occurred_at, collection_time) <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   collection_time >= $5", sql, StringComparison.Ordinal);
         /* The shape, and the recurrence as distinct REPORTS within it. */
         Assert.Contains("GROUP BY participant_count, lock_modes, resources", sql, StringComparison.Ordinal);
         Assert.Contains("count(DISTINCT deadlock_hash)", sql, StringComparison.Ordinal);
@@ -62,10 +63,13 @@ public sealed class PgTargetDeadlockDrillDownTests
         Assert.Contains("count(*) OVER ()", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(reports) OVER ()", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(rows_captured) OVER ()", sql, StringComparison.Ordinal);
-        /* Bounded in the read, with the untruncated lengths for the flags. */
-        Assert.Contains("LEFT(latest_victim_statement, $5)", sql, StringComparison.Ordinal);
+        /* #5320: the statement and graph come back WHOLE, for the filter to judge before the caps cut them in C#, with the
+           untruncated lengths for the flags. */
+        Assert.DoesNotContain("LEFT(latest_victim_statement", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEFT(latest_graph_text", sql, StringComparison.Ordinal);
+        Assert.Contains("latest_victim_statement                              AS victim_statement", sql, StringComparison.Ordinal);
+        Assert.Contains("latest_graph_text                                    AS graph_text", sql, StringComparison.Ordinal);
         Assert.Contains("length(latest_victim_statement)", sql, StringComparison.Ordinal);
-        Assert.Contains("LEFT(latest_graph_text, $6)", sql, StringComparison.Ordinal);
         Assert.Contains("length(latest_graph_text)", sql, StringComparison.Ordinal);
         /* Store clock discipline and dialect. */
         Assert.DoesNotContain("now(", sql, StringComparison.OrdinalIgnoreCase);
@@ -118,8 +122,9 @@ public sealed class PgTargetDeadlockDrillDownTests
     [Fact]
     public void AStoredFindingsExemplars_ReadBackNormalized_AndNameTheirReportByTimeAndPid()
     {
-        const string rawStatement = "UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111";
-        const string rawGraph = "Process 11 waits for ShareLock on transaction 900; blocked by process 12.\nProcess 12 waits for ShareLock on transaction 901; blocked by process 11.\nProcess 11: UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111\nProcess 12: UPDATE accounts SET pin = '9034' WHERE card = 5500005555555559";
+        /* The planted literals are sentinels: their letters lie outside a-f, so a timestamp, an id or a hash can't contain them. */
+        const string rawStatement = "UPDATE accounts SET pin = 'qx4721' WHERE card = 4111111111111111";
+        const string rawGraph = "Process 11 waits for ShareLock on transaction 900; blocked by process 12.\nProcess 12 waits for ShareLock on transaction 901; blocked by process 11.\nProcess 11: UPDATE accounts SET pin = 'qx4721' WHERE card = 4111111111111111\nProcess 12: UPDATE accounts SET pin = 'qx9034' WHERE card = 5500005555555559";
         var rawHash = PgDeadlockLogParser.HashOf(rawGraph);
         var lastSeen = new DateTime(2026, 9, 1, 12, 30, 15, 250);
         var sentence = $"Exemplars: 1 report captured. The most frequent 2-participant shape involves ShareLock on transaction with the victim `{rawStatement}`, seen 1 time.";
@@ -164,7 +169,7 @@ public sealed class PgTargetDeadlockDrillDownTests
 
         foreach (var text in new[] { once.Item1, finding.StoryText })
         {
-            foreach (var secret in new[] { "4721", "9034", "4111111111111111", "5500005555555559", rawHash })
+            foreach (var secret in new[] { "qx4721", "qx9034", "4111111111111111", "5500005555555559", rawHash })
                 Assert.DoesNotContain(secret, text, StringComparison.Ordinal);
         }
 
@@ -368,7 +373,7 @@ public sealed class PgTargetDeadlockDrillDownTests
             const string resourcesA = "relation orders, tuple orders";
             /* The later report of shape A as a build before #4005 stored it: a literal in the graph, and a hash
                over that raw graph. The exemplar carries neither (#4005). */
-            var graphA = "Process 11 waits for ShareLock on transaction 900; blocked by process 12.\nProcess 12 waits for ShareLock on transaction 901; blocked by process 11.\nProcess 11: UPDATE orders SET status = $1 WHERE id = $2\nProcess 12: UPDATE orders SET status = 'held-4721' WHERE id = 7";
+            var graphA = "Process 11 waits for ShareLock on transaction 900; blocked by process 12.\nProcess 12 waits for ShareLock on transaction 901; blocked by process 11.\nProcess 11: UPDATE orders SET status = $1 WHERE id = $2\nProcess 12: UPDATE orders SET status = 'held-qx4721' WHERE id = 7";
             var rawHashA2 = PgDeadlockLogParser.HashOf(graphA);
             await PlantDeadlockAsync(connection, windowStart.AddMinutes(10), "hash-a1", 2, modesA, resourcesA, "UPDATE orders SET status = $1 WHERE id = $2", graphA, ct);
             await PlantDeadlockAsync(connection, windowStart.AddMinutes(45), rawHashA2, 2, modesA, resourcesA, "UPDATE   orders\n SET status = $1 WHERE id = $2", graphA, ct);
@@ -418,9 +423,9 @@ public sealed class PgTargetDeadlockDrillDownTests
                 Assert.False(a.GetProperty("victim_statement_may_be_truncated").GetBoolean());
                 Assert.Equal(4, a.GetProperty("graph_text_lines_total").GetInt32());
                 Assert.False(a.GetProperty("graph_text_truncated").GetBoolean());
-                Assert.Equal(graphA.Replace("'held-4721' WHERE id = 7", "'?' WHERE id = ?", StringComparison.Ordinal), a.GetProperty("graph_text").GetString());
+                Assert.Equal(graphA.Replace("'held-qx4721' WHERE id = 7", "'?' WHERE id = ?", StringComparison.Ordinal), a.GetProperty("graph_text").GetString());
                 Assert.DoesNotContain(rawHashA2, analysis, StringComparison.Ordinal);
-                Assert.DoesNotContain("4721", analysis, StringComparison.Ordinal);
+                Assert.DoesNotContain("qx4721", analysis, StringComparison.Ordinal);
 
                 /* Shape B: one report seen twice; both bounds cut and both say so. */
                 var b = shapes[1];
@@ -457,7 +462,7 @@ public sealed class PgTargetDeadlockDrillDownTests
             /* #4005: a finding a build before #4005 stored (an anchored run like the one above persists nothing)
                reads back through PgFindingStore, get_analysis_findings' read, normalized and naming its report by
                timestamp and pid, never by the stored hash. */
-            var rawStatement = "UPDATE orders SET status = 'held-4721' WHERE id = 7";
+            var rawStatement = "UPDATE orders SET status = 'held-qx4721' WHERE id = 7";
             var preFix = new AnalysisFinding
             {
                 FindingId = CollectionIdGenerator.Next(),
@@ -497,7 +502,7 @@ public sealed class PgTargetDeadlockDrillDownTests
 
             var stored = await DarlingMcpTools.GetAnalysisFindings(service, postgres, ServerName, 24, include_drilldown: true);
             Assert.Contains("4005-pre-fix-exemplar", stored, StringComparison.Ordinal);
-            Assert.DoesNotContain("4721", stored, StringComparison.Ordinal);
+            Assert.DoesNotContain("qx4721", stored, StringComparison.Ordinal);
             Assert.DoesNotContain(rawHashA2, stored, StringComparison.Ordinal);
             Assert.Contains(PgDeadlockLogParser.ReportIdentity(windowStart.AddMinutes(45), 4242), stored, StringComparison.Ordinal);
 

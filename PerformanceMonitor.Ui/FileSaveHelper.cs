@@ -23,10 +23,14 @@ public static class FileSaveHelper
 {
     /// <summary>
     /// Prompts for a <c>.sqlplan</c> path and writes <paramref name="planXml"/> there; the pre-filled name is
-    /// <paramref name="defaultName"/> plus a <c>yyyyMMdd_HHmmss</c> timestamp.
+    /// <paramref name="defaultName"/> plus a <c>yyyyMMdd_HHmmss</c> timestamp. A plan the statement filter withheld whole
+    /// is refused with <see cref="PerformanceMonitor.Common.SensitiveStatements.WithheldPlanSentence"/> and nothing is written.
     /// </summary>
     public static void SavePlanFile(string planXml, string defaultName)
     {
+        /* #5320: the whole-plan marker is not a plan; say it is withheld instead of writing it into a .sqlplan. */
+        if (WithheldPlanGuard.RefuseSave(planXml)) return;
+
         var dialog = new SaveFileDialog
         {
             Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
@@ -48,10 +52,16 @@ public static class FileSaveHelper
 
     /// <summary>
     /// Prompts for a <c>.xml</c> path and writes <paramref name="xml"/> there. <paramref name="suggestedFileName"/>
-    /// is the full pre-filled file name; <paramref name="whatLabel"/> names the content in the error dialog.
+    /// is the full pre-filled file name; <paramref name="whatLabel"/> names the content in the error dialog;
+    /// <paramref name="withheldSubject"/> names it in the withheld sentence (#5367: "deadlock graph", "blocked process
+    /// report"; the plan viewers' own sentence says "plan").
     /// </summary>
-    public static void SaveXmlToFile(string xml, string suggestedFileName, string whatLabel)
+    public static void SaveXmlToFile(string xml, string suggestedFileName, string whatLabel, string withheldSubject)
     {
+        /* #5320: a deadlock graph or blocked process report the statement filter withheld whole is the marker, not XML.
+           Say so and write no file, the same as the plan save sites do (shared by Lite and the Darling viewer). */
+        if (WithheldPlanGuard.RefuseSave(xml, withheldSubject)) return;
+
         var dialog = new SaveFileDialog
         {
             Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*",

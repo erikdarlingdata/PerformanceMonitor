@@ -40,28 +40,43 @@ public sealed class RawPurgeTriggerLiveTests
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 trigger pins.");
 
         var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default);
-
-        /* Max Auto Prepare=0: RunRetentionPurgeJobSql is a multi-statement string (BEGIN; ...; COMMIT;) run
-           through NpgsqlCommand, and this rig's connection reruns other multi-statement SQL enough times over
-           its life that Npgsql's default auto-prepare threshold can trigger on it, which Npgsql rejects with
-           42601 ("cannot insert multiple commands into a prepared statement") — a client-side caching
-           artifact of this test's connection reuse, not a product behavior. */
-        var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { MaxAutoPrepare = 0 }.ConnectionString;
-        var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync();
-        await PgMigrations.MigrateAsync(connection, default);
-
-        var enabled = await TimescaleSupport.TryEnableAsync(connection, null, default);
-        Assert.SkipWhen(!enabled, "The live #4299 trigger pins need TimescaleDB.");
-        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, default);
-        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, default);
-
-        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection) { CommandTimeout = SetupTimeoutSeconds })
+        NpgsqlConnection? connection = null;
+        /* A skip (no TimescaleDB) or a failed setup throws before the caller owns the store, so the opener drops it
+           here. Left alone it would survive to the process-exit drain, which the test runner waits only 10 s for. */
+        try
         {
-            await stop.ExecuteNonQueryAsync();
-        }
+            /* Max Auto Prepare=0: RunRetentionPurgeJobSql is a multi-statement string (BEGIN; ...; COMMIT;) run
+               through NpgsqlCommand, and this rig's connection reruns other multi-statement SQL enough times over
+               its life that Npgsql's default auto-prepare threshold can trigger on it, which Npgsql rejects with
+               42601 ("cannot insert multiple commands into a prepared statement") — a client-side caching
+               artifact of this test's connection reuse, not a product behavior. */
+            var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { MaxAutoPrepare = 0 }.ConnectionString;
+            connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync();
+            await PgMigrations.MigrateAsync(connection, default);
 
-        return (connection, scratch);
+            var enabled = await TimescaleSupport.TryEnableAsync(connection, null, default);
+            Assert.SkipWhen(!enabled, "The live #4299 trigger pins need TimescaleDB.");
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, default);
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, default);
+
+            await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                await stop.ExecuteNonQueryAsync();
+            }
+
+            return (connection, scratch);
+        }
+        catch
+        {
+            if (connection is not null)
+            {
+                await connection.DisposeAsync();
+            }
+
+            await scratch.DisposeAsync();
+            throw;
+        }
     }
 
     private static async Task<long> ReadPostmasterEpochAsync(NpgsqlConnection connection)
@@ -190,6 +205,63 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
+        }
+    }
+
+    /// <summary>#5329: a store that took the io rollups holds raw hours the io views never saw (they are created WITH
+    /// NO DATA and their refresh policy reaches back one day), and the repair closes 24 buckets a start. The io
+    /// views must not hold the raw purge (the #1661 rule), so a purge over a range the io views only cover for the
+    /// last day still drops chunks and records "ran". RED on 9aae0d75c: the hole gate walked the io views and held
+    /// query_stats for as long as the io floor sat above raw's.</summary>
+    [Fact]
+    public async Task IoRollupsFilledOnlyForTheLastDay_DoNotHoldThePurge()
+    {
+        var (connection, scratch) = await OpenAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await ArmRawJobAsync(connection, Raw);
+            await SeedRawAsync(connection);
+
+            var dropFrom = TimescaleSupport.AlignDown(DateTime.UtcNow.AddDays(-11), TimeSpan.FromHours(1));
+            var dropTo = TimescaleSupport.AlignDown(DateTime.UtcNow, TimeSpan.FromHours(1));
+            await RefreshSuccessorsAsync(connection, dropFrom, dropTo);
+
+            /* What the io views hold on an upgraded store: the policy's one-day window and nothing earlier. */
+            foreach (var io in new[] { TimescaleSupport.QueryStatsIoHourlyView, TimescaleSupport.ProcedureStatsIoHourlyView })
+            {
+                await using var refresh = new NpgsqlCommand($"CALL refresh_continuous_aggregate('collect.{io}'::regclass, $1::timestamp, $2::timestamp)", connection) { CommandTimeout = SetupTimeoutSeconds };
+                refresh.Parameters.AddWithValue(DateTime.SpecifyKind(dropTo.AddDays(-1), DateTimeKind.Unspecified));
+                refresh.Parameters.AddWithValue(DateTime.SpecifyKind(dropTo, DateTimeKind.Unspecified));
+                await refresh.ExecuteNonQueryAsync();
+            }
+
+            var periodic = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, TimescaleSupport.RetentionSweepPass.Periodic, default);
+            Assert.True(periodic.Armed >= 1, "the seeded and fully-refreshed raw relation must read Covered this pass");
+            await StampCurrentEpochAsync(connection, Raw);
+
+            var before = await ChunkCountAsync(connection);
+            var logger = new CapturingTestLogger();
+            await DarlingWorker.TriggerRawPurgeCoreAsync(connection, logger, default);
+
+            var after = await ChunkCountAsync(connection);
+            Assert.True(after < before, $"an io rollup that is only filled for the last day must not hold the raw purge (before={before}, after={after}); log: {logger.Joined}");
+            var rec = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
+            Assert.NotNull(rec);
+            Assert.Equal("ran", rec!.Outcome);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                var batch = new LiveCleanupBatch(cleanup);
+                await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
+            });
+            await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -241,6 +313,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -300,6 +373,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -365,6 +439,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -417,6 +492,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -504,6 +580,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -585,6 +662,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -728,6 +806,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 var batch = new LiveCleanupBatch(cleanup);
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
+            await scratch.DisposeAsync();
         }
     }
 }

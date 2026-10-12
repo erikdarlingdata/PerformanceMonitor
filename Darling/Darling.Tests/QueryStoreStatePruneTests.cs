@@ -40,6 +40,7 @@ namespace Darling.Tests;
 /// itself lives in the shared <see cref="QueryStorePerDatabaseState"/> so a prefix cannot end up pruned on
 /// one SKU and orphaning on the other.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class QueryStoreStatePruneTests
 {
     private static string Qsowm(string database) => QueryStoreOpenIntervalState.WatermarkKeyPrefix + database;

@@ -100,7 +100,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("get_alert_history", "server_name,hours_back,limit,as_of,include_dismissed")]
     [InlineData("get_mute_rules", "enabled_only")]
     [InlineData("update_alert_settings", "settings_json")]
-    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at")]
+    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id")]
     [InlineData("delete_mute_rule", "rule_id")]
     [InlineData("set_mute_rule_enabled", "rule_id,enabled")]
     [InlineData("update_mute_rule", "rule_id,changes_json")]
@@ -152,14 +152,14 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
         /* #3541 A3: the exclusion is the DEFAULT arm of a caller's choice, not a hidden constant — $5 lifts
            it. The literal stays so the grid's read and this one keep saying the same words. */
-        Assert.Contains("(dismissed = FALSE OR $5)", sql, StringComparison.Ordinal);
+        Assert.Contains("(a.dismissed = FALSE OR $5)", sql, StringComparison.Ordinal);
         /* And the row SAYS which population it belongs to, so an include-dismissed page can label each row. */
         Assert.Contains("dismissed\n", sql.Replace("\r\n", "\n"), StringComparison.Ordinal);
         /* #2495: BOTH window edges are bound, so server_id and the cap moved up one ordinal each. */
         Assert.Contains("alert_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("server_id = $3", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY alert_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("a.server_id = $3", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY a.alert_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
     }
 
@@ -168,8 +168,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     {
         var sql = Reader.AlertHistoryAllServersSql;
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
-        Assert.Contains("(dismissed = FALSE OR $4)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("server_id =", sql, StringComparison.Ordinal);   /* fleet-wide */
+        Assert.Contains("(a.dismissed = FALSE OR $4)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("a.server_id =", sql, StringComparison.Ordinal);   /* fleet-wide */
         Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);       /* #2495 upper edge */
         Assert.Contains("LIMIT $3", sql, StringComparison.Ordinal);
     }
@@ -2095,8 +2095,12 @@ internal sealed class SlowInsertMuteRuleStore : IMuteRuleStore
 /// </summary>
 public sealed class RepeatedCreateMuteRuleTests
 {
+    /* #5496: one clock reading for the whole class. Expiry(30) is called twice in one test and the two spellings must be
+       the SAME instant; reading the date at each call made them differ when a run crossed midnight UTC. */
+    private static readonly DateTime Today = DateTime.UtcNow.Date;
+
     private static string Expiry(int daysFromNow) =>
-        DateTime.UtcNow.Date.AddDays(daysFromNow).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+        Today.AddDays(daysFromNow).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
 
     private static Task<string> ViaMcp(
         IMuteRuleStore store,

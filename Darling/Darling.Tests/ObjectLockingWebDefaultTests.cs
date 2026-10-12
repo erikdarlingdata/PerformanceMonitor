@@ -33,7 +33,7 @@ public sealed class ObjectLockingWebDefaultTests
 
         var dispatchLine = Assert.Single(
             web.Split('\n'),
-            l => l.Contains("DarlingMcpObjectStatsTools.GetObjectLocking(", StringComparison.Ordinal));
+            l => l.Contains("DarlingMcpObjectStatsTools.GetObjectLockingWithHeatAsync(", StringComparison.Ordinal));
 
         Assert.Contains("Rows(c, \"limit\", 200)", dispatchLine, StringComparison.Ordinal);
 

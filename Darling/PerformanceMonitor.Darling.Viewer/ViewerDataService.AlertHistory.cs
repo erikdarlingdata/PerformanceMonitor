@@ -12,7 +12,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -37,8 +39,14 @@ public sealed class ViewerAlertRow
     /// <summary>The server the alert fired for (dismiss keys on it; the Server column shows the name).</summary>
     public int ServerId { get; init; }
 
-    /// <summary>The alert's server display name (the Server column + mute-from-alert context).</summary>
+    /// <summary>The server's registry display name where the row's server is registered, else the stored name
+    /// (the Server column).</summary>
     public string ServerName { get; init; } = "";
+
+    /// <summary>The spelling the alert log STORED for the server (an analysis alert stores the storage name,
+    /// an engine alert the display name). Mute rules are authored from and judged against this spelling, so
+    /// <see cref="ToMuteContext"/> uses it, not <see cref="ServerName"/>.</summary>
+    public string StoredServerName { get; init; } = "";
 
     public required string MetricName { get; init; }
 
@@ -58,8 +66,22 @@ public sealed class ViewerAlertRow
 
     public string? ContextJson { get; init; }
 
-    /// <summary>Stored naive-UTC; shown in the viewer machine's local time (the viewer convention).</summary>
-    public string TimeLocal => ViewerTimeHelper.ForDisplay(AlertTime).ToString("yyyy-MM-dd HH:mm:ss");
+    /// <summary>This row's own server's clock (its time zone where one is known, else its UTC offset; the viewer
+    /// machine's offset while none is collected), set by <see cref="ViewerDataService.GetAlertHistoryAsync"/>
+    /// from the fleet's clocks, which it reads at most once per <see cref="ViewerDataService.AlertClockLifetime"/>
+    /// (#4766). The all-servers list holds rows of many servers, so each converts on
+    /// its own clock and not on the active server tab's. Null (a row built without one) falls back to the active
+    /// server's clock.</summary>
+    public ServerClock? Clock { get; init; }
+
+    /// <summary>Stored naive-UTC; shown in the viewer's time display mode (Server/Local/UTC), Server on this row's
+    /// own server's clock (<see cref="Clock"/>). An alert in the repeated hour after a fall-back reads the same wall
+    /// time in both of its occurrences, so it takes a space and its UTC offset ("2026-11-01 01:30:00 -05:00"), as
+    /// Lite's alert row and <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> do for the other
+    /// grids (#4766).</summary>
+    public string TimeLocal => ViewerTimeHelper.FormatForDisplay(
+        AlertTime, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock),
+        "yyyy-MM-dd HH:mm:ss");
 
     public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
 
@@ -88,6 +110,11 @@ public sealed class ViewerAlertRow
 
     public bool IsWarning => AlertHistoryRowSeverity.IsWarning(MetricName, ContextJson);
 
+    /* #5642: how old the newest sample was when the alert FIRED, the Newest Sample column. Read off the persisted context
+       (the carrier the engine stamped), never measured against the clock now; empty on a row without one, as Lite's row. */
+    public string NewestSampleDisplay =>
+        AlertDetailText.SampleAgeLine(AlertContextSerializer.TryReadNewestSample(ContextJson)) ?? "";
+
     /// <summary>
     /// This row as the <see cref="AlertMuteContext"/> a <see cref="MuteRule"/> is judged against — the SAME
     /// server name and metric name the row carries (so a rule keyed on them matches this row by construction,
@@ -110,7 +137,9 @@ public sealed class ViewerAlertRow
     {
         var context = new AlertMuteContext
         {
-            ServerName = ServerName,
+            /* Ids are signed hashes: only 0 means "no id". */
+            ServerId = ServerId != 0 ? ServerId : null,
+            ServerName = StoredServerName.Length > 0 ? StoredServerName : ServerName,
             MetricName = MetricName,
         };
         context.PopulateFromDetailText(DetailText, MetricName);
@@ -127,47 +156,96 @@ public sealed partial class ViewerDataService
        server_id + server_name so the grid's Server column and the dismiss key have them. */
 
     private const string AlertHistorySelectColumns = @"
-    alert_time,
-    server_id,
-    server_name,
-    metric_name,
-    current_value,
-    threshold_value,
-    alert_sent,
-    notification_type,
-    send_error,
-    muted,
-    detail_text,
-    context_json";
+    a.alert_time,
+    a.server_id,
+    COALESCE(s.display_name, a.server_name) AS server_name,
+    a.metric_name,
+    a.current_value,
+    a.threshold_value,
+    a.alert_sent,
+    a.notification_type,
+    a.send_error,
+    a.muted,
+    a.detail_text,
+    a.context_json,
+    a.server_name AS stored_server_name";
 
-    /// <summary>Per-server read. $1 window start, $2 server_id, $3 limit (naive UTC / int / int).</summary>
+    /// <summary>Per-server read. $1 window start, $2 server_id, $3 limit, $4 window end, exclusive (naive UTC / int / int / naive UTC).
+    /// The end (#5562) is what a finished calendar period or a typed range needs; a live window passes a far-future instant.</summary>
     public const string AlertHistorySql = @"
 SELECT" + AlertHistorySelectColumns + @"
-FROM config_alert_log
-WHERE alert_time >= $1
-AND   server_id = $2
-AND   dismissed = FALSE
-ORDER BY alert_time DESC
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time >= $1
+AND   a.server_id = $2
+AND   a.alert_time < $4
+AND   a.dismissed = FALSE
+ORDER BY a.alert_time DESC
 LIMIT $3";
 
-    /// <summary>All-servers read (the Alert History default). $1 window start, $2 limit (naive UTC / int).</summary>
+    /// <summary>All-servers read (the Alert History default). $1 window start, $2 limit, $3 window end, exclusive (naive UTC / int / naive UTC).</summary>
     public const string AlertHistoryAllServersSql = @"
 SELECT" + AlertHistorySelectColumns + @"
-FROM config_alert_log
-WHERE alert_time >= $1
-AND   dismissed = FALSE
-ORDER BY alert_time DESC
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time >= $1
+AND   a.alert_time < $3
+AND   a.dismissed = FALSE
+ORDER BY a.alert_time DESC
 LIMIT $2";
+
+    /// <summary>The "no end" instant a live window passes: far past any alert, inside the timestamp type's range.</summary>
+    internal static readonly DateTime AlertWindowOpenEnd = new(9999, 12, 31, 0, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>Window dismiss with an end (#5562), per server: $1 window start, $2 server_id, $3 window end (exclusive).
+    /// The shared dismiss-all statement has no end, which is right for a window that runs to now; a finished period must
+    /// dismiss only the rows it shows.</summary>
+    internal const string DismissWindowForServerSql = @"
+UPDATE config_alert_log
+SET    dismissed = TRUE
+WHERE  alert_time >= $1
+AND    server_id = $2
+AND    alert_time < $3
+AND    dismissed = FALSE";
+
+    /// <summary>Window dismiss with an end (#5562), every server: $1 window start, $2 window end (exclusive).</summary>
+    internal const string DismissWindowAllServersSql = @"
+UPDATE config_alert_log
+SET    dismissed = TRUE
+WHERE  alert_time >= $1
+AND    alert_time < $2
+AND    dismissed = FALSE";
+
+    /// <summary>How long the alert-history reads serve the fleet's server clocks before reading them again
+    /// (#4766). The shell polls the history on every refresh tick (30s by default, 10s at the fastest), and a
+    /// server's clock only changes with a new <c>server_properties</c> row, which lands when the server connects
+    /// and once a day after that. Five minutes is the longest a server added since the last read shows the
+    /// viewer machine's offset in Server mode.</summary>
+    internal static readonly TimeSpan AlertClockLifetime = TimeSpan.FromMinutes(5);
 
     /// <summary>
     /// Recent alerts newest first, excluding dismissed rows — the Alert History tab's read. With no
     /// <paramref name="serverId"/> it aggregates ALL servers (the tab's default); with one it scopes to
     /// that server (the Server filter combo). Mirrors Lite's optional-serverId GetAlertHistoryAsync.
     /// </summary>
-    public async Task<List<ViewerAlertRow>> GetAlertHistoryAsync(
+    public Task<List<ViewerAlertRow>> GetAlertHistoryAsync(
         DateTime sinceUtc, int? serverId = null, int limit = 500, CancellationToken cancellationToken = default)
+        => GetAlertHistoryWindowAsync(sinceUtc, null, serverId, limit, cancellationToken);
+
+    /// <summary><see cref="GetAlertHistoryAsync"/> over a window that may END before now (#5562): <paramref name="untilUtc"/> is
+    /// exclusive, and null means the window runs to now.</summary>
+    public async Task<List<ViewerAlertRow>> GetAlertHistoryWindowAsync(
+        DateTime sinceUtc, DateTime? untilUtc, int? serverId = null, int limit = 500, CancellationToken cancellationToken = default)
     {
         var rows = new List<ViewerAlertRow>();
+
+        /* One clock read for the whole list (#4766): each row is stamped with its own server's clock, or the
+           viewer machine's offset where none is collected, so the list's times are each server's own hour in
+           Server mode. The read is the fleet's, held for AlertClockLifetime (see ServerClockCache): this method
+           runs on every refresh tick, and re-sorting server_properties' whole retained history each time gave the
+           same answer each time. A server filter reads the same fleet snapshot and looks its rows up in it. */
+        var clocks = await _alertClocks.GetAsync(cancellationToken);
+        var nowUtc = DateTime.UtcNow;
 
         await using var command = _dataSource.CreateCommand(serverId.HasValue ? AlertHistorySql : AlertHistoryAllServersSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -180,14 +258,20 @@ LIMIT $2";
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId.Value });
         }
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = limit });
+        command.Parameters.Add(new NpgsqlParameter<DateTime>
+        {
+            TypedValue = DateTime.SpecifyKind(untilUtc ?? AlertWindowOpenEnd, DateTimeKind.Unspecified),
+        });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var rowServerId = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
             rows.Add(new ViewerAlertRow
             {
                 AlertTime = reader.GetDateTime(0),
-                ServerId = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                ServerId = rowServerId,
+                Clock = ViewerTimeHelper.ClockForServerOrMachine(clocks, rowServerId, TimeZoneInfo.Local, nowUtc),
                 ServerName = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 MetricName = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 CurrentValue = reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
@@ -198,6 +282,7 @@ LIMIT $2";
                 Muted = !reader.IsDBNull(9) && reader.GetBoolean(9),
                 DetailText = reader.IsDBNull(10) ? null : reader.GetString(10),
                 ContextJson = reader.IsDBNull(11) ? null : reader.GetString(11),
+                StoredServerName = reader.IsDBNull(12) ? "" : reader.GetString(12),
             });
         }
 
@@ -212,34 +297,14 @@ LIMIT $2";
        the two-phase live+sidecar dismiss collapses to one atomic UPDATE — no explicit transaction
        needed. Every match is keyed the same way Lite keyed it: (alert_time, server_id, metric_name). */
 
-    /// <summary>
-    /// Dismiss the given rows by (alert_time, server_id, metric_name). One set-based UPDATE keyed off
-    /// unnested arrays (so the whole batch dismisses in a single round-trip). Already-dismissed rows are
-    /// left alone by the <c>dismissed = FALSE</c> guard.
-    /// </summary>
-    public const string DismissAlertsSql = @"
-UPDATE config_alert_log
-SET    dismissed = TRUE
-WHERE  dismissed = FALSE
-AND    (alert_time, server_id, metric_name) IN (
-    SELECT t.alert_time, t.server_id, t.metric_name
-    FROM   unnest($1::timestamp[], $2::integer[], $3::text[]) AS t(alert_time, server_id, metric_name)
-)";
+    /// <summary>The keyed dismiss UPDATE; the statement lives in <see cref="AlertDismissStore"/>, the one copy the web route shares.</summary>
+    public const string DismissAlertsSql = AlertDismissStore.DismissAlertsSql;
 
     /// <summary>Dismiss all visible rows in the window across every server. $1 window start.</summary>
-    public const string DismissAllAlertsSql = @"
-UPDATE config_alert_log
-SET    dismissed = TRUE
-WHERE  alert_time >= $1
-AND    dismissed = FALSE";
+    public const string DismissAllAlertsSql = AlertDismissStore.DismissAllAlertsSql;
 
     /// <summary>Dismiss all visible rows in the window for one server. $1 window start, $2 server_id.</summary>
-    public const string DismissAllAlertsForServerSql = @"
-UPDATE config_alert_log
-SET    dismissed = TRUE
-WHERE  alert_time >= $1
-AND    server_id = $2
-AND    dismissed = FALSE";
+    public const string DismissAllAlertsForServerSql = AlertDismissStore.DismissAllAlertsForServerSql;
 
     /// <summary>
     /// Marks the given alerts dismissed. Returns how many live rows the UPDATE actually changed
@@ -257,21 +322,14 @@ AND    dismissed = FALSE";
             return 0;
         }
 
-        var times = new DateTime[alerts.Count];
-        var ids = new int[alerts.Count];
-        var metrics = new string[alerts.Count];
+        var keys = new AlertDismissKey[alerts.Count];
         for (var i = 0; i < alerts.Count; i++)
         {
-            times[i] = DateTime.SpecifyKind(alerts[i].AlertTime, DateTimeKind.Unspecified);
-            ids[i] = alerts[i].ServerId;
-            metrics[i] = alerts[i].MetricName;
+            keys[i] = new AlertDismissKey(alerts[i].AlertTime, alerts[i].ServerId, alerts[i].MetricName);
         }
 
-        await using var command = _dataSource.CreateCommand(DismissAlertsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter { Value = times });
-        command.Parameters.Add(new NpgsqlParameter { Value = ids });
-        command.Parameters.Add(new NpgsqlParameter { Value = metrics });
+        await using var command = AlertDismissStore.CreateDismissCommand(
+            _dataSource, keys, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
 
         return await ExecuteWriteAsync(command, cancellationToken);
     }
@@ -281,20 +339,32 @@ AND    dismissed = FALSE";
     /// <paramref name="serverId"/> is set, otherwise across all servers (matching the current filter).
     /// Returns the number of rows changed.
     /// </summary>
-    public async Task<int> DismissAllVisibleAlertsAsync(
+    public Task<int> DismissAllVisibleAlertsAsync(
         DateTime sinceUtc, int? serverId = null, CancellationToken cancellationToken = default)
+        => DismissAllVisibleAlertsWindowAsync(sinceUtc, null, serverId, cancellationToken);
+
+    /// <summary><see cref="DismissAllVisibleAlertsAsync"/> over a window that may END before now (#5562): only the rows the
+    /// grid shows for that window. <paramref name="untilUtc"/> is exclusive; null means the window runs to now.</summary>
+    public async Task<int> DismissAllVisibleAlertsWindowAsync(
+        DateTime sinceUtc, DateTime? untilUtc, int? serverId = null, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(
-            serverId.HasValue ? DismissAllAlertsForServerSql : DismissAllAlertsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<DateTime>
+        if (untilUtc is { } until)
         {
-            TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified),
-        });
-        if (serverId.HasValue)
-        {
-            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId.Value });
+            /* #5562: a window that ended in the past dismisses only the rows it shows. */
+            await using var bounded = _dataSource.CreateCommand(serverId.HasValue ? DismissWindowForServerSql : DismissWindowAllServersSql);
+            bounded.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            bounded.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
+            if (serverId.HasValue)
+            {
+                bounded.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId.Value });
+            }
+
+            bounded.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(until, DateTimeKind.Unspecified) });
+            return await ExecuteWriteAsync(bounded, cancellationToken);
         }
+
+        await using var command = AlertDismissStore.CreateDismissAllCommand(
+            _dataSource, sinceUtc, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
 
         return await ExecuteWriteAsync(command, cancellationToken);
     }

@@ -70,7 +70,7 @@ public sealed class JobHistoryWatermarkEpochLiveTests
     private static async Task<(DateTime? Watermark, bool WatermarkFromUtcColumn, long? NumericWatermark, long ServerWatermarkMs, bool WatermarkCacheEligible, bool ServerWatermarkDiscarded)> ResolveAsync<TRow>(
         DarlingCollectorRunner runner, ServerRuntime server, ICollectorDefinition<TRow> definition, CancellationToken ct)
     {
-        var probe = MakeContext(server, DateTime.UtcNow);
+        var probe = MakeContext(server, DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
         var task = (Task)ResolveMethod.MakeGenericMethod(typeof(TRow)).Invoke(
             runner, new object?[] { server, definition, probe, null, ct })!;
         await task;
@@ -157,8 +157,8 @@ public sealed class JobHistoryWatermarkEpochLiveTests
         var bodySucceeded = false;
         try
         {
-            var oldEpochTime = DateTime.UtcNow.AddDays(-3);
-            var newEpochTime = DateTime.UtcNow.AddDays(-1); // outside the 6h bounded probe: unbounded fallback text
+            var oldEpochTime = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc).AddDays(-3);
+            var newEpochTime = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc).AddDays(-1); // outside the 6h bounded probe: unbounded fallback text
             await PlantBatchAsync(
                 connection, server.ServerId, server.StorageName, oldEpochTime, oldEpochTime,
                 Range(10_200_001, 10_200_040), ct);
@@ -209,8 +209,8 @@ public sealed class JobHistoryWatermarkEpochLiveTests
         var bodySucceeded = false;
         try
         {
-            var oldEpochTime = DateTime.UtcNow.AddHours(-4); // inside the 6h bounded window too
-            var newEpochTime = DateTime.UtcNow.AddHours(-1); // inside the 6h bounded probe window
+            var oldEpochTime = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc).AddHours(-4); // inside the 6h bounded window too
+            var newEpochTime = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc).AddHours(-1); // inside the 6h bounded probe window
             await PlantBatchAsync(
                 connection, server.ServerId, server.StorageName, oldEpochTime, oldEpochTime,
                 Range(10_200_001, 10_200_040), ct);
@@ -271,7 +271,7 @@ public sealed class JobHistoryWatermarkEpochLiveTests
         {
             // Batch A: the older epoch, planted first.
             var batchARunDateTime = new DateTime(2026, 9, 10, 0, 0, 0, DateTimeKind.Unspecified);
-            var batchACollectionTime = DateTime.UtcNow.AddDays(-2);
+            var batchACollectionTime = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc).AddDays(-2);
             await PlantBatchAsync(
                 connection, server.ServerId, server.StorageName, batchACollectionTime, batchARunDateTime,
                 Range(500, 520), ct);
@@ -279,7 +279,7 @@ public sealed class JobHistoryWatermarkEpochLiveTests
             // Batch B: the newer epoch, planted second — its run_datetime spans 09-20 through 09-21, its
             // newest row (12) landing last so the newest instance_id and the newest run_datetime agree.
             var batchBNewestRunDateTime = new DateTime(2026, 9, 21, 0, 0, 0, DateTimeKind.Unspecified);
-            var batchBCollectionTime = DateTime.UtcNow.AddHours(-2);
+            var batchBCollectionTime = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc).AddHours(-2);
             await using (var earlier = new NpgsqlCommand(
                 "INSERT INTO collect.job_history " +
                 "(job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name, run_status, run_datetime) " +
@@ -327,7 +327,7 @@ public sealed class JobHistoryWatermarkEpochLiveTests
             {
                 ServerId = server.ServerId,
                 ServerName = server.StorageName,
-                CollectionTime = DateTime.UtcNow,
+                CollectionTime = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc),
                 Deltas = new CollectorDeltaCalculator(),
                 Target = server.Target,
                 NumericWatermark = resolvedNumeric,
@@ -430,7 +430,7 @@ public sealed class JobHistoryWatermarkEpochLiveTests
         var bodySucceeded = false;
         try
         {
-            var now = DateTime.UtcNow;
+            var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
 
             /* A1: epoch A, instance_id 500..520 (21 rows), run_datetime spread D-3d .. D-1d, collected
                3 days ago. AddTicks(7) plants sub-microsecond ticks on purpose (#4496): Windows'
@@ -528,7 +528,7 @@ public sealed class JobHistoryWatermarkEpochLiveTests
         var bodySucceeded = false;
         try
         {
-            var now = DateTime.UtcNow;
+            var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
             /* AddTicks(7) plants sub-microsecond ticks on purpose (#4496), same reason as the A→B→A
                pin above: the replay batch's re-delivered RunDateTime must be truncated to whole
                microseconds before it matches the stored, already-truncated key. */
@@ -593,7 +593,7 @@ public sealed class JobHistoryWatermarkEpochLiveTests
         var bodySucceeded = false;
         try
         {
-            var now = DateTime.UtcNow;
+            var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
             var runDateTime = now.AddHours(-1);
             var storedRow = MakeRow(700, "job-x", 0, runDateTime);
             var context1 = MakeContext(server, now.AddHours(-1));
@@ -657,7 +657,7 @@ public sealed class JobHistoryWatermarkEpochLiveTests
         var bodySucceeded = false;
         try
         {
-            var now = DateTime.UtcNow;
+            var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
 
             /* 30 daily chunks, ~2,000 rows/day, one server. */
             for (var daysAgo = 29; daysAgo >= 0; daysAgo--)

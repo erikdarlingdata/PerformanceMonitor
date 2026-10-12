@@ -18,6 +18,7 @@ namespace PerformanceMonitorLite.Tests;
 /// but is now hidden or minimized — and must leave a window the user deliberately sent
 /// to the tray (wasVisibleBeforeSuspend == false) alone, so resume never pops it back out.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class WindowResumeGuardTests
 {
     [Theory]

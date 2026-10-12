@@ -41,27 +41,35 @@ namespace Darling.Tests;
 /// </summary>
 public class ProcedureStatsPlanCadenceTests
 {
-    /* The exact seam the saving rides on: CollectorContext.CapturePlanXml=false erases the plan placeholders,
-       which is decomposition variant A. Built here rather than retyped so the pin tracks the shipped SQL. */
+    /* The exact seam the saving rides on: CollectorContext.CapturePlanXml decides whether the plan phase runs and
+       renders at all (#5449: the main query is numbers only either way). Built here rather than retyped so the pin
+       tracks the shipped SQL. */
+    private static CollectorContext ContextFor(bool capturePlanXml) => new()
+    {
+        ServerId = 42,
+        ServerName = "example",
+        CollectionTime = new DateTime(2026, 9, 4, 0, 0, 0, DateTimeKind.Utc),
+        Deltas = new CollectorDeltaCalculator(),
+        CapturePlanXml = capturePlanXml,
+    };
+
     private static string BuiltQuery(bool capturePlanXml) =>
-        ProcedureStatsCollector.Instance.BuildQuery(new CollectorContext
-        {
-            ServerId = 42,
-            ServerName = "example",
-            CollectionTime = new DateTime(2026, 9, 4, 0, 0, 0, DateTimeKind.Utc),
-            Deltas = new CollectorDeltaCalculator(),
-            CapturePlanXml = capturePlanXml,
-        }).Text;
+        ProcedureStatsCollector.Instance.BuildQuery(ContextFor(capturePlanXml)).Text;
+
+    private static string PlanPhase(bool capturePlanXml) =>
+        ProcedureStatsCollector.BuildPlanPhaseQuery(ContextFor(capturePlanXml), new[] { new byte[] { 0x05, 0x00, 0xAB } }).Text;
 
     [Fact]
-    public void AGatedCycle_OmitsThePlanApplyEntirely_RatherThanRenderingAndDiscarding()
+    public void AGatedCycle_RunsNoPlanQueryAtAll_RatherThanRenderingAndDiscarding()
     {
         /* THE load-bearing pin for the whole change. Cadence only saves anything if the skipped cycle does
            not render; a gated path that rendered and threw the bytes away would still pay the 73.8%, which
-           is the entire cost this exists to remove. Asserted on the SQL the collector actually builds. */
-        var gated = BuiltQuery(capturePlanXml: false);
-        var capturing = BuiltQuery(capturePlanXml: true);
+           is the entire cost this exists to remove. With #5449 the plan lives in a second query, so the pin
+           is that a gated cycle has no such query (PlanPhaseApplies is false) and its main query has no apply. */
+        Assert.False(ProcedureStatsCollector.PlanPhaseApplies(ContextFor(capturePlanXml: false)));
+        Assert.Throws<InvalidOperationException>(() => PlanPhase(capturePlanXml: false));
 
+        var gated = BuiltQuery(capturePlanXml: false);
         Assert.DoesNotContain("dm_exec_text_query_plan", gated, StringComparison.Ordinal);
         Assert.DoesNotContain("OUTER APPLY", gated, StringComparison.Ordinal);
         Assert.DoesNotContain("query_plan", gated, StringComparison.Ordinal);
@@ -69,55 +77,35 @@ public class ProcedureStatsPlanCadenceTests
         /* And the capturing form still renders at whole-module grain, so this is a cadence change and not a
            silent narrowing of what gets captured when it IS captured. The module DMVs expose no statement
            offsets, so 0, -1 is the only available grain. */
-        Assert.Contains("sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), 0, -1)", capturing, StringComparison.Ordinal);
-
-        /* #1959's placement survives: the apply is outside the ranked derived table, so it renders once
-           against at most 150 survivors rather than once per pre-TOP candidate. */
-        Assert.Contains(") AS ranked" + Environment.NewLine + "OUTER APPLY", capturing.Replace("\r\n", Environment.NewLine, StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.True(ProcedureStatsCollector.PlanPhaseApplies(ContextFor(capturePlanXml: true)));
+        Assert.Contains("sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), 0, -1)", PlanPhase(capturePlanXml: true), StringComparison.Ordinal);
     }
 
     [Fact]
-    public void TheGatedQuery_KeepsTheRowShapeTheWriterAndPayloadDimensionExpect()
+    public void TheMainQuery_IsTheSameShape_WithOrWithoutCapture_AndThePlanColumnsStayInsideThePlanPhase()
     {
-        /* The gated form must differ from the capturing form ONLY by the plan fragments — same payload
-           columns, same branches, same exclusion handling — because ReadAsync reads ordinals 27 and 28 only
-           when CapturePlanXml is set and PgCollectorRowWriter writes NULL payloads for both plan positions.
-           Pinned by removing the known fragments from the capturing text and demanding equality, which
-           fails if either form grows or loses anything else.
-
-           This is also the pin that keeps #3392's query_plan_xml_bytes INSIDE the CapturePlanXml gate. A
-           size column spliced outside it would appear in the gated form too, the equality below would hold,
-           and Lite's SQL would have silently stopped being byte-identical to the no-plan form — so the
-           fragment stripped here carries BOTH plan columns as one unit, exactly as the collector splices
-           them. */
+        /* #5449: the main query is numbers only, so it is byte-identical with and without capture, which is what
+           keeps the ordinals ReadAsync reads (0-26) and the writer's payload columns fixed. The two plan
+           columns, as one unit (#3392: the size column must stay inside the CapturePlanXml gate), exist only in the
+           plan phase. */
         var gated = BuiltQuery(capturePlanXml: false);
         var capturing = BuiltQuery(capturePlanXml: true);
+        Assert.Equal(gated, capturing);
 
         /* Derived from the shared cap constant, not retyped, so this can't silently drift out of sync
            with QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes the way a repeated literal could. */
-        var planXmlFragment = $",\r\n    query_plan_xml = CASE WHEN DATALENGTH(tqp.query_plan) > {QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes} THEN NULL ELSE tqp.query_plan END,\r\n    query_plan_xml_bytes = DATALENGTH(tqp.query_plan)";
-        var stripped = capturing
-            .Replace(planXmlFragment, "", StringComparison.Ordinal)
-            .Replace(planXmlFragment.Replace("\r\n", "\n", StringComparison.Ordinal), "", StringComparison.Ordinal)
-            .Replace("\r\nOUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), 0, -1) AS tqp", "", StringComparison.Ordinal)
-            .Replace("\nOUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), 0, -1) AS tqp", "", StringComparison.Ordinal);
-
-        Assert.Equal(gated, stripped);
+        var planPhase = PlanPhase(capturePlanXml: true).Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains($",\n    query_plan_xml = CASE WHEN DATALENGTH(tqp.query_plan) > {QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes} THEN NULL ELSE tqp.query_plan END,\n    query_plan_xml_bytes = DATALENGTH(tqp.query_plan)", planPhase, StringComparison.Ordinal);
 
         /* Both forms still carry the last non-plan payload column, so "no plans" has not eaten a real one. */
         Assert.Contains("plan_handle = CONVERT(varchar(130), s.plan_handle, 1)", gated, StringComparison.Ordinal);
-        Assert.Contains("plan_handle = CONVERT(varchar(130), s.plan_handle, 1)", capturing, StringComparison.Ordinal);
 
-        /* Both forms are still capped, which is why a skipped cycle cannot make the next one more expensive:
-           the us-east-1 fleet reports rows_collected = 150 on every run, so the candidate set is already
-           saturated and a gap cannot enlarge it. */
-        Assert.Contains("TOP (150)", gated, StringComparison.Ordinal);
-        Assert.Contains("TOP (150)", capturing, StringComparison.Ordinal);
+        /* The candidate set is capped once, and a gap cannot enlarge it past the cap. */
+        Assert.Contains("TOP (" + ProcedureStatsCollector.MaxCandidateRows + ")", gated, StringComparison.Ordinal);
+        Assert.DoesNotContain("TOP (150)", gated, StringComparison.Ordinal);
 
-        /* #3392, stated directly rather than only implied by the equality above: the size column exists in
-           the capturing form and NOWHERE in the gated one. Without this, a future edit that moved the column
-           out of the gate and correspondingly widened the stripped fragment would still pass. */
-        Assert.Contains("query_plan_xml_bytes", capturing, StringComparison.Ordinal);
+        /* #3392, stated directly: the size column is in the plan phase and NOWHERE in the main query. */
+        Assert.Contains("query_plan_xml_bytes", planPhase, StringComparison.Ordinal);
         Assert.DoesNotContain("query_plan_xml_bytes", gated, StringComparison.Ordinal);
     }
 

@@ -129,6 +129,7 @@
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
@@ -140,7 +141,15 @@
                 <TextBlock Text="Server:" VerticalAlignment="Center" Margin="0,0,6,0"
                            FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
                 <ComboBox x:Name="ServerSelector" Width="260" DisplayMemberPath="DisplayNameWithIntent"
-                          SelectionChanged="ServerSelector_SelectionChanged"/>
+                          AutomationProperties.Name="Server"
+                          SelectionChanged="ServerSelector_SelectionChanged">
+                    <!-- A screen reader announces each item (and the selection) by the server's name, not the model's type name. -->
+                    <ComboBox.ItemContainerStyle>
+                        <Style TargetType="ComboBoxItem" BasedOn="{StaticResource {x:Type ComboBoxItem}}">
+                            <Setter Property="AutomationProperties.Name" Value="{Binding DisplayNameWithIntent, Mode=OneTime}"/>
+                        </Style>
+                    </ComboBox.ItemContainerStyle>
+                </ComboBox>
                 <Button x:Name="RefreshButton" Content="Refresh" Padding="12,4"
                         Margin="12,0,0,0"
                         Click="RefreshButton_Click"
@@ -154,8 +163,14 @@
             </StackPanel>
         </Border>
 
+        <!-- #5558: this node holds a secondary copy of some databases in an availability group, so their
+             per-database findings are left to the primary. Shown only with a Loaded or Empty list. -->
+        <TextBlock x:Name="ReplicaNoteText" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap"
+                   Margin="12,6,12,0" FontStyle="Italic"
+                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+
         <!-- Content area: exactly one region is visible per state. -->
-        <Grid Grid.Row="1">
+        <Grid Grid.Row="2">
             <!-- Loaded: scrollable, grouped, collapsible sections. -->
             <ScrollViewer x:Name="SectionsScroll" VerticalScrollBarVisibility="Auto"
                           Padding="10" Visibility="Collapsed">

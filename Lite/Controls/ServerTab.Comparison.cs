@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Controls;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 
@@ -19,40 +20,17 @@ public partial class ServerTab : UserControl
 {
     private async void CompareToCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded || _isRefreshing) return;
+        /* #5371: a Compare-to change made while a refresh pass is running used to be dropped here (`_isRefreshing`), so the
+           combo showed the new baseline while the grids kept the old one. It goes through the coordinator like the tab
+           switch and the range change: remembered when a pass is running (latest wins) and replayed when it ends, the
+           replay reading the combo's selection at its own start. The overview and the visible Top Queries / Top Procedures /
+           Query Store grid read the combo in that pass (#4284's UTC window per grid, #2933's per-grid generations in
+           _loads), and a grid that is not showing reads it when its sub-tab is switched to. A change the program
+           makes (UpdateCompareDropdownState resetting the combo on a tab with no comparison) sets
+           _suppressRangeRefresh and starts nothing: the tab switch that caused it is already loading. */
+        if (!IsLoaded || _suppressRangeRefresh) return;
 
-        var hoursBack = GetHoursBack();
-        DateTime? fromDate = null, toDate = null;
-        if (IsCustomRange)
-        {
-            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-            if (fromLocal.HasValue && toLocal.HasValue)
-            {
-                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-            }
-        }
-
-        await RefreshOverviewAsync(hoursBack, fromDate, toDate);
-
-        // Also refresh comparison grids
-        try
-        {
-            /* #4284: GetQueryStatsComparisonAsync/GetProcedureStatsComparisonAsync/GetQueryStoreComparisonAsync
-               compare currentStart/currentEnd straight against UTC collection_time, with no offset conversion
-               of their own -- the SAME UTC window the Top Queries/Top Procedures/Query Store grid reads get via
-               LocalDataService.GetQueriesTabWindowUtc, computed once here and handed to all three so the
-               current window matches the grid on any server not on UTC. */
-            var (currentStart, currentEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
-            await RefreshQueryStatsComparisonAsync(currentStart, currentEnd);
-            await RefreshProcStatsComparisonAsync(currentStart, currentEnd);
-            await RefreshQueryStoreComparisonAsync(currentStart, currentEnd);
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] Comparison refresh failed: {ex.Message}");
-        }
+        await RefreshVisibleTabOnlyAsync();
     }
 
     /// <summary>
@@ -81,15 +59,15 @@ public partial class ServerTab : UserControl
     /// <c>SlicerRangeEventArgs.StartUtc</c>/<c>EndUtc</c>) -- a server-local pair here silently shifts the
     /// baseline by the server's UTC offset, which is what #4284 fixed. Returns null if "None" is selected.
     ///
-    /// <para>Not used by <c>RefreshOverviewAsync</c>'s correlated-lanes comparison (ServerTab.Refresh.cs):
-    /// that caller's underlying reads (GetCpuUtilizationAsync, GetTotalWaitTrendAsync) take server-local
-    /// fromDate/toDate, not UTC, so it derives its own range with <see cref="ShiftComparisonRange"/> in that
-    /// basis instead of calling through here.</para>
+    /// <para>Not used by <c>RefreshOverviewAsync</c>'s correlated-lanes comparison (ServerTab.Refresh.cs): the
+    /// lanes plot the UTC instant and compare against the same wall-clock hours N days earlier on this tab's server
+    /// clock, so that caller takes its range from <see cref="CorrelatedTimelineLanesControl.GetOverviewComparisonRange"/>
+    /// instead of calling through here.</para>
     /// </summary>
     private (DateTime From, DateTime To)? GetComparisonRange(DateTime currentStartUtc, DateTime currentEndUtc)
         => CompareToCombo == null ? null : ShiftComparisonRange(CompareToCombo.SelectedIndex, currentStartUtc, currentEndUtc);
 
-    /* #2933: CompareToCombo_SelectionChanged sets no in-flight flag, so two Compare changes overlap and
+    /* #2933: CompareToCombo_SelectionChanged used to set no in-flight flag, so two Compare changes overlap and
        the LATER-STARTING read can land first, leaving the grid showing the baseline the operator moved
        off. The grids are on screen while that happens, so no visibility change comes along to repaint
        them. A scope re-verify cannot separate Yesterday -> Last week -> Yesterday: the third read's
@@ -97,16 +75,26 @@ public partial class ServerTab : UserControl
        grid gets its own generation instead, which compares identity rather than range.
 
        Only the comparison loaders take this. ServerTab's main-tab Refresh*Async loaders are deliberately
-       NOT here: their races all route through the bail-only _isRefreshing, where the user-visible half is
-       the DROPPED trigger (a time-range change mid-pass leaves the charts on the old window while the
-       combo shows the new one), and a generation cannot fix a load that never started. That wants the
-       viewer's coalescing replay, which needs _isRefreshing split from the event-suppression duty it also
-       serves in TimeDisplayMode_SelectionChanged, ServerTab.DrillDown.cs and ServerTab.Grids.cs. */
+       NOT here: their races used to route through the bail-only _isRefreshing, where the user-visible half
+       was the DROPPED trigger (a time-range change mid-pass left the charts on the old window while the
+       combo showed the new one), and a generation cannot fix a load that never started. #5371 gave them
+       the viewer's coalescing replay instead (RefreshCoordinator, ServerTab.Refresh.cs), with the
+       event-suppression duty split off into _suppressRangeRefresh. */
     private readonly PerformanceMonitor.Ui.ScopedLoadGenerations _loads = new();
 
     /* #4284: tests the combo directly rather than through GetComparisonRange, which now needs the caller's
        current UTC window as an argument and has none to give here. */
     private bool IsQueryStatsComparisonActive => CompareToCombo != null && CompareToCombo.SelectedIndex > 0;
+
+    /// <summary>
+    /// The baseline banner's text (#4766): both ends of the baseline window worded in <paramref name="zone"/>, the
+    /// tab's own display zone (<see cref="GetPickerZone"/>). Never the active server's clock: a tab that refreshes
+    /// while another server's tab is selected would put that other server's zone into its own banner.
+    /// </summary>
+    internal static string BaselineBannerText((DateTime From, DateTime To) baseline, TimeZoneInfo zone) =>
+        $"Comparing against baseline: {DisplayZone.Format(baseline.From, zone, BaselineTimeFormat)} → {DisplayZone.Format(baseline.To, zone, BaselineTimeFormat)}";
+
+    private const string BaselineTimeFormat = "yyyy-MM-dd HH:mm:ss";
 
     private void SetQueryStatsComparisonMode(bool active, (DateTime From, DateTime To)? baselineRange = null)
     {
@@ -116,9 +104,7 @@ public partial class ServerTab : UserControl
 
         if (active && baselineRange.HasValue)
         {
-            var from = ServerTimeHelper.FormatServerTime(baselineRange.Value.From);
-            var to = ServerTimeHelper.FormatServerTime(baselineRange.Value.To);
-            QueryStatsComparisonBanner.Text = $"Comparing against baseline: {from} → {to}";
+            QueryStatsComparisonBanner.Text = BaselineBannerText(baselineRange.Value, GetPickerZone());
         }
     }
 
@@ -145,6 +131,8 @@ public partial class ServerTab : UserControl
             .ThenByDescending(x => x.SortableDurationDelta)
             .ToList();
 
+        /* Release walk V12d: a baseline period the store holds nothing for (Yesterday on a store a few hours old) says so. */
+        QueryStatsComparisonBanner.Text = ComparisonBaselineNote.Banner(QueryStatsComparisonBanner.Text, items);
         QueryStatsComparisonGrid.ItemsSource = sorted;
     }
 
@@ -156,9 +144,7 @@ public partial class ServerTab : UserControl
 
         if (active && baselineRange.HasValue)
         {
-            var from = ServerTimeHelper.FormatServerTime(baselineRange.Value.From);
-            var to = ServerTimeHelper.FormatServerTime(baselineRange.Value.To);
-            ProcStatsComparisonBanner.Text = $"Comparing against baseline: {from} → {to}";
+            ProcStatsComparisonBanner.Text = BaselineBannerText(baselineRange.Value, GetPickerZone());
         }
     }
 
@@ -184,6 +170,8 @@ public partial class ServerTab : UserControl
             .ThenByDescending(x => x.SortableDurationDelta)
             .ToList();
 
+        /* Release walk V12d: a baseline period the store holds nothing for (Yesterday on a store a few hours old) says so. */
+        ProcStatsComparisonBanner.Text = ComparisonBaselineNote.Banner(ProcStatsComparisonBanner.Text, items);
         ProcStatsComparisonGrid.ItemsSource = sorted;
     }
 
@@ -195,9 +183,7 @@ public partial class ServerTab : UserControl
 
         if (active && baselineRange.HasValue)
         {
-            var from = ServerTimeHelper.FormatServerTime(baselineRange.Value.From);
-            var to = ServerTimeHelper.FormatServerTime(baselineRange.Value.To);
-            QueryStoreComparisonBanner.Text = $"Comparing against baseline: {from} → {to}";
+            QueryStoreComparisonBanner.Text = BaselineBannerText(baselineRange.Value, GetPickerZone());
         }
     }
 
@@ -223,8 +209,17 @@ public partial class ServerTab : UserControl
             .ThenByDescending(x => x.SortableDurationDelta)
             .ToList();
 
+        /* Release walk V12d: a baseline period the store holds nothing for (Yesterday on a store a few hours old) says so. */
+        QueryStoreComparisonBanner.Text = ComparisonBaselineNote.Banner(QueryStoreComparisonBanner.Text, items);
         QueryStoreComparisonGrid.ItemsSource = sorted;
     }
+
+    /// <summary>
+    /// What the disabled Compare box says when the pointer rests on it (walk finding V10b: it was greyed with a tooltip that WPF never
+    /// showed on a disabled control, so nobody could tell why). It names the tabs <see cref="IsComparisonSupportedOnCurrentTab"/> accepts.
+    /// </summary>
+    internal const string CompareUnavailableToolTip =
+        "Compare works on the Overview tab and on the Top Queries, Top Procedures and Query Store sub-tabs of Queries. It is off on this tab.";
 
     private bool IsComparisonSupportedOnCurrentTab()
     {
@@ -248,10 +243,22 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            CompareToCombo.SelectedIndex = 0;
+            /* The program writes the combo here, not the user: no refresh from it (see CompareToCombo_SelectionChanged).
+               The flag's old value is put back, not cleared, because the drill-down holds it across a tab switch. */
+            var wasSuppressed = _suppressRangeRefresh;
+            _suppressRangeRefresh = true;
+            try
+            {
+                CompareToCombo.SelectedIndex = 0;
+            }
+            finally
+            {
+                _suppressRangeRefresh = wasSuppressed;
+            }
+
             CompareToCombo.IsEnabled = false;
             CompareToCombo.Opacity = 0.5;
-            CompareToCombo.ToolTip = "Comparison is not available for this tab";
+            CompareToCombo.ToolTip = CompareUnavailableToolTip;
         }
     }
 }

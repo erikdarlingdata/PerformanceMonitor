@@ -24,6 +24,7 @@ namespace PerformanceMonitorLite.Tests;
 /// Also pins that the #3539 <c>collection_runs</c> column is the TRAILING projection, so the eleven positional
 /// reads before it stayed put.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DailySummaryCpuBarPinTests
 {
     [Fact]

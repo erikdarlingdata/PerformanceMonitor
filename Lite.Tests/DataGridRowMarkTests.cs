@@ -29,6 +29,7 @@ namespace Lite.Tests;
 /// is being right about which row it is on, that trade is the wrong way round.
 /// </para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public class DataGridRowMarkTests
 {
     private sealed class Row

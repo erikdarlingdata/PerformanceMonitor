@@ -20,8 +20,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins Darling rung V153 (#4608, split #4615): a plain btree on <c>first_execution_time</c> for
-/// <c>query_store_interval_latest</c> (V143) only — the column both the daily retention sweep's
-/// <see cref="DarlingRetention.TimeSlicedDeleteSql"/> filters on and the read gate's per-server floor
+/// <c>query_store_interval_latest</c> (V143) only — the column the retention sweep filters on (the one-day slice then, the row-capped cursor form since #5569, pinned in <c>QueryStoreIntervalPurgeRowCappedTests</c>) and the read gate's per-server floor
 /// reads. V154 (<c>IntervalFirstExecIndexWideRungTests</c>) is the twin rung for
 /// <c>query_store_interval_wide</c>'s index, split into its own rung so each index build gets its own
 /// migration-command-timeout window. This file's "I am the top rung" claim moved to that class now that
@@ -136,45 +135,12 @@ public sealed class IntervalFirstExecIndexRungTests
         }
     }
 
-    /// <summary>
-    /// The purge's plan (<see cref="DarlingRetention.TimeSlicedDeleteSql"/>) against the migrated schema
-    /// uses the new index for its outer scan and both <c>min()</c> subqueries — no Seq Scan (or the
-    /// equivalent full-index walk a leading-column-less plan would take) on the table. Seeded with rows
-    /// spanning two days so both the "nothing to delete" and the min()-subquery shapes are exercised.
-    /// </summary>
-    [Fact]
-    public async Task ThePurgesPlan_UsesTheIndex_NoSeqScan()
-    {
-        var baseConnectionString = ConnectionString;
-        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the V153 purge-plan pin.");
-
-        var ct = TestContext.Current.CancellationToken;
-
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
-        var bodySucceeded = false;
-        try
-        {
-            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-            await connection.OpenAsync(ct);
-            await PgMigrations.MigrateAsync(connection, ct);
-
-            await SeedIntervalLatestAsync(connection, ct, rowCount: 2000);
-            await ExecAsync(connection, ct, "VACUUM ANALYZE collect.query_store_interval_latest");
-
-            var sql = DarlingRetention.TimeSlicedDeleteSql("collect.query_store_interval_latest", "first_execution_time");
-            var plan = await ExplainAsync(connection, ct, sql, new DateTime(2026, 1, 3, 0, 0, 0, DateTimeKind.Unspecified));
-
-            Assert.DoesNotContain("Seq Scan", plan, StringComparison.Ordinal);
-            Assert.Contains("idx_query_store_interval_latest_first_exec", plan, StringComparison.Ordinal);
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
-        }
-    }
+    /* The purge's plan test that lived here ran the old one-day-slice statement, which the interval tables no
+       longer execute (#5569). The production statement is the row-capped cursor form, and its plan (ordered scan
+       of this index, no Seq Scan, no Sort, the cursor bound in the Index Cond) is pinned at a realistic row count
+       by QueryStoreIntervalPurgeRowCappedTests.ThePurgesPlan_IsAnOrderedIndexScan_NoSeqScan_NoSort: at the 2,000
+       rows this class seeds the planner correctly prefers a Sort over a Seq Scan, so a plan pin here proves
+       nothing about production. */
 
     /// <summary>
     /// The read gate's per-server floor (<see cref="QueryStoreIntervalLatest.PlainTableFloorSql"/>) also

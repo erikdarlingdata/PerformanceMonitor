@@ -84,3 +84,13 @@ darling.json
 # Deliberately untracked for now: whether pincheck in particular belongs in the repo is Erik's call, and it
 # should not join a PR by accident.
 Darling/tools/pg-harnesses/
+
+# The agent coordination bus lives in a SEPARATE, PRIVATE repository
+# (~/Documents/pm-issue-queue-inbox). Two of its files were committed here by
+# accident in #5167 and reached this PUBLIC repo. Nothing from the bus belongs
+# in this tree: lane reports, design notes, seat state and inbox/outbox messages
+# all stay there. A lane brief that names a bus path MUST use an absolute path -
+# a relative one resolves inside the code worktree, which is how this happened.
+design/
+inbox/
+outbox/

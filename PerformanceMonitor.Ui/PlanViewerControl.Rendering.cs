@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -71,11 +72,11 @@ public partial class PlanViewerControl
             RenderNodes(child);
     }
 
-    private Border CreateNodeVisual(PlanNode node, int totalWarningCount = -1)
+    private PlanNodeBorder CreateNodeVisual(PlanNode node, int totalWarningCount = -1)
     {
         var isExpensive = node.IsExpensive;
 
-        var border = new Border
+        var border = new PlanNodeBorder
         {
             Width = PlanLayoutEngine.NodeWidth,
             MinHeight = PlanLayoutEngine.NodeHeightMin,
@@ -100,11 +101,16 @@ public partial class PlanViewerControl
             allWarnings.AddRange(_currentStatement.PlanWarnings);
             CollectWarnings(node, allWarnings);
             border.ToolTip = BuildNodeTooltip(node, allWarnings);
+            AutomationProperties.SetHelpText(border, PlanNodeBorder.Summary(node, allWarnings));
         }
         else
         {
             border.ToolTip = BuildNodeTooltip(node);
+            AutomationProperties.SetHelpText(border, PlanNodeBorder.Summary(node, null));
         }
+
+        // D21: a screen reader cannot read a tooltip, so the operator's name and the tooltip's summary are also its name and help text.
+        AutomationProperties.SetName(border, PlanNodeBorder.OperatorName(node));
 
         // Click to select + show properties
         border.MouseLeftButtonUp += Node_Click;

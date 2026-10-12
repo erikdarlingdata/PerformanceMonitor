@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// anyone noticed they were the same judgement. A pin that lands in neither list fails asking which it is,
 /// instead of joining the family by adjacency or skipping it by omission.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CommandDeadlineScannerAdoptionTests
 {
     /// <summary>

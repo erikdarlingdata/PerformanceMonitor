@@ -56,8 +56,31 @@ internal static class ExplainJoinProbe
         bool Reads(JsonElement node) =>
             (node.TryGetProperty("Relation Name", out var name) && name.GetString() == relation)
             || Children(node).Any(Reads);
-
-        static IEnumerable<JsonElement> Children(JsonElement node) =>
-            node.TryGetProperty("Plans", out var children) ? children.EnumerateArray() : [];
     }
+
+    /// <summary>
+    /// The actual rows (across loops) that the plan's scans of <paramref name="relation"/> returned, summed over the
+    /// plan, SubPlans included. It is the measure for a read that asks the relation for rows by key with no join to
+    /// it, which <see cref="RowsResolvedAgainst"/> reads as 0 whatever it fetched. Rows returned, not rows read: the
+    /// planner picks an index, bitmap or sequential scan by the table's size, which moves the second, and the rows a
+    /// scan hands back are the ones resolved.
+    /// </summary>
+    public static double RowsFetchedFrom(string explainJson, string relation)
+    {
+        using var document = JsonDocument.Parse(explainJson);
+
+        return Fetched(document.RootElement[0].GetProperty("Plan"));
+
+        double Fetched(JsonElement node)
+        {
+            var returned = node.TryGetProperty("Relation Name", out var name) && name.GetString() == relation
+                ? node.GetProperty("Actual Rows").GetDouble() * node.GetProperty("Actual Loops").GetDouble()
+                : 0.0;
+
+            return returned + Children(node).Sum(Fetched);
+        }
+    }
+
+    private static IEnumerable<JsonElement> Children(JsonElement node) =>
+        node.TryGetProperty("Plans", out var children) ? children.EnumerateArray() : [];
 }

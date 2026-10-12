@@ -273,6 +273,78 @@ public sealed class DarlingStoreHostProfileTests
         Assert.Equal(HostSettingVerdict.StaleAfterHardwareChange, verdict);
     }
 
+    private const long Gb = 1024L * 1024 * 1024;
+
+    private static HostSettingVerdict WalVerdictAfterWriteAndLaterReading(long freeAtWrite, long freeAtCheck)
+    {
+        /* What the service start wrote, then what a later check derives from a later reading of the volume. */
+        var stored = DarlingManagedPostgres.DeriveWalSettings(freeAtWrite).MaxWalSizeMb;
+        var rawDerived = DarlingManagedPostgres.DeriveWalSettings(freeAtCheck).MaxWalSizeMb;
+        var derived = DarlingStoreHostProfile.ApplyWalDriftTolerance("max_wal_size", rawDerived, stored, freeAtCheck);
+        var attribution = new PerformanceMonitor.Darling.Service.ConfSettingAttribution(
+            PerformanceMonitor.Darling.Service.ConfSettingOrigin.ManagedBlock, "darling-managed.conf", 25, $"{stored}MB");
+        return DarlingStoreHostProfile.ClassifyVerdict(attribution, stored, derived).Verdict;
+    }
+
+    /// <summary>#5459: a volume a few hundred MB either side of a ladder edge (16, 32, 64, 128 GB free) must not
+    /// read stale on a store nobody touched. The plant is the churn a busy runner puts on the free-space reading
+    /// between the write and the check; the unmodified comparison (derived straight from the later reading) is
+    /// asserted to read stale for the same plant, so the test fails on the old shape.</summary>
+    [Theory]
+    [InlineData(16, 300)]
+    [InlineData(32, 300)]
+    [InlineData(64, 1024)]
+    [InlineData(128, 2048)]
+    public void WalSizeVerdict_FreeSpaceChurnAcrossARungEdgeStillMatches(long edgeGb, long churnMb)
+    {
+        var edge = edgeGb * Gb;
+        var churn = churnMb * 1024L * 1024;
+
+        /* Written just above the edge, checked just below it, and the other way round. */
+        Assert.NotEqual(
+            DarlingManagedPostgres.DeriveWalSettings(edge + churn).MaxWalSizeMb,
+            DarlingManagedPostgres.DeriveWalSettings(edge - churn).MaxWalSizeMb);
+
+        Assert.Equal(HostSettingVerdict.Matches, WalVerdictAfterWriteAndLaterReading(edge + churn, edge - churn));
+        Assert.Equal(HostSettingVerdict.Matches, WalVerdictAfterWriteAndLaterReading(edge - churn, edge + churn));
+
+        /* The old shape: the same plant compared without the tolerance reads stale. */
+        var stored = DarlingManagedPostgres.DeriveWalSettings(edge + churn).MaxWalSizeMb;
+        var oldDerived = DarlingManagedPostgres.DeriveWalSettings(edge - churn).MaxWalSizeMb;
+        var attribution = new PerformanceMonitor.Darling.Service.ConfSettingAttribution(
+            PerformanceMonitor.Darling.Service.ConfSettingOrigin.ManagedBlock, "darling-managed.conf", 25, $"{stored}MB");
+        Assert.Equal(
+            HostSettingVerdict.StaleAfterHardwareChange,
+            DarlingStoreHostProfile.ClassifyVerdict(attribution, stored, oldDerived).Verdict);
+    }
+
+    /// <summary>#5459: the tolerance is a band, not a switch-off. Headroom that halved or doubled (the rung moves
+    /// by one or more steps away from the band) still reads stale, at every edge and in both directions.</summary>
+    [Theory]
+    [InlineData(20, 10)]
+    [InlineData(10, 20)]
+    [InlineData(40, 16)]
+    [InlineData(16, 40)]
+    [InlineData(200, 60)]
+    [InlineData(60, 200)]
+    [InlineData(300, 20)]
+    public void WalSizeVerdict_ARealChangeInHeadroomStillReadsStale(long freeAtWriteGb, long freeAtCheckGb)
+    {
+        Assert.Equal(
+            HostSettingVerdict.StaleAfterHardwareChange,
+            WalVerdictAfterWriteAndLaterReading(freeAtWriteGb * Gb, freeAtCheckGb * Gb));
+    }
+
+    /// <summary>#5459: only max_wal_size is tolerated, and an unreadable current value never is.</summary>
+    [Fact]
+    public void WalSizeVerdict_ToleranceAppliesOnlyToMaxWalSizeWithAReadableValue()
+    {
+        Assert.Equal(1024, DarlingStoreHostProfile.ApplyWalDriftTolerance("shared_buffers", 1024, 2048, 16 * Gb));
+        Assert.Equal(1024, DarlingStoreHostProfile.ApplyWalDriftTolerance("max_wal_size", 1024, null, 16 * Gb));
+        Assert.Equal(2048, DarlingStoreHostProfile.ApplyWalDriftTolerance("max_wal_size", 1024, 2048, 16 * Gb));
+        Assert.Equal(1024, DarlingStoreHostProfile.ApplyWalDriftTolerance("max_wal_size", 1024, 4096, 16 * Gb));
+    }
+
     [Fact]
     public void ClassifyVerdict_OperatorOverrideIsAlwaysOperatorOverride()
     {

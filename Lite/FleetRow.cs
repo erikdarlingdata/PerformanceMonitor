@@ -45,6 +45,12 @@ internal abstract class FleetRow
     /// this by a fixed step to produce the left margin.
     /// </summary>
     public int Depth { get; protected init; }
+
+    /// <summary>
+    /// What a screen reader announces for this row (<c>AutomationProperties.Name</c> on the sidebar's list item):
+    /// the server's display name or the group's title, instead of the row class's type name.
+    /// </summary>
+    public virtual string AutomationName => string.Empty;
 }
 
 /// <summary>
@@ -152,6 +158,8 @@ internal sealed class FleetHeaderRow : FleetRow
     /// <summary>Display label: the tag name, or "Favorites" / "Untagged".</summary>
     public string Title { get; }
 
+    public override string AutomationName => Title;
+
     /// <summary>Servers shown directly under this header (its own directly-assigned servers; for the
     /// pseudo-groups, the favourites or untagged count). Rendered as a "(n)" badge.</summary>
     public int ServerCount { get; }
@@ -185,4 +193,6 @@ internal sealed class FleetServerRow : FleetRow
 
     /// <summary>The monitored server this row renders.</summary>
     public FleetServer Server { get; }
+
+    public override string AutomationName => Server.DisplayName;
 }

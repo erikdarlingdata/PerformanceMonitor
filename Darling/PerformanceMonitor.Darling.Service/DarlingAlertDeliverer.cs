@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -85,9 +86,11 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
     ///
     /// <para><b>What comes back.</b> On the combined send (Summary mode, or any alert without incidents,
     /// which is every self-alert) the exact <see cref="AlertDelivery"/> the history row was written with.
-    /// On a Per-event split there are N sends and N rows and no single disposition describes them, so this
-    /// returns <c>null</c> — "unreported" — rather than electing one; the callers that read the answer (the
-    /// three daily documents) carry structured <see cref="AlertContext.Details"/> since #3834 but no
+    /// On a Per-event split there are N sends and N rows, and this returns the one
+    /// <see cref="FailedSendBackoff.ReportForSplit"/> picks (#4822): a delivery that reached a channel, else a
+    /// failed one so the engine tries the alert again, else <c>null</c> — "unreported" — when no send was
+    /// attempted; the callers that read the answer (the three daily documents) carry structured
+    /// <see cref="AlertContext.Details"/> since #3834 but no
     /// <see cref="AlertContext.Incidents"/>, so the Per-event branch below — which is gated on incidents,
     /// not on a context existing — remains unreachable for them and their disposition is always reported.
     /// That is a property of what a report IS rather than an accident of how it fires: an incident-carrying
@@ -104,6 +107,12 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             throw new ArgumentNullException(nameof(outcome));
         }
 
+        /* #5320 (part of #4348): the statement filter runs at this choke point, so a caller that hands an outcome
+           straight here (the PostgreSQL families, the self alerts, the custom alert rules) is filtered like an
+           engine alert. An outcome AlertEngine.FireAsync already filtered is remembered by the filter and passes
+           through untouched, so nothing is judged twice. Never throws. */
+        outcome = AlertStatementFilter.Apply(outcome);
+
         try
         {
             /* #1236/#1141: a per-server override wins over the global mode; Per-event splits an
@@ -111,6 +120,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             var mode = AlertDeliveryModeResolver.Resolve(_resolveServerOverride(outcome.ServerKey), _settings.DeliveryMode);
             if (mode == AlertNotificationMode.PerEvent && outcome.Context?.Incidents is { Count: > 0 })
             {
+                var deliveries = new List<AlertDelivery?>();
                 foreach (var message in PerEventNotification.Split(outcome.Context, _settings.PerEventMax))
                 {
                     /* Per-incident card: msg.CurrentValue is the incident's occurrence count, and
@@ -118,14 +128,15 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
                        overflow message's "+N more" text is unparseable, so the store's text fallback
                        silently recorded 0). Threshold is the outcome's, unchanged. Matches Lite's
                        per-event sends; detail text rebuilt from the split context. */
-                    await SendAndRecordAsync(
+                    deliveries.Add(await SendAndRecordAsync(
                         outcome, message.CurrentValue, message.Context,
                         AlertContextBuilders.ContextToDetailText(message.Context),
                         numericCurrentValue: message.NumericValue, numericThresholdValue: outcome.NumericThresholdValue,
-                        deliveryMode: mode, cancellationToken: cancellationToken);
+                        deliveryMode: mode, cancellationToken: cancellationToken));
                 }
 
-                return null;
+                /* N sends, N rows: the split reports the one delivery the engine acts on (#4822). */
+                return FailedSendBackoff.ReportForSplit(deliveries);
             }
 
             /* Summary mode, or an alert with no incidents (CPU/low-disk/jobs): one combined send+row, unchanged. */
@@ -186,6 +197,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             context ??= new AlertContext();
             context.SeverityOverride ??= outcome.Severity;
         }
+
+        /* #5642: the sample-age line rides the history row's detail_text and every channel's prose exactly
+           once, whichever way the engine built the text; the context JSON below carries the typed field. */
+        detailText = AlertDetailText.WithSampleAge(detailText, context);
 
         /* Lite's EmailAlertService.cs:65-66 — muted alerts skip both channels but still record below.
            outcome.DisplayName (a custom rule's human name, or null for built-ins) renders in the

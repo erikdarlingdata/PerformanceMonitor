@@ -406,8 +406,10 @@ public sealed class PgServerConfigScopeRungTests
         /* 10 -> 12 (#3937): ScopedConfigChangesSql's `snapshots` subquery and `overrides` CTE, both aliased
            `FROM pg_server_config AS c`, both classified "selects" above. 12 -> 13 (#4348 S1b): the scrub's
            one candidate read, classified above as the deliberate third answer. 13 -> 15 (#4677): the eviction
-           finding's pg_stat_statements.max read and the top-queries reader's, both server-wide (they exclude the overrides). */
-        Assert.Equal(15, reads);
+           finding's pg_stat_statements.max read and the top-queries reader's, both server-wide (they exclude the overrides).
+           15 -> 16 (#4938): the worker's server-clock read (DarlingWorker.ReadPgServerClockSql), the newest server-wide
+           TimeZone setting of a PostgreSQL target, which excludes the overrides the same way. */
+        Assert.Equal(16, reads);
         Assert.True(undecided.Count == 0,
             "a pg_server_config read carries neither arm of the V138 scope split, so it will see per-database "
           + "and per-role override rows as if they were the server's settings: ["

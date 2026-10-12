@@ -8,9 +8,11 @@
 
 using System;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitorLite.Tests;
 using Xunit;
@@ -66,7 +68,7 @@ public sealed class FileGrowthReadTests : IClassFixture<SharedDuckDbFixture>, ID
         return _seedConn;
     }
 
-    private async Task SeedFileAsync(DateTime collectionTime, string fileName, string fileType, double totalSizeMb)
+    private async Task SeedFileAsync(DateTime collectionTime, string fileName, string fileType, double totalSizeMb, bool unknownVolume = false)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -77,7 +79,7 @@ INSERT INTO database_size_stats
      database_name, database_id, file_id, file_type_desc, file_name, physical_name,
      total_size_mb, used_size_mb,
      volume_mount_point, volume_total_mb, volume_free_mb)
-VALUES ($1, $2, $3, $4, 'tempdb', 2, $5, $6, $7, $8, $9, $10, 'D:\', 4096000, 3000000)";
+VALUES ($1, $2, $3, $4, 'tempdb', 2, $5, $6, $7, $8, $9, $10, " + (unknownVolume ? "NULL, NULL, NULL" : "'D:\\', 4096000, 3000000") + ")";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
@@ -127,5 +129,50 @@ VALUES ($1, $2, $3, $4, 'tempdb', 2, $5, $6, $7, $8, $9, $10, 'D:\', 4096000, 30
         await SeedFileAsync(collection2, "tempdev", "ROWS", 122_880);
         var after = await service.GetDatabaseFileGrowthAsync(ServerId, lookbackMinutes: 120);
         Assert.Equal((DateTime?)collection2, Assert.Single(after, f => f.FileName == "tempdev").ObservedAtUtc);
+    }
+
+    [Fact]
+    public async Task AnUnknownVolume_ReadsBackNull_InTheFileGrowthRead_AndAsJsonNullInGetDatabaseSizes()
+    {
+        var service = new LocalDataService(_duckDb);
+        await SeedFileAsync(Collection1, "tempdev", "ROWS", 4_096, unknownVolume: true);
+
+        var growth = Assert.Single(await service.GetDatabaseFileGrowthAsync(ServerId, lookbackMinutes: 120));
+        Assert.Null((object?)growth.VolumeMountPoint);
+        Assert.Equal((double?)null, (double?)growth.VolumeTotalMb);
+        Assert.Equal((double?)null, (double?)growth.VolumeFreeMb);
+
+        var sizes = await service.GetLatestDatabaseSizeStatsAsync(ServerId);
+        var row = Assert.Single(sizes);
+        Assert.Null((object?)row.VolumeMountPoint);
+        Assert.Equal((double?)null, (double?)row.VolumeTotalMb);
+        Assert.Equal((double?)null, (double?)row.VolumeFreeMb);
+
+        using var doc = JsonDocument.Parse(McpServerInfoTools.DatabaseSizesPayload("srv", sizes));
+        var file = doc.RootElement.GetProperty("databases").EnumerateArray().Single()
+            .GetProperty("files").EnumerateArray().Single();
+        Assert.Equal(JsonValueKind.Null, file.GetProperty("volume_mount_point").ValueKind);
+        Assert.Equal(JsonValueKind.Null, file.GetProperty("volume_total_mb").ValueKind);
+        Assert.Equal(JsonValueKind.Null, file.GetProperty("volume_free_mb").ValueKind);
+    }
+
+    [Fact]
+    public async Task AKnownVolume_ReadsItsValues_InTheFileGrowthRead_AndInGetDatabaseSizes()
+    {
+        var service = new LocalDataService(_duckDb);
+        await SeedFileAsync(Collection1, "tempdev", "ROWS", 4_096);
+
+        var growth = Assert.Single(await service.GetDatabaseFileGrowthAsync(ServerId, lookbackMinutes: 120));
+        Assert.Equal(@"D:\", growth.VolumeMountPoint);
+        Assert.Equal((double?)4_096_000d, (double?)growth.VolumeTotalMb);
+        Assert.Equal((double?)3_000_000d, (double?)growth.VolumeFreeMb);
+
+        var sizes = await service.GetLatestDatabaseSizeStatsAsync(ServerId);
+        using var doc = JsonDocument.Parse(McpServerInfoTools.DatabaseSizesPayload("srv", sizes));
+        var file = doc.RootElement.GetProperty("databases").EnumerateArray().Single()
+            .GetProperty("files").EnumerateArray().Single();
+        Assert.Equal(@"D:\", file.GetProperty("volume_mount_point").GetString());
+        Assert.Equal(4_096_000d, file.GetProperty("volume_total_mb").GetDouble(), precision: 3);
+        Assert.Equal(3_000_000d, file.GetProperty("volume_free_mb").GetDouble(), precision: 3);
     }
 }

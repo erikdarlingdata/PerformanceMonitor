@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// an EC2 success, an Azure success, neither found (a timeout within the probe's own budget), a 401, a 404, an
 /// oversized body, a redirect (never followed), and a value that fails the accept pattern.
 /// </summary>
+[Collection("timing")]
 public sealed class DarlingCloudIdentityProbeTests
 {
     private static HttpResponseMessage Text(HttpStatusCode status, string body) =>
@@ -147,11 +148,29 @@ public sealed class DarlingCloudIdentityProbeTests
             throw new InvalidOperationException("unreachable");
         });
 
+        /* #5600: this failed again in the whole-suite guards job (about 28,000 tests in one process) at 1083 ms
+           after the request ended, with the probe unchanged. returnedAt was read HERE after
+           `await ...WaitAsync(...)`, so it included the hop from the probe task's completion back into this
+           test (WaitAsync's own completion, then the awaiter's continuation), and that hop belongs to the
+           machine, not the probe. The probe's completion is stamped instead by a synchronous continuation on
+           the probe task itself, which runs on whichever thread completes the probe, with no hop. The test now
+           also runs in the `timing` collection (TimingCollection), alone in the process, so the remaining
+           cancel-to-return step is not competing with other classes either. No stall allowance: the bar
+           stays NoPoolStepLimitMs. */
+        var returnedAtMs = new long[] { -1 };
+
         clock.Start();
         CloudIdentity identity;
         try
         {
-            identity = await DarlingCloudIdentityProbe.ProbeAsync(handler, CancellationToken.None).WaitAsync(HangGuard);
+            var probe = DarlingCloudIdentityProbe.ProbeAsync(handler, CancellationToken.None);
+            var stamp = probe.ContinueWith(
+                _ => Interlocked.CompareExchange(ref returnedAtMs[0], clock.ElapsedMilliseconds, -1),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            identity = await probe.WaitAsync(HangGuard);
+            await stamp.WaitAsync(HangGuard);
         }
         catch (TimeoutException)
         {
@@ -159,7 +178,8 @@ public sealed class DarlingCloudIdentityProbeTests
             throw;
         }
 
-        var returnedAt = clock.ElapsedMilliseconds;
+        var resumedAt = clock.ElapsedMilliseconds;
+        var returnedAt = Interlocked.Read(ref returnedAtMs[0]);
 
         Assert.Equal(CloudIdentity.None, identity);
         var startedAt = Interlocked.Read(ref handlerStartedAtMs[0]);
@@ -173,7 +193,7 @@ public sealed class DarlingCloudIdentityProbeTests
             $"the handler's request ended after {endedAt} ms, well before the {DarlingCloudIdentityProbe.ProbeBudget.TotalMilliseconds:0} ms budget: something other than the probe's budget ended it");
         Assert.True(
             returnedAt - endedAt <= NoPoolStepLimitMs,
-            $"ProbeAsync returned {returnedAt - endedAt} ms after the handler's request ended (at {endedAt} ms), not within {NoPoolStepLimitMs} ms: the probe waited after the budget cancelled the request, and nothing bounds that wait");
+            $"ProbeAsync returned {returnedAt - endedAt} ms after the handler's request ended (at {endedAt} ms; this test resumed at {resumedAt} ms), not within {NoPoolStepLimitMs} ms: the probe waited after the budget cancelled the request, and nothing bounds that wait");
     }
 
     /// <summary>The number the timing test above no longer measures against a clock (#4741): the 200 ms total
@@ -512,6 +532,7 @@ public sealed class DarlingCloudIdentityProbeTests
 /// lane orders' "real gates" list). Proved once, by hand, that each assertion fails when the source it pins is
 /// broken (reverted after).
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingCloudIdentityProbeSourcePinTests
 {
     private const string ProbeClassName = "DarlingCloudIdentityProbe";
@@ -553,11 +574,13 @@ public sealed class DarlingCloudIdentityProbeSourcePinTests
     }
 
     [Fact]
-    public void GetStoreHostCallSite_OnlyInTheMcpToolAndTheWebDispatch()
+    public void GetStoreHostCallSite_OnlyInTheMcpToolTheWebDispatchAndTheDiagnosticsBundle()
     {
+        /* The diagnostics bundle (#5097) reads the store host the way the MCP tool serves it, once, from a verb an
+           operator runs by hand, as --check-settings does through GatherAsync. */
         var files = FilesContainingAcrossServiceProject("GetStoreHost(");
 
-        Assert.Equal(new[] { "DarlingWebEndpoints.cs", "Mcp/DarlingMcpStoreHostTools.cs" }, files);
+        Assert.Equal(new[] { "DarlingWebEndpoints.cs", "DiagnosticsBundleRunner.cs", "Mcp/DarlingMcpStoreHostTools.cs" }, files);
     }
 
     /// <summary>Every <c>.cs</c> file under <c>Darling/PerformanceMonitor.Darling.Service/</c> (skipping

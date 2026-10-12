@@ -88,8 +88,11 @@ public sealed class SignificantWaitsToolTests : IClassFixture<SharedDuckDbFixtur
         Assert.Contains("NOT an all-clear", neverText, StringComparison.Ordinal);
         Assert.DoesNotContain("widen", neverText, StringComparison.OrdinalIgnoreCase);
 
-        /* Captured, but outside the asked-for window: a quiet window, and widening IS the move. */
+        /* Captured, but outside the asked-for window: a quiet window, and widening IS the move. The collector's runs
+           cover the window (#4966): with no run in it, the store would hold nothing for the window at all, the notice
+           would say the window is cut, and the quiet claim would rightly give way to the cut sentence. */
         await SeedWaitAsync(LoadFixture("wait_info.xml"), Truncate(DateTime.UtcNow.AddHours(-48)));
+        await SeedCollectorRunsAsync(Truncate(DateTime.UtcNow.AddHours(-3)), Truncate(DateTime.UtcNow), everyMinutes: 30);
 
         var quiet = await McpHealthParserTools.GetSignificantWaits(service, _serverManager, ServerName, 1, 50);
         var quietRoot = JsonDocument.Parse(quiet).RootElement;
@@ -169,6 +172,26 @@ public sealed class SignificantWaitsToolTests : IClassFixture<SharedDuckDbFixtur
             await _seedConn.OpenAsync();
         }
         return _seedConn;
+    }
+
+    /// <summary>The system_health collector's logged runs, one every <paramref name="everyMinutes"/> from
+    /// <paramref name="firstUtc"/> to <paramref name="lastUtc"/>: what shows the store covered a window with no event in it.</summary>
+    private async Task SeedCollectorRunsAsync(DateTime firstUtc, DateTime lastUtc, int everyMinutes)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT $1 + row_number() OVER (), $2, $3, 'system_health_events', g.t, 12, 'SUCCESS', 0
+FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL {everyMinutes} MINUTE) AS g(t)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = _serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = firstUtc });
+        cmd.Parameters.Add(new DuckDBParameter { Value = lastUtc });
+        await cmd.ExecuteNonQueryAsync();
+        _nextId += 100_000;
     }
 
     private async Task SeedWaitAsync(string eventXml, DateTime eventTimeUtc)

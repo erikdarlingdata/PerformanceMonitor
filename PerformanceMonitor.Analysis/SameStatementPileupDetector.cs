@@ -98,6 +98,12 @@ public static class SameStatementPileupDetector
     /// <paramref name="ElapsedMs"/> is the row's <c>total_elapsed_time_ms</c> — the in-flight elapsed
     /// at the instant the snapshot was taken, which is what both the pileup floor and the sub-second
     /// baseline compare (an observation, not a completed-execution duration).
+    /// <paramref name="PreviewText"/> (#5320) is the statement text the finding PRINTS: the reader judged the
+    /// whole statement with the sensitive-statement filter, then cut it. It is a required parameter, so a reader
+    /// cannot forget it. <paramref name="QueryText"/> stays the reader's raw cut, which is only ever hashed (the
+    /// null-hash identity surrogate) or searched (the sp_server_diagnostics noise filter) and is never shown. A
+    /// null <paramref name="PreviewText"/> prints nothing (the finding fails closed; it never falls back to the
+    /// raw cut).
     /// </summary>
     public sealed record SnapshotRow(
         DateTime CollectionTime,
@@ -111,7 +117,8 @@ public static class SameStatementPileupDetector
         long ElapsedMs,
         long CpuTimeMs,
         long LogicalReads,
-        long PhysicalReads);
+        long PhysicalReads,
+        string? PreviewText);
 
     /// <summary>One fired pileup: the story (severity, fingerprint, frozen advice) plus the evidence
     /// drill-down the caller attaches to the materialized finding before persisting it.</summary>
@@ -295,8 +302,8 @@ public static class SameStatementPileupDetector
            pack and rewriting its severity arithmetic with a session that never touched its plan
            (#3474; the review on #3469 predicted the shape, the store's snapshots confirmed it). */
         foreach (var group in usable
-            .Where(r => r.CollectionTime == latest)
-            .GroupBy(r => (Database: DatabaseScope(r), Identity: StatementIdentity(r))))
+            .Where(r => r.CollectionTime == latest && StatementIdentity(r) is not null)
+            .GroupBy(r => (Database: DatabaseScope(r), Identity: StatementIdentity(r)!)))
         {
             var pack = group.ToList();
             var sessions = pack.Select(r => r.SessionId).Distinct().Count();
@@ -444,12 +451,21 @@ public static class SameStatementPileupDetector
     /// honest about its reach (readers cap the projected text, so two distinct giant statements
     /// sharing a prefix could collide) and the conjunction of gates keeps that from mattering: a
     /// collision still has to pass the elapsed floor, the IO gate, and the sub-second baseline.
+    /// <para>#4348: a null-hash row whose text is the withheld marker has NO identity (null, and
+    /// <see cref="Evaluate"/> leaves it out). The marker is what a collector stores for any statement it
+    /// withheld, so a text hash over it would put every withheld statement in one group and fire a pileup
+    /// on statements that have nothing in common.</para>
     /// </summary>
-    public static string StatementIdentity(SnapshotRow row)
+    public static string? StatementIdentity(SnapshotRow row)
     {
         if (!string.IsNullOrWhiteSpace(row.QueryHash))
         {
             return row.QueryHash.Trim().ToLowerInvariant();
+        }
+
+        if (WithheldStatementMarker.IsMarker(row.QueryText))
+        {
+            return null;
         }
 
         var text = NormalizeText(row.QueryText);
@@ -571,7 +587,7 @@ public static class SameStatementPileupDetector
                 identity,
                 database_name = databaseName,
                 snapshot_time = snapshotTime,
-                query_text = Preview(leader.QueryText),
+                query_text = Preview(leader.PreviewText ?? ""),
             },
         };
 

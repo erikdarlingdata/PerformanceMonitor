@@ -37,6 +37,7 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <TextBlock Grid.Row="0" Grid.Column="0" Text="Time:" FontWeight="SemiBold"
@@ -73,6 +74,12 @@
                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
             <TextBlock Grid.Row="6" Grid.Column="1" x:Name="StatusText"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" TextWrapping="Wrap"/>
+
+            <!-- #5642: shown only when the alert persisted the age of its newest sample. -->
+            <TextBlock Grid.Row="7" Grid.Column="0" x:Name="SampleAgeLabel" Text="Newest sample:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" Visibility="Collapsed"/>
+            <TextBlock Grid.Row="7" Grid.Column="1" x:Name="SampleAgeText"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" TextWrapping="Wrap" Visibility="Collapsed"/>
         </Grid>
 
         <!-- Muted indicator -->

@@ -29,12 +29,25 @@ internal sealed class SystemHealthChartRenderer
 
     private readonly ChartRenderHelper _chartHelper;
     private readonly Func<DateTime, DateTime> _project;
+    private readonly Func<TimeZoneInfo>? _displayZone;
 
-    internal SystemHealthChartRenderer(ChartRenderHelper chartHelper, Func<DateTime, DateTime> project)
+    /// <param name="chartHelper">The app's chart clear/legend helper.</param>
+    /// <param name="project">Turns a stored UTC sample time into the app's plotted X.</param>
+    /// <param name="displayZone">
+    /// Set by an app whose chart X is the UTC instant (#4766): every sample is then plotted at its own UTC time
+    /// (<paramref name="project"/> is not applied) and the bottom axis prints whole wall-clock times of the zone
+    /// (<see cref="AxesExtensions.DateTimeTicksBottomUtc"/>). Omitted, the renderer plots <paramref name="project"/>'s
+    /// value and draws the axis exactly as it always has.
+    /// </param>
+    internal SystemHealthChartRenderer(ChartRenderHelper chartHelper, Func<DateTime, DateTime> project, Func<TimeZoneInfo>? displayZone = null)
     {
         _chartHelper = chartHelper;
         _project = project;
+        _displayZone = displayZone;
     }
+
+    /// <summary>The X a sample at <paramref name="sampleUtc"/> plots at: its UTC time when a display zone was passed, else the app's projection of it.</summary>
+    private double PlotX(DateTime sampleUtc) => _displayZone is null ? _project(sampleUtc).ToOADate() : sampleUtc.ToOADate();
 
     /// <summary>
     /// One single-series counter chart (Bad Pages / Dump Requests / Access Violations / Write AV /
@@ -57,7 +70,7 @@ internal sealed class SystemHealthChartRenderer
         }
         else
         {
-            var xs = data.Select(d => _project(d.EventTime!.Value).ToOADate()).ToArray();
+            var xs = data.Select(d => PlotX(d.EventTime!.Value)).ToArray();
             var ys = data.Select(d => (double)(selector(d) ?? 0)).ToArray();
 
             var scatter = chart.Plot.Add.TimeSeries(xs, ys);
@@ -68,7 +81,7 @@ internal sealed class SystemHealthChartRenderer
             max = ys.Length > 0 ? ys.Max() : 0;
         }
 
-        chart.Plot.Axes.DateTimeTicksBottomDateChange();
+        chart.Plot.Axes.DateTimeTicksBottomFor(_displayZone);
         ChartStyle.ReapplyAxisColors(chart);
         chart.Plot.Axes.SetLimitsX(xMin, xMax);
         /* The tiles are borderless (no in-panel title), so the descriptive Y-axis label is the chart's
@@ -110,7 +123,7 @@ internal sealed class SystemHealthChartRenderer
                 if (typeData.Count == 0)
                     continue;
 
-                var xs = typeData.Select(d => _project(d.EventTime!.Value).ToOADate()).ToArray();
+                var xs = typeData.Select(d => PlotX(d.EventTime!.Value)).ToArray();
                 var ys = typeData.Select(d => (double)(d.SpinlockBackoffs ?? 1)).ToArray();
 
                 var scatter = chart.Plot.Add.TimeSeries(xs, ys);
@@ -128,7 +141,7 @@ internal sealed class SystemHealthChartRenderer
                 _chartHelper.ShowChartLegend(chart);
         }
 
-        chart.Plot.Axes.DateTimeTicksBottomDateChange();
+        chart.Plot.Axes.DateTimeTicksBottomFor(_displayZone);
         ChartStyle.ReapplyAxisColors(chart);
         chart.Plot.Axes.SetLimitsX(xMin, xMax);
         chart.Plot.YLabel("Sick Spinlocks (backoffs)");
@@ -153,7 +166,7 @@ internal sealed class SystemHealthChartRenderer
         }
         else
         {
-            var xs = data.Select(d => _project(d.EventTime!.Value).ToOADate()).ToArray();
+            var xs = data.Select(d => PlotX(d.EventTime!.Value)).ToArray();
 
             var sysScatter = chart.Plot.Add.TimeSeries(xs, data.Select(d => (double)(d.SystemCpuUtilization ?? 0)).ToArray());
             sysScatter.Color = ScottPlot.Color.FromHex(ChartPalette.CyclingColor(0));
@@ -170,7 +183,7 @@ internal sealed class SystemHealthChartRenderer
             _chartHelper.ShowChartLegend(chart);
         }
 
-        chart.Plot.Axes.DateTimeTicksBottomDateChange();
+        chart.Plot.Axes.DateTimeTicksBottomFor(_displayZone);
         ChartStyle.ReapplyAxisColors(chart);
         chart.Plot.Axes.SetLimitsX(xMin, xMax);
         chart.Plot.YLabel("CPU %");

@@ -116,9 +116,9 @@ public interface IAlertDeliverer
     /// <para><b>Required, not defaulted — CONTRIBUTING's Two-Store Parity rule, which names this interface.</b>
     /// A default body here would have compiled, and would have left Lite's deliverer and fourteen test fakes
     /// quietly inheriting an answer nobody wrote down. So every implementer states its answer: Darling's
-    /// deliverer reports the disposition its history row was written with; Lite's, whose send seam returns
-    /// no disposition and which hosts neither daily document, returns <c>null</c> by hand and says why; each
-    /// fake does the same. <c>null</c> means "unreported", never "failed" — every asker treats it the way every
+    /// deliverer reports the disposition its history row was written with, and since #4752 Lite's reports the
+    /// disposition its send returned, though Lite hosts neither daily document; each fake states its own
+    /// answer. <c>null</c> means "unreported", never "failed" — every asker treats it the way every
     /// fire before #3580 was treated, as delivered — and a deliverer that KNOWS a send failed reports
     /// <see cref="AlertDelivery.ChannelFailed"/>, the one disposition the two document askers withhold their
     /// delivered-today stamp on.</para>

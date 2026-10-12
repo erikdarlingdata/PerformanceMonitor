@@ -51,6 +51,7 @@ namespace Lite.Tests;
 /// palette slot the operator should tune independently of the fills it sits on.</description></item>
 /// </list>
 /// </summary>
+[Trait("Reads", "Darling")]
 public class ThemeStatusContrastTests
 {
     private static readonly string[] StatusColorKeys = { "SuccessColor", "WarningColor", "ErrorColor", "InfoColor" };

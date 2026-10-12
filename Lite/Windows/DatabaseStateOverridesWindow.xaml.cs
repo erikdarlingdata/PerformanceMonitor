@@ -12,7 +12,10 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Windows;
@@ -86,6 +89,20 @@ public partial class DatabaseStateOverridesWindow : Window
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await LoadAsync();
 
+    /// <summary>Which collectors have ever run for the server. A failed read gives the empty history, which makes no claim.</summary>
+    private async System.Threading.Tasks.Task<CollectorRunHistory> ReadCollectorRunsAsync(int serverId)
+    {
+        try
+        {
+            /* #5457: off the UI thread, where the read waits on the store lock. */
+            return await System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorRunHistoryAsync(serverId));
+        }
+        catch (Exception)
+        {
+            return CollectorRunHistory.Empty;
+        }
+    }
+
     /// <summary>
     /// Loads the selected server's database states into the grid.
     ///
@@ -123,7 +140,14 @@ public partial class DatabaseStateOverridesWindow : Window
 
         try
         {
-            var rows = await _dataService.GetDatabaseStateExpectationsAsync(serverId);
+            /* #5457: the reads run on the pool, not the dispatcher: each takes the store read lock, which an archive or compaction
+               pass can hold. The same lock-and-query-on-one-thread rule as Lite/Controls (TabLoadsOffUiThreadTests). */
+            var rows = await System.Threading.Tasks.Task.Run(() => _dataService.GetDatabaseStateExpectationsAsync(serverId));
+
+            /* Read with the rows, ahead of the two checks below, so those checks still guard every paint. An unknown
+               edition (no stored row, or a failed read) makes no claim. */
+            var engineEdition = await System.Threading.Tasks.Task.Run(() => McpEngineCapability.EngineEditionAsync(_dataService, serverId));
+            var runs = await ReadCollectorRunsAsync(serverId);
 
             /* A newer load for this grid has started, so this answer is not the one the operator is
                waiting for even if the combo came back to the same server. */
@@ -166,7 +190,14 @@ public partial class DatabaseStateOverridesWindow : Window
             StatesGrid.ItemsSource = _rows;
             var deviating = _rows.Count(r => !string.Equals(r.ExpectedState, DatabaseStateTokens.Ignore, StringComparison.Ordinal)
                 && !string.Equals(r.CurrentState, r.ExpectedState, StringComparison.Ordinal));
-            StatusText.Text = $"{_rows.Count} database(s); {deviating} currently deviating from expected.";
+            var serverName = ServerCombo.Items.OfType<ServerPick>().FirstOrDefault(p => p.ServerId == serverId)?.DisplayName ?? "";
+            /* With no rows the line says why when the collector does not collect for this server. On an Azure SQL Database that is
+               the sentence the MCP tools return as not_collected. Elsewhere it is the tabs' sentence for a collector with no run:
+               not run yet inside its first-run grace, never ran after it. An unknown edition (no stored row) and a failed history
+               read make no claim, so the count shows as it always did. */
+            StatusText.Text = ServerTab.EngineGapStateFromRuns(serverName, engineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition, "database_states", _rows.Count, skipped: null, runs) is { Visibility: Visibility.Visible } gap
+                ? gap.Text
+                : $"{_rows.Count} database(s); {deviating} currently deviating from expected.";
         }
         catch (Exception ex)
         {
@@ -195,14 +226,61 @@ public partial class DatabaseStateOverridesWindow : Window
             return;
         }
 
+        if (_writeInFlight)
+        {
+            return;
+        }
+
+        SetWriteInFlight(true, $"resetting {row.DatabaseName}");
         try
         {
-            await _dataService.ResetDatabaseStateExpectedToCurrentAsync(serverId, row.DatabaseName);
+            var databaseName = row.DatabaseName;
+            await System.Threading.Tasks.Task.Run(() => _dataService.ResetDatabaseStateExpectedToCurrentAsync(serverId, databaseName));
+            if (!IsLoaded)
+            {
+                return;   // closed while it waited
+            }
+
+            SetWriteInFlight(false);
             await LoadAsync();
+        }
+        catch (StoreLockTimeoutException ex)
+        {
+            if (IsLoaded)
+            {
+                StatusText.Text = StoreBusyReport.Report("DatabaseStates", $"Reset {row.DatabaseName} to current", ex, $"resetting {row.DatabaseName}");
+            }
         }
         catch (Exception ex)
         {
             StatusText.Text = $"Could not reset {row.DatabaseName}: {ex.Message}";
+        }
+        finally
+        {
+            if (IsLoaded)
+            {
+                SetWriteInFlight(false);
+            }
+        }
+    }
+
+    /* #5650: a save or a reset can wait up to 30 s for the local database (LocalDataService.OpenUserWriteConnectionAsync)
+       while archival or a collector write holds it. While it waits, the grid, the server picker and both write buttons
+       are off, so a second click cannot start another write, and the line above the buttons says what is happening.
+       Close stays enabled; the continuations check IsLoaded so a window closed during the wait is left alone. */
+    private bool _writeInFlight;
+
+    private void SetWriteInFlight(bool inFlight, string? doing = null)
+    {
+        _writeInFlight = inFlight;
+        StatesGrid.IsEnabled = !inFlight;
+        ServerCombo.IsEnabled = !inFlight;
+        RefreshButton.IsEnabled = !inFlight;
+        ResetButton.IsEnabled = !inFlight;
+        SaveButton.IsEnabled = !inFlight;
+        if (inFlight && doing is not null)
+        {
+            StatusText.Text = StoreBusyReport.WaitingText(doing);
         }
     }
 
@@ -217,19 +295,52 @@ public partial class DatabaseStateOverridesWindow : Window
             return;
         }
 
+        if (_writeInFlight)
+        {
+            return;
+        }
+
+        var changed = _rows.Where(r => !string.Equals(r.ExpectedState, r.OriginalExpected, StringComparison.Ordinal)).ToList();
+        var saved = 0;
+        SetWriteInFlight(true, "saving the overrides");
         try
         {
-            var changed = _rows.Where(r => !string.Equals(r.ExpectedState, r.OriginalExpected, StringComparison.Ordinal)).ToList();
             foreach (var row in changed)
             {
-                await _dataService.SetDatabaseStateExpectedAsync(serverId, row.DatabaseName, row.ExpectedState);
+                var databaseName = row.DatabaseName;
+                var expectedState = row.ExpectedState;
+                await System.Threading.Tasks.Task.Run(() => _dataService.SetDatabaseStateExpectedAsync(serverId, databaseName, expectedState));
+                row.OriginalExpected = expectedState;
+                saved++;
             }
 
-            DialogResult = true;
+            if (IsLoaded)
+            {
+                DialogResult = true;
+            }
+        }
+        catch (StoreLockTimeoutException ex)
+        {
+            if (IsLoaded)
+            {
+                /* Each row is its own write, so a timeout after the first leaves the earlier ones saved. Say which, and
+                   mark them as no longer changed, so the retry writes only the rest. */
+                var outcome = saved == 0
+                    ? "nothing was changed"
+                    : $"{saved} of {changed.Count} change(s) were saved and the rest were not";
+                StatusText.Text = StoreBusyReport.Report("DatabaseStates", "Save database state overrides", ex, "saving the overrides", outcome);
+            }
         }
         catch (Exception ex)
         {
             StatusText.Text = $"Could not save: {ex.Message}";
+        }
+        finally
+        {
+            if (IsLoaded)
+            {
+                SetWriteInFlight(false);
+            }
         }
     }
 

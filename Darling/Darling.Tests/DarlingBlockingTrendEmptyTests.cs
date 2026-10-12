@@ -71,6 +71,8 @@ public sealed class DarlingBlockingTrendEmptyTests
             var never = await DarlingMcpBlockingTools.GetBlockingTrend(dataSource, ServerName, 4);
             var neverRoot = JsonDocument.Parse(never).RootElement;
             Assert.Equal("unavailable", neverRoot.GetProperty("status").GetString());
+            /* #5244: the empty answer names no collector, and says so with the same key a data answer uses (get_blocking_stats gives null too). */
+            Assert.Equal(JsonValueKind.Null, neverRoot.GetProperty("source").ValueKind);
             var neverText = neverRoot.GetProperty("message").GetString()!;
             Assert.Contains("NOT an all-clear", neverText, StringComparison.Ordinal);
             Assert.Contains("EVER", neverText, StringComparison.Ordinal);
@@ -98,6 +100,8 @@ public sealed class DarlingBlockingTrendEmptyTests
             var clear = await DarlingMcpBlockingTools.GetBlockingTrend(dataSource, ServerName, 4);
             var clearRoot = JsonDocument.Parse(clear).RootElement;
             Assert.Equal("empty", clearRoot.GetProperty("status").GetString());
+            /* #5244: the empty answer names no collector, and says so with the same key a data answer uses (get_blocking_stats gives null too). */
+            Assert.Equal(JsonValueKind.Null, clearRoot.GetProperty("source").ValueKind);
             var clearText = clearRoot.GetProperty("message").GetString()!;
             Assert.Contains("genuine all-clear", clearText, StringComparison.Ordinal);
 
@@ -215,6 +219,8 @@ public sealed class DarlingBlockingTrendEmptyTests
             var clear = JsonDocument.Parse(
                 await DarlingMcpBlockingTools.GetDeadlockTrend(dataSource, ServerName, 4)).RootElement;
             Assert.Equal("empty", clear.GetProperty("status").GetString());
+            /* The deadlock trend has no collector choice, so it carries no source key. */
+            Assert.False(clear.TryGetProperty("source", out _));
             var clearText = clear.GetProperty("message").GetString()!;
             Assert.Contains("genuine all-clear", clearText, StringComparison.Ordinal);
             Assert.DoesNotContain("EVER", clearText, StringComparison.Ordinal);

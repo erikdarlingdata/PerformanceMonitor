@@ -35,6 +35,7 @@ namespace Darling.Tests;
 /// which reads carry the parameter. The live half — seed a past window, read it anchored, read it
 /// unanchored, prove the two disagree — is <see cref="AsOfWindowAnchorLivePostgresTests"/>.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class AsOfWindowAnchorTests
 {
     /* ── the resolver's contract ── */
@@ -242,6 +243,7 @@ public sealed class AsOfWindowAnchorTests
     public void EveryDispatchedReadWhoseToolTakesAnAnchor_AdvertisesItInTheCatalog()
     {
         var missing = DarlingWebEndpoints.BuildReadDispatch().Keys
+            .Where(name => !DarlingWebEndpoints.WebOnlyReadNames.Contains(name)) // no tool behind it, and a keyed read has no window (#5241)
             .Where(ToolTakesAnAnchor)
             .Where(name => !DarlingWebEndpoints.CatalogDescriptors[name].Params.Any(p => p.Name == "as_of"))
             .OrderBy(n => n, StringComparer.Ordinal)
@@ -281,10 +283,13 @@ public sealed class AsOfWindowAnchorTests
            result whose two halves describe different instants, which is worse than not offering it.
            get_store_metrics windows in days over the store's own growth series. get_read_latency windows
            in hours over the service's own read-duration telemetry, like get_store_metrics over the store's
-           own growth series. */
+           own growth series. get_finops windows over the query-stats rows ending now and takes no anchor
+           (its description says so); the FinOps views are cost-oriented live reads. get_slow_reads windows in hours
+           back from now over the service's own slow-read telemetry, like get_read_latency, and takes no anchor. get_store_query_history windows in hours back from now over the store's own statement history and takes no anchor. */
         var excluded = new[]
         {
             "get_pvs_stats", "get_fleet_overview", "get_store_metrics", "get_read_latency",
+            "get_finops", "get_slow_reads", "get_store_query_history",
         };
 
         var unanchored = DarlingWebEndpoints.BuildReadDispatch().Keys
@@ -555,6 +560,7 @@ public sealed class AsOfWindowAnchorTests
 /// a demonstrably different answer, not the same one with more rows.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class AsOfWindowAnchorLivePostgresTests
 {
     private const string ServerName = "darling-asof-anchor-e2e";

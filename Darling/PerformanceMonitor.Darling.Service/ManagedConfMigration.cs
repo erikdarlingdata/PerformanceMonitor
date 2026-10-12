@@ -31,8 +31,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// <see cref="ConfLineClassification.HandEdit"/> (left in place, never migrated as ours) until this
 /// classifier covers that block version too.</para>
 ///
-/// <para><b>Coverage today: v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15</b>
-/// (<see cref="CoveredMarkers"/>). v4, v6, v9, v10, v11, v13, v14, v15 write only FIXED constants with no
+/// <para><b>Coverage today: v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18</b>
+/// (<see cref="CoveredMarkers"/>). v18 (part of #5097) reuses v13's preload form test and fixed-line compare. v4, v6, v9, v10, v11, v13, v14, v15 write only FIXED constants with no
 /// derivation input at all — a block appended once with the same bytes on every store, so the rebuild test
 /// is a plain string comparison (v14, v15, and v13's <c>track_utility</c> line), or a round trip through a
 /// pure parse/format pair the codebase already has (v13's preload-library merge). v1 is NOT covered
@@ -133,6 +133,7 @@ internal static class ManagedConfMigration
         DarlingManagedPostgres.ConfMarkerV15,
         DarlingManagedPostgres.ConfMarkerV16,
         DarlingManagedPostgres.ConfMarkerV17,
+        DarlingManagedPostgres.ConfMarkerV18,
     ];
 
     /// <summary>
@@ -296,6 +297,7 @@ internal static class ManagedConfMigration
                 key, text, "checkpoint_timeout", "checkpoint_timeout = 15min"),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV17 => ClassifyFixedLine(
                 key, text, "log_line_prefix", "log_line_prefix = '%m [%p] %a '"),
+            _ when span.Marker == DarlingManagedPostgres.ConfMarkerV18 => ClassifyV18Line(key, value, text),
             _ => (false, HandEditReason.FormMismatch),
         };
 
@@ -784,15 +786,61 @@ internal static class ManagedConfMigration
     {
         if (string.Equals(key, DarlingManagedPostgres.PreloadSetting, StringComparison.OrdinalIgnoreCase))
         {
-            var roundTripped = DarlingManagedPostgres.FormatPreloadList(DarlingManagedPostgres.ParsePreloadList(value));
-            var expected = FormattableString.Invariant($"{DarlingManagedPostgres.PreloadSetting} = '{DarlingManagedPostgres.EscapeConfValue(roundTripped)}'");
-            return string.Equals(text.Trim(), expected, StringComparison.Ordinal)
-                ? (true, HandEditReason.None)
-                : (false, HandEditReason.FormMismatch);
+            return ClassifyPreloadLineForm(value, text);
         }
 
         return ClassifyFixedLine(key, text, DarlingManagedPostgres.StatementStatisticsLibrary + ".track_utility", DarlingManagedPostgres.StatementStatisticsLibrary + ".track_utility = off");
     }
+
+    /// <summary>The form test v13 and v18 share for their merged <c>shared_preload_libraries</c> line: the
+    /// value must round-trip through <see cref="DarlingManagedPostgres.ParsePreloadList"/> then
+    /// <see cref="DarlingManagedPostgres.FormatPreloadList"/> unchanged, so the line is byte-identical to what
+    /// the builder writes for that list.</summary>
+    private static (bool IsOurs, HandEditReason Reason) ClassifyPreloadLineForm(string value, string text)
+    {
+        var roundTripped = DarlingManagedPostgres.FormatPreloadList(DarlingManagedPostgres.ParsePreloadList(value));
+        var expected = FormattableString.Invariant($"{DarlingManagedPostgres.PreloadSetting} = '{DarlingManagedPostgres.EscapeConfValue(roundTripped)}'");
+        return string.Equals(text.Trim(), expected, StringComparison.Ordinal)
+            ? (true, HandEditReason.None)
+            : (false, HandEditReason.FormMismatch);
+    }
+
+    /// <summary>
+    /// v18's eight lines (part of #5097): the merged preload line takes the v13 form test
+    /// (<see cref="ClassifyPreloadLineForm"/>), and each <c>auto_explain.*</c> line is a fixed constant, so
+    /// <see cref="ClassifyFixedLine"/> compares it byte for byte. Any other key inside the block is a hand edit.
+    /// </summary>
+    private static (bool IsOurs, HandEditReason Reason) ClassifyV18Line(string key, string value, string text)
+    {
+        if (string.Equals(key, DarlingManagedPostgres.PreloadSetting, StringComparison.OrdinalIgnoreCase))
+        {
+            return ClassifyPreloadLineForm(value, text);
+        }
+
+        foreach (var (setting, written) in V18FixedLines)
+        {
+            if (string.Equals(key, DarlingManagedPostgres.AutoExplainLibrary + "." + setting, StringComparison.OrdinalIgnoreCase))
+            {
+                return ClassifyFixedLine(
+                    key, text, DarlingManagedPostgres.AutoExplainLibrary + "." + setting,
+                    DarlingManagedPostgres.AutoExplainLibrary + "." + setting + " = " + written);
+            }
+        }
+
+        return (false, HandEditReason.FormMismatch);
+    }
+
+    /// <summary>v18's fixed lines, as the setting name after <c>auto_explain.</c> and the value as written.</summary>
+    private static readonly (string Setting, string Written)[] V18FixedLines =
+    [
+        ("log_min_duration", "10s"),
+        ("log_analyze", "off"),
+        ("log_format", "json"),
+        ("log_nested_statements", "off"),
+        ("log_verbose", "on"),
+        ("log_settings", "on"),
+        ("log_parameter_max_length", "0"),
+    ];
 
     /// <summary>
     /// The rebuild-plus-form test for a key whose covered block writes exactly one constant line (v14, v15,

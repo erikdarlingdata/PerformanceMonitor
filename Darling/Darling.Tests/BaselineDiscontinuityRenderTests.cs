@@ -35,7 +35,7 @@ public sealed class BaselineDiscontinuityRenderTests
     {
         "get_memory_trend", "get_perfmon_trend", "get_file_io_trend", "get_query_trend",
         "get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend",
-        "get_wait_trend",
+        "get_wait_trend", "get_server_trend",
     };
 
     private static (string Name, MethodInfo Method)[] AllDarlingTools() => typeof(DarlingMcpTrendTools).Assembly.GetTypes()
@@ -76,7 +76,8 @@ public sealed class BaselineDiscontinuityRenderTests
         var byType = AllDarlingTools().ToDictionary(t => t.Name, t => t.Method.DeclaringType!, StringComparer.Ordinal);
 
         Assert.Equal(typeof(DarlingMcpDataTools), byType["get_wait_trend"]);
-        foreach (var name in Roster.Where(n => n != "get_wait_trend"))
+        Assert.Equal(typeof(DarlingMcpServerTrendTools), byType["get_server_trend"]);
+        foreach (var name in Roster.Where(n => n != "get_wait_trend" && n != "get_server_trend"))
         {
             Assert.Equal(typeof(DarlingMcpTrendTools), byType[name]);
         }

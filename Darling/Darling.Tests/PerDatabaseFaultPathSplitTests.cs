@@ -425,9 +425,12 @@ public sealed class PerDatabaseFaultPathSplitTests
         Assert.Contains("({Rows} rows, pg:{PgMs}ms)", runner, StringComparison.Ordinal);
 
         /* And dbSqlMs reaches sqlMs and the fan-out from ONE place each, both on the success path past the
-           flush. The fault path prints a reading and feeds nothing. */
+           flush. The fault path prints a reading and feeds nothing. The fan-out figure also carries the
+           database's plan and text fetch time (dbFetchMs, zero for every collector but query_store), because
+           the enumerated path counts that time inside the item's SQL slice; it is still one call, past the
+           flush, and the fault arms still feed nothing. */
         Assert.Equal(1, Occurrences(runner, "sqlMs += dbSqlMs;"));
-        Assert.Equal(1, Occurrences(runner, "fanout.Observe(databaseName, dbSqlMs + dbStorageMs);"));
+        Assert.Equal(1, Occurrences(runner, "fanout.Observe(databaseName, dbSqlMs + dbFetchMs + dbStorageMs);"));
 
         /* Positive control for the count assertions above: the identical counter finds a string the file
            really does carry more than once, so a mistyped needle cannot make them pass by matching nothing

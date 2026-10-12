@@ -112,8 +112,21 @@ public sealed class RollupCoverageCeilingLiveTests
         Assert.NotNull(laterWatermark);
         Assert.True(laterWatermark > engineWatermark, "the second refresh must move the engine's own watermark later");
 
+        /* #4957: past the hour with the oldest chunk unchanged, the caller is served the cached floor AND ceiling and one
+           background re-measure replaces them, so the first call after the hour still reads the old ceiling and the
+           ceiling advances once that re-measure lands. (Before #4957 this call measured inline.) */
         var pastTtl = now + TimescaleSupport.RollupFloorMaxReuse + TimeSpan.FromMinutes(1);
-        var secondCall = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTtl, ct);
+        var servedFromCache = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTtl, ct);
+        Assert.Equal(firstCall.CeilingOf(view), servedFromCache.CeilingOf(view));
+
+        var secondCall = servedFromCache;
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (secondCall.CeilingOf(view) != laterWatermark && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50, ct);
+            secondCall = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTtl, ct);
+        }
+
         Assert.Equal(laterWatermark, secondCall.CeilingOf(view));
         Assert.True(secondCall.CeilingOf(view) > firstCall.CeilingOf(view), "the ceiling must advance once the rollup materializes further");
 

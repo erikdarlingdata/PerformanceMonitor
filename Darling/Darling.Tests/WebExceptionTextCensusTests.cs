@@ -52,7 +52,7 @@ public sealed class WebExceptionTextCensusTests
     /// startup/shutdown/OIDC-config lifecycle (service diagnostics), or the sign-in flow's own
     /// <c>DarlingHttpRefusalLog</c> line — never a byte written to an HTTP response; the ONE place it DOES
     /// answer a request, the #4281 backstop, already passes the <see cref="Exception"/> itself through
-    /// <see cref="DarlingWebFailureLog.Report(ILogger,string,long,Exception)"/>, never its bare
+    /// <see cref="DarlingWebFailureLog.Report(ILogger,string,long,Exception,System.Threading.CancellationToken)"/>, never its bare
     /// <c>.Message</c>. A file NOT in this list is not swept by the census — the same tradeoff
     /// <c>AlertReadFailureSurfaceTests</c>' fixed roster makes, over scanning every collector file that
     /// legitimately logs <c>ex.Message</c> with nothing to do with a browser.</summary>
@@ -84,6 +84,36 @@ public sealed class WebExceptionTextCensusTests
             "reclassifies it through DarlingWebFailureLog before it ever reaches a browser (ServerErrorResult), " +
             "and the MCP run_custom_view_panel tool (DarlingMcpCustomViewTools) reads the same field unchanged " +
             "— #4283 does not touch what an MCP client sees."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "ex.InnerException is TimeoutException",
+            "The two statement catch filters (#4605): they only decide whether the runner throws the statement-timeout marker; the exception's text is never read or returned."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "base(inner.Message, inner)",
+            "Both compose markers (#4605) carry the original message for the log. The web route answers the fixed StatementTimeoutText at 400 for the statement marker and never logs or returns its message; the open marker's message reaches the server-error sentence, which ServerErrorResult reclassifies before a browser sees it."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "PostgresOpenTimeout.IsTimedOutOpen(open.InnerException!)",
+            "FromRunException's chain check (#4605, #5016): it only decides WHICH fixed sentence an open failure answers with; the exception's text is not read here."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "{marker.InnerException!.Message}",
+            "FromRunException with the remap flag false (#4605): the same ServerError sentence shape as above, built from the original timeout message; no production caller passes false."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "could not get a store connection in time: {open.InnerException!.Message}",
+            "FromRunException's open-timeout sentence (#4605): a ServerError that names the cause and is logged at Error; ServerErrorResult reclassifies it before a browser sees it."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "could not open a store connection: {open.InnerException!.Message}",
+            "FromRunException's open-failure sentence (#4605): a ServerError carrying the original message for the log; ServerErrorResult reclassifies it before a browser sees it."
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingWebOidc.cs"),
@@ -502,7 +532,7 @@ public sealed class WebExceptionTextCensusTests
         var sentence = McpHelpers.ErrorSentence("get_blocking",
             new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014"));
 
-        DarlingWebFailureLog.Report(logger, "/api/read/get_blocking", 12, sentence);
+        DarlingWebFailureLog.Report(logger, "/api/read/get_blocking", 12, sentence, System.Threading.CancellationToken.None);
 
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
@@ -516,7 +546,7 @@ public sealed class WebExceptionTextCensusTests
         var logger = new CapturingTestLogger();
         var sentence = McpHelpers.ErrorSentence("get_object_locking", new InvalidOperationException("boom"));
 
-        DarlingWebFailureLog.Report(logger, "/api/read/get_object_locking", 3, sentence);
+        DarlingWebFailureLog.Report(logger, "/api/read/get_object_locking", 3, sentence, System.Threading.CancellationToken.None);
 
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
@@ -531,7 +561,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014");
         var envelope = McpHelpers.FormatError("get_blocking", ex);
 
-        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_blocking", logger, 77);
+        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_blocking", logger, 77, System.Threading.CancellationToken.None);
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
@@ -547,7 +577,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new InvalidOperationException("Host=store.internal;Port=5432 role \"app_rw\" failed");
         var envelope = McpHelpers.FormatError("get_object_locking", ex);
 
-        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_object_locking", logger, 5);
+        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_object_locking", logger, 5, System.Threading.CancellationToken.None);
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
@@ -568,7 +598,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new PostgresException("relation \"x\" does not exist", "ERROR", "ERROR", "42P01");
         var envelope = McpHelpers.FormatError("get_sweep_reports", ex);
 
-        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_sweep_reports", logger, 9);
+        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_sweep_reports", logger, 9, System.Threading.CancellationToken.None);
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
@@ -585,7 +615,7 @@ public sealed class WebExceptionTextCensusTests
         var logger = new CapturingTestLogger();
         var refusal = McpHelpers.Refusal("hours_back", "hours_back must be between 1 and 8760.");
 
-        var result = DarlingWebEndpoints.ToHttpResult(refusal, "/api/read/get_x", logger, 1);
+        var result = DarlingWebEndpoints.ToHttpResult(refusal, "/api/read/get_x", logger, 1, System.Threading.CancellationToken.None);
 
         ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status400BadRequest, statusCode);
@@ -599,7 +629,7 @@ public sealed class WebExceptionTextCensusTests
         var logger = new CapturingTestLogger();
         var sentence = $"{DarlingServerResolver.RegistryReadFaultPrefix}Host=store.internal;Port=5432 role \"app_rw\" failed";
 
-        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5);
+        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5, System.Threading.CancellationToken.None);
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
@@ -614,7 +644,7 @@ public sealed class WebExceptionTextCensusTests
         var logger = new CapturingTestLogger();
         var sentence = $"{DarlingServerResolver.RegistryReadFaultPrefix}57014: canceling statement due to statement timeout";
 
-        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5);
+        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5, System.Threading.CancellationToken.None);
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
@@ -641,7 +671,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new InvalidOperationException("Host=store.internal;Port=5432 role \"app_rw\" failed");
         var envelope = McpHelpers.FormatError("create_mute_rule", ex);
 
-        var result = DarlingWebEndpoints.MuteRuleToolResult(envelope, "/api/mute-rules", logger, 5, StatusCodes.Status201Created);
+        var result = DarlingWebEndpoints.MuteRuleToolResult(envelope, "/api/mute-rules", logger, 5, System.Threading.CancellationToken.None, StatusCodes.Status201Created);
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
@@ -657,7 +687,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014");
         var envelope = McpHelpers.FormatError("create_mute_rule", ex);
 
-        var result = DarlingWebEndpoints.MuteRuleToolResult(envelope, "/api/mute-rules", logger, 5, StatusCodes.Status201Created);
+        var result = DarlingWebEndpoints.MuteRuleToolResult(envelope, "/api/mute-rules", logger, 5, System.Threading.CancellationToken.None, StatusCodes.Status201Created);
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
@@ -679,7 +709,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new PostgresException("syntax error at or near \"selct\"", "ERROR", "ERROR", "42601");
         var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}");
 
-        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5);
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5, System.Threading.CancellationToken.None);
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status400BadRequest, statusCode);
@@ -717,7 +747,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new PostgresException("password authentication failed for user \"app_rw\"", "FATAL", "FATAL", "28P01");
         var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
 
-        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5);
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5, System.Threading.CancellationToken.None);
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
@@ -738,7 +768,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new PostgresException("terminating connection due to administrator command on host db-primary.internal", "FATAL", "FATAL", "57P01");
         var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
 
-        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5);
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5, System.Threading.CancellationToken.None);
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
@@ -768,7 +798,7 @@ public sealed class WebExceptionTextCensusTests
         Assert.False(outcome.IsServerError);
         Assert.NotNull(outcome.Fault);
 
-        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", new CapturingTestLogger(), 5);
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", new CapturingTestLogger(), 5, System.Threading.CancellationToken.None);
         ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
     }
@@ -873,7 +903,7 @@ public sealed class WebExceptionTextCensusTests
         var logger = new CapturingTestLogger();
         var outcome = DarlingWebEndpoints.ComposeRunOutcome.AuthorQueryError("Query failed: syntax error at or near \"selct\"", "42601");
 
-        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5);
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5, System.Threading.CancellationToken.None);
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status400BadRequest, statusCode);
@@ -888,7 +918,7 @@ public sealed class WebExceptionTextCensusTests
         var logger = new CapturingTestLogger();
         var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest("bad spec");
 
-        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5);
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5, System.Threading.CancellationToken.None);
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status400BadRequest, statusCode);
@@ -983,7 +1013,7 @@ public sealed class WebExceptionTextCensusTests
                 result = McpHelpers.FormatError("test_tool", ex);
             }
 
-            return DarlingWebEndpoints.ToHttpResult(result, "/api/__test/tool-caught-timeout", logger, stopwatch.ElapsedMilliseconds);
+            return DarlingWebEndpoints.ToHttpResult(result, "/api/__test/tool-caught-timeout", logger, stopwatch.ElapsedMilliseconds, System.Threading.CancellationToken.None);
         });
 
         await app.StartAsync(ct);

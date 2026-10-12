@@ -11,7 +11,7 @@ using System;
 namespace PerformanceMonitor.Common;
 
 /// <summary>
-/// The FinOps provisioning verdict for one server — over-provisioned, right-sized, or under-provisioned —
+/// The FinOps provisioning verdict for one server — over-provisioned, right-sized, under-provisioned, or not applicable (a logical server's master) —
 /// as a single shared predicate both apps call.
 ///
 /// <para><b>Why this is shared rather than inlined.</b> The rule this replaces was copy-pasted four times
@@ -77,8 +77,18 @@ public static class ProvisioningVerdict
     /// <summary>Under pressure on CPU, workspace memory, or worker threads.</summary>
     public const string UnderProvisioned = "UNDER_PROVISIONED";
 
+    /// <summary>No service objective to resize: a logical server's <c>master</c> database.</summary>
+    public const string NotApplicable = "NOT_APPLICABLE";
+
+    /// <summary>What the verdict badge shows for <see cref="NotApplicable"/>.</summary>
+    public const string NotApplicableLabel = "N/A";
+
+    /// <summary>The sentence shown beside <see cref="NotApplicable"/>.</summary>
+    public const string NotApplicableExplanation = "A logical server's master database has no service objective to resize.";
+
     /// <summary>
-    /// The verdict for one server from one window's measurements.
+    /// The verdict for one server from one window's measurements. A logical server's <c>master</c>
+    /// (<see cref="ServerHardwareScope.IsLogicalServerMaster"/>) gets <see cref="NotApplicable"/> whatever it measured.
     /// </summary>
     /// <param name="avgCpuPercent">Mean SQL Server CPU over the window.</param>
     /// <param name="maxCpuPercent">Peak SQL Server CPU over the window.</param>
@@ -90,7 +100,10 @@ public static class ProvisioningVerdict
     /// <param name="grantUtilizationPercent">Peak granted-over-target workspace memory, as a percentage.</param>
     /// <param name="maxWorkers">The instance's worker-thread ceiling; 0 or negative means unknown, which
     /// cannot imply saturation.</param>
-    /// <param name="currentWorkers">Workers in use at the latest sample.</param>
+    /// <param name="currentWorkers">Workers in use at the latest sample; <c>null</c> where the collector cannot read it (an
+    /// Azure SQL Database), which is unknown: it never counts as zero in use and it cannot imply saturation.</param>
+    /// <param name="engineEdition">The target's engine edition, when known.</param>
+    /// <param name="edition">The target's stored edition, when known.</param>
     public static string Evaluate(
         decimal avgCpuPercent,
         decimal maxCpuPercent,
@@ -100,8 +113,15 @@ public static class ProvisioningVerdict
         long forcedGrants,
         decimal grantUtilizationPercent,
         int maxWorkers,
-        int currentWorkers)
+        int? currentWorkers,
+        int? engineEdition = null,
+        string? edition = null)
     {
+        if (ServerHardwareScope.IsLogicalServerMaster(engineEdition, edition))
+        {
+            return NotApplicable;
+        }
+
         /* Any of these three is a query that asked for workspace memory and did not simply get it. They are
            counts of events, not levels, so there is no threshold to tune — and on a fleet with no memory
            pressure they are all zero, which is the point. */
@@ -111,7 +131,8 @@ public static class ProvisioningVerdict
            rule the collector gates follow, where an unclassified target must never be gated off by
            assumption. */
         var workerPressure = maxWorkers > 0
-            && currentWorkers / (double)maxWorkers > HighWorkerRatio;
+            && currentWorkers is int inUse
+            && inUse / (double)maxWorkers > HighWorkerRatio;
 
         if (p95CpuPercent > HighCpuP95Percent || memoryPressure || workerPressure)
         {
@@ -146,7 +167,7 @@ public static class ProvisioningVerdict
         long grantTimeouts,
         long forcedGrants,
         int maxWorkers,
-        int currentWorkers)
+        int? currentWorkers)
     {
         if (p95CpuPercent > HighCpuP95Percent)
         {
@@ -161,9 +182,9 @@ public static class ProvisioningVerdict
                 + $"{forcedGrants} forced grant(s). This server may need more memory.";
         }
 
-        if (maxWorkers > 0 && currentWorkers / (double)maxWorkers > HighWorkerRatio)
+        if (maxWorkers > 0 && currentWorkers is int inUse && inUse / (double)maxWorkers > HighWorkerRatio)
         {
-            return $"Worker threads are near the limit: {currentWorkers} of {maxWorkers} in use "
+            return $"Worker threads are near the limit: {inUse} of {maxWorkers} in use "
                 + $"(threshold: {HighWorkerRatio:P0}). This server may need more CPU capacity.";
         }
 

@@ -26,7 +26,7 @@ public sealed class SpinlockStatsCollectorDefinitionTests
     private const string ExpectedQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     spinlock_name = ss.name,
     collisions = ss.collisions,
     spins = ss.spins,

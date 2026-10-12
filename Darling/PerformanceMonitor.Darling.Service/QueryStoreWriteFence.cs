@@ -24,16 +24,47 @@ namespace PerformanceMonitor.Darling.Service;
 /// landed": the server stays non-quiet, so nothing is reused or stored, until a clean write proves the table
 /// state is known again. A success clears the poison only when it began with no write in flight, no failure ended
 /// during its span, and nothing else is still in flight when it ends; anything less keeps the server poisoned.
+/// This leans on one assumption: a commit that faulted on the client does not become visible minutes after a later clean
+/// write cleared the poison. The candidate-list cache (#5518) shares it and, past it, is bounded by its age limit.
 /// </summary>
 public sealed class QueryStoreWriteFence
 {
     private readonly object _gate = new();
     private readonly Dictionary<int, (long Generation, int InFlight, bool Poisoned, bool CleanSpan)> _state = new();
 
-    public void BeginWrite(int serverId)
+    /* #5518: the database names each server's batches have named, with the sequence number of the latest one. A
+       reader that caches a list of names (QueryStoreBackfill's per-tick candidate list) asks whether any name
+       outside the list was written since it read. The sequence is one counter for the whole fence, so a snapshot
+       of it orders against every server's writes. One entry per distinct (server, database) name; ForgetServer drops a
+       removed server's. */
+    private readonly Dictionary<int, Dictionary<string, long>> _writtenNames = new();
+    private long _nameSequence;
+
+    /// <param name="serverId">The server the write targets.</param>
+    /// <param name="databases">The database names the batch writes (#5518), recorded BEFORE the transaction opens,
+    /// like the generation, so a name is visible to a reader the moment its write is in flight, and a write that
+    /// then fails is recorded as well. Null or empty for a caller with no names to give.</param>
+    public void BeginWrite(int serverId, IReadOnlyCollection<string>? databases = null)
     {
         lock (_gate)
         {
+            if (databases is { Count: > 0 })
+            {
+                if (!_writtenNames.TryGetValue(serverId, out var names))
+                {
+                    names = new Dictionary<string, long>(StringComparer.Ordinal);
+                    _writtenNames[serverId] = names;
+                }
+
+                foreach (var database in databases)
+                {
+                    if (database is not null)
+                    {
+                        names[database] = ++_nameSequence;
+                    }
+                }
+            }
+
             var s = _state.GetValueOrDefault(serverId);
             /* A write that starts with nothing in flight opens a fresh clean span; an overlapping one inherits it. */
             _state[serverId] = (s.Generation + 1, s.InFlight + 1, s.Poisoned, s.InFlight == 0 || s.CleanSpan);
@@ -57,6 +88,52 @@ public sealed class QueryStoreWriteFence
                 var clears = inFlight == 0 && s.CleanSpan;
                 _state[serverId] = (s.Generation + 1, inFlight, clears ? false : s.Poisoned, s.CleanSpan);
             }
+        }
+    }
+
+    /// <summary>#5518: drops a removed server's recorded database names, so the ledger holds nothing for a server that
+    /// no longer exists. The write state is a handful of numbers per server id and is left alone.</summary>
+    public void ForgetServer(int serverId)
+    {
+        lock (_gate)
+        {
+            _writtenNames.Remove(serverId);
+        }
+    }
+
+    /// <summary>#5518: the name sequence now, and whether no write is in flight and none ended ambiguously. A reader
+    /// that caches a list of names takes this BEFORE it reads and stores the list only when Quiet: a write already in
+    /// flight may commit after the read and its name sits at a sequence the reader would never look at.</summary>
+    public (long Sequence, bool Quiet) NameSnapshot(int serverId)
+    {
+        lock (_gate)
+        {
+            var s = _state.GetValueOrDefault(serverId);
+            return (_nameSequence, s.InFlight == 0 && !s.Poisoned);
+        }
+    }
+
+    /// <summary>#5518: true when a batch named a database that is NOT in <paramref name="known"/> after
+    /// <paramref name="sinceSequence"/> (a <see cref="NameSnapshot"/>'s). A name that is in the set does not change a
+    /// list of names, however many rows it writes; an unknown one may be a database the list is missing.</summary>
+    public bool WroteUnknownNameSince(int serverId, long sinceSequence, IReadOnlySet<string> known)
+    {
+        lock (_gate)
+        {
+            if (!_writtenNames.TryGetValue(serverId, out var names))
+            {
+                return false;
+            }
+
+            foreach (var (name, sequence) in names)
+            {
+                if (sequence > sinceSequence && !known.Contains(name))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 

@@ -107,7 +107,7 @@ public partial class LocalDataService
         int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetServerConfigChangesAsync", "v_server_config snapshot diff");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var snapshots = await ReadServerConfigSnapshotsAsync(serverId, endTime);
         return ConfigChangeDiff.DiffServerConfigChanges(snapshots, startTime, endTime)
             .Select(c => new ServerConfigChangeRow(c))
@@ -121,7 +121,7 @@ public partial class LocalDataService
         int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetDatabaseConfigChangesAsync", "v_database_config snapshot diff");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var snapshots = await ReadDatabaseConfigSnapshotsAsync(serverId, endTime, databaseNames);
         return ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, startTime, endTime)
             .Select(c => new DatabaseConfigChangeRow(c))
@@ -135,11 +135,43 @@ public partial class LocalDataService
         int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetTraceFlagChangesAsync", "v_trace_flags snapshot diff");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var snapshots = await ReadTraceFlagSnapshotsAsync(serverId, endTime);
         return ConfigChangeDiff.DiffTraceFlagChanges(snapshots, startTime, endTime)
             .Select(c => new TraceFlagChangeRow(c))
             .ToList();
+    }
+
+    /// <summary>
+    /// #4966: the coverage probe of a config-change tool (<see cref="QueryWindowRelation.ServerConfig"/>,
+    /// <see cref="QueryWindowRelation.DatabaseConfig"/>, <see cref="QueryWindowRelation.TraceFlags"/>). The config reads keep the
+    /// snapshot BEFORE the window as the diff baseline, and the collectors capture on connect, so a server that has stayed
+    /// connected holds its last snapshot days before the window and none inside it: <see cref="GetQueryWindowFloorAsync"/>
+    /// answers null there (nothing in the window), which an empty answer would read as "the store holds no collection of this
+    /// in the window". A snapshot at or before the window's start does cover the window, so this answers the start then and
+    /// otherwise what <see cref="GetQueryWindowFloorAsync"/> answers.
+    /// </summary>
+    internal async Task<DateTime?> GetConfigSnapshotCoverageFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc)
+    {
+        var floor = await GetQueryWindowFloorAsync(relation, serverId, startUtc, endUtc);
+        if (floor is not null)
+        {
+            return floor;
+        }
+
+        /* A snapshot before the window only proves coverage if the server was monitored during it: at least one run in the
+           window. With none, nothing was read, and the null answer says so. */
+        var view = QueryWindowRelationView(relation);
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = $@"
+SELECT 1
+WHERE EXISTS (SELECT 1 FROM {view} WHERE server_id = $1 AND capture_time < $2)
+AND   EXISTS (SELECT 1 FROM v_collection_log WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+        return await command.ExecuteScalarAsync() is not null ? startUtc : null;
     }
 
     private async Task<List<ConfigChangeDiff.ServerConfigSnapshot>> ReadServerConfigSnapshotsAsync(int serverId, DateTime endUtc)

@@ -95,7 +95,8 @@ public static partial class PgTargetScorer
     public const double PlanCoFireBoost = 0.3;
 
     /// <summary>
-    /// How many distinct <c>plan_hash</c> values one <c>query_id</c> must have been captured under in the window to
+    /// How many distinct <c>plan_hash</c> values (plan SHAPES: a change in estimates alone is not a new hash, #5114)
+    /// one <c>query_id</c> must have been captured under in the window to
     /// be parameter-SENSITIVE rather than merely re-planned once: two hashes is a flip (the regression's shape);
     /// three or more is the planner choosing among plans as the values change. unmeasured: chosen, not measured —
     /// calibrate against COUNT(DISTINCT plan_hash) per query_id per window in pg_plan_capture before the next

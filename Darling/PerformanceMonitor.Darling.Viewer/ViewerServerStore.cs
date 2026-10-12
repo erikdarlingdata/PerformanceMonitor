@@ -8,8 +8,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using PerformanceMonitor.Common;
 
@@ -161,11 +163,35 @@ public sealed class ViewerServerStore
             .ThenBy(s => s.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-    /// <summary>The first registered entry whose server name matches (case-insensitive), or null.</summary>
+    /// <summary>
+    /// The first registered entry whose server name matches (case-insensitive), or null. Only for an entry filed
+    /// under a key that is one server's alone (a <see cref="FavoriteKey"/>, or the collected server name the
+    /// database filter is filed under). It is not a way to find a server by its host: several databases on one
+    /// Azure SQL Database server share a host and are separate servers, so a host name does not pick one of them.
+    /// </summary>
     public ViewerServerEntry? GetByServerName(string serverName) =>
         _servers.FirstOrDefault(s => string.Equals(s.ServerName, serverName, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>Whether a server with this name is marked favorite in the registry.</summary>
+    /// <summary>
+    /// The registered entry that is the same server as <paramref name="entry"/>, or null: the same host, database and
+    /// read-only intent, in any letter case (a missing database only equals a missing database). The host alone is not
+    /// enough, because databases on one Azure SQL Database server share a host and are separate servers. Used by the
+    /// import, so a second database on a host already in the registry is not dropped as a duplicate.
+    /// </summary>
+    private ViewerServerEntry? FindSameServer(ViewerServerEntry entry) =>
+        _servers.FirstOrDefault(s =>
+            string.Equals(s.ServerName, entry.ServerName, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(
+                string.IsNullOrWhiteSpace(s.DatabaseName) ? null : s.DatabaseName.Trim(),
+                string.IsNullOrWhiteSpace(entry.DatabaseName) ? null : entry.DatabaseName.Trim(),
+                StringComparison.OrdinalIgnoreCase)
+            && s.ReadOnlyIntent == entry.ReadOnlyIntent);
+
+    /// <summary>
+    /// Whether the registry entry filed under this name (case-insensitive) is marked favorite. It reads one entry
+    /// by its name, so it says nothing about a server: to ask about a server use
+    /// <see cref="IsFavorite(int, string[])"/>, which reads the entry filed under the server's id (#4768).
+    /// </summary>
     public bool IsFavorite(string serverName) => GetByServerName(serverName)?.IsFavorite == true;
 
     /// <summary>Adds a new server definition, persists it, and stores its secret when one was supplied.</summary>
@@ -209,10 +235,15 @@ public sealed class ViewerServerStore
     }
 
     /// <summary>
-    /// Imports server definitions from another viewer's registry file, upserting by server name — an
-    /// existing name is skipped (Lite's "skipped duplicate" behavior). Each imported entry gets a fresh id
+    /// Imports server definitions from another viewer's registry file. A server the registry already holds — the
+    /// same host, database and read-only intent — is skipped (Lite's "skipped duplicate" behavior); another
+    /// database on a host the registry holds is a different server and is imported. Each imported entry gets a fresh id
     /// because secrets never cross machines (they live in the source machine's Credential Manager). Returns
     /// the imported and skipped counts.
+    ///
+    /// <para>A <see cref="FavoriteKey"/> entry is a server's star, not a server definition (#4768), so it is in
+    /// neither count. It still rides along, which keeps the star: it is added when this registry holds no entry
+    /// under that key, and an entry that is already here is left as it is, so an unpin made here is not undone.</para>
     /// </summary>
     public (int Imported, int Skipped) ImportServersFromFile(string path)
     {
@@ -223,9 +254,28 @@ public sealed class ViewerServerStore
 
         var imported = 0;
         var skipped = 0;
+        var carriedStars = 0;
         foreach (var entry in incoming)
         {
-            if (string.IsNullOrWhiteSpace(entry.ServerName) || GetByServerName(entry.ServerName) is not null)
+            if (string.IsNullOrWhiteSpace(entry.ServerName))
+            {
+                skipped++;
+                continue;
+            }
+
+            if (IsFavoriteKey(entry.ServerName))
+            {
+                if (GetByServerName(entry.ServerName) is null)
+                {
+                    entry.Id = Guid.NewGuid().ToString();
+                    _servers.Add(entry);
+                    carriedStars++;
+                }
+
+                continue;
+            }
+
+            if (FindSameServer(entry) is not null)
             {
                 skipped++;
                 continue;
@@ -236,7 +286,7 @@ public sealed class ViewerServerStore
             imported++;
         }
 
-        if (imported > 0)
+        if (imported > 0 || carriedStars > 0)
         {
             Save();
         }
@@ -245,46 +295,15 @@ public sealed class ViewerServerStore
     }
 
     /// <summary>
-    /// Flips the favorite flag for the server with this name and persists, returning the new state. When no
-    /// registry entry exists yet (the sidebar server came straight from the Postgres store), a minimal entry
-    /// is created and marked favorite — "adopting" the collected server into the registry so the one favorites
-    /// source of truth stays in the registry, exactly like Lite pins on <c>ServerConnection.IsFavorite</c>.
+    /// Sets the flag on the entry filed under <paramref name="serverName"/> in memory, creating a minimal entry
+    /// when a favorite has none yet. Returns whether anything changed, for the caller to save.
+    ///
+    /// <para>Favorites are the one thing this store keeps after Stage 3 moved server DEFINITIONS to
+    /// <c>config.config_monitored_servers</c> — they are viewer-local (the service never reads them), so they
+    /// legitimately stay in viewer-servers.json.</para>
     /// </summary>
-    public bool ToggleFavorite(string serverName)
+    private bool ApplyFavorite(string serverName, bool isFavorite)
     {
-        var entry = GetByServerName(serverName);
-        if (entry is null)
-        {
-            entry = new ViewerServerEntry
-            {
-                ServerName = serverName,
-                DisplayName = serverName,
-                IsFavorite = true
-            };
-            _servers.Add(entry);
-        }
-        else
-        {
-            entry.IsFavorite = !entry.IsFavorite;
-        }
-
-        Save();
-        return entry.IsFavorite;
-    }
-
-    /// <summary>
-    /// Sets (not toggles) the favorite flag for a server by name, creating a minimal viewer-local entry when
-    /// none exists, and persists. Favorites are the one thing this store keeps after Stage 3 moved server
-    /// DEFINITIONS to <c>config.config_monitored_servers</c> — they are viewer-local (the service never reads
-    /// them), so they legitimately stay in viewer-servers.json. Returns the resulting state.
-    /// </summary>
-    public bool SetFavorite(string serverName, bool isFavorite)
-    {
-        if (string.IsNullOrWhiteSpace(serverName))
-        {
-            return false;
-        }
-
         var entry = GetByServerName(serverName);
         if (entry is null)
         {
@@ -294,25 +313,209 @@ public sealed class ViewerServerStore
                 return false;
             }
 
-            _servers.Add(new ViewerServerEntry
-            {
-                ServerName = serverName,
-                DisplayName = serverName,
-                IsFavorite = true
-            });
+            _servers.Add(NewFavoriteEntry(serverName));
+            return true;
         }
-        else
+
+        if (entry.IsFavorite == isFavorite)
         {
-            if (entry.IsFavorite == isFavorite)
+            return false;
+        }
+
+        entry.IsFavorite = isFavorite;
+        return true;
+    }
+
+    private static ViewerServerEntry NewFavoriteEntry(string serverName) => new()
+    {
+        ServerName = serverName,
+        DisplayName = serverName,
+        IsFavorite = true
+    };
+
+    /// <summary>The prefix that marks a registry entry as a server's favorite flag; see <see cref="FavoriteKey"/>.</summary>
+    private const string FavoriteKeyPrefix = "server-id:";
+
+    /// <summary>
+    /// The ONE key a server's favorite flag is filed under (#4768). The sidebar, the Add/Edit dialog and Manage
+    /// Servers all reach the flag through <see cref="IsFavorite(int, string[])"/>,
+    /// <see cref="SetFavorite(int, bool, string[])"/> and <see cref="ToggleFavorite(int, string[])"/>, which take
+    /// their key from here, so the three cannot file it under different names again.
+    ///
+    /// <para>The server's id is the key because it is the one identifier all three surfaces hold and the one an
+    /// edit of the address keeps (#2158: the row keeps its <c>server_id</c> when its host changes). The names they
+    /// used before do not survive that: the dialog and Manage Servers filed the flag under the host and the
+    /// sidebar under the collected server name, so an edit of the host left the old entry set, that entry starred
+    /// any server added later at the old address, and unchecking the box in the same edit did not clear it.</para>
+    /// </summary>
+    public static string FavoriteKey(int serverId) =>
+        FavoriteKeyPrefix + serverId.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Whether a registry entry name is a <see cref="FavoriteKey"/>. Such an entry is a favorite flag, not a
+    /// server definition, so anything that turns registry entries into server definitions must skip it.
+    /// </summary>
+    public static bool IsFavoriteKey(string? serverName) =>
+        serverName is not null && serverName.StartsWith(FavoriteKeyPrefix, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Whether the server with this id is a favorite (#4768). Earlier versions filed the flag under a name, the
+    /// host or the collected server name. <paramref name="legacyNames"/> are the names this caller knows the
+    /// server by: a flag found under any of them is carried over to the server's <see cref="FavoriteKey"/> on
+    /// this read, once, and the old entry is dropped (or only un-starred, when it also holds something else) so
+    /// nothing keeps starring the old name.
+    /// </summary>
+    public bool IsFavorite(int serverId, params string?[] legacyNames)
+    {
+        var key = FavoriteKey(serverId);
+        if (CarryOverLegacyFavorites(key, legacyNames))
+        {
+            Save();
+        }
+
+        return IsFavorite(key);
+    }
+
+    /// <summary>
+    /// Sets (not toggles) the favorite flag of the server with this id, and clears any flag left under
+    /// <paramref name="legacyNames"/>, so a save that changes the host (pass the old and the new one) leaves the
+    /// flag on the server's <see cref="FavoriteKey"/> and no entry set under either address (#4768). Unchecking in
+    /// the same save leaves no entry set to true anywhere. Returns the resulting state.
+    /// </summary>
+    public bool SetFavorite(int serverId, bool isFavorite, params string?[] legacyNames)
+    {
+        var key = FavoriteKey(serverId);
+
+        /* This write supersedes what the old names held, so it is cleared rather than carried over. */
+        var changed = ClearLegacyFavorites(key, legacyNames);
+        changed |= ApplyFavorite(key, isFavorite);
+        if (changed)
+        {
+            Save();
+        }
+
+        return isFavorite;
+    }
+
+    /// <summary>
+    /// Flips the favorite flag of the server with this id (carrying over a flag an earlier version filed under
+    /// <paramref name="legacyNames"/> first, so the flip starts from what the operator was seeing) and persists,
+    /// returning the new state (#4768).
+    /// </summary>
+    public bool ToggleFavorite(int serverId, params string?[] legacyNames) =>
+        SetFavorite(serverId, !IsFavorite(serverId, legacyNames), legacyNames);
+
+    /// <summary>
+    /// Moves a flag an earlier version filed under one of <paramref name="legacyNames"/> to <paramref name="key"/>
+    /// and drops the old entry. Returns whether the registry changed, for the caller to save.
+    ///
+    /// <para>A star under an old name is consumed either way, but it only sets the key when the key has no entry
+    /// yet: an entry that exists was written under the new scheme, so it records what the operator chose since,
+    /// and a leftover star under another name must not undo an unpin.</para>
+    /// </summary>
+    private bool CarryOverLegacyFavorites(string key, string?[]? legacyNames)
+    {
+        if (!ClearLegacyFavorites(key, legacyNames))
+        {
+            return false;
+        }
+
+        if (GetByServerName(key) is null)
+        {
+            _servers.Add(NewFavoriteEntry(key));
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Un-stars every entry filed under one of <paramref name="legacyNames"/>, and removes the ones that held
+    /// nothing but the star. Returns whether any entry was starred (which is also whether the registry changed).
+    ///
+    /// <para>An entry that also holds something else is only un-starred: the sidebar's database filter (#1319) is
+    /// filed under the same collected name, and a definition an earlier version saved under it is what the
+    /// one-time import reads, so deleting either would lose more than the star.</para>
+    /// </summary>
+    private bool ClearLegacyFavorites(string key, string?[]? legacyNames)
+    {
+        if (legacyNames is null)
+        {
+            return false;
+        }
+
+        var cleared = false;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { key };
+        foreach (var name in legacyNames)
+        {
+            if (string.IsNullOrWhiteSpace(name) || !seen.Add(name))
             {
-                return isFavorite;
+                continue;
             }
 
-            entry.IsFavorite = isFavorite;
+            var starred = _servers
+                .Where(s => s.IsFavorite && string.Equals(s.ServerName, name, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            foreach (var entry in starred)
+            {
+                entry.IsFavorite = false;
+                if (HoldsNothingButAFavoriteFlag(entry))
+                {
+                    _servers.Remove(entry);
+                }
+
+                cleared = true;
+            }
         }
 
-        Save();
-        return isFavorite;
+        return cleared;
+    }
+
+    /// <summary>
+    /// The properties of a <see cref="ViewerServerEntry"/> that say nothing about which server it is, so an old
+    /// entry may differ from a bare favorite in these and still be treated as one (#4768). Every other public
+    /// property counts, see <see cref="HoldsNothingButAFavoriteFlag"/>.
+    /// </summary>
+    private static readonly HashSet<string> NotPartOfTheServer = new(StringComparer.Ordinal)
+    {
+        nameof(ViewerServerEntry.Id),            // a generated key for the entry; a bare favorite made now has its own
+        nameof(ViewerServerEntry.CreatedDate),   // when the entry was made, which a bare favorite made now cannot match
+        nameof(ViewerServerEntry.LastConnected), // the same, stamped when the entry was made
+        nameof(ViewerServerEntry.IsFavorite)     // the star being moved, which the caller has just cleared
+    };
+
+    /* Declared after NotPartOfTheServer on purpose: static initializers run in the order they are written. */
+    private static readonly PropertyInfo[] ComparedToABareFavorite = typeof(ViewerServerEntry)
+        .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Where(p => !NotPartOfTheServer.Contains(p.Name))
+        .ToArray();
+
+    /// <summary>
+    /// Whether an entry is what <see cref="NewFavoriteEntry"/> builds for its server name, and nothing has been
+    /// set on it since. It is compared with a fresh one over every public property of
+    /// <see cref="ViewerServerEntry"/> except <see cref="NotPartOfTheServer"/>, found by reflection, so a setting
+    /// added to the entry later is covered without anyone listing it: the entry is removed only when every
+    /// compared property matches. Lists match by count and sequence, everything else by <c>Equals</c>.
+    /// A definition with nothing set beyond its name and the defaults looks the same, and is treated the same:
+    /// there is nothing to lose.
+    /// </summary>
+    private static bool HoldsNothingButAFavoriteFlag(ViewerServerEntry entry)
+    {
+        var bare = NewFavoriteEntry(entry.ServerName);
+        foreach (var property in ComparedToABareFavorite)
+        {
+            var held = property.GetValue(entry);
+            var bareValue = property.GetValue(bare);
+            var same = property.PropertyType == typeof(List<string>)
+                ? (held as List<string> ?? new List<string>()).SequenceEqual(
+                    bareValue as List<string> ?? new List<string>(), StringComparer.Ordinal)
+                : object.Equals(held, bareValue);
+            if (!same)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>#1319: the persisted per-server display database filter (empty list = All / not yet set).</summary>
@@ -321,7 +524,7 @@ public sealed class ViewerServerStore
 
     /// <summary>
     /// #1319: persists the per-server display database filter, adopting a minimal viewer-local registry
-    /// entry when the server has none yet (same adopt-on-write rule as <see cref="SetFavorite"/>). An empty
+    /// entry when the server has none yet (same adopt-on-write rule as <see cref="SetFavorite(int, bool, string[])"/>). An empty
     /// list clears the filter (and writes no new entry for a server that had none).
     /// </summary>
     public void SetViewFilterDatabases(string serverName, List<string> databases)

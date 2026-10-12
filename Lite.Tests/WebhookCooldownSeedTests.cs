@@ -1,4 +1,8 @@
 using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite;
@@ -13,19 +17,27 @@ namespace PerformanceMonitorLite.Tests;
 /// restart is not re-posted on the first post-restart sweep — the guarantee #981 gave the email
 /// channel. The cooldown is time-bounded (EmailCooldownMinutes), so it only covers a restart
 /// inside the cooldown window; the time-independent edge-trigger watermark persistence (Lite)
-/// covers the rest. These tests use a dead webhook URL: a SUPPRESSED post never touches the
-/// network (the cooldown short-circuits first), while an ATTEMPTED post fails against the dead
-/// URL and increments the Teams failure counter — the observable proxy for "did it try to post".
+/// covers the rest. These tests point the webhook at a loopback endpoint that answers every post
+/// with HTTP 500: a SUPPRESSED post never touches the network (the cooldown short-circuits first),
+/// while an ATTEMPTED post fails against the endpoint and increments the Teams failure counter — the
+/// observable proxy for "did it try to post". The endpoint is in-process because the earlier dead URL,
+/// <c>http://localhost:1</c>, is not fast on Windows: a connect to a closed port retries the SYN and
+/// takes about 2 s per address, and <c>localhost</c> tries both ::1 and 127.0.0.1, so each attempted
+/// post took about 4.1 s and the 7 tests together about 20 s of waiting with almost no CPU.
 /// </summary>
-public class WebhookCooldownSeedTests
+public class WebhookCooldownSeedTests : IDisposable
 {
+    private readonly RefusingEndpoint _endpoint = new();
+
+    public void Dispose() => _endpoint.Dispose();
+
     private static WebhookAlertService MakeService(IAlertHistoryStore? history, FakeWebhookSettings settings)
         => new(settings, EmailAlertService.Branding, new AppLoggerAdapter<WebhookAlertService>(), history);
 
-    private static FakeWebhookSettings EnabledTeamsSettings() => new()
+    private FakeWebhookSettings EnabledTeamsSettings() => new()
     {
         TeamsWebhookEnabled = true,
-        TeamsWebhookUrl = "http://localhost:1/never", // closed port -> connection refused, fast deterministic failure
+        TeamsWebhookUrl = _endpoint.Url, // answers HTTP 500 at once -> fast deterministic failure
         EmailCooldownMinutes = 15
     };
 
@@ -54,13 +66,13 @@ public class WebhookCooldownSeedTests
     {
         // gotqn's repro: the restart is 17 min after the send, beyond the 15-min cooldown. The
         // cooldown seed must NOT suppress here — that's exactly why the Lite watermark persistence
-        // is also needed. The post is attempted (and fails against the dead URL).
+        // is also needed. The post is attempted (and fails against the refusing endpoint).
         var history = new FakeHistoryStore { LastWebhookSent = DateTime.UtcNow.AddMinutes(-17) };
         var svc = MakeService(history, EnabledTeamsSettings());
 
         var result = await svc.TrySendWebhookAlertsAsync("Deadlocks Detected", "Srv", "4", "1", "1");
 
-        Assert.False(result.Sent);                                 // dead URL -> post failed
+        Assert.False(result.Sent);                                 // endpoint refused -> post failed
         Assert.Equal(1, history.GetLastWebhookSentCallCount);      // seed consulted
         Assert.Equal(1, svc.GetTeamsHealth().ConsecutiveFailures); // but it WAS attempted (not suppressed)
 
@@ -83,6 +95,69 @@ public class WebhookCooldownSeedTests
         Assert.False(result.Sent);
         Assert.Equal(1, svc.GetTeamsHealth().ConsecutiveFailures);
         Assert.Equal(AlertChannelOutcome.Failed, result.Outcome);
+    }
+
+    /// <summary>
+    /// A loopback endpoint that answers every POST with HTTP 500 and closes. <c>TcpListener</c> rather than
+    /// <c>HttpListener</c> because the latter wants a URL ACL on Windows. It binds a free port on 127.0.0.1
+    /// only, so the client has one address to try and no connect timeout to wait out.
+    /// </summary>
+    private sealed class RefusingEndpoint : IDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource _stop = new();
+        private readonly Task _accepting;
+
+        public RefusingEndpoint()
+        {
+            _listener.Start();
+            Url = $"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/never";
+            _accepting = Task.Run(AcceptLoopAsync);
+        }
+
+        public string Url { get; }
+
+        private async Task AcceptLoopAsync()
+        {
+            try
+            {
+                while (!_stop.IsCancellationRequested)
+                {
+                    using var client = await _listener.AcceptTcpClientAsync(_stop.Token);
+                    using var stream = client.GetStream();
+
+                    /* Read to the blank line after the headers, then answer. The small JSON body may still be
+                       unread when the connection closes; the client has the status line by then. */
+                    var buffer = new byte[16 * 1024];
+                    var seen = new StringBuilder();
+                    while (!seen.ToString().Contains("\r\n\r\n", StringComparison.Ordinal))
+                    {
+                        var read = await stream.ReadAsync(buffer, _stop.Token);
+                        if (read == 0)
+                            break;
+                        seen.Append(Encoding.ASCII.GetString(buffer, 0, read));
+                    }
+
+                    var response = Encoding.ASCII.GetBytes(
+                        "HTTP/1.1 500 Refused\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    await stream.WriteAsync(response, _stop.Token);
+                    await stream.FlushAsync(_stop.Token);
+                }
+            }
+            catch (OperationCanceledException) { /* Dispose */ }
+            catch (SocketException) { /* listener stopped */ }
+            catch (ObjectDisposedException) { /* listener stopped */ }
+            catch (System.IO.IOException) { /* client went away */ }
+        }
+
+        public void Dispose()
+        {
+            _stop.Cancel();
+            _listener.Stop();
+            try { _accepting.Wait(TimeSpan.FromSeconds(2)); }
+            catch (AggregateException) { /* the loop's own shutdown */ }
+            _stop.Dispose();
+        }
     }
 
     private sealed class FakeWebhookSettings : IAlertSettings
@@ -151,14 +226,14 @@ public class WebhookCooldownSeedTests
     public async Task DistinctFingerprint_NotSuppressedByAnotherIncidentsCooldown()
     {
         // #1154: incident X was delivered "just now"; a DISTINCT incident Y arrives within the window.
-        // Y must be attempted (it fails against the dead URL) — not throttled by X's cooldown.
+        // Y must be attempted (it fails against the refusing endpoint) — not throttled by X's cooldown.
         var history = new FakeHistoryStore { LastWebhookSent = DateTime.UtcNow, SeededDedupKey = "X" };
         var svc = MakeService(history, EnabledTeamsSettings());
 
         var result = await svc.TrySendWebhookAlertsAsync(
             "Deadlocks Detected", "Srv", "4", "1", "1", ContextWith("Y"));
 
-        Assert.False(result.Sent);                                 // dead URL -> attempted, failed
+        Assert.False(result.Sent);                                 // endpoint refused -> attempted, failed
         Assert.Equal(1, svc.GetTeamsHealth().ConsecutiveFailures); // ATTEMPTED, not suppressed
         Assert.Equal(AlertChannelOutcome.Failed, result.Outcome);
     }
@@ -185,7 +260,7 @@ public class WebhookCooldownSeedTests
     /// <c>AlertHistoryServerIdentity</c> mapping: the other key's fresh row sits in the collapsed 0 bucket,
     /// which is exactly where the old parse-to-0 seed found it and answered this key's question with it —
     /// throttling an unannounced incident, the class #1154 exists to prevent. The seed now declines, the
-    /// key reads as a first notice, and the post is attempted (failing against the dead URL). The real
+    /// key reads as a first notice, and the post is attempted (failing against the refusing endpoint). The real
     /// DuckDB store's own refusal is pinned in <c>StoreRoundTripTests</c>; this is the service-level half,
     /// where "declined seed" has to come out as "attempted post".
     /// </summary>
@@ -199,7 +274,7 @@ public class WebhookCooldownSeedTests
         var result = await svc.TrySendWebhookAlertsAsync(
             "Collector Cost Regression", "Srv", "120 ms/run", "60 ms/run", "cost:7:wait_stats");
 
-        Assert.False(result.Sent);                                 // dead URL -> post failed
+        Assert.False(result.Sent);                                 // endpoint refused -> post failed
         Assert.Equal(1, history.SeedReads);                        // the seed WAS consulted
         Assert.Equal(1, svc.GetTeamsHealth().ConsecutiveFailures); // but the post was ATTEMPTED
         Assert.Equal(AlertChannelOutcome.Failed, result.Outcome);

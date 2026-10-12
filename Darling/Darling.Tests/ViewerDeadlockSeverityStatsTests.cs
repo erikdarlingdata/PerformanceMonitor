@@ -42,18 +42,19 @@ public sealed class ViewerDeadlockSeverityStatsSqlTests
     }
 
     [Fact]
-    public void DeadlockSeverityGraphsSql_WindowsOnCollectionTime_ReconcilesWithCountTrend()
+    public void DeadlockSeverityGraphsSql_WindowsOnDeadlockTime_ReconcilesWithCountTrend()
     {
-        /* Reconciliation: the deadlock COUNT trend windows on collection_time (NOT deadlock_time). To draw from
-           the identical row set — so the count on the summary strip and the victim/wait aggregate agree in
-           period — this read must window on collection_time too. */
-        Assert.Contains("collection_time >= $2", ViewerDataService.DeadlockSeverityGraphsSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $3", ViewerDataService.DeadlockSeverityGraphsSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $3", ViewerDataService.DeadlockTrendSql, StringComparison.Ordinal);
-        /* The window is NOT applied on deadlock_time (that column is only the SELECT'd bucket key + ORDER BY). */
-        Assert.DoesNotContain("deadlock_time >=", ViewerDataService.DeadlockSeverityGraphsSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("deadlock_time <=", ViewerDataService.DeadlockSeverityGraphsSql, StringComparison.Ordinal);
+        /* Reconciliation: the deadlock COUNT trend and this read both window on deadlock_time (when it
+           happened), so the count on the summary strip and the victim/wait aggregate draw from the identical
+           row set. collection_time is only the lower-bound floor ($4) - never an upper bound, so a deadlock
+           collected after the window end still counts. */
+        foreach (var sql in new[] { ViewerDataService.DeadlockSeverityGraphsSql, ViewerDataService.DeadlockTrendSql })
+        {
+            Assert.Contains("deadlock_time >= $2", sql, StringComparison.Ordinal);
+            Assert.Contains("deadlock_time <= $3", sql, StringComparison.Ordinal);
+            Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("collection_time <=", sql, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

@@ -48,13 +48,13 @@
             </DataGrid>
         </Border>
 
-        <TextBlock Grid.Row="4" x:Name="StatusText" FontSize="10" FontStyle="Italic"
+        <TextBlock Grid.Row="4" x:Name="StatusText" FontSize="10" FontStyle="Italic" TextWrapping="Wrap"
                    Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,8,0,0"/>
 
         <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button Content="Reset Selected to Current" Height="28" Padding="10,0" Margin="0,0,8,0"
+            <Button x:Name="ResetButton" Content="Reset Selected to Current" Height="28" Padding="10,0" Margin="0,0,8,0"
                     Click="ResetSelected_Click"/>
-            <Button Content="Save" Width="80" Height="28" Margin="0,0,8,0" Click="Save_Click" Style="{StaticResource AccentButton}"/>
+            <Button x:Name="SaveButton" Content="Save" Width="80" Height="28" Margin="0,0,8,0" Click="Save_Click" Style="{StaticResource AccentButton}"/>
             <Button Content="Close" Width="80" Height="28" Click="Cancel_Click" IsCancel="True"/>
         </StackPanel>
     </Grid>

@@ -8,9 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -34,17 +38,35 @@ namespace PerformanceMonitorLite.Services;
  * reads window on the UTC bounds from GetTimeRange, and the row VMs render event_time through
  * ServerTimeHelper.FormatServerTime (naive-UTC -> display) exactly like the deadlock / blocked-process grids.
  * The Default Trace event_time is the monitored server's LOCAL StartTime (ft.StartTime, stored raw) — that
- * read windows on the server-LOCAL bounds from GetTimeRangeServerLocal and de-skews each row's server-local
- * event_time to naive-UTC (subtract THAT server's utc offset, the one the caller passed alongside its
- * server_id) BEFORE the row VM, so a Default Trace row and a system_health row from the same instant render
- * the same wall-clock time and a merged System Events timeline sorts consistently.
+ * read resolves the window to exact UTC through THAT server's clock (the one the caller passed alongside its
+ * server_id) and uses the server-local bounds of that window, widened by an hour on each side, only as a SQL
+ * pre-filter. It converts each row's event_time to naive-UTC with the clock at the row's own date and keeps
+ * only the rows inside the exact UTC window, all BEFORE the row VM, so a Default Trace row and a
+ * system_health row from the same instant render the same wall-clock time and a merged System Events
+ * timeline sorts consistently. The one difference is the repeated autumn hour (#4766): a system_health row
+ * is a real instant and carries its UTC offset there, but a Default Trace row is a stored wall clock that
+ * cannot say which pass it was in, so it renders the bare wall time (SystemEventRowFormat.StoredWallClock).
  */
 
 /// <summary>Shared render of a naive-UTC event timestamp for the System Events grids — the same
 /// ServerTimeHelper.FormatServerTime the deadlock / blocked-process grids use (empty for a null time).</summary>
 internal static class SystemEventRowFormat
 {
+    /// <summary>A REAL instant (the system_health XE <c>@timestamp</c> is UTC): the text
+    /// <see cref="ServerTimeHelper.FormatServerTime(DateTime?, string)"/> words, so the two passes of the repeated autumn
+    /// hour differ by their UTC offsets.</summary>
     public static string Local(DateTime? utc) => ServerTimeHelper.FormatServerTime(utc, "yyyy-MM-dd HH:mm:ss");
+
+    /// <summary>
+    /// A time converted from a STORED server wall clock (the Default Trace <c>StartTime</c>), as the plain wall time in
+    /// the same zone <see cref="Local"/> uses (#4766). <see cref="ServerClock.ToUtc"/> maps both passes of a repeated
+    /// local hour to the first, so the instant cannot say which pass the event was in; appending the offset would print
+    /// the first pass's for an event that ran in the second. Every other time reads as <see cref="Local"/> does.
+    /// </summary>
+    public static string StoredWallClock(DateTime? utc) => utc.HasValue
+        ? DisplayZone.ToDisplay(utc.Value, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ActiveServerClock))
+            .ToString("yyyy-MM-dd HH:mm:ss")
+        : "";
 }
 
 /// <summary>One scheduler-monitor utilization sample (Scheduler Issues sub-tab), flagged the way sp_HealthParser flags this section: SQL CPU pinned, other-process CPU high, or memory utilization low.</summary>
@@ -63,8 +85,8 @@ public sealed class SchedulerIssueRow(SchedulerIssueRecord record)
 
 /// <summary>
 /// One severe-error row (Severe Errors sub-tab). Mirrors sp_HealthParser's <c>*_SevereErrors</c>.
-/// <see cref="DatabaseName"/> is resolved from the store's collected database_id -> database_name mapping
-/// (see <see cref="LocalDataService.ResolveDatabaseName"/>) — the pure shred left it null.
+/// <see cref="DatabaseName"/> is resolved from the store's collected database_id -> database_name history, the name the id carried at
+/// the error's time (see <see cref="DatabaseNameHistory"/>, #5373) — the pure shred left it null.
 /// </summary>
 public sealed class SevereErrorRow(SevereErrorRecord record, string databaseName)
 {
@@ -225,8 +247,10 @@ public sealed class IoIssuesRow(IoIssuesRecord record)
 /// Memory Change), classified via the shared <see cref="DefaultTraceEventSignificance.Classify"/>. Unlike
 /// the system_health rows (whose event_time is the UTC XE @timestamp), the Default Trace StartTime is the
 /// monitored server's LOCAL wall clock, so <see cref="LocalDataService.GetDefaultTraceEventsAsync"/> de-skews
-/// it to naive-UTC BEFORE this row, so <see cref="EventTimeLocal"/> renders through the same
-/// <see cref="SystemEventRowFormat.Local"/> as every other System Events grid and sorts consistently.
+/// it to naive-UTC BEFORE this row, so <see cref="EventTimeLocal"/> sorts consistently with every other System Events
+/// grid. It renders through <see cref="SystemEventRowFormat.StoredWallClock"/>, not <see cref="SystemEventRowFormat.Local"/>:
+/// the wall time is stored, so an event in the repeated autumn hour cannot say which pass it was in and never takes an
+/// offset (#4766).
 /// </summary>
 public sealed class DefaultTraceEventRow
 {
@@ -247,7 +271,7 @@ public sealed class DefaultTraceEventRow
         string? textData)
     {
         EventTimeUtc = eventTimeUtc;
-        EventTimeLocal = SystemEventRowFormat.Local(eventTimeUtc);
+        EventTimeLocal = SystemEventRowFormat.StoredWallClock(eventTimeUtc);
         Category = category.ToString();
         EventName = eventName;
         DatabaseName = databaseName;
@@ -303,12 +327,7 @@ public partial class LocalDataService
         command.CommandText = @"
 SELECT
     event_xml
-FROM v_system_health_events
-WHERE server_id = $1
-AND   event_time >= $2
-AND   event_time <= $3
-AND   event_type = $4
-AND   event_xml IS NOT NULL
+FROM " + StoredEventCopies.SystemHealthEvents("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND event_type = $4 AND event_xml IS NOT NULL") + @" AS ev
 ORDER BY event_time DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -330,7 +349,7 @@ ORDER BY event_time DESC";
     public async Task<List<SchedulerIssueRow>> GetSchedulerIssuesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetSchedulerIssuesAsync", "v_system_health_events scheduler_monitor shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SchedulerMonitorEvent);
 
         var rows = new List<SchedulerIssueRow>();
@@ -354,22 +373,32 @@ ORDER BY event_time DESC";
     public async Task<List<SevereErrorRow>> GetSevereErrorsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetSevereErrorsAsync", "v_system_health_events error_reported shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
-        var map = await GetDatabaseNameMapAsync(serverId);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.ErrorReportedEvent);
 
-        var filter = databaseNames is { Count: > 0 } ? new HashSet<string>(databaseNames, StringComparer.OrdinalIgnoreCase) : null;
-
-        var rows = new List<SevereErrorRow>();
+        var records = new List<SevereErrorRecord>();
         foreach (var xml in xmls)
         {
             var record = SystemHealthParser.ParseSevereError(xml);
             if (record != null && SystemHealthSignificance.IsSignificant(record))
-            {
-                var databaseName = ResolveDatabaseName(record.DatabaseId, map);
-                if (filter == null || filter.Contains(databaseName))
-                    rows.Add(new SevereErrorRow(record, databaseName));
-            }
+                records.Add(record);
+        }
+
+        /* #5373: each error is named by what its database_id carried at the error's own time (the collected
+           database-size snapshots), not by the server's latest name for the id. */
+        var names = await GetDatabaseNameHistoryAsync(
+            serverId, records.Select(r => (r.DatabaseId, r.EventTime)));
+
+        /* #5244: the filter matches on that same per-error name, ordinal, and an id the history never saw (its "database_id N"
+           label is not a name) or an error with no database context is in no chosen database, the reading Darling's severe-errors
+           reader takes, so the same filter returns the same rows on both products. */
+        var filter = databaseNames is { Count: > 0 } ? databaseNames : null;
+
+        var rows = new List<SevereErrorRow>();
+        foreach (var record in records)
+        {
+            if (filter == null || names.IsIn(record.DatabaseId, record.EventTime, filter))
+                rows.Add(new SevereErrorRow(record, names.Resolve(record.DatabaseId, record.EventTime)));
         }
         return rows;
     }
@@ -380,7 +409,7 @@ ORDER BY event_time DESC";
     public async Task<List<MemoryConditionsRow>> GetMemoryConditionsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetMemoryConditionsAsync", "v_system_health_events sp_server_diagnostics RESOURCE shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SpServerDiagnosticsEvent);
 
         var rows = new List<MemoryConditionsRow>();
@@ -400,7 +429,7 @@ ORDER BY event_time DESC";
     public async Task<List<MemoryBrokerRow>> GetMemoryBrokerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetMemoryBrokerAsync", "v_system_health_events memory_broker shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.MemoryBrokerEvent);
 
         var rows = new List<MemoryBrokerRow>();
@@ -419,7 +448,7 @@ ORDER BY event_time DESC";
     public async Task<List<MemoryNodeOomRow>> GetMemoryNodeOomAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetMemoryNodeOomAsync", "v_system_health_events memory_node_oom shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.MemoryNodeOomEvent);
 
         var rows = new List<MemoryNodeOomRow>();
@@ -453,7 +482,7 @@ ORDER BY event_time DESC";
     public async Task<(List<SignificantWaitRow> Rows, int CapturedCount)> GetSignificantWaitsWithCaptureAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetSignificantWaitsAsync", "v_system_health_events wait_info shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.WaitInfoEvent);
 
         var rows = new List<SignificantWaitRow>();
@@ -475,8 +504,10 @@ ORDER BY event_time DESC";
     /// being mis-reported, whereas a stored event is proof the session was alive and the collector reached
     /// it. Windowless and type-less on purpose - it answers "has this server's ring buffer ever been read
     /// into the store"; the type-scoped question is <see cref="GetLastSystemHealthCaptureOfTypeAsync"/>.
-    /// Reads <c>v_system_health_events</c>, the SAME source <see cref="ReadSystemHealthEventXmlAsync"/>
-    /// uses, so it cannot report a source as observed for rows the read itself can never see. Darling twin:
+    /// Reads <c>v_system_health_events</c>, the SAME rows <see cref="ReadSystemHealthEventXmlAsync"/>
+    /// reads, so it cannot report a source as observed for rows the read itself can never see. It reads them
+    /// directly, not through <see cref="StoredEventCopies"/>: a batch that stored only copies of events already
+    /// held still read the session, so its collection_time is a true capture. Darling twin:
     /// <c>DarlingSystemHealthReader.GetLastCaptureAsync</c>; the two must stay in step so a user moving
     /// between the SKUs is not told a different story about the same state.</para>
     /// </summary>
@@ -502,7 +533,8 @@ AND   event_xml IS NOT NULL";
     /// has never fired here while the session IS being read" - which for a rare category (a memory-node
     /// OOM, a severe error) is the healthy measurement rather than a blind spot. Succeeds the #2484
     /// <c>HasAnySystemHealthEventOfTypeAsync</c> yes/no probe, which could not say WHEN. Darling twin:
-    /// <c>DarlingSystemHealthReader.GetLastCaptureOfTypeAsync</c>.</para>
+    /// <c>DarlingSystemHealthReader.GetLastCaptureOfTypeAsync</c>. Reads the rows directly, not through
+    /// <see cref="StoredEventCopies"/>, for the same reason as <see cref="GetLastSystemHealthCaptureAsync"/>.</para>
     /// </summary>
     public async Task<DateTime?> GetLastSystemHealthCaptureOfTypeAsync(int serverId, string eventType)
     {
@@ -531,19 +563,14 @@ AND   event_xml IS NOT NULL";
     /// </summary>
     public async Task<int> CountSystemHealthEventsAsync(int serverId, string eventType, int hoursBack = 24, DateTime? asOfUtc = null)
     {
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate: null, toDate: null, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate: null, toDate: null, asOfUtc);
 
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         command.CommandText = @"
 SELECT COUNT(*)
-FROM v_system_health_events
-WHERE server_id = $1
-AND   event_time >= $2
-AND   event_time <= $3
-AND   event_type = $4
-AND   event_xml IS NOT NULL";
+FROM " + StoredEventCopies.SystemHealthEvents("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND event_type = $4 AND event_xml IS NOT NULL") + @" AS ev";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -562,7 +589,7 @@ AND   event_xml IS NOT NULL";
     public async Task<List<CpuTasksRow>> GetCpuTasksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetCpuTasksAsync", "v_system_health_events sp_server_diagnostics QUERY_PROCESSING shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SpServerDiagnosticsEvent);
 
         var rows = new List<CpuTasksRow>();
@@ -586,7 +613,7 @@ AND   event_xml IS NOT NULL";
     public async Task<List<IoIssuesRow>> GetIoIssuesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetIoIssuesAsync", "v_system_health_events sp_server_diagnostics IO_SUBSYSTEM shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SpServerDiagnosticsEvent);
 
         var rows = new List<IoIssuesRow>();
@@ -615,7 +642,7 @@ AND   event_xml IS NOT NULL";
     public async Task<List<SystemHealthRecord>> GetSystemHealthAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetSystemHealthAsync", "v_system_health_events sp_server_diagnostics SYSTEM shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SpServerDiagnosticsEvent);
 
         var records = new List<SystemHealthRecord>();
@@ -633,51 +660,127 @@ AND   event_xml IS NOT NULL";
     // ── Severe-Errors database name resolution ──
 
     /// <summary>
-    /// The server's latest database_id -> database_name mapping from the collected size-stats (the newest
-    /// name per id — handles a dropped-and-recreated id). DuckDB has no <c>DISTINCT ON</c>, so this uses
-    /// <c>QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DESC) = 1</c> — the
-    /// same idiom the archive views' dedup uses. database_size_stats is the mapping source because it is the
-    /// only collected table carrying BOTH database_id and database_name for every online DB.
+    /// The database_id -> database_name history the Severe Errors resolve against (#5373): the name each id carried at
+    /// the errors' own time, not the newest name per id (SQL Server reuses a dropped database's id, so the latest map
+    /// names the wrong database for an old error). Read from the collected size-stats snapshots
+    /// (database_size_stats is the only collected table carrying BOTH database_id and database_name for every online
+    /// DB), limited to the errors' time range, in one query. Darling twin: <c>DatabaseNameHistoryReader.Sql</c>.
+    /// <para><c>floor_snap</c> is the newest snapshot at or before the first error, <c>snap</c> every snapshot from
+    /// there to the last error, and <c>runs</c> keeps the rows where an id's name differs from its previous snapshot
+    /// (ties on one instant break by name, so the result is fixed). The floor snapshot is server-wide, so an id missing
+    /// from it (an offline, suspect or excluded database is not collected) gets <c>before_floor</c>: its newest row
+    /// before the floor, one pass for every such id. The last arm covers an id with no row up to the last error: its
+    /// oldest row after it, also one pass. Both extra arms look at most <see cref="DatabaseNameHistory.LookbackDays"/>
+    /// days (back from the floor, forward from the last error), and the newest-name read the last that many days from now,
+    /// so an id that is never collected cannot make a refresh scan the whole history; the larger name in ordinal order
+    /// wins when one id has two names at one instant, in every arm. An error with no time is named by its id's newest
+    /// name, one more read made only when such an error is shown. The ids are ints and go in as literals, because DuckDB takes no
+    /// array parameter through this driver.</para>
     /// </summary>
-    public async Task<Dictionary<int, string>> GetDatabaseNameMapAsync(int serverId)
+    public async Task<DatabaseNameHistory> GetDatabaseNameHistoryAsync(
+        int serverId, IEnumerable<(int? DatabaseId, DateTime? EventTime)> errors)
     {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
+        var plan = DatabaseNameHistory.Plan(errors);
+        if (plan.Ids.Length == 0)
+            return DatabaseNameHistory.Empty;
 
-        command.CommandText = @"
-SELECT
-    database_id,
-    database_name
+        var idList = string.Join(", ", plan.Ids.Select(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+
+        using var connection = await OpenConnectionAsync();
+        var changes = new List<DatabaseNameHistory.Change>();
+
+        if (plan.Range is { } range)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = $@"
+WITH floor_snap AS (
+    SELECT COALESCE(MAX(collection_time), CAST($2 AS TIMESTAMP)) AS floor_time
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time <= $2
+),
+snap AS (
+    SELECT DISTINCT database_id, database_name, collection_time
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time >= (SELECT floor_time FROM floor_snap)
+    AND   collection_time <= $3
+    AND   database_id IN ({idList})
+    AND   database_name IS NOT NULL
+),
+runs AS (
+    SELECT
+        database_id,
+        database_name,
+        collection_time,
+        LAG(database_name) OVER (PARTITION BY database_id ORDER BY collection_time, database_name) AS previous_name
+    FROM snap
+),
+before_floor AS (
+    SELECT database_id, database_name, collection_time
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time < (SELECT floor_time FROM floor_snap)
+    AND   collection_time >= (SELECT floor_time FROM floor_snap) - INTERVAL '{DatabaseNameHistory.LookbackDays} days'
+    AND   database_id IN ({idList})
+    AND   database_name IS NOT NULL
+    AND   database_id NOT IN (SELECT database_id FROM snap WHERE collection_time = (SELECT floor_time FROM floor_snap))
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DESC, database_name DESC) = 1
+),
+after_range AS (
+    SELECT database_id, database_name, collection_time
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time > $3
+    AND   collection_time <= CAST($3 AS TIMESTAMP) + INTERVAL '{DatabaseNameHistory.LookbackDays} days'
+    AND   database_id IN ({idList})
+    AND   database_name IS NOT NULL
+    AND   database_id NOT IN (SELECT database_id FROM snap)
+    AND   database_id NOT IN (SELECT database_id FROM before_floor)
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time, database_name DESC) = 1
+)
+SELECT database_id, database_name, collection_time
+FROM runs
+WHERE previous_name IS DISTINCT FROM database_name
+UNION ALL
+SELECT database_id, database_name, collection_time FROM before_floor
+UNION ALL
+SELECT database_id, database_name, collection_time FROM after_range";
+
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = range.Min });
+            command.Parameters.Add(new DuckDBParameter { Value = range.Max });
+            await ReadDatabaseNameChangesAsync(command, changes);
+        }
+
+        if (plan.NeedsNewest)
+        {
+            using var newest = connection.CreateCommand();
+            newest.CommandText = $@"
+SELECT database_id, database_name, collection_time
 FROM v_database_size_stats
 WHERE server_id = $1
-QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DESC) = 1";
+AND   database_id IN ({idList})
+AND   collection_time >= $2
+AND   database_name IS NOT NULL
+QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DESC, database_name DESC) = 1";
+            newest.Parameters.Add(new DuckDBParameter { Value = serverId });
+            newest.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow - DatabaseNameHistory.LookbackWindow });
+            await ReadDatabaseNameChangesAsync(newest, changes);
+        }
 
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return new DatabaseNameHistory(changes);
+    }
 
-        var map = new Dictionary<int, string>();
+    private static async Task ReadDatabaseNameChangesAsync(DuckDBCommand command, List<DatabaseNameHistory.Change> changes)
+    {
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            if (reader.IsDBNull(0) || reader.IsDBNull(1))
+            if (reader.IsDBNull(0) || reader.IsDBNull(1) || reader.IsDBNull(2))
                 continue;
-            map[reader.GetInt32(0)] = reader.GetString(1);
+            changes.Add(new DatabaseNameHistory.Change(reader.GetInt32(0), reader.GetString(1), reader.GetDateTime(2)));
         }
-        return map;
-    }
-
-    /// <summary>
-    /// Resolves a severe-error <c>database_id</c> to a display name using the collected mapping. A null or 0
-    /// id means "no database context" (error_reported often carries database_id 0; <c>DB_NAME(0)</c> is NULL
-    /// server-side too) -> empty. A real id absent from the map (a database dropped before the latest
-    /// size-stats snapshot, or one never captured) is surfaced as its raw id rather than silently blanked.
-    /// </summary>
-    public static string ResolveDatabaseName(int? databaseId, IReadOnlyDictionary<int, string> databaseNameMap)
-    {
-        if (databaseId is not { } id || id == 0)
-            return string.Empty;
-        if (databaseNameMap.TryGetValue(id, out var name))
-            return name;
-        return $"database_id {id}";
     }
 
     // ── Default Trace (always-on server events; the Default Trace sub-tab) ──
@@ -685,31 +788,54 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DES
     /// <summary>
     /// Significant Default Trace events for the window, newest first, from the v_default_trace_events archive
     /// view. The Default Trace StartTime is the monitored server's LOCAL wall clock (ft.StartTime, stored
-    /// raw), so this windows on the server-LOCAL bounds from <see cref="GetTimeRangeServerLocal"/> and
-    /// de-skews each row's server-local event_time to naive-UTC (subtracting that server's UTC offset)
-    /// BEFORE the row VM, so the returned timestamps share
+    /// raw), so this takes the window as exact UTC (a custom range arrives that way, #4766), uses the
+    /// server-local bounds of that window, widened by an hour on each side, only as a SQL pre-filter via the
+    /// server's clock, converts each row's
+    /// event_time to naive-UTC with the clock at the row's own date, and keeps only the rows inside the exact
+    /// UTC window, all BEFORE the row VM, so the returned timestamps share
     /// the same UTC frame as the system_health rows and render/sort consistently on the tab. #1319: the
     /// global database filter is pushed into SQL on <c>database_name</c>. The ErrorLog severity gate is
     /// applied on read via the shared <see cref="DefaultTraceEventSignificance"/>.
     /// </summary>
-    /// <param name="utcOffsetMinutes">
-    /// <paramref name="serverId"/>'s OWN UTC offset. Used TWICE here — to build the server-local window and
-    /// to de-skew each returned row — and both uses read the one resolved value, so the bounds and the
-    /// timestamps can never disagree about which server's clock they are in. <c>null</c> means "use the
-    /// desktop UI's selected-tab offset" (<see cref="ServerTimeHelper.UtcOffsetMinutes"/>); see
-    /// <see cref="LocalDataService.GetCpuUtilizationAsync"/> for why a caller that picks its own
-    /// <paramref name="serverId"/> must not take that default.
+    /// <param name="serverClock">
+    /// <paramref name="serverId"/>'s OWN clock (#4766): its time zone where one was collected, else its fixed
+    /// offset. <c>null</c> means "use the desktop UI's selected-tab clock"
+    /// (<see cref="ServerTimeHelper.ActiveServerClock"/>); see <see cref="LocalDataService.GetCpuUtilizationAsync"/>
+    /// for why a caller that picks its own <paramref name="serverId"/> must not take that default.
+    /// The window is already exact UTC, so the clock does two jobs only: the SQL windows on the server-local
+    /// bounds of that span widened by one hour on each side (a pre-filter), and each returned row is converted
+    /// to UTC through it, so a row on the far side of a daylight-saving change is not an hour off; the exact UTC
+    /// window is then applied to the converted rows. A skipped local hour moves forward by the gap and a
+    /// repeated one reads as its first occurrence (<see cref="ServerClock.ToUtc"/>), so no row throws.
     /// </param>
-    public async Task<List<DefaultTraceEventRow>> GetDefaultTraceEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int? utcOffsetMinutes = null)
+    public async Task<List<DefaultTraceEventRow>> GetDefaultTraceEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, ServerClock? serverClock = null)
     {
         using var _q = TimeQuery("GetDefaultTraceEventsAsync", "v_default_trace_events significant-set read");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        /* Default Trace event_time is server-LOCAL, so window on server-local bounds (the same helper the
-           CPU/sample_time reads use). Bind db filter params immediately after the 3 fixed params ($4+). */
-        var offset = utcOffsetMinutes ?? ServerTimeHelper.UtcOffsetMinutes;
-        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, asOfUtc, offset);
+        /* Default Trace event_time is server-LOCAL. The exact window is UTC (fromDate/toDate arrive as naive
+           UTC, #4766; a preset is anchored on UTC), and the SQL only
+           pre-filters on the server-local bounds of that window widened by an hour on each side, which is
+           enough to cover a daylight-saving change inside the span. Each row is then converted to UTC through
+           the same clock and held to the exact window below (#4766). Bind db filter params immediately after
+           the 3 fixed params ($4+). */
+        var clock = serverClock ?? ServerTimeHelper.ActiveServerClock;
+        DateTime windowStartUtc;
+        DateTime windowEndUtc;
+        if (fromDate.HasValue && toDate.HasValue)
+        {
+            windowStartUtc = fromDate.Value;
+            windowEndUtc = toDate.Value;
+        }
+        else
+        {
+            windowEndUtc = asOfUtc ?? DateTime.UtcNow;
+            windowStartUtc = windowEndUtc.AddHours(-hoursBack);
+        }
+
+        var startTime = clock.ToServerLocal(windowStartUtc).AddHours(-1);
+        var endTime = clock.ToServerLocal(windowEndUtc).AddHours(1);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -743,8 +869,12 @@ ORDER BY event_time DESC";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            /* De-skew server-local StartTime -> naive-UTC so the row shares the system_health rows' UTC frame. */
-            var eventTimeUtc = reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0).AddMinutes(-offset);
+            /* De-skew server-local StartTime -> naive-UTC so the row shares the system_health rows' UTC frame. Per row,
+               through the clock: the offset in force at the row's own date, not the newest one (#4766). The SQL
+               window is only a pre-filter, so the exact UTC window is applied here. */
+            var eventTimeUtc = reader.IsDBNull(0) ? (DateTime?)null : clock.ToUtc(reader.GetDateTime(0));
+            if (eventTimeUtc is { } convertedUtc && (convertedUtc < windowStartUtc || convertedUtc > windowEndUtc))
+                continue;
             var eventName = reader.IsDBNull(1) ? null : reader.GetString(1);
             var severity = reader.IsDBNull(10) ? (int?)null : reader.GetInt32(10);
 

@@ -265,6 +265,96 @@ public sealed class DarlingIncidentFingerprintTests
     {
         var server = new DarlingServerResolver.RegisteredServer(42, storageName, displayName);
 
-        Assert.Equal(expected, DarlingServerResolver.FingerprintNameOf(server));
+        Assert.Equal(expected, DarlingServerResolver.FingerprintNameOf(server, DarlingServerResolver.SharedNamesOf(new[] { server })));
+    }
+
+    /// <summary>
+    /// A server whose display name another registration also carries sends a dedup key with its store id in
+    /// it. The MCP filter must fingerprint with the same name or it matches nothing for exactly those
+    /// servers. A unique name, host-named or not, keeps its plain key.
+    /// </summary>
+    [Fact]
+    public void FingerprintName_CarriesTheStoreIdOnlyWhenTheNameIsShared()
+    {
+        var rows = new[]
+        {
+            new DarlingServerResolver.RegisteredServer(42, "host1:SalesDB", "host1"),
+            new DarlingServerResolver.RegisteredServer(43, "host1:Other", "host1"),
+            new DarlingServerResolver.RegisteredServer(44, "hostA", "Prod"),
+            new DarlingServerResolver.RegisteredServer(45, "hostB", "Prod"),
+            new DarlingServerResolver.RegisteredServer(46, "host9", "host9"),
+            new DarlingServerResolver.RegisteredServer(47, "host8", null),
+        };
+        var shared = DarlingServerResolver.SharedNamesOf(rows);
+
+        Assert.Equal("host1#42", DarlingServerResolver.FingerprintNameOf(rows[0], shared));
+        Assert.Equal("host1#43", DarlingServerResolver.FingerprintNameOf(rows[1], shared));
+        Assert.Equal("Prod#44", DarlingServerResolver.FingerprintNameOf(rows[2], shared));
+        Assert.Equal("Prod#45", DarlingServerResolver.FingerprintNameOf(rows[3], shared));
+        Assert.Equal("host9", DarlingServerResolver.FingerprintNameOf(rows[4], shared));
+        Assert.Equal("host8", DarlingServerResolver.FingerprintNameOf(rows[5], shared));
+    }
+
+    [Fact]
+    public void FingerprintName_AgreesWithTheAlertSnapshot_ForASharedAndAUniqueName()
+    {
+        var rows = new[]
+        {
+            new DarlingServerResolver.RegisteredServer(42, "host1:SalesDB", "host1"),
+            new DarlingServerResolver.RegisteredServer(43, "host1:Sales", "host1"),
+            new DarlingServerResolver.RegisteredServer(44, "host2", "Sales Primary"),
+        };
+        var shared = DarlingServerResolver.SharedNamesOf(rows);
+        foreach (var row in rows)
+        {
+            var alertSide = new PerformanceMonitor.Alerting.AlertServerSnapshot(
+                row.ServerId.ToString(), row.DisplayName!, true, null, null, true, false, null)
+            { ServerId = row.ServerId, ServerNameIsShared = shared.Contains(row.DisplayName!) }.FingerprintServerName;
+            Assert.Equal(alertSide, DarlingServerResolver.FingerprintNameOf(row, shared));
+        }
+    }
+
+    /// <summary>The filter resolves BOTH the new key and the pre-upgrade (plain-name) key for a server whose
+    /// name is shared; a unique-named server has no separate legacy form.</summary>
+    [Fact]
+    public void TheMcpFilter_ResolvesBothTheNewKeyAndTheLegacyKey()
+    {
+        var rows = new[]
+        {
+            new DarlingServerResolver.RegisteredServer(42, "host1:SalesDB", "host1"),
+            new DarlingServerResolver.RegisteredServer(43, "host1:Other", "host1"),
+            new DarlingServerResolver.RegisteredServer(44, "host2", "Unique"),
+        };
+        var (shared, _) = DarlingServerResolver.ResolveWithFingerprintName(rows, "host1:SalesDB");
+        Assert.Equal("host1#42", shared.FingerprintName);
+        Assert.Equal("host1", shared.LegacyFingerprintName);
+
+        var (unique, _) = DarlingServerResolver.ResolveWithFingerprintName(rows, "host2");
+        Assert.Equal("Unique", unique.FingerprintName);
+        Assert.Equal("Unique#44", unique.LegacyFingerprintName);
+
+        Assert.Equal("host1",
+            DarlingServerResolver.LegacyFingerprintNameOf(rows[0], DarlingServerResolver.SharedNamesOf(rows)));
+        Assert.Equal("Unique#44",
+            DarlingServerResolver.LegacyFingerprintNameOf(rows[2], DarlingServerResolver.SharedNamesOf(rows)));
+    }
+
+    /// <summary>The filter's population (<c>servers</c>, a row written at first connect) can lag the worker's
+    /// registry: a registration that has never connected is in the registry, not in <c>servers</c>. Its
+    /// connected same-named sibling is then suffixed by the engine and not by the filter's own count. The filter
+    /// matches the OTHER form too, so the engine's key still finds the incident.</summary>
+    [Fact]
+    public void TheMcpFilter_MatchesTheSuffixedKey_WhenASameNamedSiblingHasNotConnectedYet()
+    {
+        /* The worker's registry holds 42 and a never-connected 43, both "host1", so the alert key is host1#42.
+           The servers table holds only 42. */
+        var registry = PerformanceMonitor.Notifications.AlertFingerprint.SharedDisplayNames(new[] { "host1", "host1" });
+        var engineName = PerformanceMonitor.Notifications.AlertFingerprint.ServerIdentity("host1", 42, registry.Contains("host1"));
+        var connectedOnly = new[] { new DarlingServerResolver.RegisteredServer(42, "host1:SalesDB", "host1") };
+
+        var (resolved, _) = DarlingServerResolver.ResolveWithFingerprintName(connectedOnly, "host1:SalesDB");
+
+        Assert.Equal("host1#42", engineName);
+        Assert.Contains(engineName, new[] { resolved.FingerprintName, resolved.LegacyFingerprintName });
     }
 }

@@ -145,6 +145,7 @@ public sealed class DarlingAlertingTests
 
         var config = new DarlingConfig();
         config.Smtp.EncryptedPassword = DarlingSecrets.Protect("smtp-s3cret");
+        config.Smtp.EncryptedPasswordDeclaredByFile = true; /* #5366: the file declares it, so no pin is needed. */
         Assert.Equal("smtp-s3cret", new DarlingAlertSettings(config).GetSmtpPassword());
     }
 

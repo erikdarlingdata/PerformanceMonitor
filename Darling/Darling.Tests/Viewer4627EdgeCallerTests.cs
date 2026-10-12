@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// nesting level only, so a nested call's own commas are not miscounted; a self-check below feeds it both
 /// shapes.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class Viewer4627EdgeCallerTests
 {
     /// <summary>The two files that turn a plan edge into a brush.</summary>

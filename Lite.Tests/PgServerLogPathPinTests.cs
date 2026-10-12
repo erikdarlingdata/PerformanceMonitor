@@ -38,6 +38,7 @@ namespace Lite.Tests;
 /// count that averages them — and the source sweep below holds the shape for a site that does not exist
 /// yet, so a third log reader cannot arrive unpinned.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgServerLogPathPinTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

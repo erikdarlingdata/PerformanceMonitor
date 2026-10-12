@@ -16,6 +16,7 @@ namespace Darling.Tests;
 /// a candidate row. If a future rule joins the redactor corpus without a matching term, this fails — it is
 /// so the coarse filter and the fine-grained redactor cannot drift out of rule-for-rule sync (#4348).
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgSettingScrubCandidateCensusTests
 {
     public static IEnumerable<object[]> MaskedRedactionCases()

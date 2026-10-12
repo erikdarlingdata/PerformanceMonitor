@@ -81,7 +81,7 @@ public partial class ViewerServerTab
         BarMaxExecutions = Math.Max(1.0, items.Max(i => (double)i.TotalExecutions));
         BarMaxTotalCpu = Math.Max(1.0, items.Max(i => i.TotalCpuMs));
         BarMaxTotalElapsed = Math.Max(1.0, items.Max(i => i.TotalElapsedMs));
-        BarMaxTotalReads = Math.Max(1.0, items.Max(i => (double)i.TotalLogicalReads));
+        BarMaxTotalReads = Math.Max(1.0, items.Max(i => (double)(i.TotalLogicalReads ?? 0)));
 
         RefreshByDbCards(items);
     }

@@ -8,10 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -41,17 +44,19 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// arm parses them out of the blocked-process-report XML's <c>lasttranstarted</c> / <c>lastbatchstarted</c> /
 /// <c>lastbatchcompleted</c> attributes, and the DMV arm ships
 /// <c>sys.dm_tran_active_transactions.transaction_begin_time</c> verbatim. So the mixture is inside a single
-/// ROW, not merely a single payload. These reads de-skew all six to naive UTC by the collected
-/// <c>server_properties.utc_offset_minutes</c> (V16), leaving the STORED frame local so the collectors keep
-/// comparing local against local; a server with no offset yet collected falls back to 0, and the single-row
-/// COALESCE CTE guarantees the cross join never drops an event.
+/// ROW, not merely a single payload. The SQL returns all six as stored, and the reader converts each
+/// row to naive UTC in C# through the server's <see cref="ServerClock"/> (<see cref="DarlingServerClockReader"/>),
+/// leaving the STORED frame local so the collectors keep comparing local against local. The clock follows the
+/// server's time zone where SQL Server reports one, so a stamp from before a daylight saving change is not an
+/// hour off (#4793); otherwise it is the newest collected <c>server_properties.utc_offset_minutes</c> (V16),
+/// and a server with no offset yet collected reads as UTC.
 /// </para>
 ///
 /// <para><b>Why converting matters here specifically.</b> These six are how a reader establishes whether a
 /// blocker's transaction PREDATES the blocking event — that ordering is the whole diagnostic. Read as UTC
 /// when they are local they are early by the server's offset (4 hours on the production fleet), which
 /// inverts the ordering and makes a transaction that began during the block look like it began before it.
-/// The window stays on the naive-UTC <c>collection_time</c>, so the de-skew changes no row SELECTION — only
+/// The window stays on the naive-UTC <c>collection_time</c>, so the conversion changes no row SELECTION — only
 /// the values returned.
 /// </para>
 ///
@@ -121,6 +126,22 @@ internal static class DarlingBlockingReader
         public DateTime? BlockingLastBatchCompletedUtc { get; set; }
         public int BlockedPriority { get; set; }
         public int BlockingPriority { get; set; }
+
+        /// <summary>The report's own <c>collection_time</c> (#5236): half of the store key that
+        /// <see cref="ReadBlockedPlanFlagsAsync"/> re-reads a page's rows by. Null on a DMV-snapshot row, which has no key.</summary>
+        public DateTime? CollectionTime { get; set; }
+
+        /// <summary>The report's own <c>blocked_report_id</c> (#5236): the other half of that key. Null on a DMV-snapshot row.</summary>
+        public long? BlockedReportId { get; set; }
+
+        /// <summary>Whether this report carries a stored plan for the BLOCKED process (#5236). Filled in by
+        /// <see cref="ReadBlockedPlanFlagsAsync"/> for a page's rows, never by the list read itself, and it answers with
+        /// <c>IS NOT NULL AND &lt;&gt; ''</c>, the presence predicate the plan read (<c>BlockedPlanSql</c>) uses, so a
+        /// flagged row cannot come back "no plan". False until then, and on a DMV-snapshot row, which never has one.</summary>
+        public bool HasBlockedPlan { get; set; }
+
+        /// <summary>The same for the BLOCKING process's plan (#5236).</summary>
+        public bool HasBlockingPlan { get; set; }
     }
 
     /// <summary>One deadlock event — the shared alert-row fields (victim id/SQL, graph XML, the parsed
@@ -129,6 +150,19 @@ internal static class DarlingBlockingReader
     {
         public DateTime CollectionTime { get; set; }
         public DateTime? DeadlockTime { get; set; }
+
+        /// <summary>The database the deadlock was captured for. On an Azure SQL Database <c>master</c>
+        /// target this is the user database whose deadlock it is.</summary>
+        public string? DatabaseName { get; set; }
+
+        /// <summary>The deadlock's own <c>deadlock_id</c> (#5236): with <see cref="CollectionTime"/>, the store key that
+        /// <see cref="ReadVictimPlanFlagsAsync"/> re-reads a page's rows by.</summary>
+        public long? DeadlockId { get; set; }
+
+        /// <summary>Whether this deadlock carries a stored plan for its victim (#5236), by the presence predicate
+        /// <c>DeadlockVictimPlanSql</c> reads with (<c>IS NOT NULL AND &lt;&gt; ''</c>). Filled in by
+        /// <see cref="ReadVictimPlanFlagsAsync"/> for a page's rows, never by the list read itself; false until then.</summary>
+        public bool HasVictimPlan { get; set; }
     }
 
     /* ─────────────────────────── blocked-process reports (XE + DMV fallback) ─────────────────────────── */
@@ -136,9 +170,14 @@ internal static class DarlingBlockingReader
     /// <summary>
     /// The XE blocked-process-report read — the viewer's <c>BlockedProcessReportsSql</c> projection trimmed
     /// to the columns Lite's get_blocked_process_reports surfaces. Reads the BASE table (the viewer reads
-    /// base here too, for the V7 plan-column safety). The six transaction/batch stamps are de-skewed from the
-    /// server's local clock to naive UTC; <c>event_time</c> is the XE <c>@timestamp</c> and is already UTC, so
-    /// it is deliberately left alone. $1 server_id, $2/$3 window (naive UTC), $4 row cap.
+    /// base here too, for the V7 plan-column safety). The six transaction/batch stamps come back as the server's
+    /// local clock and <see cref="MapXeRow"/> converts them to naive UTC with the server's clock (#4793);
+    /// <c>event_time</c> is the XE <c>@timestamp</c> and is already UTC, so it is deliberately left alone. $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 the <see cref="EventWindowFloor"/>,
+    /// $6 database filter (<c>text[]</c>, NULL = all; #5244).
+    ///
+    /// <para><b>The database predicate is the list form (#5244).</b> <see cref="DatabaseFilter.Clause"/> on <c>database_name</c> at $6,
+    /// so one name and several names are the same statement text; it sits in the WHERE before the ORDER BY / LIMIT, so the cap is the
+    /// top N of the chosen databases.</para>
     ///
     /// <para>The cap is a PARAMETER, not a literal (#3541 A3). It was <c>LIMIT 200</c> while the tool advertised
     /// a caller-supplied <c>limit</c> and applied it with <c>Take(limit)</c>, so a window with 5,000 blocking
@@ -151,8 +190,9 @@ internal static class DarlingBlockingReader
     /// after a capped fetch was the shape of the defect: a page of graph-less rows read as "no XML in the
     /// window" while older rows with reports sat behind the cap.</para>
     /// </summary>
-    public const string BlockedProcessReportsSql = BlockedProcessReportsBody + """
-
+    public static readonly string BlockedProcessReportsSql = $$"""
+        {{BlockedProcessReportsBody}}
+        {{DatabaseFilter.All.Clause("database_name", 6)}}
         ORDER BY event_time DESC
         LIMIT $4
         """;
@@ -161,26 +201,31 @@ internal static class DarlingBlockingReader
     /// <c>get_blocked_process_xml</c> pages over. Same parameters as <see cref="BlockedProcessReportsSql"/>.
     /// The predicate is on the base-table column, not on the projection, so the planner can apply it before
     /// the ORDER BY / LIMIT rather than after materializing every row's XML.</summary>
-    public const string BlockedProcessReportsWithXmlSql = BlockedProcessReportsBody + """
-
+    public static readonly string BlockedProcessReportsWithXmlSql = $$"""
+        {{BlockedProcessReportsBody}}
+        {{DatabaseFilter.All.Clause("database_name", 6)}}
         AND   blocked_process_report_xml IS NOT NULL
         AND   blocked_process_report_xml <> ''
         ORDER BY event_time DESC
         LIMIT $4
         """;
 
-    /// <summary>The shared projection + window predicate behind the two XE consts above. Private so the
-    /// executable statements stay the two public consts the tests pin.</summary>
+    /// <summary>The shared projection + window predicate behind the two XE consts above. Windows on the
+    /// report's own <c>event_time</c> (when it happened), as the viewer grid and Lite do; $5 is the
+    /// <see cref="EventWindowFloor"/> for $2 — a partition-column bound with NO upper limit, so an event
+    /// collected late (after an outage) still lists. Private so the
+    /// executable statements stay the two public consts the tests pin.
+    ///
+    /// <para>The last two columns (#5236) are the row's store key, <c>collection_time</c> and <c>blocked_report_id</c>. The plan
+    /// columns are deliberately NOT in this projection. In a compressed chunk every column a statement names is
+    /// decompressed for each batch it scans, and the list scans every row from the floor to now (there is no
+    /// <c>event_time</c> index) and sorts. A flag computed here was evaluated only after the per-chunk sorts, so each row's whole
+    /// plan text (about 29 KB) went through them: on a server where half the rows carry plans, a 7-day list read moved
+    /// from 0.5 s to 0.6 s and 9,153 to 13,937 buffers, and the deadlock list from 0.3 s to 1.9 s with 217 MB of sort spill.
+    /// The flags come from <see cref="BlockedPlanFlagsSql"/> instead, one statement for the page's rows only, so only the batches
+    /// holding the page's own rows decompress a plan column. (<c>&lt;&gt; ''</c> compares lengths and does not detoast a
+    /// heap tuple, which is why an uncompressed chunk never showed the cost.)</para></summary>
     private const string BlockedProcessReportsBody = """
-        WITH svr AS (
-            SELECT COALESCE((
-                SELECT sp.utc_offset_minutes
-                FROM server_properties AS sp
-                WHERE sp.server_id = $1
-                AND   sp.utc_offset_minutes IS NOT NULL
-                ORDER BY sp.collection_time DESC
-                LIMIT 1), 0) AS offset_minutes
-        )
         SELECT
             event_time,
             database_name,
@@ -207,20 +252,45 @@ internal static class DarlingBlockingReader
             blocking_sql_text,
             blocked_transaction_name,
             blocking_transaction_name,
-            blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started,
-            blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started,
-            blocked_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_started,
-            blocking_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_started,
-            blocked_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_completed,
-            blocking_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_completed,
+            blocked_last_tran_started,
+            blocking_last_tran_started,
+            blocked_last_batch_started,
+            blocking_last_batch_started,
+            blocked_last_batch_completed,
+            blocking_last_batch_completed,
             blocked_priority,
             blocking_priority,
             blocked_process_report_xml,
-            contentious_object
-        FROM blocked_process_reports, svr
+            contentious_object,
+            collection_time,
+            blocked_report_id
+        FROM blocked_process_reports
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        AND   event_time >= $2
+        AND   event_time <= $3
+        AND   collection_time >= $5
+        """;
+
+    /// <summary>
+    /// The plan-presence flags for ONE PAGE of <see cref="BlockedProcessReportsSql"/> rows (#5236), found by the rows' own store
+    /// key: $1 server_id, $2 the page's <c>collection_time</c> values (<c>timestamp[]</c>), $3 the page's <c>blocked_report_id</c>
+    /// values (<c>bigint[]</c>). Both arrays name the same rows, so the result is mapped back by the (time, id) pair in
+    /// <see cref="ApplyBlockedPlanFlags"/>. The segment column and the time column let TimescaleDB skip every chunk and batch
+    /// that holds none of the page's rows, so only those batches decompress the two plan columns.
+    ///
+    /// <para>The predicate is <c>IS NOT NULL AND &lt;&gt; ''</c>, the same one <see cref="DarlingStoredPlanReader.BlockedPlanSql"/>
+    /// and <see cref="DarlingStoredPlanReader.BlockingPlanSql"/> read with, so a row flagged here is a row those reads can answer.</para>
+    /// </summary>
+    public const string BlockedPlanFlagsSql = """
+        SELECT
+            collection_time,
+            blocked_report_id,
+            (blocked_query_plan_xml IS NOT NULL AND blocked_query_plan_xml <> '') AS has_blocked_plan,
+            (blocking_query_plan_xml IS NOT NULL AND blocking_query_plan_xml <> '') AS has_blocking_plan
+        FROM blocked_process_reports
+        WHERE server_id = $1
+        AND   collection_time = ANY($2)
+        AND   blocked_report_id = ANY($3)
         """;
 
     /// <summary>
@@ -229,19 +299,10 @@ internal static class DarlingBlockingReader
     /// priorities). Its <c>event_time</c> is the collector's own naive-UTC <c>collection_time</c>
     /// (<c>DmvBlockingSnapshotCollector</c> stamps it from <c>context.CollectionTime</c>), while its two
     /// transaction stamps come straight off <c>sys.dm_tran_active_transactions</c> and are server-local — so
-    /// the same de-skew applies here, on two columns instead of six. Same parameters as
-    /// <see cref="BlockedProcessReportsSql"/>, including the $4 row cap.
+    /// the same conversion applies here (in <see cref="MapDmvRow"/>), on two columns instead of six. $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 database filter
+    /// (<c>text[]</c>, NULL = all; #5244; the DMV arm has no floor, so the filter takes $5 where the XE read's takes $6).
     /// </summary>
-    public const string DmvBlockingSnapshotsSql = """
-        WITH svr AS (
-            SELECT COALESCE((
-                SELECT sp.utc_offset_minutes
-                FROM server_properties AS sp
-                WHERE sp.server_id = $1
-                AND   sp.utc_offset_minutes IS NOT NULL
-                ORDER BY sp.collection_time DESC
-                LIMIT 1), 0) AS offset_minutes
-        )
+    public static readonly string DmvBlockingSnapshotsSql = $$"""
         SELECT
             event_time,
             database_name,
@@ -261,12 +322,13 @@ internal static class DarlingBlockingReader
             blocking_login_name,
             blocking_host_name,
             blocking_client_app,
-            blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started,
-            blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started
-        FROM v_dmv_blocking_snapshots, svr
+            blocked_last_tran_started,
+            blocking_last_tran_started
+        FROM v_dmv_blocking_snapshots
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
+        {{DatabaseFilter.All.Clause("database_name", 5)}}
         ORDER BY event_time DESC
         LIMIT $4
         """;
@@ -288,15 +350,27 @@ internal static class DarlingBlockingReader
     /// full page as complete. The merge then re-caps to <paramref name="cap"/>, so a result of exactly
     /// <paramref name="cap"/> rows means "at least this many" and a shorter one means "all of them".</para>
     /// </summary>
+    public static Task<List<BlockedProcessReadRow>> GetRecentBlockedProcessReportsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default) =>
+        GetRecentBlockedProcessReportsAsync(postgres, serverId, startUtc, endUtc, cap, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// The same read over a SET of databases (#5244): <paramref name="databases"/> empty (<see cref="DatabaseFilter.All"/>) is every
+    /// database, otherwise both arms (the XE reports AND the DMV fallback) keep only the named databases' rows, so the cap, the
+    /// DMV arm's <c>cap + XE rows</c> over-fetch and the merge all run over the chosen databases.
+    /// </summary>
     public static async Task<List<BlockedProcessReadRow>> GetRecentBlockedProcessReportsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
     {
         var items = new List<BlockedProcessReadRow>();
         var dmvItems = new List<BlockedProcessReadRow>();
 
+        /* Read the clock before a connection is held, so the two never sit in the pool at once. */
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
 
-        await ReadXeRowsAsync(connection, BlockedProcessReportsSql, serverId, startUtc, endUtc, cap, items, cancellationToken);
+        await ReadXeRowsAsync(connection, BlockedProcessReportsSql, serverId, startUtc, endUtc, cap, databases, clock, items, cancellationToken);
 
         await using (var command = new NpgsqlCommand(DmvBlockingSnapshotsSql, connection))
         {
@@ -305,33 +379,11 @@ internal static class DarlingBlockingReader
             /* cap + the XE rows in hand: one DMV row can hide behind each XE row in the merge (see the
                method remarks), so this is what keeps a surplus observable after the dedupe. */
             DarlingMcpReadParameters.AddInt(command, cap + items.Count);
+            command.Parameters.Add(databases.Parameter());
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                dmvItems.Add(new BlockedProcessReadRow
-                {
-                    EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
-                    DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    BlockedSpid = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                    BlockedEcid = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
-                    BlockingSpid = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
-                    BlockingEcid = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
-                    WaitTimeMs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                    LockMode = reader.IsDBNull(7) ? "" : reader.GetString(7),
-                    BlockingStatus = reader.IsDBNull(8) ? null : reader.GetString(8),
-                    ContentiousObject = reader.IsDBNull(9) ? "" : reader.GetString(9),
-                    BlockedSqlText = reader.IsDBNull(10) ? "" : reader.GetString(10),
-                    BlockingSqlText = reader.IsDBNull(11) ? "" : reader.GetString(11),
-                    BlockedLoginName = reader.IsDBNull(12) ? null : reader.GetString(12),
-                    BlockedHostName = reader.IsDBNull(13) ? null : reader.GetString(13),
-                    BlockedClientApp = reader.IsDBNull(14) ? null : reader.GetString(14),
-                    BlockingLoginName = reader.IsDBNull(15) ? null : reader.GetString(15),
-                    BlockingHostName = reader.IsDBNull(16) ? null : reader.GetString(16),
-                    BlockingClientApp = reader.IsDBNull(17) ? null : reader.GetString(17),
-                    BlockedLastTranStartedUtc = reader.IsDBNull(18) ? null : reader.GetDateTime(18),
-                    BlockingLastTranStartedUtc = reader.IsDBNull(19) ? null : reader.GetDateTime(19),
-                    Source = BlockedProcessAlertRow.DmvSnapshotSource,
-                });
+                dmvItems.Add(MapDmvRow(reader, clock));
             }
         }
 
@@ -348,67 +400,180 @@ internal static class DarlingBlockingReader
     /// it in would only add rows the caller has to discard, and discarding after a cap is the defect this
     /// exists to remove. Callers detecting truncation pass <c>limit + 1</c>.
     /// </summary>
+    public static Task<List<BlockedProcessReadRow>> GetRecentBlockedProcessReportsWithXmlAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default) =>
+        GetRecentBlockedProcessReportsWithXmlAsync(postgres, serverId, startUtc, endUtc, cap, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>The same XE-only read over a SET of databases (#5244): <see cref="DatabaseFilter.All"/> is every database, otherwise
+    /// only the named databases' reports are the population the cap runs over.</summary>
     public static async Task<List<BlockedProcessReadRow>> GetRecentBlockedProcessReportsWithXmlAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
     {
         var items = new List<BlockedProcessReadRow>();
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        await ReadXeRowsAsync(connection, BlockedProcessReportsWithXmlSql, serverId, startUtc, endUtc, cap, items, cancellationToken);
+        await ReadXeRowsAsync(connection, BlockedProcessReportsWithXmlSql, serverId, startUtc, endUtc, cap, databases, clock, items, cancellationToken);
         return items;
     }
 
     /// <summary>Runs one of the two XE consts (same projection, same parameters) and appends its rows. One
     /// mapper for both so the with-XML variant cannot drift a column from the unfiltered one.</summary>
     private static async Task ReadXeRowsAsync(
-        NpgsqlConnection connection, string sql, int serverId, DateTime startUtc, DateTime endUtc, int cap,
-        List<BlockedProcessReadRow> items, CancellationToken cancellationToken)
+        NpgsqlConnection connection, string sql, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases,
+        ServerClock clock, List<BlockedProcessReadRow> items, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);
+        DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(startUtc));
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            items.Add(new BlockedProcessReadRow
-            {
-                EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
-                DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                BlockedSpid = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                BlockedEcid = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
-                BlockingSpid = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
-                BlockingEcid = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
-                WaitTimeMs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                WaitResource = reader.IsDBNull(7) ? null : reader.GetString(7),
-                LockMode = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                BlockedStatus = reader.IsDBNull(9) ? null : reader.GetString(9),
-                BlockedIsolationLevel = reader.IsDBNull(10) ? null : reader.GetString(10),
-                BlockedLogUsed = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                BlockedTransactionCount = reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
-                BlockedClientApp = reader.IsDBNull(13) ? null : reader.GetString(13),
-                BlockedHostName = reader.IsDBNull(14) ? null : reader.GetString(14),
-                BlockedLoginName = reader.IsDBNull(15) ? null : reader.GetString(15),
-                BlockedSqlText = reader.IsDBNull(16) ? "" : reader.GetString(16),
-                BlockingStatus = reader.IsDBNull(17) ? null : reader.GetString(17),
-                BlockingIsolationLevel = reader.IsDBNull(18) ? null : reader.GetString(18),
-                BlockingClientApp = reader.IsDBNull(19) ? null : reader.GetString(19),
-                BlockingHostName = reader.IsDBNull(20) ? null : reader.GetString(20),
-                BlockingLoginName = reader.IsDBNull(21) ? null : reader.GetString(21),
-                BlockingSqlText = reader.IsDBNull(22) ? "" : reader.GetString(22),
-                BlockedTransactionName = reader.IsDBNull(23) ? null : reader.GetString(23),
-                BlockingTransactionName = reader.IsDBNull(24) ? null : reader.GetString(24),
-                BlockedLastTranStartedUtc = reader.IsDBNull(25) ? null : reader.GetDateTime(25),
-                BlockingLastTranStartedUtc = reader.IsDBNull(26) ? null : reader.GetDateTime(26),
-                BlockedLastBatchStartedUtc = reader.IsDBNull(27) ? null : reader.GetDateTime(27),
-                BlockingLastBatchStartedUtc = reader.IsDBNull(28) ? null : reader.GetDateTime(28),
-                BlockedLastBatchCompletedUtc = reader.IsDBNull(29) ? null : reader.GetDateTime(29),
-                BlockingLastBatchCompletedUtc = reader.IsDBNull(30) ? null : reader.GetDateTime(30),
-                BlockedPriority = reader.IsDBNull(31) ? 0 : reader.GetInt32(31),
-                BlockingPriority = reader.IsDBNull(32) ? 0 : reader.GetInt32(32),
-                BlockedProcessReportXml = reader.IsDBNull(33) ? "" : reader.GetString(33),
-                ContentiousObject = reader.IsDBNull(34) ? "" : reader.GetString(34),
-            });
+            items.Add(MapXeRow(reader, clock));
         }
+    }
+
+    /// <summary>Maps one row of <see cref="BlockedProcessReportsSql"/> / <see cref="BlockedProcessReportsWithXmlSql"/>
+    /// (37 columns, in the SELECT's order; the last two are the row's store key, #5236, and the plan flags stay false until
+    /// <see cref="ReadBlockedPlanFlagsAsync"/> fills them for a page). One mapper for both, so the with-XML
+    /// variant cannot drift a column from the unfiltered one.</summary>
+    internal static BlockedProcessReadRow MapXeRow(DbDataReader reader, ServerClock clock)
+    {
+        return new BlockedProcessReadRow
+        {
+            EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
+            DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+            BlockedSpid = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+            BlockedEcid = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+            BlockingSpid = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+            BlockingEcid = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+            WaitTimeMs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+            WaitResource = reader.IsDBNull(7) ? null : reader.GetString(7),
+            LockMode = reader.IsDBNull(8) ? "" : reader.GetString(8),
+            BlockedStatus = reader.IsDBNull(9) ? null : reader.GetString(9),
+            BlockedIsolationLevel = reader.IsDBNull(10) ? null : reader.GetString(10),
+            BlockedLogUsed = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+            BlockedTransactionCount = reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
+            BlockedClientApp = reader.IsDBNull(13) ? null : reader.GetString(13),
+            BlockedHostName = reader.IsDBNull(14) ? null : reader.GetString(14),
+            BlockedLoginName = reader.IsDBNull(15) ? null : reader.GetString(15),
+            BlockedSqlText = reader.IsDBNull(16) ? "" : reader.GetString(16),
+            BlockingStatus = reader.IsDBNull(17) ? null : reader.GetString(17),
+            BlockingIsolationLevel = reader.IsDBNull(18) ? null : reader.GetString(18),
+            BlockingClientApp = reader.IsDBNull(19) ? null : reader.GetString(19),
+            BlockingHostName = reader.IsDBNull(20) ? null : reader.GetString(20),
+            BlockingLoginName = reader.IsDBNull(21) ? null : reader.GetString(21),
+            BlockingSqlText = reader.IsDBNull(22) ? "" : reader.GetString(22),
+            BlockedTransactionName = reader.IsDBNull(23) ? null : reader.GetString(23),
+            BlockingTransactionName = reader.IsDBNull(24) ? null : reader.GetString(24),
+            BlockedLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 25),
+            BlockingLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 26),
+            BlockedLastBatchStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 27),
+            BlockingLastBatchStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 28),
+            BlockedLastBatchCompletedUtc = DarlingServerClockReader.ToUtc(clock, reader, 29),
+            BlockingLastBatchCompletedUtc = DarlingServerClockReader.ToUtc(clock, reader, 30),
+            BlockedPriority = reader.IsDBNull(31) ? 0 : reader.GetInt32(31),
+            BlockingPriority = reader.IsDBNull(32) ? 0 : reader.GetInt32(32),
+            BlockedProcessReportXml = reader.IsDBNull(33) ? "" : reader.GetString(33),
+            ContentiousObject = reader.IsDBNull(34) ? "" : reader.GetString(34),
+            CollectionTime = reader.IsDBNull(35) ? null : reader.GetDateTime(35),
+            BlockedReportId = reader.IsDBNull(36) ? null : reader.GetInt64(36),
+        };
+    }
+
+    /// <summary>
+    /// Fills <c>HasBlockedPlan</c> / <c>HasBlockingPlan</c> on the XE rows of one page of <c>get_blocking</c> (#5236), by
+    /// <see cref="BlockedPlanFlagsSql"/>: one statement over the page's own rows, issued after the page is known. A page with
+    /// no keyed row (every row a DMV snapshot) issues none.
+    /// </summary>
+    public static async Task ReadBlockedPlanFlagsAsync(
+        NpgsqlDataSource postgres, int serverId, IReadOnlyCollection<BlockedProcessReadRow> page, CancellationToken cancellationToken = default)
+    {
+        var keyed = new List<BlockedProcessReadRow>(page.Count);
+        foreach (var row in page)
+        {
+            if (row.CollectionTime is not null && row.BlockedReportId is not null)
+            {
+                keyed.Add(row);
+            }
+        }
+
+        if (keyed.Count == 0)
+        {
+            return;
+        }
+
+        var times = new DateTime[keyed.Count];
+        var ids = new long[keyed.Count];
+        for (var i = 0; i < keyed.Count; i++)
+        {
+            times[i] = DateTime.SpecifyKind(keyed[i].CollectionTime!.Value, DateTimeKind.Unspecified);
+            ids[i] = keyed[i].BlockedReportId!.Value;
+        }
+
+        var flags = new Dictionary<(DateTime Time, long Id), (bool Blocked, bool Blocking)>();
+        await using var command = postgres.CreateCommand(BlockedPlanFlagsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Timestamp, Value = times });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Bigint, Value = ids });
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                flags[(reader.GetDateTime(0), reader.GetInt64(1))] =
+                    (!reader.IsDBNull(2) && reader.GetBoolean(2), !reader.IsDBNull(3) && reader.GetBoolean(3));
+            }
+        }
+
+        ApplyBlockedPlanFlags(keyed, flags);
+    }
+
+    /// <summary>Sets the two flags on every row whose (collection_time, blocked_report_id) pair is in <paramref name="flags"/>;
+    /// a row with no entry (its report purged between the two statements) keeps both false.</summary>
+    internal static void ApplyBlockedPlanFlags(
+        IEnumerable<BlockedProcessReadRow> rows, IReadOnlyDictionary<(DateTime Time, long Id), (bool Blocked, bool Blocking)> flags)
+    {
+        foreach (var row in rows)
+        {
+            if (row.CollectionTime is { } time && row.BlockedReportId is { } id && flags.TryGetValue((time, id), out var found))
+            {
+                row.HasBlockedPlan = found.Blocked;
+                row.HasBlockingPlan = found.Blocking;
+            }
+        }
+    }
+
+    /// <summary>Maps one row of <see cref="DmvBlockingSnapshotsSql"/> (20 columns, in the SELECT's order).</summary>
+    internal static BlockedProcessReadRow MapDmvRow(DbDataReader reader, ServerClock clock)
+    {
+        return new BlockedProcessReadRow
+        {
+            EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
+            DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+            BlockedSpid = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+            BlockedEcid = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+            BlockingSpid = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+            BlockingEcid = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+            WaitTimeMs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+            LockMode = reader.IsDBNull(7) ? "" : reader.GetString(7),
+            BlockingStatus = reader.IsDBNull(8) ? null : reader.GetString(8),
+            ContentiousObject = reader.IsDBNull(9) ? "" : reader.GetString(9),
+            BlockedSqlText = reader.IsDBNull(10) ? "" : reader.GetString(10),
+            BlockingSqlText = reader.IsDBNull(11) ? "" : reader.GetString(11),
+            BlockedLoginName = reader.IsDBNull(12) ? null : reader.GetString(12),
+            BlockedHostName = reader.IsDBNull(13) ? null : reader.GetString(13),
+            BlockedClientApp = reader.IsDBNull(14) ? null : reader.GetString(14),
+            BlockingLoginName = reader.IsDBNull(15) ? null : reader.GetString(15),
+            BlockingHostName = reader.IsDBNull(16) ? null : reader.GetString(16),
+            BlockingClientApp = reader.IsDBNull(17) ? null : reader.GetString(17),
+            BlockedLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 18),
+            BlockingLastTranStartedUtc = DarlingServerClockReader.ToUtc(clock, reader, 19),
+            Source = BlockedProcessAlertRow.DmvSnapshotSource,
+        };
     }
 
     /* ─────────────────────────── deadlocks ─────────────────────────── */
@@ -439,18 +604,103 @@ internal static class DarlingBlockingReader
         LIMIT $4
         """;
 
+    /// <summary>Windows on <c>deadlock_time</c> (when the deadlock happened); $5 is the
+    /// <see cref="EventWindowFloor"/> for $2, with no upper bound so a late-collected deadlock still lists. The last
+    /// column (#5236) is the row's <c>deadlock_id</c>, which with <c>collection_time</c> is its store key. The victim plan column is
+    /// deliberately NOT in this projection, for the reason <see cref="BlockedProcessReportsSql"/> gives (a compressed chunk
+    /// decompresses every named column of every batch it scans, and the plan text rode through the per-chunk sorts: a 7-day list
+    /// read went from 0.3 s to 1.9 s on a server where half the deadlocks carry a plan). The flag comes from
+    /// <see cref="DeadlockVictimPlanFlagsSql"/>, for the page's rows only.</summary>
     private const string RecentDeadlocksBody = """
         SELECT
             collection_time,
             deadlock_time,
             victim_process_id,
             victim_sql_text,
-            deadlock_graph_xml
+            deadlock_graph_xml,
+            database_name,
+            deadlock_id
         FROM deadlocks
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        AND   deadlock_time >= $2
+        AND   deadlock_time <= $3
+        AND   collection_time >= $5
         """;
+
+    /// <summary>
+    /// The victim-plan flag for ONE PAGE of <see cref="RecentDeadlocksSql"/> rows (#5236), found by the rows' own store key:
+    /// $1 server_id, $2 the page's <c>collection_time</c> values (<c>timestamp[]</c>), $3 the page's <c>deadlock_id</c> values
+    /// (<c>bigint[]</c>). The predicate is <c>IS NOT NULL AND &lt;&gt; ''</c>, the one
+    /// <see cref="DarlingStoredPlanReader.DeadlockVictimPlanSql"/> reads with.
+    /// </summary>
+    public const string DeadlockVictimPlanFlagsSql = """
+        SELECT
+            collection_time,
+            deadlock_id,
+            (victim_query_plan_xml IS NOT NULL AND victim_query_plan_xml <> '') AS has_victim_plan
+        FROM deadlocks
+        WHERE server_id = $1
+        AND   collection_time = ANY($2)
+        AND   deadlock_id = ANY($3)
+        """;
+
+    /// <summary>
+    /// Fills <c>HasVictimPlan</c> on one page of <c>get_deadlocks</c> (#5236), by <see cref="DeadlockVictimPlanFlagsSql"/>: one
+    /// statement over the page's own rows, issued after the page is known.
+    /// </summary>
+    public static async Task ReadVictimPlanFlagsAsync(
+        NpgsqlDataSource postgres, int serverId, IReadOnlyCollection<DeadlockReadRow> page, CancellationToken cancellationToken = default)
+    {
+        var keyed = new List<DeadlockReadRow>(page.Count);
+        foreach (var row in page)
+        {
+            if (row.DeadlockId is not null)
+            {
+                keyed.Add(row);
+            }
+        }
+
+        if (keyed.Count == 0)
+        {
+            return;
+        }
+
+        var times = new DateTime[keyed.Count];
+        var ids = new long[keyed.Count];
+        for (var i = 0; i < keyed.Count; i++)
+        {
+            times[i] = DateTime.SpecifyKind(keyed[i].CollectionTime, DateTimeKind.Unspecified);
+            ids[i] = keyed[i].DeadlockId!.Value;
+        }
+
+        var flags = new Dictionary<(DateTime Time, long Id), bool>();
+        await using var command = postgres.CreateCommand(DeadlockVictimPlanFlagsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Timestamp, Value = times });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Bigint, Value = ids });
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                flags[(reader.GetDateTime(0), reader.GetInt64(1))] = !reader.IsDBNull(2) && reader.GetBoolean(2);
+            }
+        }
+
+        ApplyVictimPlanFlags(keyed, flags);
+    }
+
+    /// <summary>Sets <c>HasVictimPlan</c> on every row whose (collection_time, deadlock_id) pair is in <paramref name="flags"/>.</summary>
+    internal static void ApplyVictimPlanFlags(IEnumerable<DeadlockReadRow> rows, IReadOnlyDictionary<(DateTime Time, long Id), bool> flags)
+    {
+        foreach (var row in rows)
+        {
+            if (row.DeadlockId is { } id && flags.TryGetValue((row.CollectionTime, id), out var has))
+            {
+                row.HasVictimPlan = has;
+            }
+        }
+    }
 
     /// <summary>The newest <paramref name="cap"/> deadlocks over the window — every row, or with
     /// <paramref name="graphOnly"/> only those carrying a graph. Callers detecting truncation pass
@@ -463,6 +713,7 @@ internal static class DarlingBlockingReader
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);
+        DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -473,6 +724,8 @@ internal static class DarlingBlockingReader
                 VictimProcessId = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 VictimSqlText = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 DeadlockGraphXml = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                DatabaseName = reader.IsDBNull(5) ? null : reader.GetString(5),
+                DeadlockId = reader.IsDBNull(6) ? null : reader.GetInt64(6),
             });
         }
 

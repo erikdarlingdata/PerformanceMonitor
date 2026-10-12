@@ -53,7 +53,7 @@
                     <DataGridTextColumn Header="Kind" Binding="{Binding MatchKindDisplay}" Width="100"/>
                     <DataGridTextColumn Header="Channels set" Binding="{Binding ChannelsDisplay}" Width="*"/>
                     <DataGridTextColumn Header="Email to" Binding="{Binding SmtpRecipients}" Width="180"/>
-                    <DataGridTextColumn Header="Modified" Binding="{Binding ModifiedDisplay}" Width="130"/>
+                    <DataGridTextColumn Header="Modified" Binding="{Binding ModifiedDisplay}" Width="130" SortMemberPath="ModifiedAtUtc"/>
                 </DataGrid.Columns>
             </DataGrid>
             <TextBlock x:Name="NoRoutesMessage"

@@ -42,8 +42,8 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// the bound on anything that did move inside a settled window (a late row, a purge, the target's clock changing zone,
 /// which is re-keyed on the next compute exactly as before). Dead entries are swept, so the tier holds at most one
 /// TTL's worth of computes. <b>Except (#4248, widened by #4298):</b> a successful compute of a daily-cache arm
-/// (<see cref="PgBaselineProvider.IsDailyCacheArm"/> — every <c>PgTargetBaselineProvider</c> arm, plus Cpu and
-/// IoLatency on the SQL Server side) is never eroded by the TTL
+/// (<see cref="PgBaselineProvider.IsDailyCacheArm"/> — every <c>PgTargetBaselineProvider</c> arm, plus Cpu,
+/// IoLatency, Blocking and Deadlock on the SQL Server side, #4731) is never eroded by the TTL
 /// (<see cref="PgBaselineProvider.CachedBaseline.FreshUntilUtc"/> is a 24-hour backstop, not the real bound) — the
 /// EntryKey's analysis-day component is, exactly as the hourly case's analysis-hour component always was, so this
 /// tier keeps answering every lookup for the rest of that UTC day. See <see cref="PgBaselineProvider.IsFresh"/>,

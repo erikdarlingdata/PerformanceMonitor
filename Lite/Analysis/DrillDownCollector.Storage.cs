@@ -99,12 +99,15 @@ WHERE rn = 1
 AND   is_percent_growth = true
 AND   total_size_mb >= 10240
 AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
+/*SEC*/
 ORDER BY total_size_mb DESC
 LIMIT 50";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name) });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        /* #5558: the same databases the fact skipped. */
+        cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "FILE_AUTOGROWTH_PERCENT", "database_name", 4);
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

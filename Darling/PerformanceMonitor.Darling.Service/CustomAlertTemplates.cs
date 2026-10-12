@@ -113,7 +113,9 @@ public static class CustomAlertTemplates
             "Fires when the longest blocked-process report in the window crosses a duration bar: a session was "
             + "blocked that long, not just momentary contention. Starter: warn at 30s blocked, critical at 2 "
             + "minutes. Fires after 2 breaching evaluations (blocking is more urgent than the slow-moving "
-            + "signals). Requires the blocked-process report threshold to be configured on the instance.",
+            + "signals). Requires the blocked-process report threshold to be configured on the instance. "
+            + "On an Azure SQL Database master target it sees every database's blocking, so filter "
+            + "database_name or scope it by tag.",
             "{\"metric\":{\"source\":\"blocked_process_reports\",\"measure\":\"bpr_wait_time_ms\",\"aggregate\":\"max\",\"unit\":\"ms\",\"hours\":0.25}," +
             "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":30000,\"criticalThreshold\":120000}," +
             "\"hysteresis\":{\"breachSamples\":2,\"clearSamples\":2}}"),

@@ -29,11 +29,14 @@ SELECT database_name, recovery_model, is_auto_shrink_on, is_auto_close_on,
 FROM v_database_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)
+/*SEC*/
 AND   (is_auto_shrink_on = true OR is_auto_close_on = true
        OR is_read_committed_snapshot_on = false OR page_verify_option != 'CHECKSUM')
 ORDER BY database_name";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        /* #5558: the same databases the fact skipped. */
+        cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "DB_CONFIG", "database_name", 2);
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

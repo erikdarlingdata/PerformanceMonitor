@@ -52,6 +52,24 @@ public sealed class McpToolLatencyRecordingTests
         [McpServerTool(Name = "latency_probe_ok"), Description("Test-only: always answers Ok.")]
         public static string ProbeOk() => "probe-ok";
 
+        [McpServerTool(Name = "latency_probe_gate_failed"), Description("Test-only: answers Ok after noting a gate failure.")]
+        public static string ProbeGateFailed()
+        {
+            ReadScope.NoteFallback(ReadFallback.GateFailed, "probe", null);
+            return "probe-ok";
+        }
+
+        [McpServerTool(Name = "latency_probe_gate_failed_then_error"), Description("Test-only: notes a gate failure, then answers an error envelope.")]
+        public static string ProbeGateFailedThenError()
+        {
+            ReadScope.NoteFallback(ReadFallback.GateFailed, "probe", null);
+            return PerformanceMonitor.Common.McpHelpers.FormatError("latency_probe_gate_failed_then_error", new InvalidOperationException("probe failed"));
+        }
+
+        [McpServerTool(Name = "latency_probe_servers_json"), Description("Test-only: takes a JSON-bearing string like add_servers does and fails.")]
+        public static string ProbeServersJson([Description("A JSON batch.")] string servers_json) =>
+            PerformanceMonitor.Common.McpHelpers.FormatError("latency_probe_servers_json", new InvalidOperationException("probe failed"));
+
         [McpServerTool(Name = "latency_probe_timeout"), Description("Test-only: answers the 57014 statement-timeout envelope.")]
         public static string ProbeTimeout() =>
             PerformanceMonitor.Common.McpHelpers.FormatError(
@@ -63,7 +81,7 @@ public sealed class McpToolLatencyRecordingTests
     /// and <see cref="DarlingMcpHostService.ConfigurePipeline"/>, wired to <paramref name="readLatency"/> — the
     /// same construction <see cref="DarlingMcpHostGateLiveTests.BuildServer"/> uses, plus the test-only probe
     /// tool registered directly on <c>builder.Services</c> (never through production's tool registrations).</summary>
-    private static async Task<TestServer> BuildServer(ReadLatencyAccumulator readLatency)
+    private static async Task<TestServer> BuildServer(ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -80,7 +98,7 @@ public sealed class McpToolLatencyRecordingTests
 
         DarlingMcpHostService.ConfigureMcpServices(
             builder.Services, DarlingPeerDirectory.Snapshot.Empty, readLatency,
-            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, slowReads);
 
         /* The probe tool is added AFTER ConfigureMcpServices's own AddMcpServer() call, chaining onto the
            SAME builder — WithGeminiCompatibleTools appends to the already-registered tool set rather than
@@ -129,6 +147,37 @@ public sealed class McpToolLatencyRecordingTests
         using var reader = new System.IO.StreamReader(ctx.Response.Body);
         var body = await reader.ReadToEndAsync();
         return (ctx.Response.StatusCode, body);
+    }
+
+    [Fact]
+    public async Task AFailedWriteToolCall_CarryingAServerBatchWithAPassword_IsRecordedWithoutThePassword()
+    {
+        var slowReads = new SlowReadLog(0);
+        using var server = await BuildServer(new ReadLatencyAccumulator(), slowReads);
+        var batch = "[{\\\"server_name\\\":\\\"x\\\",\\\"password\\\":\\\"Hunter2!\\\"}]";
+        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"latency_probe_servers_json\",\"arguments\":{\"servers_json\":\"" + batch + "\"}}}";
+
+        await SendJsonRpcAsync(server, "/", requestBody);
+
+        Assert.True(slowReads.TryRead(out var record));
+        Assert.Equal("latency_probe_servers_json", record!.Route);
+        Assert.DoesNotContain("Hunter2!", record.ArgumentsJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("password\":\"", record.ArgumentsJson, StringComparison.Ordinal);
+        Assert.Contains(SlowReadLog.OmittedMarker, record.ArgumentsJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AToolThatNotesAFallback_RecordsGateFailed_AndAFailedToolStillRecordsError()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        using var server = await BuildServer(readLatency);
+
+        await ToolsCallAsync(server, "/", "latency_probe_gate_failed");
+        await ToolsCallAsync(server, "/", "latency_probe_gate_failed_then_error");
+
+        var drained = readLatency.Drain();
+        Assert.Equal(ReadOutcome.GateFailed, Assert.Single(drained, d => d.Route == "latency_probe_gate_failed").Outcome);
+        Assert.Equal(ReadOutcome.Error, Assert.Single(drained, d => d.Route == "latency_probe_gate_failed_then_error").Outcome);
     }
 
     [Fact]
@@ -182,11 +231,36 @@ public sealed class McpToolLatencyRecordingTests
         var readLatency = new ReadLatencyAccumulator();
         using var server = await BuildServer(readLatency);
 
-        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_custom_view_panel\",\"arguments\":{\"view_id\":0}}}";
+        /* #4782: the argument is 'spec', the tool's one model-supplied parameter. This request used to send a
+           'view_id' argument no parameter declares, which the unknown-argument guard (the first call-tool
+           filter) refuses before the tool or the latency filter runs -- so the assertion below held without
+           the filter's skip for this tool ever being exercised. */
+        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_custom_view_panel\",\"arguments\":{\"spec\":\"{}\"}}}";
         var (statusCode, _) = await SendJsonRpcAsync(server, "/", requestBody);
         Assert.Equal(StatusCodes.Status200OK, statusCode);
 
         var drained = readLatency.Drain();
+        Assert.DoesNotContain(drained, d => d.Surface == ReadSurface.Mcp && d.Route == "run_custom_view_panel");
+    }
+
+    /// <summary>#4782: the tool's composed-panel run is recorded ONCE, as a <c>Compose</c> sample, into the
+    /// accumulator the MCP host was given -- the filter skips this tool because the shared runner already
+    /// records it. A <c>spec</c> with no <c>panel</c> is refused by the runner's validation before it reaches
+    /// the store (no database), and the runner records the run either way.</summary>
+    [Fact]
+    public async Task RunCustomViewPanel_RecordsOneComposeSample_IntoTheAccumulatorTheHostWasGiven()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        using var server = await BuildServer(readLatency);
+
+        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_custom_view_panel\",\"arguments\":{\"spec\":\"{}\"}}}";
+        var (statusCode, _) = await SendJsonRpcAsync(server, "/", requestBody);
+        Assert.Equal(StatusCodes.Status200OK, statusCode);
+
+        var drained = readLatency.Drain();
+        var sample = Assert.Single(drained, d => d.Surface == ReadSurface.Compose);
+        Assert.Equal(ReadOutcome.Error, sample.Outcome);
+        Assert.Equal(1, sample.Count);
         Assert.DoesNotContain(drained, d => d.Surface == ReadSurface.Mcp && d.Route == "run_custom_view_panel");
     }
 }

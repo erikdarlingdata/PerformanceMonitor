@@ -150,6 +150,14 @@ public sealed class DarlingWorkerTests
         excludedChanged.ExcludedDatabases = new List<string> { "tempdb", "reporting" };
         Assert.False(DarlingWorker.ServerDefinitionEquals(original, excludedChanged), "an excluded-databases change must reconnect");
 
+        var portChanged = SampleServer();
+        portChanged.Port = 5433;
+        Assert.False(DarlingWorker.ServerDefinitionEquals(original, portChanged), "a port-only change must reconnect: the connection is built from it");
+
+        var engineChanged = SampleServer();
+        engineChanged.Engine = "postgres";
+        Assert.False(DarlingWorker.ServerDefinitionEquals(original, engineChanged), "an engine change must reconnect");
+
         /* Sanity: two identical definitions compare equal. */
         Assert.True(DarlingWorker.ServerDefinitionEquals(original, SampleServer()));
     }

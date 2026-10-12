@@ -1,0 +1,154 @@
+/* Runs the shipped Storage Growth tab (wwwroot/js/pages/finops/storage-growth.js) against a recording fetch and a node-tree DOM,
+   and prints as one line of JSON what it asked for: the databases read, the objects read after a click on a database, a pick of
+   each window, a rebuild for the same server (the 60 s poll) and a build for another server.
+       node finops-storage-growth-window-harness.mjs <path to wwwroot/js> */
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { pickRange, pickerText, pickerItems, pickerButton, withDocumentListeners } from "./web-picker-driver.mjs";
+
+const jsDir = process.argv[2];
+
+class FakeNode {
+  constructor(tag, text) {
+    this.tag = tag;
+    this.children = [];
+    this.attrs = {};
+    this.dataset = {};
+    this.style = {};
+    this.className = "";
+    this.value = "";
+    this.handlers = {};
+    this.text = text == null ? null : String(text);
+    this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
+  }
+  get firstChild() {
+    return this.children[0] || null;
+  }
+  appendChild(child) {
+    this.children.push(child);
+    return child;
+  }
+  removeChild(child) {
+    const i = this.children.indexOf(child);
+    if (i >= 0) this.children.splice(i, 1);
+    return child;
+  }
+  setAttribute(name, value) {
+    this.attrs[name] = String(value);
+  }
+  getAttribute(name) {
+    return name in this.attrs ? this.attrs[name] : null;
+  }
+  addEventListener(type, fn) {
+    this.handlers[type] = fn;
+  }
+  set textContent(value) {
+    this.children = [];
+    this.text = String(value);
+  }
+  get textContent() {
+    return (this.text || "") + this.children.map((c) => c.textContent).join("");
+  }
+}
+
+globalThis.Node = FakeNode;
+globalThis.document = withDocumentListeners({
+  createElement: (tag) => new FakeNode(tag),
+  createElementNS: (ns, tag) => new FakeNode(tag),
+  createTextNode: (text) => new FakeNode("#text", text),
+});
+
+const fetches = [];
+let body = "{}";
+/* The catalog the picker reads its reach from (#5562 L4b): get_finops says 168 for its other views and serves the Storage Growth view's own
+   reach as view_max_hours, the number the server validates. The page takes it from here, not from a constant of its own. */
+const catalogBody = JSON.stringify({
+  reads: [{ name: "get_finops", params: [{ name: "hours", max_hours: 168, view_max_hours: { storage_growth: 2160 } }] }],
+});
+globalThis.fetch = async (url) => {
+  fetches.push(String(url));
+  return { status: 200, ok: true, text: async () => (String(url).includes("/api/catalog") ? catalogBody : body) };
+};
+
+const find = (node, tag) => (node.tag === tag ? node : node.children.map((c) => find(c, tag)).find(Boolean) || null);
+const paramsOf = (url) => Object.fromEntries(new URL(url, "http://viewer.test").searchParams.entries());
+const findAll = (node, tag, out = []) => {
+  if (node.tag === tag) out.push(node);
+  node.children.forEach((c) => findAll(c, tag, out));
+  return out;
+};
+const findText = (node, tag, text) => findAll(node, tag).find((n) => n.textContent === text) || null;
+
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "storage-growth-window-"));
+try {
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert; every stand-in below is
+     written AFTER the copy, so it still replaces the real file. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
+  fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
+  fs.writeFileSync(
+    path.join(scratch, "charts.js"),
+    'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\n' +
+      'export function zoomableLineChart() { return el("div", {}); }\nexport function chartZoomScope() { return ""; }\n'
+  );
+  const { tab } = await import(pathToFileURL(path.join(scratch, "pages", "finops", "storage-growth.js")).href);
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+  const dbBody = { databases: { status: "ok", database_count: 1, truncated: false, rows: [{ database_name: "Alpha", current_size_mb: 10 }] } };
+  const objBody = (days) => ({ database: { status: "ok" }, objects: { status: "ok", window_days: days, object_count: 0, truncated: false, days: [], rows: [] } });
+  const seen = () => fetches.filter((u) => String(u).includes("get_finops")).map(paramsOf).map((p) => ({ view: p.view, hours: p.hours, database_name: p.database_name ?? null, limit: p.limit ?? null }));
+  const out = {};
+
+  // The databases level: no window picker, 24 hours.
+  body = JSON.stringify(dbBody);
+  fetches.length = 0;
+  let root = tab.build("srv-a", {});
+  await settle();
+  out.databases = { reads: seen(), selects: pickerButton(root, "Window") ? 1 : 0 };
+
+  // Open the database: the objects read at the default window (30 days = 720 hours), with the picker.
+  body = JSON.stringify(objBody(30));
+  fetches.length = 0;
+  findText(root, "button", "Show objects").handlers.click();
+  await settle();
+  // #5562 R5: the Compact rolling-only picker, whole days (the heatmap has one column per day), reach 2160 hours for this view.
+  out.objects = {
+    reads: seen(),
+    options: pickerItems(root, "Window").filter((i) => !i.disabled).map((i) => i.name),
+    disabled: pickerItems(root, "Window").filter((i) => i.disabled).map((i) => i.name + ": " + i.why),
+    value: pickerText(root, "Window"),
+    refused: { hours: pickRange(root, "Window", "200h"), calendar: pickRange(root, "Window", "last month"), tooLong: pickRange(root, "Window", "120d"), tooShort: pickRange(root, "Window", "3d"), oneDay: pickRange(root, "Window", "1d") },
+  };
+
+  // Pick 90 days, then 7 days: each re-reads with days * 24.
+  for (const days of [90, 7]) {
+    fetches.length = 0;
+    body = JSON.stringify(objBody(days));
+    pickRange(root, "Window", days + "d");
+    await settle();
+    out["picked" + days] = { reads: seen(), value: pickerText(root, "Window") };
+  }
+
+  // The poll rebuilds the tab for the same server: one read with the picked window, picker still on it.
+  fetches.length = 0;
+  root = tab.build("srv-a", {});
+  await settle();
+  out.rebuilt = { reads: seen(), value: pickerText(root, "Window") };
+
+  // Another server starts at the databases level.
+  body = JSON.stringify(dbBody);
+  fetches.length = 0;
+  root = tab.build("srv-b", {});
+  await settle();
+  out.other = { reads: seen(), selects: pickerButton(root, "Window") ? 1 : 0 };
+  // ... and its own objects read starts at 30 days.
+  body = JSON.stringify(objBody(30));
+  fetches.length = 0;
+  findText(root, "button", "Show objects").handlers.click();
+  await settle();
+  out.otherObjects = { reads: seen(), value: pickerText(root, "Window") };
+  console.log(JSON.stringify(out));
+} finally {
+  fs.rmSync(scratch, { recursive: true, force: true });
+}

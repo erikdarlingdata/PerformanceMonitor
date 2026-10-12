@@ -12,6 +12,7 @@ namespace PerformanceMonitorLite.Tests;
 /// #4727: a data file stamped with a schema version newer than the app's is refused, with a message naming both
 /// versions, and nothing is written to it. A read-only open would not be enough: the collectors would still fail.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class NewerSchemaFileGuardTests : IDisposable
 {
     private readonly string _tempDir;
@@ -52,7 +53,7 @@ public class NewerSchemaFileGuardTests : IDisposable
         var bytesBefore = SHA256.HashData(File.ReadAllBytes(_dbPath));
         var writtenBefore = File.GetLastWriteTimeUtc(_dbPath);
 
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         var refusal = await Assert.ThrowsAsync<SchemaVersionTooNewException>(() => initializer.InitializeAsync());
 
         Assert.Equal(newer, refusal.FileVersion);
@@ -75,10 +76,10 @@ public class NewerSchemaFileGuardTests : IDisposable
     [Fact]
     public async Task AFileStampedAtTheAppsOwnVersion_StillOpens()
     {
-        var first = new DuckDbInitializer(_dbPath);
+        using var first = new DuckDbInitializer(_dbPath);
         await first.InitializeAsync();
 
-        var second = new DuckDbInitializer(_dbPath);
+        using var second = new DuckDbInitializer(_dbPath);
         await second.InitializeAsync();
 
         using var verify = new DuckDBConnection($"Data Source={_dbPath}");

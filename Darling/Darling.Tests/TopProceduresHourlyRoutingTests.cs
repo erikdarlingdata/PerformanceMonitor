@@ -36,7 +36,9 @@ public sealed class TopProceduresHourlyRoutingTests
 
         Assert.Contains("GROUP BY database_name, schema_name, object_name", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("object_type", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY SUM(worker_time_sum) DESC", sql, StringComparison.Ordinal);
+        /* The ranking is the const's anchor; the CPU read is the const expanded to the worker-time sum (#5226). */
+        Assert.Contains("ORDER BY rank_metric DESC NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(worker_time_sum) AS rank_metric", TopRankings.Apply(sql, TopRanking.Cpu, hourly: true), StringComparison.Ordinal);
         Assert.Contains(DarlingDataReader.TopProceduresHourlyFromPlaceholder, sql, StringComparison.Ordinal);
     }
 
@@ -69,6 +71,42 @@ public sealed class TopProceduresHourlyRoutingTests
         Assert.DoesNotContain("\"procedure_stats_interval_hourly\"", methodBody, StringComparison.Ordinal);
         Assert.DoesNotContain("FROM procedure_stats_interval_hourly", methodBody, StringComparison.Ordinal);
         Assert.DoesNotContain("FROM procedure_stats_hourly", methodBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5329 lane B2 source pin: the procedures read takes the io route through <c>ChooseProceduresHourlyRoute</c> (the one route
+    /// table, <c>TopRankings.ChooseHourlyRoute</c>, with no second copy), the hourly arm names <c>procedure_stats_io_hourly</c> and
+    /// projects its three sums only on that route, the reads ranking carries the raw retention notice only when it does not read io,
+    /// and the procedures tool no longer says only raw carries reads.
+    /// </summary>
+    [Fact]
+    public void TheIoRoute_IsChosenInTheRoutedRead_NamedInTheHourlyArm_AndDisclosedByTheTool()
+    {
+        var source = File.ReadAllText(FindReaderSourcePath());
+        var routed = source.Substring(source.IndexOf("public static async Task<TopProceduresReadResult> GetTopProceduresByCpuRoutedAsync", StringComparison.Ordinal));
+        routed = routed[..routed.IndexOf("GetTopProceduresByCpuHourlyAsync(postgres, coverage", StringComparison.Ordinal)];
+        Assert.Contains("ChooseProceduresHourlyRoute(rollups, coverage, ranking, startUtc)", routed, StringComparison.Ordinal);
+        Assert.Contains("ranking != TopRanking.Reads || ioRoute", routed, StringComparison.Ordinal);
+        Assert.DoesNotContain("TopRankings.HourlyCarries(ranking)", routed, StringComparison.Ordinal);
+
+        var chooser = source.Substring(source.IndexOf("public static HourlyRoute ChooseProceduresHourlyRoute", StringComparison.Ordinal));
+        chooser = chooser[..chooser.IndexOf("return TopRankings.ChooseHourlyRoute", StringComparison.Ordinal)];
+        Assert.Contains("return TopRankings.ChooseHourlyRoute(ranking, startUtc, ioFloor, rawOldest);", source, StringComparison.Ordinal);
+        Assert.Contains("TimescaleSupport.ProcedureStatsIoHourlyView", chooser, StringComparison.Ordinal);
+        Assert.DoesNotContain("QueryStats", chooser, StringComparison.Ordinal);
+
+        var arm = source.Substring(source.IndexOf("private static async Task<(List<TopProcedureRow> Rows, DateTime? FirstBucket)> GetTopProceduresByCpuHourlyAsync", StringComparison.Ordinal));
+        arm = arm[..arm.IndexOf("/* ─────────────────────────── query store", StringComparison.Ordinal)];
+        /* #5329: the io FROM goes through StitchedRelationSql like every other hourly relation (no literal relation name). */
+        Assert.Contains("coverage.StitchedRelationSql(\n            io ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView,", arm.Replace("\r\n", "\n"), StringComparison.Ordinal);
+        Assert.DoesNotContain("collect.{TimescaleSupport.ProcedureStatsIoHourlyView} AS f", arm, StringComparison.Ordinal);
+        Assert.Contains("io ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView", arm, StringComparison.Ordinal);
+        Assert.Contains("TopRankings.HourlyIoSums", arm, StringComparison.Ordinal);
+
+        var tool = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"));
+        Assert.DoesNotContain("which only raw procedure_stats carries (the hourly rollup keeps CPU", tool, StringComparison.Ordinal);
+        Assert.Contains("procedure_stats_io_hourly", tool, StringComparison.Ordinal);
+        Assert.Contains("hourly && !routed.IoRoute ? (long?)null : r.TotalLogicalReads", tool, StringComparison.Ordinal);
     }
 
     private static string FindReaderSourcePath()

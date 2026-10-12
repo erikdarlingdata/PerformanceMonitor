@@ -31,6 +31,20 @@ public sealed class HourlyAttributionSpanTests
         Assert.Contains("served span", note, StringComparison.Ordinal);
     }
 
+    /// <summary>#4966: the served span's two instants print as UTC with the Z, though the first bucket and the ceiling come off the store naive.</summary>
+    [Fact]
+    public void Hourly_TheServedSpanNote_NamesBothInstantsInUtc_WithTheZ()
+    {
+        var start = Day.AddHours(10).AddMinutes(37);
+        var asOf = Day.AddHours(20).AddMinutes(20);
+        var firstBucket = DateTime.SpecifyKind(Day.AddHours(13), DateTimeKind.Unspecified);
+        var ceiling = DateTime.SpecifyKind(Day.AddHours(18), DateTimeKind.Unspecified);
+
+        var (_, _, note) = DarlingMcpDataTools.HourlyAttributionSpan(true, start, asOf, firstBucket, ceiling);
+
+        Assert.Contains("the served span 2026-01-05T13:00:00.0000000Z to 2026-01-05T18:00:00.0000000Z.", note, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Hourly_ShareDividesByTheServedSpan_NotTheRequestedWindow()
     {
@@ -46,6 +60,31 @@ public sealed class HourlyAttributionSpanTests
         // The requested window (about 9.7 h) would give a different, smaller share.
         var requested = CpuAttribution.Compute(27000, start, asOf, 300, from, to, 25, 8);
         Assert.NotEqual(served.AttributedCpuRatio, requested.AttributedCpuRatio);
+    }
+
+    [Fact]
+    public void Hourly_OnTheHourAsOf_DividesByExactlyTheHoursBeforeIt()
+    {
+        // An on-the-hour as_of divides N hours of CPU by N hours, not N+1 (#4859): the read stops before the hour
+        // that begins at as_of, so that hour is not in the denominator. The ceiling sits above as_of, so it does
+        // not cut the span.
+        var start = Day.AddHours(10);
+        var asOf = Day.AddHours(14);
+        var (from, to, _) = DarlingMcpDataTools.HourlyAttributionSpan(true, start, asOf, Day.AddHours(10), Day.AddHours(18));
+
+        Assert.Equal(Day.AddHours(10), from);
+        Assert.Equal(Day.AddHours(14), to);
+
+        // 25% of 8 cores over exactly 4 hours = 28,800 CPU-seconds; 21,600 ranked seconds is 0.75.
+        var served = CpuAttribution.Compute(21600, from, to, 240, from, to, 25, 8);
+        Assert.Equal(28800, served.SqlCpuSecondsInWindow);
+        Assert.Equal(0.75, served.AttributedCpuRatio);
+
+        // Contrast: an as_of 20 minutes into the hour still counts the bucket holding it whole, so the span ends
+        // at the top of the next hour.
+        var (_, unalignedTo, _) = DarlingMcpDataTools.HourlyAttributionSpan(
+            true, start, Day.AddHours(14).AddMinutes(20), Day.AddHours(10), Day.AddHours(18));
+        Assert.Equal(Day.AddHours(15), unalignedTo);
     }
 
     [Fact]

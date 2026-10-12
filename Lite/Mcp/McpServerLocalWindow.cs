@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -46,9 +47,10 @@ namespace PerformanceMonitorLite.Mcp;
 internal static class McpServerLocalWindow
 {
     /// <summary>
-    /// This server's collected offset, or 0 when the store holds none.
+    /// This server's collected clock (#4766): its time zone where one was collected, else its fixed offset, else
+    /// UTC when the store holds neither. For a read whose window or returned rows can cross a daylight-saving change.
     ///
-    /// <para><b>Why 0 and not the desktop static.</b> 0 is a fixed point: two identical MCP calls get the
+    /// <para><b>Why UTC and not the desktop static.</b> UTC is a fixed point: two identical MCP calls get the
     /// same window from it no matter what the desktop is doing, which is the property this whole seam exists
     /// to restore. Falling back to the static would reinstate exactly the coupling being removed, and would
     /// do it on the least visible path.</para>
@@ -69,6 +71,6 @@ internal static class McpServerLocalWindow
     /// self-correcting on the next on-load collection, and it is no longer contingent on which tab the
     /// desktop last had open.</para>
     /// </summary>
-    public static async Task<int> OffsetForAsync(LocalDataService dataService, int serverId)
-        => await dataService.GetServerUtcOffsetMinutesAsync(serverId) ?? 0;
+    public static async Task<ServerClock> ClockForAsync(LocalDataService dataService, int serverId)
+        => await dataService.GetServerClockAsync(serverId) ?? ServerClock.Utc;
 }

@@ -32,7 +32,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// 5–600 by
 /// <see cref="StoreConfigProvider.ClampComposeStatementTimeoutSeconds"/>. It is a ROLE setting, so it
 /// bounds every statement those identities run, not merely the composed queries it is named for —
-/// <see cref="DarlingTrendReader.QueryStoreDurationTrendSql"/> and
+/// <see cref="DarlingTrendReader.QueryStoreDurationTrendFilteredSql"/> and
 /// <see cref="QueryStoreTrendRouting"/> both already reason about it by name.</para>
 ///
 /// <para><b>Why a client-side deadline does not simply defer to that GUC.</b> Three reasons, and they land

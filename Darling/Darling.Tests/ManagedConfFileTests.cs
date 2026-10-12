@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -379,6 +380,111 @@ public sealed class ManagedConfFileTests
         Assert.Contains("log_line_prefix = '%m [%p] %a '", body, StringComparison.Ordinal);
     }
 
+    /// <summary>The planner page-cost setting is rendered exactly once, at 1.1, in the managed body and in the
+    /// full file text a start writes.</summary>
+    [Fact]
+    public void RenderBody_ContainsRandomPageCost_ExactlyOnce_At1Point1()
+    {
+        var inputs = SampleInputs();
+        foreach (var text in new[] { ManagedConfFile.RenderBody(inputs), ManagedConfFile.Render(inputs) })
+        {
+            var lines = text.Split('\n').Where(l => l.StartsWith("random_page_cost", StringComparison.Ordinal)).ToList();
+            Assert.Single(lines);
+            Assert.Equal("random_page_cost = '1.1'", lines[0]);
+        }
+    }
+
+    /// <summary>A file the previous version wrote (the same body without the page-cost line, with a header hash
+    /// that matches it) is not a hand edit, and a start replaces it with the new render.</summary>
+    [Fact]
+    public void PreviousVersionRender_IsNotHandEdited_AndIsReplacedWithTheNewLine()
+    {
+        var inputs = SampleInputs();
+        var newBody = ManagedConfFile.RenderBody(inputs);
+        var previousBody = string.Concat(newBody.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(l => !l.StartsWith("random_page_cost", StringComparison.Ordinal))
+            .Select(l => l + "\n"));
+        Assert.NotEqual(newBody, previousBody);
+        var previousFile = ManagedConfFile.RenderHeader(inputs, ManagedConfFile.ComputeBodyHash(previousBody)) + previousBody;
+        var newFile = ManagedConfFile.Render(inputs);
+
+        Assert.False(ManagedConfFile.IsHandEdited(previousFile));
+        Assert.True(ManagedConfFile.ShouldReplaceManagedConf(previousFile, newFile));
+        var diff = Assert.Single(ManagedConfFile.DiffBodyKeys(
+            ManagedConfFile.ParseExisting(previousFile).Body, ManagedConfFile.ParseExisting(newFile).Body));
+        Assert.Equal("random_page_cost", diff.Key);
+        Assert.Null(diff.FileValue);
+        Assert.Equal("1.1", diff.RenderedValue);
+    }
+
+    /// <summary>A hand-edited previous-version file keeps today's behaviour: it is detected, never replaced, and
+    /// the diff names the page-cost key as the one a fresh render would add.</summary>
+    [Fact]
+    public void HandEditedPreviousVersionRender_IsLeftInForce_AndTheDiffNamesRandomPageCost()
+    {
+        var inputs = SampleInputs();
+        var newFile = ManagedConfFile.Render(inputs);
+        var previousBody = string.Concat(ManagedConfFile.RenderBody(inputs).Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(l => !l.StartsWith("random_page_cost", StringComparison.Ordinal))
+            .Select(l => l + "\n"));
+        var previousFile = ManagedConfFile.RenderHeader(inputs, ManagedConfFile.ComputeBodyHash(previousBody)) + previousBody;
+        var edited = previousFile.Replace("checkpoint_timeout = '15min'", "checkpoint_timeout = '30min'", StringComparison.Ordinal);
+        Assert.NotEqual(previousFile, edited);
+
+        Assert.True(ManagedConfFile.IsHandEdited(edited));
+        Assert.False(ManagedConfFile.ShouldReplaceManagedConf(edited, newFile));
+        var diffs = ManagedConfFile.DiffBodyKeys(ManagedConfFile.ParseExisting(edited).Body, ManagedConfFile.ParseExisting(newFile).Body);
+        Assert.Contains(diffs, d => d.Key == "random_page_cost" && d.FileValue is null && d.RenderedValue == "1.1");
+        Assert.Contains(diffs, d => d.Key == "checkpoint_timeout");
+    }
+
+    /// <summary>v18 is one of the builders <see cref="ManagedConfFile.RenderBody"/> calls: the rendered body
+    /// carries exactly one preload line, <c>timescaledb,pg_stat_statements,auto_explain</c> (v18's list wins
+    /// over v13's), and every <c>auto_explain.*</c> setting, once.</summary>
+    [Fact]
+    public void RenderBody_CarriesAutoExplain_OnePreloadLine_AndEverySetting()
+    {
+        var body = ManagedConfFile.RenderBody(SampleInputs());
+
+        Assert.Equal(1, CountOccurrences(body, "shared_preload_libraries = '"));
+        Assert.Contains("shared_preload_libraries = 'timescaledb,pg_stat_statements,auto_explain'", body, StringComparison.Ordinal);
+        foreach (var setting in new[]
+        {
+            "auto_explain.log_min_duration = '10s'",
+            "auto_explain.log_analyze = 'off'",
+            "auto_explain.log_format = 'json'",
+            "auto_explain.log_nested_statements = 'off'",
+            "auto_explain.log_verbose = 'on'",
+            "auto_explain.log_settings = 'on'",
+            "auto_explain.log_parameter_max_length = '0'",
+        })
+        {
+            Assert.Equal(1, CountOccurrences(body, setting));
+        }
+    }
+
+    /// <summary>An operator library already in force survives the v18 merge, and auto_explain is last.</summary>
+    [Fact]
+    public void RenderBody_V18Merge_KeepsAnOperatorLibrary_AndAppendsAutoExplainLast()
+    {
+        var body = ManagedConfFile.RenderBody(SampleInputs(effectivePreloadList: "timescaledb,pg_prewarm"));
+
+        Assert.Contains("shared_preload_libraries = 'timescaledb,pg_prewarm,pg_stat_statements,auto_explain'", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>A render over a list that already holds auto_explain is byte-identical to a second render
+    /// over the list that render produced: the merge is idempotent across starts.</summary>
+    [Fact]
+    public void RenderBody_V18Merge_IsIdempotentAcrossStarts()
+    {
+        var first = ManagedConfFile.RenderBody(SampleInputs(effectivePreloadList: "timescaledb"));
+        var preload = Assert.Single(ManagedConfFile.DiffBodyKeys(string.Empty, first), d => d.Key == "shared_preload_libraries");
+
+        var second = ManagedConfFile.RenderBody(SampleInputs(effectivePreloadList: preload.RenderedValue));
+
+        Assert.Equal(first, second);
+    }
+
     /// <summary>Pin: <see cref="ManagedConfFile.RenderBody"/> always renders <c>listen_addresses</c> as
     /// exactly loopback (<c>DarlingManagedPostgres.BuildConfAppend</c>'s v1 line) — never the network
     /// address an exposed store's command line adds. Every verification path that reads this rendered text
@@ -535,6 +641,11 @@ public sealed class ManagedConfFileTests
         if (marker == DarlingManagedPostgres.ConfMarkerV17)
         {
             return DarlingManagedPostgres.BuildLogLinePrefixConfAppend();
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV18)
+        {
+            return DarlingManagedPostgres.BuildSlowPlanConfAppend(inputs.EffectivePreloadList);
         }
 
         throw new InvalidOperationException(

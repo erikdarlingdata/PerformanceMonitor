@@ -15,6 +15,8 @@
 
   <ItemGroup>
     <PackageReference Include="xunit.v3" />
+    <!-- The MCP host's POST content-type guard is run through a real ASP.NET Core pipeline (McpJsonPostGuardTests). -->
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" />
   </ItemGroup>
 
   <ItemGroup>
@@ -26,13 +28,17 @@
          neighbour, is a failure with no user behind it; so this host states a budget orders of magnitude
          larger and the acquisition waits the hold out. Short of forever on purpose - a wedged lock still
          fails, with the same message, rather than hanging the suite. The shipped app declares nothing
-         here and keeps LocalDataService.DefaultWriteLockBudget.
-
-         This comment carries no apostrophe, deliberately. CrossAppGuardCiGateTests reads this file with
-         a regex that treats one as an attribute delimiter, so an unbalanced pair swallows the quoted
-         attribute values after it - including the linked cross-app Compile below, whose absence the
-         guard reports as a moved blind spot rather than as a comment. -->
+         here and keeps LocalDataService.DefaultWriteLockBudget. -->
     <RuntimeHostConfigurationOption Include="PerformanceMonitorLite.WriteLockBudgetSeconds" Value="120" />
+    <!-- #5596: WPF builds one WeakEventTable per STA thread that touches a WeakEventManager, and each table
+         registers a ProcessExit handler. At exit that handler runs on the main thread, and when the table's
+         own thread is gone it asks the dead dispatcher to purge the table with a 300 ms timeout nobody ever
+         answers: about 0.3 seconds per STA test thread, spent after the run has returned. About fifty test files
+         start their own STA thread, so the exit stage grew past the 11 seconds xUnit v3 gives a process after the
+         run returns, and the runner printed "Foreground threads were left running" with exit code 1 and 0 failed
+         tests. This WPF switch (WindowsBase, BaseAppContextSwitches) makes the handler purge the table directly.
+         WpfExitSwitchTests pins that the switch is set, and that the runtime still knows its name. -->
+    <RuntimeHostConfigurationOption Include="Switch.MS.Internal.DoNotInvokeInWeakEventTableShutdownListener" Value="true" />
   </ItemGroup>
 
   <ItemGroup>
@@ -45,6 +51,22 @@
          Its own coverage stays in Darling.Tests/CSharpSourceWalkerTests.cs - the implementation Lite compiles
          is byte-identical to the one those tests exercise. -->
     <Compile Include="..\Darling\Darling.Tests\CSharpSourceWalker.cs" Link="CSharpSourceWalker.cs" />
+    <!-- The in-process MCP server and client (a real call through the shared call-tool guard and the SDK's
+         binder), linked for the same reason: one harness, so the two SKUs' whole-number pins run the same path. -->
+    <Compile Include="..\Darling\Darling.Tests\McpInProcessHost.cs" Link="McpInProcessHost.cs" />
+    <!-- The per-type argument table and its test-only probe tool, shared for the same reason: both SKUs run one
+         table of values through the same real call path. -->
+    <Compile Include="..\Darling\Darling.Tests\McpArgumentTypeRows.cs" Link="McpArgumentTypeRows.cs" />
+    <!-- #4348: the statement-filter canary plan and its needles, shared so both SKUs' plan tools are held to the same text. -->
+    <Compile Include="..\Darling\Darling.Tests\StatementScrubCanary.cs" Link="StatementScrubCanary.cs" />
+    <!-- #5459: the guard-stage scanner, so both suites tag their guard classes by one detector. -->
+    <Compile Include="..\Darling\Darling.Tests\GuardStageScanner.cs" Link="GuardStageScanner.cs" />
+    <!-- #5602 (was #5559's WpfStaGate): the one shared STA thread every WPF test body runs on, and the gate that keeps one body in at a time. -->
+    <Compile Include="..\Darling\Darling.Tests\StaTestThread.cs" Link="StaTestThread.cs" />
+    <!-- #5602: the timing scanner, so both suites keep a clock-starting class in the one `timing` collection by one detector. -->
+    <Compile Include="..\Darling\Darling.Tests\TimingTestScanner.cs" Link="TimingTestScanner.cs" />
+    <!-- #5596: the test that proves this process runs with the WPF exit switch on (the switch itself is declared above), so both suites check their own process. -->
+    <Compile Include="..\Darling\Darling.Tests\WpfExitSwitchTests.cs" Link="WpfExitSwitchTests.cs" />
   </ItemGroup>
 
   <ItemGroup>

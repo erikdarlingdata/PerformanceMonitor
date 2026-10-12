@@ -31,7 +31,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// do not exist there);</item>
 /// <item>one row per payload dimension table (<c>object_kind = 'dimension'</c>): total bytes
 /// (<c>pg_total_relation_size</c> — heap + indexes + TOAST, where the plan XML actually lives), the
-/// exact row count and, since V137 (#3783), the TOAST file's own size (<c>toast_bytes</c>) beside a
+/// row count (the planner's <c>reltuples</c> estimate since #5520, not a scan) and, since V137 (#3783), the TOAST file's own size (<c>toast_bytes</c>) beside a
 /// <c>toast_live_bytes</c> that is NULL unless the store happens to carry <c>pg_freespacemap</c> — see
 /// <see cref="DimensionInsertSql"/> and <see cref="ToastLiveBytesUpdateSql"/>. The dims are the store's dominant payloads (measured: query_plan_dim
 /// alone was 101 GB of a 147 GB store, 69%) and invisible to every hypertable-shaped surface because they
@@ -94,8 +94,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>checkpoint_sync_ms</c>, <c>checkpoints_requested</c> — hold the server's CUMULATIVE counters as the
 /// sweep read them, NOT the interval's delta, and since V139 (#3955) <c>postmaster_start_time</c> holds the
 /// <c>pg_postmaster_start_time()</c> of the postmaster that produced them, as naive UTC, so a reader can tell an
-/// interval that spans a restart; every other kind leaves all four NULL, and the two TOAST columns
-/// are filled on <c>dimension</c> rows only. That is the same convention every <c>pg_stat_*</c>-sourced
+/// interval that spans a restart, and since V156 (#4834) <c>checkpoint_longest_sync_ms</c> and
+/// <c>checkpoint_longest_sync_at</c> hold the hour's LONGEST single sync and the naive-UTC time of the minute sample
+/// that saw it (both NULL when the sampler took no difference in the hour); every other kind leaves all of
+/// them NULL, and the two TOAST columns are filled on <c>dimension</c> rows only. That is the same convention every <c>pg_stat_*</c>-sourced
 /// collector table in this store follows (the columns are raw counters; the read differences them), and
 /// <see cref="CheckpointerInsertSql"/> says why it was chosen over an in-process baseline here.</para>
 ///
@@ -309,10 +311,22 @@ JOIN timescaledb_information.jobs AS j USING (job_id)";
     /// <summary>
     /// The payload dimension rows — every store shape (the dims are plain tables everywhere). Table names
     /// are the <see cref="PayloadDimensions"/> compile-time constants, so interpolation is safe (the
-    /// DarlingRetention.DeleteSqlFor reasoning). The exact <c>count(*)</c> is deliberate over
-    /// <c>pg_class.reltuples</c>: it is an hourly index-only scan over the digest PK, and the dim heap is
-    /// small — the bytes live in TOAST, which <c>pg_total_relation_size</c> counts and a scan never
-    /// touches. $1 metric_time.
+    /// DarlingRetention.DeleteSqlFor reasoning). <c>row_count</c> is the planner's
+    /// <c>pg_class.reltuples</c> ESTIMATE, not a <c>count(*)</c> (#5520). This used to be an exact count, chosen
+    /// on the premise of an hourly index-only scan over the digest PK of a small heap, with the bytes in TOAST
+    /// where a scan never goes. The premise does not hold on a large store: 329 calls measured 149,562 blocks and
+    /// 25.9 s each (49.2 M blocks, 8,510 s in all), because the scan reads the index and whatever of the heap it
+    /// must, and a table this size is not read cheaply once an hour for a figure whose job is "roughly how many
+    /// distinct statements and plans are stored". <c>reltuples</c> is refreshed by every autovacuum and ANALYZE
+    /// (the dims churn through row-capped deletes, so that is often), costs one catalog row, and is the same
+    /// estimate <see cref="TableInsertSql"/> already uses, so <c>row_count</c> means one thing across the kinds
+    /// that carry it. It is <c>-1</c> for a table never vacuumed or analysed (PostgreSQL 14+), which maps to NULL
+    /// rather than a count of minus one, as it does there. Every reader of a dimension row's <c>row_count</c>
+    /// passes it through (<c>get_store_metrics</c> and its daily series); none computes from it, and the test
+    /// <c>NoReaderComputesFromADimensionRowCount</c> pins that. Because it is an estimate, the daily <c>row_count</c>
+    /// series moves in steps between ANALYZE and autovacuum runs (flat for days, then a jump, so a flat day is not
+    /// "no new rows"), and <c>reltuples</c> is a 4-byte float, so above about 16.7 M rows (2^24) the value is
+    /// rounded to a multiple of the float's step. $1 metric_time.
     ///
     /// <para><b><c>toast_bytes</c> and <c>toast_live_bytes</c> (V137, #3783) — the dimension rows are the
     /// only kind that fills them.</b> <c>pg_total_relation_size</c> says how big the dimension is and nothing
@@ -352,7 +366,7 @@ SELECT
     '{PayloadDimensions.QueryTextDimTable}',
     '{DimensionObjectKind}',
     pg_total_relation_size('collect.{PayloadDimensions.QueryTextDimTable}'),
-    (SELECT count(*) FROM collect.{PayloadDimensions.QueryTextDimTable}),
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryTextDimTable}'::regclass),
     pg_relation_size(NULLIF((SELECT c.reltoastrelid FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryTextDimTable}'::regclass), 0)),
     NULL::bigint
 UNION ALL
@@ -361,7 +375,7 @@ SELECT
     '{PayloadDimensions.QueryPlanDimTable}',
     '{DimensionObjectKind}',
     pg_total_relation_size('collect.{PayloadDimensions.QueryPlanDimTable}'),
-    (SELECT count(*) FROM collect.{PayloadDimensions.QueryPlanDimTable}),
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryPlanDimTable}'::regclass),
     pg_relation_size(NULLIF((SELECT c.reltoastrelid FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryPlanDimTable}'::regclass), 0)),
     NULL::bigint";
 
@@ -528,11 +542,18 @@ AND   m.toast_bytes IS NOT NULL";
     /// every interval even though no single checkpoint came near it. A row from before this rung carries a
     /// NULL timed count, which the average arm reads as unmeasured, never as zero.</para>
     ///
-    /// <para>Single-row view, so no join and no filter. $1 metric_time.</para>
+    /// <para><b>And the hour's longest single sync (V156, #4834).</b> The worker's once-a-minute sample finds the
+    /// longest single checkpoint sync inside the hour and the sweep stores it on this row, as milliseconds
+    /// ($2) and the naive-UTC time of the sample that saw it ($3), so the tool and the self-alert read one value
+    /// from the stored row. Both are NULL when the sampler took no difference in the hour, which a reader takes as
+    /// no evidence. The types are cast because a parameter in a SELECT list is otherwise inferred as text.</para>
+    ///
+    /// <para>Single-row view, so no join and no filter. $1 metric_time, $2 the longest sync in milliseconds (or
+    /// NULL), $3 the sample's time, naive UTC (or NULL).</para>
     /// </summary>
     public const string CheckpointerInsertSql = $@"
 INSERT INTO collect.store_metrics
-    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed)
+    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed, checkpoint_longest_sync_ms, checkpoint_longest_sync_at)
 SELECT
     $1,
     '{CheckpointerObjectName}',
@@ -541,7 +562,9 @@ SELECT
     round(c.sync_time)::bigint,
     c.num_requested,
     pg_postmaster_start_time() AT TIME ZONE 'UTC',
-    c.num_timed
+    c.num_timed,
+    $2::bigint,
+    $3::timestamp
 FROM pg_stat_checkpointer AS c";
 
     /// <summary>
@@ -550,11 +573,12 @@ FROM pg_stat_checkpointer AS c";
     /// through 16 — <c>checkpoint_write_time</c>, <c>checkpoint_sync_time</c>, <c>checkpoints_req</c> — written
     /// under the SAME object name and kind so the series is one series. The bundled store is 18 and never
     /// runs this arm; a bring-your-own store on 14–16 does. Same row shape, same reader, the same postmaster
-    /// start time beside the counters (<c>checkpoints_req</c> counts the shutdown checkpoint too). $1 metric_time.
+    /// start time beside the counters (<c>checkpoints_req</c> counts the shutdown checkpoint too), and the same two
+    /// longest-sync parameters. $1 metric_time, $2 the longest sync in milliseconds, $3 its sample's time.
     /// </summary>
     public const string CheckpointerBgwriterInsertSql = $@"
 INSERT INTO collect.store_metrics
-    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed)
+    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed, checkpoint_longest_sync_ms, checkpoint_longest_sync_at)
 SELECT
     $1,
     '{CheckpointerObjectName}',
@@ -563,8 +587,51 @@ SELECT
     round(b.checkpoint_sync_time)::bigint,
     b.checkpoints_req,
     pg_postmaster_start_time() AT TIME ZONE 'UTC',
-    b.checkpoints_timed
+    b.checkpoints_timed,
+    $2::bigint,
+    $3::timestamp
 FROM pg_stat_bgwriter AS b";
+
+    /// <summary>
+    /// The checkpointer's CUMULATIVE sync time alone, in milliseconds, PostgreSQL 17+ (#4823): the one-column read
+    /// the worker takes once a minute so the longest SINGLE checkpoint sync inside an hour can be found. The hourly
+    /// checkpointer row (<see cref="CheckpointerInsertSql"/>) cannot show it: two cumulative counters an hour apart
+    /// difference to the hour's TOTAL sync time, and the Store Checkpointer Pressure alert divides that by the
+    /// hour's checkpoint count, so one 23.5 s sync among four checkpoints averaged 5.9 s and read as clean. Rounded
+    /// the way the hourly row rounds it (<c>sync_time</c> is <c>double precision</c> milliseconds), so a minute's
+    /// difference and the hour's compare. Nothing is written: <c>CheckpointSyncSampler</c> keeps the previous value
+    /// in memory.
+    /// </summary>
+    public const string CheckpointerSyncTimeSql = "SELECT round(sync_time)::bigint FROM pg_stat_checkpointer";
+
+    /// <summary>
+    /// <see cref="CheckpointerSyncTimeSql"/> for PostgreSQL below <see cref="CheckpointerViewMajorVersion"/> (#4823):
+    /// the same counter under the name <c>pg_stat_bgwriter</c> carried it by through 16, <c>checkpoint_sync_time</c>.
+    /// </summary>
+    public const string CheckpointerBgwriterSyncTimeSql = "SELECT round(checkpoint_sync_time)::bigint FROM pg_stat_bgwriter";
+
+    /// <summary>
+    /// The statement for a server of major version <paramref name="postgreSqlMajor"/> (#4823): the rule
+    /// <see cref="SweepAsync"/> applies to the hourly checkpointer row, the view's own statement from
+    /// <see cref="CheckpointerViewMajorVersion"/> on and the <c>pg_stat_bgwriter</c> one below it, because a
+    /// statement naming a view the catalog lacks fails at analysis.
+    /// </summary>
+    public static string CheckpointerSyncTimeSqlFor(int postgreSqlMajor) =>
+        postgreSqlMajor >= CheckpointerViewMajorVersion ? CheckpointerSyncTimeSql : CheckpointerBgwriterSyncTimeSql;
+
+    /// <summary>
+    /// Reads the checkpointer's cumulative sync time in milliseconds (#4823), by the connection's reported major
+    /// version (Npgsql takes it from the startup parameters, no round trip). Null when the view returns no row.
+    /// The per-statement <see cref="SweepTimeoutSeconds"/> is the belt for a caller that passes no token; the
+    /// once-a-minute caller passes a token that cancels after a few seconds, which is the bound that matters on
+    /// its loop. NOT failure-isolated: the caller decides what a failed read costs.
+    /// </summary>
+    public static async Task<long?> ReadCheckpointerSyncTimeMsAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken = default)
+    {
+        using var command = new NpgsqlCommand(CheckpointerSyncTimeSqlFor(connection.PostgreSqlVersion.Major), connection) { CommandTimeout = SweepTimeoutSeconds };
+        return await command.ExecuteScalarAsync(cancellationToken) is long syncMs ? syncMs : null;
+    }
 
     /// <summary>The <c>object_kind</c> of the named plain-table rows (#3582). See
     /// <see cref="HypertableObjectKind"/> for why it is a const.</summary>
@@ -578,6 +645,35 @@ FROM pg_stat_bgwriter AS b";
     /// placed it in <c>config</c> (<c>PgSchemaGenerator.ConfigTables</c>), which is where it is sized.
     /// </summary>
     public const string AlertLogTable = "config.config_alert_log";
+
+    /// <summary>
+    /// The size of a day-partitioned interval parent (#5571): the sum of <c>pg_total_relation_size</c> over its LEAF
+    /// partitions (heap, indexes and TOAST of the legacy table, every day and DEFAULT), because the partitioned parent
+    /// itself has no storage and reads 0. <c>pg_partition_tree</c> returns NO row for a plain table (it is not the
+    /// table's own single leaf), so for a table that is not partitioned (a store that has not run its rung yet) the sum
+    /// is NULL and the COALESCE falls back to the plain size. Both arms are live: the first for every migrated store,
+    /// the second for a store below the rung.
+    /// </summary>
+    private const string IntervalLatestPartitionBytesSql =
+        $"COALESCE((SELECT sum(pg_total_relation_size(t.relid)) FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass) AS t WHERE t.isleaf), pg_total_relation_size('collect.{QueryStoreIntervalLatest.TableName}'))::bigint";
+
+    /// <summary>The wide parent's size, summed over its leaf partitions. See <see cref="IntervalLatestPartitionBytesSql"/>.</summary>
+    private const string IntervalWidePartitionBytesSql =
+        $"COALESCE((SELECT sum(pg_total_relation_size(t.relid)) FROM pg_partition_tree('collect.{QueryStoreIntervalWide.TableName}'::regclass) AS t WHERE t.isleaf), pg_total_relation_size('collect.{QueryStoreIntervalWide.TableName}'))::bigint";
+
+    /// <summary>
+    /// The row count of a day-partitioned interval parent (#5571): the sum of the leaf partitions' planner estimates
+    /// (<c>reltuples</c>, as every other row of this kind), NULL where none has been vacuumed or analysed yet. The
+    /// parent's own <c>reltuples</c> is only set by an ANALYZE of the parent, so it would lag the partitions. For a table
+    /// that is not partitioned <c>pg_partition_tree</c> returns no row (not the table itself as a leaf), so the
+    /// <c>NOT EXISTS</c> arm counts the table's own estimate instead.
+    /// </summary>
+    private const string IntervalLatestPartitionRowsSql =
+        $"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND (c.oid IN (SELECT t.relid FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass) AS t WHERE t.isleaf) OR (c.oid = 'collect.{QueryStoreIntervalLatest.TableName}'::regclass AND NOT EXISTS (SELECT 1 FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass)))))";
+
+    /// <summary>The wide parent's row estimate, summed over its leaf partitions. See <see cref="IntervalLatestPartitionRowsSql"/>.</summary>
+    private const string IntervalWidePartitionRowsSql =
+        $"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND (c.oid IN (SELECT t.relid FROM pg_partition_tree('collect.{QueryStoreIntervalWide.TableName}'::regclass) AS t WHERE t.isleaf) OR (c.oid = 'collect.{QueryStoreIntervalWide.TableName}'::regclass AND NOT EXISTS (SELECT 1 FROM pg_partition_tree('collect.{QueryStoreIntervalWide.TableName}'::regclass)))))";
 
     /// <summary>
     /// The named plain-table rows (#3582, extended #4609) — every store shape, like the dimension rows,
@@ -605,15 +701,15 @@ FROM pg_stat_bgwriter AS b";
     /// with (<c>DarlingStoreMetricsReader.LargestUnenumeratedSql</c>) names relations
     /// <c>schema.relation</c>, so a table that moves from that list to this one keeps its name.</para>
     ///
-    /// <para><b><c>row_count</c> here is the planner's <c>reltuples</c> ESTIMATE, not a scan, and the two
-    /// kinds differ on purpose.</b> The dimension arm counts exactly because a dim's heap is small — its
-    /// bytes live in TOAST, which a count never reads. <c>query_store_text</c> is the opposite shape: V74
-    /// stores statement text INLINE, most statements fit a heap page, so the heap IS the 15 GiB and an
-    /// exact <c>count(*)</c> would be a 15 GiB read every hour, on the same store the CAGG refresh convoy
-    /// is running on, for a figure whose job is "roughly how many statements have text". <c>reltuples</c>
-    /// is refreshed by every autovacuum and ANALYZE, is exact enough for that job, and costs one catalog
-    /// row. It is <c>-1</c> for a table never vacuumed or analysed (PostgreSQL 14+), which maps to NULL
-    /// rather than to a count of minus one. The same estimate is used for all three so the kind means one
+    /// <para><b><c>row_count</c> here is the planner's <c>reltuples</c> ESTIMATE, not a scan, and so is the
+    /// dimension kind's (#5520).</b> <c>query_store_text</c> stores statement text INLINE (V74), most statements
+    /// fit a heap page, so the heap IS the 15 GiB and an exact <c>count(*)</c> would be a 15 GiB read every
+    /// hour, on the same store the CAGG refresh convoy is running on, for a figure whose job is "roughly how
+    /// many statements have text". The dimension arm once counted exactly on the premise of a small heap and an
+    /// index-only scan; measured, that was 149,562 blocks and 25.9 s a call (see <see cref="DimensionInsertSql"/>).
+    /// <c>reltuples</c> is refreshed by every autovacuum and ANALYZE, is exact enough for that job, and costs one
+    /// catalog row. It is <c>-1</c> for a table never vacuumed or analysed (PostgreSQL 14+), which maps to NULL
+    /// rather than to a count of minus one. The same estimate is used for all of them so the column means one
     /// thing. $1 metric_time.</para>
     /// </summary>
     public const string TableInsertSql = $@"
@@ -644,8 +740,8 @@ SELECT
     $1,
     'collect.{QueryStoreIntervalLatest.TableName}',
     '{TableObjectKind}',
-    pg_total_relation_size('collect.{QueryStoreIntervalLatest.TableName}'),
-    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalLatest.TableName}'::regclass)
+    {IntervalLatestPartitionBytesSql},
+    {IntervalLatestPartitionRowsSql}
 UNION ALL
 SELECT
     $1,
@@ -658,8 +754,8 @@ SELECT
     $1,
     'collect.{QueryStoreIntervalWide.TableName}',
     '{TableObjectKind}',
-    pg_total_relation_size('collect.{QueryStoreIntervalWide.TableName}'),
-    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalWide.TableName}'::regclass)
+    {IntervalWidePartitionBytesSql},
+    {IntervalWidePartitionRowsSql}
 UNION ALL
 SELECT
     $1,
@@ -697,8 +793,16 @@ SELECT
     /// nobody checks. Aliases <c>c</c> (<c>pg_class</c>) and <c>n</c> (<c>pg_namespace</c>) are the
     /// contract every consumer of this fragment supplies.
     /// </summary>
-    public const string CensusRelationPredicateSql = @"c.relkind IN ('r', 'm', 'p', 'S')
-AND   NOT c.relisshared";
+    public const string CensusRelationPredicateSql = $@"c.relkind IN ('r', 'm', 'p', 'S')
+AND   NOT c.relisshared
+AND   NOT (c.relispartition AND EXISTS (
+        SELECT 1 FROM pg_inherits AS inh
+        JOIN pg_class AS parent_c ON parent_c.oid = inh.inhparent
+        JOIN pg_namespace AS parent_n ON parent_n.oid = parent_c.relnamespace
+        WHERE inh.inhrelid = c.oid
+        AND   (parent_n.nspname || '.' || parent_c.relname) IN (
+            'collect.{QueryStoreIntervalLatest.TableName}',
+            'collect.{QueryStoreIntervalWide.TableName}')))";
 
     /// <summary>
     /// Which side of the user/system line a relation falls on, as a fragment over <c>n.nspname</c> (#3582).
@@ -1117,7 +1221,10 @@ WHERE metric_time < $1";
     /// catch-all rows (the TimescaleDB or plain variant, by the same flag), the store summary row, then the
     /// retention DELETE, all stamped with one <paramref name="utcNow"/>. Returns the number of metric rows
     /// written (the caller logs it at Debug); the live-bytes UPDATE rewrites rows already counted and adds
-    /// nothing to it.
+    /// nothing to it. <paramref name="checkpointLongestSyncMs"/> and <paramref name="checkpointLongestSyncAt"/>
+    /// (#4834) are the hour's longest single checkpoint sync and the time of the sample that saw it, as the worker's
+    /// minute sampler found them (the sampler is the Service's, so the sweep takes primitives); they are written to
+    /// the checkpointer row only, and both are null when the sampler took no difference in the hour.
     ///
     /// <para><b>Order matters for the reconciliation, and it is stated rather than relied on.</b> Every
     /// sizing statement runs before <see cref="StoreInsertSql"/>'s <c>pg_database_size</c>, so the
@@ -1132,6 +1239,8 @@ WHERE metric_time < $1";
         bool timescaleAvailable,
         DateTime utcNow,
         ILogger? logger,
+        long? checkpointLongestSyncMs,
+        DateTime? checkpointLongestSyncAt,
         CancellationToken cancellationToken = default)
     {
         if (connection is null)
@@ -1207,6 +1316,18 @@ WHERE metric_time < $1";
         using (var checkpointer = new NpgsqlCommand(checkpointerSql, connection) { CommandTimeout = SweepTimeoutSeconds })
         {
             checkpointer.Parameters.AddWithValue(metricTime);
+            /* #4834: the hour's longest single sync, typed explicitly because a NULL carries no type of its own. The
+               instant is naive UTC like every stamp in this table. */
+            checkpointer.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint,
+                Value = checkpointLongestSyncMs is long longestMs ? longestMs : DBNull.Value,
+            });
+            checkpointer.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
+                Value = checkpointLongestSyncAt is DateTime longestAt ? DateTime.SpecifyKind(longestAt, DateTimeKind.Unspecified) : DBNull.Value,
+            });
             written += await checkpointer.ExecuteNonQueryAsync(cancellationToken);
         }
 

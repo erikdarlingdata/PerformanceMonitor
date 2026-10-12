@@ -50,6 +50,7 @@ namespace Darling.Tests;
 /// additionally asserts its ANCHOR is present before judging the file: the bare-read check keys on the
 /// <c>dte</c> alias, so a rename would otherwise turn it into an assertion about nothing.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ServerLocalReadFrameDisciplineTests
 {
     /* ───────────────────────── the literal-SQL reads of default_trace_events ───────────────────────── */
@@ -60,7 +61,8 @@ public sealed class ServerLocalReadFrameDisciplineTests
     private static readonly Regex ReadsTheTable =
         new(@"FROM\s+(?:collect\.)?(?:v_)?default_trace_events", RegexOptions.IgnoreCase);
 
-    /// <summary>The Postgres de-skew, spelled on the column exactly as both Darling constants carry it.</summary>
+    /// <summary>The Postgres de-skew, spelled on the column exactly as the Darling constants carry it (the two
+    /// window pre-filter bounds of the MCP and viewer reads, and all three sites of the analysis trace-anchor read).</summary>
     private static readonly Regex PgDeSkew =
         new(@"event_time\s*-\s*make_interval\s*\(\s*mins\s*=>\s*svr\.offset_minutes\s*\)");
 
@@ -84,7 +86,7 @@ public sealed class ServerLocalReadFrameDisciplineTests
     /// hour off there). Matched on the conversion because that is the step that puts the RETURNED value in
     /// UTC; the window bounds stay in SQL as an hour-wide pre-filter (<see cref="PgDeSkew"/>).</summary>
     private static readonly Regex ClockRowDeSkew =
-        new(@"clock\.ToUtc\(\s*reader\.GetDateTime\(0\)\s*\)");
+        new(@"clock\.ToUtc\(\s*reader\.GetDateTime\(0\)\s*\)|ServerLocalTimes\.TraceLinesInWindow\(");
 
     /// <summary>
     /// Every literal-SQL read of the Default Trace, with the de-skew form it must carry and why it differs.
@@ -93,20 +95,20 @@ public sealed class ServerLocalReadFrameDisciplineTests
     /// </summary>
     private static readonly (string RelativePath, int PgSites, bool LiteRowDeSkew, bool ClockRowDeSkew, string Why)[] KnownReaders =
     [
-        ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDefaultTraceReader.cs", 3, false, false,
-            "the get_default_trace_events MCP read: one projection + both window bounds"),
+        ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDefaultTraceReader.cs", 2, false, true,
+            "the get_default_trace_events MCP read: the raw event_time projection, converted per row in C# with the server's ServerClock, and both window bounds as an hour-wide pre-filter (#4793)"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", 2, false, true,
             "the viewer's System Events tab: the raw event_time projection, converted per row in C# with the server's ServerClock, and both window bounds as an hour-wide pre-filter"),
-        ("Lite/Services/LocalDataService.SystemEvents.cs", 0, true, false,
-            "Lite's DuckDB read: server-local window via GetTimeRangeServerLocal, then the row de-skewed in C#"),
+        ("Lite/Services/LocalDataService.SystemEvents.cs", 0, false, true,
+            "Lite's DuckDB read (#4766): server-local pre-filter widened by an hour, each row converted in C# with the server's ServerClock, and the exact UTC window applied to the converted rows"),
         /* #3740: the CONFIG_CHANGED attribution anchors on the sp_configure trace line. Its span is the two
            config captures' naive-UTC times, so an un-de-skewed bound would put the line OUTSIDE the span on
            every non-UTC server and the anchor would silently never resolve — the selection defect, not the
            rendering one. */
-        ("Darling/PerformanceMonitor.Darling.Analysis/DarlingAnalysisService.cs", 3, false, false,
-            "the pass's trace-anchor read (ReconfigureTraceLinesForAttributionSql): one projection + both span bounds, byte-identical in form to the MCP read"),
-        ("Lite/Analysis/AnalysisService.cs", 0, true, false,
-            "the Lite pass's trace-anchor read: both span bounds shifted into the server's frame by the one collected offset, then the row de-skewed in C#"),
+        ("Darling/PerformanceMonitor.Darling.Analysis/DarlingAnalysisService.cs", 2, false, true,
+            "the pass's trace-anchor read (ReconfigureTraceLinesForAttributionSql): the raw event_time projection, converted per line in ServerLocalTimes.TraceLinesInWindow with the server's ServerClock, and both span bounds as an hour-wide pre-filter (#4821)"),
+        ("Lite/Analysis/AnalysisService.cs", 0, false, true,
+            "the Lite pass's trace-anchor read: both span bounds shifted into the server's frame by the server's ServerClock (opened by an hour, as a first filter), then each row converted in C# with the same clock (#4821)"),
     ];
 
     [Fact]
@@ -255,8 +257,10 @@ public sealed class ServerLocalReadFrameDisciplineTests
                 Assert.Contains($"{deSkewed} >= $1", sql, StringComparison.Ordinal);
                 Assert.Contains($"{deSkewed} <= $2", sql, StringComparison.Ordinal);
                 /* The per-server join, not one scalar for the whole overlay: a panel routinely spans servers
-                   at different offsets, and a single offset would de-skew all of them by one of them. */
-                Assert.Contains("DISTINCT ON (server_name) server_name, utc_offset_minutes", sql, StringComparison.Ordinal);
+                   at different offsets, and a single offset would de-skew all of them by one of them. The
+                   join is on the row's own local time as well (#4821), so each row takes the offset in force
+                   on its own date. */
+                Assert.Contains("AS o(server_name, local_from, local_to, utc_offset_minutes)", sql, StringComparison.Ordinal);
                 Assert.Contains("LEFT JOIN", sql, StringComparison.Ordinal);
                 /* No bare occurrence survives anywhere — projection or bound. */
                 Assert.DoesNotContain($"{bare} AS ts", sql, StringComparison.Ordinal);
@@ -272,42 +276,48 @@ public sealed class ServerLocalReadFrameDisciplineTests
                 Assert.DoesNotContain("utc_offset_minutes", sql, StringComparison.Ordinal);
             }
 
-            /* Unchanged by the de-skew: the offset table and column are compiler constants, so the join
-               introduces no parameter and the window/server binds keep their ordinals. */
+            /* Unchanged by the de-skew: the join's stretches are bound AFTER the window and server binds, so
+               those keep their ordinals, and every identifier in the join is a compiler constant. */
             Assert.DoesNotContain("config.", sql, StringComparison.Ordinal);
         }
     }
 
     /// <summary>
-    /// The offset join is scoped by the panel's own server array when it has one, and unscoped when it does
-    /// not. <c>server_properties</c> is indexed <c>(server_id, collection_time)</c>, so this subquery's
+    /// The server clock read is scoped by the panel's own server array when it has one, and unscoped when it
+    /// does not. <c>server_properties</c> is indexed <c>(server_id, collection_time)</c>, so that read's
     /// <c>DISTINCT ON (server_name)</c> sort has no index to ride and would otherwise sort the whole fleet's
-    /// retained offset history on every compile of a server-scoped panel.
+    /// retained offset history on every run of a server-scoped panel.
     ///
-    /// <para>Asserted as the parameter COUNT as well as the predicate, because the cheap way to scope a
-    /// subquery is to bind the server list a second time — which would work, would look right here, and
-    /// would silently shift the ordinals every other assertion in <c>DarlingComposeTests</c> depends on.
-    /// Reusing the array the outer query already binds is the whole point.</para>
+    /// <para>The annotation query itself binds the server list ONCE, as <c>$3</c>, and the per-server offset
+    /// stretches after it (#4821). Asserted as the parameter COUNT as well as the predicate, because binding
+    /// the list a second time would work, would look right here, and would silently shift the ordinals every
+    /// other assertion in <c>DarlingComposeTests</c> depends on.</para>
     /// </summary>
     [Fact]
-    public void CompiledAnnotationSql_ScopesTheOffsetJoin_ToThePanelsOwnServerArray()
+    public void CompiledAnnotationSql_ScopesTheServerClockRead_ToThePanelsOwnServerArray()
     {
         var serverLocal = MeasureCatalog.AnnotationSources
             .Single(a => a.Frame == AnnotationClockFrame.ServerLocal).Key;
+        var servers = new[] { "SERVER-A", "SERVER-B" };
 
-        var scoped = CompiledAnnotation(serverLocal, new[] { "SERVER-A", "SERVER-B" });
-        Assert.Contains("AND   server_name = ANY($3)", scoped.Sql, StringComparison.Ordinal);
-        /* The outer predicate is still there and still binds the same $3 — one array, two uses. */
-        Assert.Contains("f.server_name = ANY($3)", scoped.Sql, StringComparison.Ordinal);
-        Assert.Equal(3, scoped.Parameters.Count);
-        Assert.DoesNotContain("$4", scoped.Sql, StringComparison.Ordinal);
+        var clockRead = ComposeCompiler.CompileServerClockRead(RunContext(servers));
+        Assert.Contains("AND   server_id = ANY(ARRAY(SELECT reg.server_id FROM collect.servers AS reg WHERE reg.server_name = ANY($1)))", clockRead.Sql, StringComparison.Ordinal);
+        Assert.Single(clockRead.Parameters);
+
+        var scoped = CompiledAnnotation(serverLocal, servers);
+        Assert.Contains("f.server_id = ANY(ARRAY(SELECT reg.server_id FROM collect.servers AS reg WHERE reg.server_name = ANY($3)))", scoped.Sql, StringComparison.Ordinal);
+        /* #5525: the id list is resolved from the names inside the SQL, so the scope spells ANY( twice and still binds the names once. */
+        Assert.Equal(2, Regex.Matches(scoped.Sql, @"ANY\(").Count);
+        Assert.Single(Regex.Matches(scoped.Sql, @"\$3(?!\d)"));
+        Assert.Equal(7, scoped.Parameters.Count);
         Assert.DoesNotContain("SERVER-A", scoped.Sql, StringComparison.Ordinal);
 
-        /* A fleet-wide panel names no servers, so it needs the whole relation and binds only the window. */
+        /* A fleet-wide panel names no servers: the clock read covers the whole relation, and the annotation
+           query binds the window and the stretches only. */
+        Assert.DoesNotContain("ANY(", ComposeCompiler.CompileServerClockRead(RunContext(null)).Sql, StringComparison.Ordinal);
         var fleet = CompiledAnnotation(serverLocal, null);
         Assert.DoesNotContain("server_name = ANY", fleet.Sql, StringComparison.Ordinal);
-        Assert.Contains("DISTINCT ON (server_name) server_name, utc_offset_minutes", fleet.Sql, StringComparison.Ordinal);
-        Assert.Equal(2, fleet.Parameters.Count);
+        Assert.Equal(6, fleet.Parameters.Count);
     }
 
     /* ───────────────────────── the discriminators, both directions ───────────────────────── */
@@ -396,13 +406,17 @@ public sealed class ServerLocalReadFrameDisciplineTests
         Assert.True(error is null, error);
         Assert.NotNull(plan);
 
-        var start = new DateTime(2026, 7, 18, 0, 0, 0, DateTimeKind.Utc);
-        var end = new DateTime(2026, 7, 18, 6, 0, 0, DateTimeKind.Utc);
-        var compiled = ComposeCompiler.CompileAnnotations(
-            plan!,
-            new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, RollupCoverage.Unknown));
+        var compiled = ComposeCompiler.CompileAnnotations(plan!, RunContext(servers), ComposeCompiler.NoServerClocks);
 
         return Assert.Single(compiled).Compiled;
+    }
+
+    private static ComposeRunContext RunContext(IReadOnlyList<string>? servers)
+    {
+        var start = new DateTime(2026, 7, 18, 0, 0, 0, DateTimeKind.Utc);
+        var end = new DateTime(2026, 7, 18, 6, 0, 0, DateTimeKind.Utc);
+
+        return new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, RollupCoverage.Unknown);
     }
 
     /// <summary>Comment spans out, string literals kept — the SQL under test IS a verbatim literal, and this

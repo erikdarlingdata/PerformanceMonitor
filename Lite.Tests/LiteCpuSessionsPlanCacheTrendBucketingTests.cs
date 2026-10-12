@@ -187,6 +187,26 @@ public sealed class LiteCpuSessionsPlanCacheTrendBucketingLiveTests : IClassFixt
         Assert.Equal(45, point.TopHostConnections);
     }
 
+    /// <summary>#4966: the summary strip's Collected time is the NEWEST collection in the last bucket (the one its Top Application and
+    /// Top Host come from), not the bucket's grid time and not its oldest collection.</summary>
+    [Fact]
+    public async Task SessionStatsTrend_MergedBucket_CarriesTheNewestCollectionsOwnTime()
+    {
+        var end = new DateTime(2026, 3, 20, 0, 0, 0);
+        var start = end.AddDays(-8);
+        var t1 = start.AddHours(1);
+        var t2 = t1.AddSeconds(60);
+
+        await SeedSessionAsync(t1, total: 100, running: 5, topApp: "OlderApp", topAppConns: 40, topHost: "OlderHost", topHostConns: 30);
+        await SeedSessionAsync(t2, total: 120, running: 9, topApp: "NewerApp", topAppConns: 55, topHost: "NewerHost", topHostConns: 45);
+
+        var trend = await _dataService.GetSessionStatsAsync(ServerId, fromDate: start, toDate: end);
+
+        var point = Assert.Single(trend);
+        Assert.Equal(t2, point.LatestCollectionTime);
+        Assert.NotEqual(t2, point.CollectionTime);
+    }
+
     [Fact]
     public async Task PlanCacheTrend_SevenDayWindow_ReturnsAtMostBudgetRows()
     {

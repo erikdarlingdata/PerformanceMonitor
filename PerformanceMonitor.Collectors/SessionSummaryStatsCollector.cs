@@ -75,7 +75,7 @@ public sealed class SessionSummaryStatsCollector : CollectorDefinitionBase<Sessi
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     total_sessions = CONVERT(integer, COUNT_BIG(*)),
     running_sessions =
         SUM

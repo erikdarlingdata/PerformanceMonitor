@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// finds that migration by what it creates, not by today's version number, and asserts every constant still
 /// equals it.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class QueryStoreIntervalWideMinSchemaVersionPinTests
 {
     [Fact]

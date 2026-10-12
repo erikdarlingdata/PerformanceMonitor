@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -96,6 +97,103 @@ public sealed class PerfmonWaitStatisticsArtifactMcpLiveTests
             Assert.True(root.TryGetProperty("notes", out var notes), "expected a notes line when artifacts were set aside");
             Assert.Contains("1 one-sample Wait Statistics spike set aside", notes.GetString(), StringComparison.Ordinal);
 
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, cleanupCt);
+                using var servers = new NpgsqlCommand("DELETE FROM servers WHERE server_id = $1", cleanup);
+                servers.Parameters.AddWithValue(ServerId);
+                await servers.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #5562 L4b: the Wait Statistics arm's suffix test moved from <c>right(object_name, 16) = ':Wait Statistics'</c> to
+    /// <c>object_name LIKE '%:Wait Statistics'</c> so a compressed chunk's columnar scan can vectorize it. The two must pick the
+    /// same rows, so this runs the shipped SQL and the same SQL with the old predicate side by side over every object-name shape:
+    /// the default instance, a named instance (with its own isolated spike), another object, a NULL object, and near misses
+    /// (longer and shorter names) that share the suffix's start but not its end.
+    /// </summary>
+    [Fact]
+    public async Task PerfmonTrendSql_LikeSuffixPicksTheSameRowsAsTheOldRightPredicate_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live artifact round trip.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var t0 = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-10);
+
+            var objects = new (string? Name, long[] Values)[]
+            {
+                ("SQLServer:Wait Statistics", new long[] { 300, 310, 320, 330, 340 }),
+                ("MSSQL$INST1:Wait Statistics", new long[] { 200, 214_396_451, 220, 230, 240 }),
+                ("SQLServer:SQL Statistics", new long[] { 11, 12, 13, 14, 15 }),
+                (null, new long[] { 21, 22, 23, 24, 25 }),
+                ("SQLServer:Wait Statistics Extra", new long[] { 31, 32, 33, 34, 35 }),
+                ("Wait Statistics", new long[] { 41, 42, 43, 44, 45 }),
+                ("SQLServer:Wait Statistic", new long[] { 51, 52, 53, 54, 55 }),
+            };
+            foreach (var (name, values) in objects)
+            {
+                for (var i = 0; i < values.Length; i++)
+                {
+                    await DarlingMcpTestData.ExecAsync(connection, ct,
+                        @"INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds, cntr_type)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                        CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(t0.AddMinutes(i)), ServerId, ServerName, name, "Waits started per second", "", values[i],
+                        (long?)null, (int?)null, PerfmonCounterTypes.PerfCounterLargeRawCount);
+                }
+            }
+
+            var shipped = DarlingTrendReader.PerfmonTrendSql;
+            /* Both arms test the suffix with LIKE (the artifact predicate's own right() runs on the first arm's few surviving rows). */
+            Assert.Equal(2, shipped.Split("object_name LIKE '%:Wait Statistics'").Length - 1);
+            var old = shipped.Replace("object_name LIKE '%:Wait Statistics'", "right(object_name, 16) = ':Wait Statistics'", StringComparison.Ordinal);
+            Assert.NotEqual(shipped, old);
+
+            async Task<List<string>> RunAsync(string sql)
+            {
+                var rows = new List<string>();
+                await using var command = new NpgsqlCommand(sql, connection);
+                command.Parameters.AddWithValue(ServerId);
+                command.Parameters.AddWithValue("Waits started per second");
+                command.Parameters.AddWithValue(DarlingMcpTestData.Naive(t0.AddMinutes(-1)));
+                command.Parameters.AddWithValue(DarlingMcpTestData.Naive(t0.AddMinutes(10)));
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    var cells = new string[reader.FieldCount];
+                    for (var c = 0; c < cells.Length; c++)
+                    {
+                        cells[c] = reader.IsDBNull(c) ? "NULL" : Convert.ToString(reader.GetValue(c), System.Globalization.CultureInfo.InvariantCulture)!;
+                    }
+
+                    rows.Add(string.Join("|", cells));
+                }
+
+                return rows;
+            }
+
+            var withLike = await RunAsync(shipped);
+            var withRight = await RunAsync(old);
+            Assert.Equal(5, withLike.Count);
+            Assert.Equal(withRight, withLike);
+
+            /* The named instance's spike is still set aside (the artifact count is the last column), and nothing else is. */
+            Assert.Equal(1, withLike.Sum(r => long.Parse(r.Split('|')[^1], System.Globalization.CultureInfo.InvariantCulture)));
             bodySucceeded = true;
         }
         finally

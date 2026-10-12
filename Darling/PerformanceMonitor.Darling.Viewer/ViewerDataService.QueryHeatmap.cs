@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -163,6 +164,20 @@ public sealed partial class ViewerDataService
     }
 
     private const int HeatmapBucketCount = 7;
+
+    /// <summary>
+    /// Where this server's query_stats coverage starts for the window (#4966), through the shared probe
+    /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's edge, or its first row in the window if
+    /// that is earlier. The heatmap reads the raw table only (<see cref="BuildQueryHeatmapSql"/> has no rollup route), so the
+    /// probe is the raw table's; a rollup route added to the read must move the probe to that rollup's floor
+    /// (<see cref="DataWindowFloor.Source.TryForRollup"/>). The chart draws one column per 5-minute bin that holds a row, in order,
+    /// so a stretch with no row has no column and the chart cannot tell a server that did not exist yet from a quiet one: the
+    /// caller names the earlier of this and the first bin it draws (<see cref="ViewerEventDataStart.Of"/>), never a time later
+    /// than a column on screen. Null when the window holds no row and no logged run, and when it lies wholly before the coverage.
+    /// </summary>
+    public Task<DateTime?> GetQueryHeatmapDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("query_stats"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>
     /// The Query Heatmap grid for one metric over [<paramref name="startUtc"/>, <paramref name="endUtc"/>]:

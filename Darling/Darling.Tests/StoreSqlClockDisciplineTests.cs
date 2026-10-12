@@ -19,8 +19,16 @@ namespace Darling.Tests;
 
 /// <summary>
 /// No store-side SQL literal may compare a naive collector timestamp column against a BARE clock function.
-/// Every timestamp column in both stores is <c>timestamp without time zone</c> holding naive UTC — measured,
-/// there is not one <c>timestamptz</c> column in the schema — while <c>now()</c> is <c>timestamptz</c>. The
+/// Every timestamp column the collectors write in both stores is <c>timestamp without time zone</c> holding naive UTC
+/// — measured, the stored tables had no <c>timestamptz</c> column at all until #5655 added exactly two, the
+/// <c>process_started_at</c> and <c>updated_at</c> of <c>config.service_version</c> (the only other
+/// <c>timestamp with time zone</c> in the schema is the <c>stats_reset</c> column of a function's result, never stored).
+/// Those two are the deliberate exception: they hold an absolute instant that the viewers render in a chosen zone, are
+/// written and read through <c>NpgsqlDbType.TimestampTz</c>, and no SQL compares them with <c>now()</c> in a window, so
+/// the hazard below cannot arise for them. The scan below keys on the NAIVE column names (its DDL scrape skips
+/// <c>timestamptz</c>), so they never enter its vocabulary and it stays correct for the rest of the schema. A new
+/// <c>timestamptz</c> column that a window compares with a naive one needs its own thought; this pin does not cover it.
+/// Meanwhile <c>now()</c> is <c>timestamptz</c>. The
 /// mixed comparison is not an error: PostgreSQL resolves it by converting the NAIVE side at the store
 /// SESSION's TimeZone, which initdb takes from the host OS and which
 /// <c>DarlingManagedPostgres.BuildConfAppend</c> does not pin, so a managed store on a Windows host inherits
@@ -45,6 +53,7 @@ namespace Darling.Tests;
 /// columns back. Widening this to the write side is a separate change with a data-migration question
 /// attached, so it is deliberately out of scope here rather than silently allowlisted.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class StoreSqlClockDisciplineTests
 {
     /* Floors, so the scan cannot pass by finding nothing. Measured on dev: 602 files, 20,843 string literal

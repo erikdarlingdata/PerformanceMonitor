@@ -59,7 +59,7 @@ public sealed class QueryHighDopStaleMaxDopTests : IClassFixture<SharedDuckDbFix
     private const long CachedMaxDop = 16;
 
     private static readonly DateTime WindowEnd = DateTime.SpecifyKind(
-        new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)),
+        new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond),
         DateTimeKind.Unspecified);
 
     private static readonly DateTime WindowStart = WindowEnd.AddHours(-4);

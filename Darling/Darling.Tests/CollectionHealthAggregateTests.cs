@@ -451,7 +451,62 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
         await plant.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>One statement's result, keyed (server, collector), every one of the thirteen ordinals rendered
+    /// <summary>The two collectors the parity proof plants a partial-failure note on (#4812), both on server 1. The
+    /// NEWEST run of the first is a partial-failure cycle; the second had a partial-failure cycle and then a clean
+    /// run.</summary>
+    private const string NoteNewestCollector = "collector_note_newest";
+
+    private const string NoteClearedCollector = "collector_note_cleared";
+
+    /// <summary>The note the product's own writer records for a per-database cycle that lost
+    /// <paramref name="failed"/> of <paramref name="attempted"/> databases and still finished SUCCESS, which is the
+    /// only record of the loss.</summary>
+    private static string PartialNote(int failed, int attempted) =>
+        EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, new[] { "a", "b", "c" }.Take(failed).ToArray(), "boom")
+        ?? throw new InvalidOperationException($"the writer recorded no note for {failed} of {attempted} databases");
+
+    /// <summary>
+    /// Plants the two histories that put a real note in the parity proof's <c>latest_run_note</c> column (#4812).
+    /// Every other seed leaves it NULL on both sides, and a parity over NULLs compares nothing. Planted BEFORE the
+    /// policy's run, so the notes sit in materialized hour buckets and the composed read really re-aggregates them
+    /// rather than taking them from the real-time tail. Every run is SUCCESS with rows: a cycle that lost some of its
+    /// databases still records SUCCESS, and its note is the only record. Each run is placed by hours back from the
+    /// current hour and minute within that hour, so its bucket is fixed whatever the clock reads.
+    ///
+    /// <para><c>collector_note_newest</c> (a clean run 6 hours back at :10, a 3-of-4 note 4 hours back at :40, and its
+    /// newest run 3 hours back at :40 carrying a 1-of-4 note): both sides must return the NEWEST run's note. The
+    /// older note's text sorts after the newest one's, so a read that kept the greatest note text instead of the
+    /// newest run's note would return the wrong one.</para>
+    ///
+    /// <para><c>collector_note_cleared</c> (a 2-of-4 note 5 hours back at :40, then a 2-of-4 note and a clean run 3
+    /// hours back at :10 and :40): both sides must return NULL. The newest run is clean, so the newest bucket keeps no
+    /// note (its last run is the clean one), and the older bucket's note must not survive the re-aggregate.</para>
+    /// </summary>
+    private static async Task PlantPartialFailureRunsAsync(NpgsqlConnection connection, long idBase, CancellationToken ct)
+    {
+        await using var plant = new NpgsqlCommand($@"
+WITH n AS (SELECT date_trunc('hour', now() AT TIME ZONE 'UTC') AS h),
+runs (collector_name, hours_back, minute_of_hour, error_message) AS
+(
+    VALUES ('{NoteNewestCollector}', 6, 10, CAST(NULL AS text)),
+           ('{NoteNewestCollector}', 4, 40, CAST(@older AS text)),
+           ('{NoteNewestCollector}', 3, 40, CAST(@newest AS text)),
+           ('{NoteClearedCollector}', 5, 40, CAST(@cleared AS text)),
+           ('{NoteClearedCollector}', 3, 10, CAST(@cleared AS text)),
+           ('{NoteClearedCollector}', 3, 40, CAST(NULL AS text))
+)
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+SELECT {idBase} + row_number() OVER (), 1, 'srv-1', r.collector_name,
+       n.h - r.hours_back * INTERVAL '1 hour' + r.minute_of_hour * INTERVAL '1 minute', 1, 'SUCCESS', 5, r.error_message
+FROM n
+CROSS JOIN runs r", connection);
+        plant.Parameters.AddWithValue("older", PartialNote(3, 4));
+        plant.Parameters.AddWithValue("newest", PartialNote(1, 4));
+        plant.Parameters.AddWithValue("cleared", PartialNote(2, 4));
+        await plant.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One statement's result, keyed (server, collector), every one of the fourteen ordinals rendered
     /// invariantly (timestamps to the tick, so a MAX that loses a microsecond cannot compare equal).</summary>
     private static Task<SortedDictionary<string, string>> ReadRowsAsync(
         NpgsqlDataSource postgres, string sql, DateTime windowStart, DateTime? headEnd, CancellationToken ct) =>
@@ -472,10 +527,10 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
         }
         var rows = new SortedDictionary<string, string>(StringComparer.Ordinal);
         await using var reader = await command.ExecuteReaderAsync(ct);
-        Assert.Equal(13, reader.FieldCount);
+        Assert.Equal(14, reader.FieldCount); // #4812 appended latest_run_note
         while (await reader.ReadAsync(ct))
         {
-            var fields = Enumerable.Range(0, 13).Select(i => reader.GetName(i) + "=" + (reader.IsDBNull(i)
+            var fields = Enumerable.Range(0, 14).Select(i => reader.GetName(i) + "=" + (reader.IsDBNull(i)
                 ? "NULL"
                 : reader.GetValue(i) switch
                 {
@@ -505,6 +560,47 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
         Assert.True(diff.Count == 0, $"composed read differs from the raw scan in {diff.Count} row(s):\n" + string.Join("\n", diff));
     }
 
+    /// <summary>The note a rendered row carries: everything after <c>latest_run_note=</c>, which is the row's last
+    /// field, or null for the <c>NULL</c> that <c>ReadRowsAsync</c> renders.</summary>
+    private static string? NoteOf(string row)
+    {
+        const string field = " latest_run_note=";
+        var at = row.IndexOf(field, StringComparison.Ordinal);
+        Assert.True(at >= 0, $"the rendered row has no latest_run_note field: {row}");
+        var note = row[(at + field.Length)..];
+        return note == "NULL" ? null : note;
+    }
+
+    /// <summary>
+    /// The note column, compared with a value in it (#4812). <see cref="AssertSameRows"/> already compares every
+    /// rendered field, but until <see cref="PlantPartialFailureRunsAsync"/> planted two histories the note was NULL
+    /// on both sides, so that comparison covered nothing. Some row must carry a note on each side (so the proof
+    /// cannot go vacuous again if the seed changes); both sides must agree on the note of each planted collector;
+    /// the one whose newest run is a partial-failure cycle must return exactly that run's note; the one whose
+    /// partial-failure cycle was followed by a clean run must return NULL.
+    /// </summary>
+    private static void AssertPartialFailureNotesAgree(SortedDictionary<string, string> raw, SortedDictionary<string, string> composed)
+    {
+        Assert.True(raw.Values.Any(v => NoteOf(v) is not null), "no row of the raw scan carries a note, so the parity proof compares no note");
+        Assert.True(composed.Values.Any(v => NoteOf(v) is not null), "no row of the composed read carries a note, so the parity proof compares no note");
+
+        string? Note(SortedDictionary<string, string> rows, string side, string collector)
+        {
+            Assert.True(rows.TryGetValue("1|" + collector, out var row), $"the {side} read has no row for server 1, {collector}");
+            return NoteOf(row!);
+        }
+
+        foreach (var collector in new[] { NoteNewestCollector, NoteClearedCollector })
+        {
+            Assert.Equal(Note(raw, "raw", collector), Note(composed, "composed", collector));
+        }
+
+        Assert.Equal(PartialNote(1, 4), Note(raw, "raw", NoteNewestCollector));
+        Assert.Equal(PartialNote(1, 4), Note(composed, "composed", NoteNewestCollector));
+        Assert.Null(Note(raw, "raw", NoteClearedCollector));
+        Assert.Null(Note(composed, "composed", NoteClearedCollector));
+    }
+
     private static DateTime NaiveUtcNow() => DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
     private static async Task DropAggregateAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -516,9 +612,12 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
     /// <summary>
     /// THE PARITY PROOF. Eight days of every CASE arm, materialized by the PRODUCT's first policy run (no hand
     /// backfill), then rows landing above the watermark: the composed read (whole buckets + raw head slice)
-    /// EQUALS the raw scan per (server, collector) across all thirteen ordinals, the guard says composed, and
+    /// EQUALS the raw scan per (server, collector) across all fourteen ordinals, the guard says composed, and
     /// the banded fleet payload the product computes through the composed path is identical to the one it
-    /// computes through the raw path (the aggregate dropped, so the chooser falls back).
+    /// computes through the raw path (the aggregate dropped, so the chooser falls back). The last ordinal, the
+    /// newest run's partial-failure note (#4812), is compared with a value in it: one collector's newest run is a
+    /// partial-failure cycle (both sides return its note) and another's was followed by a clean run (both return
+    /// NULL), see <see cref="PlantPartialFailureRunsAsync"/>.
     /// </summary>
     [Fact]
     public async Task ComposedRead_EqualsRawScan_AcrossEveryCaseArm_AgainstDevPostgres()
@@ -532,6 +631,7 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         await PlantEveryArmAsync(connection, 10_000_000, ct);
+        await PlantPartialFailureRunsAsync(connection, 12_000_000, ct);
         await RunPolicyAsync(connection, jobId, ct);
         await PlantAboveWatermarkAsync(connection, 19_000_000, ct);
 
@@ -549,8 +649,9 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
 
         var raw = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthSql, windowStart, null, ct);
         var composed = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthComposedSql, windowStart, headEnd, ct);
-        Assert.Equal(2 * 5 + 1, raw.Count); // 2 servers × (3 rotating + streak + skipflip) + collector_late; sentinel excluded
+        Assert.Equal(2 * 5 + 1 + 2, raw.Count); // 2 servers × (3 rotating + streak + skipflip) + collector_late + the two note collectors; sentinel excluded
         AssertSameRows(raw, composed);
+        AssertPartialFailureNotesAgree(raw, composed);
 
         /* Every arm is actually exercised (a parity over zeros proves nothing). */
         var all = string.Join(" ", raw.Values);

@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Generic;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -57,8 +58,15 @@ public static class ServerContextCard
             serverLine += $", {metadata.ProductVersion}";
         rows.Add(new ServerContextRow("Server", serverLine));
 
-        // Hardware — dropped entirely when CpuCount is 0 (no hardware facts captured), matching PS.
-        if (metadata.CpuCount > 0)
+        // Hardware. An Azure SQL Database (engine edition 5) names the vCores its service objective gives it, labeled
+        // "vCores", and reads n/a where the objective names none (a DTU model or an elastic pool): its stored CPU count is the
+        // schedulers it can see, which can be higher than its vCores, and its stored memory is the HOST's, so neither is shown.
+        // Any other engine drops the row when CpuCount is 0 (no hardware facts captured), matching PS.
+        if (ServerHardwareScope.HardwareIsTheHosts(metadata.EngineEdition))
+            rows.Add(new ServerContextRow("Hardware", metadata.VcoreCount is > 0
+                ? $"{metadata.VcoreCount} vCores"
+                : ServerHardwareScope.NotApplicable));
+        else if (metadata.CpuCount > 0)
             rows.Add(new ServerContextRow("Hardware", $"{metadata.CpuCount} CPUs, {metadata.PhysicalMemoryMB:N0} MB RAM"));
 
         // Instance settings — PS always shows these three rows, even when the value is 0 (a real

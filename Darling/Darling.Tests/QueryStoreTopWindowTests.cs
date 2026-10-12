@@ -39,19 +39,22 @@ public class QueryStoreTopWindowTests
         "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"));
 
     /// <summary>
-    /// The floor probe is bounded on BOTH sides of the window. Bounding the partitioning column is what lets
-    /// TimescaleDB exclude chunks; an unbounded <c>MIN</c> would read the retention window to answer a question
-    /// about it.
+    /// The floor probe walks the table's <c>(server_id, collection_time)</c> index in time order and stops at the
+    /// first row, so it reads one row, not the retention window, while being bounded only by the window's end. A
+    /// floor bounded below by the window's start called a quiet start a cut. The start bounds only the existence
+    /// check that keeps an empty window null.
     /// </summary>
     [Fact]
-    public void TheWindowFloorProbe_IsBoundedOnBothSides()
+    public void TheWindowFloorProbe_WalksTheIndexFromTheOldestRow_AndChecksTheWindowApart()
     {
         var sql = DarlingDataReader.QueryStoreWindowFloorSql;
 
-        Assert.Contains("MIN(collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM query_store_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >=", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <=", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_store_stats AS f", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   f.collection_time <= $3", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("f.collection_time >=", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY f.collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   w.collection_time >= $2", sql, StringComparison.Ordinal);
     }
 
     /// <summary>

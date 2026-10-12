@@ -319,7 +319,8 @@ public sealed class QueryStoreClutterViewerSurfacesTests
                      "RunsSlowestPct", "SlowestSharePct", "SlowestItemMsP50", "DominanceRatio",
                      "PlansPerQueryP95", "PlansPerQueryMax", "NewPlansPerDay", "OneShotFraction",
                      "DistinctPlans", "MaxPlansPerQuery", "StaleQueryThresholdDays", "PctOfCap",
-                     "OptionsCaptured",
+                     /* OptionsCaptured is not here since #4766: the column binds OptionsCapturedText (a XAML StringFormat cannot
+                        carry the offset of the repeated autumn hour) and sorts by the DateTime; ViewerGridTimeTextZoneTests pins it. */
                  })
         {
             var binding = Regex.Match(grid, @"\{Binding " + column + @"(?<rest>[^}]*)\}");

@@ -110,6 +110,10 @@ public sealed class PgSelfAlertDeliveryStampStore : ISelfAlertDeliveryStampStore
     /// <summary>The analysis singles digest's stamp key (#3712) — the third daily document, same shape.</summary>
     public const string AnalysisSinglesDigestStateKey = "singles_digest_delivered_at";
 
+    /// <summary>The daily retained-history audit's stamp key (#5450). The value is the UTC slot of the audit pass
+    /// that ran, 01:00Z of the day it ran on, so a restart on the same day finds the day already audited.</summary>
+    public const string HistoryAuditStateKey = "history_audit_slot";
+
     /// <summary>The alert pass's own deadline (<c>DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds</c>),
     /// because this read runs inside it: a stamp read that outlives the pass's budget is a stamp read that
     /// should have failed toward the memory gate.</summary>

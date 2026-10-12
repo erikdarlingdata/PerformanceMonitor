@@ -305,7 +305,7 @@ public sealed class ViewerAlertToastCoordinatorTests
         Assert.Empty(new AlertToastCoordinator(Retention).SelectToasts(new[] { row }, T0, Cooldown, new[] { differentCase }));
 
         /* A whole-server silence (no metric) covers every metric on that server — the sidebar's one-click rule. */
-        var silence = ViewerDataService.BuildServerSilenceRule("Server1");
+        var silence = ViewerDataService.BuildServerSilenceRule(1, "Server1");
         Assert.Empty(new AlertToastCoordinator(Retention).SelectToasts(new[] { row }, T0, Cooldown, new[] { silence }));
     }
 

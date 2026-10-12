@@ -71,6 +71,10 @@ LIMIT 1";
         // Fetch plan XML live from SQL Server
         var planXml = await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
         if (string.IsNullOrEmpty(planXml)) return;
+        // #4348: the plan is judged BEFORE it is analyzed. A warning quotes up to 300 characters of a predicate or
+        // a statement from the plan, so a statement the filter withholds must reach the analyzer already withheld,
+        // with its predicates and parameter values: each quote is then judged with its statement.
+        planXml = SensitiveStatements.Xml(planXml)!;
 
         try
         {
@@ -152,7 +156,9 @@ SELECT p.edition, p.product_version, p.product_level, p.cpu_count, p.physical_me
         WHERE c.server_id = $1
         AND   c.configuration_name = 'max degree of parallelism'
         AND   c.capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
-        LIMIT 1) AS max_dop
+        LIMIT 1) AS max_dop,
+       p.engine_edition,
+       p.vcore_count
 FROM v_server_properties AS p
 WHERE p.server_id = $1
 ORDER BY p.collection_time DESC
@@ -162,13 +168,23 @@ LIMIT 1";
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken)) return null;
 
+            /* Same rule as LocalDataService.GetServerMetadataForPlanAnalysisAsync: an Azure SQL Database's stored
+               physical_memory_mb is the HOST's, so the drill-down's server context carries no RAM figure, and its Hardware row
+               names the vCores. */
+            int? engineEdition = reader.IsDBNull(6) ? null : Convert.ToInt32(reader.GetValue(6));
+            int? vcoreCount = reader.IsDBNull(7) ? null : Convert.ToInt32(reader.GetValue(7));
+            int? storedCpuCount = reader.IsDBNull(3) ? null : reader.GetInt32(3);
+            long? storedPhysicalMemoryMb = reader.IsDBNull(4) ? null : Convert.ToInt64(reader.GetValue(4));
+
             return new PerformanceMonitor.PlanAnalysis.ServerMetadata
             {
                 Edition = reader.IsDBNull(0) ? null : reader.GetString(0),
                 ProductVersion = reader.IsDBNull(1) ? null : reader.GetString(1),
                 ProductLevel = reader.IsDBNull(2) ? null : reader.GetString(2),
-                CpuCount = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
-                PhysicalMemoryMB = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
+                CpuCount = storedCpuCount ?? 0,
+                PhysicalMemoryMB = ServerHardwareScope.OwnPhysicalMemoryMb(engineEdition, storedPhysicalMemoryMb) ?? 0L,
+                EngineEdition = engineEdition,
+                VcoreCount = vcoreCount,
                 MaxDop = reader.IsDBNull(5) ? 0 : Convert.ToInt32(Convert.ToDouble(reader.GetValue(5))),
             };
         }
@@ -214,7 +230,7 @@ LIMIT 10";
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
                     if (!reader.IsDBNull(0))
-                        planXmls.Add(reader.GetString(0));
+                        planXmls.Add(SensitiveStatements.Xml(reader.GetString(0))!); // #4348: judged before the analyzer quotes it
                 }
             }
 

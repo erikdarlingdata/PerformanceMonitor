@@ -17,7 +17,7 @@ namespace PerformanceMonitor.Darling.Service;
 internal static partial class AlertNotebookEndpoint
 {
     /// <summary>Poison Wait template version (#4223). Bumped only if this template's SHAPE changes.</summary>
-    internal const int PoisonWaitTemplateVersion = 1;
+    internal const int PoisonWaitTemplateVersion = 2;
 
     /// <summary>The one wait type this alert fires on, RESOURCE_SEMAPHORE (ordinal, case-insensitive) — the
     /// only type whose remedy is "raise a memory grant/worker ceiling", so its two supporting reads

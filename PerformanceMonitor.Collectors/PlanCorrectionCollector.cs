@@ -12,6 +12,7 @@ using System.Data.Common;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -200,7 +201,7 @@ DROP TABLE IF EXISTS #pm_plan_correction_plans;
 DROP TABLE IF EXISTS #pm_plan_correction_queries;
 DROP TABLE IF EXISTS #pm_plan_correction_query_text;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     recommendation_name = dtr.name,
     recommendation_type = dtr.type,
     recommendation_state = JSON_VALUE(dtr.state, '$.currentValue'),
@@ -280,7 +281,7 @@ OPTION(RECOMPILE);
   catalog views are seeked once each here and never joined by the shipping SELECT below. Plans are
   keyed by the (query_id, last_good_plan_id) pair the final join needs; queries by query_id; text by
   query_text_id from the queries temp, the same plan -> query -> text chain sp_QuickieStore walks.*/
-SELECT
+SELECT /* PerformanceMonitorLite */
     query_id = qsp.query_id,
     plan_id = qsp.plan_id,
     plan_forcing_type_desc = qsp.plan_forcing_type_desc,
@@ -297,7 +298,7 @@ WHERE EXISTS
     AND   r.last_good_plan_id = qsp.plan_id
 );
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     query_id = qsq.query_id,
     query_text_id = qsq.query_text_id
 INTO #pm_plan_correction_queries
@@ -310,7 +311,7 @@ WHERE EXISTS
     WHERE r.query_id = qsq.query_id
 );
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     query_text_id = qsqt.query_text_id,
     query_sql_text = qsqt.query_sql_text
 INTO #pm_plan_correction_query_text
@@ -323,7 +324,7 @@ WHERE EXISTS
     WHERE q.query_text_id = qsqt.query_text_id
 );
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     force_last_good_plan_desired_state = o.desired_state_desc,
     force_last_good_plan_actual_state = o.actual_state_desc,
     force_last_good_plan_reason = o.reason_desc,
@@ -427,7 +428,7 @@ DECLARE
     @product_major integer =
         CONVERT(integer, PARSENAME(CONVERT(sysname, SERVERPROPERTY('PRODUCTVERSION')), 4));
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     d.name
 FROM sys.databases AS d
 LEFT JOIN sys.dm_hadr_database_replica_states AS drs
@@ -531,9 +532,12 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
         ArgumentNullException.ThrowIfNull(reader);
         ArgumentNullException.ThrowIfNull(rows);
 
+        /* #4348: statement text and the implementation script are judged where they first enter a Row. */
+        var scrub = context.BeginStatementScrub();
+
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(ReadRow(reader, item));
+            rows.Add(ReadRow(reader, item, scrub));
         }
     }
 
@@ -545,17 +549,18 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
 
         var rows = new List<Row>();
         var databaseName = context.CurrentDatabaseName ?? "";
+        var scrub = context.BeginStatementScrub();
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(ReadRow(reader, databaseName));
+            rows.Add(ReadRow(reader, databaseName, scrub));
         }
 
         return rows;
     }
 
     /// <summary>Ordinals follow <see cref="PayloadBodyText"/>'s SELECT list, which follows PayloadColumns.</summary>
-    private static Row ReadRow(DbDataReader reader, string databaseName) =>
+    private static Row ReadRow(DbDataReader reader, string databaseName, SensitiveStatements.Session scrub) =>
         new()
         {
             DbName = databaseName,
@@ -573,7 +578,7 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
             LastRefresh = NullableDateTime(reader, 11),
             Score = NullableInt(reader, 12),
             QueryId = NullableLong(reader, 13),
-            QueryText = NullableString(reader, 14),
+            QueryText = scrub.Text(NullableString(reader, 14)),
             RegressedPlanId = NullableLong(reader, 15),
             LastGoodPlanId = NullableLong(reader, 16),
             LastGoodPlanForcingType = NullableString(reader, 17),
@@ -596,7 +601,7 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
             RevertActionInitiatedTime = NullableDateTime(reader, 34),
             RevertActionStartTime = NullableDateTime(reader, 35),
             RevertActionDurationSeconds = NullableDouble(reader, 36),
-            ImplementationScript = NullableString(reader, 37),
+            ImplementationScript = scrub.Text(NullableString(reader, 37)),
         };
 
     private static string? NullableString(DbDataReader reader, int ordinal) =>

@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -143,6 +145,8 @@ public partial class ViewerServerTab
             case SystemEventsCorruptionSubTabIndex:
             case SystemEventsContentionSubTabIndex:
             default:
+                /* #4966: the two chart sub-tabs plot a time axis that already shows the empty span, so they take the grids' banner down. */
+                SystemEventsTruncationBanner.Visibility = Visibility.Collapsed;
                 await LoadSystemHealthChartsAsync();
                 break;
         }
@@ -151,82 +155,146 @@ public partial class ViewerServerTab
     private async Task LoadSchedulerIssuesAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var data = await _dataService.GetSchedulerIssuesAsync(_server.ServerId, startUtc, endUtc);
+        var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetSchedulerIssuesAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seSchedulerFilterMgr!.UpdateData(data);
-        SchedulerIssuesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
+        ShowSystemHealthEmptyState(SchedulerIssuesNoDataMessage, data.Count);
         SchedulerIssuesCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
     private async Task LoadSevereErrorsAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var data = await _dataService.GetSevereErrorsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetSevereErrorsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seSevereErrorFilterMgr!.UpdateData(data);
-        SevereErrorsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
+        ShowSystemHealthEmptyState(SevereErrorsNoDataMessage, data.Count);
         SevereErrorsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
     private async Task LoadMemoryConditionsAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var data = await _dataService.GetMemoryConditionsAsync(_server.ServerId, startUtc, endUtc);
+        var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetMemoryConditionsAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seMemoryConditionsFilterMgr!.UpdateData(data);
-        MemoryConditionsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
+        ShowSystemHealthEmptyState(MemoryConditionsNoDataMessage, data.Count);
         MemoryConditionsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
     private async Task LoadMemoryBrokerAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var data = await _dataService.GetMemoryBrokerAsync(_server.ServerId, startUtc, endUtc);
+        var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetMemoryBrokerAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seMemoryBrokerFilterMgr!.UpdateData(data);
-        MemoryBrokerNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
+        ShowSystemHealthEmptyState(MemoryBrokerNoDataMessage, data.Count);
         MemoryBrokerCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
     private async Task LoadMemoryNodeOomAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var data = await _dataService.GetMemoryNodeOomAsync(_server.ServerId, startUtc, endUtc);
+        var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetMemoryNodeOomAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seMemoryNodeOomFilterMgr!.UpdateData(data);
-        MemoryNodeOomNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
+        ShowSystemHealthEmptyState(MemoryNodeOomNoDataMessage, data.Count);
         MemoryNodeOomCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
     private async Task LoadSignificantWaitsAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var data = await _dataService.GetSignificantWaitsAsync(_server.ServerId, startUtc, endUtc);
+        var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetSignificantWaitsAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seSignificantWaitsFilterMgr!.UpdateData(data);
-        SignificantWaitsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
+        ShowSystemHealthEmptyState(SignificantWaitsNoDataMessage, data.Count);
         SignificantWaitsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
     private async Task LoadCpuTasksAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var data = await _dataService.GetCpuTasksAsync(_server.ServerId, startUtc, endUtc);
+        var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetCpuTasksAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seCpuTasksFilterMgr!.UpdateData(data);
-        CpuTasksNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
+        ShowSystemHealthEmptyState(CpuTasksNoDataMessage, data.Count);
         CpuTasksCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
     private async Task LoadIoIssuesAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var data = await _dataService.GetIoIssuesAsync(_server.ServerId, startUtc, endUtc);
+        var dataStartTask = _dataService.GetSystemHealthEventsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetIoIssuesAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "System Events");
+        var data = dataReadTask.Result;
         _seIoIssuesFilterMgr!.UpdateData(data);
-        IoIssuesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
+        ShowSystemHealthEmptyState(IoIssuesNoDataMessage, data.Count);
         IoIssuesCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
     }
 
     private async Task LoadDefaultTraceEventsAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var data = await _dataService.GetDefaultTraceEventsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataStartTask = _dataService.GetDefaultTraceDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetDefaultTraceEventsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Default Trace");
+        var data = dataReadTask.Result;
         _seDefaultTraceFilterMgr!.UpdateData(data);
+        await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "Default Trace", startUtc, data.Select(r => r.EventTimeUtc));
+        if (DefaultTraceGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind) is { } gap)
+            DefaultTraceNoDataMessage.Text = gap;
         DefaultTraceNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         DefaultTraceCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+    }
+
+    /// <summary>
+    /// The Default Trace grid's note where the default_trace_events collector cannot run (Azure SQL Database has no
+    /// default trace): the same sentence the PostgreSQL panels' <see cref="PanelNote"/> and the MCP tools'
+    /// <c>not_collected</c> answer give. Null anywhere else, where the grid keeps its "no events in this window" text.
+    /// </summary>
+    internal static string? DefaultTraceGapNote(string serverName, int engineEdition, string? engineKind) =>
+        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, "default_trace_events");
+
+    /// <summary>
+    /// The note every sub-tab the system_health session feeds shows where the system_health_events collector cannot run
+    /// (an Azure SQL Database): the eight grids and the two chart sub-tabs. The same sentence as
+    /// <see cref="DefaultTraceGapNote"/>'s, for this collector. Null anywhere else, where each grid keeps its "no events
+    /// in this window" text and the charts show.
+    /// </summary>
+    internal static string? SystemHealthGapNote(string serverName, int engineEdition, string? engineKind) =>
+        CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, "system_health_events");
+
+    /// <summary>A system_health grid's empty state: shown when the window has no rows. Where the collector cannot run it
+    /// says so, in place of the grid's "no events in this window" text.</summary>
+    private void ShowSystemHealthEmptyState(TextBlock message, int rowCount)
+    {
+        if (SystemHealthGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind) is { } gap)
+            message.Text = gap;
+        message.Visibility = rowCount == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>

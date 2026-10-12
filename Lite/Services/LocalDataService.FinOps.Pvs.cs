@@ -35,7 +35,8 @@ SELECT
     oldest_active_transaction_id,
     oldest_aborted_transaction_id,
     aborted_version_cleaner_start_time,
-    aborted_version_cleaner_end_time
+    aborted_version_cleaner_end_time,
+    collection_time
 FROM v_pvs_stats
 WHERE server_id = $1
 AND   collection_time = (
@@ -64,7 +65,9 @@ ORDER BY
                 OldestActiveTransactionId = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 OldestAbortedTransactionId = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                 /* MS's documented shape for "cleanup is ongoing": a start time with no end time. */
-                AbortedCleanupOngoing = !reader.IsDBNull(6) && reader.IsDBNull(7)
+                AbortedCleanupOngoing = !reader.IsDBNull(6) && reader.IsDBNull(7),
+                /* #5642: the snapshot's own collection_time (naive UTC), for the alert's newest-sample age line. */
+                NewestSampleUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
             });
         }
 
@@ -77,12 +80,16 @@ ORDER BY
     /// POINT from the same row's data-file denominator, the exact ratio the grid shows, so the two
     /// surfaces cannot disagree. Mirrored by the Darling viewer's <c>GetPvsTrendAsync</c> — same
     /// columns, same top-N pin, same ordering — so the twins cannot drift.
+    /// <para>#5312: <paramref name="databaseNames"/> is the saved per-server database filter (null or empty = every database,
+    /// the statement as it always read). The top five are ranked among the chosen databases.</para>
     /// </summary>
-    public async Task<List<PvsTrendPoint>> GetPvsTrendAsync(int serverId, DateTime sinceUtc)
+    public async Task<List<PvsTrendPoint>> GetPvsTrendAsync(int serverId, DateTime sinceUtc, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        /* $1 server, $2 since, so the optional database list starts at $3. */
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 3, out var dbValues);
+        command.CommandText = $@"
 WITH top_dbs AS (
     SELECT database_name
     FROM v_pvs_stats
@@ -91,7 +98,7 @@ WITH top_dbs AS (
         SELECT MAX(collection_time)
         FROM v_pvs_stats
         WHERE server_id = $1
-    )
+    ){dbClause}
     ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name
     LIMIT 5
 )
@@ -109,6 +116,8 @@ AND   p.collection_time >= $2
 ORDER BY p.database_name, p.collection_time";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<PvsTrendPoint>();
         using var reader = await command.ExecuteReaderAsync();
@@ -135,12 +144,15 @@ ORDER BY p.database_name, p.collection_time";
     /// so a window that has aged into parquet still resolves, and pins to the newest collection_time the
     /// way the sibling database-size read does — this grid answers "what is my version store doing right
     /// now", not "how did it get here".
+    /// <para>#5312: <paramref name="databaseNames"/> is the saved per-server database filter (null or empty = every database,
+    /// the statement as it always read). It narrows the OUTER rows only: the newest snapshot is still the server's newest.</para>
     /// </summary>
-    public async Task<List<PvsStatsRow>> GetPvsStatsLatestAsync(int serverId)
+    public async Task<List<PvsStatsRow>> GetPvsStatsLatestAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
+        command.CommandText = $@"
 SELECT
     database_name,
     is_accelerated_database_recovery_on,
@@ -164,10 +176,12 @@ AND   collection_time = (
     SELECT MAX(collection_time)
     FROM v_pvs_stats
     WHERE server_id = $1
-)
+){dbClause}
 ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<PvsStatsRow>();
         using var reader = await command.ExecuteReaderAsync();

@@ -163,16 +163,70 @@ public sealed class DefaultTraceEventFrameLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #4821: a server that reports its zone (SQL Server 2022 and later) and whose newest snapshot is in
+    /// summer time. The summer event is placed at -4 h and the winter event at -5 h, each by the offset in
+    /// force on its own date, where the old newest-offset de-skew put the winter event an hour early.
+    ///
+    /// <para>The window opens at 14:30Z on the winter date: the winter event's true instant (15:00Z) is
+    /// inside it and the old answer (14:00Z) is not, so this checks the row selection as well as the
+    /// returned time.</para>
+    /// </summary>
+    [Fact]
+    public async Task DefaultTraceAnnotation_PlacesEachEventByTheOffsetOnItsOwnDate_ForAServerThatReportsItsZone()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the annotation time zone test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var winterLocal = new DateTime(2026, 1, 15, 10, 0, 0, DateTimeKind.Unspecified);
+            var summerLocal = new DateTime(2026, 7, 15, 10, 0, 0, DateTimeKind.Unspecified);
+            var windowStart = new DateTime(2026, 1, 15, 14, 30, 0, DateTimeKind.Utc);
+            var windowEnd = new DateTime(2026, 7, 31, 0, 0, 0, DateTimeKind.Utc);
+
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await PlantServerPropertiesAsync(connection, windowEnd, -240, ct, "Eastern Standard Time");
+            await PlantTraceEventAsync(connection, winterLocal, "Object:Created", null, ct);
+            await PlantTraceEventAsync(connection, summerLocal, "Object:Altered", null, ct);
+
+            var trace = await RunAnnotationAsync(connection, "default_trace_events", windowStart, windowEnd, ct);
+
+            Assert.Equal(
+                new[]
+                {
+                    new DateTime(2026, 1, 15, 15, 0, 0, DateTimeKind.Unspecified),
+                    new DateTime(2026, 7, 15, 14, 0, 0, DateTimeKind.Unspecified),
+                },
+                trace);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /* ─────────────────────────── fixtures ─────────────────────────── */
 
     private static async Task PlantServerPropertiesAsync(
-        NpgsqlConnection connection, DateTime collectionTimeUtc, int offsetMinutes, CancellationToken ct) =>
+        NpgsqlConnection connection, DateTime collectionTimeUtc, int offsetMinutes, CancellationToken ct, string? timeZoneId = null) =>
         await DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO server_properties
     (collection_id, collection_time, server_id, server_name, edition, product_version, product_level,
-     engine_edition, utc_offset_minutes)
-VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5)",
-            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc), ServerId, ServerName, offsetMinutes);
+     engine_edition, utc_offset_minutes, time_zone_id)
+VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5, $6)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc), ServerId, ServerName, offsetMinutes,
+            (object?)timeZoneId ?? DBNull.Value);
 
     private static async Task PlantTraceEventAsync(
         NpgsqlConnection connection, DateTime storedLocalEventTime, string eventName, int? severity, CancellationToken ct) =>
@@ -207,8 +261,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
             .ToArray();
     }
 
-    /// <summary>Compiles the panel's annotation query for one source through the real
-    /// <see cref="ComposeCompiler"/> and runs it, returning the <c>ts</c> column.</summary>
+    /// <summary>Reads the servers' clocks and compiles the panel's annotation query for one source through
+    /// the real <see cref="ComposeCompiler"/>, the way the compose endpoint does, and runs it, returning the
+    /// <c>ts</c> column.</summary>
     private static async Task<DateTime[]> RunAnnotationAsync(
         NpgsqlConnection connection, string sourceKey, DateTime startUtc, DateTime endUtc, CancellationToken ct)
     {
@@ -222,7 +277,20 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
             new[] { ServerName }, DarlingMcpTestData.Naive(startUtc), DarlingMcpTestData.Naive(endUtc),
             ComposeRunContext.NoVariables, RollupAvailability.All, DarlingMcpTestData.Naive(endUtc), RollupCoverage.Unknown);
 
-        var compiled = Assert.Single(ComposeCompiler.CompileAnnotations(plan!, context)).Compiled;
+        var clockRead = ComposeCompiler.CompileServerClockRead(context);
+        IReadOnlyDictionary<string, PerformanceMonitor.Analysis.Baselines.ServerClock> clocks;
+        await using (var clockCommand = new NpgsqlCommand(clockRead.Sql, connection))
+        {
+            foreach (var p in clockRead.Parameters)
+            {
+                clockCommand.Parameters.Add(p);
+            }
+
+            await using var clockReader = await clockCommand.ExecuteReaderAsync(ct);
+            clocks = await ComposeCompiler.ReadServerClocksAsync(clockReader, ct);
+        }
+
+        var compiled = Assert.Single(ComposeCompiler.CompileAnnotations(plan!, context, clocks)).Compiled;
 
         await using var command = new NpgsqlCommand(compiled.Sql, connection);
         foreach (var p in compiled.Parameters)

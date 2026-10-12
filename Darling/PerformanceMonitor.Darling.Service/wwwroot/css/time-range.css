@@ -1,0 +1,70 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+/* The time range picker (#5562): js/time-range-picker.js. Colors come from the theme tokens only. */
+.time-range-picker { position: relative; display: inline-flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; font-size: 0.78rem; color: var(--muted); }
+.trp-button {
+  background: var(--card);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.2rem 0.55rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.trp-button:hover { background: var(--lighter); }
+.trp-button:focus-visible, .trp-item:focus-visible, .trp-text:focus-visible, .trp-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.trp-detail { color: var(--dim); }
+.trp-note { color: var(--warn); }
+.trp-note:empty, .trp-detail:empty { display: none; }
+.trp-popup-slot { position: absolute; top: 100%; left: 0; z-index: 30; }
+.trp-popup {
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.3rem;
+  padding: 0.7rem 0.8rem;
+  background: var(--bg-dark);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  max-width: calc(100vw - 2rem);
+  flex-wrap: wrap;
+}
+.trp-column { display: flex; flex-direction: column; gap: 0.15rem; min-width: 11rem; }
+.trp-custom { min-width: 17rem; gap: 0.4rem; }
+.trp-heading { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.15rem; }
+.trp-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  text-align: left;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 0.2rem 0.45rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.trp-item:hover { background: var(--lighter); }
+.trp-item.trp-selected { border-color: var(--accent); }
+.trp-item-name { flex: 1 1 auto; }
+.trp-item-length { color: var(--muted); }
+.trp-item-why { flex-basis: 100%; color: var(--muted); font-size: 0.7rem; }
+.trp-item.trp-disabled { color: var(--muted); cursor: not-allowed; opacity: 0.6; }
+.trp-item.trp-disabled:hover { background: transparent; }
+.trp-text, .trp-pick { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.2rem 0.4rem; font-size: 0.78rem; }
+.trp-text { width: 100%; box-sizing: border-box; }
+.trp-preview { min-height: 2.4em; font-size: 0.74rem; color: var(--muted); }
+.trp-preview.trp-ok { color: var(--ok); }
+.trp-preview.trp-error { color: var(--err); }
+.trp-picks { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
+.trp-zone { color: var(--muted); font-size: 0.7rem; }
+.trp-apply[disabled] { opacity: 0.5; cursor: not-allowed; }

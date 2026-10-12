@@ -44,7 +44,7 @@ public sealed partial class ViewerDataService
             return new List<AgTopologyCard>();
         }
 
-        return AgTopology.BuildCards(replicas, await ReadAgDatabasesAsync(nowUtc, cancellationToken));
+        return AgTopology.BuildCards(replicas, await ReadAgDatabasesAsync(nowUtc, cancellationToken), nowUtc);
     }
 
     /// <summary>Maps <see cref="DarlingAgStatesReader"/>'s raw rows into <see cref="AgTopologyReplicaRow"/>,

@@ -24,7 +24,7 @@ public sealed class WebRenderSettleTests
     private static readonly string s_wwwroot = Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js");
 
-    /// <summary>Runs one harness scenario and returns its JSON, or false when Node is not installed.</summary>
+    /// <summary>Runs one harness scenario and returns its JSON. When Node is not installed, the test is reported as skipped.</summary>
     private static bool TryRun(string scenario, out JsonElement result)
     {
         result = default;
@@ -49,7 +49,8 @@ public sealed class WebRenderSettleTests
         }
         catch (Win32Exception)
         {
-            // Node is not installed on this machine; the source-order pin below still holds the fix in place.
+            // The source-order pin below still holds the fix in place.
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
             return false;
         }
 
@@ -212,5 +213,20 @@ public sealed class WebRenderSettleTests
         Assert.True(settle > tick, "schedulerTick does not settle a finished render");
         Assert.True(guard > tick, "schedulerTick lost its hidden-or-paused return");
         Assert.True(settle < guard, "the settle check must run before the hidden-or-paused return, or a render that finishes there never settles");
+    }
+
+    /// <summary>Review round (L9): the footer's "Updated" time moves only when the render's reads settled without an error. A poll
+    /// whose reads failed keeps the last good time (the red strip shows the failure); the next clean poll stamps again.</summary>
+    [Fact]
+    public void AFailedPoll_KeepsTheLastGoodUpdatedTime_AndACleanOneMovesIt()
+    {
+        if (!TryRun("failedPoll", out var run)) return;
+
+        var first = run.GetProperty("first").GetProperty("pageUpdatedAt").GetInt64();
+        var failed = run.GetProperty("failed").GetProperty("pageUpdatedAt").GetInt64();
+        var recovered = run.GetProperty("recovered").GetProperty("pageUpdatedAt").GetInt64();
+        Assert.True(first > 0);
+        Assert.Equal(first, failed);
+        Assert.True(recovered > first);
     }
 }

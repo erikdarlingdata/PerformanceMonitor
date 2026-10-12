@@ -75,7 +75,8 @@ public sealed class DailySummaryRangeToolTests : IClassFixture<SharedDuckDbFixtu
     public async Task TheCalendar_BandsEachDaySeparately_AndShowsCollectionGapsAsMissingDays()
     {
         var service = new LocalDataService(_duckDb);
-        var today = DateTime.UtcNow.Date;
+        var utcNow = DateTime.UtcNow; // #5496: one reading -- "today" and today's seeded run must be the same calendar day
+        var today = utcNow.Date;
         var twoDaysAgo = today.AddDays(-2);
 
         /* 1. nothing collected at all: an empty calendar is a collection fault, not a quiet fortnight. */
@@ -91,7 +92,7 @@ public sealed class DailySummaryRangeToolTests : IClassFixture<SharedDuckDbFixtu
             Warning (#3539 A2: the share's tier, never Critical). Yesterday is deliberately left alone:
             it is the gap, and the point of the read is that a gap is an ABSENT day rather than a quiet one.
         */
-        await SeedRunAsync(Truncate(DateTime.UtcNow), "wait_stats", "SUCCESS", error: null);
+        await SeedRunAsync(Truncate(utcNow), "wait_stats", "SUCCESS", error: null);
         await SeedRunAsync(twoDaysAgo.AddHours(12), "wait_stats", "SUCCESS", error: null);
         await SeedRunAsync(twoDaysAgo.AddHours(13), "query_store", "ERROR", error: "seeded failure");
 
@@ -137,10 +138,11 @@ public sealed class DailySummaryRangeToolTests : IClassFixture<SharedDuckDbFixtu
     public async Task TheAnchor_MovesTheRange_AndAnEmptyRangeIsNotAnUncollectedServer()
     {
         var service = new LocalDataService(_duckDb);
-        var today = DateTime.UtcNow.Date;
+        var utcNow = DateTime.UtcNow; // #5496: one reading for the day and the seeded run
+        var today = utcNow.Date;
         var tenDaysAgo = today.AddDays(-10);
 
-        await SeedRunAsync(Truncate(DateTime.UtcNow), "wait_stats", "SUCCESS", error: null);
+        await SeedRunAsync(Truncate(utcNow), "wait_stats", "SUCCESS", error: null);
 
         /* A range this server has no history for, on a server that HAS collected. Same zero rows as the
            never-collected branch, and it must not reach for the same word. */

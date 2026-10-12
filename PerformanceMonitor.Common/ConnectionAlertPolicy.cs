@@ -62,13 +62,23 @@ public static class ConnectionAlertPolicy
     /// Null while the server is down means the outage has never been announced (a restart lost the state, or
     /// the original edge fired before re-fire was enabled) — the re-fire path treats that as due now.</param>
     /// <param name="nowUtc">The caller's clock, injected so the decision pins under test.</param>
+    /// <param name="retryDueUtc">#4795: when a down alert that reached no channel is due again, or null when
+    /// none is pending. Callers record it from the delivery report (<c>FailedSendRetryTracker</c>) and clear it
+    /// on <see cref="ConnectionAlertDecision.Restored"/>. A standing outage at or past this time is
+    /// <see cref="ConnectionAlertDecision.StillDown"/> WHATEVER the re-fire setting says: with re-fire off (the
+    /// shipped default) a "Server Unreachable" that no channel delivered has nothing else to bring it back.
+    /// Null, or a time still ahead, leaves every rule above exactly as it was — a delivered alert is never
+    /// repeated by this. A caller that hands its send off without waiting for the answer passes null while that
+    /// send is still running: the due time only moves once the answer is recorded, and until then a due time in
+    /// the past would send the retry again on every call.</param>
     public static ConnectionAlertDecision Decide(
         bool? previousOnline,
         bool online,
         bool alertWhenAlreadyDownAtFirstSight,
         TimeSpan? refireInterval,
         DateTime? lastDownAlertUtc,
-        DateTime nowUtc)
+        DateTime nowUtc,
+        DateTime? retryDueUtc = null)
     {
         if (previousOnline is null)
         {
@@ -91,7 +101,8 @@ public static class ConnectionAlertPolicy
            AG re-fire needs the identical "non-positive is off, no stamp is due now" rules, and a second
            hand-written copy of them is how the two would eventually disagree. */
         if (previousOnline == false && !online
-            && AlertRefireWindow.IsDue(refireInterval, lastDownAlertUtc, nowUtc))
+            && (AlertRefireWindow.IsDue(refireInterval, lastDownAlertUtc, nowUtc)
+                || (retryDueUtc is DateTime due && nowUtc >= due)))
         {
             return ConnectionAlertDecision.StillDown;
         }

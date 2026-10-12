@@ -78,7 +78,10 @@ public sealed class QueryStoreIntervalEndRungTests : IDisposable
     public async Task AFreshFile_EndsQueryStoreStatsWithTheIntervalEnd_AfterTheTier2Pair()
     {
         var dbPath = Path.Combine(_tempDir, "lite-fresh.duckdb");
-        await new DuckDbInitializer(dbPath).InitializeAsync();
+        using (var initializer = new DuckDbInitializer(dbPath))
+        {
+            await initializer.InitializeAsync();
+        }
 
         using var conn = new DuckDBConnection($"Data Source={dbPath}");
         await conn.OpenAsync();
@@ -108,7 +111,10 @@ public sealed class QueryStoreIntervalEndRungTests : IDisposable
     {
         var dbPath = Path.Combine(_tempDir, "lite-v65.duckdb");
 
-        await new DuckDbInitializer(dbPath).InitializeAsync();
+        using (var initializer = new DuckDbInitializer(dbPath))
+        {
+            await initializer.InitializeAsync();
+        }
 
         using (var conn = new DuckDBConnection($"Data Source={dbPath}"))
         {
@@ -136,7 +142,7 @@ public sealed class QueryStoreIntervalEndRungTests : IDisposable
             Assert.Equal(0L, await CountAsync(conn, $"SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'query_store_stats' AND column_name = '{Column}'"));
         }
 
-        var upgraded = new DuckDbInitializer(dbPath);
+        using var upgraded = new DuckDbInitializer(dbPath);
         await upgraded.InitializeAsync();
         await upgraded.CreateArchiveViewsAsync();
 

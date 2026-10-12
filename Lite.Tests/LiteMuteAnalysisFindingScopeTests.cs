@@ -20,14 +20,14 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #4734: <c>mute_analysis_finding</c> resolves <c>server_name</c> to exactly ONE server, as Darling's twin does, not
-/// with the read resolver's first-match rule. The mute persists a row against whichever server the name resolves to,
-/// so a name that two registrations answer to used to mute the pattern on whichever the enabled list held first,
-/// echoing the caller's spelling rather than the server it had chosen. These pins hold the pure decision
-/// (<c>ResolveMuteScope</c>: the enabled servers in, the scope or the refusal out), the answer shapes of the two
-/// refusals, and that the tool writes only through that decision. The read resolver's own first-match rule is
-/// untouched (every read tool uses it); the tool-level cases that drive <c>MuteAnalysisFinding</c> against a real
-/// registry and a real store are in <c>McpMuteReportsWhatItMatchedTests</c>.
+/// #4734: <c>mute_analysis_finding</c> resolves <c>server_name</c> to exactly ONE server, as Darling's twin does, with
+/// the same rule the read tools use (a name several servers answer to is refused, not answered for the first one).
+/// The mute persists a row against whichever server the name resolves to, so a name that two registrations answer to
+/// used to mute the pattern on whichever the enabled list held first, echoing the caller's spelling rather than the
+/// server it had chosen. These pins hold the pure decision (<c>ResolveMuteScope</c>: the enabled servers in, the
+/// scope or the refusal out), the answer shapes of the two refusals, and that the tool writes only through that
+/// decision; the tool-level cases that drive <c>MuteAnalysisFinding</c> against a real registry and a real store are
+/// in <c>McpMuteReportsWhatItMatchedTests</c>.
 /// </summary>
 public sealed class LiteMuteAnalysisFindingScopeTests
 {
@@ -181,6 +181,22 @@ public sealed class LiteMuteAnalysisFindingScopeTests
         Assert.Equal("ambiguous", (string)answer["status"]!);
         Assert.Equal("exact", (string)answer["matched_by"]!);
         Assert.Equal(4, answer["candidates"]!.AsArray().Count);
+    }
+
+    [Fact]
+    public void TheMachineNameInUpperCase_PicksThePlainServerForARead_AndTiesForTheMute()
+    {
+        /* One name, one fleet. The read tools also take the storage name in another letter case; the write keeps the
+           exact-case tier, because the same rule chooses what a delete removes. */
+        var fleet = MachineWithSiblings();
+
+        var (read, readError) = ServerResolver.ResolveIn(fleet, "BILLING");
+        var mute = McpAnalysisTools.ResolveMuteScope(fleet, "BILLING", Hash);
+
+        Assert.Null(readError);
+        Assert.Equal(IdOf(Server("billing")), read.ServerId);
+        Assert.Null(mute.ServerId);
+        Assert.Equal("ambiguous", (string)JsonNode.Parse(mute.Answer!)!["status"]!);
     }
 
     [Fact]
@@ -359,8 +375,9 @@ public sealed class LiteMuteAnalysisFindingScopeTests
 
     /// <summary>The pure decision is only worth pinning if the tool writes through it: the tool resolves with
     /// <c>ResolveMuteScope</c>, reads the enabled list once, returns its refusal before any write, and echoes the
-    /// resolved label in the answer — never the caller's raw <c>server_name</c>, never the read resolver's
-    /// first-match.</summary>
+    /// resolved label in the answer — never the caller's raw <c>server_name</c>. The match is the write rule (exact
+    /// case on the storage name, then the shared tiers), not the read tools' rule, which also takes the storage name
+    /// in another letter case.</summary>
     [Fact]
     public void TheTool_ResolvesThroughTheOneServerRule_BeforeAnyWrite_AndEchoesTheResolvedLabel()
     {

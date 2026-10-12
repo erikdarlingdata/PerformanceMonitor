@@ -436,4 +436,91 @@ public sealed class DatabaseWatermarkCacheRunnerLiveTests
         cache.Seed(ServerId, Db, readBeforeBackfill, WatermarkPolicy.ReadFloor(T0)!.Value, T0, captured);
         await AssertNextReadsStoreOnceAsync(rig, server, token);
     }
+
+    /// <summary>
+    /// #4749: a value read from the store keeps its witness, so a database whose newest row is recent but has
+    /// had no batch since the seed hits the cache until that row leaves the floor. The seed is taken 2h30m after
+    /// the batch: the row leaves the 3-hour floor at ct0 + 3h, 30 minutes into the 1-hour reseed interval, so
+    /// only the witness decides that miss. A seed taken at the batch itself would let the reseed interval end
+    /// before the floor could.
+    /// </summary>
+    [Fact]
+    public async Task K_ASeedReadFromTheStore_KeepsItsWitness_SoAQuietDatabaseHitsUntilItsRowLeavesTheFloor()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #4749 pins.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var server = MakeServer();
+        var ct0 = T0;
+        var rows = new List<QueryStoreCollector.Row> { Row(1, ct0.AddMinutes(-5)) };
+
+        /* No cache entry exists yet, so no batch advances one: the seed read below is the cache's only source. */
+        await WriteAsync(rig.Runner, rig.Connection, server, rows, ct0, token);
+
+        var seededAt = ct0 + TimeSpan.FromMinutes(150);
+        rig.Logger.Provider.Reset();
+        var seeded = await ResolveAsync(rig.Runner, server, seededAt, token);
+        Assert.Equal(1, Reads(rig.Logger));
+        Assert.NotNull(seeded);
+        Assert.Equal(await StoreAsync(rig.Runner, seededAt, token), seeded);
+
+        var quiet = seededAt + TimeSpan.FromMinutes(5);
+        rig.Logger.Provider.Reset();
+        var cached = await ResolveAsync(rig.Runner, server, quiet, token);
+        Assert.Equal(0, Reads(rig.Logger));
+        Assert.Equal(seeded, cached);
+        Assert.Equal(await StoreAsync(rig.Runner, quiet, token), cached);
+
+        /* At ct0 + 3h the row's collection_time equals the floor, which the store's collection_time > floor leaves out. */
+        var boundary = ct0 + TimeSpan.FromHours(3);
+        rig.Logger.Provider.Reset();
+        var atBoundary = await ResolveAsync(rig.Runner, server, boundary, token);
+        Assert.Equal(1, Reads(rig.Logger));
+        Assert.Null(atBoundary);
+        Assert.Equal(await StoreAsync(rig.Runner, boundary, token), atBoundary);
+    }
+
+    /// <summary>
+    /// #4749: the witness is the newest collection_time among the rows AT the maximum value. Batches A and B
+    /// hold the same value and batch C, the newest, holds a lower one. At ct0 + 3h batch A is at the floor but
+    /// batch B still holds the value, so a witness taken from the oldest such row would miss. At ct0 + 3h20m
+    /// batch B is at the floor and the store's read sees only C's lower value, so a witness taken from the
+    /// newest batch of any value would still hit and serve the stale one.
+    /// </summary>
+    [Fact]
+    public async Task L_TheSeededWitness_IsTheNewestBatchAtTheMaximumValue_NotTheNewestBatchOrTheOldest()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #4749 pins.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var server = MakeServer();
+        var ct0 = T0;
+        var value = ct0.AddMinutes(-5);
+
+        await WriteAsync(rig.Runner, rig.Connection, server, new List<QueryStoreCollector.Row> { Row(1, value) }, ct0, token);
+        await WriteAsync(rig.Runner, rig.Connection, server, new List<QueryStoreCollector.Row> { Row(2, value) }, ct0.AddMinutes(20), token);
+        await WriteAsync(rig.Runner, rig.Connection, server, new List<QueryStoreCollector.Row> { Row(3, value.AddHours(-1)) }, ct0.AddMinutes(30), token);
+
+        var seededAt = ct0 + TimeSpan.FromMinutes(150);
+        rig.Logger.Provider.Reset();
+        var seeded = await ResolveAsync(rig.Runner, server, seededAt, token);
+        Assert.Equal(1, Reads(rig.Logger));
+        Assert.NotNull(seeded);
+        Assert.Equal(await StoreAsync(rig.Runner, seededAt, token), seeded);
+
+        var oldestGone = ct0 + TimeSpan.FromHours(3);
+        rig.Logger.Provider.Reset();
+        var stillHeld = await ResolveAsync(rig.Runner, server, oldestGone, token);
+        Assert.Equal(0, Reads(rig.Logger));
+        Assert.Equal(seeded, stillHeld);
+        Assert.Equal(await StoreAsync(rig.Runner, oldestGone, token), stillHeld);
+
+        var newestGone = ct0 + TimeSpan.FromMinutes(200);
+        rig.Logger.Provider.Reset();
+        var lower = await ResolveAsync(rig.Runner, server, newestGone, token);
+        Assert.Equal(1, Reads(rig.Logger));
+        Assert.NotNull(lower);
+        Assert.True(lower < seeded);
+        Assert.Equal(await StoreAsync(rig.Runner, newestGone, token), lower);
+    }
 }

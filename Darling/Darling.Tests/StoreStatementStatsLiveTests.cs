@@ -54,6 +54,13 @@ public sealed class StoreStatementStatsLiveTests
     private const string PlainOwnerPassword = "PlainOwnerLiteral3899";
     private const string ScrubPassword = "ScrubLiteral3899";
 
+    /* #5602: roles and databases are cluster-wide, so each run names its own and no other test can see them. */
+    private static readonly string RunSuffix = Guid.NewGuid().ToString("N")[..8];
+    private static readonly string Reader = "pgss_reader_" + RunSuffix;
+    private static readonly string Outsider = "pgss_outsider_" + RunSuffix;
+    private static readonly string PlainOwner = "pgss_plainowner_" + RunSuffix;
+    private static readonly string PlainDb = "pgss_plain_" + RunSuffix;
+
     [Fact]
     public async Task OnTheProductsOwnConf_StatementsRankByRole_AndARolePasswordNeverReachesTheView_Gated()
     {
@@ -88,22 +95,22 @@ public sealed class StoreStatementStatsLiveTests
                 Assert.Equal("off", await ScalarAsync<string>(c, "SHOW pg_stat_statements.track_utility", ct));
 
                 await ExecAsync(c, "CREATE SCHEMA IF NOT EXISTS config", ct);
-                await ExecAsync(c, $"CREATE ROLE pgss_reader LOGIN PASSWORD '{ReaderPassword}'", ct);
-                await ExecAsync(c, $"CREATE ROLE pgss_outsider LOGIN PASSWORD '{OutsiderPassword}'", ct);
+                await ExecAsync(c, $"CREATE ROLE {Reader} LOGIN PASSWORD '{ReaderPassword}'", ct);
+                await ExecAsync(c, $"CREATE ROLE {Outsider} LOGIN PASSWORD '{OutsiderPassword}'", ct);
 
                 /* Schema USAGE for both, as provisioning gives the product's roles: the outsider's refusal below
                    must come from the missing EXECUTE grant, not from the schema. */
-                await ExecAsync(c, "GRANT USAGE ON SCHEMA config TO pgss_reader, pgss_outsider", ct);
+                await ExecAsync(c, $"GRANT USAGE ON SCHEMA config TO {Reader}, {Outsider}", ct);
 
                 Assert.Equal(
                     StoreStatementStats.SetupOutcome.Ready,
-                    await StoreStatementStats.EnsureAsync(c, "config", ["pgss_reader", "pgss_absent"], NullLogger.Instance, ct));
+                    await StoreStatementStats.EnsureAsync(c, "config", [Reader, "pgss_absent"], NullLogger.Instance, ct));
 
                 /* Both CREATE ROLEs above carried a password literal, and neither was recorded. */
                 Assert.Equal(0L, await CountRecordedAsync(c, "Literal3899", ct));
             }
 
-            var readerCs = new NpgsqlConnectionStringBuilder(ownerCs.ConnectionString) { Username = "pgss_reader", Password = ReaderPassword };
+            var readerCs = new NpgsqlConnectionStringBuilder(ownerCs.ConnectionString) { Username = Reader, Password = ReaderPassword };
             await using var reader = NpgsqlDataSource.Create(readerCs.ConnectionString);
             await using (var r = await reader.OpenConnectionAsync(ct))
             {
@@ -121,14 +128,14 @@ public sealed class StoreStatementStatsLiveTests
                 var root0 = doc.RootElement;
                 var statements = root0.GetProperty("statements").EnumerateArray().ToList();
                 var probe = Assert.Single(statements, s => QueryOf(s).Contains("pgss_probe_marker", StringComparison.Ordinal));
-                Assert.Equal("pgss_reader", probe.GetProperty("role").GetString());
+                Assert.Equal(Reader, probe.GetProperty("role").GetString());
                 Assert.Equal(3L, probe.GetProperty("calls").GetInt64());
                 Assert.Contains("$1 AS pgss_probe_marker", QueryOf(probe), StringComparison.Ordinal);
                 Assert.Equal(JsonValueKind.String, probe.GetProperty("query_id").ValueKind);
                 Assert.True(long.TryParse(probe.GetProperty("query_id").GetString(), out _));
                 Assert.DoesNotContain(statements, s => QueryOf(s).Contains("Literal3899", StringComparison.Ordinal));
                 Assert.Contains(root0.GetProperty("by_role").EnumerateArray(), row => row.GetProperty("role").GetString() == "owner");
-                Assert.Contains(root0.GetProperty("by_role").EnumerateArray(), row => row.GetProperty("role").GetString() == "pgss_reader");
+                Assert.Contains(root0.GetProperty("by_role").EnumerateArray(), row => row.GetProperty("role").GetString() == Reader);
                 Assert.False(string.IsNullOrEmpty(root0.GetProperty("stats_since").GetString()));
                 Assert.False(root0.GetProperty("utility_statements_tracked").GetBoolean());
                 Assert.False(root0.GetProperty("connected_as_owner").GetBoolean());
@@ -146,7 +153,7 @@ public sealed class StoreStatementStatsLiveTests
             }
 
             /* A role outside the grant is told what it lacks, from the catalog, not handed an error. */
-            var outsiderCs = new NpgsqlConnectionStringBuilder(ownerCs.ConnectionString) { Username = "pgss_outsider", Password = OutsiderPassword };
+            var outsiderCs = new NpgsqlConnectionStringBuilder(ownerCs.ConnectionString) { Username = Outsider, Password = OutsiderPassword };
             await using (var outsider = NpgsqlDataSource.Create(outsiderCs.ConnectionString))
             {
                 var denied = await DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(outsider);
@@ -187,7 +194,7 @@ public sealed class StoreStatementStatsLiveTests
             await using (var c = await OpenAsync(ownerCs.ConnectionString, ct))
             {
                 await ExecAsync(c, "SET pg_stat_statements.track_utility = on", ct);
-                await ExecAsync(c, $"ALTER ROLE pgss_outsider PASSWORD '{ScrubPassword}'", ct);
+                await ExecAsync(c, $"ALTER ROLE {Outsider} PASSWORD '{ScrubPassword}'", ct);
                 await ExecAsync(c, "RESET pg_stat_statements.track_utility", ct);
                 Assert.Equal(1L, await CountRecordedAsync(c, ScrubPassword, ct));
             }
@@ -226,11 +233,11 @@ public sealed class StoreStatementStatsLiveTests
                 await ExecAsync(c, "SET pg_stat_statements.track_utility = on", ct);
                 Assert.Equal(
                     StoreStatementStats.SetupOutcome.Ready,
-                    await StoreStatementStats.EnsureAsync(c, "config", ["pgss_reader"], firstPass, ct));
+                    await StoreStatementStats.EnsureAsync(c, "config", [Reader], firstPass, ct));
                 Assert.Equal(0L, await CountRecordedAsync(c, ScrubPassword, ct));
                 Assert.Equal(
                     StoreStatementStats.SetupOutcome.Ready,
-                    await StoreStatementStats.EnsureAsync(c, "config", ["pgss_reader"], secondPass, ct));
+                    await StoreStatementStats.EnsureAsync(c, "config", [Reader], secondPass, ct));
             }
 
             Assert.Contains("Warning: Statement statistics: pg_stat_statements.track_utility is on", firstPass.Joined, StringComparison.Ordinal);
@@ -244,29 +251,29 @@ public sealed class StoreStatementStatsLiveTests
                and what fixes it, until pg_read_all_stats is granted. */
             await using (var c = await OpenAsync(ownerCs.ConnectionString, ct))
             {
-                await ExecAsync(c, $"CREATE ROLE pgss_plainowner LOGIN NOSUPERUSER PASSWORD '{PlainOwnerPassword}'", ct);
-                await ExecAsync(c, "CREATE DATABASE pgss_plain OWNER pgss_plainowner", ct);
+                await ExecAsync(c, $"CREATE ROLE {PlainOwner} LOGIN NOSUPERUSER PASSWORD '{PlainOwnerPassword}'", ct);
+                await ExecAsync(c, $"CREATE DATABASE {PlainDb} OWNER {PlainOwner}", ct);
             }
 
-            var plainSuperCs = new NpgsqlConnectionStringBuilder(ownerCs.ConnectionString) { Database = "pgss_plain" };
+            var plainSuperCs = new NpgsqlConnectionStringBuilder(ownerCs.ConnectionString) { Database = PlainDb };
             await using (var c = await OpenAsync(plainSuperCs.ConnectionString, ct))
             {
                 await ExecAsync(c, "CREATE EXTENSION pg_stat_statements", ct);
-                await ExecAsync(c, "CREATE SCHEMA config AUTHORIZATION pgss_plainowner", ct);
-                await ExecAsync(c, "GRANT USAGE ON SCHEMA config TO pgss_reader", ct);
+                await ExecAsync(c, $"CREATE SCHEMA config AUTHORIZATION {PlainOwner}", ct);
+                await ExecAsync(c, $"GRANT USAGE ON SCHEMA config TO {Reader}", ct);
                 await ScalarAsync<int>(c, "SELECT 3899 AS pgss_hidden_marker", ct);
             }
 
-            var plainOwnerCs = new NpgsqlConnectionStringBuilder(plainSuperCs.ConnectionString) { Username = "pgss_plainowner", Password = PlainOwnerPassword };
+            var plainOwnerCs = new NpgsqlConnectionStringBuilder(plainSuperCs.ConnectionString) { Username = PlainOwner, Password = PlainOwnerPassword };
             await using (var c = await OpenAsync(plainOwnerCs.ConnectionString, ct))
             {
                 Assert.False(await ScalarAsync<bool>(c, "SELECT pg_catalog.pg_has_role(current_user, 'pg_read_all_settings', 'USAGE')", ct));
                 Assert.Equal(
                     StoreStatementStats.SetupOutcome.Ready,
-                    await StoreStatementStats.EnsureAsync(c, "config", ["pgss_reader"], NullLogger.Instance, ct));
+                    await StoreStatementStats.EnsureAsync(c, "config", [Reader], NullLogger.Instance, ct));
             }
 
-            var plainReaderCs = new NpgsqlConnectionStringBuilder(readerCs.ConnectionString) { Database = "pgss_plain" };
+            var plainReaderCs = new NpgsqlConnectionStringBuilder(readerCs.ConnectionString) { Database = PlainDb };
             await using (var plainReader = NpgsqlDataSource.Create(plainReaderCs.ConnectionString))
             {
                 using (var doc = JsonDocument.Parse(await DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(plainReader, top: 1000, full_text: true)))
@@ -277,7 +284,7 @@ public sealed class StoreStatementStatsLiveTests
 
                 await using (var c = await OpenAsync(ownerCs.ConnectionString, ct))
                 {
-                    await ExecAsync(c, "GRANT pg_read_all_stats TO pgss_plainowner", ct);
+                    await ExecAsync(c, $"GRANT pg_read_all_stats TO {PlainOwner}", ct);
                 }
 
                 using (var doc = JsonDocument.Parse(await DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(plainReader, top: 1000, full_text: true)))

@@ -42,6 +42,12 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingUpgradeInstallTreeWaitTests
 {
+    private static readonly TimeSpan PowerShellExitLimit = TimeSpan.FromSeconds(180);
+
+    /// <summary>How long the process the wait must refuse on stays alive (#5459): the longest the PowerShell child may
+    /// run, plus two minutes. The test kills it as soon as it is done with it.</summary>
+    private static readonly int HolderLifetimeSeconds = (int)PowerShellExitLimit.TotalSeconds + 120;
+
     private static string DeployScript => ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
 
     /// <summary>The shell this pin runs the extracted function under: Windows PowerShell 5.1 - the
@@ -142,13 +148,18 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
                 proc.WaitForExit(5_000);
             }
 
-            /* Bound (1s) shorter than the process's own lifetime (30s): it must refuse to wait forever and
-               return the still-running process instead. Killed in a finally so the test leaves nothing
-               behind even if an assertion above it fails first. */
+            /* Bound (1s) shorter than the process's own lifetime: it must refuse to wait forever and return the
+               still-running process instead. Killed in a finally so the test leaves nothing behind even if an
+               assertion above it fails first.
+
+               #5459: the holder used to live 30 s, but a PowerShell 5.1 that starts cold on a loaded runner takes
+               most of a minute before its first poll, so the holder could be gone by then and the wait found
+               nothing to refuse on. It now outlives the longest the child may run, so the result no longer
+               depends on how fast PowerShell starts. */
             Process? holder = null;
             try
             {
-                holder = StartUnder(sleeperExe, SleepArguments(30));
+                holder = StartUnder(sleeperExe, SleepArguments(HolderLifetimeSeconds));
                 var stillHolding = RunWait(pwsh!, resolvedRoot, waitSeconds: 1, pollSeconds: 1);
                 Assert.NotEmpty(stillHolding);
                 Assert.Contains(stillHolding, name => name.Contains(SleeperImageName, StringComparison.OrdinalIgnoreCase));
@@ -318,8 +329,19 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
             var stdoutTask = process!.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
             /* Waits comfortably longer than either bound this test drives it with, so the process's own
-               poll loop is what decides the outcome, not a race against this timeout. */
-            Assert.True(process.WaitForExit(60_000), "pwsh did not exit within 60s running the extracted wait function.");
+               poll loop is what decides the outcome, not a race against this timeout. 180 s, the same limit
+               the deploy tests use (PowerShellExitLimit): on a loaded Windows runner, Windows PowerShell
+               5.1's start and module load alone can take most of a minute. */
+            var exited = process.WaitForExit(PowerShellExitLimit);
+            if (!exited)
+            {
+                try { process.Kill(entireProcessTree: true); }
+                catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
+                {
+                    /* Already gone between the timeout and the kill. Nothing to do. */
+                }
+            }
+            Assert.True(exited, $"pwsh did not exit within {PowerShellExitLimit.TotalSeconds:0} seconds running the extracted wait function.");
 
             var stdout = stdoutTask.GetAwaiter().GetResult();
             var stderr = stderrTask.GetAwaiter().GetResult();

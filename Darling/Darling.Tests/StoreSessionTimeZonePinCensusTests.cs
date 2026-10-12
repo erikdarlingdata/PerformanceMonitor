@@ -40,6 +40,7 @@ namespace Darling.Tests;
 /// inline on the <c>NpgsqlDataSource.Create(...)</c> line itself, so every STORE site the scan finds must show
 /// the pin on its own line, with no indirection rule left to fool.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class StoreSessionTimeZonePinCensusTests
 {
     /* Measured on dev at #4277: 562 .cs files across the four store-side projects, 29 call sites (25 STORE,
@@ -67,6 +68,9 @@ public sealed class StoreSessionTimeZonePinCensusTests
            connection, not the store's. */
         "DarlingWorker.cs:ReadPgStatementTextAsync",
         "DarlingWorker.cs:RunTestHypotheticalIndexAsync",
+
+        /* The RDS endpoint check's fresh unpooled login to a MONITORED target (runtime.ConnectionString), never the store. */
+        "RdsEndpointVerifier.cs:ProbeLoginAsync",
     };
 
     [Fact]

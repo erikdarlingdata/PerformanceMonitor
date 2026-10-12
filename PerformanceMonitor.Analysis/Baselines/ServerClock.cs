@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Globalization;
+using System.Threading;
 
 namespace PerformanceMonitor.Analysis.Baselines;
 
@@ -31,6 +33,10 @@ public sealed class ServerClock
 {
     private readonly TimeZoneInfo? _zone;
     private readonly int _fixedOffsetMinutes;
+
+    /* The fixed-offset zone AsTimeZone hands out, built on first use and kept: a chart asks for the zone on
+       every render pass, and a custom zone is an allocation the first call pays for and the rest reuse. */
+    private TimeZoneInfo? _fixedZone;
 
     private ServerClock(TimeZoneInfo? zone, int fixedOffsetMinutes)
     {
@@ -64,6 +70,41 @@ public sealed class ServerClock
         }
 
         return utcOffsetMinutes.HasValue ? FixedOffset(utcOffsetMinutes.Value) : Utc;
+    }
+
+    /// <summary>
+    /// This clock as a <see cref="TimeZoneInfo"/>, for code that renders through a zone and cannot take a
+    /// <see cref="ServerClock"/> (the shared chart project does not reference this one): the server's own zone
+    /// when it resolved, else a custom zone at the fixed offset, else <see cref="TimeZoneInfo.Utc"/>. The
+    /// fixed-offset zone is built once per instance. An offset past the 14 hours a zone can hold (a stored value
+    /// no real server reports) is held at 14 hours rather than thrown.
+    /// </summary>
+    public TimeZoneInfo AsTimeZone()
+    {
+        if (_zone is not null)
+        {
+            return _zone;
+        }
+
+        if (_fixedOffsetMinutes == 0)
+        {
+            return TimeZoneInfo.Utc;
+        }
+
+        var cached = Volatile.Read(ref _fixedZone);
+        if (cached is not null)
+        {
+            return cached;
+        }
+
+        const int maxMinutes = 14 * 60;
+        var offset = TimeSpan.FromMinutes(Math.Clamp(_fixedOffsetMinutes, -maxMinutes, maxMinutes));
+        var sign = offset < TimeSpan.Zero ? "-" : "+";
+        var name = string.Create(CultureInfo.InvariantCulture, $"UTC{sign}{offset.Duration().Hours:00}:{offset.Duration().Minutes:00}");
+        var created = TimeZoneInfo.CreateCustomTimeZone(name, offset, name, name);
+
+        /* Two threads can race to the first call; the loser's zone is dropped so every caller sees one instance. */
+        return Interlocked.CompareExchange(ref _fixedZone, created, null) ?? created;
     }
 
     /// <summary>Minutes the server's clock is ahead of UTC at the instant <paramref name="utc"/> (naive UTC).</summary>

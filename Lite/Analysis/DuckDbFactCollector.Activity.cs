@@ -44,8 +44,10 @@ SELECT
     SUM(delta_worker_time)::BIGINT AS total_cpu_us,
     SUM(delta_logical_reads)::BIGINT AS total_reads,
     SUM(delta_spills)::BIGINT AS total_spills,
-    MAX(max_dop) AS max_dop,
-    LEFT(MAX(query_text), 200) AS query_text
+    /* #5320: no statement text. The fact is keyed on the query hash and carries only numbers, so the read fetched a
+       200-character cut of the text for nothing, and a cut text read here would have been judged as a prefix. The text is
+       read, judged whole and then cut where an answer prints it (the BAD_ACTOR drill-down). */
+    MAX(max_dop) AS max_dop
 FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -74,7 +76,6 @@ LIMIT 5";
                 var totalReads = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7));
                 var totalSpills = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8));
                 var maxDop = reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9));
-                var queryText = reader.IsDBNull(10) ? "" : reader.GetString(10);
 
                 // Skip low-impact queries — need meaningful per-execution cost
                 if (avgCpuMs < 10 && avgReads < 1000) continue;

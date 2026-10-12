@@ -124,9 +124,13 @@ public static class DarlingPgCpuUtilizationReader
     /// Every reading newer than <paramref name="afterUtc"/>, OLDEST FIRST, for the High CPU persistence
     /// gate (#3282).
     ///
-    /// <para><b>Why the gate cannot just re-read the latest row here, the way the SQL Server side does.</b>
-    /// On SQL Server the alert sweep (30 s) is faster than the sample (about 60 s), so every sample is seen
-    /// by at least one sweep and "latest row, counted once" loses nothing. Performance Insights is the
+    /// <para><b>Why the gate cannot just re-read the latest row here.</b>
+    /// The SQL Server side used to read only the latest row (#5642 changed that). Its sweep (30 s) is faster
+    /// than the sample (about 60 s), so a steady stream is seen sample by sample, but a collection that lands
+    /// several samples between two sweeps (a collector that fell behind, a slower sweep) used to have only the
+    /// newest counted, so it lost the rest and took three collection passes to reach three samples. The shared
+    /// engine now feeds every new sample of a recent list through the gate, oldest first, for the samples
+    /// collected while the service was watching. Performance Insights is the
     /// opposite shape: <c>pg_cpu_utilization</c> is a five-minute collector ingesting 60-second data points,
     /// so five samples land at once and four of every five would never be counted. Requiring three
     /// consecutive breaching samples would then take three BATCHES — about fifteen minutes — which is a

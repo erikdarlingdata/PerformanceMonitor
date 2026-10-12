@@ -19,6 +19,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>#4660: the orphaned per-database state prune runs at most hourly per server, through one shared rule.</summary>
+[Trait("Reads", "Lite")]
 public class OrphanStatePruneTests
 {
     private static readonly DateTime Now = new(2026, 9, 28, 12, 0, 0, DateTimeKind.Utc);

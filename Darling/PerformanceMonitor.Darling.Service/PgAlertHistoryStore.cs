@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -78,8 +79,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", connection) { Comma
             command.Parameters.AddWithValue(record.NotificationType);
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)record.SendError ?? DBNull.Value });
             command.Parameters.AddWithValue(record.Muted);
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)record.DetailText ?? DBNull.Value });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)record.ContextJson ?? DBNull.Value });
+            /* #4348/#5320 Layer 0b: the alert text and its context are judged where they are written, because the
+               source rows an alert was built from may predate the collection-time filter. Clean text is the same
+               instance, so the stored row is unchanged. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)DerivedStoreScrub.Text(record.DetailText) ?? DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)DerivedStoreScrub.Json(record.ContextJson) ?? DBNull.Value });
 
             await command.ExecuteNonQueryAsync();
 

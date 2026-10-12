@@ -59,9 +59,10 @@ public sealed class ConfigChangeTraceAnchorTests
         Assert.Contains("<= $3", sql, StringComparison.Ordinal);
         Assert.DoesNotContain(">= $2", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("< $3", sql, StringComparison.Ordinal);
-        /* Oldest first, so a caller reading the list in order reads the change history in order. */
-        Assert.EndsWith("ORDER BY event_time_utc", sql.TrimEnd(), StringComparison.Ordinal);
-        Assert.DoesNotContain("ORDER BY event_time_utc DESC", sql, StringComparison.Ordinal);
+        /* Oldest first by the server-local time, and ServerLocalTimes.TraceLinesInWindow re-sorts (stably) by the
+           converted UTC time, so a caller reading the list in order reads the change history in order. */
+        Assert.EndsWith("ORDER BY event_time_local", sql.TrimEnd(), StringComparison.Ordinal);
+        Assert.DoesNotContain("ORDER BY event_time_local DESC", sql, StringComparison.Ordinal);
         /* Only what the join needs. */
         Assert.Contains("dte.text_data", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("severity", sql, StringComparison.Ordinal);
@@ -73,25 +74,29 @@ public sealed class ConfigChangeTraceAnchorTests
     {
         var sql = DarlingAnalysisService.ReconfigureTraceLinesForAttributionSql;
 
-        /* The offset CTE, in the exact shape DarlingDefaultTraceReader.EventsByWindowSql carries: the newest
-           collected non-NULL offset, or 0 — and a single row, so the cross join keeps every event. */
-        Assert.Contains("WITH svr AS (", sql, StringComparison.Ordinal);
-        Assert.Contains("SELECT COALESCE((", sql, StringComparison.Ordinal);
+        /* The newest collected non-NULL snapshot, its zone id from the SAME row (#4821), and a single svr row
+           carrying the offset (0 when none is collected yet) and the zone, so the cross join keeps every event. */
+        Assert.Contains("WITH newest AS (", sql, StringComparison.Ordinal);
         Assert.Contains("FROM server_properties AS sp", sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT sp.utc_offset_minutes, sp.time_zone_id", sql, StringComparison.Ordinal);
         Assert.Contains("AND   sp.utc_offset_minutes IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY sp.collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 1), 0) AS offset_minutes", sql, StringComparison.Ordinal);
+        Assert.Contains("svr AS (", sql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE((SELECT utc_offset_minutes FROM newest), 0) AS offset_minutes", sql, StringComparison.Ordinal);
+        Assert.Contains("(SELECT time_zone_id FROM newest) AS time_zone_id", sql, StringComparison.Ordinal);
 
-        /* Three sites, each the same expression: the value returned and the two bounds it is selected by. */
+        /* The event time comes back RAW: ServerLocalTimes.TraceLinesInWindow converts each line with the server's
+           ServerClock (#4821). The newest offset survives only in the two span bounds, an hour wider than the
+           span, as a rough first filter. */
         var deSkew = new Regex(@"dte\.event_time\s*-\s*make_interval\s*\(\s*mins\s*=>\s*svr\.offset_minutes\s*\)");
-        Assert.Equal(3, deSkew.Matches(sql).Count);
-        Assert.Contains("dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc", sql, StringComparison.Ordinal);
-        Assert.Contains("AND   dte.event_time - make_interval(mins => svr.offset_minutes) > $2", sql, StringComparison.Ordinal);
-        Assert.Contains("AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3", sql, StringComparison.Ordinal);
+        Assert.Equal(2, deSkew.Matches(sql).Count);
+        Assert.Contains("dte.event_time AS event_time_local", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   dte.event_time - make_interval(mins => svr.offset_minutes) > $2 - interval '1 hour'", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'", sql, StringComparison.Ordinal);
 
-        /* And no bare read of the column survives anywhere in the statement. */
+        /* The one bare read of the column is that projection. */
         var bare = new Regex(@"dte\.event_time(?!\s*-\s*make_interval)");
-        Assert.Empty(bare.Matches(sql));
+        Assert.Single(bare.Matches(sql));
     }
 
     /* ───────────────────────── the join, from this assembly ───────────────────────── */

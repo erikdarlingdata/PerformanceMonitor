@@ -17,6 +17,7 @@ namespace Darling.Tests;
 /// brittle form it replaces; one that normalised too much would make a removed predicate pass, which is
 /// strictly worse than the brittleness. Neither shows up as a failure anywhere else.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class SqlTextPinTests
 {
     /// <summary>The exact #3212 rewrite: a table alias added, then the column qualified with it.</summary>

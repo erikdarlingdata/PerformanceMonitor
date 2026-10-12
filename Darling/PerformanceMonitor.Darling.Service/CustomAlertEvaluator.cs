@@ -17,6 +17,8 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
@@ -73,6 +75,24 @@ public sealed class CustomAlertEvaluator
     /// a restart simply restarts the window, which is the right bias for an integrity heuristic (no false alarm
     /// across a restart) and keeps the slice migration-free.</summary>
     private readonly ConcurrentDictionary<long, DateTime> _noDataSinceUtc = new();
+
+    /// <summary>
+    /// #4795: the longest a custom rule waits before it sends an alert again after every channel failed to deliver
+    /// it. A rule has no cooldown of its own, so this stands in for the cooldown a built-in alert has: it is the
+    /// cap on the 1, 2, 4 ... minute wait <see cref="FailedSendBackoff"/> hands back.
+    /// </summary>
+    private static readonly TimeSpan FailedSendRetryCap = TimeSpan.FromMinutes(15);
+
+    /// <summary>#4795: the run of failed sends per (rule, server) subject, keyed on the rule's metric name and the
+    /// server id. In memory only: a restart starts every streak over, and the first retry after a restart is
+    /// only ever earlier.</summary>
+    private readonly FailedSendBackoff _failedSends = new();
+
+    /// <summary>#4795: when each subject may be sent again after a send no channel took. An entry exists only for
+    /// a subject whose rising edge or last severity change was not delivered, and is gone once a send goes out,
+    /// the incident resolves or the process restarts. After a restart the table is empty, so the first due pass
+    /// sends whatever was left undelivered.</summary>
+    private readonly ConcurrentDictionary<(long RuleId, int ServerId), DateTime> _retryAtUtc = new();
 
     private DateTime _cacheRefreshedUtc = DateTime.MinValue;
 
@@ -284,11 +304,15 @@ public sealed class CustomAlertEvaluator
         }
 
         var now = DateTime.UtcNow;
+        /* #5525: the scope lookup is per server, not per rule, so it runs once here and every rule below reuses the answer (an empty list
+           means looked up, nothing unregistered). A fault answers with the storage name itself, the safe fallback the lookup documents. */
+        var unregistered = await ComposeServerScope.FindUnregisteredAsync(_viewer, new[] { storageName }, cancellationToken, _logger)
+            ?? (IReadOnlyList<string>)Array.Empty<string>();
         foreach (var (row, def, _) in applicable)
         {
             try
             {
-                await EvaluateRuleForServerAsync(row, def, serverId, storageName, displayName, now, rollups, coverage, composedSeconds, cancellationToken);
+                await EvaluateRuleForServerAsync(row, def, serverId, storageName, displayName, now, rollups, coverage, composedSeconds, unregistered, cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -322,22 +346,35 @@ public sealed class CustomAlertEvaluator
         return currentSeverity.ToString() != firedSeverity ? currentSeverity : null;
     }
 
+    /// <summary>
+    /// #4732: whether a (rule, server) subject is still waiting out its per-rule cadence, from the due time saved with
+    /// its state (<paramref name="nextDueAt"/>, null for a subject that has never run, which is never waiting). The
+    /// saved time is <c>now + interval</c> at the pass that stamped it, so a due time more than one
+    /// <paramref name="interval"/> ahead of <paramref name="now"/> can only come from a wall clock that stepped
+    /// backwards since (the state is persisted, so it survives a restart too). It counts as due now
+    /// (<see cref="CollectorCadence.ClampDue"/>); left raw it skipped the rule on every sweep until the clock caught
+    /// up. A due time up to one interval ahead is the normal wait and is honoured.
+    /// </summary>
+    internal static bool CadenceIsWaiting(DateTime? nextDueAt, DateTime now, TimeSpan interval) =>
+        nextDueAt is DateTime due && now < CollectorCadence.ClampDue(due, now, interval);
+
     private async Task EvaluateRuleForServerAsync(
         CustomAlertRule row, CustomAlertRuleDefinition def, int serverId, string storageName, string displayName,
-        DateTime now, RollupAvailability rollups, RollupCoverage coverage, int composedSeconds, CancellationToken cancellationToken)
+        DateTime now, RollupAvailability rollups, RollupCoverage coverage, int composedSeconds,
+        IReadOnlyList<string> unregistered, CancellationToken cancellationToken)
     {
         var state = await _stateStore.LoadAsync(row.Id, serverId, row.Version, cancellationToken);
 
         // Per-rule cadence over a single sweep: skip until this subject is due.
-        if (state.NextDueAt is DateTime due && now < due)
+        var intervalSeconds = def.EvaluationIntervalSeconds ?? _defaultIntervalSeconds;
+        if (CadenceIsWaiting(state.NextDueAt, now, TimeSpan.FromSeconds(intervalSeconds)))
         {
             return;
         }
 
-        var intervalSeconds = def.EvaluationIntervalSeconds ?? _defaultIntervalSeconds;
         var nextDue = now.AddSeconds(intervalSeconds);
 
-        var value = await RunScalarAsync(def, storageName, now, rollups, coverage, composedSeconds, cancellationToken);
+        var value = await RunScalarAsync(def, storageName, now, rollups, coverage, composedSeconds, unregistered, cancellationToken);
 
         if (value is null)
         {
@@ -353,30 +390,75 @@ public sealed class CustomAlertEvaluator
         // firing-eligible and must never be flagged as never-firing.
         _noDataSinceUtc.TryRemove(row.Id, out _);
 
-        var breaching = def.IsBreaching(value.Value);
+        var newState = await ApplyValueAsync(
+            row, def, serverId, displayName, now, nextDue, value.Value, state, cancellationToken);
+
+        await _stateStore.SaveAsync(row.Id, serverId, newState, cancellationToken);
+    }
+
+    /// <summary>
+    /// The decision half of one (rule, server) evaluation, split out of <see cref="EvaluateRuleForServerAsync"/> so a
+    /// test can drive it without a store: given the loaded <paramref name="state"/> and one observed
+    /// <paramref name="value"/>, it runs the persistence gate, sends the fire, the severity change or the resolve
+    /// the gate calls for, and returns the state to save. The caller does the loading and the saving.
+    /// </summary>
+    internal async Task<CustomAlertRuleState> ApplyValueAsync(
+        CustomAlertRule row, CustomAlertRuleDefinition def, int serverId, string displayName,
+        DateTime now, DateTime nextDue, double value, CustomAlertRuleState state, CancellationToken cancellationToken)
+    {
+        var breaching = def.IsBreaching(value);
         var evaluation = AlertPersistenceGate.Evaluate(state.Persistence, breaching, def.BreachSamples, def.ClearSamples);
         var newState = state with { Persistence = evaluation.State, LastEvaluatedAt = now, NextDueAt = nextDue };
 
         switch (evaluation.Outcome)
         {
             case PersistenceOutcome.Fire:
-                var severity = def.SeverityFor(value.Value);
-                await DeliverFireAsync(row, def, serverId, displayName, value.Value, severity, cancellationToken);
-                newState = newState with { FiredSeverity = severity.ToString() };
+                // #4795: the rising edge counts as delivered only when a channel took it. When every channel failed
+                // the incident is open but FiredSeverity stays null (opened, not delivered): the None arm sends the
+                // fire again while the condition holds, after 1, 2, 4 ... minutes, and a resolve never goes out for
+                // it. A muted or throttled fire, a partial failure and a null report all read as delivered.
+                var severity = def.SeverityFor(value);
+                var fireDelivery = await DeliverFireAsync(row, def, serverId, displayName, value, severity, cancellationToken);
+                newState = newState with
+                {
+                    FiredSeverity = RecordSendResult(row, serverId, displayName, now, fireDelivery) ? severity.ToString() : null,
+                };
                 break;
 
             case PersistenceOutcome.Resolve:
-                // Only deliver a resolve for an incident that was actually delivered.
+                // Only deliver a resolve for an incident that was actually delivered: a fire no channel took left
+                // FiredSeverity null (#4795), so it gets none.
                 if (state.FiredSeverity is not null)
                 {
-                    await DeliverResolveAsync(row, serverId, displayName, value.Value);
+                    await DeliverResolveAsync(row, serverId, displayName, value);
                 }
 
                 newState = newState with { FiredSeverity = null };
+
+                // #4795: the incident is over, so a later one starts a fresh failure streak at a minute.
+                _failedSends.RecordDelivered(MetricNameFor(row.Id), ServerKey(serverId));
+                _retryAtUtc.TryRemove((row.Id, serverId), out _);
                 break;
 
             case PersistenceOutcome.None:
             default:
+                if (newState.Persistence.Firing && breaching && state.FiredSeverity is null)
+                {
+                    // #4795: the condition holds on an open incident whose rising edge was never delivered: every
+                    // channel failed, or the incident was saved before a restart. Send the fire again at the
+                    // severity the value has now once the backoff wait is over (no wait is recorded after a
+                    // restart, so the first pass sends). This pass sends nothing else: the severity-change branch
+                    // below needs a delivered band to change.
+                    if (RetryIsDue(row.Id, serverId, now))
+                    {
+                        var retrySeverity = def.SeverityFor(value);
+                        var retryDelivery = await DeliverFireAsync(row, def, serverId, displayName, value, retrySeverity, cancellationToken);
+                        if (RecordSendResult(row, serverId, displayName, now, retryDelivery))
+                        {
+                            newState = newState with { FiredSeverity = retrySeverity.ToString() };
+                        }
+                    }
+                }
                 // #3341: severity is re-evaluated while an incident stays OPEN, not only on the rising Fire edge.
                 // If the still-breaching value has crossed into a different band than the one delivered, deliver
                 // the change on the SAME incident (Custom:<id>) and record the new band. Decision 3: a higher band
@@ -384,24 +466,70 @@ public sealed class CustomAlertEvaluator
                 // resolve, so BOTH directions are delivered. No tier-change debounce yet: a value oscillating right
                 // at a band boundary could re-deliver — low in practice (windowed aggregate, 60s cadence, tier
                 // gap), tracked as a possible follow-up.
-                if (ClassifySeverityChange(
-                        newState.Persistence.Firing, breaching, def.SeverityFor(value.Value), state.FiredSeverity)
-                    is { } changedSeverity)
+                // #4795: when every channel failed the change, FiredSeverity keeps the band the operator was last
+                // told about, so the next pass still sees the change, and it is sent again only once the wait is over.
+                else if (ClassifySeverityChange(
+                        newState.Persistence.Firing, breaching, def.SeverityFor(value), state.FiredSeverity)
+                    is { } changedSeverity
+                    && RetryIsDue(row.Id, serverId, now))
                 {
-                    await DeliverFireAsync(row, def, serverId, displayName, value.Value, changedSeverity, cancellationToken);
-                    newState = newState with { FiredSeverity = changedSeverity.ToString() };
+                    var changeDelivery = await DeliverFireAsync(row, def, serverId, displayName, value, changedSeverity, cancellationToken);
+                    if (RecordSendResult(row, serverId, displayName, now, changeDelivery))
+                    {
+                        newState = newState with { FiredSeverity = changedSeverity.ToString() };
+                    }
                 }
 
                 break;
         }
 
-        await _stateStore.SaveAsync(row.Id, serverId, newState, cancellationToken);
+        return newState;
+    }
+
+    /// <summary>The server id as the invariant text <see cref="_failedSends"/> keys it by.</summary>
+    private static string ServerKey(int serverId) => serverId.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>#4795: false while a subject is waiting out a failed send; true when it has no wait recorded (never
+    /// failed, delivered since, or the process restarted) or the wait is over. #4732: a wait that ends more than
+    /// <see cref="FailedSendRetryCap"/> ahead of <paramref name="now"/>, the longest wait <see cref="RecordSendResult"/>
+    /// ever records, can only come from a wall clock that stepped backwards since, and counts as over
+    /// (<see cref="CollectorCadence.ClampDue"/>) instead of holding the alert back until the clock catches up.</summary>
+    private bool RetryIsDue(long ruleId, int serverId, DateTime now) =>
+        !_retryAtUtc.TryGetValue((ruleId, serverId), out var retryAtUtc)
+        || now >= CollectorCadence.ClampDue(retryAtUtc, now, FailedSendRetryCap);
+
+    /// <summary>
+    /// #4795: reads what the channels did with one fire or severity-change send. Returns false when EVERY channel
+    /// failed (<see cref="FailedSendBackoff.EveryChannelFailed"/>): it counts the failure, notes when the next
+    /// attempt is due (1, 2, 4 ... minutes, never past <see cref="FailedSendRetryCap"/>) and logs it. Anything
+    /// else returns true, ends the subject's failure streak and drops its wait: delivered, a partial failure
+    /// (a retry would send it a second time down the channel that worked), a muted, throttled or folded send, and
+    /// a deliverer that reported nothing.
+    /// </summary>
+    private bool RecordSendResult(CustomAlertRule row, int serverId, string displayName, DateTime now, AlertDelivery? delivery)
+    {
+        var family = MetricNameFor(row.Id);
+        var key = ServerKey(serverId);
+
+        if (!FailedSendBackoff.EveryChannelFailed(delivery))
+        {
+            _failedSends.RecordDelivered(family, key);
+            _retryAtUtc.TryRemove((row.Id, serverId), out _);
+            return true;
+        }
+
+        var delay = _failedSends.RecordFailure(family, key, now, FailedSendRetryCap, out var failures);
+        _retryAtUtc[(row.Id, serverId)] = now + delay;
+        _logger.LogInformation(
+            "[{Server}] custom alert rule {Id}: no channel delivered the alert (failure {Failures} in a row); sending it again in {DelayMinutes} min",
+            displayName, row.Id, failures, delay.TotalMinutes);
+        return false;
     }
 
     private Task<double?> RunScalarAsync(
         CustomAlertRuleDefinition def, string storageName, DateTime now, RollupAvailability rollups, RollupCoverage coverage,
-        int composedSeconds, CancellationToken cancellationToken) =>
-        EvaluateScalarNowAsync(_viewer, def, storageName, now, rollups, coverage, composedSeconds, _logger, cancellationToken);
+        int composedSeconds, IReadOnlyList<string> unregistered, CancellationToken cancellationToken) =>
+        EvaluateScalarNowAsync(_viewer, def, storageName, now, rollups, coverage, composedSeconds, _logger, cancellationToken, unregistered);
 
     /// <summary>
     /// Compiles the rule's Scalar metric scoped to ONE server and reads its current value on the given
@@ -412,15 +540,21 @@ public sealed class CustomAlertEvaluator
     /// <para><b>Pool discipline (Component 4 R2-SEC):</b> <paramref name="pool"/> MUST be a least-privilege role
     /// that carries the <c>statement_timeout</c> cap and the secret-column ACL — the worker's dedicated viewer
     /// pool on the sweep, or the MCP host's mcp-role pool from the tool — NEVER the owner/superuser pool.</para>
+    /// <para><paramref name="resolvedUnregistered"/> (#5525): the sweep looks up once per server which of the scoped names the registry
+    /// does not hold and passes the answer (an empty list for none) to every rule; the evaluate-now tool passes null and the lookup
+    /// runs here.</para>
     /// </summary>
     public static async Task<double?> EvaluateScalarNowAsync(
         NpgsqlDataSource pool, CustomAlertRuleDefinition definition, string storageName, DateTime nowUtc,
         RollupAvailability rollups, RollupCoverage coverage, int composedQuerySeconds,
-        ILogger? logger, CancellationToken cancellationToken)
+        ILogger? logger, CancellationToken cancellationToken, IReadOnlyList<string>? resolvedUnregistered = null)
     {
         var start = nowUtc.AddHours(-definition.WindowHours);
+        var servers = new[] { storageName };
+        /* #5525: the compiler scopes by server_id; a storage name with no registry row keeps matching on the row's stored name. */
+        var unregistered = resolvedUnregistered ?? await ComposeServerScope.FindUnregisteredAsync(pool, servers, cancellationToken, logger);
         var context = new ComposeRunContext(
-            new[] { storageName }, start, nowUtc, ComposeRunContext.NoVariables, rollups, nowUtc, coverage);
+            servers, start, nowUtc, ComposeRunContext.NoVariables, rollups, nowUtc, coverage, UnregisteredServers: unregistered);
 
         var (compiled, compileError) = ComposeCompiler.Compile(definition.Plan, context);
         if (compileError is not null || compiled is null)
@@ -457,15 +591,20 @@ public sealed class CustomAlertEvaluator
         return (true, definition.SeverityFor(v));
     }
 
-    private async Task DeliverFireAsync(
+    /// <summary>
+    /// Sends one fire or severity-change alert and returns what the channels did with it (#4795), so the caller can
+    /// tell a delivery from a send no channel took: the report rides <c>DeliverAndReportAsync</c>, where
+    /// <c>DeliverAsync</c> returns nothing. <c>null</c> is a deliverer with nothing to report and reads as delivered.
+    /// </summary>
+    private async Task<AlertDelivery?> DeliverFireAsync(
         CustomAlertRule row, CustomAlertRuleDefinition def, int serverId, string displayName, double value,
         AlertSeverityLevel severity, CancellationToken cancellationToken)
     {
         var metricName = MetricNameFor(row.Id);
         var serverKey = serverId.ToString(CultureInfo.InvariantCulture);
-        var muted = _isAlertMuted?.Invoke(new AlertMuteContext { ServerName = displayName, MetricName = metricName }) ?? false;
+        var muted = _isAlertMuted?.Invoke(new AlertMuteContext { ServerName = displayName, ServerId = serverId, MetricName = metricName }) ?? false;
 
-        await _deliverer.DeliverAsync(
+        return await _deliverer.DeliverAndReportAsync(
             BuildFireOutcome(row, def, serverKey, displayName, value, severity, muted),
             cancellationToken);
     }
@@ -516,6 +655,15 @@ public sealed class CustomAlertEvaluator
             DisplayName: safeName);
     }
 
+    /// <summary>
+    /// A rule's operator-typed name, judged by the statement filter (#5320, L4 of #5360). The name rides a resolution
+    /// row's title (the history row's metric_name) and, on the teardown row, its message; both rows go out to the
+    /// history store, so the name is judged there like the display name of a fired alert. The local log line and the
+    /// server name stay as they are (the log never leaves the machine; the server name is a routing key). The
+    /// " Resolved" suffix is added after the judgment, so a withheld name still reads as a resolution.
+    /// </summary>
+    internal static string JudgedRuleName(string safeName) => SensitiveStatements.Text(safeName) ?? safeName;
+
     private async Task DeliverResolveAsync(CustomAlertRule row, int serverId, string displayName, double value)
     {
         var metricName = MetricNameFor(row.Id);
@@ -524,11 +672,12 @@ public sealed class CustomAlertEvaluator
            and its Message becomes detail_text, so a crafted rule name must be newline-stripped + capped here
            too or it re-opens the mute-pre-fill spoof on the recovery row. */
         var safeName = SanitizeDisplayText(row.Name, CustomAlertRuleStore.MaxNameLength);
-        var title = safeName + " Resolved";
+        var title = JudgedRuleName(safeName) + " Resolved";
         var message = string.Create(CultureInfo.InvariantCulture,
             $"{displayName}: {safeName} back within threshold (now {value:0.###})");
 
-        _logger.LogInformation("{Line}", AlertFiringLog.Resolved(displayName, title, message));
+        /* The local log line keeps the name as typed (L4, #5360): it never leaves the machine. */
+        _logger.LogInformation("{Line}", AlertFiringLog.Resolved(displayName, safeName + " Resolved", message));
 
         try
         {
@@ -566,10 +715,10 @@ public sealed class CustomAlertEvaluator
         long ruleId, string ruleName, int serverId, string serverName, string reason)
     {
         var safeName = SanitizeDisplayText(ruleName, CustomAlertRuleStore.MaxNameLength);
-        var title = safeName + " Resolved";
-        var message = string.Create(CultureInfo.InvariantCulture, $"{serverName}: {safeName} resolved because {reason}");
+        var title = JudgedRuleName(safeName) + " Resolved";
+        var message = string.Create(CultureInfo.InvariantCulture, $"{serverName}: {JudgedRuleName(safeName)} resolved because {reason}");
 
-        logger?.LogInformation("{Line}", AlertFiringLog.Resolved(serverName, title, message));
+        logger?.LogInformation("{Line}", AlertFiringLog.Resolved(serverName, safeName + " Resolved", string.Create(CultureInfo.InvariantCulture, $"{serverName}: {safeName} resolved because {reason}")));
 
         try
         {

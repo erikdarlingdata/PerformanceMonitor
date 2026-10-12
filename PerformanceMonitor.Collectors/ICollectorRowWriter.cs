@@ -35,4 +35,13 @@ public interface ICollectorRowWriter
     ICollectorRowWriter Value(DateTime value);
     ICollectorRowWriter Value(DateTime? value);
     ICollectorRowWriter NullValue();
+
+    /// <summary>
+    /// Writes a payload column that may already be in the store under a known digest (#5158). A writer that
+    /// can store a digest without the content overrides this; the default ignores the digest and writes the
+    /// content, so a host that does not (Lite) behaves exactly as it did with <see cref="Value(string?)"/>.
+    /// </summary>
+    /// <param name="content">The payload text, or null when the row carries none.</param>
+    /// <param name="knownDigest">The digest the store already holds for this content, or null.</param>
+    ICollectorRowWriter PayloadOrDigest(string? content, string? knownDigest) => Value(content);
 }

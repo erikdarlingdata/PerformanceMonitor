@@ -28,6 +28,18 @@ public class ServerMetadata
     public int CpuCount { get; set; }
     public long PhysicalMemoryMB { get; set; }
 
+    /// <summary>
+    /// <c>SERVERPROPERTY('EngineEdition')</c> of the stored properties row; null when it was not read. 5 is an Azure SQL
+    /// Database, whose Hardware row names its vCores and no RAM (see <see cref="ServerContextCard"/>).
+    /// </summary>
+    public int? EngineEdition { get; set; }
+
+    /// <summary>
+    /// The vCores parsed from an Azure SQL Database's service objective; null for any other engine, and for an objective that
+    /// names none (a DTU-model objective or an elastic pool).
+    /// </summary>
+    public int? VcoreCount { get; set; }
+
     // Instance settings
     public int MaxDop { get; set; }
     public int CostThresholdForParallelism { get; set; }

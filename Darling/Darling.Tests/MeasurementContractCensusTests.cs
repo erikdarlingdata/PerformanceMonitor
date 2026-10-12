@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -75,6 +75,7 @@ namespace Darling.Tests;
 /// runs this suite on a change there.</description></item>
 /// </list>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class MeasurementContractCensusTests
 {
     /// <summary>The two trees the Lite census cannot reach; everything else is swept there.</summary>
@@ -387,16 +388,16 @@ public sealed class MeasurementContractCensusTests
     /* ---------------- rule 6, the C# half (the Lite half's regexes, verbatim) ---------------- */
 
     private static readonly Regex IdentifierPayloadKey = new(
-        @"(?<![\w.])(?<key>\w+_per_sec(?:ond)?)\s*=(?![=>])", RegexOptions.Compiled);
+        @"(?<![\w.])(?<key>(?:\w+_)?per_sec(?:ond)?)\s*=(?![=>])", RegexOptions.Compiled);
 
     private static readonly Regex QuotedPayloadKey = new(
-        @"\[\s*""(?<key>\w+_per_sec(?:ond)?)""\s*\]\s*=(?![=>])", RegexOptions.Compiled);
+        @"\[\s*""(?<key>(?:\w+_)?per_sec(?:ond)?)""\s*\]\s*=(?![=>])", RegexOptions.Compiled);
 
     private static readonly Regex AddedPayloadKey = new(
-        @"\.(?:Try)?Add\(\s*""(?<key>\w+_per_sec(?:ond)?)""\s*,", RegexOptions.Compiled);
+        @"\.(?:Try)?Add\(\s*""(?<key>(?:\w+_)?per_sec(?:ond)?)""\s*,", RegexOptions.Compiled);
 
     private static readonly Regex PerSecondKeyConstant = new(
-        @"\bconst\s+string\s+(?<name>\w+)\s*=\s*""(?<key>\w+_per_sec(?:ond)?)""\s*;", RegexOptions.Compiled);
+        @"\bconst\s+string\s+(?<name>\w+)\s*=\s*""(?<key>(?:\w+_)?per_sec(?:ond)?)""\s*;", RegexOptions.Compiled);
 
     private static readonly Regex ConstantIndexerKey = new(
         @"\[\s*(?:\w+\s*\.\s*)*(?<name>\w+)\s*\]\s*=(?![=>])", RegexOptions.Compiled);
@@ -552,6 +553,7 @@ public sealed class MeasurementContractCensusTests
                 ["assumed_per_sec"] = row.DeltaValue / 60.0,
                 [Keys.ConstPerSecKey] = ops / observedSeconds,
                 ["unknown_per_sec"] = something,
+                ["per_second"] = PerSecond(row.DeltaValue, row.SampleIntervalSeconds),
             };
             stamped.Add("added_per_sec", total / elapsed.TotalSeconds);
             var page = new
@@ -564,6 +566,7 @@ public sealed class MeasurementContractCensusTests
                 halved_per_second = total / count,
                 renamed_per_second = p.Value,
                 mapped_per_second = "a_table",
+                per_sec = row.DeltaValue,
                 compared = ms_per_sec == 0,
             };
             """;
@@ -591,6 +594,7 @@ public sealed class MeasurementContractCensusTests
                 ("assumed_per_sec", "OFFENDER"),
                 ("constant_per_sec", Quotient),
                 ("unknown_per_sec", UnderAnotherName),
+                ("per_second", RateHelper),
                 ("added_per_sec", Quotient),
                 ("divided_per_second", Quotient),
                 ("helped_per_second", RateHelper),
@@ -600,6 +604,7 @@ public sealed class MeasurementContractCensusTests
                 ("halved_per_second", "OFFENDER"),
                 ("renamed_per_second", UnderAnotherName),
                 ("mapped_per_second", MapEntry),
+                ("per_sec", "OFFENDER"),
             },
             verdicts);
 
@@ -944,14 +949,17 @@ public sealed class MeasurementContractCensusTests
         var admitting = governed.Where(a => !a.CarriesIntervalPredicate && EquivalentPredicates.All(e => e.View != a.View)).Select(a => a.View).OrderBy(v => v, StringComparer.Ordinal).ToList();
 
         /* The successors carry it — the whole point of #3698 and of #3653 Q12 — and every one is REGISTERED:
-           the baseline pair in the legacy pair's positions, the hourly trio appended to HourlyAggregates. */
+           the baseline pair in the legacy pair's positions, the hourly trio appended to HourlyAggregates. The
+           two io hourlies (#5329) copy their interval siblings' WHERE and carry it too. */
         Assert.Equal(
             new[]
             {
                 TimescaleSupport.PerfmonIntervalBaselineView,
                 TimescaleSupport.ProcedureStatsIntervalHourlyView,
+                TimescaleSupport.ProcedureStatsIoHourlyView,
                 TimescaleSupport.QueryStatsDbIntervalHourlyView,
                 TimescaleSupport.QueryStatsIntervalHourlyView,
+                TimescaleSupport.QueryStatsIoHourlyView,
                 TimescaleSupport.WaitStatsIntervalBaselineView,
             }.OrderBy(v => v, StringComparer.Ordinal),
             carrying);

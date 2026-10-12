@@ -79,7 +79,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
         }
     }
 
-    private static readonly DateTime T0 = new(2026, 8, 1, 9, 0, 0, DateTimeKind.Unspecified);
+    private static readonly DateTime T0 = DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-2), DateTimeKind.Unspecified);
 
     /// <summary>
     /// Runs the deviation sweep until <paramref name="settled"/> holds, up to <paramref name="cycles"/> times
@@ -113,11 +113,22 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
         List<DatabaseStateInfo> result;
         do
         {
-            result = await service.GetDatabaseStateDeviationsAsync(ServerId);
+            result = await VerdictAsync(service);
         }
         while (!settled(result) && --cycles > 0);
 
         return result;
+    }
+
+    /// <summary>
+    /// The sweep's verdict, for a test that has two snapshots in the store and so expects one. A null here is the
+    /// store saying it has too little to judge, and the test fails on the line that asked for it.
+    /// </summary>
+    private static async Task<List<DatabaseStateInfo>> VerdictAsync(LocalDataService service)
+    {
+        var verdict = await service.GetDatabaseStateDeviationsAsync(ServerId);
+        Assert.NotNull(verdict);
+        return verdict;
     }
 
     /// <summary>
@@ -180,7 +191,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         var service = new LocalDataService(_duckDb);
 
         var deviations = await service.GetDatabaseStateDeviationsAsync(ServerId);
-        Assert.Empty(deviations); // one snapshot -> no second sample -> nothing fires
+        Assert.Null(deviations); // one snapshot -> no second sample -> no verdict
 
         var rows = await service.GetDatabaseStateExpectationsAsync(ServerId);
         Assert.Equal(3, rows.Count);
@@ -199,11 +210,11 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
 
         // One OFFLINE sample (a transient — e.g. mid-restart) must NOT fire.
         await SeedSnapshotAsync(T0.AddMinutes(1), ("App", "OFFLINE", false));
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Empty(await VerdictAsync(service));
 
         // A second consecutive OFFLINE — the condition stuck — fires.
         await SeedSnapshotAsync(T0.AddMinutes(2), ("App", "OFFLINE", false));
-        var app = Assert.Single(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        var app = Assert.Single(await VerdictAsync(service));
         Assert.Equal("App", app.DatabaseName);
         Assert.Equal("OFFLINE", app.StateDesc);
         Assert.Equal("ONLINE", app.ExpectedState);
@@ -224,11 +235,11 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
     {
         var service = new LocalDataService(_duckDb);
         await DriveAppToStableStateAsync(service, "OFFLINE");
-        Assert.Single(await service.GetDatabaseStateDeviationsAsync(ServerId)); // deviating (two samples)
+        Assert.Single(await VerdictAsync(service)); // deviating (two samples)
 
         await service.SetDatabaseStateExpectedAsync(ServerId, "App", PerformanceMonitor.Alerting.DatabaseStateTokens.Ignore);
 
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId)); // ignored → suppressed
+        Assert.Empty(await VerdictAsync(service)); // ignored → suppressed
         var row = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
         Assert.True(row.IsUserOverride);
         Assert.True(row.IsIgnored);
@@ -243,7 +254,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         // Accept RESTORING as the new expected state (an override, not the baseline).
         await service.SetDatabaseStateExpectedAsync(ServerId, "App", PerformanceMonitor.Alerting.DatabaseStateTokens.Restoring);
 
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Empty(await VerdictAsync(service));
         var row = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
         Assert.True(row.IsUserOverride);
         Assert.Equal("RESTORING", row.ExpectedState);
@@ -254,11 +265,11 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
     {
         var service = new LocalDataService(_duckDb);
         await DriveAppToStableStateAsync(service, "OFFLINE");
-        Assert.Single(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Single(await VerdictAsync(service));
 
         await service.ResetDatabaseStateExpectedToCurrentAsync(ServerId, "App");
 
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId)); // expected now == current (OFFLINE)
+        Assert.Empty(await VerdictAsync(service)); // expected now == current (OFFLINE)
         var row = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
         Assert.False(row.IsUserOverride);
         Assert.Equal("OFFLINE", row.ExpectedState);
@@ -272,7 +283,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         await SeedSnapshotAsync(T0.AddMinutes(1), ("Payments", "SUSPECT", false), ("App", "ONLINE", false));
         var service = new LocalDataService(_duckDb);
 
-        var suspect = Assert.Single(await service.GetDatabaseStateDeviationsAsync(ServerId)); // App baselined, quiet
+        var suspect = Assert.Single(await VerdictAsync(service)); // App baselined, quiet
         Assert.Equal("Payments", suspect.DatabaseName);
         Assert.Equal("SUSPECT", suspect.StateDesc);
         Assert.Equal("", suspect.ExpectedState); // pending — a critical first observation writes NO baseline
@@ -288,10 +299,10 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         // A restart: RECOVERY_PENDING for one collection, then ONLINE. The two-sample rule keeps it silent.
         await SeedSnapshotAsync(T0, ("App", "RECOVERY_PENDING", false));
         var service = new LocalDataService(_duckDb);
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId)); // one sample, nothing fires
+        Assert.Null(await service.GetDatabaseStateDeviationsAsync(ServerId)); // one sample, no verdict
 
         await SeedSnapshotAsync(T0.AddMinutes(1), ("App", "ONLINE", false));
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId)); // recovered before a second critical sample
+        Assert.Empty(await VerdictAsync(service)); // recovered before a second critical sample
 
         var row = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
         Assert.Equal("ONLINE", row.ExpectedState); // baselined ONLINE once healthy
@@ -303,11 +314,11 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         await SeedSnapshotAsync(T0, ("Payments", "SUSPECT", false));
         await SeedSnapshotAsync(T0.AddMinutes(1), ("Payments", "SUSPECT", false));
         var service = new LocalDataService(_duckDb);
-        Assert.Single(await service.GetDatabaseStateDeviationsAsync(ServerId)); // pending, alerts
+        Assert.Single(await VerdictAsync(service)); // pending, alerts
 
         await SeedSnapshotAsync(T0.AddMinutes(2), ("Payments", "ONLINE", false));
 
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId)); // recovered -> baselines ONLINE
+        Assert.Empty(await VerdictAsync(service)); // recovered -> baselines ONLINE
         var row = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
         Assert.Equal("ONLINE", row.ExpectedState);
         Assert.False(row.IsUserOverride);
@@ -325,17 +336,17 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         var service = new LocalDataService(_duckDb);
 
         await SeedSnapshotAsync(T0, ("App", "RESTORING", false));
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Null(await service.GetDatabaseStateDeviationsAsync(ServerId));
         await SeedSnapshotAsync(T0.AddMinutes(1), ("App", "RESTORING", false));
         await SeedSnapshotAsync(T0.AddMinutes(2), ("App", "RESTORING", false));
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId)); // a restore in progress is not news
+        Assert.Empty(await VerdictAsync(service)); // a restore in progress is not news
 
         var pending = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
         Assert.Equal("", pending.ExpectedState);
 
         await SeedSnapshotAsync(T0.AddMinutes(3), ("App", "ONLINE", false));
         await SeedSnapshotAsync(T0.AddMinutes(4), ("App", "ONLINE", false));
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Empty(await VerdictAsync(service));
 
         var settled = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
         Assert.Equal("ONLINE", settled.ExpectedState);
@@ -376,7 +387,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         await SeedSnapshotAsync(T0.AddMinutes(1), ("pecan", "ONLINE", false));
         var service = new LocalDataService(_duckDb);
 
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Empty(await VerdictAsync(service));
 
         var row = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
         Assert.Equal("ONLINE", row.ExpectedState);
@@ -444,14 +455,14 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
 
         await SeedSnapshotAsync(T0.AddMinutes(1), ("Parked", "ONLINE", false));
         await SeedSnapshotAsync(T0.AddMinutes(2), ("Parked", "ONLINE", false));
-        var up = Assert.Single(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        var up = Assert.Single(await VerdictAsync(service));
         Assert.Equal("ONLINE", up.StateDesc);
         Assert.Equal("OFFLINE", up.ExpectedState);
 
         await SeedSnapshotAsync(T0.AddMinutes(3), ("Parked", "OFFLINE", false));
         await SeedSnapshotAsync(T0.AddMinutes(4), ("Parked", "OFFLINE", false));
 
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Empty(await VerdictAsync(service));
         var row = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
         Assert.Equal("OFFLINE", row.ExpectedState);
         Assert.False(row.IsUserOverride);
@@ -471,7 +482,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         await SeedSnapshotAsync(T0.AddMinutes(1), ("LogShip", "ONLINE", false));
         await SeedSnapshotAsync(T0.AddMinutes(2), ("LogShip", "ONLINE", false));
 
-        var fired = Assert.Single(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        var fired = Assert.Single(await VerdictAsync(service));
         Assert.Equal("ONLINE", fired.StateDesc);
         Assert.Equal("STANDBY", fired.ExpectedState);
         Assert.Equal("STANDBY", (await service.GetDatabaseStateExpectationsAsync(ServerId)).Single().ExpectedState);
@@ -491,7 +502,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         await SeedSnapshotAsync(T0.AddMinutes(1), ("Parked", "ONLINE", false));
         await SeedSnapshotAsync(T0.AddMinutes(2), ("Parked", "ONLINE", false));
 
-        var fired = Assert.Single(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        var fired = Assert.Single(await VerdictAsync(service));
         Assert.Equal("ONLINE", fired.StateDesc);
         Assert.Equal("OFFLINE", fired.ExpectedState);
 
@@ -515,7 +526,16 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         for (int minute = 0; minute < 6; minute++)
         {
             await SeedSnapshotAsync(T0.AddMinutes(minute), ("Secondary", "RESTORING", false));
-            Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+            var verdict = await service.GetDatabaseStateDeviationsAsync(ServerId);
+            if (minute == 0)
+            {
+                Assert.Null(verdict); // one snapshot -> no verdict
+            }
+            else
+            {
+                Assert.NotNull(verdict);
+                Assert.Empty(verdict);
+            }
         }
 
         Assert.Equal("", (await service.GetDatabaseStateExpectationsAsync(ServerId)).Single().ExpectedState);
@@ -524,7 +544,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         await SeedSnapshotAsync(T0.AddMinutes(6), ("Secondary", "OFFLINE", false));
         await SeedSnapshotAsync(T0.AddMinutes(7), ("Secondary", "OFFLINE", false));
 
-        var fired = Assert.Single(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        var fired = Assert.Single(await VerdictAsync(service));
         Assert.Equal("OFFLINE", fired.StateDesc);
         Assert.Equal("RESTORING", fired.ExpectedState);
     }
@@ -543,7 +563,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         await SeedSnapshotAsync(T0.AddMinutes(1), ("LogShip", "ONLINE", true));
         await SeedSnapshotAsync(T0.AddMinutes(2), ("LogShip", "RESTORING", true));
 
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Empty(await VerdictAsync(service));
         Assert.Equal("STANDBY", (await service.GetDatabaseStateExpectationsAsync(ServerId)).Single().ExpectedState);
     }
 
@@ -557,13 +577,13 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         var service = new LocalDataService(_duckDb);
         await DriveAppToStableStateAsync(service, "OFFLINE");
 
-        var before = Assert.Single(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        var before = Assert.Single(await VerdictAsync(service));
         Assert.Equal("", before.LastAlertedState); // never announced yet
 
         var store = new DuckDbAlertHistoryStore(_duckDb);
         await store.SaveDatabaseStateAlertedAsync(ServerId, "App", "OFFLINE");
 
-        var after = Assert.Single(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        var after = Assert.Single(await VerdictAsync(service));
         Assert.Equal("OFFLINE", after.LastAlertedState);
         Assert.Equal("OFFLINE", after.StateDesc); // still deviating — the engine is what goes quiet, not the read
     }
@@ -582,11 +602,11 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
 
         var store = new DuckDbAlertHistoryStore(_duckDb);
         await store.SaveDatabaseStateAlertedAsync(ServerId, "App", "OFFLINE");
-        Assert.Equal("OFFLINE", (await service.GetDatabaseStateDeviationsAsync(ServerId)).Single().LastAlertedState);
+        Assert.Equal("OFFLINE", (await VerdictAsync(service)).Single().LastAlertedState);
 
         // Operator brings it back. It stops deviating, so it drops out of the read entirely...
         await SeedSnapshotAsync(T0.AddMinutes(3), ("App", "ONLINE", false));
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Empty(await VerdictAsync(service));
 
         // ...and the memory must be gone, or a second parking weeks later reads as already-announced.
         Assert.Null(await AlertedStateAsync("App"));
@@ -604,7 +624,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         await store.SaveDatabaseStateAlertedAsync(ServerId, "App", "OFFLINE");
         await service.SetDatabaseStateExpectedAsync(ServerId, "App", PerformanceMonitor.Alerting.DatabaseStateTokens.Ignore);
 
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId));
+        Assert.Empty(await VerdictAsync(service));
         Assert.Null(await AlertedStateAsync("App"));
     }
 
@@ -651,7 +671,7 @@ SELECT $1, $2, $3, $4, now()::TIMESTAMP";
         await SeedSnapshotAsync(T0.AddMinutes(1), ("LogShip", "RESTORING", true));
         await SeedSnapshotAsync(T0.AddMinutes(2), ("LogShip", "RESTORING", true));
 
-        Assert.Empty(await service.GetDatabaseStateDeviationsAsync(ServerId)); // STANDBY == STANDBY, no churn
+        Assert.Empty(await VerdictAsync(service)); // STANDBY == STANDBY, no churn
         var row = Assert.Single(await service.GetDatabaseStateExpectationsAsync(ServerId));
         Assert.Equal("STANDBY", row.ExpectedState);
         Assert.Equal("STANDBY", row.CurrentState);

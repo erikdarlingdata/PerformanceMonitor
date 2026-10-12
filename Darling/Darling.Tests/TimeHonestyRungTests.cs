@@ -58,6 +58,7 @@ namespace Darling.Tests;
 /// after the writer has stored a twin, and after the post-rung rows are gone again); the dedup is pinned in
 /// <c>Lite.Tests/CpuUtilizationCollectorDefinitionTests</c>.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class TimeHonestyRungTests
 {
     private const int RungVersion = 134;
@@ -394,7 +395,9 @@ public sealed class TimeHonestyRungTests
     public void TheServerPropertiesRead_CarriesTheClockPair_AndThePayloadPublishesIt()
     {
         var sql = DarlingDataReader.LatestServerPropertiesSql.Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.Contains("service_objective,\n    utc_offset_minutes,\n    time_zone_id\nFROM server_properties", Dedent(sql), StringComparison.Ordinal);
+        /* The clock pair still follows the pre-rung columns; vcore_count (what an Azure SQL Database is given, where
+           cpu_count is the schedulers it can see) is projected after it, so the pair's position is unchanged. */
+        Assert.Contains("service_objective,\n    utc_offset_minutes,\n    time_zone_id,\n    vcore_count\nFROM server_properties", Dedent(sql), StringComparison.Ordinal);
 
         Assert.Equal(typeof(int?), typeof(DarlingDataReader.ServerPropertiesReadRow).GetProperty("UtcOffsetMinutes")!.PropertyType);
         Assert.Equal(typeof(string), typeof(DarlingDataReader.ServerPropertiesReadRow).GetProperty("TimeZoneId")!.PropertyType);
@@ -504,6 +507,7 @@ public sealed class TimeHonestyRungTests
 /// against every other live class because it shares the store.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class TimeHonestyRungLivePostgresTests
 {
     private const int ServerId = -134134;

@@ -1610,7 +1610,10 @@ public partial class PlanViewerControl
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         int rowIndex = 0;
 
-        void AddRow(string label, string value, string? colorKey)
+        // nested (#4836): the row is a detail of the row above it (the early abort reason under
+        // Optimization), so only its label gets a 12px left indent; its value stays in the same
+        // column as every other value, as in erikdarlingdata/PerformanceStudio#614.
+        void AddRow(string label, string value, string? colorKey, bool nested)
         {
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
@@ -1620,7 +1623,7 @@ public partial class PlanViewerControl
                 FontSize = 11,
                 Foreground = labelBrush,
                 HorizontalAlignment = HorizontalAlignment.Left,
-                Margin = new Thickness(0, 1, 8, 1)
+                Margin = new Thickness(nested ? 12 : 0, 1, 8, 1)
             };
             Grid.SetRow(labelText, rowIndex);
             Grid.SetColumn(labelText, 0);
@@ -1641,7 +1644,7 @@ public partial class PlanViewerControl
         }
 
         foreach (var row in PlanDisplayText.BuildRuntimeSummaryRows(statement))
-            AddRow(row.Label, row.Value, row.ColorKey);
+            AddRow(row.Label, row.Value, row.ColorKey, row.Nested);
 
         RuntimeSummaryContent.Children.Add(grid);
         SetInsightQuiet(RuntimeSummaryTitle, TooltipFgBrush, RuntimeSummaryAccent, isEmpty: false);

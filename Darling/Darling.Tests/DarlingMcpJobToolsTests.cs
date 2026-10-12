@@ -36,13 +36,13 @@ public sealed class DarlingMcpJobToolsSurfaceAndSqlTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_ExactlyGetRunningJobs()
+    public void ToolSurface_ExactlyTheJobTools()
     {
         var names = ToolMethods()
             .Select(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name)
             .ToArray();
 
-        Assert.Equal(new[] { "get_running_jobs" }, names);
+        Assert.Equal(new[] { "get_job_history", "get_running_jobs" }, names.OrderBy(n => n, StringComparer.Ordinal).ToArray());
         Assert.NotNull(typeof(DarlingMcpJobTools).GetCustomAttribute<McpServerToolTypeAttribute>());
         Assert.All(ToolMethods(), m => Assert.True(m.IsStatic, $"{m.Name} must be static"));
         Assert.All(ToolMethods(), m => Assert.True(m.ReturnType == typeof(Task<string>), $"{m.Name} must return Task<string>"));
@@ -51,7 +51,7 @@ public sealed class DarlingMcpJobToolsSurfaceAndSqlTests
     [Fact]
     public void ParamContract_ServerNameOnly_Optional()
     {
-        var method = ToolMethods().Single();
+        var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "get_running_jobs");
         var p = method.GetParameters()
             .Where(x => x.GetCustomAttribute<DescriptionAttribute>() is not null)
             .Select(x => (x.Name!, x.HasDefaultValue))
@@ -126,7 +126,7 @@ public sealed class DarlingMcpJobToolsSurfaceAndSqlTests
     public void AdvertisedSchema_IsGeminiClean_NoRequiredParams()
     {
         var tools = BuildToolSchemas();
-        Assert.Single(tools);
+        Assert.Equal(2, tools.Count);
         var violations = tools.SelectMany(t => DarlingMcpSchemaAssert.Violations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0, "Gemini-incompatible schema keywords leaked:\n" + string.Join("\n", violations));
         foreach (var t in tools)

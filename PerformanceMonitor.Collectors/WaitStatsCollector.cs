@@ -47,7 +47,7 @@ public sealed class WaitStatsCollector : CollectorDefinitionBase<WaitStatsCollec
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     wait_type = ws.wait_type,
     waiting_tasks_count = ws.waiting_tasks_count,
     wait_time_ms = ws.wait_time_ms,
@@ -63,7 +63,7 @@ OPTION(RECOMPILE);";
        when the target is not Azure SQL DB (BuildQuery), so the Azure text stays the verbatim parity contract. */
     private const string IdentityResultSetText = @"
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     server_start_time = dosi.sqlserver_start_time,
     server_name = @@SERVERNAME
 FROM sys.dm_os_sys_info AS dosi;";
@@ -219,7 +219,10 @@ FROM sys.dm_os_sys_info AS dosi;";
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            var waitType = reader.GetString(0);
+            /* Trimmed BEFORE the ignore check, the delta key and the stored value, so all three read one
+               string: four names (SQP_STATS_REPORTING among them) come back from the DMV with a trailing space,
+               which an exact-match ignore entry or a clean-name lookup could never hit. See WaitTypeName. */
+            var waitType = WaitTypeName.Trim(reader.GetString(0));
 
             /* Skip ignored wait types (Lite: ignored_wait_types.json — #1240) */
             if (context.IgnoredWaitTypes.Contains(waitType))

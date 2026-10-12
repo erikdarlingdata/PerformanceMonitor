@@ -14,6 +14,11 @@ using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Notifications;
 
+/// <summary>The newest sample behind an alert (#5642): <paramref name="Source"/> is a short label ("CPU",
+/// "Wait stats"), <paramref name="InstantUtc"/> the newest sample's UTC instant, and <paramref name="Age"/>
+/// the gap to the fire time, computed once when the alert fires.</summary>
+public sealed record AlertNewestSample(string Source, DateTime InstantUtc, TimeSpan Age);
+
 /// <summary>
 /// Optional detail context attached to alert emails.
 /// Populated from blocking/deadlock detail queries at alert time.
@@ -95,6 +100,35 @@ public class AlertContext
     /// other alert and on any row written before this member existed.
     /// </summary>
     public string? CollectorName { get; set; }
+
+    /// <summary>
+    /// The availability group and replica this firing is ABOUT, for edge alerts that need a per-replica
+    /// incident identity (the AG disconnect/reconnect pair — one server can host many replicas of many
+    /// groups). Set by both engines' AG fire sites to the replica grain the row itself is keyed on, so
+    /// <see cref="WebhookAlertService.DerivePagerDutyDedupKey"/> can scope that pair's dedup key per
+    /// replica instead of per server: with auto-resolve on, one replica's reconnect must close only ITS
+    /// incident, not the one a still-disconnected sibling is still holding open. Read only through
+    /// <see cref="WebhookAlertService.PairedReplicaScope"/>, only for that pair: the dedup key and the
+    /// webhook cooldown key (#5469) both take it from there, under the same auto-resolve gate. No renderer,
+    /// budget or email cooldown reads it. Null on every other alert and on any
+    /// row written before this member existed. Unpersisted: like <see cref="AttachmentXml"/> this is
+    /// live-render data, not row data. The pairing name is the literal "AG:replica", because that is
+    /// exactly the shape consumers can reason about — see the helper for why.
+    /// </summary>
+    public string? AgReplicaIdentity { get; set; }
+
+    /// <summary>The newest source sample behind this alert (#5642): its source label, its UTC instant, and its
+    /// age computed ONCE at fire time. Null when the alert has no UTC instant to age (a pre-V134 local stamp, a
+    /// live read, or a check not yet wired). Persisted with the alert's context, so the age never drifts at
+    /// render time. The renderers print it as one line per body.</summary>
+    public AlertNewestSample? NewestSample { get; set; }
+
+    /// <summary>
+    /// A copy of this context that shares its member objects (#5320): the alert statement filter replaces the
+    /// members it rewrites and leaves the rest, so a member added to this class later is carried without the
+    /// filter being edited. A field-by-field copy would silently drop it.
+    /// </summary>
+    public AlertContext ShallowCopy() => (AlertContext)MemberwiseClone();
 }
 
 /// <summary>
@@ -285,6 +319,9 @@ public class AlertDetailItem
     /// which is the no-Apply-button case.
     /// </summary>
     public RemediationAction? Remediation { get; set; }
+
+    /// <summary>A copy that shares its member objects (#5320); see <see cref="AlertContext.ShallowCopy"/>.</summary>
+    public AlertDetailItem ShallowCopy() => (AlertDetailItem)MemberwiseClone();
 }
 
 /// <summary>
@@ -334,7 +371,17 @@ public record AlertContextDto(
     /* #4223 self-monitor notebook: trailing and nullable like WaitType, so a row written before this
        member existed rehydrates to null ("this row carries no collector name") rather than a fabricated
        value. */
-    string? CollectorName = null);
+    string? CollectorName = null,
+    /* #5642 sample age: trailing and nullable like CollectorName, so a row written before this member
+       existed rehydrates to null ("this row carries no sample age") rather than a fabricated age. */
+    AlertNewestSampleDto? NewestSample = null);
+
+/// <summary>
+/// JSON mirror of <see cref="AlertNewestSample"/> (#5642): the age rides as whole-and-fractional seconds,
+/// computed ONCE when the alert fired, so the history row, the web pages, the MCP read and the Viewer all say
+/// what the notification said and never re-measure against a later clock.
+/// </summary>
+public record AlertNewestSampleDto(string Source, DateTime InstantUtc, double AgeSeconds);
 
 /// <summary>
 /// The persisted routing DECISION for an analysis finding (#3712): trailing and nullable on
@@ -662,7 +709,11 @@ public static class AlertContextSerializer
             /* #4223: the wait type this firing is about, as structured data. Already the persisted shape. */
             context.WaitType,
             /* #4223: the collector this firing is about, as structured data. Already the persisted shape. */
-            context.CollectorName);
+            context.CollectorName,
+            /* #5642: the newest sample's source, instant and fire-time age. */
+            context.NewestSample is { } sample
+                ? new AlertNewestSampleDto(sample.Source, DateTime.SpecifyKind(sample.InstantUtc, DateTimeKind.Utc), sample.Age.TotalSeconds)
+                : null);
         return JsonSerializer.Serialize(dto);
     }
 
@@ -777,6 +828,41 @@ public static class AlertContextSerializer
             }
 
             return route.Deserialize<AlertRouteDto>();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The newest-sample carrier a persisted alert-history row holds (#5642): the sample's source label, UTC
+    /// instant and the age computed ONCE when the alert fired. <c>null</c> when the row carries none (an alert
+    /// with no UTC sample instant, a row written before the member existed, a resolution row, or unparseable
+    /// JSON). Reads the one property rather than rehydrating the whole context, for the reason
+    /// <see cref="TryReadRoute"/> gives; every surface that shows the age reads it here and never measures it
+    /// again against a later clock.
+    /// </summary>
+    public static AlertNewestSample? TryReadNewestSample(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.NewestSample), out var sample)
+                || sample.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var dto = sample.Deserialize<AlertNewestSampleDto>();
+            return dto is not null && !string.IsNullOrWhiteSpace(dto.Source)
+                ? new AlertNewestSample(dto.Source, DateTime.SpecifyKind(dto.InstantUtc, DateTimeKind.Utc),
+                    TimeSpan.FromSeconds(Math.Max(0, dto.AgeSeconds)))
+                : null;
         }
         catch (JsonException)
         {
@@ -911,6 +997,13 @@ public static class AlertContextSerializer
             /* #4223: the collector this firing is about, null on every non-Collector-Cost-Regression alert
                and every row written before this member existed. */
             context.CollectorName = dto.CollectorName;
+
+            /* #5642: the fire-time sample age, null on every alert without a UTC sample instant and every row
+               written before this member existed. */
+            context.NewestSample = dto.NewestSample is { } newest && !string.IsNullOrWhiteSpace(newest.Source)
+                ? new AlertNewestSample(newest.Source, DateTime.SpecifyKind(newest.InstantUtc, DateTimeKind.Utc),
+                    TimeSpan.FromSeconds(Math.Max(0, newest.AgeSeconds)))
+                : null;
 
             foreach (var d in dto.Details)
             {

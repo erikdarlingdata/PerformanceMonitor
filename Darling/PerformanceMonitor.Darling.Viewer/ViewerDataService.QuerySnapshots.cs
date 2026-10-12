@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -81,7 +82,7 @@ public sealed class ViewerQuerySnapshotRow
     public bool HasQueryPlan { get; set; }
     public bool HasLiveQueryPlan { get; set; }
     public string CollectionTimeLocal =>
-        CollectionTime == DateTime.MinValue ? "" : ViewerTimeHelper.ForDisplay(CollectionTime).ToString("yyyy-MM-dd HH:mm:ss");
+        CollectionTime == DateTime.MinValue ? "" : ViewerTimeHelper.FormatForDisplay(CollectionTime, "yyyy-MM-dd HH:mm:ss");
 
     /// <summary>The transaction begin time, empty when the request has no open transaction.
     /// transaction_begin_time from sys.dm_tran_active_transactions is a SQL-server-local wall-clock time (NOT
@@ -196,7 +197,10 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The "Show Queries With This Wait" drill-down read (Wait Stats chart right-click) — Lite's
     /// <c>GetQuerySnapshotsByWaitTypeAsync</c>: the captured running-query snapshots whose <c>wait_type</c>
-    /// exactly matches, over the drill window. Same row shape / column list as the Active Queries grid.
+    /// matches, over the drill window. Same row shape / column list as the Active Queries grid.
+    /// The match takes the name as given or with one trailing space: SQL Server reports a few wait names
+    /// with a trailing space, which the collector stores trimmed from #4884 on, so a snapshot stored before the
+    /// upgrade still answers the clean name. The column stays bare in the predicate.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 wait_type.
     /// </summary>
     public static readonly string QuerySnapshotsByWaitTypeSql = $"""
@@ -207,7 +211,7 @@ public sealed partial class ViewerDataService
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
-        AND   wait_type = $4
+        AND   wait_type IN ($4, $4 || ' ')
         AND   query_text NOT LIKE 'WAITFOR%'
         ORDER BY collection_time DESC, cpu_time_ms DESC
         """;
@@ -405,6 +409,19 @@ public sealed partial class ViewerDataService
         GROUP BY date_trunc('hour', collection_time)
         ORDER BY bucket
         """;
+
+    /// <summary>
+    /// Where this server's query_snapshots coverage starts for the range, through the shared probe
+    /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its
+    /// first row in the range if that is earlier. The Active Queries tab compares it with the range's start and
+    /// shows "Showing since" when a custom range reaches back past what the store covers. Null when the range holds
+    /// no row and no logged run, and when the range lies wholly before the coverage (the run log outlives the table,
+    /// so a logged run there makes the server count though its rows are purged, and its coverage starts after the
+    /// range ends).
+    /// </summary>
+    public Task<DateTime?> GetQuerySnapshotsDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("query_snapshots"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>Hourly Active-Queries slicer buckets over the window (Value = session count).</summary>
     public async Task<List<TimeSliceBucket>> GetActiveQuerySlicerDataAsync(

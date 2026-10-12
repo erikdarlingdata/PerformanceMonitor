@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// the same column the Blocked Process Reports grid and the alert path read as the block's wait time.
 /// </summary>
 public sealed record BlockingDurationStatsPoint(
-    DateTime Time, int EventCount, long TotalDurationMs, long MaxDurationMs, double AvgDurationMs);
+    DateTime Time, int EventCount, long TotalDurationMs, long MaxDurationMs, double AvgDurationMs, string? Source = null);
 
 
 public sealed partial class ViewerDataService
@@ -47,7 +47,9 @@ public sealed partial class ViewerDataService
     /// UTC). $4 is the <see cref="EventWindowFloor"/> for $2 — both tables are hypertables partitioned on
     /// <c>collection_time</c>, which this event-time window alone gives the planner nothing to exclude a
     /// chunk on (#4229); the floor lets it skip every chunk older than the window, without being able to
-    /// drop a row (an event is collected after it happens).
+    /// drop a row (an event is collected after it happens). $5 is the database filter (#5244), the same
+    /// <c>text[]</c> (NULL for all) the count trend binds, on BOTH arms so the severity reconciles with it.
+    /// The last column names the arm that answered, the tag Darling's MCP answers carry.
     /// </summary>
     public const string BlockingDurationStatsSql = """
         WITH bpr AS (
@@ -56,10 +58,12 @@ public sealed partial class ViewerDataService
                 COUNT(*) AS event_count,
                 CAST(SUM(wait_time_ms) AS bigint) AS total_duration_ms,
                 MAX(wait_time_ms) AS max_duration_ms,
-                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
+                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms,
+                'blocked-process-report' AS source
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
@@ -68,15 +72,17 @@ public sealed partial class ViewerDataService
                 COUNT(*) AS event_count,
                 CAST(SUM(wait_time_ms) AS bigint) AS total_duration_ms,
                 MAX(wait_time_ms) AS max_duration_ms,
-                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
+                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms,
+                'DMV snapshot' AS source
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY DATE_TRUNC('minute', event_time)
         )
-        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM bpr
+        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms, source FROM bpr
         UNION ALL
-        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
+        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms, source FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
         ORDER BY bucket
         """;
 
@@ -86,7 +92,7 @@ public sealed partial class ViewerDataService
     /// so it reconciles with the blocking-incident count trend.
     /// </summary>
     public async Task<List<BlockingDurationStatsPoint>> GetBlockingDurationStatsAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         var items = new List<BlockingDurationStatsPoint>();
 
@@ -102,6 +108,7 @@ public sealed partial class ViewerDataService
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -110,7 +117,8 @@ public sealed partial class ViewerDataService
                 reader.IsDBNull(1) ? 0 : (int)reader.GetInt64(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4)));
+                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5)));
         }
 
         return items;
@@ -122,15 +130,16 @@ public sealed partial class ViewerDataService
     /// <see cref="DeadlockGraphParser"/> can read, so this read hands back just the raw
     /// (<c>deadlock_time</c>, <c>deadlock_graph_xml</c>) pairs and the C# aggregate does the parse + bucket.
     ///
-    /// <para>Windows on <c>collection_time</c> (NOT <c>deadlock_time</c>) and reads <c>v_deadlocks</c> — the
-    /// IDENTICAL row-selection predicate the deadlock COUNT trend (<see cref="DeadlockTrendSql"/>) uses — so
+    /// <para>Windows on <c>deadlock_time</c> (when the deadlock happened, NOT when it was collected) and reads
+    /// <c>v_deadlocks</c> — the IDENTICAL row-selection predicate the deadlock COUNT trend (<see cref="DeadlockTrendSql"/>) uses — so
     /// the count already shown on this tab's summary strip and the new victim_count / wait aggregate are drawn
     /// from the exact same set of deadlock rows and reconcile in period. Bucketing (on <c>deadlock_time</c>,
     /// matching the count trend's <c>DATE_TRUNC('minute', deadlock_time)</c>) happens C#-side after the parse,
     /// so it is not expressed here. <c>deadlock_graph_xml</c> is an original deadlocks column (predates the V7
     /// <c>victim_query_plan_xml</c>), so unlike <see cref="RecentDeadlocksSql"/> the view exposes it.
     /// No LIMIT: deadlocks are rare, and a cap would drop rows the count trend keeps (breaking reconciliation).
-    /// $1 server_id, $2 window start, $3 window end (naive UTC).</para>
+    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 the <see cref="EventWindowFloor"/> for $2
+    /// (no upper bound, so a late-collected deadlock still counts).</para>
     /// </summary>
     public const string DeadlockSeverityGraphsSql = """
         SELECT
@@ -138,8 +147,9 @@ public sealed partial class ViewerDataService
             deadlock_graph_xml
         FROM v_deadlocks
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        AND   deadlock_time >= $2
+        AND   deadlock_time <= $3
+        AND   collection_time >= $4
         ORDER BY deadlock_time
         """;
 
@@ -158,6 +168,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(DeadlockSeverityGraphsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

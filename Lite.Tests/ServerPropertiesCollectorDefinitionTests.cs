@@ -97,7 +97,7 @@ public sealed class ServerPropertiesCollectorDefinitionTests
            so comments are stripped first), and it is inside an N'...' literal handed to sp_executesql. */
         var code = System.Text.RegularExpressions.Regex.Replace(text, @"/\*.*?\*/", " ", System.Text.RegularExpressions.RegexOptions.Singleline);
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(code, @"CURRENT_TIMEZONE_ID\s*\(\s*\)"));
-        Assert.Contains("EXEC sys.sp_executesql\n            N'SELECT @tz = CURRENT_TIMEZONE_ID();',\n            N'@tz nvarchar(128) OUTPUT', @tz = @time_zone_id OUTPUT;", text, StringComparison.Ordinal);
+        Assert.Contains("EXEC sys.sp_executesql\n            N'SELECT /* PerformanceMonitorLite */ @tz = CURRENT_TIMEZONE_ID();',\n            N'@tz nvarchar(128) OUTPUT', @tz = @time_zone_id OUTPUT;", text, StringComparison.Ordinal);
 
         /* The gate (both arms), then TRY, then the EXEC, then the CATCH that leaves NULL — in that order. */
         var gate = code.IndexOf("IF CONVERT(integer, SERVERPROPERTY(N'ProductMajorVersion')) >= 16\nOR CONVERT(integer, SERVERPROPERTY(N'EngineEdition')) IN (5, 8)\nBEGIN", StringComparison.Ordinal);

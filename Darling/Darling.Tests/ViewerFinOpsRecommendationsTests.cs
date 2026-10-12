@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -377,6 +378,7 @@ public sealed class ViewerFinOpsRecommendationsTests
 
     [Theory]
     [InlineData(nameof(ViewerDataService.RecommendationsEditionFactsSql))]
+    [InlineData(nameof(ViewerDataService.RecommendationsEngineEditionSql))]
     [InlineData(nameof(ViewerDataService.RecommendationsMemoryP95Sql))]
     [InlineData(nameof(ViewerDataService.RecommendationsCpuP95Sql))]
     [InlineData(nameof(ViewerDataService.RecommendationsMaintenanceWindowSql))]
@@ -397,7 +399,7 @@ public sealed class ViewerFinOpsRecommendationsTests
     {
         var serverProps = PgSchemaGenerator.CreateTable(ServerPropertiesCollector.Instance);
         Assert.Equal("server_properties", ServerPropertiesCollector.Instance.TargetTable);
-        foreach (var col in new[] { "edition", "product_version", "cpu_count" })
+        foreach (var col in new[] { "edition", "product_version", "cpu_count", "engine_edition" })
             Assert.Contains(col, serverProps, StringComparison.Ordinal);
 
         var databaseConfig = PgSchemaGenerator.CreateTable(DatabaseConfigCollector.Instance);
@@ -422,6 +424,94 @@ public sealed class ViewerFinOpsRecommendationsTests
         var fileIo = PgSchemaGenerator.CreateTable(FileIoStatsCollector.Instance);
         foreach (var col in new[] { "delta_reads", "delta_stall_read_ms", "delta_writes", "delta_stall_write_ms" })
             Assert.Contains(col, fileIo, StringComparison.Ordinal);
+    }
+
+    // ── Right-sizing advice needs a measurement, and a server whose hardware is its own ──
+
+    [Theory]
+    [InlineData("", false)]                                   // no CPU sample in the window: the no-verdict value
+    [InlineData(ProvisioningVerdict.OverProvisioned, true)]
+    [InlineData(ProvisioningVerdict.RightSized, true)]
+    [InlineData(ProvisioningVerdict.UnderProvisioned, true)]
+    public void UtilizationRow_HasCpuSample_FollowsTheEmptyNoVerdictStatus(string status, bool expected)
+    {
+        Assert.Equal(expected, new UtilizationEfficiencyRow { ProvisioningStatus = status }.HasCpuSample);
+    }
+
+    [Fact]
+    public void UtilizationRow_NeverRead_HasNoCpuSample()
+    {
+        // A row that nothing populated has no measurement, so the rules read it as "nothing to advise on".
+        Assert.False(new UtilizationEfficiencyRow().HasCpuSample);
+    }
+
+    [Fact]
+    public void EngineEditionSql_ReadsTheNewestCollectedServerPropertiesRow()
+    {
+        var sql = ViewerDataService.RecommendationsEngineEditionSql;
+        Assert.Contains("engine_edition", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM server_properties", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("v_server_properties", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The three right-sizing rules run inside <c>GetRecommendationsAsync</c> over the Postgres store, which this
+    /// suite does not stand up, so the gates are pinned on the rule source. The CPU rule's guard lives in
+    /// <c>BuildCpuRightSizingRecommendation</c>, which <c>GetRecommendationsAsync</c> calls, so that half is pinned on
+    /// the builder's guard and on the call. The VM rule keeps its guard in <c>GetRecommendationsAsync</c> itself. The
+    /// CPU rule and the VM rule read <c>HasCpuSample</c>, and the memory rule and the VM rule stand down on Azure SQL
+    /// Database (edition 5).
+    /// </summary>
+    [Fact]
+    public void CpuAndVmRightSizing_StandDownWithNoCpuSample()
+    {
+        var body = RightSizingRulesSource();
+
+        Assert.Matches(
+            new Regex(@"CpuRightSizingTargetCores\s*\(\s*util\s*\)\s*is\s*not\s*int\s*targetCores"),
+            CpuRightSizingBuilderSource());
+        /* The no-sample guard lives in the target helper both CPU rows share (one rule, #5492). */
+        Assert.Matches(
+            new Regex(@"util\s*==\s*null\s*\|\|\s*!\s*FinOpsUtilizationFigures\s*\.\s*HasCpuSample\s*\(\s*util\s*\)\s*\|\|\s*util\s*\.\s*P95CpuPct\s*>=\s*30"),
+            RecommendationsMethodSource("int? CpuRightSizingTargetCores(", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs"));
+        Assert.Matches(
+            new Regex(@"FinOpsRecommendationFigures\s*\.\s*CpuRightSizing\s*\(\s*util\s*,\s*monthlyCost\s*\)"),
+            body);
+        Assert.Matches(
+            new Regex(@"vmUtil\s*!=\s*null\s*&&\s*FinOpsUtilizationFigures\s*\.\s*HasCpuSample\s*\(\s*vmUtil\s*\)\s*&&"),
+            body);
+    }
+
+    [Fact]
+    public void MemoryAndVmRightSizing_StandDownOnAzureSqlDatabase()
+    {
+        var body = RightSizingRulesSource();
+        const string notAzureSqlDatabase =
+            @"await\s+GetEngineEditionAsync\(\s*dataSource\s*,\s*serverId\s*,\s*commandTimeoutSeconds\s*,\s*cancellationToken\s*\)\s*!=\s*CollectorEngineCapability\s*\.\s*AzureSqlDatabaseEngineEdition";
+
+        Assert.Matches(new Regex(@"util\s*\.\s*PhysicalMemoryMb\s*>\s*8192\s*&&\s*" + notAzureSqlDatabase), body);
+        Assert.Matches(new Regex(@"FinOpsUtilizationFigures\s*\.\s*HasCpuSample\s*\(\s*vmUtil\s*\)\s*&&\s*" + notAzureSqlDatabase), body);
+        Assert.Equal(5, CollectorEngineCapability.AzureSqlDatabaseEngineEdition);
+    }
+
+    private static string RightSizingRulesSource() =>
+        RecommendationsMethodSource("Task<List<FinOpsRecommendation>> GetRecommendationsAsync(", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsRecommendationsReader.cs");
+
+    private static string CpuRightSizingBuilderSource() =>
+        RecommendationsMethodSource("FinOpsRecommendation? CpuRightSizing(", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs");
+
+    private static string RecommendationsMethodSource(string signatureText) =>
+        RecommendationsMethodSource(signatureText, "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs");
+
+    private static string RecommendationsMethodSource(string signatureText, params string[] projectPath)
+    {
+        var source = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile(["Darling", .. projectPath]));
+        var signature = source.IndexOf(signatureText, StringComparison.Ordinal);
+        Assert.True(signature >= 0, $"{signatureText} is gone, so this pin would read nothing.");
+        return CSharpSourceWalker.BraceBalanced(source, source.IndexOf('{', signature));
     }
 
     private static IndexCleanupIndexInput Index(string db, string schema, string table, string compression, decimal reservedMb) =>

@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -36,6 +37,7 @@ public sealed class DarlingMcpPgLogEventTools
         [Description("Lowest severity to return, by seriousness: LOG, INFO, NOTICE, WARNING, ERROR, FATAL, PANIC. Default LOG (everything). See the tool's reading guide.")] string? min_severity = null,
         [Description("Maximum events to return. Default 50. The page is truncated when the window holds more; total_events is the window's count.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -73,10 +75,11 @@ public sealed class DarlingMcpPgLogEventTools
 
         try
         {
+            var windowStart = windowEnd.AddHours(-hours_back);
             /* limit + 1 so truncation is OBSERVED from the extra row rather than inferred from the count reaching
                the cap (#3594). */
             var page = await DarlingPgLogEventReader.GetEventsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd,
+                postgres, resolved.ServerId, windowStart, windowEnd,
                 familyFilter, minRank, limit + 1, cancellationToken);
 
             if (page.Rows.Count == 0)
@@ -91,6 +94,7 @@ public sealed class DarlingMcpPgLogEventTools
                     postgres, resolved.ServerId, resolved.ServerName, "pg_log_events", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
                         postgres, resolved.ServerId, resolved.ServerName, "pg_log_events", cancellationToken)
+                    /* #4966: not_collected and the precondition stay bare; a quiet answer carries the window keys under hints. */
                     ?? McpHelpers.Status(
                         "no_events",
                         $"No log event{(familyFilter is null ? string.Empty : $" in family '{familyFilter}'")}"
@@ -108,16 +112,29 @@ public sealed class DarlingMcpPgLogEventTools
                         + "FEHLER: line matches nothing - the readiness read's message_locale facet). "
                         + "pg_stat_database's counters in get_pg_database_stats are the independent check "
                         + "for the error and temp_file families: if they moved and nothing is here, the log "
-                        + "is the problem rather than the server.");
+                        + "is the problem rather than the server.",
+                        (await DarlingMcpWindowNotice.ReadEventAsync(
+                            () => DarlingMcpWindowNotice.Probe(postgres, "pg_log_events", resolved.ServerName, windowStart, windowEnd, cancellationToken),
+                            null, windowStart, windowEnd, "pg_log_events", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
             }
 
             var truncated = page.Rows.Count > limit;
             var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows.ToList();
 
-            return JsonSerializer.Serialize(new
+            /* #4966: the notice is always COVERAGE, whether or not the cap cut the page (the cap is reported by truncated). A sparse event
+               list windowed on the event's own time: the floor is the earlier of the coverage probe (the schedule's retention edge and the
+               server's first collection, never an oldest row) and the oldest event shown (a first run stores events from before itself). */
+            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "pg_log_events", resolved.ServerName, windowStart, windowEnd, cancellationToken),
+                rows.Min(r => r.OccurredAtUtc), windowStart, windowEnd, "pg_log_events", logger: logger, cancellationToken: cancellationToken);
+
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 family = familyFilter,
                 min_severity = severityLabel,
                 status = "events",
@@ -171,6 +188,9 @@ public sealed class DarlingMcpPgLogEventTools
                         : null,
                 }),
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

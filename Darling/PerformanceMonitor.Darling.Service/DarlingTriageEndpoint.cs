@@ -125,6 +125,10 @@ internal static class DarlingTriageEndpoint
         (DarlingSelfAlertEvaluator.RetentionJobRecoveredMetric, DarlingSelfAlertEvaluator.RetentionJobStuckMetric),
         (DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, DarlingSelfAlertEvaluator.StaleMuteMetric),
         (DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric),
+        /* #5288: the MCP endpoint's certificate alert and its own resolution title. */
+        (DarlingSelfAlertEvaluator.McpTlsCertRenewedMetric, DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric),
+        /* #4732: the fleet-gate self-alert's resolution. */
+        (DarlingSelfAlertEvaluator.FleetGateClearedMetric, DarlingSelfAlertEvaluator.FleetGateMetric),
         /* The store families that landed AFTER #2768 (#3833). Their resolution titles are triage entry
            points exactly like the five edges above — the history row records resolution.Title into
            metric_name — and each was falling to the per-server fallback because nothing folded it onto its
@@ -287,6 +291,10 @@ internal static class DarlingTriageEndpoint
                and collector cost is what DRIVES the volume all three are downstream of. */
             [DarlingSelfAlertEvaluator.DiskPressureMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.StoreUpgradeMetric] = StoreSections(),
+            /* #5450: a fleet-level event about the whole store's collection, so the same fleet-level sections. */
+            [DarlingSelfAlertEvaluator.CollectionGapAtStartMetric] = StoreSections(),
+            /* #5450: about the whole store's retained history, so the same fleet-level sections. */
+            [DarlingSelfAlertEvaluator.CollectionGapsInHistoryMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.JobCadenceMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.CompressionJobMetric] = StoreSections(),
             /* #3816: the same shape for the two families the self-heal now covers and for the failure arm —
@@ -317,6 +325,14 @@ internal static class DarlingTriageEndpoint
                not-yet-valid arm of the same metric, the date the window opens) are in the alert detail; the
                history is the firing trail, so the operator can see when the warning began. */
             [DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric] = new[]
+            {
+                F("Recent alerts (the certificate's subject, thumbprint and validity dates are in the alert detail)", "get_alert_history", ("hours", "168"), ("limit", "50")),
+            },
+
+            /* #5288: the MCP endpoint's certificate alert is the web one's twin (mcp.network.tls instead of
+               web.network.tls), and answers the same way: renewing the certificate is an out-of-band step on the
+               service host, the facts are in the alert detail, and the history is the firing trail. */
+            [DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric] = new[]
             {
                 F("Recent alerts (the certificate's subject, thumbprint and validity dates are in the alert detail)", "get_alert_history", ("hours", "168"), ("limit", "50")),
             },
@@ -599,7 +615,7 @@ internal static class DarlingTriageEndpoint
                 var resolveStopwatch = Stopwatch.StartNew();
                 try
                 {
-                    var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverQuery);
+                    var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverQuery, context.RequestAborted);
                     if (error is null)
                     {
                         serverId = resolved.ServerId;
@@ -610,7 +626,7 @@ internal static class DarlingTriageEndpoint
                         /* #4283 H2: the resolver's OWN store-fault sentence, not the caller's refusal — this is
                            the ONE branch below that can carry ex.Message (via LoadEnabledOrFaultAsync's catch), so
                            it is logged once and answered with the fixed generic/timeout note, never shown raw. */
-                        DarlingWebFailureLog.Report(logger, "/api/triage:resolve-server", resolveStopwatch.ElapsedMilliseconds, error);
+                        DarlingWebFailureLog.Report(logger, "/api/triage:resolve-server", resolveStopwatch.ElapsedMilliseconds, error, context.RequestAborted);
                         notes.Add((JsonNode)(DarlingWebFailureLog.IsStatementTimeoutSentence(error)
                             ? DarlingWebFailureLog.TimeoutMessage
                             : DarlingWebFailureLog.GenericMessage));
@@ -631,7 +647,7 @@ internal static class DarlingTriageEndpoint
                     /* #4283: a fixed note, never ex.Message — the real text still reaches the service log. This
                        page answers 200 regardless (a degraded note, not a failed response), so only the TEXT
                        changes, not the status. */
-                    DarlingWebFailureLog.Report(logger, "/api/triage:resolve-server", resolveStopwatch.ElapsedMilliseconds, ex);
+                    DarlingWebFailureLog.Report(logger, "/api/triage:resolve-server", resolveStopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                     notes.Add((JsonNode)"Server resolution failed. The service log names what failed.");
                 }
             }
@@ -689,7 +705,7 @@ internal static class DarlingTriageEndpoint
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 /* #4283: fixed note, real text to the service log — same reasoning as the resolver catch above. */
-                DarlingWebFailureLog.Report(logger, "/api/triage:alert-history", alertHistoryStopwatch.ElapsedMilliseconds, ex);
+                DarlingWebFailureLog.Report(logger, "/api/triage:alert-history", alertHistoryStopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                 notes.Add((JsonNode)"Alert-history lookup failed. The service log names what failed.");
             }
 
@@ -731,7 +747,8 @@ internal static class DarlingTriageEndpoint
                 ["sections"] = sections,
             };
 
-            return Results.Text(body.ToJsonString(), "application/json");
+            /* #4348: the page's own body holds the alert row and every section's read, so it is swept whole. */
+            return DarlingWebStatementSweep.JsonText(body, "/api/triage", logger, 0, context.RequestAborted);
         });
     }
 
@@ -742,9 +759,10 @@ internal static class DarlingTriageEndpoint
     /// each reduced to its OWN sentence here because <c>error</c> on this page is TEXT the card renders. A tool
     /// that caught an exception (its <c>{"status":"error", ...}</c> envelope since #3653 Q11) or a
     /// binding-layer throw instead gets a fixed sentence (#4283: never <c>ex.Message</c>), and the real text
-    /// goes to the service log once through <see cref="DarlingWebFailureLog.Report(ILogger,string,long,string)"/>.
-    /// Never throws: a broken section is one card on the page, not a dead page.</summary>
-    private static async Task<JsonObject> RunSectionAsync(
+    /// goes to the service log once through <see cref="DarlingWebFailureLog.Report(ILogger,string,long,string,System.Threading.CancellationToken)"/>.
+    /// Never throws for a broken section (one card on the page, not a dead page) and never for a caller who has gone (the section
+    /// ends quietly, #5678).</summary>
+    internal static async Task<JsonObject> RunSectionAsync(
         TriageSection section,
         IReadOnlyDictionary<string, DarlingWebEndpoints.ReadToolHandler> dispatch,
         HttpContext requestContext,
@@ -785,7 +803,7 @@ internal static class DarlingTriageEndpoint
                        ServerError arm answers with (this page still answers 200 overall; only the card's text
                        degrades). */
                     var sentence = McpHelpers.ErrorMessageOf(raw);
-                    DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, sentence);
+                    DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, sentence, requestContext.RequestAborted);
                     result["error"] = DarlingWebFailureLog.IsStatementTimeoutSentence(sentence)
                         ? DarlingWebFailureLog.TimeoutMessage
                         : DarlingWebFailureLog.GenericMessage;
@@ -800,12 +818,21 @@ internal static class DarlingTriageEndpoint
                     break;
             }
         }
+        catch (Exception ex) when (requestContext.RequestAborted.IsCancellationRequested)
+        {
+            /* #5678 round 2: the caller has gone, so whatever the section's tool threw (the read tools resolve the server OUTSIDE
+               their own try, so a cancellation, or a connect timeout the driver threw instead of one, leaves the tool) is not a
+               broken card: nobody is reading this page. This section ends quietly -- no error text, no Warning or Error line
+               (Report with the fired token writes one Debug line). This is what keeps "Never throws" true for a gone caller. */
+            DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex, requestContext.RequestAborted);
+            return result;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* #4283: the binding-layer backstop (a throw, not a tool's own catch) — the real Exception is
                still here, so reported and answered from it directly rather than through the sentence
                classifier, exactly as the /api/read/* loop's own binding-layer catch does. */
-            DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex);
+            DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex, requestContext.RequestAborted);
             result["error"] = DarlingWebFailureLog.IsStatementTimeout(ex)
                 ? DarlingWebFailureLog.TimeoutMessage
                 : DarlingWebFailureLog.GenericMessage;
@@ -848,7 +875,7 @@ internal static class DarlingTriageEndpoint
 
     /// <summary>One alert-history row in the SAME wire shape <c>get_alert_history</c> serves, so the page and
     /// any automation parse one shape whichever surface they read.</summary>
-    private static JsonObject AlertRowNode(DarlingAlertReader.AlertHistoryReadRow row) => new()
+    internal static JsonObject AlertRowNode(DarlingAlertReader.AlertHistoryReadRow row) => new()
     {
         ["alert_time"] = row.AlertTime.ToString("o", CultureInfo.InvariantCulture),
         ["server_id"] = row.ServerId,
@@ -861,11 +888,12 @@ internal static class DarlingTriageEndpoint
         ["send_error"] = row.SendError,
         ["muted"] = row.Muted,
         ["detail_text"] = row.DetailText,
+        /* #5642: the fire-time age of the newest sample, read from the persisted context. */
+        ["newest_sample"] = AlertNotebookEndpoint.NewestSampleNode(row.ContextJson),
     };
 
-    private static string? Query(HttpContext context, string key)
-    {
-        var value = context.Request.Query[key].ToString();
-        return string.IsNullOrEmpty(value) ? null : value;
-    }
+    /// <summary>The first non-empty value for a query key, or null — the read surface's binding rule, which this
+    /// calls rather than restates (#5245: a repeated key is its first value, not the values joined by a comma).</summary>
+    internal static string? Query(HttpContext context, string key) =>
+        DarlingWebEndpoints.First(context, key);
 }

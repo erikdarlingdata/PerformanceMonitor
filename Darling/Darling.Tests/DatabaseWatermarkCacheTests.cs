@@ -59,12 +59,89 @@ public sealed class DatabaseWatermarkCacheTests
         Assert.Null(v);
     }
 
+    /// <summary>
+    /// #4749: a seed that carries its witness (the newest <c>collection_time</c> among the rows at the seeded
+    /// value) answers later floors while that row is still inside the read, as an advanced entry does. Before,
+    /// the seed never carried one, so a quiet database with a recent row missed on every cycle.
+    /// </summary>
     [Fact]
-    public void NonNullSeed_MissesAtTheNextFloor_BecauseTheWitnessIsUnknown()
+    public void NonNullSeedWithItsWitness_HitsAtTheNextFloor_WhileTheWitnessRowIsInsideIt()
+    {
+        var c = new DatabaseWatermarkCache();
+        var value = Floor0.AddHours(1);
+        var witness = Floor0.AddMinutes(90);
+        c.Seed(S, Db, value, Floor0, Now, c.TokenFor(S, Db), witness);
+
+        Assert.True(c.TryGet(S, Db, Floor0.AddMinutes(1), Now, out var v));
+        Assert.Equal(value, v);
+        Assert.True(c.TryGet(S, Db, witness.AddTicks(-10), Now, out v));
+        Assert.Equal(value, v);
+    }
+
+    [Fact]
+    public void NonNullSeedWithItsWitness_MissesOnceTheWitnessRowLeavesTheFloor()
+    {
+        var c = new DatabaseWatermarkCache();
+        var witness = Floor0.AddMinutes(90);
+        c.Seed(S, Db, Floor0.AddHours(1), Floor0, Now, c.TokenFor(S, Db), witness);
+
+        /* The store keeps collection_time > floor, so a row stamped AT the floor is already outside the read. */
+        Assert.False(c.TryGet(S, Db, witness, Now, out _));
+        Assert.False(c.TryGet(S, Db, witness.AddSeconds(1), Now, out _));
+    }
+
+    /// <summary>A seed with no witness (a caller that does not know it) still misses, as before.</summary>
+    [Fact]
+    public void NonNullSeedWithoutAWitness_StillMissesAtTheNextFloor()
     {
         var c = new DatabaseWatermarkCache();
         c.Seed(S, Db, Floor0.AddHours(1), Floor0, Now, c.TokenFor(S, Db));
         Assert.False(c.TryGet(S, Db, Floor0.AddMinutes(1), Now, out _));
+    }
+
+    /// <summary>The witness is kept the way the store keeps a timestamp, truncated to microseconds.</summary>
+    [Fact]
+    public void ASeededWitness_IsTruncatedToMicroseconds()
+    {
+        var c = new DatabaseWatermarkCache();
+        var witness = Floor0.AddMinutes(90);
+        c.Seed(S, Db, Floor0.AddHours(1), Floor0, Now, c.TokenFor(S, Db), witness.AddTicks(7));
+
+        Assert.True(c.TryGet(S, Db, witness.AddTicks(-10), Now, out _));
+        Assert.False(c.TryGet(S, Db, witness, Now, out _));
+    }
+
+    /// <summary>A seeded witness answers only until the re-seed interval ends, like every other entry.</summary>
+    [Fact]
+    public void ASeededWitness_DoesNotOutliveTheReseedInterval()
+    {
+        var c = new DatabaseWatermarkCache();
+        c.Seed(S, Db, Floor0.AddHours(1), Floor0, Now, c.TokenFor(S, Db), Floor0.AddHours(2));
+
+        Assert.True(c.TryGet(S, Db, Floor0.AddMinutes(1), Now.AddMinutes(59), out _));
+        Assert.False(c.TryGet(S, Db, Floor0.AddMinutes(1), Now + DatabaseWatermarkCache.ReseedInterval, out _));
+    }
+
+    /// <summary>
+    /// A batch advances a seeded witness the way it advances any other: a tie moves it forward, and a lower
+    /// value leaves it alone.
+    /// </summary>
+    [Fact]
+    public void ASeededWitness_MovesForwardOnATie_AndIsNotDisturbedByALowerAdvance()
+    {
+        var c = new DatabaseWatermarkCache();
+        var value = Floor0.AddHours(1);
+        var witness = Floor0.AddMinutes(90);
+        c.Seed(S, Db, value, Floor0, Now, c.TokenFor(S, Db), witness);
+
+        c.Advance(S, Db, value.AddMinutes(-1), witness.AddHours(1));
+        Assert.True(c.TryGet(S, Db, witness.AddTicks(-10), Now, out var v));
+        Assert.Equal(value, v);
+        Assert.False(c.TryGet(S, Db, witness.AddMinutes(1), Now, out _));
+
+        c.Advance(S, Db, value, witness.AddHours(1));
+        Assert.True(c.TryGet(S, Db, witness.AddMinutes(1), Now, out v));
+        Assert.Equal(value, v);
     }
 
     [Fact]

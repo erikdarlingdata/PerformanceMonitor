@@ -31,6 +31,12 @@ public partial class ServerTab : UserControl
         _planCorrectionFilterMgr = new DataGridFilterManager<PlanCorrectionRow>(PlanCorrectionGrid);
         _blockedProcessFilterMgr = new DataGridFilterManager<BlockedProcessReportRow>(BlockedProcessReportGrid);
         _deadlockFilterMgr = new DataGridFilterManager<DeadlockProcessDetail>(DeadlockGrid);
+        /* Empty-state wording (F15): a grid that comes back with no rows says what is missing, in the words the System Events
+           sub-tabs use, instead of showing a bare header row. Grids without wording here say "No rows to show.". */
+        EmptyState.SetText(QuerySnapshotsGrid, "No active queries in the selected time window.");
+        EmptyState.SetText(ProcedureStatsGrid, "No procedure executions in the selected time window.");
+        EmptyState.SetText(BlockedProcessReportGrid, "No blocked process reports in the selected time window.");
+        EmptyState.SetText(DeadlockGrid, "No deadlocks in the selected time window.");
         _runningJobsFilterMgr = new DataGridFilterManager<RunningJobRow>(RunningJobsGrid);
         _longQueryFilterMgr = new DataGridFilterManager<LongQueryCompletionRow>(LongQueryCompletionsGrid);
         _serverConfigFilterMgr = new DataGridFilterManager<ServerConfigRow>(ServerConfigGrid);

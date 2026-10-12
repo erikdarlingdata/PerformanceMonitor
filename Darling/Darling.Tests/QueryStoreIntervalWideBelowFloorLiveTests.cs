@@ -33,6 +33,7 @@ namespace Darling.Tests;
    to CREATE and DROP its own database through ScratchPostgres and works entirely inside it (the chunk drops and
    the retention delete run against that database), so it cannot race live collection. */
 [Collection("gap-cache-serial")]
+[Trait("Cost", "Slow")]
 public sealed class QueryStoreIntervalWideBelowFloorLiveTests
 {
     internal const int ServerId = -4689001;
@@ -441,6 +442,7 @@ AND   hypertable_name = 'query_store_stats';";
         Assert.Equal(S.AddHours(12), DateTime.Parse(filled.GetProperty("effective_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
         Assert.True(filled.GetProperty("window_truncated").GetBoolean());
         Assert.Contains("began keeping complete history", filled.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+        AssertTheNoteNamesTheField(filled);
 
         await ForceFilledSinceAsync(rig.Connection, S.AddDays(-1), ct);
         await PurgeTableAsync(rig.Connection, S.AddMinutes(90), ct);
@@ -449,20 +451,40 @@ AND   hypertable_name = 'query_store_stats';";
         Assert.Equal("interval_table", edge.GetProperty("history_source").GetString());
         Assert.Equal(S.AddHours(2).Add(QueryStoreIntervalWide.PurgeEdgeMargin), DateTime.Parse(edge.GetProperty("effective_start").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
         Assert.Contains("keeps 9 days", edge.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+        AssertTheNoteNamesTheField(edge);
+    }
+
+    /// <summary>#4966: <c>effective_start</c> prints in UTC with the Z, and the note names the start in that exact text.
+    /// The page shows the instant in the browser's zone by finding the field's text in the note; a note that spelled the
+    /// store's naive floor on its own carried no Z, so it was found nowhere and drawn in bare UTC above local times.</summary>
+    private static void AssertTheNoteNamesTheField(JsonElement answer)
+    {
+        var start = answer.GetProperty("effective_start").GetString()!;
+        Assert.EndsWith("Z", start, StringComparison.Ordinal);
+        Assert.Contains(start, answer.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
     }
 
     /* ---- helpers ------------------------------------------------------------------------------------------ */
 
-    /// <summary>Runs the real retention delete for the interval table, slice by slice, until it deletes nothing.</summary>
+    /// <summary>
+    /// Runs the real retention delete for the interval table (#5569: the row-capped cursor form, batch by
+    /// batch, carrying the cursor the way <c>DarlingRetention.PurgeOneAsync</c> does) until it deletes nothing.
+    /// </summary>
     internal static async Task PurgeTableAsync(NpgsqlConnection connection, DateTime cutoff, CancellationToken ct)
     {
-        var sql = DarlingRetention.TimeSlicedDeleteSql("collect.query_store_interval_wide", "first_execution_time");
+        var unspecified = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified);
+        DateTime? cursor = null;
         int deleted;
         do
         {
-            await using var command = new NpgsqlCommand(sql, connection);
-            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
-            deleted = await command.ExecuteNonQueryAsync(ct);
+            var (rows, maxDeleted) = await DarlingRetention.ExecuteCursoredBatchAsync(
+                connection, "collect.query_store_interval_wide", "first_execution_time", 5_000, unspecified,
+                cursor, ct);
+            deleted = rows;
+            if (maxDeleted is not null)
+            {
+                cursor = maxDeleted;
+            }
         }
         while (deleted > 0);
     }
@@ -475,11 +497,13 @@ AND   hypertable_name = 'query_store_stats';";
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(start, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(rig.End, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = TestTop });
-        for (var i = 0; i < 3; i++)
+        command.Parameters.Add(PerformanceMonitor.Darling.Storage.DatabaseFilter.All.Parameter());  /* #5245: the database list binds one text[] */
+        for (var i = 0; i < 2; i++)
         {
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value });
         }
 
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(TestTop) });  /* #5313: the round's candidate limit, bound last */
         await command.ExecuteNonQueryAsync(ct);
     }
 

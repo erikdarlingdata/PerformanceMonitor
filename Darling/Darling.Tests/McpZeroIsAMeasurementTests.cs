@@ -54,6 +54,7 @@ namespace Darling.Tests;
 /// SQL consts are pinned for the new columns, and the pure derivations (growth, PVS reasons) are executed.
 /// <see cref="McpZeroIsAMeasurementLivePostgresTests"/> runs the tools against live Postgres.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class McpZeroIsAMeasurementTests
 {
     private const string DarlingMcp = "Darling/PerformanceMonitor.Darling.Service/Mcp";
@@ -211,15 +212,15 @@ public sealed class McpZeroIsAMeasurementTests
 
     private static IEnumerable<(string Name, string Sql)> DifferencedTrendSql()
     {
-        yield return (nameof(DarlingTrendReader.QueryDurationTrendSql), DarlingTrendReader.QueryDurationTrendSql);
-        yield return (nameof(DarlingTrendReader.ProcedureDurationTrendSql), DarlingTrendReader.ProcedureDurationTrendSql);
-        yield return (nameof(DarlingTrendReader.QueryStoreDurationTrendSql), DarlingTrendReader.QueryStoreDurationTrendSql);
+        yield return (nameof(DarlingTrendReader.QueryDurationTrendFilteredSql), DarlingTrendReader.QueryDurationTrendFilteredSql);
+        yield return (nameof(DarlingTrendReader.ProcedureDurationTrendFilteredSql), DarlingTrendReader.ProcedureDurationTrendFilteredSql);
+        yield return (nameof(DarlingTrendReader.QueryStoreDurationTrendFilteredSql), DarlingTrendReader.QueryStoreDurationTrendFilteredSql);
         yield return ("BuildRollupTrendSql(false)", QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: false));
         yield return ("BuildRollupTrendSql(true)", QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true));
-        /* #3653 A11: the raw query-stats trend the viewer runs (and the MCP raw const's alias-in-waiting) — its
-           LAG is the pre-V128 fallback arm of the three-state interval, and the rule below still holds. */
-        yield return ("QueryDurationTrendRawSql(false)", DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false));
-        yield return ("QueryDurationTrendRawSql(true)", DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true));
+        /* #3653 A11: the bucketed raw query-stats trend, with and without the viewer's filter — its LAG is the pre-V128
+           fallback arm of the three-state interval, and the rule below still holds. */
+        yield return ("BuildBucketedRawTrendSql(false)", DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: false));
+        yield return ("BuildBucketedRawTrendSql(true)", DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true));
     }
 
     [Fact]
@@ -258,11 +259,12 @@ public sealed class McpZeroIsAMeasurementTests
         }
 
         /* #3653 A11: Lite's three delta-family trends read the interval the store HAS — the three-state
-           MAX(sample_interval_seconds) shape, 0 → NULL, LAG only for a pre-v61 collection — and only the
-           Query Store trend (no interval column on its source) keeps the LAG-only shape. Since #4234 the query
-           and procedure duration trends share one statement (DurationTrendChartSql, which takes the view), so
-           the three trends are two statements in this file, and each divides its bucket's work by its rated
-           seconds, NULL for an unrated collection. */
+           MAX(sample_interval_seconds) shape, 0 → NULL, LAG only for a pre-v61 collection — and the
+           Query Store trend rates over its stored interval END (#4765), the LAG only for a row that stored
+           none. Its COALESCE stays on one line so the `))) AS interval_seconds` census below still counts it.
+           Since #4234 the query and procedure duration trends share one statement (DurationTrendChartSql,
+           which takes the view), so the three trends are two statements in this file, and each divides its
+           bucket's work by its rated seconds, NULL for an unrated collection. */
         var liteQueryStats = ReadRepoFile("Lite", "Services", "LocalDataService.QueryStats.cs");
         Assert.Equal(2, Regex.Matches(liteQueryStats, @"CASE WHEN MAX\(sample_interval_seconds\) IS NULL").Count);
         Assert.Equal(2, Regex.Matches(liteQueryStats, @"ELSE NULLIF\(MAX\(sample_interval_seconds\), 0\)").Count);
@@ -452,7 +454,7 @@ public sealed class McpZeroIsAMeasurementTests
         Assert.DoesNotContain("growth_7d_mb", darling, StringComparison.Ordinal);
 
         var lite = ReadRepoFile("Lite", "Services", "LocalDataService.FinOps.IndexObjects.cs");
-        var read = lite[lite.IndexOf("GetObjectSizeGrowthAsync(int serverId", StringComparison.Ordinal)..];
+        var read = lite[lite.IndexOf("GetObjectSizeGrowthAsync(", StringComparison.Ordinal)..];
         read = read[..read.IndexOf("return items;", StringComparison.Ordinal)];
         Assert.DoesNotMatch(FoldedBaseline, read);
         Assert.Contains("MAX(collection_time) FILTER (WHERE collection_time <= $2) AS snapshot_7d_time", read, StringComparison.Ordinal);
@@ -571,6 +573,7 @@ public sealed class McpZeroIsAMeasurementTests
 /// 0 MB beside one not measured at all, and the growth read over three days of history.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class McpZeroIsAMeasurementLivePostgresTests
 {
     private const string ServerName = "zero-is-a-measurement-e2e";

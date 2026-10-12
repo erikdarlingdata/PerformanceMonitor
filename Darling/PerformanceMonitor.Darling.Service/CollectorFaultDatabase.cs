@@ -20,8 +20,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>ServerRuntime.ConnectedDatabase</c> - an <c>init</c>-only field stamped once during the initial
 /// connect-and-probe, from whatever database the probe landed on. For a per-database collector that is
 /// simply a different database from the one that failed, so a message built on it names the wrong one with
-/// full confidence. Seven collectors declare <c>RunsPerDatabase =&gt; true</c>, <c>pg_index_bloat</c>
-/// among them.</para>
+/// full confidence. Many collectors fan out per database, <c>pg_index_bloat</c> among them, and on Azure SQL
+/// Database so does <c>database_size_stats</c> (#5498). A count kept here goes stale each time one is added, so
+/// it is not kept.</para>
 ///
 /// <para><b>Why <see cref="Exception.Data"/> and not a wrapper exception.</b> Fault classification keys on
 /// the exception's TYPE and SQLSTATE - <c>PostgresTargetProvider.Classify</c> asks whether it is a

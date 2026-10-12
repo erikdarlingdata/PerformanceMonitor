@@ -189,7 +189,7 @@ public sealed class StoreSelfMetricsTests
     }
 
     [Fact]
-    public void DimensionInsertSql_CoversBothPayloadDims_WithTotalRelationSizeAndExactRowCount()
+    public void DimensionInsertSql_CoversBothPayloadDims_WithTotalRelationSizeAndTheEstimatedRowCount()
     {
         var sql = StoreSelfMetrics.DimensionInsertSql;
 
@@ -201,7 +201,9 @@ public sealed class StoreSelfMetricsTests
         Assert.Contains(PayloadDimensions.QueryPlanDimTable, sql, StringComparison.Ordinal);
         Assert.Contains("pg_total_relation_size", sql, StringComparison.Ordinal);
         Assert.Contains("'dimension'", sql, StringComparison.Ordinal);
-        Assert.Contains("count(*)", sql, StringComparison.Ordinal);
+        /* #5520: the planner's estimate, NULL where it is -1, never a count(*) over a table this size every hour. */
+        Assert.Contains("CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("count(*)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -302,9 +304,19 @@ public sealed class StoreSelfMetricsTests
         foreach (var table in qualified)
         {
             Assert.Contains($"'{table}',", sql, StringComparison.Ordinal);
-            Assert.Contains($"pg_total_relation_size('{table}')", sql, StringComparison.Ordinal);
-            /* The planner's estimate, NULL where it is -1 (never analysed) — never a 15 GiB count(*) an hour. */
-            Assert.Contains($"(SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = '{table}'::regclass)", sql, StringComparison.Ordinal);
+            if (table is "collect." + QueryStoreIntervalLatest.TableName or "collect." + QueryStoreIntervalWide.TableName)
+            {
+                /* #5571: a day-partitioned parent has no storage of its own (its size reads 0), so its row sums the
+                   LEAF partitions through pg_partition_tree, bytes and the reltuples estimate alike. */
+                Assert.Contains($"COALESCE((SELECT sum(pg_total_relation_size(t.relid)) FROM pg_partition_tree('{table}'::regclass) AS t WHERE t.isleaf), pg_total_relation_size('{table}'))::bigint", sql, StringComparison.Ordinal);
+                Assert.Contains($"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND (c.oid IN (SELECT t.relid FROM pg_partition_tree('{table}'::regclass) AS t WHERE t.isleaf) OR", sql, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains($"pg_total_relation_size('{table}')", sql, StringComparison.Ordinal);
+                /* The planner's estimate, NULL where it is -1 (never analysed) — never a 15 GiB count(*) an hour. */
+                Assert.Contains($"(SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = '{table}'::regclass)", sql, StringComparison.Ordinal);
+            }
 
             /* The census names the same table by the same compound constant, compared against the
                concatenated schema.relation — no hand-typed (schema, relation) tuple to drift (review catch). */
@@ -380,6 +392,15 @@ public sealed class StoreSelfMetricsTests
             ["collect.store_log_captures"] = "self-telemetry about the store's own logging, not collected monitoring data",
             ["collect.read_latency"] = "internal self-telemetry (the read-path histogram), not collected monitoring data (V148 doc)",
             ["collect.pg_statement_text"] = "dimension-shaped content keyed to facts rather than collected as facts, pruned on last_seen (V73 doc)",
+            ["collect.query_stats_hour_ledger"] = "the hourly row count of query_stats the count guard reads, one row per server per hour and pruned to the hourly rollup's horizon, not collected monitoring data (V164 doc)",
+            ["collect.query_stats_hour_ledger_state"] = "one row saying from which hour the ledger is complete, bytes too small to matter (V164 doc)",
+            ["collect.store_statement_captures"] = "internal self-telemetry (the store's statement history captures), not collected monitoring data (V163 doc)",
+            ["collect.store_statement_history"] = "internal self-telemetry (the store's statement history), pruned to 90 days by its own writer, not collected monitoring data (V163 doc)",
+            ["collect.slow_reads"] = "internal self-telemetry (the slow-read record), not collected monitoring data (V162 doc)",
+            ["collect.query_store_top_daily"] = "the daily summary the Query Store top read uses, approximate by design and rebuilt from the interval table (V161 doc)",
+            ["collect.plan_regression_daily"] = "the per-day plan totals PLAN_REGRESSION reads for closed days, rebuilt from the interval table (V168 doc)",
+            ["collect.plan_regression_daily_built"] = "per-day build and validity bookkeeping for the per-day plan totals, bytes too small to matter (V168 doc)",
+            ["collect.query_store_top_daily_built"] = "per-day build bookkeeping for the daily summary, bytes too small to matter (V161 doc)",
             ["collect.plan_force_actions"] = "the force-plan bot's append-only audit ledger, not collected monitoring data (V107 doc)",
         };
 
@@ -563,6 +584,98 @@ public sealed class StoreSelfMetricsTests
         Assert.Empty(offenders);
     }
 
+    /// <summary>
+    /// #5520: the dimension rows' <c>row_count</c> is the planner's estimate, and the comment on the dimension
+    /// insert in <see cref="StoreSelfMetrics"/> says no reader computes from it. This pins that claim: in the
+    /// product source, a use of a store-metrics row's <c>RowCount</c> is a record parameter, a verbatim pass
+    /// through to the tool answer, or the owner-job-history evidence (a job row's own count, never a dimension's),
+    /// and the only reader of the column from the store is the metrics reader. A new use that does arithmetic, a
+    /// comparison or a threshold on it fails here, so the author decides whether an estimate that moves in steps
+    /// is fit for it.
+    /// </summary>
+    [Fact]
+    public void NoReaderComputesFromADimensionRowCount()
+    {
+        var root = RepoRoot();
+        var offenders = new List<string>();
+        var scanned = 0;
+        var passThroughs = 0;
+        var allowed = new[]
+        {
+            @"^long\? RowCount,$",
+            @"^row_count = \w+\.RowCount,$",
+            @"^var status = row\.RowCount is null \? OwnerJobHistoryEvidenceStatus\.Filtered$",
+            @"^row\.RowCount,$",
+        };
+
+        foreach (var project in new[]
+        {
+            "PerformanceMonitor.Darling.Storage", "PerformanceMonitor.Darling.Service",
+            "PerformanceMonitor.Darling.Analysis", "PerformanceMonitor.Darling.Viewer",
+        })
+        {
+            var dir = Path.Combine(root, "Darling", project);
+            Assert.True(Directory.Exists(dir), $"product project not found: {dir}");
+
+            foreach (var path in Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories))
+            {
+                var relative = Path.GetRelativePath(dir, path);
+                var top = relative.Split(Path.DirectorySeparatorChar)[0];
+                if (string.Equals(top, "bin", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(top, "obj", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                scanned++;
+                var text = File.ReadAllText(path);
+                var name = Path.GetFileName(path);
+
+                /* The store's own column: read by the metrics reader, written by the self-metrics collector, created by a migration. */
+                if (text.Contains("collect.store_metrics", StringComparison.Ordinal)
+                    && Regex.IsMatch(text, @"\brow_count\b")
+                    && name is not ("DarlingStoreMetricsReader.cs" or "StoreSelfMetrics.cs" or "PgMigrations.cs"))
+                {
+                    offenders.Add($"{project}/{relative}: reads store_metrics.row_count outside the metrics reader");
+                }
+
+                if (!text.Contains("StoreMetricRow", StringComparison.Ordinal)
+                    && !text.Contains("StoreMetricDailyPoint", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                /* Comments are blanked by the shared walker, not a line-prefix filter, so a // note or a block comment that names RowCount is not read as a use. */
+                var lines = CSharpSourceWalker.StripCommentsAndStrings(text).Split('\n');
+                for (var i = 0; i < lines.Length; i++)
+                {
+                    var line = lines[i].Trim();
+                    if (!Regex.IsMatch(line, @"\bRowCount\b"))
+                    {
+                        continue;
+                    }
+
+                    if (allowed.Any(a => Regex.IsMatch(line, a)))
+                    {
+                        if (line.StartsWith("row_count = ", StringComparison.Ordinal))
+                        {
+                            passThroughs++;
+                        }
+
+                        continue;
+                    }
+
+                    offenders.Add($"{project}/{relative}:{i + 1}: {line}");
+                }
+            }
+        }
+
+        /* An empty scan is how a guard starts reporting clean, so a moved tree or a renamed pass-through fails here. */
+        Assert.True(scanned >= 100, $"the product scan found only {scanned} source files; the projects have moved");
+        Assert.True(passThroughs >= 2, $"expected the two tool pass-throughs (the latest row and the daily point), found {passThroughs}");
+        Assert.True(offenders.Count == 0, string.Join(Environment.NewLine, offenders));
+    }
+
     private static string RepoRoot([CallerFilePath] string thisFile = "")
     {
         var dir = Path.GetDirectoryName(thisFile);
@@ -639,6 +752,42 @@ public sealed class StoreSelfMetricsTests
         Assert.Equal("background_job", StoreSelfMetrics.BackgroundJobObjectKind);
     }
 
+    /// <summary>
+    /// #4834: the hour's longest single checkpoint sync rides on the checkpointer row, written by BOTH arms of the
+    /// insert (17+ and the pre-17 bgwriter shape) from the sweep's two parameters, with the types stated because a
+    /// parameter in a SELECT list is otherwise inferred as text.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(StoreSelfMetrics.CheckpointerInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.CheckpointerBgwriterInsertSql))]
+    public void TheCheckpointerInsertSql_WritesTheHoursLongestSync_FromParametersTwoAndThree(string sqlName)
+    {
+        var sql = ((string)typeof(StoreSelfMetrics)
+            .GetField(sqlName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!
+            .GetValue(null)!).Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        Assert.Contains("checkpoints_timed, checkpoint_longest_sync_ms, checkpoint_longest_sync_at)", sql, StringComparison.Ordinal);
+        Assert.Contains("$2::bigint,\n    $3::timestamp\nFROM ", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$4", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>Every other kind leaves the two columns NULL: no other statement the sweep runs names them.</summary>
+    [Fact]
+    public void NoOtherKindsInsert_NamesTheLongestSyncColumns()
+    {
+        var others = typeof(StoreSelfMetrics)
+            .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.EndsWith("Sql", StringComparison.Ordinal))
+            .Where(f => f.Name is not nameof(StoreSelfMetrics.CheckpointerInsertSql) and not nameof(StoreSelfMetrics.CheckpointerBgwriterInsertSql))
+            .Select(f => (f.Name, Sql: (string)f.GetRawConstantValue()!))
+            .ToList();
+
+        Assert.True(others.Count >= 10, "the census of the sweep's statements found too few to mean anything");
+        Assert.All(others, o => Assert.False(
+            o.Sql.Contains("checkpoint_longest_sync", StringComparison.Ordinal),
+            $"{o.Name} names the checkpointer's longest-sync columns, but only the checkpointer row carries them"));
+    }
+
     [Theory]
     [InlineData(nameof(StoreSelfMetrics.HypertableInsertSql))]
     [InlineData(nameof(StoreSelfMetrics.ContinuousAggregateInsertSql))]
@@ -713,7 +862,7 @@ public sealed class StoreSelfMetricsTests
         await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct);
 
         var written = await StoreSelfMetrics.SweepAsync(
-            connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
+            connection, timescaleAvailable: true, DateTime.UtcNow, null, null, null, ct);
         Assert.True(written > 0, "the sweep wrote nothing");
 
         /* One table row per name TableInsertSql carries — the same source the census test
@@ -874,7 +1023,7 @@ FROM collect.store_metrics", connection);
         }
 
         var secondSweepAt = DateTime.UtcNow.AddSeconds(2);
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, secondSweepAt, null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, secondSweepAt, null, null, null, ct);
 
         var second = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetCheckpointerAsync(dataSource, ct);
         Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, second.Status);
@@ -885,6 +1034,14 @@ FROM collect.store_metrics", connection);
         Assert.True(second.Requested is >= 1, $"the forced CHECKPOINT must land in the interval's requested count, not {second.Requested}");
         Assert.Equal(first.CumulativeRequested + second.Requested, second.CumulativeRequested);
         Assert.True(second.IsPressure, "one requested checkpoint in the interval IS the pressure arm");
+
+        /* #4823: the one-column sync-time read the once-a-minute sampler takes, through the shipped statement for this
+           server's major. A value in the same milliseconds the hourly row stores, and never behind the row the sweep
+           just wrote from the same cumulative counter. */
+        var sampledSyncMs = await StoreSelfMetrics.ReadCheckpointerSyncTimeMsAsync(connection, ct);
+        Assert.NotNull(sampledSyncMs);
+        Assert.True(sampledSyncMs >= second.CumulativeSyncMs,
+            $"the sampled sync time {sampledSyncMs} ms cannot be behind the {second.CumulativeSyncMs} ms the sweep stored from the same counter");
 
         /* #4619: the existence check, through the shipped SQL, over the names THIS SWEEP WROTE. Every one must
            resolve back to its object: a kind whose lookup drifted from the sweep's name form (the job name, a
@@ -975,7 +1132,7 @@ LIMIT 1", connection))
         await ExecAsync(connection, $"DROP MATERIALIZED VIEW collect.{retiredView} CASCADE", ct);
 
         var thirdSweepAt = secondSweepAt.AddSeconds(2);
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, thirdSweepAt, null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, thirdSweepAt, null, null, null, ct);
 
         async Task<PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.InventoryReconciliation> InventoryNowAsync()
         {
@@ -1110,7 +1267,7 @@ SELECT
         }
 
         /* The sweep. On 2.29+ before #3918 this threw 42703 from the catch-all statement. */
-        var written = await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
+        var written = await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, null, null, ct);
         Assert.True(written > 0, "the sweep wrote nothing");
 
         await using (var identity = new NpgsqlCommand($@"
@@ -1307,7 +1464,7 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
                 $"\n  what the job did: {await DescribeJobWorkAsync(connection, Table, jobId, ct)}");
         }
 
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, null, null, ct);
 
         /* 10x: one closed chunk, 500k rows. */
         await SeedTickRowsAsync(connection, Table, daysBack: 8, rows: 500_000, ct);
@@ -1325,7 +1482,7 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
                 $"\n  what the job did: {await DescribeJobWorkAsync(connection, Table, jobId, ct)}");
         }
 
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow.AddSeconds(2), null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow.AddSeconds(2), null, null, null, ct);
 
         /* 1. The escalation is REAL WORK at two different scales — asserted on rows and chunks, which are
            exact, instead of on the two durations, which are a benchmark of somebody else's compression

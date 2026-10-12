@@ -153,7 +153,8 @@ public sealed class CollectorHealthClassifierTests
     {
         Assert.Equal(expected, CollectorHealthClassifier.Classify(
             totalRuns, successCount, errorCount, permissionDeniedCount, extensionMissingCount, abandonedCount,
-            hoursSinceLastSuccess, hoursSinceLastRun, frequencyMinutes));
+            hoursSinceLastSuccess, hoursSinceLastRun, frequencyMinutes,
+            latestRunNote: null, trailingSuccessRuns: 0)); // 0: the table's rows are counts only, no run history
     }
 
     /// <summary>
@@ -188,10 +189,15 @@ public sealed class CollectorHealthClassifierTests
         Assert.DoesNotContain("SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
 
-        /* The predicate reads rows_collected, and this query's aggregates sit outside a subquery that
-           ENUMERATES its columns - so the column has to be projected through it or the read fails at the
-           store and nowhere earlier. */
+        /* The predicate reads rows_collected. Until #5371 this query's aggregates sat outside a subquery that
+           ENUMERATES its columns, so the column had to be projected through it or the read failed at the
+           store and nowhere earlier. The aggregates now read v_collection_log directly (one CTE, no column
+           list in between), so what has to hold is the same claim in its new form: the abandonment
+           aggregate is computed over the view's own rows, ahead of the first FROM of the view. */
         Assert.Contains("rows_collected,", sql, StringComparison.Ordinal);
+        Assert.True(
+            sql.IndexOf("AS abandoned_count", StringComparison.Ordinal) < sql.IndexOf("FROM v_collection_log", StringComparison.Ordinal),
+            "abandoned_count must be aggregated over the view's own rows, not over a projected subquery");
     }
 
     /// <summary>
@@ -223,7 +229,8 @@ public sealed class CollectorHealthClassifierTests
     {
         Assert.Equal(CollectorHealthClassifier.Stopped, CollectorHealthClassifier.Classify(
             totalRuns: 882, successCount: 882, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
-            abandonedCount: 0, hoursSinceLastSuccess: 120, hoursSinceLastRun: 120, frequencyMinutes: 5));
+            abandonedCount: 0, hoursSinceLastSuccess: 120, hoursSinceLastRun: 120, frequencyMinutes: 5,
+            latestRunNote: null, trailingSuccessRuns: 0)); // 0: a count-only fixture, no run history
     }
 
     [Theory]
@@ -406,7 +413,8 @@ public sealed class CollectorHealthClassifierTests
         CollectorHealthClassifier.Classify(
             totalRuns: 100, successCount: 100, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
             abandonedCount: 0, hoursSinceLastSuccess: hoursSinceLastSuccess, hoursSinceLastRun: hoursSinceLastRun,
-            frequencyMinutes: 5, latestRunNote: note);
+            frequencyMinutes: 5, latestRunNote: note,
+            trailingSuccessRuns: 0); // 0: the note is the input under test, not the newest runs
 
     /// <summary>The run still records SUCCESS, so the counts read clean; the newest run's note is the only
     /// record of the loss. Half or more of the attempted databases failing bands Warning, fewer stays Healthy.</summary>
@@ -481,7 +489,12 @@ public sealed class CollectorHealthClassifierTests
     [Fact]
     public void TheCollectionHealthReadSql_ProjectsTheNewestRunsNote()
     {
-        Assert.Contains("recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note", LocalDataService.CollectionHealthSql, StringComparison.Ordinal);
+        var sql = LocalDataService.CollectionHealthSql;
+
+        /* #5371: the newest run is a keyed lookup at the aggregate's newest instant (it was recency_rank = 1),
+           and the SUCCESS gate still decides whether its message is a note. */
+        Assert.Contains("CASE WHEN newest.pick.status = 'SUCCESS' THEN newest.pick.error_message END AS latest_run_note", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   n.collection_time = h.last_run_time", sql, StringComparison.Ordinal);
     }
 
 }

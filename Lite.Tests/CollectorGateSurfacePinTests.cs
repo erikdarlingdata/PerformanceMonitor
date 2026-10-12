@@ -38,6 +38,7 @@ namespace Lite.Tests;
 /// name, a switch string that drifted from its definition's <c>Name</c> would make the gate silently no-op.</item>
 /// </list>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectorGateSurfacePinTests
 {
     /* Representative targets spanning every gate dimension. */

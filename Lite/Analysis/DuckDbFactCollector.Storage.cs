@@ -272,11 +272,14 @@ FROM latest
 WHERE rn = 1
 AND   is_percent_growth = true
 AND   total_size_mb >= 10240
-AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
+AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
+/*SEC*/";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            /* #5558: the file growth setting replicates from the primary; a secondary copy is the primary's to report. */
+            cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "FILE_AUTOGROWTH_PERCENT", "database_name", 4);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;

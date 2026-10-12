@@ -50,6 +50,36 @@ public static class PgStatementText
     private static readonly string SensitiveTextCase =
         PgSensitiveStatementFilter.SqlPredicate("query_text") + " AS query_text";
 
+    /// <summary>The collector name the hourly text fetch's failures are recorded under in the collection log
+    /// (#5320). The fetch rides the statistics collector's run, so a failure under that collector's name would
+    /// turn a run whose statistics were stored into an error; its own name keeps the two apart.</summary>
+    public const string CollectorName = "pg_statement_text";
+
+    /// <summary>The command timeout, in seconds, of the text fetch on the monitored target (#5320: the
+    /// statement filter's pattern runs there for every entry, so a slow fetch is a failure worth naming).</summary>
+    public const int FetchCommandTimeoutSeconds = 60;
+
+    /// <summary>The collection-log message for a failed text fetch or store write (#5320). A timeout is named as
+    /// one, with the deadline, because text then stops being collected for the target until the fetch gets
+    /// faster; any other failure keeps the fault's own message.</summary>
+    public static string DescribeFailure(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        Exception? current = exception;
+        while (current is not null)
+        {
+            if (current is TimeoutException)
+            {
+                return string.Create(CultureInfo.InvariantCulture,
+                    $"The statement text fetch timed out after {FetchCommandTimeoutSeconds} s; no statement text was stored this cycle. {exception.Message}");
+            }
+
+            current = current.InnerException;
+        }
+
+        return exception.Message;
+    }
+
     /// <summary>The table. Not a hypertable: one row per statement per server, near-static once a workload is
     /// warm, so it is dimension-shaped and pruned on <see cref="LastSeenColumn"/> rather than by drop_chunks.</summary>
     public const string TableName = "collect.pg_statement_text";

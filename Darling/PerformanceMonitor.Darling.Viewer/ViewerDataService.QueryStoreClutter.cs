@@ -94,6 +94,17 @@ public partial class ViewerDataService
         /// column sorts chronologically rather than by the text of a formatted stamp.</summary>
         public DateTime? OptionsCaptured { get; init; }
 
+        /// <summary>The UTC instant behind <see cref="OptionsCaptured"/> (#4766). A converted wall clock cannot say which
+        /// of the two 01:30s of the repeated autumn hour it was, so the column text is worded from this.</summary>
+        public DateTime? OptionsCapturedUtc { get; init; }
+
+        /// <summary>What the Options Captured column shows (#4766): the instant in the display mode, with its UTC offset
+        /// added in the repeated autumn hour. Null when the verdict read no options row, so the binding's
+        /// <c>TargetNullValue</c> still draws the em-dash. The column binds this and sorts by <see cref="OptionsCaptured"/>.</summary>
+        public string? OptionsCapturedText => OptionsCapturedUtc.HasValue
+            ? ViewerTimeHelper.FormatForDisplay(OptionsCapturedUtc.Value, "yyyy-MM-dd HH:mm")
+            : null;
+
         /// <summary>The composition's prose for this row's reasons, one sentence per reason — the same
         /// sentences the MCP payload and the web panel carry. Shown as the row's tooltip and in the
         /// detail pane under the grid.</summary>
@@ -132,12 +143,62 @@ public partial class ViewerDataService
         public long WaitingTasks { get; init; }
         public long MeasuredSeconds { get; init; }
         public DateTime LastObserved { get; init; }
+
+        /// <summary>The UTC instant behind <see cref="LastObserved"/> (#4766); the column text is worded from it.</summary>
+        public DateTime LastObservedUtc { get; init; }
+
+        /// <summary>What the Last Seen column shows (#4766): the instant in the display mode, with its UTC offset added in the
+        /// repeated autumn hour. The column binds this and sorts by <see cref="LastObserved"/>.</summary>
+        public string LastObservedText => ViewerTimeHelper.FormatForDisplay(LastObservedUtc, "yyyy-MM-dd HH:mm");
     }
 
     /// <summary>Both halves of one read: the per-database rows and the one per-server overhead block.</summary>
     public sealed record QueryStoreClutterResult(
         List<QueryStoreClutterRow> Databases,
         QueryStoreOverheadSummary Overhead);
+
+    /// <summary>
+    /// Where this server's coverage starts for the window the clutter read draws (#4966), through the shared probe
+    /// (<see cref="DataWindowFloor"/>). The panel draws from two ranged sources: the plan churn from <c>query_store_stats</c>, and the
+    /// read cost from the collection log (the runs of the <c>query_store</c> collector). Both are aggregates over the window, so the
+    /// coverage rule applies to each, and the note names the LATER of the two starts, which makes it true of every column the panel
+    /// shows. Its config and memory-clerk sections show the newest snapshot only and need no note. A source that comes back alone is
+    /// named; when neither does the answer is null.
+    ///
+    /// <para>The read cost's source counts the <c>query_store</c> collector's runs and no other collector's (#5022): the name is the
+    /// one the panel's read-cost SQL binds (<see cref="DarlingQueryStoreClutterReader.CollectorName"/>). A server that logged other
+    /// collectors' runs but never ran that one has no read cost, so it names nothing above an empty panel, and another collector's
+    /// earlier runs cannot move the note earlier.</para>
+    ///
+    /// <para>Two probe calls, not one: <see cref="DataWindowFloor.GetForServerAsync"/> takes one source, and the shared probe's
+    /// several-source form (<see cref="DataWindowFloor.GetAsync"/>) answers the EARLIEST start among its sources, which is the rule for
+    /// the two halves of a stitched rollup and the opposite of this panel's. The caller works the window out once and hands the same
+    /// start to this probe and to <see cref="GetQueryStoreClutterAsync"/>. A range that reaches before the later start names it, and a
+    /// covered range whose first rows came late names nothing. Null too when the window lies wholly before the coverage, and for a
+    /// window of 90 minutes or less, which makes no probe call. A probe that throws throws here (see <see cref="LaterStartAsync"/>).</para>
+    /// </summary>
+    public Task<DateTime?> GetQueryStoreClutterDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        LaterStartAsync(
+            () => DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("query_store_stats"), serverId, startUtc, endUtc,
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken),
+            () => DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorRuns(DarlingQueryStoreClutterReader.CollectorName), serverId, startUtc, endUtc,
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken));
+
+    /// <summary>
+    /// The later of the two coverage starts the clutter panel's sources came back with (#4966): the plan churn's, then the read cost's,
+    /// each probed in turn. A start that came back alone is the answer, and neither is null. A probe that throws throws here, so the
+    /// tab's guard (<c>DataStartOrNullAsync</c>) drops the note and the panel loads without it, and a first probe that failed starts no
+    /// second. <c>internal static</c> so the tests run the choice, and a failing probe, without a store.
+    /// </summary>
+    internal static async Task<DateTime?> LaterStartAsync(Func<Task<DateTime?>> planChurnStart, Func<Task<DateTime?>> readCostStart)
+    {
+        ArgumentNullException.ThrowIfNull(planChurnStart);
+        ArgumentNullException.ThrowIfNull(readCostStart);
+
+        var planChurn = await planChurnStart();
+        var readCost = await readCostStart();
+        return planChurn is { } churn && readCost is { } cost ? (churn >= cost ? churn : cost) : planChurn ?? readCost;
+    }
 
     /// <summary>
     /// The clutter view for one server over the toolbar's window. Runs the four shared arms, composes them
@@ -156,9 +217,9 @@ public partial class ViewerDataService
         CancellationToken cancellationToken = default)
     {
         var serverIds = new[] { serverId };
-        var readCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken);
-        var planChurn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken);
-        var config = await DarlingQueryStoreClutterReader.GetConfigAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken);
+        var readCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken: cancellationToken);
+        var planChurn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken: cancellationToken);
+        var config = await DarlingQueryStoreClutterReader.GetConfigAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken: cancellationToken);
         var waits = await DarlingQueryStoreClutterReader.GetQdsWaitsAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken);
         var clerk = await DarlingQueryStoreClutterReader.GetQueryStoreClerkAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
 
@@ -206,6 +267,7 @@ public partial class ViewerDataService
             StaleQueryThresholdDays = c?.StaleQueryThresholdDays,
             PctOfCap = c is null ? null : Round(QueryStoreClutter.PctOfCap(c), 1),
             OptionsCaptured = c is null ? null : ViewerTimeHelper.ForDisplay(c.CapturedAt),
+            OptionsCapturedUtc = c?.CapturedAt,
             Recommendation = string.Join(" ", QueryStoreClutter.Recommendations(row)),
         };
     }
@@ -225,6 +287,7 @@ public partial class ViewerDataService
                 WaitingTasks = w.WaitingTasksTotal,
                 MeasuredSeconds = w.MeasuredSeconds,
                 LastObserved = ViewerTimeHelper.ForDisplay(w.LastObserved),
+                LastObservedUtc = w.LastObserved,
             })
             .ToList();
 

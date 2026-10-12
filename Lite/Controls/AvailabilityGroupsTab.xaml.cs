@@ -71,7 +71,11 @@ public partial class AvailabilityGroupsTab : UserControl
         _loading = true;
         try
         {
-            var cards = await _dataService.GetAgTopologyAsync();
+            /* #5457: off the UI thread. The read takes the store lock before it opens a connection and DuckDB.NET's
+               async completes synchronously, so awaited here it waits on that lock, and then runs the whole query,
+               on the dispatcher. Task.Run keeps the lock enter and exit on a pool thread (see ServerTab.BlockChain). */
+            var dataService = _dataService;
+            var cards = await Task.Run(() => dataService.GetAgTopologyAsync());
 
             /* Same rows as the last render — skip reconciling and re-binding entirely (#4238). */
             var digest = AgTopology.ComputeDigest(cards);

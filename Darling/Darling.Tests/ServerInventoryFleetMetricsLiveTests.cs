@@ -168,6 +168,15 @@ LEFT JOIN grants g ON true";
         await InsertQueryStatsAsync(connection, ServerId, ServerName, "TailDb", watermarkTarget.AddMinutes(10), 2, ct);
         // NeverExecutedDb: no query_stats rows at all.
 
+        /* The idle coverage rule: 7 days of history and a sample on each complete UTC day before "now" (idleCutoff + 7 days, so
+           2020-06-01 through 2020-06-07). One zero-execution sample before the cutoff hour (read raw, as the rollup may not hold
+           it) and one at noon on each day; the days after the watermark are read raw, the first day from the rollup. */
+        await FinOpsIdleCoverageSeed.InsertAsync(connection, ct, ServerId, ServerName, idleCutoff.AddHours(-1), "oldest");
+        for (var day = 0; day < 7; day++)
+        {
+            await FinOpsIdleCoverageSeed.InsertAsync(connection, ct, ServerId, ServerName, anchorHour.Date.AddDays(day).AddHours(12), "day" + day);
+        }
+
         /* The "known databases" universe: one size snapshot per candidate, all at the SAME collection_time so
            the latest-snapshot join (exact timestamp equality) picks up every one of them together. */
         var snapshotTime = watermarkTarget.AddMinutes(20);
@@ -236,9 +245,10 @@ LEFT JOIN grants g ON true";
         const int ServerA = -940301;
         const int ServerB = -940302;
         const int ServerC = -940303;
+        const int ServerD = -940304;
 
-        await ExecAsync(connection, "INSERT INTO servers (server_id, server_name) VALUES ($1, $2), ($3, $4), ($5, $6)",
-            ct, ServerA, "old-new-A", ServerB, "old-new-B", ServerC, "old-new-C");
+        await ExecAsync(connection, "INSERT INTO servers (server_id, server_name) VALUES ($1, $2), ($3, $4), ($5, $6), ($7, $8)",
+            ct, ServerA, "old-new-A", ServerB, "old-new-B", ServerC, "old-new-C", ServerD, "old-new-D");
 
         var now = DateTime.UtcNow;
 
@@ -255,6 +265,7 @@ LEFT JOIN grants g ON true";
         await InsertDatabaseSizeAsync(connection, ServerA, "old-new-A", "StaleDb", now.AddDays(-2), 9999, ct); // not latest — must be ignored
         await InsertQueryStatsAsync(connection, ServerA, "old-new-A", "AppDb1", now.AddDays(-2), 5, ct);
         // AppDb2: no executions -> idle.
+        await FinOpsIdleCoverageSeed.SeedAsync(connection, ct, ServerA, "old-new-A", now);
 
         // Server B: both databases active, no memory-grant evidence at all (grants CTE empty, must COALESCE to 0).
         await InsertCpuAsync(connection, ServerB, now.AddHours(-1), 20, ct);
@@ -264,10 +275,17 @@ LEFT JOIN grants g ON true";
         await InsertDatabaseSizeAsync(connection, ServerB, "old-new-B", "Db2", now.AddMinutes(-15), 150, ct);
         await InsertQueryStatsAsync(connection, ServerB, "old-new-B", "Db1", now.AddDays(-1), 2, ct);
         await InsertQueryStatsAsync(connection, ServerB, "old-new-B", "Db2", now.AddDays(-6), 7, ct); // inside the 7d window
+        await FinOpsIdleCoverageSeed.SeedAsync(connection, ct, ServerB, "old-new-B", now);
 
         // Server C: both databases idle, no CPU/memory evidence at all (every left-joined CTE empty).
         await InsertDatabaseSizeAsync(connection, ServerC, "old-new-C", "Db1", now.AddMinutes(-45), 50, ct);
         await InsertDatabaseSizeAsync(connection, ServerC, "old-new-C", "Db2", now.AddMinutes(-45), 75, ct);
+        await FinOpsIdleCoverageSeed.SeedAsync(connection, ct, ServerC, "old-new-C", now);
+
+        // Server D: low CPU and nothing else — the verdict every server with CPU samples kept: OVER_PROVISIONED.
+        await InsertCpuAsync(connection, ServerD, now.AddHours(-1), 5, ct);
+        await InsertCpuAsync(connection, ServerD, now.AddHours(-2), 7, ct);
+        await FinOpsIdleCoverageSeed.SeedAsync(connection, ct, ServerD, "old-new-D", now);
 
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         var metrics = await viewer.GetServerMetricsAsync(ct);
@@ -278,7 +296,7 @@ LEFT JOIN grants g ON true";
         var cpuCutoff = now.AddHours(-24);
         var idleCutoff = now.AddDays(-7);
 
-        foreach (var serverId in new[] { ServerA, ServerB, ServerC })
+        foreach (var serverId in new[] { ServerA, ServerB, ServerC, ServerD })
         {
             Assert.True(metrics.ContainsKey(serverId), $"server {serverId} did not appear in the fleet result.");
             var fleetRow = metrics[serverId];
@@ -294,6 +312,55 @@ LEFT JOIN grants g ON true";
         Assert.Equal(1, metrics[ServerA].IdleDbCount);
         Assert.Equal(0, metrics[ServerB].IdleDbCount);
         Assert.Equal(2, metrics[ServerC].IdleDbCount);
+
+        // A server with size rows but no CPU sample in the window has no verdict, not OVER_PROVISIONED from zeros;
+        // a server with low CPU still gets it.
+        Assert.Null(metrics[ServerC].ProvisioningStatus);
+        Assert.Equal(ProvisioningVerdict.OverProvisioned, metrics[ServerD].ProvisioningStatus);
+    }
+
+    /// <summary>
+    /// The drill-down's verdict follows the fleet rule. A server with a memory sample but no CPU sample in the
+    /// window comes back with an EMPTY status (the tab shows "No Data"), where zeros used to read as
+    /// OVER_PROVISIONED; a server with low CPU still gets OVER_PROVISIONED.
+    /// </summary>
+    [Fact]
+    public async Task GetUtilizationEfficiencyAsync_ServerWithNoCpuSample_GetsNoVerdict_ALowCpuServerStillGetsOverProvisioned()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live utilization-verdict test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        const int QuietServer = -940311;
+        const int NoCpuServer = -940312;
+
+        await ExecAsync(connection, "INSERT INTO servers (server_id, server_name) VALUES ($1, $2), ($3, $4)",
+            ct, QuietServer, "util-quiet", NoCpuServer, "util-nocpu");
+
+        var now = DateTime.UtcNow;
+        await InsertMemoryAsync(connection, QuietServer, now.AddHours(-1), 100, 10, ct);
+        await InsertMemoryAsync(connection, NoCpuServer, now.AddHours(-1), 100, 10, ct);
+        await InsertCpuAsync(connection, QuietServer, now.AddHours(-1), 5, ct);
+        await InsertCpuAsync(connection, QuietServer, now.AddHours(-2), 7, ct);
+
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+        var quiet = await viewer.GetUtilizationEfficiencyAsync(QuietServer, ct);
+        Assert.NotNull(quiet);
+        Assert.Equal(2L, quiet.CpuSamples);
+        Assert.Equal(ProvisioningVerdict.OverProvisioned, quiet.ProvisioningStatus);
+
+        var noCpu = await viewer.GetUtilizationEfficiencyAsync(NoCpuServer, ct);
+        Assert.NotNull(noCpu);
+        Assert.Equal(0L, noCpu.CpuSamples);
+        Assert.Equal("", noCpu.ProvisioningStatus);
     }
 
     // ── SQL execution helpers ─────────────────────────────────────────────────────────
@@ -305,6 +372,10 @@ LEFT JOIN grants g ON true";
         await using var command = dataSource.CreateCommand(sql);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = idleCutoff }); // $1 cpu cutoff — unused by this test
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = idleCutoff }); // $2 idle cutoff
+        var now = idleCutoff.AddDays(7);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = PerformanceMonitor.Darling.Storage.FinOps.DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now) }); // $3 first complete day
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = PerformanceMonitor.Darling.Storage.FinOps.DarlingFinOpsOptimizationReader.IdleCoverageDays }); // $4 days
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = PerformanceMonitor.Darling.Storage.FinOps.DarlingFinOpsOptimizationReader.IdleCoverageEndUtc(now) }); // $5 today
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -335,8 +406,10 @@ LEFT JOIN grants g ON true";
         await using var reader = await command.ExecuteReaderAsync(ct);
         if (await reader.ReadAsync(ct))
         {
-            var status = ProvisioningVerdict.Evaluate(
-                avgCpuPercent: reader.IsDBNull(0) ? 0m : Convert.ToDecimal(reader.GetValue(0)),
+            /* The same rule the fleet read follows: a server with no CPU sample in the window has no verdict, where
+               zeros used to read as OVER_PROVISIONED. */
+            var status = reader.IsDBNull(0) ? null : ProvisioningVerdict.Evaluate(
+                avgCpuPercent: Convert.ToDecimal(reader.GetValue(0)),
                 maxCpuPercent: reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
                 p95CpuPercent: reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
                 maxGrantWaiters: reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),

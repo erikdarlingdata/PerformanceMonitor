@@ -38,6 +38,8 @@ namespace Darling.Tests;
 /// the function as it ships, under <c>powershell.exe</c> (Windows PowerShell 5.1), which is what Windows
 /// Server hands an operator by default.</para>
 /// </summary>
+/* Reads Lite/README.md and a Lite csproj (#5651), so the Reads=Lite guard (#5459) wants the trait. */
+[Trait("Reads", "Lite")]
 public class DarlingRuntimePreflightTests
 {
     private static string InstallScript => ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
@@ -91,10 +93,12 @@ public class DarlingRuntimePreflightTests
 
         foreach (var (marker, what) in new[]
         {
+            ("Microsoft.NETCore.App", "the base shared framework BOTH exes need (#5407)"),
             ("Microsoft.AspNetCore.App", "the ASP.NET Core shared framework the SERVICE needs"),
             ("Microsoft.WindowsDesktop.App", "the Desktop shared framework the VIEWER needs"),
             ("$dotnetMajor = 10", "the required .NET major version"),
             ("https://dotnet.microsoft.com/download/dotnet/10.0", "where to download both runtimes"),
+            ("The .NET Runtime $dotnetMajor.0 is not installed", "the base-runtime refusal naming the missing runtime by its installer's name (#5407)"),
             ("ASP.NET Core Runtime $dotnetMajor.0 is not installed", "the refusal naming the missing runtime by its installer's name"),
             (".NET Desktop Runtime $dotnetMajor.0 is not installed", "the warning naming the missing runtime by its installer's name"),
         })
@@ -131,6 +135,92 @@ public class DarlingRuntimePreflightTests
     }
 
     /// <summary>
+    /// The base .NET Runtime is a refusal too, and it is checked before ASP.NET Core (#5407). The standalone
+    /// ASP.NET Core Runtime installer does not include <c>Microsoft.NETCore.App</c>, so a box with only that
+    /// installer passed the old gate and then died at service start with the host's "You must install .NET".
+    /// Checking it first lets an operator missing both read one message that names both.
+    /// </summary>
+    [Fact]
+    public void RuntimeGate_RefusesOnTheBaseRuntime_BeforeItChecksAspNetCore()
+    {
+        var script = InstallScript;
+
+        var netCoreHeader = "if (-not (Test-FrameworkMajorPresent $netCoreVersions $dotnetMajor)) {";
+        var netCore = ExtractBracedBlock(script, netCoreHeader);
+        Assert.Contains("Fail @\"", netCore, StringComparison.Ordinal);
+        Assert.Contains("Nothing was installed or changed.", netCore, StringComparison.Ordinal);
+        Assert.Contains("-SkipPreflight", netCore, StringComparison.Ordinal);
+        Assert.Contains("Hosting Bundle", netCore, StringComparison.Ordinal);
+
+        var netCoreAt = script.IndexOf(netCoreHeader, StringComparison.Ordinal);
+        var aspNetAt = script.IndexOf("if (-not (Test-FrameworkMajorPresent $aspNetVersions $dotnetMajor)) {", StringComparison.Ordinal);
+        Assert.True(netCoreAt < aspNetAt, "the base-runtime check must run before the ASP.NET Core check (#5407)");
+    }
+
+    /// <summary>
+    /// The gate, executed with the framework lookup stubbed. Missing base runtime with ASP.NET Core present is
+    /// refused with the base-runtime message; both present passes; base present with ASP.NET Core missing is
+    /// refused as before; missing both gives the one message that shows what was found for each.
+    /// </summary>
+    [Fact]
+    public void RuntimeGate_Executed_DecidesOnEachFramework()
+    {
+        const string present = "@('10.0.11')";
+        const string absent = "@()";
+
+        var baseMissing = RunGate(netCore: absent, aspNet: present, desktop: present);
+        Assert.Contains("FAILED", baseMissing, StringComparison.Ordinal);
+        Assert.Contains("The .NET Runtime 10.0 is not installed", baseMissing, StringComparison.Ordinal);
+        Assert.Contains("Hosting Bundle", baseMissing, StringComparison.Ordinal);
+        Assert.Contains("Nothing was installed or changed.", baseMissing, StringComparison.Ordinal);
+        Assert.Contains("Microsoft.NETCore.App):      nothing", baseMissing, StringComparison.Ordinal);
+        Assert.Contains("Microsoft.AspNetCore.App):   10.0.11", baseMissing, StringComparison.Ordinal);
+        Assert.DoesNotContain("Runtime check passed", baseMissing, StringComparison.Ordinal);
+
+        var bothPresent = RunGate(netCore: present, aspNet: present, desktop: present);
+        Assert.DoesNotContain("FAILED", bothPresent, StringComparison.Ordinal);
+        Assert.Contains("Runtime check passed", bothPresent, StringComparison.Ordinal);
+
+        var aspNetMissing = RunGate(netCore: present, aspNet: absent, desktop: present);
+        Assert.Contains("FAILED", aspNetMissing, StringComparison.Ordinal);
+        Assert.Contains("ASP.NET Core Runtime 10.0 is not installed", aspNetMissing, StringComparison.Ordinal);
+        Assert.DoesNotContain("The .NET Runtime 10.0 is not installed", aspNetMissing, StringComparison.Ordinal);
+        Assert.Contains("Microsoft.NETCore.App):      10.0.11", aspNetMissing, StringComparison.Ordinal);
+
+        var bothMissing = RunGate(netCore: "@('9.0.14')", aspNet: absent, desktop: present);
+        Assert.Contains("FAILED", bothMissing, StringComparison.Ordinal);
+        Assert.Contains("The .NET Runtime 10.0 is not installed", bothMissing, StringComparison.Ordinal);
+        Assert.Contains("Microsoft.NETCore.App):      9.0.14", bothMissing, StringComparison.Ordinal);
+        Assert.Contains("Microsoft.AspNetCore.App):   nothing", bothMissing, StringComparison.Ordinal);
+
+        /* Both runtimes present and only Desktop missing: a warning, and the install continues. */
+        var desktopMissing = RunGate(netCore: present, aspNet: present, desktop: absent);
+        Assert.DoesNotContain("FAILED", desktopMissing, StringComparison.Ordinal);
+        Assert.Contains("WARNING: the .NET Desktop Runtime 10.0 is not installed.", desktopMissing, StringComparison.Ordinal);
+    }
+
+    /// <summary>Runs the gate's body under Windows PowerShell 5.1 with the framework lookup stubbed and
+    /// <c>Fail</c> turned into a printed marker plus exit, and returns everything it printed.</summary>
+    private static string RunGate(string netCore, string aspNet, string desktop)
+    {
+        var script = InstallScript;
+        var gate = script.IndexOf("# -- 1c. Refuse an install the .NET runtimes on this box cannot run", StringComparison.Ordinal);
+        var guard = script.IndexOf("if (-not $SkipPreflight) {", gate, StringComparison.Ordinal);
+        var body = ExtractBracedBlockAt(script, script.IndexOf('{', guard), out _);
+
+        var probe = new StringBuilder();
+        probe.AppendLine("$dotnetMajor = 10");
+        probe.AppendLine("$dotnetDownloadUrl = 'https://dotnet.microsoft.com/download/dotnet/10.0'");
+        probe.AppendLine("function Fail([string]$message) { 'FAILED'; $message; exit 1 }");
+        probe.AppendLine($"function Get-InstalledFrameworkVersions([string]$name) {{ switch ($name) {{ 'Microsoft.NETCore.App' {{ {netCore} }} 'Microsoft.AspNetCore.App' {{ {aspNet} }} 'Microsoft.WindowsDesktop.App' {{ {desktop} }} }} }}");
+        probe.AppendLine(ExtractFunction(script, "Test-FrameworkMajorPresent"));
+        probe.AppendLine(ExtractFunction(script, "Format-FrameworkVersionList"));
+        probe.AppendLine(body);
+
+        return string.Join("\n", RunWindowsPowerShell(probe.ToString()));
+    }
+
+    /// <summary>
     /// The gate rides the existing <c>-SkipPreflight</c> switch rather than adding a second one. One
     /// documented escape hatch for "this script cannot see my box", not two — and the refusal message has
     /// to say which switch that is, or a false refusal is a dead end.
@@ -147,6 +237,7 @@ public class DarlingRuntimePreflightTests
         Assert.True(guard >= 0, "the .NET runtime gate is no longer governed by -SkipPreflight (#2479)");
 
         var body = ExtractBracedBlockAt(script, script.IndexOf('{', guard), out _);
+        Assert.Contains("Get-InstalledFrameworkVersions 'Microsoft.NETCore.App'", body, StringComparison.Ordinal);
         Assert.Contains("Get-InstalledFrameworkVersions 'Microsoft.AspNetCore.App'", body, StringComparison.Ordinal);
         Assert.Contains("Get-InstalledFrameworkVersions 'Microsoft.WindowsDesktop.App'", body, StringComparison.Ordinal);
 
@@ -240,6 +331,170 @@ public class DarlingRuntimePreflightTests
         Assert.Equal(2, answers.Count);
         Assert.Equal("nothing", answers[0]);
         Assert.Equal("8.0.20, 9.0.14", answers[1]);
+    }
+
+    private const string CetMessage = "Fatal error. Your Windows doesn't fully support CET. Please install all available Windows updates.";
+
+    /// <summary>
+    /// #5651: on a Windows that lacks the updates .NET 10 needs for CET, the service exe dies before any of
+    /// our code runs, with exit code 0x80131506 (-2146233082 signed) and <see cref="CetMessage"/> on stderr.
+    /// 0x80131506 is .NET's general fatal-error code (COR_E_EXECUTIONENGINE), so only the message stops the
+    /// install; the exit code alone keeps the ordinary failure path. The decision is executed as it ships.
+    /// </summary>
+    [Fact]
+    public void TestCetStartFailure_DecidesOnTheOutputTextOnly_AsShipped()
+    {
+        var cases = new (string Args, bool Expected)[]
+        {
+            /* No output, or only a generic fatal-error line, is not CET: the CET text is what counts. */
+            ("@()", false),
+            ("@('Fatal error.', 'Some other runtime failure')", false),
+            ("@('" + CetMessage.Replace("'", "''") + "')", true),
+            ("@('Fatal error.', 'Your Windows doesn''t fully support CET. Please install all available Windows updates.')", true),
+            /* Ordinary outcomes keep their old paths: pass, a failed server probe, a bad config. */
+            ("@('PASS server1', 'FAIL server2: login failed')", false),
+            ("@('You must install .NET to run this application')", false),
+        };
+
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Test-CetStartFailure"));
+        foreach (var (args, _) in cases)
+        {
+            probe.AppendLine($"if (Test-CetStartFailure {args}) {{ 'True' }} else {{ 'False' }}");
+        }
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+        Assert.Equal(cases.Length, answers.Count);
+
+        var wrong = new List<string>();
+        for (var i = 0; i < cases.Length; i++)
+        {
+            if (!string.Equals(answers[i], cases[i].Expected.ToString(), StringComparison.Ordinal))
+            {
+                wrong.Add($"Test-CetStartFailure {cases[i].Args} returned {answers[i]}, expected {cases[i].Expected}");
+            }
+        }
+
+        Assert.True(wrong.Count == 0, "install-darling.ps1's CET start-failure check is wrong (#5651):\n  " + string.Join("\n  ", wrong));
+    }
+
+    /// <summary>
+    /// The CET stop has to come after the pre-flight exe runs, BEFORE the continue-or-abort prompt (whose
+    /// "the config is invalid or a server is unreachable" wording is the wrong diagnosis), and has to tell the
+    /// operator what to do: install the Windows updates, then the README workaround.
+    /// </summary>
+    [Fact]
+    public void Preflight_StopsOnCetBeforeThePrompt_AndSaysWindowsNeedsItsUpdates()
+    {
+        var script = InstallScript.ReplaceLineEndings("\n");
+
+        var run = script.IndexOf("& $serviceExe --test-connection", StringComparison.Ordinal);
+        var check = script.IndexOf("if (Test-CetStartFailure $preflightOutput) {", StringComparison.Ordinal);
+        var prompt = script.IndexOf("Install anyway?", StringComparison.Ordinal);
+        Assert.True(run >= 0 && check > run && prompt > check,
+            "the CET check must read the pre-flight exe's output, and run before the 'Install anyway?' prompt (#5651)");
+
+        var block = ExtractBracedBlockAt(script, script.IndexOf('{', check), out _);
+        Assert.Contains("Windows on this machine is missing updates", block, StringComparison.Ordinal);
+        Assert.Contains("Install all available Windows updates", block, StringComparison.Ordinal);
+        Assert.Contains("README", block, StringComparison.Ordinal);
+        Assert.Contains("UserShadowStack", block, StringComparison.Ordinal);
+        Assert.Contains("exit 5", block, StringComparison.Ordinal);
+
+        /* The output is both shown and kept, so the operator still sees every line the exe printed. */
+        Assert.Contains("2>&1", script.Substring(run, 120), StringComparison.Ordinal);
+        Assert.Contains("Write-Host \"$_\"", script.Substring(run, 160), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The capture block, executed as it ships against a stand-in exe that writes the CET message to stderr and
+    /// exits 0x80131506. Under <c>$ErrorActionPreference = 'Stop'</c> (the script's own setting) Windows
+    /// PowerShell 5.1 would throw on the first stderr line if the block did not relax it, so this proves the
+    /// capture sees the exit code and the text, shows the line, and puts the preference back (#5651).
+    /// </summary>
+    [Fact]
+    public void Preflight_CaptureBlock_SeesTheExitCodeAndStderr_UnderErrorActionStop()
+    {
+        var script = InstallScript.ReplaceLineEndings("\n");
+        var from = script.IndexOf("$savedErrorAction = $ErrorActionPreference", StringComparison.Ordinal);
+        var endMarker = "$ErrorActionPreference = $savedErrorAction";
+        var to = script.IndexOf(endMarker, from, StringComparison.Ordinal);
+        Assert.True(from >= 0 && to > from, "the pre-flight capture block moved (#5651)");
+        var block = script.Substring(from, to + endMarker.Length - from);
+
+        var dir = Path.Combine(Path.GetTempPath(), $"darling-5651-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var fake = Path.Combine(dir, "fake-service.cmd");
+            File.WriteAllText(fake, "@echo off\r\necho " + CetMessage + " 1>&2\r\nexit /b -2146233082\r\n");
+
+            var probe = new StringBuilder();
+            probe.AppendLine(ExtractFunction(InstallScript, "Test-CetStartFailure"));
+            probe.AppendLine("$ErrorActionPreference = 'Stop'");
+            probe.AppendLine($"$serviceExe = '{fake}'");
+            probe.AppendLine(block);
+            probe.AppendLine("\"exit=$preflightExit\"");
+            probe.AppendLine("\"lines=$($preflightOutput.Count)\"");
+            probe.AppendLine("\"cet=$(Test-CetStartFailure $preflightOutput)\"");
+            probe.AppendLine("\"eap=$ErrorActionPreference\"");
+
+            var lines = RunWindowsPowerShell(probe.ToString());
+            Assert.Contains("exit=-2146233082", lines);
+            Assert.Contains("lines=1", lines);
+            Assert.Contains("cet=True", lines);
+            Assert.Contains("eap=Stop", lines);
+            Assert.Contains(CetMessage, lines);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch (IOException) { /* best-effort */ }
+        }
+    }
+
+    /// <summary>
+    /// <c>upgrade-darling.ps1</c> never runs the service exe (it copies files and drives the service), so it has
+    /// no pre-flight to teach the CET check to. If it ever grows one, this fails and the check must follow.
+    /// </summary>
+    [Fact]
+    public void UpgradeScript_RunsNoServiceExePreflight_SoThereIsNothingToTeachTheCetCheck()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        Assert.DoesNotContain("--test-connection", upgrade, StringComparison.Ordinal);
+        Assert.DoesNotContain("& $serviceExe", upgrade, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5651: each README quotes the CET message exactly (so a search finds the line) and gives the
+    /// per-program opt-out and its undo for every exe that product ships. The exe names come from the project
+    /// files, so renaming an assembly breaks this instead of leaving a command that names a dead exe.
+    /// </summary>
+    [Theory]
+    [InlineData("Lite", "Lite/PerformanceMonitorLite.csproj")]
+    [InlineData("Darling", "Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj", "Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj")]
+    public void Readme_QuotesTheCetMessage_AndGivesTheOptOutAndItsUndoForEveryExe(string product, params string[] projects)
+    {
+        var readme = ReadRepoFile(product, "README.md").ReplaceLineEndings("\n");
+        Assert.Contains(CetMessage, readme, StringComparison.Ordinal);
+        Assert.Contains("0x80131506", readme, StringComparison.Ordinal);
+        /* The undo is the registry way, proven on build 20348.5622; the cmdlet's own -Remove failed there. */
+        Assert.DoesNotContain(readme.Split((char)10), l => l.TrimStart().StartsWith("Set-ProcessMitigation", StringComparison.Ordinal) && l.Contains("-Remove", StringComparison.Ordinal));
+        Assert.Contains("Remove-ItemProperty", readme, StringComparison.Ordinal);
+        Assert.Contains("MitigationOptions, MitigationAuditOptions, EAFModules", readme, StringComparison.Ordinal);
+        Assert.Contains("20348.5622", readme, StringComparison.Ordinal);
+        Assert.Contains("install all available Windows updates", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("off one protection", readme, StringComparison.Ordinal);
+
+        foreach (var project in projects)
+        {
+            var csproj = ReadRepoFile(project.Split('/'));
+            var match = System.Text.RegularExpressions.Regex.Match(csproj, "<AssemblyName>([^<]+)</AssemblyName>");
+            Assert.True(match.Success, $"{project} no longer sets AssemblyName");
+            var exe = match.Groups[1].Value + ".exe";
+
+            Assert.Contains($"Set-ProcessMitigation -Name {exe} -Disable UserShadowStack", readme, StringComparison.Ordinal);
+            Assert.Contains(exe, readme[readme.IndexOf("To undo it once Windows is patched", StringComparison.Ordinal)..], StringComparison.Ordinal);
+        }
     }
 
     /// <summary>Runs a script under Windows PowerShell 5.1 and returns its non-blank output lines — the

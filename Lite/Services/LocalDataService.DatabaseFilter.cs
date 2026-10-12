@@ -55,4 +55,24 @@ public partial class LocalDataService
         sb.Append(')');
         return sb.ToString();
     }
+
+    /// <summary>
+    /// The aggregate-side form of a <see cref="BuildDbInClause"/> clause (#5414 M1): the same predicate without its
+    /// leading <c>AND</c>, for a <c>FILTER (WHERE ...)</c> inside the per-collection aggregates of a trend read,
+    /// or <c>""</c> when there is no filter. A trend's database filter belongs there and not in the WHERE: the
+    /// collection's interval is the collection's whichever databases were asked about, so a collection where the
+    /// chosen database had no rows must stay in the bucket as zero work over its real seconds, not vanish from the
+    /// denominator and read the rate high.
+    /// </summary>
+    internal static string DbInPredicate(string dbClause) =>
+        dbClause.Length == 0 ? "" : dbClause[" AND ".Length..];
+
+    /// <summary>
+    /// <c>SUM(expr)</c>, or with a database filter <c>COALESCE(SUM(expr) FILTER (WHERE predicate), 0)</c> — a
+    /// collection the chosen databases had no rows in is zero work, a measurement (#5414 M1).
+    /// </summary>
+    internal static string FilteredSum(string expr, string dbClause) =>
+        dbClause.Length == 0
+            ? $"SUM({expr})"
+            : $"COALESCE(SUM({expr}) FILTER (WHERE {DbInPredicate(dbClause)}), 0)";
 }

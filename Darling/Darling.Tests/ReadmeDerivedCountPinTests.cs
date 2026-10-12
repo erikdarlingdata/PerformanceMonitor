@@ -43,6 +43,7 @@ namespace Darling.Tests;
 /// bolded number, a line rewrapped — is otherwise indistinguishable from a clean tree by its result alone,
 /// which is the failure mode this whole family of source-parsing tests exists to catch.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ReadmeDerivedCountPinTests
 {
     /* The derived quantities, restated ONCE each. Everything below compares against these rather than against

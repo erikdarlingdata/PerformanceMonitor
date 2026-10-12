@@ -49,6 +49,7 @@ namespace Darling.Tests;
 /// <c>long?</c> and the shared <see cref="DailyHealthBandCalculator.BuildKeyMetricsLine"/> takes <c>long?</c>;
 /// Lite's callers hand a <c>long</c> and compile unchanged — a no-op field widening, stated here.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class DailySummaryNotCarriedTests
 {
     private static readonly (RetentionTier Tier, string Relation)[] RoutedForms =
@@ -273,6 +274,7 @@ public sealed class DailySummaryNotCarriedTests
 /// on the source still holding it.</para>
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class DailySummaryNotCarriedLiveTests
 {
     private const int RecentServerId = -936538;
@@ -467,6 +469,7 @@ public sealed class DailySummaryNotCarriedLiveTests
         read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = from });
         read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = to });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(from) });
         await using var reader = await read.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {

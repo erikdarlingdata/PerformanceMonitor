@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using static PerformanceMonitor.Common.DeadlockGraphProcessParser;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -62,7 +63,7 @@ public sealed class DeadlockProcessDetail : DeadlockProcessInfo
     /// <summary><c>deadlocks.deadlock_time</c> is the XE <c>@timestamp</c>, so it is naive UTC and
     /// converts through <see cref="ViewerTimeHelper.ForDisplay"/>.</summary>
     public string DeadlockTimeLocal
-        => DeadlockTime is { } t ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss") : "";
+        => DeadlockTime is { } t ? ViewerTimeHelper.FormatForDisplay(t, "yyyy-MM-dd HH:mm:ss") : "";
     public string VictimDisplay => IsVictim ? "Victim" : "";
     public string WaitTimeFormatted => WaitTime > 0 ? $"{WaitTime:N0} ms" : "";
 
@@ -101,7 +102,9 @@ public sealed partial class ViewerDataService
     /// so an upgraded store's view would not expose the plan column and this read would fail. The column is
     /// Darling-only (Lite's DuckDB view has none), so this read was never twinnable with Lite once it
     /// carries the plan.</para>
-    /// $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// $1 server_id, $2 window start, $3 window end (naive UTC). Windows on <c>deadlock_time</c> (when the
+    /// deadlock happened), like Lite. $4 is the <see cref="EventWindowFloor"/> for $2, with no upper bound so a
+    /// late-collected deadlock inside the window still lists.
     /// </summary>
     public const string RecentDeadlocksSql = """
         SELECT
@@ -113,11 +116,27 @@ public sealed partial class ViewerDataService
             victim_query_plan_xml
         FROM deadlocks
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        AND   deadlock_time >= $2
+        AND   deadlock_time <= $3
+        AND   collection_time >= $4
         ORDER BY deadlock_time DESC
         LIMIT 50
         """;
+
+    /// <summary>The grid's row cap: the newest 50 deadlocks. <see cref="RecentDeadlocksSql"/>'s LIMIT is the same number.</summary>
+    public const int DeadlocksRowCap = 50;
+
+    /// <summary>
+    /// Where this server's deadlocks coverage starts for the window, through the shared probe
+    /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its first
+    /// row in the window if that is earlier (#4966). The grid windows on <c>deadlock_time</c>, the graph's own time,
+    /// which can reach before the coverage (the server's first collection stores its history), so the caller names the
+    /// earlier of this and the earliest deadlock it shows (<see cref="ViewerEventDataStart.Of"/>). Null when the window
+    /// holds no row and no logged run, and when it lies wholly before the coverage.
+    /// </summary>
+    public Task<DateTime?> GetDeadlocksDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("deadlocks"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>The raw deadlock rows for the window; the grid parses them into per-process detail rows.</summary>
     public async Task<List<ViewerDeadlockRow>> GetRecentDeadlocksAsync(
@@ -128,6 +147,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(RecentDeadlocksSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

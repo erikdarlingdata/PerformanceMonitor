@@ -130,7 +130,7 @@ public sealed class DarlingTrendEmptyTests
         /* #3897: both file I/O statements — the ranking and the bucketed series — walk the probe's relation. */
         AssertSameRelation(DarlingTrendReader.HasAnyFileIoStatSql, DarlingTrendReader.FileIoSeriesSql);
         AssertSameRelation(DarlingTrendReader.HasAnyFileIoStatSql, DarlingTrendReader.FileIoTrendSql);
-        AssertSameRelation(DarlingTrendReader.HasAnyQueryStatSql, DarlingTrendReader.QueryDurationTrendSql);
+        AssertSameRelation(DarlingTrendReader.HasAnyQueryStatSql, DarlingTrendReader.QueryDurationTrendFilteredSql);
 
         /* And each stops at the first row: it runs on a path that already found nothing, and its only job
            is to pick which of the two sentences is true. */

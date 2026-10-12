@@ -15,6 +15,6 @@ param analyze_query_store_plan.database_name 43
 param analyze_query_store_plan.plan_id 37
 param analyze_query_store_plan.server_name 28
 
-tool get_plan_xml 169
+tool get_plan_xml 162
 param get_plan_xml.query_hash 49
 param get_plan_xml.server_name 28

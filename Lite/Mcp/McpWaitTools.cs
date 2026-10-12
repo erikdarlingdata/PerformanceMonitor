@@ -42,6 +42,15 @@ public sealed class McpWaitTools
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
 
+            /* #4966: where this server's wait_stats data starts for the window. The rows are per-type sums over the whole
+               window, so a window the store only partly held sums less than it asked for with nothing in the numbers saying
+               so. Keyed on the data answer only: the no-rows answer above is `unavailable` and stays bare. The probe reads
+               the collector's coverage on collection_time, the column the sum windows on. */
+            var requestedStart = windowEnd.AddHours(-hours_back);
+            var notice = await McpQueryTools.WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.WaitStats, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, windowEnd, "wait_stats");
+
             var result = page.Select(r => new
             {
                 wait_type = r.WaitType,
@@ -56,6 +65,11 @@ public sealed class McpWaitTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: where the data starts, always present (false and null when the store covered the window). No
+                   effective_hours_back: this payload carries a page `truncated`. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 /* #3541 A3: the page described as a page, on Darling's names. No time bounds here — the rows
                    are per-type aggregates over the whole window, so there is no page reach to report, only a
                    cap. */
@@ -192,14 +206,15 @@ public sealed class McpWaitTools
         }
     }
 
-    [McpServerTool(Name = "get_waiting_tasks"), Description("Gets recently captured waiting tasks — queries that were actively waiting on a resource at collection time — NEWEST CAPTURE FIRST, longest wait first within a capture. Shows session ID, wait type, duration, blocking session, and database. Complements get_wait_stats by showing individual waiting queries rather than aggregated stats. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: tasks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, and one busy capture can fill the whole page by itself. Raise limit or narrow hours_back when truncated is true.")]
+    [McpServerTool(Name = "get_waiting_tasks"), Description("Gets recently captured waiting tasks — queries that were actively waiting on a resource at collection time — NEWEST CAPTURE FIRST, longest wait first within a capture. Shows session ID, wait type, duration, blocking session, and database. Complements get_wait_stats by showing individual waiting queries rather than aggregated stats. <<GUIDE>> THE PAGE IS BOUNDED BY limit, NOT BY hours_back: tasks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, and one busy capture can fill the whole page by itself. Raise limit or narrow hours_back when truncated is true. When the store did not cover the whole window, effective_start, window_truncated and truncation_note say where its data starts.")]
     public static async Task<string> GetWaitingTasks(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 1.")] int hours_back = 1,
         [Description("Maximum rows to return, newest capture first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -212,13 +227,39 @@ public sealed class McpWaitTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
+            /* #5244: database_name appended LAST (H1). The reader already takes a database list, so the one name rides it
+               into the SQL BEFORE the limit + 1 fetch: limit counts the CHOSEN database's tasks, as on Darling. A blank
+               or whitespace name is "no filter". */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
+
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The read was UNBOUNDED with a Take(limit) on top, and the envelope stated no bound. */
-            var rows = await dataService.GetWaitingTasksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
+            var rows = await dataService.GetWaitingTasksAsync(resolved.ServerId, hours_back, databaseNames: database == null ? null : new[] { database }, asOfUtc: windowEnd, limit: limit + 1);
+
+            /* #4966: where this server's waiting_tasks start for the window, beside the page cut below — truncated
+               says the window held more than limit, this says the store did not hold the window's head. The page's
+               oldest_returned_collection_time already names where ITS rows stop, so no key is added for that. The
+               probe reads coverage (the collector's logged runs count as well as rows: nothing waits for hours on a
+               quiet server, so its first row can come long after the store began covering the window), from the
+               same view the page was read from. Read ahead of the empty answer, which carries it too: nothing
+               waiting over a window the store does not reach back to is not a true negative. */
+            var requestedStart = windowEnd.AddHours(-hours_back);
+            var notice = await McpQueryTools.WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.WaitingTasks, resolved.ServerId, requestedStart, windowEnd),
+                requestedStart, windowEnd, "waiting_tasks", emptyAnswer: rows.Count == 0);
+
             if (rows.Count == 0)
             {
+                /* #5244: a filtered miss still asks whether the collector ever ran first (never collected stays
+                   not_collected), and only then says the CHOSEN database had none, in Darling's words: it is not a
+                   verdict on the databases nobody read. */
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "waiting_tasks")
-                    ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.");
+                    ?? McpHelpers.Status("empty",
+                        database == null
+                            ? "No waiting tasks captured in the specified time range."
+                            : $"No waiting tasks captured in the specified time range{McpDatabaseSelection.ForChosen(new[] { database })}. "
+                              + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds.",
+                        notice.AsHints());
             }
 
             var truncated = rows.Count > limit;
@@ -242,10 +283,21 @@ public sealed class McpWaitTools
                    span requested, the page described as a page, and the span the page covers, on Darling's
                    names. */
                 hours_back,
+                /* #4966: the window floor, always present (false and null when the store covered the window). No
+                   effective_hours_back: this payload carries a page `truncated`, and the census holds that key
+                   apart for the window floor (McpPayloadContractCensusTests), so the reach is the instant. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
+                /* #5244: the chosen database, null for all. After the three notice keys, which stay right behind hours_back,
+                   as on Darling's twin. */
+                database_name = database,
                 tasks_returned = page.Count,
                 truncated,
-                oldest_returned_collection_time = page.Min(r => r.CollectionTime).ToString("o"),
-                newest_returned_collection_time = page.Max(r => r.CollectionTime).ToString("o"),
+                /* #4966: where the page's rows stop describes the window the page covers, so it prints like
+                   effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.CollectionTime)),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.CollectionTime)),
                 order = "collection_time_desc",
                 tasks = result
             }, McpHelpers.JsonOptions);

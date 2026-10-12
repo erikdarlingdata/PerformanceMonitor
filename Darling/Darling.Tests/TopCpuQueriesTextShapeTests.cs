@@ -35,7 +35,7 @@ public sealed class TopCpuQueriesTextShapeTests
         Assert.DoesNotContain("query_text", sql[..cut], StringComparison.Ordinal);
 
         /* ...it is read after the cut: equality for a keyed group, NULL-safe for a group with a NULL key. */
-        Assert.Contains("SELECT LEFT(MAX(v.query_text), 500)", sql[cut..], StringComparison.Ordinal);
+        Assert.Contains("SELECT MAX(v.query_text)", sql[cut..], StringComparison.Ordinal);
         Assert.Contains("v.query_hash = t.query_hash", sql[cut..], StringComparison.Ordinal);
         Assert.Contains("CASE WHEN t.database_name IS NULL OR t.query_hash IS NULL THEN", sql[cut..], StringComparison.Ordinal);
         Assert.Contains("v.query_hash IS NOT DISTINCT FROM t.query_hash", sql[cut..], StringComparison.Ordinal);

@@ -56,7 +56,7 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// No query used <c>NOW()</c>/<c>CURRENT_TIMESTAMP</c> (every window bound is a parameter), no
 /// <c>QUALIFY</c> appears (that lives in BaselineProvider, a different slice), and the one
 /// <c>any_value()</c> use is standard SQL:2023, in Postgres since 16 (the product's minimum PG
-/// is 17) — all pinned by <c>PgFactCollectorTests</c>.
+/// is 16) — all pinned by <c>PgFactCollectorTests</c>.
 /// </para>
 /// </summary>
 public sealed partial class PgFactCollector : IFactCollector
@@ -158,9 +158,13 @@ public sealed partial class PgFactCollector : IFactCollector
     private void ReportCollectionFailure(
         Exception ex,
         AnalysisContext context,
-        [CallerMemberName] string collectMethod = "")
+        [CallerMemberName] string collectMethod = "",
+        bool record = true)
     {
-        context.RecordCollectionFailure(CollectionFailure.FamilyOf(collectMethod), collectMethod, ClassifyOutcome(ex), ex);
+        /* record: false logs the classified reason without marking the family unread — for a read whose caller decides, once
+           per pass, whether the family counts as unread (#5630's plan-input check: a fact that carries the gap is not unread). */
+        if (record)
+            context.RecordCollectionFailure(CollectionFailure.FamilyOf(collectMethod), collectMethod, ClassifyOutcome(ex), ex);
 
         if (PgBaselineProvider.IsCommandTimeout(ex))
         {
@@ -304,6 +308,7 @@ public sealed partial class PgFactCollector : IFactCollector
         ServerConfigSql,
         MemoryStatsSql,
         DatabaseSizeSql,
+        DatabaseSizeNewestSql,
         ServerMetadataSql,
         CpuUtilizationSql,
         RunnableTaskStatsSql,
@@ -314,6 +319,7 @@ public sealed partial class PgFactCollector : IFactCollector
         ParameterSensitivitySql,
         PlanRegressionSql,
         PlanRegressionTableSql,
+        PlanRegressionDailySql,
         BadActorSql,
         PerfmonSql,
         MemoryClerkSql,

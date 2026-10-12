@@ -113,18 +113,20 @@ public sealed class ViewerClockRendererArithmeticTests
     }
 
     /// <summary>
-    /// The inverse the custom-range pickers use round-trips, in every mode. A conversion pair that agrees
-    /// with itself in one direction only skews every window the user types.
+    /// The read the custom-range pickers use (a typed wall time back to its UTC instant, in the zone the mode
+    /// draws in) round-trips the display conversion, in every mode. A conversion pair that agrees with itself in
+    /// one direction only skews every window the user types.
     /// </summary>
     [Theory]
     [InlineData(TimeDisplayMode.ServerTime)]
     [InlineData(TimeDisplayMode.LocalTime)]
     [InlineData(TimeDisplayMode.UTC)]
-    public void TheDisplayInverse_RoundTripsTheStoredValue(TimeDisplayMode mode)
+    public void TheDisplayZoneRead_RoundTripsTheStoredValue(TimeDisplayMode mode)
     {
+        var zone = ViewerTimeHelper.DisplayZoneFor(mode, PerformanceMonitor.Analysis.Baselines.ServerClock.FixedOffset(FleetOffsetMinutes));
         var display = ViewerTimeHelper.ConvertToDisplay(NaiveUtc, mode, FleetOffsetMinutes);
 
-        Assert.Equal(NaiveUtc, ViewerTimeHelper.ConvertFromDisplay(display, mode, FleetOffsetMinutes));
+        Assert.Equal(NaiveUtc, DisplayZone.ToUtcBound(display, zone, BoundSide.From));
     }
 
     /// <summary>

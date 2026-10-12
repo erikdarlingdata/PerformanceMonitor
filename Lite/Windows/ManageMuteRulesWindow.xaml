@@ -62,7 +62,7 @@
                         </Style>
                     </DataGridTextColumn.ElementStyle>
                 </DataGridTextColumn>
-                <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="120">
+                <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="120" SortMemberPath="ExpiresAtUtc">
                     <DataGridTextColumn.ElementStyle>
                         <Style TargetType="TextBlock">
                             <Setter Property="Foreground" Value="{DynamicResource ForegroundDimBrush}"/>

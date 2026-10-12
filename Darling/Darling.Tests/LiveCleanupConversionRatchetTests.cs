@@ -89,6 +89,7 @@ namespace Darling.Tests;
 /// about scratch DATABASES and not a licence for the classes that use them: one which joins the shared
 /// collection is scanned like anything else, pinned below in both directions.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class LiveCleanupConversionRatchetTests
 {
     /// <summary>The attribute that puts a class in the shared live collection, and so in this scan.</summary>

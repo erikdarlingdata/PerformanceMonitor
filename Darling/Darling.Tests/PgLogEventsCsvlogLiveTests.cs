@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Sockets;
@@ -85,41 +86,30 @@ public sealed class PgLogEventsCsvlogLiveTests
         {
             await DarlingMcpTestData.RegisterServerAsync(storeConnection, ServerId, ServerName, ct);
 
-            await SendForgedLoginAsync(target!, ForgedCsvUserName, ct);
-            await SendForgedLoginAsync(target!, ForgedStderrUserName, ct);
-
             await using var targetConnection = new NpgsqlConnection(target);
             await targetConnection.OpenAsync(ct);
 
-            await WaitForLogGrowthAsync(targetConnection, ct);
+            /* This run's own entries are the ones at or after this floor: a target reused across runs (or a retry)
+               already holds earlier runs' identical forged FATAL events, so a count over the whole log says nothing
+               about whether THIS run's two reached the file. */
+            await using var clockCommand = new NpgsqlCommand("SELECT clock_timestamp()", targetConnection);
+            var floor = (DateTime)(await clockCommand.ExecuteScalarAsync(ct))!;
+
+            await SendForgedLoginAsync(target!, ForgedCsvUserName, ct);
+            await SendForgedLoginAsync(target!, ForgedStderrUserName, ct);
+
+            await WaitForBothForgedEventsAsync(targetConnection, floor, ct);
 
             var usesCsvlog = await PgLogFormatCapability.IsCsvlogEnabledAsync(targetConnection, target!, ct);
             Assert.True(usesCsvlog, "the rig's log_destination must include csvlog for this route to be exercised.");
 
             foreach (var binaryGranted in new[] { false, true })
             {
-                var context = new CollectorContext
-                {
-                    LogHashKey = TestLogHashKeys.Fixed,
-                    ServerId = ServerId, ServerName = ServerName,
-                    CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
-                    Deltas = new CollectorDeltaCalculator(),
-                    Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
-                    PgLogUsesCsvlog = true,
-                    PgReadBinaryFileGranted = binaryGranted,
-                };
-
-                var definition = PgLogEventsCollector.Instance;
-                await using var command = PostgresTargetProvider.Instance.CreateCommand(definition.BuildQuery(context), targetConnection, 30);
-                await using var reader = await command.ExecuteReaderAsync(ct);
-                var rows = await definition.ReadAsync(reader, context, ct);
+                var rows = await ReadRowsAsync(targetConnection, binaryGranted, ct);
 
                 /* The forged text lands INSIDE the two real FATAL auth-failure events' own message text —
                    the record each was planted into — never as a separate line of its own. */
-                var fatalCount = rows.Count(r =>
-                    r.Severity == "FATAL"
-                    && r.Message != null
-                    && r.Message.Contains("forged", StringComparison.Ordinal));
+                var fatalCount = rows.Count(r => IsForgedFatal(r, floor));
                 Assert.True(fatalCount >= 2,
                     $"expected at least the two forged FATAL events this run planted; got {fatalCount}.");
 
@@ -195,31 +185,48 @@ public sealed class PgLogEventsCsvlogLiveTests
         buffer[offset + 3] = (byte)value;
     }
 
-    /// <summary>
-    /// Polls <c>pg_ls_logdir()</c> for a <c>.csv</c> file whose size has grown since the call started, up to
-    /// 5 seconds — the syslogger flushes asynchronously, so the forged lines are not guaranteed to be on disk
-    /// the instant the TCP round trip above returns.
-    /// </summary>
-    private static async Task WaitForLogGrowthAsync(NpgsqlConnection connection, CancellationToken ct)
-    {
-        long before = 0;
-        await using (var command = new NpgsqlCommand(
-            "SELECT coalesce(max(size), 0) FROM pg_catalog.pg_ls_logdir() WHERE name ~* '\\.csv$'", connection))
-        {
-            before = (long)(await command.ExecuteScalarAsync(ct))!;
-        }
+    /// <summary>One of this run's planted FATAL auth failures: at or after the floor, severity FATAL, carrying the forged text.</summary>
+    private static bool IsForgedFatal(PgLogEvent row, DateTime floor) =>
+        row.OccurredAtUtc >= floor
+        && row.Severity == "FATAL"
+        && row.Message != null
+        && row.Message.Contains("forged", StringComparison.Ordinal);
 
-        var deadline = DateTime.UtcNow.AddSeconds(5);
+    private static async Task<List<PgLogEvent>> ReadRowsAsync(NpgsqlConnection targetConnection, bool binaryGranted, CancellationToken ct)
+    {
+        var context = new CollectorContext
+        {
+            LogHashKey = TestLogHashKeys.Fixed,
+            ServerId = ServerId, ServerName = ServerName,
+            CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+            Deltas = new CollectorDeltaCalculator(),
+            Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
+            PgLogUsesCsvlog = true,
+            PgReadBinaryFileGranted = binaryGranted,
+        };
+
+        var definition = PgLogEventsCollector.Instance;
+        await using var command = PostgresTargetProvider.Instance.CreateCommand(definition.BuildQuery(context), targetConnection, 30);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        return await definition.ReadAsync(reader, context, ct);
+    }
+
+    /// <summary>
+    /// Reads the log until both of THIS run's planted FATAL entries (at or after <paramref name="floor"/>) are readable,
+    /// up to 30 seconds — the syslogger flushes asynchronously, so the planted lines are not guaranteed to be on disk
+    /// the instant the TCP round trip returns. The wait used to look only for the csv file growing, which one of the
+    /// two entries satisfied, so the read could run with the second still unwritten ("expected at least two forged FATAL
+    /// events; got 0"). It returns when the deadline passes too, and the assertions then report what was readable.
+    /// </summary>
+    private static async Task WaitForBothForgedEventsAsync(NpgsqlConnection targetConnection, DateTime floor, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
         while (DateTime.UtcNow < deadline)
         {
-            await using (var command = new NpgsqlCommand(
-                "SELECT coalesce(max(size), 0) FROM pg_catalog.pg_ls_logdir() WHERE name ~* '\\.csv$'", connection))
+            var rows = await ReadRowsAsync(targetConnection, false, ct);
+            if (rows.Count(r => IsForgedFatal(r, floor)) >= 2)
             {
-                var after = (long)(await command.ExecuteScalarAsync(ct))!;
-                if (after > before)
-                {
-                    return;
-                }
+                return;
             }
 
             await Task.Delay(200, ct);

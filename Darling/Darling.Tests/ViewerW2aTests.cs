@@ -346,7 +346,7 @@ public sealed class ViewerServerSummaryDisplayTests
     public void LastCollectionDisplay_TreatsStoredValueAsUtc_ShownLocal()
     {
         var storedUtc = new DateTime(2026, 7, 3, 3, 30, 45, DateTimeKind.Unspecified);
-        var expected = DateTime.SpecifyKind(storedUtc, DateTimeKind.Utc).ToLocalTime().ToString("HH:mm:ss");
+        var expected = DateTime.SpecifyKind(storedUtc, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
         Assert.Equal(expected, new ServerSummaryItem { LastCollectionTime = storedUtc }.LastCollectionDisplay);
     }
 
@@ -365,6 +365,32 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Equal("2", new ServerSummaryItem { DeadlockCount = 2 }.DeadlockDisplay);
         Assert.True(new ServerSummaryItem { DeadlockCount = 1 }.HasAlerts);
         Assert.False(new ServerSummaryItem().HasAlerts);
+    }
+
+    [Fact]
+    public void OfflineCard_DeadlockDetailAndHasAlerts_ReadAsNoCurrentData()
+    {
+        /* Round-1 L7: the values read "--" while the detail line and the alert flag still carried the old counts. */
+        var online = new ServerSummaryItem
+        {
+            IsOnline = true,
+            BlockingCount = 2,
+            DeadlockCount = 3,
+            LastDeadlockMinutesAgo = 10,
+        };
+        Assert.NotEqual("", online.DeadlockDetail);
+        Assert.True(online.HasAlerts);
+
+        var offline = new ServerSummaryItem
+        {
+            IsOnline = false,
+            BlockingCount = 2,
+            DeadlockCount = 3,
+            LastDeadlockMinutesAgo = 10,
+        };
+        Assert.Equal("--", offline.DeadlockDisplay);
+        Assert.Equal("", offline.DeadlockDetail);
+        Assert.False(offline.HasAlerts);
     }
 
     [Fact]
@@ -753,9 +779,9 @@ public sealed class ViewerAlertHistoryW2aSqlTests
     {
         var sql = ViewerDataService.AlertHistoryAllServersSql;
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE alert_time >= $1", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE a.alert_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("dismissed = FALSE", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY alert_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY a.alert_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $2", sql, StringComparison.Ordinal);
         /* No per-server predicate in the all-servers read (that's the per-server read's $2). */
         Assert.DoesNotContain("server_id = $", sql, StringComparison.Ordinal);
@@ -773,7 +799,7 @@ public sealed class ViewerAlertHistoryW2aSqlTests
         }
 
         /* Per-server read keeps its scoping predicate + limit. */
-        Assert.Contains("server_id = $2", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
+        Assert.Contains("a.server_id = $2", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $3", ViewerDataService.AlertHistorySql, StringComparison.Ordinal);
     }
 

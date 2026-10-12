@@ -408,7 +408,7 @@ public class FindingStoreTests : IClassFixture<SharedDuckDbFixture>, IDisposable
         Directory.CreateDirectory(tempDir);
         try
         {
-            var legacyDb = new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb"));
+            using var legacyDb = new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb"));
             await CreateLegacyV3AnalysisSchemaAsync(legacyDb, legacyFindingId: 4242);
 
             // Run the upgrade.

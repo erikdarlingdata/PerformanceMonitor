@@ -45,6 +45,15 @@ public sealed class McpHostService : BackgroundService
         _duckDb = duckDb;
         _port = port;
         _scheduleManager = scheduleManager;
+
+        /* #4999: the health read judges each collector by the interval it is scheduled at on that server, the
+           same answer the analysis tools bound their reads by (see RegisterAnalysisService below), not by the
+           cadence it shipped with. Null leaves this instance on the app-wide answer every LocalDataService reads
+           (LocalDataService.DefaultCollectorFrequencyMinutes), which is none when nothing set one, so every row
+           then keeps its shipped cadence. */
+        dataService.CollectorFrequencyMinutes = scheduleManager is null
+            ? null
+            : (serverId, collector) => scheduleManager.GetFrequencyForStorageServer(serverManager, serverId, collector);
     }
 
     /// <summary>
@@ -72,6 +81,39 @@ public sealed class McpHostService : BackgroundService
             baselineCache: BaselineCache.For(duckDb)));
     }
 
+    /// <summary>
+    /// #4938: registers the run-time source get_collection_health reads: the collector schedules the sweep reads, and the
+    /// server list a storage id is looked up in. The tool takes the service as an optional parameter, so a host that left
+    /// this registration out would not fail on a call: the parameter would keep its null default and every collector would
+    /// read as having no run time. Extracted so a test resolves the service from the production registration instead of a
+    /// hand-built one that could drift from it.
+    /// </summary>
+    internal static void RegisterCollectorRunTimes(IServiceCollection services, ScheduleManager? schedules, ServerManager serverManager)
+    {
+        services.AddSingleton(new McpCollectorRunTimes(schedules, serverManager));
+    }
+
+    /// <summary>
+    /// A POST must carry a JSON Content-Type; any other type, or none, is answered 415 before <c>MapMcp</c>.
+    /// The guard is installed right after the Host guard. A charset parameter is fine. GET (the event stream)
+    /// and DELETE carry no body to type and pass. This is the twin of the gate in Darling's MCP host
+    /// (<c>DarlingMcpHostService</c>); both call the one shared test, <see cref="JsonContentType.IsJson"/>.
+    /// </summary>
+    internal static void UseJsonPostGuard(IApplicationBuilder app)
+    {
+        app.Use(async (context, next) =>
+        {
+            if (HttpMethods.IsPost(context.Request.Method)
+                && !JsonContentType.IsJson(context.Request.ContentType))
+            {
+                context.Response.StatusCode = StatusCodes.Status415UnsupportedMediaType;
+                return;
+            }
+
+            await next(context);
+        });
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         try
@@ -91,6 +133,9 @@ public sealed class McpHostService : BackgroundService
             builder.Services.AddSingleton(_dataService);
             builder.Services.AddSingleton(_serverManager);
             builder.Services.AddSingleton(_muteRuleService);
+            /* #4938: get_collection_health shows each collector's run time and next run, from the schedule the sweep reads.
+               Registered through the method a test also calls (see RegisterCollectorRunTimes). */
+            RegisterCollectorRunTimes(builder.Services, _scheduleManager, _serverManager);
             var planFetcher = new SqlPlanFetcher(_serverManager);
             /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
             RegisterAnalysisService(builder.Services, _duckDb, planFetcher, _serverManager, _scheduleManager);
@@ -160,9 +205,13 @@ public sealed class McpHostService : BackgroundService
                    fact: it would make a tool's own truncated/*_returned fields wrong, cut calls that
                    explicitly asked for more rows, and drop the newest rows of anything sorted
                    oldest-first. Each tool sizes its own defaults to fit instead — see
-                   McpResponseBudget.DefaultBytes, the one shared size target both SKUs read. */
-                .WithRequestFilters(filters => filters
-                    .AddCallToolFilter(McpUnknownArgumentGuard.Instance));
+                   McpResponseBudget.DefaultBytes, the one shared size target both SKUs read.
+
+                   The statement filter (#4348, SensitiveStatementOutputFilter) is registered LAST, as Darling's
+                   host does: the first filter added is the outermost, so the last one sits next to the tool and
+                   reads each result as the tool's own JSON. It covers every tool with no per-tool change, error
+                   results included. The list lives in AddCallToolFilters so a test runs the REAL registration. */
+                .WithRequestFilters(AddCallToolFilters);
 
             _app = builder.Build();
 
@@ -186,6 +235,8 @@ public sealed class McpHostService : BackgroundService
                 await next(context);
             });
 
+            UseJsonPostGuard(_app);
+
             _app.MapMcp();
 
             AppLogger.Info("MCP", $"Starting MCP server on http://localhost:{_port}");
@@ -201,6 +252,15 @@ public sealed class McpHostService : BackgroundService
             AppLogger.Error("MCP", $"MCP server failed: {ex.Message}");
         }
     }
+
+    /// <summary>
+    /// The call-tool filters, in registration order: the unknown-argument guard (#3870), then the statement filter
+    /// (#4348). The same two objects Darling's host registers, from <c>PerformanceMonitor.Common</c>, so the two SKUs
+    /// cannot answer differently. Registered through this one method so a test can start a server with the REAL list.
+    /// </summary>
+    internal static void AddCallToolFilters(IMcpRequestFilterBuilder filters) => filters
+        .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
+        .AddCallToolFilter(SensitiveStatementOutputFilter.Instance);
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {

@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// including an explicit empty one, must survive byte for byte, and the output must literally start with the
 /// caller's own string.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class StoreConnectionStringAppendPinTests
 {
     /// <summary>Each row is independently valid Npgsql connection-string content and exercises one of the

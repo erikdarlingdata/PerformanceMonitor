@@ -43,6 +43,7 @@ public sealed class SqlServerPermissionErrorsTests
     [InlineData(300)]  /* VIEW SERVER STATE denied (a service-objective limit on Azure SQL DB) */
     [InlineData(916)]  /* the principal cannot access the database under the current security context */
     [InlineData(8189)] /* sys.traces' own denial, ALTER TRACE missing (#1823) */
+    [InlineData(15247)] /* CREATE/ALTER EVENT SESSION without ALTER ANY EVENT SESSION (#5378) */
     public void PermissionDenials_AreClassifiedAsPermissions(int number)
         => Assert.True(SqlServerPermissionErrors.IsPermissionDenied(number));
 
@@ -58,6 +59,8 @@ public sealed class SqlServerPermissionErrorsTests
     [InlineData(-2)]    /* command timeout */
     [InlineData(207)]   /* invalid column name (version drift) */
     [InlineData(40615)] /* Azure firewall rejection */
+    [InlineData(1088)]  /* cannot find the object: object-missing, not a denial (#5378 checked) */
+    [InlineData(15151)] /* cannot find the object OR no permission: ambiguous, so not a denial by number alone (#5378 checked) */
     [InlineData(0)]
     public void NonPermissionFailures_StayLoud(int number)
         => Assert.False(SqlServerPermissionErrors.IsPermissionDenied(number));

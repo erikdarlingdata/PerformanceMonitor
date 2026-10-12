@@ -445,6 +445,7 @@
                          MouseDoubleClick="ServerList_MouseDoubleClick">
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
+                            <Setter Property="AutomationProperties.Name" Value="{Binding AutomationName, Mode=OneTime}"/>
                             <Setter Property="Background" Value="Transparent"/>
                             <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
                             <Setter Property="Padding" Value="8,5"/>
@@ -801,6 +802,30 @@
                                         <TextBlock x:Name="OverviewAttentionCountText" FontSize="11" VerticalAlignment="Center"
                                                    Foreground="{DynamicResource WarningBrush}" Margin="0,0,14,0"
                                                    Visibility="Collapsed"/>
+                                        <!-- #5352: Lite's Overview search, ported. Filters the cards by server name or tag
+                                             and composes with the toggle and sort here through
+                                             ApplyOverviewCardFilter. The hit-test-invisible watermark shows the placeholder
+                                             while the box is empty. -->
+                                        <TextBlock Text="Search:" FontSize="11" VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"/>
+                                        <Grid Width="180" VerticalAlignment="Center" Margin="0,0,14,0">
+                                            <TextBox x:Name="OverviewSearchBox" TextChanged="OverviewSearchBox_TextChanged"
+                                                     ToolTip="Filter the Overview by server name or tag"/>
+                                            <TextBlock Text="server name / tag…" FontSize="11" IsHitTestVisible="False"
+                                                       Foreground="{DynamicResource ForegroundMutedBrush}"
+                                                       VerticalAlignment="Center" HorizontalAlignment="Left" Margin="6,0,0,0">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Text, ElementName=OverviewSearchBox}" Value="">
+                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </Grid>
                                         <TextBlock Text="Sort:" FontSize="11" VerticalAlignment="Center"
                                                    Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"/>
                                         <ComboBox x:Name="OverviewSortSelector" Width="120" VerticalAlignment="Center"
@@ -1291,6 +1316,7 @@
                     <Grid Margin="0,8,0,0">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
 
@@ -1299,7 +1325,14 @@
                             <TextBlock Text="Server:" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"/>
                             <ComboBox x:Name="RecommendationsServerSelector" Width="260" VerticalAlignment="Center"
                                       Style="{StaticResource DarkCombo}"
+                                      AutomationProperties.Name="Server"
                                       SelectionChanged="RecommendationsServerSelector_SelectionChanged">
+                                <!-- A screen reader announces each item (and the selection) by the server's name, not the model's type name. -->
+                                <ComboBox.ItemContainerStyle>
+                                    <Style TargetType="ComboBoxItem" BasedOn="{StaticResource DarkComboItem}">
+                                        <Setter Property="AutomationProperties.Name" Value="{Binding DisplayName, Mode=OneTime}"/>
+                                    </Style>
+                                </ComboBox.ItemContainerStyle>
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate>
                                         <TextBlock Text="{Binding DisplayName}"/>
@@ -1317,8 +1350,14 @@
                                        FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                         </StackPanel>
 
+                        <!-- #5558: the node holds a secondary copy of some availability group databases, so their
+                             per-database findings are left to the primary. Shown only with a list or the all-clear. -->
+                        <TextBlock x:Name="RecommendationsReplicaNoteText" Grid.Row="1" Visibility="Collapsed"
+                                   TextWrapping="Wrap" Margin="2,6,2,0" FontStyle="Italic"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+
                         <!-- Content: exactly one region is visible per state. -->
-                        <Grid Grid.Row="1">
+                        <Grid Grid.Row="2">
                             <ScrollViewer x:Name="RecommendationsScroll" VerticalScrollBarVisibility="Auto"
                                           Padding="10" Visibility="Collapsed">
                                 <ItemsControl x:Name="RecommendationsSectionsList"

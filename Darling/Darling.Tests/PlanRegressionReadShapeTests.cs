@@ -52,30 +52,84 @@ public sealed class PlanRegressionReadShapeTests
 
         /* Appended at ordinal 8, which is where the collector reads it: the eight columns before it are read by
            ordinal and must not move. #3953 appended the best plan's last run after it, at ordinal 9, for the same
-           reason, and both PLAN_REGRESSION reads share the text (the interval-table twin's suffix). */
-        Assert.Matches(
-            new Regex(@"regression_factor,\s+database_name,\s+best_last_exec\s+FROM compared", RegexOptions.Singleline),
-            sql);
-        Assert.Matches(
-            new Regex(@"regression_factor,\s+database_name,\s+best_last_exec\s+FROM compared", RegexOptions.Singleline),
-            StripComments(PgFactCollector.PlanRegressionTableSql));
+           reason, and both PLAN_REGRESSION reads share the text (the interval-table twin's suffix). #5630 appended the
+           two plan_ids to compare and the statement text after them, at ordinals 10 to 12, and #5631 the two plans' rows
+           per call after those, at ordinals 13 and 14 (the newer plan's, then the cheaper plan's), for the same reason. */
+        var shape = new Regex(
+            @"c\.regression_factor,\s+c\.database_name,\s+c\.best_last_exec,\s+c\.latest_plan_id,\s+c\.best_plan_id,\s+x\.query_sql_text,\s+c\.latest_rows,\s+c\.best_rows\s+FROM candidates",
+            RegexOptions.Singleline);
+        Assert.Matches(shape, sql);
+        Assert.Matches(shape, StripComments(PgFactCollector.PlanRegressionTableSql));
     }
 
     [Fact]
-    public void TheParameterSensitivityDrillDown_ResolvesTextForThePrintedRowsOnly()
+    public void TheParameterSensitivityDrillDown_ReadsNoTextDimension_AndHandsBackTheDigestLast()
     {
         var sql = StripComments(PgDrillDownCollector.ParameterSensitiveSql);
 
         /* The view resolves text for every row it returns by joining the fleet's text dimension. */
         Assert.DoesNotContain("v_query_stats", sql, StringComparison.Ordinal);
 
-        /* The dimension is joined after the cut, so only the printed rows are resolved... */
-        var cut = sql.IndexOf("LIMIT 5", StringComparison.Ordinal);
-        var join = sql.IndexOf("JOIN query_text_dim", StringComparison.Ordinal);
-        Assert.True(cut >= 0 && join > cut, "query_text_dim must be joined after the LIMIT, not inside the window");
+        /* Since #4821 the cap of five is the reader's (the compiled-before-the-window test runs on the converted time
+           before it), so this read carries no LIMIT and every plan that passes the rough filter comes back. A join to
+           the text dimension here, however late in the statement, resolves text for all of them to print five (#3902).
+           So the read names no dimension at all: it hands back only WHETHER the row has inline legacy text (#5361: the
+           whole text of every ranked row was 131 times the bytes of the cut it replaced, to print five), and the digest
+           rides last for the reader's text reads, which resolve the plans the reader keeps. */
+        Assert.DoesNotContain("LIMIT 5", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_text_dim", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEFT(o.query_text", sql, StringComparison.Ordinal); /* #5320: whole text, judged then cut in C# */
+        Assert.DoesNotContain("o.query_text,", sql, StringComparison.Ordinal); /* #5361: the ranking read carries no text */
+        Assert.DoesNotContain("        query_text,", sql, StringComparison.Ordinal); /* ... and neither does its window sort */
+        Assert.Contains("query_text IS NOT NULL AS has_inline_text", sql, StringComparison.Ordinal);
+        Assert.Contains("    o.has_inline_text,", sql, StringComparison.Ordinal);
+        Assert.Matches(
+            new Regex(@"o\.time_zone_id,\s+o\.query_text_digest\s+FROM offenders AS o\s+ORDER BY", RegexOptions.Singleline),
+            sql);
+    }
 
-        /* ...with the view's own expression: inline legacy text first, then the digest's. */
-        Assert.Contains("LEFT(COALESCE(o.query_text, qtd.query_text), 500)", sql, StringComparison.Ordinal);
+    [Fact]
+    public void TheParameterSensitivityInlineTextRead_FetchesTheKeptPlansNewestRowByKey_AndNothingElse()
+    {
+        var sql = StripComments(PgDrillDownCollector.ParameterSensitiveInlineTextSql);
+
+        /* #5361: the whole inline text of the kept plans only. The row is the ranking's rn = 1 row: the newest row of the
+           window with delta_execution_count > 0, one per (database, query hash, plan hash), a NULL part matching a NULL
+           part as the ranking's PARTITION BY groups it. The plans arrive as parallel arrays, never a parameter per plan. */
+        Assert.Contains("SELECT DISTINCT ON (q.database_name, q.query_hash, q.query_plan_hash)", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM query_stats AS q", sql, StringComparison.Ordinal);
+        Assert.Contains("q.delta_execution_count > 0", sql, StringComparison.Ordinal);
+        Assert.Contains("q.collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("unnest($4::text[], $5::text[], $6::text[])", sql, StringComparison.Ordinal);
+        Assert.Equal(3, Regex.Matches(sql, @"IS NOT DISTINCT FROM").Count);
+        Assert.DoesNotContain("$7", sql, StringComparison.Ordinal);
+
+        /* The text is the view's own COALESCE (#1767, D10): the row's inline text, else the text dimension's for the row's
+           digest, through exactly ONE left join on the digest. The dimension is named in that join and nowhere else, the
+           join is never an inner join (a row whose text lives only in the dimension, or in neither, keeps its row), and
+           the read still carries no LIMIT and no second text source. */
+        Assert.Contains("COALESCE(q.query_text, d.query_text) AS query_text", sql, StringComparison.Ordinal);
+        Assert.Matches(new Regex(@"FROM query_stats AS q\s+LEFT JOIN query_text_dim AS d ON d\.digest = q\.query_text_digest\s+JOIN unnest\("), sql);
+        Assert.Single(Regex.Matches(sql, @"query_text_dim"));
+        Assert.Equal(2, Regex.Matches(sql, @"\bJOIN\b").Count); /* the one left join on the dimension and the unnest join, no third */
+        Assert.Single(Regex.Matches(sql, @"\bLEFT JOIN\b"));
+        Assert.DoesNotContain("LIMIT", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TheParameterSensitivityTextRead_BindsTheDigestsAsOneArrayParameter_AndReadsOnlyTheDimension()
+    {
+        var sql = StripComments(PgDrillDownCollector.ParameterSensitiveTextSql);
+
+        /* One dimension row per digest by primary key: the read touches the digests it was given and nothing else. The
+           cut to 500 characters stays in SQL, so it is still PostgreSQL's character count. */
+        Assert.Matches(
+            new Regex(@"^\s*SELECT digest, query_text\s+FROM query_text_dim\s+WHERE digest = ANY\(\$1\)\s*$"),
+            sql);
+
+        /* One array parameter however many plans print, never a parameter or a list literal per digest. */
+        Assert.DoesNotContain("$2", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("JOIN", sql, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string StripComments(string sql) => Regex.Replace(sql, @"--[^\n]*", string.Empty);

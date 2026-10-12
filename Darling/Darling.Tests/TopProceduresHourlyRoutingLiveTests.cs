@@ -228,6 +228,18 @@ public sealed class TopProceduresHourlyRoutingLiveTests
                 Assert.All(procedures, p => Assert.Equal(System.Text.Json.JsonValueKind.Null, p.GetProperty(column).ValueKind));
             }
 
+            /* detail=full on the rollup: no detail field exists there, and the note says so. */
+            using var fullDoc = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(
+                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, as_of: asOf, detail: "full"));
+            Assert.Equal("hourly", fullDoc.RootElement.GetProperty("tier_used").GetString());
+            Assert.Contains("detail=full was asked", fullDoc.RootElement.GetProperty("precision_note").GetString()!, StringComparison.Ordinal);
+            Assert.All(fullDoc.RootElement.GetProperty("procedures").EnumerateArray(), p =>
+            {
+                Assert.False(p.TryGetProperty("last_execution_time", out _));
+                Assert.False(p.TryGetProperty("max_logical_reads", out _));
+            });
+            Assert.DoesNotContain("detail=full was asked", hourlyNote.GetString()!, StringComparison.Ordinal);
+
             bodySucceeded = true;
         }
         finally

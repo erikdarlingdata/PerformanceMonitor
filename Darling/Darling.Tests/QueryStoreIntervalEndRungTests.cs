@@ -42,7 +42,8 @@ public sealed class QueryStoreIntervalEndRungTests
     private const int RungVersion = 155;
     private const int PreviousVersion = 154;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe - the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument - V156 (#4834) appended its
+    /// own - so this is a position within the signature rather than its end.</summary>
     private const int ProbeOrdinal = 130;
 
     private const string Column = "interval_end_time_utc";
@@ -51,16 +52,17 @@ public sealed class QueryStoreIntervalEndRungTests
 
     private static PgMigrations.Migration V155 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
-    /// <summary>The rung is registered and is the new top of a dense ladder.</summary>
+    /// <summary>The rung is registered in a dense ladder. The "I am the top rung" half of this claim moved to
+    /// <c>CheckpointLongestSyncRungTests</c> (V156, #4834) with the top.</summary>
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("query-store-interval-end", V155.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -123,12 +125,12 @@ public sealed class QueryStoreIntervalEndRungTests
     }
 
     /// <summary>
-    /// The viewer probe's sentinel carries this rung, and the map treats it as the TOP arm: a missing top arm maps
-    /// a fully-migrated store one rung short, permanently, because
-    /// <see cref="ViewerDataService.RequiredStoreSchemaVersion"/> is <see cref="StorageVersion.SchemaVersion"/>.
+    /// The viewer probe's sentinel carries this rung at its own ordinal, and the map's arm for it returns 155: a
+    /// sentinel present at only some of the probe's sites shifts every LATER ordinal onto the wrong column. The
+    /// top-arm half of this claim moved to <c>CheckpointLongestSyncRungTests</c> (V156, #4834) with the top.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains($"column_name = '{Column}'", probe, StringComparison.Ordinal);
@@ -136,19 +138,18 @@ public sealed class QueryStoreIntervalEndRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        Assert.True(ProbeOrdinal < arity - 1);
         Assert.Equal("hasQueryStoreIntervalEnd", method.GetParameters()[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
-        var behind = (object[])all.Clone();
+        var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
@@ -157,7 +158,7 @@ public sealed class QueryStoreIntervalEndRungTests
         Assert.True(thisArm >= 0, "the viewer has no V155 sentinel arm - a fully-migrated store would map one rung short");
         Assert.True(thisArm < previousArm, "the V155 arm sits below V154's, so a current store maps one rung short");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 
@@ -232,7 +233,10 @@ public sealed class QueryStoreIntervalEndRungTests
             await ExecAsync(connection, "CREATE VIEW collect.v_query_store_stats AS SELECT * FROM collect.query_store_stats", ct);
             await ExecAsync(connection, $"DELETE FROM collect.darling_schema_version WHERE version >= {RungVersion.ToString(CultureInfo.InvariantCulture)}", ct);
 
-            Assert.Equal(1, await PgMigrations.MigrateAsync(connection, ct));
+            /* The rungs above the one rolled back to also re-run (the delete above removed every row from the rung up, and
+               the ladder applies each version the store lacks), so the count is the distance from the previous version to the
+               top rung, not 1: it grew to 2 when V156 landed above this rung. */
+            Assert.Equal(StorageVersion.SchemaVersion - PreviousVersion, await PgMigrations.MigrateAsync(connection, ct));
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
 
             Assert.Equal(freshStats, await ColumnOrderAsync(connection, "query_store_stats", ct));

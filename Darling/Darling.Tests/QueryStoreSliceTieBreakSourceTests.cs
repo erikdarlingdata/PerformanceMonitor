@@ -55,8 +55,11 @@ public sealed class QueryStoreSliceTieBreakSourceTests
         /* 7, not 1, since #2827: the plan-regression dedup is one logical site but expresses its ordering
            once per projected column, as GROUP BY + ordered array_agg rather than a single window. Each of
            those orderings is independently breakable — that is the whole reason the count is declared here
-           rather than globbed — so all seven are held to the tie-break, not just the first. */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Analysis", "PgFactCollector.QueryPerf.cs"), 7),
+           rather than globbed — so all seven are held to the tie-break, not just the first.
+
+           8 since #5631: the plan-regression dedup also picks avg_rowcount (rows per call, for the output-size rule)
+           with the same ordered array_agg, ORDER BY collection_time DESC, execution_count DESC like the seven around it. */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Analysis", "PgFactCollector.QueryPerf.cs"), 8),
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Analysis", "PgDrillDownCollector.Queries.cs"), 1),
     ];
 
@@ -111,8 +114,9 @@ public sealed class QueryStoreSliceTieBreakSourceTests
         /* The count is asserted as a whole too: a file dropping to zero sites would otherwise be caught only
            by its own per-file assertion, and this states the total the fix actually swept.
            12 -> 18 with #2827: the plan-regression dedup states its ordering once per projected column
-           (7) where the window form stated it once, so the same logical site now contributes seven. */
-        Assert.Equal(18, total);
+           (7) where the window form stated it once, so the same logical site now contributes seven.
+           18 -> 19 with #5631: the eighth ordered array_agg in that dedup (avg_rowcount). */
+        Assert.Equal(19, total);
     }
 
     /// <summary>
@@ -128,6 +132,20 @@ public sealed class QueryStoreSliceTieBreakSourceTests
             var source = File.ReadAllText(SourcePath(relative));
             Assert.DoesNotContain("ORDER BY execution_count", source, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void ComposeCompiler_DedupePartitionByLiteral_EqualsTheRestrictionKey()
+    {
+        /* The dedupe spells its PARTITION BY list as a literal (this guard's regex has to see it); the
+           restriction joins on PerformanceMonitor.Darling.Service.ComposeCompiler.s_queryStorePartitionKey.
+           A drift between the two would make the restriction keep the wrong partitions. */
+        var source = File.ReadAllText(SourcePath(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Compose", "ComposeCompiler.cs")));
+        var m = Regex.Match(source, @"ROW_NUMBER\(\) OVER \(PARTITION BY ""\s*\+\s*\$""(?<cols>[^""]+?)\s*""\s*\+\s*\$""ORDER BY");
+        Assert.True(m.Success, "the Query Store dedupe's literal PARTITION BY list was not found in ComposeCompiler.cs");
+        Assert.Equal(
+            string.Join(", ", PerformanceMonitor.Darling.Service.ComposeCompiler.s_queryStorePartitionKey),
+            m.Groups["cols"].Value);
     }
 
     /// <summary>Walks up from the test binary to the repo root so the pin works from any run directory.</summary>

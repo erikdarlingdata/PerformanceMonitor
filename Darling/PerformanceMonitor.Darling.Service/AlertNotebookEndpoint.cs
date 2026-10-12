@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -52,6 +53,13 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Degrade, never error (#2710).</b> A stale or empty firing — no matching history row, no sections
 /// with data — still answers 200 with honest empty cells and a note, exactly like the triage page it sits
 /// beside.</para>
+///
+/// <para><b><c>scope_server</c> is the REGISTRY name, never a display name.</b> A chart (panel) cell names no
+/// server, so the page scopes it by this field. The matched alert row's <c>server_name</c> is the display name
+/// the snapshot stored, and the compose runner filters on the registry's <c>server_name</c>, so a chart scoped
+/// by the display name returned nothing on every server whose two names differ. <see cref="ScopeServerOf"/>
+/// resolves the row's <c>server_id</c> (else the link's <c>server</c>) to the registry key; when neither
+/// resolves the field is left out and the page says the chart has no server to scope to.</para>
 /// </summary>
 internal static partial class AlertNotebookEndpoint
 {
@@ -59,7 +67,7 @@ internal static partial class AlertNotebookEndpoint
     /// the mechanical conversion below changes; a new metric added to <see cref="DarlingTriageEndpoint.SectionsByMetric"/>
     /// does not bump it, because the conversion rule — not the per-metric read list — is what "mechanical/…"
     /// versions.</summary>
-    internal const int MechanicalTemplateVersion = 1;
+    internal const int MechanicalTemplateVersion = 2;
 
     /// <summary>Test-only seam (#4425): counts every call into <see cref="PrefetchAsync"/>, so a unit test can
     /// pin "a no-context family makes zero pre-fetch calls" against the SAME <see cref="ShouldPrefetch"/> gate
@@ -92,7 +100,7 @@ internal static partial class AlertNotebookEndpoint
                 var resolveStopwatch = Stopwatch.StartNew();
                 try
                 {
-                    var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverQuery);
+                    var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverQuery, context.RequestAborted);
                     if (error is null)
                     {
                         serverId = resolved.ServerId;
@@ -100,7 +108,7 @@ internal static partial class AlertNotebookEndpoint
                     }
                     else if (error.StartsWith(DarlingServerResolver.RegistryReadFaultPrefix, StringComparison.Ordinal))
                     {
-                        DarlingWebFailureLog.Report(logger, "/api/alert-notebook:resolve-server", resolveStopwatch.ElapsedMilliseconds, error);
+                        DarlingWebFailureLog.Report(logger, "/api/alert-notebook:resolve-server", resolveStopwatch.ElapsedMilliseconds, error, context.RequestAborted);
                         notes.Add((JsonNode)(DarlingWebFailureLog.IsStatementTimeoutSentence(error)
                             ? DarlingWebFailureLog.TimeoutMessage
                             : DarlingWebFailureLog.GenericMessage));
@@ -112,7 +120,7 @@ internal static partial class AlertNotebookEndpoint
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    DarlingWebFailureLog.Report(logger, "/api/alert-notebook:resolve-server", resolveStopwatch.ElapsedMilliseconds, ex);
+                    DarlingWebFailureLog.Report(logger, "/api/alert-notebook:resolve-server", resolveStopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                     notes.Add((JsonNode)"Server resolution failed. The service log names what failed.");
                 }
             }
@@ -154,9 +162,15 @@ internal static partial class AlertNotebookEndpoint
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:alert-history", alertHistoryStopwatch.ElapsedMilliseconds, ex);
+                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:alert-history", alertHistoryStopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                 notes.Add((JsonNode)"Alert-history lookup failed. The service log names what failed.");
             }
+
+            /* The registry name the page scopes the charts by. matchedRow.ServerName is the snapshot's display
+               name, which the compose runner's server_name filter does not match; resolve the row's server_id
+               (else the link's server) to servers.server_name here and send that. */
+            var scopeServer = await ResolveScopeServerAsync(
+                postgres, matchedRow, fleetLevelStore ? null : serverQuery, notes, logger, context.RequestAborted);
 
             /* #4755: status arms 1 and 2 read the FIRST resolution row and the FIRST later firing straight from
                the store -- two targeted reads with no window and no shared row cap (see ReadStatusRowsAsync) --
@@ -173,7 +187,7 @@ internal static partial class AlertNotebookEndpoint
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:status-history", statusHistoryStopwatch.ElapsedMilliseconds, ex);
+                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:status-history", statusHistoryStopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                 notes.Add((JsonNode)"Status lookup failed. The service log names what failed.");
             }
 
@@ -227,8 +241,78 @@ internal static partial class AlertNotebookEndpoint
                 },
             };
 
-            return Results.Text(body.ToJsonString(), "application/json");
+            if (scopeServer is not null)
+            {
+                body["scope_server"] = scopeServer;
+            }
+
+            /* #4348: the notebook's own body carries the alert row's text, so it is swept whole. */
+            return DarlingWebStatementSweep.JsonText(body, "/api/alert-notebook", logger, 0, context.RequestAborted);
         });
+    }
+
+    /// <summary>The registry name (<c>servers.server_name</c>) the page scopes this notebook's chart cells by, or
+    /// null when nothing resolves. The matched alert row's <c>server_id</c> names its server exactly, so that
+    /// wins: the row's <c>server_name</c> is the display name the snapshot stored, not the registry key the
+    /// compose runner filters on. With no matched row the link's own <c>server</c> is resolved the way every
+    /// other server-scoped web read resolves one (<see cref="DarlingServerResolver"/>: the registry name or the
+    /// display name, then a partial match). A name several servers answer to resolves to nothing here: the resolver
+    /// refuses it, and no scope beats the wrong scope, so the page leaves <c>scope_server</c> out instead of
+    /// scoping the charts to whichever of them sorts first (what it did before the resolver refused such a name).
+    /// A blank link server resolves to nothing here, never to the only registered server.</summary>
+    internal static string? ScopeServerOf(
+        IReadOnlyList<DarlingServerResolver.RegisteredServer> registry,
+        DarlingAlertReader.AlertHistoryReadRow? matchedRow,
+        string? linkServer)
+    {
+        if (matchedRow is not null)
+        {
+            return registry.FirstOrDefault(s => s.ServerId == matchedRow.ServerId)?.ServerName;
+        }
+
+        if (string.IsNullOrWhiteSpace(linkServer))
+        {
+            return null;
+        }
+
+        var (resolved, error) = DarlingServerResolver.ResolveOrError(registry, linkServer);
+        return error is null ? resolved.ServerName : null;
+    }
+
+    /// <summary>Reads the enabled registry once and hands it to <see cref="ScopeServerOf"/>. No matched row and
+    /// no link server means nothing to resolve, so no registry read. A failed registry read degrades to "no
+    /// scope server" with the same note the server lookup above gives, once, so the charts say they cannot be
+    /// scoped rather than drawing an unscoped fleet.</summary>
+    internal static async Task<string?> ResolveScopeServerAsync(
+        NpgsqlDataSource postgres,
+        DarlingAlertReader.AlertHistoryReadRow? matchedRow,
+        string? linkServer,
+        JsonArray notes,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        if (matchedRow is null && string.IsNullOrWhiteSpace(linkServer))
+        {
+            return null;
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
+        if (fault is not null)
+        {
+            DarlingWebFailureLog.Report(logger, "/api/alert-notebook:scope-server", stopwatch.ElapsedMilliseconds, fault, cancellationToken);
+            var note = DarlingWebFailureLog.IsStatementTimeoutSentence(fault)
+                ? DarlingWebFailureLog.TimeoutMessage
+                : DarlingWebFailureLog.GenericMessage;
+            if (!notes.Any(n => n is JsonValue v && v.TryGetValue<string>(out var text) && text == note))
+            {
+                notes.Add((JsonNode)note);
+            }
+
+            return null;
+        }
+
+        return ScopeServerOf(servers, matchedRow, linkServer);
     }
 
     /// <summary>The decide-and-build step <see cref="Map"/>'s handler delegates to (extracted for #4425 so a
@@ -356,7 +440,7 @@ internal static partial class AlertNotebookEndpoint
             ["type"] = "read",
             ["read"] = section.Read,
             ["params"] = parameters,
-            ["viz"] = "table",
+            ["viz"] = ReadVizFor(section.Read),
             ["title"] = section.Title,
         };
     }
@@ -642,7 +726,7 @@ internal static partial class AlertNotebookEndpoint
         {
             if (logger is not null)
             {
-                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:prefetch", stopwatch.ElapsedMilliseconds, ex);
+                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:prefetch", stopwatch.ElapsedMilliseconds, ex, ct);
             }
 
             notes?.Add((JsonNode)"The rule could not be read.");
@@ -684,7 +768,7 @@ internal static partial class AlertNotebookEndpoint
         {
             if (logger is not null)
             {
-                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:prefetch", stopwatch.ElapsedMilliseconds, ex);
+                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:prefetch", stopwatch.ElapsedMilliseconds, ex, ct);
             }
 
             notes?.Add((JsonNode)"The finding could not be read.");
@@ -742,7 +826,7 @@ internal static partial class AlertNotebookEndpoint
     /// and every fixed param the call declares, PLUS an explicit <c>hours</c> when the call did not, PLUS an
     /// explicit <c>limit</c> when the call did not AND the read is not one of
     /// <see cref="s_authoredLimitlessTrendReads"/> (a bucketed trend read has no <c>limit</c> param to
-    /// carry). <c>viz</c> is always "table" — these are drill-down reads, not charts.</summary>
+    /// carry). <c>viz</c> is "table" for a drill-down read and "line" for a trend read (<see cref="s_lineReads"/>).</summary>
     private static JsonObject AuthoredReadCell(
         string read, string title, string? serverName, string? asOf, params (string Key, string Value)[] fixedParams)
     {
@@ -781,10 +865,25 @@ internal static partial class AlertNotebookEndpoint
             ["type"] = "read",
             ["read"] = read,
             ["params"] = parameters,
-            ["viz"] = "table",
+            ["viz"] = ReadVizFor(read),
             ["title"] = title,
         };
     }
+
+    /// <summary>The reads whose cell is a chart: a bucketed trend read is a series over time, so its cell draws as a
+    /// line (the page fills the series from its field catalog, <c>read-fields.js</c>). Every other read is a table.</summary>
+    internal static readonly IReadOnlySet<string> s_lineReads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_deadlock_trend",
+        "get_wait_trend",
+        "get_tempdb_trend",
+        "get_cpu_utilization",
+        "get_pg_cpu_utilization",
+        "get_blocking_stats",
+        "get_lock_wait_trend",
+    };
+
+    private static string ReadVizFor(string read) => s_lineReads.Contains(read) ? "line" : "table";
 
     /// <summary>Ports the <c>blocking-rca</c> / <c>deadlock-postmortem</c> time-series panel spec
     /// (<c>notebook.js</c>'s <c>tsPanel</c>, <c>aggregate: "count"</c>, a deadlock/blocking annotation) into a
@@ -945,7 +1044,7 @@ internal static partial class AlertNotebookEndpoint
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            DarlingWebFailureLog.Report(logger, "/api/alert-notebook:collector-freshness", freshnessStopwatch.ElapsedMilliseconds, ex);
+            DarlingWebFailureLog.Report(logger, "/api/alert-notebook:collector-freshness", freshnessStopwatch.ElapsedMilliseconds, ex, cancellationToken);
         }
 
         return "Unknown (not collected since " + anchorStamp + ")";
@@ -1197,7 +1296,7 @@ internal static partial class AlertNotebookEndpoint
     /// <summary>One alert-history row plus its dedup-matched incident's facts, in the SAME wire shape
     /// <see cref="DarlingTriageEndpoint"/>'s own row node uses, extended with the incident facts the spec
     /// requires (Incident Since, Involved Objects, Database, Total Occurrences).</summary>
-    private static JsonObject AlertRowNode(DarlingAlertReader.AlertHistoryReadRow row, AlertIncident? incident)
+    internal static JsonObject AlertRowNode(DarlingAlertReader.AlertHistoryReadRow row, AlertIncident? incident)
     {
         var node = new JsonObject
         {
@@ -1208,6 +1307,8 @@ internal static partial class AlertNotebookEndpoint
             ["current_value"] = row.CurrentValue,
             ["threshold_value"] = row.ThresholdValue,
             ["detail_text"] = row.DetailText,
+            /* #5642: the fire-time age of the newest sample, read from the persisted context. */
+            ["newest_sample"] = NewestSampleNode(row.ContextJson),
         };
 
         if (incident is not null)
@@ -1221,9 +1322,15 @@ internal static partial class AlertNotebookEndpoint
         return node;
     }
 
-    private static string? Query(HttpContext context, string key)
-    {
-        var value = context.Request.Query[key].ToString();
-        return string.IsNullOrEmpty(value) ? null : value;
-    }
+    /// <summary>The <c>newest_sample</c> node of an alert row (#5642), shared by the notebook and the triage
+    /// page so both publish the shape <c>get_alert_history</c> does: null when the row carries no sample age.</summary>
+    internal static JsonNode? NewestSampleNode(string? contextJson) =>
+        AlertNewestSampleWire.FromContextJson(contextJson) is AlertNewestSampleWire wire
+            ? JsonSerializer.SerializeToNode(wire)
+            : null;
+
+    /// <summary>The first non-empty value for a query key, or null — the read surface's binding rule, which this
+    /// calls rather than restates (#5245: a repeated key is its first value, not the values joined by a comma).</summary>
+    internal static string? Query(HttpContext context, string key) =>
+        DarlingWebEndpoints.First(context, key);
 }

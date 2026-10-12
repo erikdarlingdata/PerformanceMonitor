@@ -746,7 +746,7 @@ public sealed class DarlingComposeTests
 
         /* The series pass buckets ONLY the winners: membership is IS NOT DISTINCT FROM (a NULL group key
            that wins a slot must not be knocked out of its own series by '='). */
-        Assert.Contains("AND EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM f.wait_type)", sql, StringComparison.Ordinal);
+        Assert.Contains("AND EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM rtrim(f.wait_type))", sql, StringComparison.Ordinal);
         Assert.Contains("date_trunc('hour', f.collection_time)", sql, StringComparison.Ordinal);
 
         /* Default is NO residual series — the label appears only under includeOther. */
@@ -768,11 +768,15 @@ public sealed class DarlingComposeTests
 
         /* The residual fold: non-members keep contributing, relabeled — so every bucket still sums to the
            window total. The CASE replaces the WHERE semi-filter (a row filtered out cannot be folded). */
-        var fold = $"CASE WHEN EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM f.wait_type) THEN f.wait_type ELSE '{ComposeCompiler.OtherSeriesLabel}' END";
+        var fold = $"CASE WHEN EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM rtrim(f.wait_type)) THEN rtrim(f.wait_type) ELSE '{ComposeCompiler.OtherSeriesLabel}' END";
         Assert.Contains(fold + " AS wait_type", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY date_trunc('hour', f.collection_time), " + fold, sql, StringComparison.Ordinal);
         Assert.DoesNotContain("  AND EXISTS", sql, StringComparison.Ordinal);
     }
+
+    /// <summary>#5525: the server scope as the compiler spells it for names bound at $3 - an id list resolved from the registry
+    /// inside the SQL, never <c>server_name = ANY</c> on the fact (that reads every compressed chunk in full).</summary>
+    private const string ServerIdScope3 = "server_id = ANY(ARRAY(SELECT reg.server_id FROM collect.servers AS reg WHERE reg.server_name = ANY($3)))";
 
     [Fact]
     public void Compile_RankedTimeSeries_BindsEachValueOnce_SharedByBothPasses()
@@ -789,12 +793,94 @@ public sealed class DarlingComposeTests
 
         var sql = compiled!.Sql;
         Assert.Equal(5, compiled.Parameters.Count);
-        Assert.Equal(2, CountOccurrences(sql, "f.server_name = ANY($3)"));
+        Assert.Equal(2, CountOccurrences(sql, "f." + ServerIdScope3));
         Assert.Equal(2, CountOccurrences(sql, "<> ALL($4)"));
         Assert.Contains("LIMIT $5", sql, StringComparison.Ordinal);
         /* Values stay bound, never interpolated — in either pass. */
         Assert.DoesNotContain("PROD-01", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SLEEP_TASK", sql, StringComparison.Ordinal);
+    }
+
+    /* ─────────────── #4884: a wait name stored under two spellings ─────────────── */
+
+    /* SQL Server reports a few wait names with a trailing space, which the collector stores trimmed from #4884 on,
+       so history from before the upgrade holds the same wait under a second spelling. The SQL Server wait-name
+       dimensions group on the trimmed name, and every filter keeps the column bare and widens the value instead. */
+    [Fact]
+    public void Catalog_TrailingSpaceHistory_IsExactlyTheSqlServerWaitNameDimensions()
+    {
+        var flagged = MeasureCatalog.Dimensions
+            .Where(d => d.TrailingSpaceHistory)
+            .Select(d => d.SourceTable + "." + d.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        /* pg_wait_stats.wait_type is a PostgreSQL wait event, never stored with a trailing space. */
+        Assert.Equal(new[] { "query_snapshots.wait_type", "wait_stats.wait_type", "waiting_tasks.wait_type" }, flagged);
+    }
+
+    [Theory]
+    [InlineData("wait_stats", "wait_time_delta_ms", "sum")]
+    [InlineData("waiting_tasks", "waiting_task_duration_ms", "max")]
+    [InlineData("query_snapshots", "snapshot_cpu_time_ms", "max")]
+    public void Compile_WaitNameDimension_GroupsOnTheTrimmedName_AndFiltersOnTheBareColumn(string source, string measure, string aggregate)
+    {
+        var compiled = CompileWithParameters(
+            $"{{\"source\":\"{source}\",\"measure\":\"{measure}\",\"aggregate\":\"{aggregate}\",\"topN\":10,\"groupBy\":[\"wait_type\"],\"viz\":\"bar\"," +
+            "\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"EDC_DOPP_LOCK\"}]}");
+
+        Assert.Contains("rtrim(f.wait_type) AS wait_type", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY rtrim(f.wait_type)", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("rtrim(f.wait_type) =", compiled.Sql, StringComparison.Ordinal);
+        Assert.Equal(new[] { "EDC_DOPP_LOCK", "EDC_DOPP_LOCK " }, BoundArray(compiled, @"f\.wait_type = ANY\(\$(\d+)\)"));
+    }
+
+    [Theory]
+    [InlineData("neq", @"f\.wait_type <> ALL\(\$\d+\)")]
+    [InlineData("like", @"\(f\.wait_type LIKE (\$\d+) OR f\.wait_type LIKE \1 \|\| ' '\)")]
+    [InlineData("gt", @"\(f\.wait_type > (\$\d+) AND f\.wait_type <> \1 \|\| ' '\)")]
+    [InlineData("gte", @"f\.wait_type >= \$\d+")]
+    [InlineData("lt", @"f\.wait_type < \$\d+")]
+    [InlineData("lte", @"\(f\.wait_type <= (\$\d+) OR f\.wait_type = \1 \|\| ' '\)")]
+    public void Compile_WaitNameFilter_EveryOperatorKeepsTheColumnBare(string op, string predicate)
+    {
+        var compiled = CompileWithParameters(
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_delta_ms\",\"aggregate\":\"sum\",\"viz\":\"stat\"," +
+            $"\"filters\":[{{\"dimension\":\"wait_type\",\"op\":\"{op}\",\"value\":\"EDC_DOPP_LOCK\"}}]}}");
+
+        Assert.Matches(predicate, compiled.Sql);
+        Assert.DoesNotContain("rtrim(", compiled.Sql, StringComparison.Ordinal);
+        if (op == "neq")
+        {
+            Assert.Equal(new[] { "EDC_DOPP_LOCK", "EDC_DOPP_LOCK " }, BoundArray(compiled, @"f\.wait_type <> ALL\(\$(\d+)\)"));
+        }
+    }
+
+    [Fact]
+    public void Compile_PgWaitStatsWaitType_IsLeftAsStored()
+    {
+        var compiled = CompileWithParameters(
+            "{\"source\":\"pg_wait_stats\",\"measure\":\"pg_wait_time_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"wait_type\"],\"viz\":\"bar\"," +
+            "\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"Lock\"}]}");
+
+        Assert.DoesNotContain("rtrim(", compiled.Sql, StringComparison.Ordinal);
+        Assert.Equal(new[] { "Lock" }, BoundArray(compiled, @"f\.wait_type = ANY\(\$(\d+)\)"));
+    }
+
+    private static ComposeCompiled CompileWithParameters(string json)
+    {
+        var (compiled, error) = ComposeCompiler.Compile(
+            ValidPlan(json), new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
+        Assert.True(error is null, error);
+        return compiled!;
+    }
+
+    /// <summary>The text array bound to the one placeholder <paramref name="pattern"/> captures.</summary>
+    private static string[] BoundArray(ComposeCompiled compiled, string pattern)
+    {
+        var match = Assert.Single(Regex.Matches(compiled.Sql, pattern));
+        var ordinal = int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+        return Assert.IsType<string[]>(compiled.Parameters[ordinal - 1].Value);
     }
 
     [Fact]
@@ -1658,7 +1744,7 @@ public sealed class DarlingComposeTests
            a window-function subquery only when the qual's columns appear in every PARTITION BY, so without
            it a fleet store would rank every server's rows before narrowing to the panel's scope. */
         var partition = sql.IndexOf("PARTITION BY", StringComparison.Ordinal);
-        var scope = sql.IndexOf("f.server_name = ANY(", StringComparison.Ordinal);
+        var scope = sql.IndexOf("f.server_id = ANY(", StringComparison.Ordinal);
         Assert.True(scope > partition, "the server scope stays in the outer WHERE, so the partition must carry server_name");
 
         /* The dedup window is pushed INSIDE the derived table, so "latest" means latest within the
@@ -1737,6 +1823,37 @@ public sealed class DarlingComposeTests
             Assert.True(error is null, error);
             Assert.Contains("WHERE w.collection_time >= $1 AND w.collection_time <= $2)", compiled!.Sql, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void Compile_QueryStoreWideEligible_CarriesNoFirstExecutionTimeFloor()
+    {
+        /* #4605: the Custom Views route, for all servers or some, deliberately carries no first_execution_time floor:
+           with a collection_time index and random_page_cost 1.1 the floor made the planner fetch window + 26 h of rows
+           through the first_exec index. */
+        const string panel = "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}";
+        var plan = ValidPlan(panel);
+
+        var wideContext = new ComposeRunContext(
+            null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown,
+            QueryStoreWideEligible: true);
+        var (wide, wideError) = ComposeCompiler.Compile(plan, wideContext);
+        Assert.True(wideError is null, wideError);
+        Assert.DoesNotContain("first_execution_time >=", wide!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, wide.Sql, StringComparison.Ordinal);
+
+        /* The raw route stays byte-for-byte what it was: the dedupe over the raw table, no floor, no margin. */
+        var rawContext = wideContext with { QueryStoreWideEligible = false };
+        var (raw, rawError) = ComposeCompiler.Compile(plan, rawContext);
+        Assert.True(rawError is null, rawError);
+        Assert.Contains(
+            "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id, server_name, database_name, "
+            + "query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role "
+            + "ORDER BY collection_time DESC, execution_count DESC) AS qs_rn "
+            + "FROM collect.query_store_stats WHERE collection_time >= $1 AND collection_time <= $2) AS qs_ranked WHERE qs_rn = 1)",
+            raw!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, raw.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("first_execution_time >=", raw.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2138,7 +2255,7 @@ public sealed class DarlingComposeTests
 
     private static IReadOnlyList<(string Source, ComposeCompiled Compiled)> CompileAnnotations(
         PanelPlan plan, IReadOnlyList<string>? servers = null) =>
-        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
+        ComposeCompiler.CompileAnnotations(plan, new ComposeRunContext(servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown), ComposeCompiler.NoServerClocks);
 
     [Fact]
     public void CompileAnnotations_ReturnsEmpty_WhenNoneRequested()
@@ -3359,6 +3476,397 @@ public sealed class DarlingComposeTests
         Assert.NotNull(outcome.Error);
         Assert.Contains(expectedFragment, outcome.Error!, StringComparison.OrdinalIgnoreCase);
     }
+
+    /* ─────────────── the hourly-raw-edges route (a count-guard verdict supplied) ─────────────── */
+
+    private static readonly DateTime EdgeNow = new(2026, 7, 23, 12, 0, 0, DateTimeKind.Utc);
+
+    private const string EdgePanelJson =
+        "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\",\"object_name\"],\"viz\":\"table\"}";
+
+    private static RollupCoverage EdgeCoverage() => new(
+        new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.QueryStatsIntervalHourlyView] = EdgeNow.AddDays(-3) },
+        new Dictionary<string, DateTime>(StringComparer.Ordinal),
+        RollupAvailability.All,
+        new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.QueryStatsIntervalHourlyView] = EdgeNow.AddMinutes(-20) });
+
+    private static ComposeRunContext EdgeContext(PanelPlan plan, bool withVerdict, IReadOnlyList<string>? servers = null, DateTime? moduleMapThrough = null)
+    {
+        var coverage = EdgeCoverage();
+        var start = EdgeNow.AddHours(-24);
+        var candidate = ComposeSourceRouter.HourlyRawEdgesCandidate(plan, EdgeNow, start, EdgeNow, RollupAvailability.All, coverage);
+        Assert.NotNull(candidate);
+        return new ComposeRunContext(
+            servers, start, EdgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, EdgeNow, coverage,
+            HourlyEdges: withVerdict ? new ComposeHourlyEdgesVerdict(candidate!.SourceTable, candidate.HourStartUtc, candidate.HourEndUtc, servers) : null,
+            ModuleMapThrough: moduleMapThrough);
+    }
+
+    private static ComposeCompiled CompileEdge(PanelPlan plan, ComposeRunContext context)
+    {
+        var (compiled, error) = ComposeCompiler.Compile(plan, context);
+        Assert.True(error is null, error);
+        return compiled!;
+    }
+
+    private static string EdgeFrom(string suffix) =>
+        "(SELECT mid.server_id, mid.server_name, mid.database_name, mid.query_hash, mid.sql_handle, mid.bucket AS collection_time, "
+        + $"mid.worker_time_{suffix} AS delta_worker_time, mid.elapsed_time_{suffix} AS delta_elapsed_time, mid.execution_count_{suffix} AS delta_execution_count, "
+        + "1 AS sample_interval_seconds FROM collect.query_stats_interval_hourly AS mid WHERE mid.bucket >= $3 AND mid.bucket < $4 "
+        + "UNION ALL SELECT server_id, server_name, database_name, query_hash, sql_handle, collection_time, delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds "
+        + "FROM collect.query_stats WHERE collection_time >= $3 AND collection_time < $4 AND sample_interval_seconds = 0 "
+        + "UNION ALL SELECT server_id, server_name, database_name, query_hash, sql_handle, collection_time, delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds "
+        + "FROM collect.query_stats WHERE collection_time >= $1 AND collection_time <= $2 AND (collection_time < $3 OR collection_time >= $4))";
+
+    [Fact]
+    public void Compile_HourlyRawEdges_MatchingVerdict_EmitsTheFullPinnedSql()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var compiled = CompileEdge(plan, EdgeContext(plan, withVerdict: true));
+
+        Assert.Equal("WITH m AS (\n"
+            + "    SELECT server_name, sql_handle, object_name, schema_name, database_name\n"
+            + "    FROM (\n"
+            + "        SELECT server_name, sql_handle, object_name, schema_name, database_name,\n"
+            + "               ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle ORDER BY collection_time DESC) AS rn\n"
+            + "        FROM collect.procedure_stats\n"
+            + "        WHERE collection_time >= $1\n"
+            + "          AND collection_time <= $2\n"
+            + "          AND sql_handle IS NOT NULL\n"
+            + "          AND sql_handle <> ''\n"
+            + "    ) ranked_modules\n"
+            + "    WHERE rn = 1\n"
+            + ")\n"
+            + "SELECT f.database_name AS database_name, COALESCE(m.object_name, '(ad hoc)') AS object_name, (CAST(SUM(f.delta_worker_time) FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0) AS double precision)) * 1.0 / 1000.0 AS value\n"
+            + "FROM " + EdgeFrom("sum") + " AS f\n"
+            + "LEFT JOIN m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name\n"
+            + "WHERE f.collection_time >= $1\n"
+            + "  AND f.collection_time <= $2\n"
+            + "GROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')\n"
+            + "ORDER BY value DESC NULLS LAST\n"
+            + "LIMIT $5", compiled.Sql);
+        Assert.Contains("collect.procedure_stats", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("module_map", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_WithAModuleMapWatermark_EmitsTheMapPlusRecentOverlaySql()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var compiled = CompileEdge(plan, EdgeContext(plan, withVerdict: true, moduleMapThrough: EdgeNow.AddMinutes(-30)));
+
+        Assert.Equal("WITH m_recent AS (\n"
+            + "    SELECT server_name, sql_handle, object_name, schema_name, database_name\n"
+            + "    FROM (\n"
+            + "        SELECT server_name, sql_handle, object_name, schema_name, database_name,\n"
+            + "               ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle ORDER BY collection_time DESC) AS rn\n"
+            + "        FROM collect.procedure_stats\n"
+            + "        WHERE collection_time >= $5\n"
+            + "          AND collection_time <= $2\n"
+            + "          AND sql_handle IS NOT NULL\n"
+            + "          AND sql_handle <> ''\n"
+            + "    ) ranked_modules\n"
+            + "    WHERE rn = 1\n"
+            + "),\n"
+            + "m AS (\n"
+            + "    SELECT server_name, sql_handle, object_name, schema_name, database_name FROM m_recent\n"
+            + "    UNION ALL\n"
+            + "    SELECT mm.server_name, mm.sql_handle, mm.object_name, mm.schema_name, mm.database_name\n"
+            + "    FROM collect.module_map AS mm\n"
+            + "    WHERE mm.last_seen >= $1\n"
+            + "      AND NOT EXISTS (SELECT 1 FROM m_recent AS r WHERE r.server_name = mm.server_name AND r.sql_handle = mm.sql_handle)\n"
+            + ")\n"
+            + "SELECT f.database_name AS database_name, COALESCE(m.object_name, '(ad hoc)') AS object_name, (CAST(SUM(f.delta_worker_time) FILTER (WHERE f.sample_interval_seconds IS DISTINCT FROM 0) AS double precision)) * 1.0 / 1000.0 AS value\n"
+            + "FROM " + EdgeFrom("sum") + " AS f\n"
+            + "LEFT JOIN m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name\n"
+            + "WHERE f.collection_time >= $1\n"
+            + "  AND f.collection_time <= $2\n"
+            + "GROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')\n"
+            + "ORDER BY value DESC NULLS LAST\n"
+            + "LIMIT $6", compiled.Sql);
+        Assert.Contains("collect.module_map AS mm", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("m_recent", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("NOT EXISTS", compiled.Sql, StringComparison.Ordinal);
+        Assert.Equal(6, compiled.Parameters.Count);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_TheOverlayFloor_IsTheWatermarkLessTheSlack_WhenInsideTheWindow()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var watermark = EdgeNow.AddMinutes(-30);
+        var compiled = CompileEdge(plan, EdgeContext(plan, true, moduleMapThrough: watermark));
+
+        Assert.Equal(watermark - DarlingModuleMap.WatermarkSlack, (DateTime)compiled.Parameters[4].Value!);
+        Assert.Equal(DateTimeKind.Unspecified, ((DateTime)compiled.Parameters[4].Value!).Kind);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_AWatermarkOlderThanTheWindowStart_FloorsTheOverlayAtTheWindowStart()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var start = EdgeNow.AddHours(-24);
+        var compiled = CompileEdge(plan, EdgeContext(plan, true, moduleMapThrough: start.AddHours(-5)));
+
+        Assert.Equal(start, (DateTime)compiled.Parameters[4].Value!);
+        Assert.Equal(start, (DateTime)compiled.Parameters[0].Value!);
+        Assert.Contains("WHERE collection_time >= $5\n", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_WithAModuleMapWatermark_AppliesTheServerScopeInBothArms()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var servers = new[] { "PROD-01" };
+        var compiled = CompileEdge(plan, EdgeContext(plan, true, servers, EdgeNow.AddMinutes(-30)));
+
+        /* $3 is the scope: the overlay's procedure_stats scan, the map arm and the fact each carry it. */
+        Assert.Contains("          AND " + ServerIdScope3 + "\n", compiled.Sql, StringComparison.Ordinal);
+        /* module_map has no server_id (keyed server_name, sql_handle) and is small, so its arm keeps the names (#5525). */
+        Assert.Contains("      AND mm.server_name = ANY($3)\n", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("  AND f." + ServerIdScope3 + "\n", compiled.Sql, StringComparison.Ordinal);
+        Assert.Equal(7, compiled.Parameters.Count);
+        Assert.Equal(servers, (string[])compiled.Parameters[2].Value!);
+        Assert.Equal(EdgeNow.AddMinutes(-30) - DarlingModuleMap.WatermarkSlack, (DateTime)compiled.Parameters[5].Value!);
+        Assert.Contains("LIMIT $7", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_ANullWatermark_IsByteIdenticalToTheWindowWideCte()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        foreach (var servers in new[] { (IReadOnlyList<string>?)null, new[] { "PROD-01" } })
+        {
+            var withNull = CompileEdge(plan, EdgeContext(plan, true, servers, moduleMapThrough: null));
+            var without = CompileEdge(plan, EdgeContext(plan, true, servers));
+
+            Assert.Equal(without.Sql, withNull.Sql);
+            Assert.Equal(without.Parameters.Count, withNull.Parameters.Count);
+            Assert.StartsWith("WITH m AS (\n", withNull.Sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("module_map", withNull.Sql, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_AWatermarkLaterThanNow_IsTreatedAsNoWatermark()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var without = CompileEdge(plan, EdgeContext(plan, true));
+        foreach (var future in new[] { EdgeNow.AddMinutes(1), EdgeNow.AddDays(1) })
+        {
+            var compiled = CompileEdge(plan, EdgeContext(plan, true, moduleMapThrough: future));
+
+            Assert.Equal(without.Sql, compiled.Sql);
+            Assert.Equal(without.Parameters.Count, compiled.Parameters.Count);
+            Assert.StartsWith("WITH m AS (\n", compiled.Sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("module_map AS mm", compiled.Sql, StringComparison.Ordinal);
+        }
+
+        /* A watermark exactly at now still serves the overlay. */
+        var atNow = CompileEdge(plan, EdgeContext(plan, true, moduleMapThrough: EdgeNow));
+        Assert.StartsWith("WITH m_recent AS (\n", atNow.Sql, StringComparison.Ordinal);
+        Assert.Contains("module_map AS mm", atNow.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_AWatermark_ChangesNothingOnTheRawRoute_NorOnACaggRoute()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var start = EdgeNow.AddHours(-24);
+        var watermark = EdgeNow.AddMinutes(-30);
+
+        /* Raw: no verdict, so the hourly-raw-edges route is not taken. */
+        var rawWith = CompileEdge(plan, EdgeContext(plan, false, moduleMapThrough: watermark));
+        var rawWithout = CompileEdge(plan, EdgeContext(plan, false));
+        Assert.Equal(rawWithout.Sql, rawWith.Sql);
+        Assert.Equal(rawWithout.Parameters.Count, rawWith.Parameters.Count);
+        Assert.StartsWith("WITH m AS (\n", rawWith.Sql, StringComparison.Ordinal);
+
+        /* CAGG: a window old enough for the daily tier joins collect.module_map directly, with or without a watermark. */
+        var caggStart = EdgeNow.AddDays(-20);
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.All,
+            new Dictionary<string, DateTime>(StringComparer.Ordinal));
+        ComposeCompiled Cagg(DateTime? through) => CompileEdge(plan, new ComposeRunContext(
+            null, caggStart, EdgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, EdgeNow, coverage, ModuleMapThrough: through));
+        var caggWith = Cagg(watermark);
+        var caggWithout = Cagg(null);
+        Assert.Equal(caggWithout.Sql, caggWith.Sql);
+        Assert.Equal(caggWithout.Parameters.Count, caggWith.Parameters.Count);
+        Assert.Contains("LEFT JOIN collect.module_map AS m ON", caggWith.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("m_recent", caggWith.Sql, StringComparison.Ordinal);
+        Assert.True(start < EdgeNow);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_APlanWithoutTheModuleJoin_IgnoresTheWatermark()
+    {
+        var plan = ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}");
+        var with = CompileEdge(plan, EdgeContext(plan, true, moduleMapThrough: EdgeNow.AddMinutes(-30)));
+        var without = CompileEdge(plan, EdgeContext(plan, true));
+
+        Assert.Equal(without.Sql, with.Sql);
+        Assert.Equal(without.Parameters.Count, with.Parameters.Count);
+        Assert.DoesNotContain("module_map", with.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_BindsStartEnd_Scope_HourStart_HourEnd_Filters_ThenTopN_InOrder()
+    {
+        var plan = ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"table\","
+            + "\"filters\":[{\"dimension\":\"database_name\",\"op\":\"eq\",\"value\":\"db1\"}]}");
+        var servers = new[] { "PROD-01" };
+        var compiled = CompileEdge(plan, EdgeContext(plan, true, servers));
+
+        Assert.Equal(7, compiled.Parameters.Count);
+        Assert.Equal(EdgeNow.AddHours(-24), (DateTime)compiled.Parameters[0].Value!);
+        Assert.Equal(EdgeNow, (DateTime)compiled.Parameters[1].Value!);
+        Assert.Equal(servers, (string[])compiled.Parameters[2].Value!);
+        Assert.Equal(EdgeNow.AddHours(-24), (DateTime)compiled.Parameters[3].Value!);
+        Assert.Equal(EdgeNow.AddHours(-1), (DateTime)compiled.Parameters[4].Value!);
+        Assert.Equal(new[] { "db1" }, (string[])compiled.Parameters[5].Value!);
+        Assert.Equal(10, compiled.Parameters[6].Value);
+    }
+
+    [Theory]
+    [InlineData("max")]
+    [InlineData("min")]
+    public void Compile_HourlyRawEdges_MaxAndMin_ProjectTheirOwnRollupColumns(string aggregate)
+    {
+        var plan = ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"" + aggregate + "\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}");
+        var compiled = CompileEdge(plan, EdgeContext(plan, true));
+
+        Assert.Contains("FROM " + EdgeFrom(aggregate) + " AS f\n", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_NoVerdict_IsByteIdenticalToTheRawCompile_AndBindsNoEdges()
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var withNone = CompileEdge(plan, EdgeContext(plan, false));
+        var (raw, error) = ComposeCompiler.Compile(
+            plan, new ComposeRunContext(null, EdgeNow.AddHours(-24), EdgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, EdgeNow, EdgeCoverage()));
+
+        Assert.True(error is null, error);
+        Assert.Equal(raw!.Sql, withNone.Sql);
+        Assert.Equal(3, withNone.Parameters.Count);
+        Assert.Contains("FROM collect.query_stats AS f\n", withNone.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("UNION ALL", withNone.Sql, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("wrong start hour", 0)]
+    [InlineData("wrong end hour", 1)]
+    [InlineData("wrong table", 2)]
+    [InlineData("avg", 3)]
+    [InlineData("ratio", 4)]
+    [InlineData("procedure_stats", 5)]
+    [InlineData("minute-grain time series", 6)]
+    public void Compile_HourlyRawEdges_ANonMatchingVerdict_IsByteIdenticalToNoVerdict(string label, int kind)
+    {
+        var json = kind switch
+        {
+            3 => "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"avg\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}",
+            4 => "{\"source\":\"query_stats\",\"ratio\":\"query_avg_cpu_us\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}",
+            5 => "{\"source\":\"procedure_stats\",\"measure\":\"proc_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"table\"}",
+            6 => "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"minute\",\"viz\":\"line\"}",
+            _ => EdgePanelJson,
+        };
+        var plan = ValidPlan(json);
+        var coverage = EdgeCoverage();
+        var start = EdgeNow.AddHours(-24);
+        var offered = ComposeSourceRouter.HourlyRawEdgesCandidate(ValidPlan(EdgePanelJson), EdgeNow, start, EdgeNow, RollupAvailability.All, coverage)!;
+        var given = kind switch
+        {
+            0 => new ComposeHourlyEdgesVerdict(offered.SourceTable, offered.HourStartUtc.AddHours(1), offered.HourEndUtc, null),
+            1 => new ComposeHourlyEdgesVerdict(offered.SourceTable, offered.HourStartUtc, offered.HourEndUtc.AddHours(-1), null),
+            2 => new ComposeHourlyEdgesVerdict("procedure_stats", offered.HourStartUtc, offered.HourEndUtc, null),
+            _ => new ComposeHourlyEdgesVerdict(plan.Measure.SourceTable, offered.HourStartUtc, offered.HourEndUtc, null),
+        };
+
+        var plain = new ComposeRunContext(null, start, EdgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, EdgeNow, coverage);
+        var (expected, expectedError) = ComposeCompiler.Compile(plan, plain);
+        var (actual, actualError) = ComposeCompiler.Compile(plan, plain with { HourlyEdges = given });
+
+        Assert.True(expected is not null, label + ": " + expectedError);
+        Assert.Equal(expectedError, actualError);
+        Assert.Equal(expected!.Sql, actual!.Sql);
+        Assert.Equal(expected.Parameters.Count, actual.Parameters.Count);
+        Assert.DoesNotContain("UNION ALL", actual.Sql, StringComparison.Ordinal);
+    }
+
+    private static ComposeHourlyEdgesVerdict EdgeVerdict(IReadOnlyList<string>? servers)
+    {
+        var offered = ComposeSourceRouter.HourlyRawEdgesCandidate(ValidPlan(EdgePanelJson), EdgeNow, EdgeNow.AddHours(-24), EdgeNow, RollupAvailability.All, EdgeCoverage())!;
+        return new ComposeHourlyEdgesVerdict(offered.SourceTable, offered.HourStartUtc, offered.HourEndUtc, servers);
+    }
+
+    private static (string? Plain, string? Given) EdgeSqlPair(IReadOnlyList<string>? runServers, ComposeHourlyEdgesVerdict verdict)
+    {
+        var plan = ValidPlan(EdgePanelJson);
+        var plain = new ComposeRunContext(runServers, EdgeNow.AddHours(-24), EdgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, EdgeNow, EdgeCoverage());
+        var (expected, expectedError) = ComposeCompiler.Compile(plan, plain);
+        var (actual, actualError) = ComposeCompiler.Compile(plan, plain with { HourlyEdges = verdict });
+        Assert.True(expected is not null, expectedError);
+        Assert.True(actual is not null, actualError);
+        return (expected!.Sql, actual!.Sql);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_AFleetVerdictOnAScopedRun_IsByteIdenticalToNoVerdict()
+    {
+        var (plain, given) = EdgeSqlPair(new[] { "A" }, EdgeVerdict(null));
+        Assert.Equal(plain, given);
+        Assert.DoesNotContain("UNION ALL", given, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_AScopedVerdictOnAFleetRun_IsByteIdenticalToNoVerdict()
+    {
+        var (plain, given) = EdgeSqlPair(null, EdgeVerdict(new[] { "A" }));
+        Assert.Equal(plain, given);
+        Assert.DoesNotContain("UNION ALL", given, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_AnEmptyVerdictScopeIsTheFleet_AndASubsetScopeIsNotTheRunsScope()
+    {
+        var (plainFleet, givenFleet) = EdgeSqlPair(null, EdgeVerdict(Array.Empty<string>()));
+        Assert.NotEqual(plainFleet, givenFleet);
+        Assert.Contains("UNION ALL", givenFleet, StringComparison.Ordinal);
+
+        var (plainScoped, givenScoped) = EdgeSqlPair(new[] { "A", "B" }, EdgeVerdict(new[] { "A" }));
+        Assert.Equal(plainScoped, givenScoped);
+        Assert.DoesNotContain("UNION ALL", givenScoped, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HourlyRawEdges_AMatchingScopedVerdictInAnotherOrder_TakesTheRoute()
+    {
+        var (plain, given) = EdgeSqlPair(new[] { "A", "B" }, EdgeVerdict(new[] { "B", "A" }));
+        Assert.NotEqual(plain, given);
+        Assert.Contains("UNION ALL", given, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RetentionNotice_HourlyRawEdges_SaysTheRawWording()
+    {
+        var now = EdgeNow;
+        var edgesRoute = new ComposeRoute(ComposeSourceTier.HourlyRawEdges, "query_stats_interval_hourly", null, null, now.AddHours(-23), now.AddHours(-1));
+
+        var edgesNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", edgesRoute, now.AddDays(-10), now, RollupAvailability.All, RollupCoverage.Unknown);
+        var rawNotice = ComposeStoreAvailability.BuildRetentionNotice("query_stats", ComposeRoute.Raw, now.AddDays(-10), now, RollupAvailability.All, RollupCoverage.Unknown);
+
+        Assert.NotNull(edgesNotice);
+        Assert.Equal(rawNotice, edgesNotice);
+        Assert.Contains("4 days", edgesNotice, StringComparison.Ordinal);
+        Assert.DoesNotContain("daily", edgesNotice, StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 /// <summary>
@@ -3372,11 +3880,19 @@ public sealed class DarlingComposeTests
 [Collection("live-postgres")]
 public sealed class DarlingComposeLivePostgresTests
 {
+    private const int ServerId = -973405;
+    private const string ServerName = "compose-old-window-no-rows";
+
     /// <summary>
     /// The live #1665 repro, end-to-end through the ONE shared runner: a >3-day window against a plain
     /// PostgreSQL store (the darling-pg CI service container — no TimescaleDB, so no rollups exist). Before
     /// the availability gate this compiled <c>collect.query_stats_hourly</c> and failed 42P01 at run time;
-    /// now it routes raw, runs clean, and carries NO notice (raw is complete on this store shape).
+    /// now it routes raw, runs clean, and carries NO notice. The panel is scoped to a server that holds no rows:
+    /// a fleet-wide panel would start at the oldest row any other test left in this shared store, and a store
+    /// whose rows start after the window's start now says so. That server is REGISTERED (a sentinel registry
+    /// row, removed afterwards), because the data-start probe reads through <c>collect.servers</c>: a name the
+    /// registry does not hold asks the probe nothing, and the no-notice assertion would pass whatever the
+    /// store held (#4953).
     /// </summary>
     [Fact]
     public async Task RunComposedPanel_OldWindow_AgainstPlainPostgres_RunsCleanOnRaw()
@@ -3387,30 +3903,43 @@ public sealed class DarlingComposeLivePostgresTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using (var connection = new NpgsqlConnection(connectionString))
+        var bodySucceeded = false;
+        try
         {
-            await connection.OpenAsync(ct);
-            await PgMigrations.MigrateAsync(connection, ct);
+            await using (var connection = new NpgsqlConnection(connectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+                await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            }
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+            var body = new JsonObject
+            {
+                ["panel"] = JsonNode.Parse(
+                    "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}"),
+                ["hours"] = 240, /* 10 days — far past the 3-day raw route horizon */
+                ["server"] = ServerName,
+            };
+
+            var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, ct);
+
+            Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
+            Assert.NotNull(outcome.Payload);
+            var sql = (string)outcome.Payload!["sql"]!;
+            Assert.Contains("collect.query_stats", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("_hourly", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("_daily", sql, StringComparison.Ordinal);
+            Assert.Null(outcome.Payload["notice"]);
+
+            bodySucceeded = true;
         }
-
-        await using var postgres = NpgsqlDataSource.Create(connectionString!);
-
-        var body = new JsonObject
+        finally
         {
-            ["panel"] = JsonNode.Parse(
-                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}"),
-            ["hours"] = 240, /* 10 days — far past the 3-day raw route horizon */
-        };
-
-        var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, ct);
-
-        Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
-        Assert.NotNull(outcome.Payload);
-        var sql = (string)outcome.Payload!["sql"]!;
-        Assert.Contains("collect.query_stats", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("_hourly", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("_daily", sql, StringComparison.Ordinal);
-        Assert.Null(outcome.Payload["notice"]);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM servers WHERE server_id = $1", ServerId));
+        }
     }
 }
 
@@ -3438,8 +3967,10 @@ public sealed class ComposeQueryStoreLivePostgresTests
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
         await DeleteAsync(connection, TestContext.Current.CancellationToken);
+        /* #5525: a composed scope resolves its names through the registry, so the fixture server must be registered. */
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, TestContext.Current.CancellationToken);
 
-        var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        var end = new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
         var bucket = end.AddHours(-2);
         var firstExecA = bucket.AddMinutes(1);
         var firstExecB = bucket.AddMinutes(2);
@@ -3512,8 +4043,10 @@ public sealed class ComposeQueryStoreLivePostgresTests
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
         await DeleteAsync(connection, TestContext.Current.CancellationToken);
+        /* #5525: a composed scope resolves its names through the registry, so the fixture server must be registered. */
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, TestContext.Current.CancellationToken);
 
-        var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        var end = new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
         var bucket = end.AddHours(-2);
         var firstExecA = bucket.AddMinutes(1);
         var firstExecB = bucket.AddMinutes(2);
@@ -3575,6 +4108,12 @@ public sealed class ComposeQueryStoreLivePostgresTests
         using var command = new NpgsqlCommand("DELETE FROM collect.query_store_stats WHERE server_id = $1", connection);
         command.Parameters.AddWithValue(ServerId);
         await command.ExecuteNonQueryAsync(ct);
+
+        await using (var deleteServer = new NpgsqlCommand("DELETE FROM collect.servers WHERE server_id = $1", connection))
+        {
+            deleteServer.Parameters.AddWithValue(ServerId);
+            await deleteServer.ExecuteNonQueryAsync(ct);
+        }
     }
 
     private static async Task InsertAsync(
@@ -3631,6 +4170,8 @@ public sealed class ComposeTopSeriesLivePostgresTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await DeleteAsync(connection, ct);
+        /* #5525: a composed scope resolves its names through the registry, so the fixture server must be registered. */
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
         /* Two hourly buckets ending on the last whole hour. Window totals: PAGELATCH_BIG 1000,
            SOS_MEDIUM 500, AAA_LOUD_EARLY 300, ZZZ_LATE 200 — so topN=2 keeps PAGELATCH_BIG + SOS_MEDIUM.
@@ -3758,6 +4299,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", connection);
         using var command = new NpgsqlCommand("DELETE FROM collect.wait_stats WHERE server_id = $1", connection);
         command.Parameters.AddWithValue(ServerId);
         await command.ExecuteNonQueryAsync(ct);
+
+        await using (var deleteServer = new NpgsqlCommand("DELETE FROM collect.servers WHERE server_id = $1", connection))
+        {
+            deleteServer.Parameters.AddWithValue(ServerId);
+            await deleteServer.ExecuteNonQueryAsync(ct);
+        }
     }
 }
 
@@ -3788,8 +4335,10 @@ public sealed class ComposeAdHocModuleLivePostgresTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await DeleteAsync(connection, ct);
+        /* #5525: a composed scope resolves its names through the registry, so the fixture server must be registered. */
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
-        var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        var end = new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
         var collectionTime = end.AddHours(-1);
 
         var bodySucceeded = false;
@@ -3921,6 +4470,12 @@ VALUES (1, $1, $2, $3, 'ComposeDb', '0xHASHP', '0xH1', 100, 1),
         {
             deleteProcs.Parameters.AddWithValue(ServerId);
             await deleteProcs.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var deleteServer = new NpgsqlCommand("DELETE FROM collect.servers WHERE server_id = $1", connection))
+        {
+            deleteServer.Parameters.AddWithValue(ServerId);
+            await deleteServer.ExecuteNonQueryAsync(ct);
         }
     }
 }

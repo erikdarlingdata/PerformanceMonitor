@@ -40,6 +40,8 @@ public partial class ProcedureHistoryWindow : Window
     private readonly DateTime _startUtc;
     private readonly DateTime _endUtc;
     private List<ViewerProcedureStatsHistoryRow> _historyData = new();
+    /* #5449: the rows the chart plots: _historyData plus a zero row at each collector run that stored nothing for this procedure. */
+    private List<ViewerProcedureStatsHistoryRow> _chartData = new();
     private ChartHoverHelper? _chartHover;
     private readonly DataGridFilterManager<ViewerProcedureStatsHistoryRow> _filterManager;
     private Popup? _filterPopup;
@@ -81,9 +83,9 @@ public partial class ProcedureHistoryWindow : Window
             {
                 var totalExec = _historyData.Sum(r => r.DeltaExecutions);
                 var totalCpu = _historyData.Sum(r => r.DeltaCpuMs);
-                var first = ViewerTimeHelper.ForDisplay(_historyData.First().CollectionTime);
-                var last = ViewerTimeHelper.ForDisplay(_historyData.Last().CollectionTime);
-                SummaryText.Text = $"{_historyData.Count} samples from {first:MM/dd HH:mm} to {last:MM/dd HH:mm} | " +
+                var first = ViewerTimeHelper.FormatForDisplay(_historyData.First().CollectionTime, "MM/dd HH:mm");
+                var last = ViewerTimeHelper.FormatForDisplay(_historyData.Last().CollectionTime, "MM/dd HH:mm");
+                SummaryText.Text = $"{_historyData.Count} samples from {first} to {last} | " +
                                    $"Total Executions: {totalExec:N0} | Total CPU: {totalCpu:N1} ms";
             }
             else
@@ -91,6 +93,9 @@ public partial class ProcedureHistoryWindow : Window
                 SummaryText.Text = "No history data found for this procedure in the selected time range.";
             }
 
+            /* #5449: the chart also plots a 0 for each collector run that stored nothing for this procedure, so a quiet
+               minute is a 0 as it is on an older store, not a gap. The grid and summary keep the stored rows. */
+            _chartData = await _dataService.GetProcedureStatsHistoryChartRowsAsync(_serverId, _historyData);
             UpdateChart();
         }
         catch (Exception ex)
@@ -101,7 +106,7 @@ public partial class ProcedureHistoryWindow : Window
 
     /// <summary>
     /// Defaults the history grid to newest-first (Erik's descending-default grid convention). The SQL read stays
-    /// ascending on purpose — the chart plots <c>_historyData</c> in reader order and the summary reads
+    /// ascending on purpose — the chart plots <c>_chartData</c> (these rows plus the idle runs) in time order and the summary reads
     /// <c>First()</c>/<c>Last()</c> — so this reorders ONLY the grid's view, mirroring the parent Queries grids'
     /// <c>SetDefaultSortIfNone(..., ListSortDirection.Descending)</c>. Guarded so a user's later sort survives.
     /// </summary>
@@ -116,7 +121,7 @@ public partial class ProcedureHistoryWindow : Window
 
     private void UpdateChart()
     {
-        if (_historyData == null || _historyData.Count == 0)
+        if (_chartData == null || _chartData.Count == 0)
         {
             HistoryChart.Plot.Clear();
             HistoryChart.Refresh();
@@ -129,8 +134,8 @@ public partial class ProcedureHistoryWindow : Window
         var tag = selected?.Tag?.ToString() ?? "AvgCpuMs";
         var label = selected?.Content?.ToString() ?? "Avg CPU (ms)";
 
-        var xs = _historyData.Select(r => ViewerTimeHelper.ForDisplay(r.CollectionTime).ToOADate()).ToArray();
-        var ys = _historyData.Select(r => GetMetricValue(r, tag)).ToArray();
+        var xs = _chartData.Select(r => r.CollectionTime.ToOADate()).ToArray();
+        var ys = _chartData.Select(r => GetMetricValue(r, tag)).ToArray();
 
         var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);
         scatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("MetricTrend"));
@@ -139,13 +144,13 @@ public partial class ProcedureHistoryWindow : Window
 
         var unit = tag.Contains("Ms") ? "ms" : "";
         if (_chartHover == null)
-            _chartHover = new ChartHoverHelper(HistoryChart, unit);
+            _chartHover = new ChartHoverHelper(HistoryChart, unit, displayZone: ViewerTimeHelper.CurrentDisplayZone);
         else
             _chartHover.Unit = unit;
         _chartHover.Clear();
         _chartHover.Add(scatter, label);
 
-        HistoryChart.Plot.Axes.DateTimeTicksBottom();
+        HistoryChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ApplyTheme(HistoryChart);
 
         HistoryChart.Refresh();
@@ -194,6 +199,9 @@ public partial class ProcedureHistoryWindow : Window
                     "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
+
+            /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
+            if (WithheldPlanGuard.RefuseSave(plan)) return;
 
             var dialog = new SaveFileDialog
             {

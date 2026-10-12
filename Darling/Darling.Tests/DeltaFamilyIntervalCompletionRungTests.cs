@@ -337,19 +337,22 @@ public sealed class DeltaFamilyIntervalCompletionRungTests
     [Fact]
     public void TheFourCollectors_WriteTheIntervalAsTheMinimumOverTheirDeltaGroups()
     {
-        foreach (var (file, groups, written) in new[]
+        /* #5449: ProcedureStatsCollector computes its deltas in ComputeDeltas (the idle skip needs them in
+           ReadAsync), so the minimum is taken into `interval` there and WritePayload writes it as
+           sampleIntervalSeconds = d.IntervalSeconds. The minimum is the same; only the variable moved. */
+        foreach (var (file, groups, minimum, written) in new[]
         {
-            ("ProcedureStatsCollector.cs", 7, ".Value(sampleIntervalSeconds);"),
-            ("MemoryGrantsCollector.cs", 2, ".Value(sampleIntervalSeconds);"),
-            ("PgWaitStatsCollector.cs", 2, ".Value(row.SampleIntervalSeconds);"),
-            ("PgStatementStatsCollector.cs", 3, ".Value(row.SampleIntervalSeconds);"),
+            ("ProcedureStatsCollector.cs", 7, "var interval = Math.Min(", ".Value(sampleIntervalSeconds);"),
+            ("MemoryGrantsCollector.cs", 2, "var sampleIntervalSeconds = Math.Min(", ".Value(sampleIntervalSeconds);"),
+            ("PgWaitStatsCollector.cs", 2, "var sampleIntervalSeconds = Math.Min(", ".Value(row.SampleIntervalSeconds);"),
+            ("PgStatementStatsCollector.cs", 3, "var sampleIntervalSeconds = Math.Min(", ".Value(row.SampleIntervalSeconds);"),
         })
         {
             var source = RepoFile.ReadRepoFile("PerformanceMonitor.Collectors", file);
 
             Assert.Equal(groups, CountOf(source, "context.Deltas.CalculateDeltaWithInterval("));
             Assert.DoesNotContain("context.Deltas.CalculateDelta(", source, StringComparison.Ordinal);
-            Assert.Contains("var sampleIntervalSeconds = Math.Min(", source, StringComparison.Ordinal);
+            Assert.Contains(minimum, source, StringComparison.Ordinal);
             Assert.Contains(written, source, StringComparison.Ordinal);
         }
     }

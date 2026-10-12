@@ -30,7 +30,7 @@ public sealed class ServerConfigCollector : CollectorDefinitionBase<ServerConfig
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     configuration_name = c.name,
     value_configured = CONVERT(bigint, c.value),
     value_in_use = CONVERT(bigint, c.value_in_use),

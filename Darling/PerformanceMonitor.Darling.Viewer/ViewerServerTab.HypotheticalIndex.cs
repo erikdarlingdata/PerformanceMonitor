@@ -43,7 +43,7 @@ public partial class ViewerServerTab
 {
     private async void TestHypotheticalIndex_Click(object sender, RoutedEventArgs e)
     {
-        if (PgPredicateStatsGrid.SelectedItem is not DarlingPgPredicateStatsReader.PgPredicateStatRow row)
+        if (PgPredicateStatsGrid.SelectedItem is not PgDisplay.PredicateStatRow selected)
         {
             MessageBox.Show(
                 "Select a predicate row first. The experiment is about one column on one table, taken from " +
@@ -51,6 +51,8 @@ public partial class ViewerServerTab
                 "Test an index", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
+
+        var row = selected.Source;
 
         if (string.IsNullOrWhiteSpace(row.SchemaName) || string.IsNullOrWhiteSpace(row.TableName) || string.IsNullOrWhiteSpace(row.ColumnName))
         {
