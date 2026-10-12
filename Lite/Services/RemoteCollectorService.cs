@@ -806,6 +806,10 @@ public partial class RemoteCollectorService
             {
                 await EnsureDeadlockXeSessionAsync(server, engineEdition, cancellationToken);
             }
+            else if (collectorName == "attention")
+            {
+                await EnsureAttentionXeSessionAsync(server, engineEdition, cancellationToken);
+            }
 
             rowsCollected = collectorName switch
             {

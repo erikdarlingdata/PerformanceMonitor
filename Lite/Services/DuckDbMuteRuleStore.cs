@@ -59,7 +59,8 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
         cmd.CommandText = @"
                     SELECT id, enabled, created_at_utc, expires_at_utc, reason,
                            server_name, metric_name, database_pattern,
-                           query_text_pattern, wait_type_pattern, job_name_pattern
+                           query_text_pattern, wait_type_pattern, job_name_pattern,
+                           client_app_pattern
                     FROM config_mute_rules
                     ORDER BY created_at_utc DESC";
 
@@ -78,7 +79,8 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
                 DatabasePattern = reader.IsDBNull(7) ? null : reader.GetString(7),
                 QueryTextPattern = reader.IsDBNull(8) ? null : reader.GetString(8),
                 WaitTypePattern = reader.IsDBNull(9) ? null : reader.GetString(9),
-                JobNamePattern = reader.IsDBNull(10) ? null : reader.GetString(10)
+                JobNamePattern = reader.IsDBNull(10) ? null : reader.GetString(10),
+                ClientAppPattern = reader.IsDBNull(11) ? null : reader.GetString(11)
             });
         }
 
@@ -96,8 +98,8 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
                 INSERT INTO config_mute_rules
                     (id, enabled, created_at_utc, expires_at_utc, reason,
                      server_name, metric_name, database_pattern,
-                     query_text_pattern, wait_type_pattern, job_name_pattern)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
+                     query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
         cmd.Parameters.Add(new DuckDBParameter { Value = rule.Id });
         cmd.Parameters.Add(new DuckDBParameter { Value = rule.Enabled });
         cmd.Parameters.Add(new DuckDBParameter { Value = rule.CreatedAtUtc });
@@ -109,6 +111,7 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.QueryTextPattern ?? System.DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.WaitTypePattern ?? System.DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.JobNamePattern ?? System.DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.ClientAppPattern ?? System.DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 
@@ -123,7 +126,7 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
                     UPDATE config_mute_rules SET
                         enabled = $2, expires_at_utc = $3, reason = $4,
                         server_name = $5, metric_name = $6, database_pattern = $7,
-                        query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10
+                        query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10, client_app_pattern = $11
                     WHERE id = $1";
         cmd.Parameters.Add(new DuckDBParameter { Value = rule.Id });
         cmd.Parameters.Add(new DuckDBParameter { Value = rule.Enabled });
@@ -135,6 +138,7 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.QueryTextPattern ?? System.DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.WaitTypePattern ?? System.DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.JobNamePattern ?? System.DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)rule.ClientAppPattern ?? System.DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 

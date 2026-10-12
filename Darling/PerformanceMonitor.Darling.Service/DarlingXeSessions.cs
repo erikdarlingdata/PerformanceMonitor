@@ -21,8 +21,8 @@ using PerformanceMonitor.Darling.Service.Targets;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// Creates and starts the app-managed XE ring-buffer sessions the deadlock and blocked-process
-/// collectors read — ported from Lite's Ensure* lifecycle (session names come from the shared
+/// Creates and starts the app-managed XE sessions the deadlock, blocked-process and attention (client
+/// timeout, #5640) collectors read — ported from Lite's Ensure* lifecycle (session names come from the shared
 /// definitions so the reader and this lifecycle can never disagree). Server-scoped sessions on
 /// on-prem/MI/RDS; on Azure SQL DB a database-scoped session in EVERY monitored database (#1535
 /// — a single session only ever captured the connection's own database), matching the
@@ -100,10 +100,27 @@ public static class DarlingXeSessions
                 logger?.LogError("[{Server}] Failed to ensure blocked process XE session: {Message} — blocked-process collection will read zero rows until resolved",
                     server.Config.DisplayName, ex.Message);
             }
+
+            /* The client-timeout capture (#5640), its own try block like the two above: a failure of one capture never
+               skips another. A read of the attention session whose ensure failed records SESSION_MISSING or PERMISSIONS
+               (it never reads zero rows as success). */
+            try
+            {
+                await EnsureAttentionOnPremAsync(connection, server, logger, cancellationToken);
+            }
+            catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
+            {
+                logger?.LogInformation("[{Server}] Attention XE session already present (benign, #1251)", server.Config.DisplayName);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogError("[{Server}] Failed to ensure attention XE session: {Message} — client-timeout collection will record SESSION_MISSING until resolved",
+                    server.Config.DisplayName, ex.Message);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogError("[{Server}] Failed to ensure XE sessions: {Message} — deadlock/blocked-process collection will read zero rows until resolved",
+            logger?.LogError("[{Server}] Failed to ensure XE sessions: {Message} — deadlock/blocked-process/client-timeout collection will not find its session until resolved",
                 server.Config.DisplayName, ex.Message);
         }
     }
@@ -174,6 +191,8 @@ public static class DarlingXeSessions
                     database, runner, server, databaseName, AlwaysOnXeSessionKind.Deadlock, "deadlock", logger, cancellationToken);
                 await DarlingAlwaysOnXeSessions.EnsureAsync(
                     database, runner, server, databaseName, AlwaysOnXeSessionKind.BlockedProcess, "blocked process", logger, cancellationToken);
+                await DarlingAlwaysOnXeSessions.EnsureAsync(
+                    database, runner, server, databaseName, AlwaysOnXeSessionKind.Attention, "client timeout", logger, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -333,6 +352,40 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
         createCmd.CommandTimeout = 60;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         logger?.LogInformation("[{Server}] Created and started blocked process XE session", server.Config.DisplayName);
+    }
+
+    /// <summary>
+    /// The client-timeout session (#5640), server-scoped, through the shared builder (<see cref="AlwaysOnXeSessions.BuildAttentionServerCreateSql"/>):
+    /// start it when it exists but is not running, create and start it when it does not exist. Always on, like the deadlock
+    /// session, so it is created whether or not the attention collector is enabled; a disabled collector costs one tiny
+    /// server-side session (the event is rare and the targets are bounded), while a gate here would leave a server blind
+    /// until the next connect after the collector is turned on.
+    /// </summary>
+    private static async Task EnsureAttentionOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
+    {
+        using (var cmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerProbeSql("PerformanceMonitorDarling"), connection))
+        {
+            cmd.CommandTimeout = 60;
+            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = AlwaysOnXeSessions.AttentionXeSessionName });
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+
+            if (result != null)
+            {
+                if (result is int isRunning && isRunning == 0)
+                {
+                    using var startCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerStartSql(), connection);
+                    startCmd.CommandTimeout = 60;
+                    await startCmd.ExecuteNonQueryAsync(cancellationToken);
+                    logger?.LogInformation("[{Server}] Started attention XE session", server.Config.DisplayName);
+                }
+                return;
+            }
+        }
+
+        using var createCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerCreateSql(), connection);
+        createCmd.CommandTimeout = 60;
+        await createCmd.ExecuteNonQueryAsync(cancellationToken);
+        logger?.LogInformation("[{Server}] Created and started attention XE session", server.Config.DisplayName);
     }
 
     /// <summary>

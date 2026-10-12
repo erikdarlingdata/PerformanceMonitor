@@ -89,6 +89,7 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <TextBlock Grid.Row="0" Grid.Column="0" x:Name="DatabaseLabel" Text="Database (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
@@ -103,6 +104,10 @@
 
             <TextBlock Grid.Row="2" Grid.Column="2" x:Name="JobNameLabel" Text="Job Name (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
             <TextBox Grid.Row="3" Grid.Column="2" x:Name="JobNamePatternBox" Margin="0,0,0,8"/>
+
+            <TextBlock Grid.Row="4" Grid.Column="0" x:Name="ClientAppLabel" Text="Client Application (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+            <TextBox Grid.Row="5" Grid.Column="0" x:Name="ClientAppPatternBox" Margin="0,0,0,8"
+                     ToolTip="Alerts raised for a client application whose name contains this value (case-insensitive) will be muted, for example Management Studio to mute SSMS cancels."/>
         </Grid>
 
         <StackPanel Grid.Row="14" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">

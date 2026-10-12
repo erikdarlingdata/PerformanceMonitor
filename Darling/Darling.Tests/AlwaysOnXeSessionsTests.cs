@@ -43,6 +43,7 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public void TheSharedSessionStartsWithTheDatabase_AndThisInstallsOwnFallbackSessionDoesNot(AlwaysOnXeSessionKind kind)
     {
         var shared = AlwaysOnXeSessions.BuildAzureCreateSql(kind, AlwaysOnXeSessions.SharedNameFor(kind));
