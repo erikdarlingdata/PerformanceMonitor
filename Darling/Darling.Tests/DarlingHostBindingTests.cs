@@ -777,4 +777,29 @@ public sealed class DarlingHostBindingTests
         Assert.Empty(proxies);
         Assert.Contains("proxy.corp.local", problem, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData("192.168.010.0/24")]   // a leading zero reads as octal: IPNetwork.TryParse makes it 192.168.8.0/24
+    [InlineData("10/8")]               // a short form is zero-padded: IPNetwork.TryParse makes it 0.0.0.0/8
+    [InlineData("010.0.0.5")]          // the same spellings as a bare address
+    [InlineData("10.1")]
+    public void TryParseTrustedProxies_RefusesAnEntryNotWrittenAsPlainText(string entry)
+    {
+        Assert.False(DarlingHostBinding.TryParseTrustedProxies(new[] { "10.0.0.5", entry }, out var proxies, out var problem));
+
+        Assert.Empty(proxies);
+        Assert.Contains(entry, problem, StringComparison.Ordinal);
+        Assert.Contains("plain address/prefix", problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TryParseTrustedProxies_StillAcceptsPlainEntries()
+    {
+        Assert.True(DarlingHostBinding.TryParseTrustedProxies(
+            new[] { "192.168.10.0/24", "10.0.0.5", "0.0.0.0/8" }, out var proxies, out var problem));
+
+        Assert.Null(problem);
+        Assert.Equal(3, proxies.Count);
+        Assert.True(proxies[0].Contains(IPAddress.Parse("192.168.10.77")));
+    }
 }

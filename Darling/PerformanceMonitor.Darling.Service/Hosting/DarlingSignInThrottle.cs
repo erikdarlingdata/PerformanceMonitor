@@ -178,7 +178,8 @@ internal sealed class DarlingSignInThrottle
     /// by in-flight reservations (which may be right tokens about to be given back) the attempt waits for one
     /// of them to finish, at most <see cref="InFlightWaitLimit"/> of real time, and is decided again. If the
     /// limit passes with the in-flight reservations still unresolved, the attempt is held for
-    /// <see cref="BaseDelay"/>. Cancelling <paramref name="cancellationToken"/> ends the wait with
+    /// the delay <see cref="DelayAfter"/> gives the source's recorded misses plus those in-flight reservations
+    /// (the same delay the pending answer was waiting on), so its <c>Retry-After</c> is the real hold. Cancelling <paramref name="cancellationToken"/> ends the wait with
     /// <see cref="OperationCanceledException"/>; a waiting attempt holds no reservation, so nothing is left
     /// behind. The returned attempt is reserved (compare once, then report <see cref="Accepted"/> or
     /// <see cref="Missed"/>) or held (answer 429, compare nothing).
@@ -199,7 +200,7 @@ internal sealed class DarlingSignInThrottle
             var remaining = _inFlightWaitLimit - Stopwatch.GetElapsedTime(started);
             if (remaining <= TimeSpan.Zero)
             {
-                return SignInAttempt.Held(BaseDelay, SignInHold.Source);
+                return SignInAttempt.Held(attempt.RetryAfter, SignInHold.Source);
             }
 
             using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -265,7 +266,7 @@ internal sealed class DarlingSignInThrottle
                 {
                     _changed ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                     changed = _changed.Task;
-                    return SignInAttempt.Pending();
+                    return SignInAttempt.Pending(DelayAfter(entry.Misses + entry.InFlight));
                 }
             }
 
@@ -540,7 +541,8 @@ internal readonly struct SignInAttempt
     /// this; <see cref="DarlingSignInThrottle.BeginAttemptAsync"/> waits it out).</summary>
     public bool IsPending { get; }
 
-    /// <summary>How long until the source may try again; zero when the attempt is reserved.</summary>
+    /// <summary>How long until the source may try again; zero when the attempt is reserved. For a pending
+    /// attempt it is the delay the source would be held for if the wait on in-flight reservations ran out.</summary>
     public TimeSpan RetryAfter { get; }
 
     /// <summary>What caused the hold; <see cref="SignInHold.None"/> when the attempt is not held.</summary>
@@ -555,7 +557,7 @@ internal readonly struct SignInAttempt
 
     internal static SignInAttempt Held(TimeSpan retryAfter, SignInHold hold) => new(true, false, retryAfter, hold, null, default);
 
-    internal static SignInAttempt Pending() => new(false, true, TimeSpan.Zero, SignInHold.None, null, default);
+    internal static SignInAttempt Pending(TimeSpan holdIfTimedOut) => new(false, true, holdIfTimedOut, SignInHold.None, null, default);
 
     internal static SignInAttempt Reserved(string source, DateTime reservedAtUtc)
         => new(false, false, TimeSpan.Zero, SignInHold.None, source, reservedAtUtc);

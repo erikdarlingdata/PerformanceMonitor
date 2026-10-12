@@ -298,7 +298,9 @@ internal static class DarlingHostBinding
     /// PURE: parses <c>network.trustedProxies</c> — each entry an IP (<c>10.0.0.5</c>, <c>::1</c>) or a CIDR
     /// (<c>10.0.1.0/24</c>) — into the networks whose forwarded headers the host honors. A bare IP becomes
     /// its single-address network. Null or empty means none (the default, so the headers are ignored from
-    /// everyone). Returns false with <paramref name="problem"/> set when an entry does not parse; the caller
+    /// everyone). Returns false with <paramref name="problem"/> set when an entry does not parse, or parses
+    /// but is not written the plain way (<see cref="CidrAllowList.IsPlainCidrText"/>, the rule <c>allowFrom</c>
+    /// follows: <c>192.168.010.0/24</c> and <c>10/8</c> are refused, not read as another network); the caller
     /// fails closed on it rather than trusting a list it cannot read.
     /// </summary>
     internal static bool TryParseTrustedProxies(
@@ -316,13 +318,24 @@ internal static class DarlingHostBinding
                     continue;
                 }
 
+                /* The same plain-text rule allowFrom uses (CidrAllowList.IsPlainCidrText): the parsers read an octal,
+                   hex or short-form address as a different network than the one written. A bare IP is checked as
+                   the address of a CIDR. */
                 if (IPNetwork.TryParse(entry, out var network))
                 {
-                    parsed.Add(network);
+                    if (CidrAllowList.IsPlainCidrText(entry))
+                    {
+                        parsed.Add(network);
+                        continue;
+                    }
                 }
                 else if (IPAddress.TryParse(entry, out var address))
                 {
-                    parsed.Add(new IPNetwork(address, address.AddressFamily == AddressFamily.InterNetworkV6 ? 128 : 32));
+                    if (CidrAllowList.IsPlainCidrText(entry + "/0"))
+                    {
+                        parsed.Add(new IPNetwork(address, address.AddressFamily == AddressFamily.InterNetworkV6 ? 128 : 32));
+                        continue;
+                    }
                 }
                 else
                 {
@@ -330,6 +343,10 @@ internal static class DarlingHostBinding
                     problem = $"'{entry}' is neither an IP address nor a CIDR";
                     return false;
                 }
+
+                proxies = Array.Empty<IPNetwork>();
+                problem = $"'{entry}' is not written as a plain address/prefix (four decimal numbers 0-255 with no leading zero, or an IPv6 address)";
+                return false;
             }
         }
 

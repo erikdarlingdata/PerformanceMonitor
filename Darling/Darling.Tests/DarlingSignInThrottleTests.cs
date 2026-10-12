@@ -292,6 +292,31 @@ public sealed class DarlingSignInThrottleTests
     }
 
     [Fact]
+    public async Task AnAttemptWhoseInFlightWaitTimesOut_IsHeldForTheDelayItsSourceEarned()
+    {
+        var throttle = new DarlingSignInThrottle(inFlightWaitLimit: TimeSpan.FromMilliseconds(200));
+
+        /* Record the free failures plus one miss, then let that wait pass: the source has several misses on file. */
+        var first = Enumerable.Range(0, DarlingSignInThrottle.FreeFailures + 1)
+            .Select(_ => throttle.BeginAttempt("a", T0)).ToList();
+        first.ForEach(throttle.Missed);
+        var later = T0 + DarlingSignInThrottle.BaseDelay + TimeSpan.FromMilliseconds(1);
+
+        /* One new attempt is in flight; the next waits on it, and the delay it would earn is the one for
+           (recorded misses + in flight), which is longer than BaseDelay. */
+        Assert.True(throttle.BeginAttempt("a", later).IsReserved);
+        var pending = throttle.BeginAttempt("a", later);
+        Assert.True(pending.IsPending);
+        var expected = DarlingSignInThrottle.DelayAfter(DarlingSignInThrottle.FreeFailures + 2);
+        Assert.True(expected > DarlingSignInThrottle.BaseDelay);
+        Assert.Equal(expected, pending.RetryAfter);
+
+        var held = await throttle.BeginAttemptAsync("a", () => later, default).WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True(held.IsHeld);
+        Assert.Equal(expected, held.RetryAfter);
+    }
+
+    [Fact]
     public async Task TheWaitOnReservationsInFlight_IsBounded_AndCancellable()
     {
         var throttle = new DarlingSignInThrottle(inFlightWaitLimit: TimeSpan.FromMilliseconds(200));
