@@ -824,21 +824,23 @@ public sealed class PgLogEventsPipelineTests
     /* ---- what is stored: prose as written, SQL normalized ---------------------------------------------- */
 
     /// <summary>
-    /// #3944's ruling, as a pin: the message and the prose of the detail and context are stored as PostgreSQL
-    /// wrote them, value and all, and the statement is never stored at all, only fingerprinted, so no literal of
-    /// the user's SQL reaches the row. #3601 through #3920 masked the value shapes in the prose; that is gone.
+    /// #3944's decision, as a pin: the message and the prose of the detail and context are stored as PostgreSQL
+    /// wrote them, and the statement is never stored at all, only fingerprinted, so no literal of the user's SQL
+    /// reaches the row. #3601 through #3920 masked the value shapes in the prose; that is gone, with one exception:
+    /// the value slot of PostgreSQL's own fixed formats (a key tuple, a quoted input value) is masked, and the
+    /// names and prose around it are kept.
     /// </summary>
     [Fact]
     public void TheProseIsStoredAsWritten_AndTheStatementNever()
     {
         var events = Classify(SelfHostedLog);
 
-        /* Two representative shapes, both masked before #3944: a unique violation's key tuple and a value-quoting
-           error. Both are PostgreSQL's own evidence, kept. */
+        /* Two representative shapes: a unique violation's key tuple and a value-quoting error. Both are PostgreSQL's
+           own fixed formats, so the constraint name, the column and the type stay and the value slot is masked. */
         var duplicate = events.Single(e => e.Message.StartsWith("duplicate key", StringComparison.Ordinal));
         Assert.Equal("duplicate key value violates unique constraint \"customers_email_key\"", duplicate.Message);
-        Assert.Equal("Key (email)=(someone@example.com) already exists.", duplicate.Detail);
-        Assert.Contains(events, e => e.Message == "invalid input syntax for type integer: \"secret-order-ref-9931\"");
+        Assert.Equal("Key (email)=(?) already exists.", duplicate.Detail);
+        Assert.Contains(events, e => e.Message == "invalid input syntax for type integer: \"?\"");
 
         /* The STATEMENT companions' literals appear nowhere a row stores: they were only ever in the statement. */
         foreach (var e in events)
@@ -1031,17 +1033,22 @@ public sealed class PgLogEventsPipelineTests
     }
 
     /// <summary>
-    /// #3944: the prose of a DETAIL and a CONTEXT is kept as PostgreSQL wrote it. A partition key's values and a
-    /// JSON input line were two of the value shapes #3920's reviews masked; now only a field's SQL is touched.
+    /// #3944: the prose of a DETAIL and a CONTEXT is kept as PostgreSQL wrote it, with one exception: the row values
+    /// PostgreSQL's own fixed formats carry. A partition key's values and a JSON input line are two of those forms,
+    /// so their value slot is masked and the columns and the frame around it are kept; the prose frame after them
+    /// is untouched.
     /// </summary>
     [Fact]
     public void DetailAndContextProse_IsKeptAsWritten()
     {
         const string partition = "Partition key of the failing row contains (tenant_email) = (bob@example.com).";
-        Assert.Equal(partition, PgLogTextRedactor.RedactDetail(partition));
+        Assert.Equal("Partition key of the failing row contains (tenant_email) = (?).", PgLogTextRedactor.RedactDetail(partition));
 
         const string json = "JSON data, line 1: {\"card\": 4111111111111111, \"cvv\": 123, \"x\": }\n\tPL/pgSQL function g() line 2 at PERFORM";
-        Assert.Equal(json, PgLogTextRedactor.RedactContext(json));
+        Assert.Equal("JSON data, line 1: ?\n\tPL/pgSQL function g() line 2 at PERFORM", PgLogTextRedactor.RedactContext(json));
+
+        const string lockWait = "while updating tuple (0,7) in relation \"orders\"\n\tPL/pgSQL function g() line 2 at PERFORM";
+        Assert.Equal(lockWait, PgLogTextRedactor.RedactContext(lockWait));
     }
 
     /// <summary>
@@ -1110,11 +1117,12 @@ public sealed class PgLogEventsPipelineTests
             three + "\nProcess 100: SELECT ?\nProcess 200: SELECT '?'",
             PgLogTextRedactor.RedactDetail(three + "\nProcess 100: SELECT 1\nProcess 200: SELECT 'Leak3944x2'"));
 
-        /* Any other DETAIL is prose, kept as written, a line inside it shaped like a query head included. */
+        /* A failing row and a key are PostgreSQL's own value-bearing forms: their values are masked in their slot,
+           a line inside them shaped like a query head included, and no query is read out of them. */
         const string failingRow = "Failing row contains (42, 123-45-6789, Steps:\nProcess 1: mix, null).";
-        Assert.Equal(failingRow, PgLogTextRedactor.RedactDetail(failingRow));
+        Assert.Equal("Failing row contains (?).", PgLogTextRedactor.RedactDetail(failingRow));
         const string keyTuple = "Key (email, note)=(bob@example.com, a\n\tFailed process was running: b) already exists.";
-        Assert.Equal(keyTuple, PgLogTextRedactor.RedactDetail(keyTuple));
+        Assert.Equal("Key (email, note)=(?) already exists.", PgLogTextRedactor.RedactDetail(keyTuple));
 
         /* The single-query shapes: a crash report, and the PREPARE a logged EXECUTE names. */
         Assert.Equal("Failed process was running: UPDATE creds SET n = ?", PgLogTextRedactor.RedactDetail("Failed process was running: UPDATE creds SET n = 4111111111111111"));
@@ -1136,7 +1144,7 @@ public sealed class PgLogEventsPipelineTests
         var copyInFunction = PgLogTextRedactor.RedactContext(
             "COPY t, line 1, column a: \"x\"\n\tSQL statement \"COPY t FROM '/srv/Leak3944a.csv'\"\n\tPL/pgSQL function f() line 3 at SQL statement");
         Assert.Equal(
-            "COPY t, line 1, column a: \"x\"\n\tSQL statement \"COPY t FROM '?'\"\n\tPL/pgSQL function f() line 3 at SQL statement",
+            "COPY t, line 1, column a: \"?\"\n\tSQL statement \"COPY t FROM '?'\"\n\tPL/pgSQL function f() line 3 at SQL statement",
             copyInFunction);
         Assert.Equal(copyInFunction, PgLogTextRedactor.RedactContext(copyInFunction));
 
@@ -1149,16 +1157,16 @@ public sealed class PgLogEventsPipelineTests
 
         var json = PgLogTextRedactor.RedactContext(
             "JSON data, line 1: {\"card\": 4111111111111111\n\tSQL statement \"SELECT '{\"card\": 4111111111111111'::json\"\n\tPL/pgSQL function g() line 2 at PERFORM");
-        Assert.Equal("JSON data, line 1: {\"card\": 4111111111111111\n\tSQL statement \"SELECT '?'::json\"\n\tPL/pgSQL function g() line 2 at PERFORM", json);
+        Assert.Equal("JSON data, line 1: ?\n\tSQL statement \"SELECT '?'::json\"\n\tPL/pgSQL function g() line 2 at PERFORM", json);
         Assert.Equal(json, PgLogTextRedactor.RedactContext(json));
 
-        /* A COPY value that runs onto a line shaped like a frame: the value's own line stays as written, and the
-           look-alike is normalized or, when it cannot be closed, withheld with what follows it. */
+        /* A COPY value that runs onto a line shaped like a frame is a COPY frame cut before its closing quote: it is
+           withheld with everything after it, so the look-alike is never read at all. */
         Assert.Equal(
-            "COPY t, line 1: \"4111111111111111,Jane Roe,x\nSQL statement \"SELECT ?\"",
+            PgLogTextRedactor.WithheldValues,
             PgLogTextRedactor.RedactContext("COPY t, line 1: \"4111111111111111,Jane Roe,x\nSQL statement \"SELECT 1\""));
         Assert.Equal(
-            "COPY t, line 1: \"4111,Jane\n\tSQL statement \"" + PgLogTextRedactor.WithheldStatement + "\"",
+            PgLogTextRedactor.WithheldValues,
             PgLogTextRedactor.RedactContext("COPY t, line 1: \"4111,Jane\n\tSQL statement \"Jane Doe\"\n\tx\""));
     }
 
@@ -1167,26 +1175,26 @@ public sealed class PgLogEventsPipelineTests
     /// withheld with it. Read on past that line, the look-alike's text set the lexical state the real statement was
     /// read in: its open <c>$$</c> closed at the real statement's own, and the literal inside came back as a word. A
     /// generated sweep of COPY values (look-alike heads of all five SQL frame kinds, ahead of real quoted, remote and
-    /// portal frames) found 23,770 leaks in 1.6 million fields before this rule and none in 2.2 million after it. A
-    /// look-alike that closes on its own line only normalizes that line, and the real frame is read on its own.
+    /// portal frames) found 23,770 misses in 1.6 million fields before this rule and none in 2.2 million after it.
+    /// A COPY frame cut before its closing quote is now withheld whole, with everything after it, so a look-alike
+    /// inside a COPY value is never read at all, whether or not it closes on its own line; no literal of the real
+    /// statement can come back either way.
     /// </summary>
     [Fact]
     public void ALookAlikeFrame_NeverDecidesHowARealStatementIsRead()
     {
         Assert.Equal(
-            "COPY t, line 1, column a: \"v\n\tSQL statement \"" + PgLogTextRedactor.WithheldStatement + "\"",
+            PgLogTextRedactor.WithheldValues,
             PgLogTextRedactor.RedactContext(
                 "COPY t, line 1, column a: \"v\n\tSQL statement \"$$\"\n\tSQL statement \"SELECT $$Leak3944q$$, 'a\"'\"\n\tPL/pgSQL function f() line 3 at SQL statement"));
         Assert.Equal(
-            "COPY t, line 1, column a: \"v\n\tremote SQL command: " + PgLogTextRedactor.WithheldStatement,
+            PgLogTextRedactor.WithheldValues,
             PgLogTextRedactor.RedactContext(
                 "COPY t, line 1, column a: \"v\n\tremote SQL command: $$\"\n\tSQL statement \"SELECT $$Leak3944r$$\"\n\tPL/pgSQL function f() line 3 at SQL statement"));
 
         var closesOnItsOwnLine = PgLogTextRedactor.RedactContext(
             "COPY t, line 1, column a: \"v\n\tSQL statement \"x 4111\"\n\tSQL statement \"SELECT 'Leak3944s'\"\n\tPL/pgSQL function f() line 3 at SQL statement");
-        Assert.Equal(
-            "COPY t, line 1, column a: \"v\n\tSQL statement \"x ?\"\n\tSQL statement \"SELECT '?'\"\n\tPL/pgSQL function f() line 3 at SQL statement",
-            closesOnItsOwnLine);
+        Assert.Equal(PgLogTextRedactor.WithheldValues, closesOnItsOwnLine);
         Assert.Equal(closesOnItsOwnLine, PgLogTextRedactor.RedactContext(closesOnItsOwnLine));
     }
 
@@ -2664,14 +2672,15 @@ public sealed class PgLogEventsLivePostgresTests
             JsonAssert.Contains("\"total_events\": 15", everything);
             JsonAssert.Contains("\"truncated\": false", everything);
             JsonAssert.Contains("\"times_seen\": 2", everything);
-            /* #3944, through the real table and the real tool: the prose comes back as PostgreSQL wrote it, and
-               the statement's literals, which only the STATEMENT companion carried, come back nowhere. */
+            /* #3944, through the real table and the real tool: the prose comes back as PostgreSQL wrote it except
+               the value slot of its own fixed formats (the key tuple, the quoted input value), which comes back
+               masked, and the statement's literals, which only the STATEMENT companion carried, come back nowhere. */
             using (var parsed = System.Text.Json.JsonDocument.Parse(everything))
             {
                 var returned = parsed.RootElement.GetProperty("events").EnumerateArray().ToList();
                 var duplicate = returned.Single(e => e.GetProperty("message").GetString()!.StartsWith("duplicate key", StringComparison.Ordinal));
-                Assert.Equal("Key (email)=(someone@example.com) already exists.", duplicate.GetProperty("detail").GetString());
-                Assert.Contains(returned, e => e.GetProperty("message").GetString() == "invalid input syntax for type integer: \"secret-order-ref-9931\"");
+                Assert.Equal("Key (email)=(?) already exists.", duplicate.GetProperty("detail").GetString());
+                Assert.Contains(returned, e => e.GetProperty("message").GetString() == "invalid input syntax for type integer: \"?\"");
             }
 
             Assert.DoesNotContain("Brien", everything, StringComparison.Ordinal);

@@ -21,7 +21,7 @@ internal enum DarlingRefusalGate
     /// <summary>The Host-header allowlist / DNS-rebinding guard. 400, both bind modes.</summary>
     HostAllowlist,
 
-    /// <summary>The access token — the MCP bearer header, or the web dashboard's <c>?token=</c>.</summary>
+    /// <summary>The access token — the MCP bearer header, or the web dashboard's sign-in form field.</summary>
     Token,
 
     /// <summary>The in-app source-address allowlist built from <c>network.allowFrom</c>. 403.</summary>
@@ -50,6 +50,13 @@ internal enum DarlingRefusalGate
     /// <summary>The JSON-only POST check on the MCP listener: a POST whose Content-Type is not JSON. 415. Its own
     /// gate because the fix is on the client (send <c>application/json</c>), not a credential or an address.</summary>
     JsonContentType,
+
+    /// <summary>The same-site check on the shared-token sign-in form post (<c>/auth/login</c>): a post whose
+    /// Sec-Fetch-Site says cross-site, or whose Origin or Referer does not name the host the dashboard serves. 403.
+    /// It exists in every mode, with or without OIDC, so it is not <see cref="SignIn"/> (the OIDC flow). Its own
+    /// gate because the fix is usually <c>web.publicBaseUrl</c> behind a proxy that rewrites Host, and because
+    /// its (gate, source) fold key must not share a budget with the OIDC flow's refusals or with <see cref="Token"/>.</summary>
+    TokenSignInSite,
 }
 
 /// <summary>
@@ -257,7 +264,7 @@ internal sealed class DarlingHttpRefusalLog
     /// What actually happened, so the verb agrees with the status code (review catch on #2479).
     ///
     /// <para>Not every gate rejection ends in a 4xx. The web dashboard answers an in-CIDR request carrying
-    /// a WRONG <c>?token=</c> with a 200 and the login page — deliberately, and it is exactly the state an
+    /// a WRONG token with a 200 and the login page — deliberately, and it is exactly the state an
     /// operator asks about when a token they pasted did not work, which is why it is logged at all. But
     /// "refused a request … with 200" is self-contradictory on its face, and it would mislead anyone
     /// reading the log cold or filtering it for denials on status.</para>
@@ -275,6 +282,7 @@ internal sealed class DarlingHttpRefusalLog
         DarlingRefusalGate.SignIn => "OIDC sign-in flow (web.network.oidc)",
         DarlingRefusalGate.PreAuthFailure => "failure before the request was authenticated",
         DarlingRefusalGate.JsonContentType => "JSON-only POST check (Content-Type)",
+        DarlingRefusalGate.TokenSignInSite => "same-site check on the token sign-in form (set web.publicBaseUrl behind a proxy that rewrites Host)",
         _ => gate.ToString(),
     };
 

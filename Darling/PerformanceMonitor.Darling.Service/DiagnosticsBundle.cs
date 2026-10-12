@@ -76,7 +76,7 @@ internal static class DiagnosticsBundle
     {
         "DarlingConfig.Postgres", "DarlingConfig.Servers", "DarlingConfig.Analyzer", "DarlingConfig.CapturePlans",
         "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
-        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "WebConfig.Enabled", "WebConfig.Network",
+        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "WebConfig.Enabled", "WebConfig.Network",
         "MonitoredServer.Engine", "MonitoredServer.AlertDeliveryModeOverride",
     };
 
@@ -158,6 +158,9 @@ internal static class DiagnosticsBundle
             ["servers_by_engine"] = byEngine,
             ["mcp_enabled"] = config.Mcp?.Enabled ?? false,
             ["mcp_network_exposed"] = config.Mcp?.Network is not null,
+            ["mcp_allow_writes"] = config.Mcp?.AllowWrites ?? false,
+            ["mcp_allow_server_admin"] = config.Mcp?.AllowServerAdmin ?? false,
+            ["mcp_allow_windows_auth_over_unverified_tls"] = config.Mcp?.AllowWindowsAuthOverUnverifiedTls ?? false,
             ["web_enabled"] = config.Web?.Enabled ?? false,
             ["web_network_exposed"] = config.Web?.Network is not null,
             ["analyzer_present"] = config.Analyzer is not null,
@@ -1189,8 +1192,13 @@ internal static class DiagnosticsBundle
     /// Writes the text to a temp file beside the target, then moves it over. The temp name is random and the file is
     /// created with <see cref="FileMode.CreateNew"/>, so a path someone planted in a shared directory is never written
     /// through. The temp file is deleted on every path that does not end in the move.
+    ///
+    /// <para>With <paramref name="restricted"/> set, on Windows, the temp file is created with its access already
+    /// limited to SYSTEM, Administrators and the account running the command (<see cref="DarlingFileSecurity.CreateHardenedFile"/>),
+    /// instead of taking the output folder's inherited access, and the move keeps that access. The alias map is
+    /// written this way: it names the real server or host behind every alias.</para>
     /// </summary>
-    internal static string? WriteAtomically(string path, string text, bool force)
+    internal static string? WriteAtomically(string path, string text, bool force, bool restricted = false)
     {
         string temp;
         try
@@ -1206,7 +1214,9 @@ internal static class DiagnosticsBundle
         var moved = false;
         try
         {
-            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var stream = restricted && OperatingSystem.IsWindows()
+                ? DarlingFileSecurity.CreateHardenedFile(temp, allowInteractiveRead: false)
+                : new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
                 var bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(text);
                 stream.Write(bytes, 0, bytes.Length);

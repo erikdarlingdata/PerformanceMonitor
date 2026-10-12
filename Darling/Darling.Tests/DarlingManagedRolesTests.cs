@@ -8,8 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -797,5 +801,284 @@ public sealed class DarlingManagedRolesTests
            that stores a single library name (#3904's review). */
         Assert.Contains("ALTER SYSTEM SET shared_preload_libraries = 'timescaledb', 'pg_stat_statements';", byo, StringComparison.Ordinal);
         Assert.DoesNotContain("'timescaledb,pg_stat_statements'", byo, StringComparison.Ordinal);
+    }
+
+    /* ---------------------------------------------------------------------------------------------------
+       A role's credential file is written only after the batch that sets its password has committed.
+       --------------------------------------------------------------------------------------------------- */
+
+    /// <summary>A data source with nothing listening behind it: opening a connection fails at once, so provisioning
+    /// fails after the credential files have been read and before any batch could be sent.</summary>
+    private static NpgsqlDataSource UnreachableStore() => NpgsqlDataSource.Create(
+        new NpgsqlConnectionStringBuilder
+        {
+            Host = "127.0.0.1",
+            Port = DarlingManagedPostgresTests.FindFreeTcpPort(),
+            Username = "darling",
+            Database = "darling",
+            Timeout = 3,
+            Pooling = false,
+        }.ConnectionString);
+
+    /// <summary>A provisioning attempt that fails leaves no credential file for a role that had none: a file
+    /// written first would hand the web and MCP hosts a password the store never received.</summary>
+    [Fact]
+    public async Task AFailedAttempt_WritesNoCredentialFile_ForRolesThatHadNone()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The credential files are DPAPI blobs, which are Windows-only.");
+
+        var root = Directory.CreateTempSubdirectory("darling-role-files-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            await using var store = UnreachableStore();
+
+            await Assert.ThrowsAnyAsync<Exception>(() => DarlingManagedRoles.EnsureProvisionedAsync(
+                store, dataDirectory, NullLogger.Instance, TestContext.Current.CancellationToken));
+
+            Assert.Empty(Directory.GetFileSystemEntries(root.FullName));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>A credential file an untrusted account owns is removed before the batch, so it is gone after a
+    /// batch that fails, and nothing takes its place: the hosts wait for a file rather than read the untrusted one.</summary>
+    [Fact]
+    public async Task AnUntrustedCredentialFile_IsRemovedBeforeTheBatch_AndStaysGoneWhenTheBatchFails()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The credential files are DPAPI blobs, which are Windows-only.");
+
+        var root = Directory.CreateTempSubdirectory("darling-role-files-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var viewerPath = DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory);
+            File.WriteAllText(viewerPath, DarlingSecrets.Protect("WrittenByAnotherAccount1"));
+            var log = new CapturingTestLogger();
+            await using var store = UnreachableStore();
+
+            await Assert.ThrowsAnyAsync<Exception>(() => DarlingManagedRoles.ProvisionManagedRolesAsync(
+                store, dataDirectory, log, isTrustedOwner: _ => false, TestContext.Current.CancellationToken));
+
+            Assert.False(File.Exists(viewerPath), "the untrusted credential file survived a failed attempt");
+            Assert.Empty(Directory.GetFileSystemEntries(root.FullName));
+            Assert.Contains("not owned by a trusted principal", log.Joined, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>A trusted file is what it always was: read for its password and kept, whatever the batch does.</summary>
+    [Fact]
+    public async Task ATrustedCredentialFile_IsUsedAndKept_WhenTheBatchFails()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The credential files are DPAPI blobs, which are Windows-only.");
+
+        var root = Directory.CreateTempSubdirectory("darling-role-files-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var paths = new[]
+            {
+                DarlingManagedPostgres.AdminCredentialPathFor(dataDirectory),
+                DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory),
+                DarlingManagedPostgres.McpCredentialPathFor(dataDirectory),
+            };
+            var before = new Dictionary<string, byte[]>();
+            foreach (var path in paths)
+            {
+                File.WriteAllText(path, DarlingSecrets.Protect("Existing-" + Path.GetFileName(path)));
+                before[path] = File.ReadAllBytes(path);
+            }
+
+            var read = DarlingManagedRoles.ReadOrGenerateRoleCredential(
+                paths[1], DarlingManagedPostgres.ViewerRoleName, allowInteractiveRead: true, NullLogger.Instance, _ => true);
+            Assert.False(read.Generated);
+            Assert.Equal("Existing-" + Path.GetFileName(paths[1]), read.Password);
+
+            await using var store = UnreachableStore();
+            await Assert.ThrowsAnyAsync<Exception>(() => DarlingManagedRoles.ProvisionManagedRolesAsync(
+                store, dataDirectory, NullLogger.Instance, isTrustedOwner: _ => true, TestContext.Current.CancellationToken));
+
+            Assert.Equal(paths.Length, Directory.GetFileSystemEntries(root.FullName).Length);
+            foreach (var path in paths)
+            {
+                Assert.Equal(before[path], File.ReadAllBytes(path));
+            }
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>What a batch that succeeded leaves behind: a file for each generated password and for no other,
+    /// created with the hardened ACL (no ordinary user can read it, and the mcp file has no entry beyond SYSTEM,
+    /// Administrators and the service account), decrypting to the password its role now holds, with no temporary
+    /// file left beside it.</summary>
+    [Fact]
+    public void GeneratedCredentials_AreWrittenHardened_AndOnlyTheGeneratedOnes()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The credential files are DPAPI blobs, which are Windows-only.");
+
+        var root = Directory.CreateTempSubdirectory("darling-role-files-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var admin = new DarlingManagedRoles.RoleCredential(
+                DarlingManagedPostgres.AdminCredentialPathFor(dataDirectory), DarlingManagedPostgres.AdminRoleName,
+                "AdminPassword1", allowInteractiveRead: true, generated: true);
+            var viewer = new DarlingManagedRoles.RoleCredential(
+                DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory), DarlingManagedPostgres.ViewerRoleName,
+                "ViewerPassword1", allowInteractiveRead: true, generated: false);
+            var mcp = new DarlingManagedRoles.RoleCredential(
+                DarlingManagedPostgres.McpCredentialPathFor(dataDirectory), DarlingManagedPostgres.McpRoleName,
+                "McpPassword1", allowInteractiveRead: false, generated: true);
+
+            DarlingManagedRoles.PersistGeneratedRoleCredentials(new[] { admin, viewer, mcp }, NullLogger.Instance);
+
+            Assert.Equal("AdminPassword1", DarlingSecrets.Unprotect(File.ReadAllText(admin.FilePath).Trim()));
+            Assert.Equal("McpPassword1", DarlingSecrets.Unprotect(File.ReadAllText(mcp.FilePath).Trim()));
+            Assert.False(File.Exists(viewer.FilePath), "a credential read from an existing file was written again");
+            Assert.Equal(
+                new[] { "pg-admin-credential.dpapi", "pg-mcp-credential.dpapi" },
+                Directory.GetFiles(root.FullName).Select(f => Path.GetFileName(f)!).OrderBy(f => f, StringComparer.Ordinal).ToArray());
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(admin.FilePath));
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(mcp.FilePath));
+            Assert.Null(DarlingFileSecurity.AccessBeyondTrusted(mcp.FilePath));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>One file that cannot be written does not keep the others off the disk, and the caller gets one
+    /// exception that names the role and never a password.</summary>
+    [Fact]
+    public void AGeneratedCredentialThatCannotBeWritten_DoesNotKeepTheOthersOffTheDisk_AndIsReportedOnce()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The credential files are DPAPI blobs, which are Windows-only.");
+
+        var root = Directory.CreateTempSubdirectory("darling-role-files-");
+        try
+        {
+            var admin = new DarlingManagedRoles.RoleCredential(
+                Path.Combine(root.FullName, "no-such-folder", "pg-admin-credential.dpapi"), DarlingManagedPostgres.AdminRoleName,
+                "AdminPassword1", allowInteractiveRead: true, generated: true);
+            var mcp = new DarlingManagedRoles.RoleCredential(
+                Path.Combine(root.FullName, "pg-mcp-credential.dpapi"), DarlingManagedPostgres.McpRoleName,
+                "McpPassword1", allowInteractiveRead: false, generated: true);
+
+            var thrown = Assert.Throws<IOException>(() =>
+                DarlingManagedRoles.PersistGeneratedRoleCredentials(new[] { admin, mcp }, NullLogger.Instance));
+
+            Assert.Contains("admin", thrown.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("mcp (", thrown.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("AdminPassword1", thrown.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("McpPassword1", thrown.Message, StringComparison.Ordinal);
+            Assert.True(File.Exists(mcp.FilePath), "the credential that could be written was not");
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>The order that makes the rest true: credentials are read (an untrusted file removed) before the
+    /// batch is sent, and written only after it returns, with the result the core handed back returned unchanged.</summary>
+    [Fact]
+    public void ProvisioningReadsBeforeTheBatch_AndWritesOnlyAfterIt()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedRoles.cs"));
+
+        var start = code.IndexOf("internal static async Task<int> ProvisionManagedRolesAsync(", StringComparison.Ordinal);
+        Assert.True(start > 0, "the managed provisioning core could not be located, so this pin proves nothing");
+        var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', code.IndexOf(')', start)));
+
+        var read = body.LastIndexOf("ReadOrGenerateRoleCredential(", StringComparison.Ordinal);
+        var batch = body.IndexOf("await ProvisionRolesAsync(", StringComparison.Ordinal);
+        var write = body.IndexOf("PersistGeneratedRoleCredentials(", StringComparison.Ordinal);
+        Assert.True(read > 0 && batch > read, "a credential must be read (or generated) before the batch is sent");
+        Assert.True(write > batch, "a credential file must be written only after the batch has returned");
+        Assert.Equal(3, CountOf(body, "ReadOrGenerateRoleCredential("));
+        Assert.Equal(1, CountOf(body, "PersistGeneratedRoleCredentials("));
+
+        /* The read step writes nothing: a new file is only ever created by the persist step. */
+        var readStep = code.IndexOf("internal static RoleCredential ReadOrGenerateRoleCredential(", StringComparison.Ordinal);
+        Assert.True(readStep > 0, "the read step could not be located");
+        var readBody = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', code.IndexOf(')', readStep)));
+        Assert.DoesNotContain("CreateHardenedFile", readBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("File.WriteAllText", readBody, StringComparison.Ordinal);
+        Assert.Contains("TryDelete(credentialPath, logger)", readBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>The worker remembers a start-path provisioning failure and retries it from the hourly store-maintenance
+    /// tick: outside the TimescaleDB gate (roles do not depend on the extension), as a sibling after the if/else that
+    /// gate opens, and inside the tick's own method, so it runs at most once per tick.</summary>
+    [Fact]
+    public void TheWorker_RetriesAFailedProvisioning_OncePerHourlyTick_OutsideTheTimescaleGate()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+
+        const string retryCall = "await RetryRoleProvisioningAsync(stoppingToken);";
+        const string lastConvergence = "await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);";
+        Assert.Equal(1, CountOf(code, retryCall));
+
+        var tick = code.IndexOf("private async Task RunStoreMaintenanceTickAsync(", StringComparison.Ordinal);
+        var convergence = code.IndexOf(lastConvergence, tick, StringComparison.Ordinal);
+        var retry = code.IndexOf(retryCall, StringComparison.Ordinal);
+        Assert.True(tick > 0 && convergence > tick && retry > convergence,
+            "the retry must sit in the tick's own method, after both of its convergence arms");
+        Assert.Equal("}", code[(convergence + lastConvergence.Length)..retry].Trim());
+
+        var startCall = code.IndexOf("await DarlingManagedRoles.EnsureProvisionedAsync(postgres, dataDirectory, _logger, stoppingToken);", StringComparison.Ordinal);
+        var remember = code.IndexOf("_roleProvisioningRetryDirectory = provisioningDirectory;", StringComparison.Ordinal);
+        Assert.True(startCall > 0 && remember > startCall, "the start path must remember a failed provisioning after the attempt");
+        Assert.Equal(1, CountOf(code, "_roleProvisioningRetryDirectory = provisioningDirectory;"));
+    }
+
+    /// <summary>The retry records what the roles were given exactly as the start path does, clears itself only
+    /// after an attempt returned, runs under its own budget, and logs a failed attempt once.</summary>
+    [Fact]
+    public void TheRetry_ClearsOnlyAfterSuccess_RecordsTheAppliedTimeout_AndLogsEachFailureOnce()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+
+        var start = code.IndexOf("private async Task RetryRoleProvisioningAsync(CancellationToken cancellationToken)", StringComparison.Ordinal);
+        Assert.True(start > 0, "the retry could not be located, so this pin proves nothing");
+        var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', code.IndexOf(')', start)));
+
+        var attempt = body.IndexOf("DarlingManagedRoles.EnsureProvisionedAsync(_postgres, dataDirectory, _logger, budget.Token)", StringComparison.Ordinal);
+        var clear = body.IndexOf("_roleProvisioningRetryDirectory = null;", StringComparison.Ordinal);
+        Assert.True(attempt > 0 && clear > attempt, "the retry must clear itself only after the attempt returned");
+        Assert.Equal(1, CountOf(body, "_roleProvisioningRetryDirectory = null;"));
+        var applied = body.IndexOf("_appliedComposeStatementTimeoutSeconds =", StringComparison.Ordinal);
+        Assert.True(applied > 0 && applied < attempt, "the retry must record what the roles were given, as the start path does");
+        Assert.Contains("budget.CancelAfter(s_roleProvisioningRetryBudget)", body, StringComparison.Ordinal);
+
+        /* One success line and one warning per failing arm (the two arms are exclusive), never an error line. */
+        Assert.Equal(1, CountOf(body, "_logger.LogInformation("));
+        Assert.Equal(2, CountOf(body, "_logger.LogWarning("));
+        Assert.Equal(0, CountOf(body, "_logger.LogError("));
+    }
+
+    private static int CountOf(string text, string needle)
+    {
+        var count = 0;
+        for (var at = text.IndexOf(needle, StringComparison.Ordinal); at >= 0; at = text.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 }
