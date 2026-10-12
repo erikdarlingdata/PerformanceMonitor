@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -102,6 +103,89 @@ public sealed class JobHistoryFilterBeforeCapLiveTests
             /* A finished range's end composes with the filters: the failure is inside a range that ended two days ago. */
             var ended = await viewer.GetJobHistoryAsync(start, null, cap, untilUtc: now.AddDays(-2), runStatus: 0, cancellationToken: ct);
             Assert.Equal(new[] { "quiet_failure" }, ended.Select(r => r.JobName).ToArray());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, CleanupAsync);
+        }
+    }
+
+    /// <summary>
+    /// #5703 (round 1): at All servers / All categories the grid's read holds only the busy server's newest runs, so the Server and
+    /// Category drop-downs, built from those rows alone, did not offer the quiet server or its category until a Status filter surfaced
+    /// them. The drop-downs now merge in the monitored servers and a category read of its own that the row cap does not touch.
+    /// </summary>
+    [Fact]
+    public async Task AllServersAllCategories_OffersTheQuietServerAndItsCategory_ThatTheFleetCapLeftOutOfTheRows()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the #5703 job-history choices live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupAsync(connection, ct);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, BusyServer, "darling-5703-busy", ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, QuietServer, "darling-5703-quiet", ct);
+
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var start = now.AddDays(-7);
+            var id = 0L;
+            for (var i = 0; i < 60; i++)
+            {
+                await InsertAsync(connection, ct, ++id, BusyServer, now.AddMinutes(-i), "busy_job_" + i, 1, CategoryA);
+            }
+
+            await InsertAsync(connection, ct, ++id, QuietServer, now.AddDays(-3), "quiet_failure", 0, CategoryB);
+            await InsertAsync(connection, ct, ++id, QuietServer, now.AddDays(-4), "quiet_success", 1, CategoryA);
+
+            /* All / All: the grid's read is the busy server's newest runs only, so the rows alone name neither the quiet server nor category B. */
+            var rows = await viewer.GetJobHistoryAsync(start, null, 20, cancellationToken: ct);
+            Assert.All(rows, r => Assert.Equal(BusyServer, r.ServerId));
+            Assert.DoesNotContain(rows, r => r.CategoryName == CategoryB);
+
+            /* The category read is the window's, not the cap's: category B is there. */
+            var categories = await viewer.GetJobHistoryCategoriesAsync(start, cancellationToken: ct);
+            Assert.Contains(CategoryA, categories);
+            Assert.Contains(CategoryB, categories);
+
+            /* The drop-down choices at All / All, from the same merge the tab runs: the rows, the monitored servers, the category read. */
+            var known = ViewerDataService.ServerChoicesOf(
+            [
+                new DarlingServer(BusyServer, "darling-5703-busy", "darling-5703-busy", true, 16),
+                new DarlingServer(QuietServer, "darling-5703-quiet", "darling-5703-quiet", true, 16),
+            ]);
+            var servers = JobHistoryFilterChoices.MergeServers(
+                [], known, rows.Select(r => new JobHistoryFilterChoices.ServerChoice(r.ServerId, r.ServerName)));
+            Assert.Contains(servers, s => s.ServerId == QuietServer);
+            Assert.Contains(servers, s => s.ServerId == BusyServer);
+            var offered = JobHistoryFilterChoices.MergeCategories([], categories, rows.Select(r => r.CategoryName));
+            Assert.Contains(CategoryB, offered);
+
+            /* The managed set the tab reads names the registered servers while the store is not config-seeded; a seeded store names its
+               configured servers, which these two rows are not part of. */
+            if (await viewer.GetConfigManagedServersAsync(ct) is null)
+            {
+                var managed = await viewer.GetJobHistoryServerChoicesAsync(ct);
+                Assert.Contains(managed, s => s.ServerId == QuietServer);
+                Assert.Contains(managed, s => s.ServerId == BusyServer);
+            }
+
+            /* The window bounds the category read: from two days ago neither quiet run is in it; a range that ended 3.5 days ago holds only the success. */
+            var recent = await viewer.GetJobHistoryCategoriesAsync(now.AddDays(-2), cancellationToken: ct);
+            Assert.DoesNotContain(CategoryB, recent);
+            var ended = await viewer.GetJobHistoryCategoriesAsync(start, now.AddDays(-3).AddHours(-12), ct);
+            Assert.DoesNotContain(CategoryB, ended);
+            Assert.Contains(CategoryA, ended);
 
             bodySucceeded = true;
         }

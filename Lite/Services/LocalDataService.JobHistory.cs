@@ -123,6 +123,44 @@ ORDER BY server_id";
     }
 
     /// <summary>
+    /// Every distinct job category with a run in the window (#5703): the Job History tab's Category drop-down choices. A read of its
+    /// own, with no row cap and no Status or Category filter, because the grid's read keeps the newest runs of the whole fleet and a
+    /// busy server fills that cap, so a quieter server's categories would otherwise reach the drop-down only after a Status filter
+    /// surfaced them. The bounds are the pre-filter's zone slack, the one <see cref="ReadJobHistoryServerIdsAsync"/> uses: the stored
+    /// <c>run_datetime</c> is a server's wall clock, UTC-12 to UTC+14 from the UTC window, plus the hour the per-server read widens by.
+    /// A category whose only run sits in that margin can be offered, which costs an empty grid and never a missing choice.
+    /// </summary>
+    /// <param name="windowStartUtc">The window's start: the instant the grid's read takes.</param>
+    /// <param name="windowEndUtc">The window's end for a range that ended in the past, else null.</param>
+    public async Task<List<string>> GetJobHistoryCategoriesAsync(DateTime windowStartUtc, DateTime? windowEndUtc = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var endClause = windowEndUtc.HasValue ? "\nAND   run_datetime <= $2" : string.Empty;
+        command.CommandText = $@"
+SELECT DISTINCT category_name
+FROM v_job_history
+WHERE run_datetime >= $1{endClause}
+AND   category_name IS NOT NULL
+AND   category_name <> ''
+ORDER BY category_name";
+        command.Parameters.Add(new DuckDBParameter { Value = windowStartUtc.AddHours(-13) });
+        if (windowEndUtc is { } end)
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = end.AddHours(15) });
+        }
+
+        var categories = new List<string>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            categories.Add(reader.GetString(0));
+        }
+
+        return categories;
+    }
+
+    /// <summary>
     /// The clock one server's window is worked out on (#4966): its collected clock (<see cref="GetServerClockAsync"/>),
     /// else its open tab's (<paramref name="openTabClock"/>, which the tab layer hands in, since the open tabs are UI objects),
     /// else the machine's, the chain the Alert History tab uses

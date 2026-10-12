@@ -182,15 +182,16 @@ export function retainedNote(data) {
     : "partial window: the store keeps less job history than the window asks for, so earlier runs are not shown.";
 }
 
-/** The notice for a list the row limit cut, or null. */
-export function limitNote(data) {
+/** The notice for a list the row limit cut, or null. `server` is the Server pick ("" for All servers): a list already scoped to one server is not told to pick one. */
+export function limitNote(data, server) {
   if (!data || data.truncated !== true) return null;
   const shown = Array.isArray(data.runs) ? data.runs.length : data.shown;
   /* #5703: under All servers the limit keeps the newest runs of the whole fleet, so one busy server's latest runs can fill it and push an
      older run on another server out; the note names how far back the list reaches and offers a single server. */
   const oldest = Array.isArray(data.runs) && data.runs.length ? data.runs[data.runs.length - 1].run_time : null;
   const reach = oldest ? " They reach back to " + localTime(oldest) + "." : "";
-  return "Showing the newest " + shown + " runs; more matched." + reach + " Raise the row limit, pick a server or narrow the filters to see the rest.";
+  const advice = server ? " Raise the row limit or narrow the filters to see the rest." : " Raise the row limit, pick a server or narrow the filters to see the rest.";
+  return "Showing the newest " + shown + " runs; more matched." + reach + advice;
 }
 
 /** The description the tool serves for a server whose collector found no SQL Agent service (DarlingJobReader.NoAgentServiceDescription). */
@@ -379,7 +380,7 @@ export function renderJobHistory(main) {
       mount(body, [
         kept,
         noticeFor(retainedNote(data)),
-        noticeFor(limitNote(data)),
+        noticeFor(limitNote(data, state.server)),
         el("div", { class: "muted", text: (data.runs || []).length + " runs shown" }),
         pane,
         VIZ.table(data, { id: "job-history", rowsKey: "runs", columns: JOB_HISTORY_COLUMNS, rowClass: runRowClass, onRow, emptyText: "No job runs matched in the requested time range." }),

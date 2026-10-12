@@ -165,6 +165,74 @@ public static class DarlingJobHistoryReader
     }
 
     /// <summary>
+    /// Every distinct job category with a run in the window (#5703): the Job History tab's Category drop-down choices. A read of its
+    /// own, with no row cap and no Status or Category filter, because the grid's read keeps the newest runs of the whole fleet and a
+    /// busy server fills that cap, so the categories of a quieter server would otherwise reach the drop-down only after a Status
+    /// filter surfaced them. The window is the grid's, widened by the hour the grid's pre-filter widens by (<see cref="BuildCategoriesSql"/>);
+    /// a category whose only run sits in that margin can be offered, which costs an empty grid and never a missing choice.
+    /// </summary>
+    /// <param name="dataSource">The store.</param>
+    /// <param name="sinceUtc">The window's start (naive UTC), the grid's.</param>
+    /// <param name="untilUtc">The window's end (naive UTC) for a range that ended in the past, else null.</param>
+    /// <param name="commandTimeoutSeconds">The read's deadline.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    public static async Task<List<string>> GetCategoriesAsync(
+        NpgsqlDataSource dataSource, DateTime sinceUtc, DateTime? untilUtc, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+
+        var categories = new List<string>();
+        await using var command = dataSource.CreateCommand(BuildCategoriesSql(untilUtc.HasValue));
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(sinceUtc) });
+        if (untilUtc is { } until)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(until, DateTimeKind.Unspecified) });
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            categories.Add(reader.GetString(0));
+        }
+
+        return categories;
+    }
+
+    /// <summary>
+    /// <see cref="GetCategoriesAsync"/>'s SQL text. $1 is the window start (naive UTC) and $2 the <see cref="EventWindowFloor"/> for it
+    /// (<c>job_history</c> is partitioned on <c>collection_time</c>, so the floor lets the planner exclude chunks, as in
+    /// <see cref="BuildJobHistorySql"/>); with <paramref name="bounded"/>, $3 is the window end. <c>run_datetime</c> is the server's
+    /// wall clock, so each server's latest collected UTC offset (0 when none) moves the bound onto it, widened by an hour as the grid's
+    /// pre-filter is.
+    /// </summary>
+    public static string BuildCategoriesSql(bool bounded)
+    {
+        var untilSql = bounded
+            ? "\nAND   jh.run_datetime <= $3 + make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) + interval '1 hour'"
+            : string.Empty;
+
+        return $@"
+WITH svr AS (
+    SELECT DISTINCT ON (server_id)
+        server_id,
+        utc_offset_minutes
+    FROM server_properties
+    WHERE utc_offset_minutes IS NOT NULL
+    ORDER BY server_id, collection_time DESC
+)
+SELECT DISTINCT jh.category_name
+FROM job_history AS jh
+LEFT JOIN svr ON svr.server_id = jh.server_id
+WHERE jh.collection_time >= $2
+AND   jh.run_datetime >= $1 + make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) - interval '1 hour'{untilSql}
+AND   jh.category_name IS NOT NULL
+AND   jh.category_name <> ''
+ORDER BY jh.category_name";
+    }
+
+    /// <summary>
     /// The exact window, after the server-local to UTC conversion: keeps the runs at or after
     /// <paramref name="sinceUtc"/> (the SQL pre-filter is widened by an hour) and, when given, at or before
     /// <paramref name="untilUtc"/>, orders them newest first by their real

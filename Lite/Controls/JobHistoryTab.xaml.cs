@@ -149,6 +149,12 @@ public partial class JobHistoryTab : UserControl
                runs the single-server grid showed. The read applies them ahead of the cap. */
             var statusFilter = GetSelectedStatus();
             var categoryFilter = GetSelectedCategory();
+            /* #5703: the Category choices that do not depend on the runs read: read once per window and every few minutes after, beside
+               the grid's read; a failure costs the extra choices and never the grid. */
+            var choicesKey = (Span: (rangeEndUtc ?? nowUtc) - startUtc, FixedEnd: rangeEndUtc);
+            var categoriesTask = choicesKey != _choicesKey || DateTime.UtcNow - _choicesReadAtUtc > ChoicesLifetime
+                ? ReadKnownCategoriesAsync(startUtc, rangeEndUtc)
+                : null;
             var (all, readClocks) = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc, statusFilter, categoryFilter));
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
@@ -171,8 +177,10 @@ public partial class JobHistoryTab : UserControl
                 }
             }
 
-            /* The Server / Category combos grow from what the reads return and never shrink: a read that Status or Category narrowed
-               holds only the matching runs, and the other choices must stay on offer. The per-column filter popups still layer on top. */
+            /* The Server / Category combos grow and never shrink: they offer every configured server and every category with a run in the
+               window (read beside the grid, #5703), so a quiet server the newest runs of a busy one pushed past the cap can be picked at
+               All Servers, and what the rows add. The per-column filter popups still layer on top. */
+            await ApplyKnownCategoriesAsync(categoriesTask, choicesKey);
             PopulateServerFilter(all);
             PopulateCategoryFilter(all);
 
@@ -198,9 +206,9 @@ public partial class JobHistoryTab : UserControl
 
             LoadingMessage.Visibility = Visibility.Collapsed;
 
-            /* #4966: the rows are bound and the loading note is down; the note comes last, from the UNFILTERED read (all): the Status
-               and Category filters narrow the grid on the client and say nothing about where the data starts. A probe that fails
-               costs the note and never the grid. */
+            /* #4966: the rows are bound and the loading note is down; the note comes last, from the read (all). Status and Category are
+               applied in the read, ahead of the row cap (#5703), so a full page of matching runs names its oldest run and the cap label
+               counts the same rows. A probe that fails costs the note and never the grid. */
             await ShowDataStartNoteAsync(serverId, readClocks, startUtc, rangeEndUtc ?? nowUtc, all, gen);
         }
         catch (Exception ex)
@@ -249,7 +257,7 @@ public partial class JobHistoryTab : UserControl
     /// <see cref="RowCap"/> runs, so a full page names its oldest run whatever the store covers, with no slack and no probe
     /// (<see cref="ServerTab.CappedGridBannerAsync{T}"/>). A window of 90 minutes or less makes no probe call, and a probe that
     /// throws shows no note (<see cref="ServerTab.ProbeWindowFloorOrNullAsync"/>). <paramref name="read"/> is the read's own result,
-    /// before the Status and Category filters. The time is worded to the second in <paramref name="zone"/>; with
+    /// the runs the grid shows (Status and Category are applied in the read, ahead of the row cap, #5703). The time is worded to the second in <paramref name="zone"/>; with
     /// <paramref name="inUtc"/> (the All Servers view, whose rows sit on different servers' clocks) the text ends in "UTC". The cap
     /// label beside the count (<see cref="JobHistoryCap"/>) stays: it says how many runs the page is cut to, and this note says the
     /// time that page reaches back to. A step of its own so the tests run the tab's banner call without building the control.
@@ -361,26 +369,73 @@ public partial class JobHistoryTab : UserControl
         }
     }
 
+    /// <summary>How long the category choices read beside the grid stay current before they are read again.</summary>
+    private static readonly TimeSpan ChoicesLifetime = TimeSpan.FromMinutes(5);
+
+    /// <summary>Every category with a run in the window, as the last read found them (<see cref="LocalDataService.GetJobHistoryCategoriesAsync"/>).</summary>
+    private List<string> _knownCategories = [];
+
+    private (TimeSpan Span, DateTime? FixedEnd)? _choicesKey;
+    private DateTime _choicesReadAtUtc = DateTime.MinValue;
+
+    /// <summary>Every configured server, by the name the grid's Server column speaks (the shell's snapshot, <see cref="Initialize"/>).</summary>
+    private List<JobHistoryFilterChoices.ServerChoice> KnownServers() =>
+        _displayNames?.Invoke()
+            .Where(p => !string.IsNullOrEmpty(p.Value))
+            .Select(p => new JobHistoryFilterChoices.ServerChoice(p.Key, p.Value))
+            .ToList()
+        ?? [];
+
+    /// <summary>Reads the window's categories. Never throws: a failed read returns null and is logged.</summary>
+    private async System.Threading.Tasks.Task<List<string>?> ReadKnownCategoriesAsync(DateTime startUtc, DateTime? endUtc)
+    {
+        var service = _dataService!;
+        try
+        {
+            return await System.Threading.Tasks.Task.Run(() => service.GetJobHistoryCategoriesAsync(startUtc, endUtc));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("JobHistory", $"Failed to load the job history category choices: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Takes the categories read beside the grid (null when this load did not read them, or the read failed, which keeps the last
+    /// ones and reads again on the next load).</summary>
+    private async System.Threading.Tasks.Task ApplyKnownCategoriesAsync(
+        System.Threading.Tasks.Task<List<string>?>? categoriesTask, (TimeSpan Span, DateTime? FixedEnd) key)
+    {
+        if (categoriesTask is null)
+        {
+            return;
+        }
+
+        if (await categoriesTask is { } categories)
+        {
+            _knownCategories = categories;
+            _choicesKey = key;
+            _choicesReadAtUtc = DateTime.UtcNow;
+        }
+    }
+
     private void PopulateServerFilter(List<JobHistoryRow> rows)
     {
-        /* #5703: the choices already on offer stay (a read narrowed by Status or Category holds only the servers with matching runs). */
+        /* #5703: the choices only grow (JobHistoryFilterChoices.MergeServers): those already on offer, every configured server (a read that
+           Status or Category narrowed, or that a busier server's newest runs filled, holds only some of them), and the rows just read. */
         var offered = ServerFilterComboBox.Items
             .OfType<ComboBoxItem>()
             .Skip(1)
             .Where(i => int.TryParse(i.Tag?.ToString(), out _) && i.Content is string)
-            .Select(i => (ServerId: int.Parse(i.Tag!.ToString()!, System.Globalization.CultureInfo.InvariantCulture), ServerName: (string)i.Content));
-        var servers = rows
-            .Select(r => (r.ServerId, r.ServerName))
-            .Concat(offered)
-            .Where(s => !string.IsNullOrEmpty(s.ServerName))
-            .GroupBy(s => s.ServerId)
-            .Select(g => g.First())
-            .OrderBy(s => s.ServerName)
-            .ToList();
-
+            .Select(i => new JobHistoryFilterChoices.ServerChoice(int.Parse(i.Tag!.ToString()!, System.Globalization.CultureInfo.InvariantCulture), (string)i.Content));
         var currentSelection = ServerFilterComboBox.SelectedIndex > 0
             ? (ServerFilterComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString()
             : null;
+        JobHistoryFilterChoices.ServerChoice? selected = GetSelectedServerId() is int selectedId && ServerFilterComboBox.SelectedItem is ComboBoxItem { Content: string selectedName }
+            ? new JobHistoryFilterChoices.ServerChoice(selectedId, selectedName)
+            : null;
+        var servers = JobHistoryFilterChoices.MergeServers(
+            offered, KnownServers(), rows.Select(r => new JobHistoryFilterChoices.ServerChoice(r.ServerId, r.ServerName)), selected);
 
         var existingIds = ServerFilterComboBox.Items
             .OfType<ComboBoxItem>()
@@ -388,7 +443,7 @@ public partial class JobHistoryTab : UserControl
             .Select(i => i.Tag?.ToString())
             .ToList();
 
-        var newIds = servers.Select(s => s.ServerId.ToString()).ToList();
+        var newIds = servers.Select(s => s.ServerId.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToList();
         if (newIds.SequenceEqual(existingIds)) return;
 
         ServerFilterComboBox.SelectionChanged -= Filter_SelectionChanged;
@@ -401,7 +456,7 @@ public partial class JobHistoryTab : UserControl
             ServerFilterComboBox.Items.Add(new ComboBoxItem
             {
                 Content = serverName,
-                Tag = serverId.ToString()
+                Tag = serverId.ToString(System.Globalization.CultureInfo.InvariantCulture)
             });
         }
 
@@ -422,23 +477,16 @@ public partial class JobHistoryTab : UserControl
 
     private void PopulateCategoryFilter(List<JobHistoryRow> rows)
     {
-        /* #5703: the choices already on offer stay (a read narrowed by Status or Category holds only the matching runs' categories). */
+        /* #5703: the choices only grow (JobHistoryFilterChoices.MergeCategories): those already on offer, every category with a run in the
+           window (a read the row cap does not touch), and the rows just read. */
         var offered = CategoryFilterComboBox.Items
             .OfType<ComboBoxItem>()
             .Skip(1)
             .Select(i => i.Tag?.ToString());
-        var categories = rows
-            .Select(r => r.CategoryName)
-            .Concat(offered)
-            .Where(c => !string.IsNullOrEmpty(c))
-            .Select(c => c!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(c => c, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
         var currentSelection = CategoryFilterComboBox.SelectedIndex > 0
             ? (CategoryFilterComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString()
             : null;
+        var categories = JobHistoryFilterChoices.MergeCategories(offered, _knownCategories, rows.Select(r => r.CategoryName), GetSelectedCategory());
 
         var existing = CategoryFilterComboBox.Items
             .OfType<ComboBoxItem>()
@@ -475,38 +523,17 @@ public partial class JobHistoryTab : UserControl
 
     private int? GetSelectedServerId()
     {
-        if (ServerFilterComboBox.SelectedIndex > 0 &&
-            ServerFilterComboBox.SelectedItem is ComboBoxItem item &&
-            item.Tag is string tagStr &&
-            int.TryParse(tagStr, out var serverId))
-        {
-            return serverId;
-        }
-        return null;
+        return JobHistoryFilterChoices.ServerFilter(ServerFilterComboBox.SelectedIndex, (ServerFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string);
     }
 
     private int? GetSelectedStatus()
     {
-        if (StatusFilterComboBox.SelectedIndex > 0 &&
-            StatusFilterComboBox.SelectedItem is ComboBoxItem item &&
-            item.Tag is string tagStr &&
-            int.TryParse(tagStr, out var status))
-        {
-            return status;
-        }
-        return null;
+        return JobHistoryFilterChoices.StatusFilter(StatusFilterComboBox.SelectedIndex, (StatusFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string);
     }
 
     private string? GetSelectedCategory()
     {
-        if (CategoryFilterComboBox.SelectedIndex > 0 &&
-            CategoryFilterComboBox.SelectedItem is ComboBoxItem item &&
-            item.Tag is string tagStr &&
-            !string.IsNullOrEmpty(tagStr))
-        {
-            return tagStr;
-        }
-        return null;
+        return JobHistoryFilterChoices.CategoryFilter(CategoryFilterComboBox.SelectedIndex, (CategoryFilterComboBox.SelectedItem as ComboBoxItem)?.Tag as string);
     }
 
     #region Column Filter Handlers

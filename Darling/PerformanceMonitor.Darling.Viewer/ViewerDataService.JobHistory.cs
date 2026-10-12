@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -205,6 +206,39 @@ public sealed partial class ViewerDataService
 
         return rows;
     }
+
+    /// <summary>
+    /// The Job History tab's Server choices that do not depend on the runs it read (#5703): every SQL Server the viewer manages (the
+    /// sidebar's set, <see cref="GetManagedServersAsync"/>), by the name the grid's Server column speaks. A PostgreSQL target has no SQL
+    /// Agent and is left out. The runs alone would leave a quiet server out of the drop-down whenever a busier server's newest runs fill
+    /// the row cap.
+    /// </summary>
+    public async Task<List<JobHistoryFilterChoices.ServerChoice>> GetJobHistoryServerChoicesAsync(CancellationToken cancellationToken = default)
+    {
+        var servers = await GetManagedServersAsync(cancellationToken);
+        return ServerChoicesOf(servers);
+    }
+
+    /// <summary>Maps the managed servers to Server choices: the SQL Server targets, by display name.</summary>
+    internal static List<JobHistoryFilterChoices.ServerChoice> ServerChoicesOf(IEnumerable<DarlingServer> servers) =>
+        servers
+            .Where(s => !s.IsPostgres)
+            .Select(s => new JobHistoryFilterChoices.ServerChoice(s.ServerId, string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName))
+            .ToList();
+
+    /// <summary>
+    /// The Job History tab's Category choices (#5703): every category with a run in the window, from a read of its own that the row cap
+    /// and the tab's Status and Category filters do not touch (<see cref="DarlingJobHistoryReader.GetCategoriesAsync"/>). At All
+    /// Servers the grid's read holds only the newest runs of the whole fleet, so a quieter server's categories would be missing from
+    /// the drop-down until a Status filter surfaced them.
+    /// </summary>
+    /// <param name="sinceUtc">The window's start: the one the grid's read takes.</param>
+    /// <param name="untilUtc">The window's end for a range that ended in the past, else null.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    public Task<List<string>> GetJobHistoryCategoriesAsync(DateTime sinceUtc, DateTime? untilUtc = null, CancellationToken cancellationToken = default) =>
+        DarlingJobHistoryReader.GetCategoriesAsync(
+            _dataSource, sinceUtc, untilUtc is { } until ? until.AddTicks(-TimeSpan.TicksPerMicrosecond) : null,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>
     /// The exact window, after the server-local to UTC conversion: keeps the runs at or after

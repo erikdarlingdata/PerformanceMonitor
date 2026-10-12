@@ -17,6 +17,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -275,6 +276,44 @@ VALUES
         Assert.Empty(none);
         var (ended, _) = await service.GetJobHistoryWithClocksAsync(Start, cap, null, windowEndUtc: _end.AddDays(-1), runStatus: 0);
         Assert.Equal(new[] { "quiet_failure" }, ended.Select(r => r.JobName).ToArray());
+    }
+
+    /// <summary>
+    /// #5703 (round 1): at All servers / All categories the grid's read holds only the busy server's newest runs, so the Server and
+    /// Category drop-downs, built from those rows alone, did not offer the quiet server or its category until a Status filter surfaced
+    /// them. They now merge in the configured servers (the shell's snapshot) and a category read of its own that the row cap does not
+    /// touch.
+    /// </summary>
+    [Fact]
+    public async Task AllServersAllCategories_OffersTheQuietServerAndItsCategory_ThatTheFleetCapLeftOutOfTheRows()
+    {
+        await SeedClockAsync(ServerA, OffsetA);
+        await SeedClockAsync(ServerB, OffsetB);
+        await SeedPageAsync(ServerB, OffsetB, 120, _end.AddMinutes(-1), _end);
+        await SeedFailureAsync(ServerA, OffsetA, _end.AddDays(-2), _end, "Quiet category");
+
+        var service = new LocalDataService(_duckDb);
+        var (rows, _) = await service.GetJobHistoryWithClocksAsync(Start, 50, null);
+        Assert.All(rows, r => Assert.Equal(ServerB, r.ServerId));
+        Assert.DoesNotContain(rows, r => r.CategoryName == "Quiet category");
+
+        /* The category read is the window's, not the cap's. */
+        var categories = await service.GetJobHistoryCategoriesAsync(Start);
+        Assert.Contains("Quiet category", categories);
+        Assert.Contains("Uncategorized (Local)", categories);
+
+        /* The choices the tab offers at All / All: the rows, the configured servers, the category read. */
+        var servers = JobHistoryFilterChoices.MergeServers(
+            [],
+            [new JobHistoryFilterChoices.ServerChoice(ServerA, "quiet"), new JobHistoryFilterChoices.ServerChoice(ServerB, "busy")],
+            rows.Select(r => new JobHistoryFilterChoices.ServerChoice(r.ServerId, r.ServerName)));
+        Assert.Contains(servers, s => s.ServerId == ServerA);
+        Assert.Contains("Quiet category", JobHistoryFilterChoices.MergeCategories([], categories, rows.Select(r => r.CategoryName)));
+
+        /* The window bounds the category read: from one day ago the failure is out; a range that ended three days ago holds neither category. */
+        Assert.DoesNotContain("Quiet category", await service.GetJobHistoryCategoriesAsync(_end.AddDays(-1)));
+        Assert.DoesNotContain("Quiet category", await service.GetJobHistoryCategoriesAsync(Start, _end.AddDays(-3)));
+        Assert.Contains("Quiet category", await service.GetJobHistoryCategoriesAsync(Start, _end.AddDays(-1)));
     }
 
     [Fact]
