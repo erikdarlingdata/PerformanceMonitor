@@ -88,7 +88,8 @@ public static partial class QueryModificationDetector
     /// </summary>
     private static bool TextRunsCodeThePlanDoesNotShow(string? queryText)
         => !string.IsNullOrWhiteSpace(queryText)
-           && (HasExecKeyword(queryText) || s_remoteRowset.IsMatch(queryText));
+           && (HasExecKeyword(queryText)
+               || PlanRegex.IsMatch(s_remoteRowset, queryText, "remote rowset functions in the query text", onTimeout: true));
 
     /// <summary>True when a Showplan <c>StatementType</c> is an EXECUTE one (<c>EXECUTE PROC</c>).</summary>
     private static bool IsExecuteStatementType(string? statementType)
@@ -100,12 +101,14 @@ public static partial class QueryModificationDetector
        is fully wrapped in a matching pair (`[exec]`, `"exec"`) is an identifier. */
     private static readonly Regex s_execStatement = new(
         @"(?<![\w@#$.])EXEC(?:UTE)?(?!\w)",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        PlanRegex.DefaultTimeout);
 
     /// <summary>True when the text has an EXEC / EXECUTE keyword that is not a bracketed or double-quoted identifier.</summary>
     private static bool HasExecKeyword(string queryText)
     {
-        foreach (Match match in s_execStatement.Matches(queryText))
+        var statements = PlanRegex.Matches(s_execStatement, queryText, "EXEC keyword in the query text");
+        foreach (Match match in statements)
         {
             var before = match.Index > 0 ? queryText[match.Index - 1] : '\0';
             var afterIndex = match.Index + match.Length;
@@ -117,12 +120,14 @@ public static partial class QueryModificationDetector
             }
         }
 
-        return false;
+        // A pass cut short cannot rule EXEC out: the re-execution gate takes the safe direction.
+        return statements.Incomplete;
     }
 
     private static readonly Regex s_remoteRowset = new(
         @"\b(?:OPENQUERY|OPENROWSET|OPENDATASOURCE)\b",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        PlanRegex.DefaultTimeout);
 
     /// <summary>
     /// True when a Showplan <c>StatementType</c> value denotes a data- or schema-modifying statement. Public so
@@ -193,7 +198,8 @@ public static partial class QueryModificationDetector
         var found = new List<string>();
         foreach (var keyword in s_textKeywords)
         {
-            if (Regex.IsMatch(queryText, $@"\b{keyword}\b", RegexOptions.IgnoreCase))
+            // Display only: a keyword that cannot be checked in time is listed, the safe direction.
+            if (PlanRegex.IsMatch(queryText, $@"\b{keyword}\b", RegexOptions.IgnoreCase, "statement keyword scan", onTimeout: true))
             {
                 found.Add(keyword);
             }

@@ -107,9 +107,21 @@ public static partial class PlanAnalyzer
         ParsedPlan plan,
         AnalyzerConfig? config,
         ServerMetadata? serverMetadata,
+        CancellationToken cancellationToken) =>
+        Analyze(plan, config, serverMetadata, TimeSpan.FromMilliseconds(PlanRegex.PlanBudgetMilliseconds), cancellationToken);
+
+    /// <summary>The same analysis with an explicit regex time budget for the whole plan; tests pass a tiny one.</summary>
+    internal static void Analyze(
+        ParsedPlan plan,
+        AnalyzerConfig? config,
+        ServerMetadata? serverMetadata,
+        TimeSpan regexBudget,
         CancellationToken cancellationToken)
     {
         var cfg = config ?? AnalyzerConfig.Default;
+
+        // One regex time budget for the whole plan; a check that is cut short is named in a note on its statement.
+        using var regexScope = PlanRegex.BeginPlan(regexBudget);
 
         /* #4514: every statement, including the ones inside a stored procedure or UDF body.
            This used to walk batch.Statements alone, so an EXEC <procedure> plan analyzed as a
@@ -127,12 +139,36 @@ public static partial class PlanAnalyzer
 
             cancellationToken.ThrowIfCancellationRequested();
             MarkLegacyWarnings(stmt);
+            NoteSkippedChecks(stmt);
         }
 
         cancellationToken.ThrowIfCancellationRequested();
         if (cfg.Rules?.SeverityOverrides?.Count > 0)
             ApplySeverityOverrides(plan, cfg);
     }
+
+    /// <summary>
+    /// Adds one statement-level note naming the regex checks that were cut short on this statement, by a match
+    /// timeout or because the plan's regex time budget was spent. Without it, a skipped check reads as a clean
+    /// result. It is rule 40, so every analyzer warning keeps carrying a rule number.
+    /// </summary>
+    private static void NoteSkippedChecks(PlanStatement stmt)
+    {
+        var skipped = PlanRegex.TakeSkipped();
+        if (skipped.Count == 0)
+            return;
+
+        stmt.PlanWarnings.Add(new PlanWarning
+        {
+            RuleNumber = 40,
+            WarningType = SkippedChecksWarningType,
+            Message = PlanRegex.SkippedNote(skipped),
+            Severity = PlanWarningSeverity.Info
+        });
+    }
+
+    /// <summary>The <see cref="PlanWarning.WarningType"/> of the note that names the regex checks a statement skipped.</summary>
+    public const string SkippedChecksWarningType = "Analysis Checks Skipped";
 
     /// <summary>
     /// #4535, mirroring erikdarlingdata/PerformanceStudio dev (85492a1) commit dcc06db
@@ -323,7 +359,7 @@ public static partial class PlanAnalyzer
             if (stmt.NonParallelPlanReason == "MaxDOPSetToOne")
             {
                 var text = MaskCommentsAndLiterals(stmt.StatementText); // #4524
-                var hasMaxdop1InText = PlanRegex.IsMatch(text, @"MAXDOP\s+1\b", RegexOptions.IgnoreCase);
+                var hasMaxdop1InText = PlanRegex.IsMatch(text, @"MAXDOP\s+1\b", RegexOptions.IgnoreCase, "MAXDOP 1 hint in the statement text");
                 var isTruncated = stmt.IsTextTruncated;
 
                 if (hasMaxdop1InText)
@@ -506,7 +542,8 @@ public static partial class PlanAnalyzer
 
         // Rule 27: OPTIMIZE FOR UNKNOWN in statement text
         if (!cfg.IsRuleDisabled(27) && !string.IsNullOrEmpty(stmt.StatementText) &&
-            PlanRegex.IsMatch(OptimizeForUnknownRegExp(), MaskCommentsAndLiterals(stmt.StatementText))) // #4524
+            PlanRegex.IsMatch(OptimizeForUnknownRegExp(), MaskCommentsAndLiterals(stmt.StatementText), // #4524
+                "OPTIMIZE FOR UNKNOWN hint", onTimeout: true)) // a check that could not finish keeps the warning
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
@@ -653,14 +690,17 @@ public static partial class PlanAnalyzer
             // qualifier must be looked for between CURSOR and the FOR that introduces
             // the SELECT. Capturing tokens *before* CURSOR never sees LOCAL and would
             // fire on every cursor, including ones already declared LOCAL.
+            // A declaration that cannot be read within the limit is recorded as a skipped check: with no
+            // declaration found there is nothing to say about its qualifiers.
             var cursorDeclMatch = PlanRegex.Match(
                 maskedText,
                 @"\bDECLARE\s+\w+\s+(?:INSENSITIVE\s+|SCROLL\s+)*CURSOR\b(.*?)\bFOR\b",
-                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+                RegexOptions.IgnoreCase | RegexOptions.Singleline, "cursor declaration", out _);
             if (cursorDeclMatch.Success)
             {
                 var qualifiers = cursorDeclMatch.Groups[1].Value;
-                if (!PlanRegex.IsMatch(qualifiers, @"\bLOCAL\b", RegexOptions.IgnoreCase))
+                // onTimeout false: LOCAL not found, so the warning stays.
+                if (!PlanRegex.IsMatch(qualifiers, @"\bLOCAL\b", RegexOptions.IgnoreCase, "cursor LOCAL qualifier", onTimeout: false))
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
@@ -682,7 +722,8 @@ public static partial class PlanAnalyzer
             // Suppress when the user explicitly set MAXDOP 2 as a query hint — the DOP
             // cap is intentional, not the Standard Edition batch-mode limitation.
             var hasMaxdop2Hint = !string.IsNullOrEmpty(stmt.StatementText)
-                && PlanRegex.IsMatch(MaskCommentsAndLiterals(stmt.StatementText), @"MAXDOP\s+2\b", RegexOptions.IgnoreCase); // #4524
+                && PlanRegex.IsMatch(MaskCommentsAndLiterals(stmt.StatementText), @"MAXDOP\s+2\b", RegexOptions.IgnoreCase,
+                    "MAXDOP 2 hint in the statement text", onTimeout: false); // #4524; no hint found keeps the warning
 
             if (!hasMaxdop2Hint)
             {
@@ -1083,6 +1124,8 @@ public static partial class PlanAnalyzer
                     "Leading wildcard LIKE prevents an index seek — SQL Server must scan every row. If substring search performance is critical, consider a full-text index or a trigram-based approach.",
                 "CASE expression in predicate" =>
                     "CASE expression in a predicate prevents an index seek. Rewrite using separate WHERE clauses combined with OR, or split into multiple queries.",
+                UnverifiedNonSargableReason =>
+                    "The predicate could not be fully checked for patterns that prevent an index seek within the analysis time limit (a very long or complex predicate), so it may be non-SARGable. Review it by hand.",
                 _ when nonSargableReason.StartsWith("Function call", StringComparison.OrdinalIgnoreCase) =>
                     $"{nonSargableReason} prevents an index seek. Remove the function from the column side — apply it to the parameter instead, or create a computed column with the expression and index that.",
                 _ =>
@@ -1632,7 +1675,8 @@ public static partial class PlanAnalyzer
     {
         // Check statement text for NOT IN
         if (string.IsNullOrEmpty(stmt.StatementText) ||
-            !PlanRegex.IsMatch(NotInRegExp(), MaskCommentsAndLiterals(stmt.StatementText))) // #4524
+            !PlanRegex.IsMatch(NotInRegExp(), MaskCommentsAndLiterals(stmt.StatementText), // #4524
+                "NOT IN in the statement text", onTimeout: true)) // a check that could not finish keeps the warning
             return false;
 
         // Walk up the tree checking ancestors and their children
@@ -1683,11 +1727,18 @@ public static partial class PlanAnalyzer
     private static bool IsProbeOnly(string predicate)
     {
         // Strip all PROBE(...) expressions — PROBE args can contain nested parens
+        // A step that cannot finish means the predicate is not proved PROBE-only, so the residual-predicate
+        // warning stays.
         var stripped = PlanRegex.Replace(predicate, @"PROBE\s*\([^()]*(?:\([^()]*\)[^()]*)*\)", "",
-            RegexOptions.IgnoreCase).Trim();
+            RegexOptions.IgnoreCase, "PROBE-only predicate", out var probeDone).Trim();
+        if (!probeDone)
+            return false;
 
         // Remove leftover AND/OR connectors and whitespace
-        stripped = PlanRegex.Replace(stripped, @"\b(AND|OR)\b", "", RegexOptions.IgnoreCase).Trim();
+        stripped = PlanRegex.Replace(stripped, @"\b(AND|OR)\b", "", RegexOptions.IgnoreCase,
+            "PROBE-only predicate", out var connectorsDone).Trim();
+        if (!connectorsDone)
+            return false;
 
         // If nothing meaningful remains, it was PROBE-only
         return stripped.Length == 0;
@@ -1699,12 +1750,13 @@ public static partial class PlanAnalyzer
     /// </summary>
     private static string StripProbeExpressions(string predicate)
     {
+        // Display only: a step that cannot finish leaves the PROBE text in the predicate shown.
         var stripped = PlanRegex.Replace(predicate, @"\s*AND\s+PROBE\s*\([^()]*(?:\([^()]*\)[^()]*)*\)", "",
-            RegexOptions.IgnoreCase);
+            RegexOptions.IgnoreCase, "PROBE text in the displayed predicate", out _);
         stripped = PlanRegex.Replace(stripped, @"PROBE\s*\([^()]*(?:\([^()]*\)[^()]*)*\)\s*AND\s+", "",
-            RegexOptions.IgnoreCase);
+            RegexOptions.IgnoreCase, "PROBE text in the displayed predicate", out _);
         stripped = PlanRegex.Replace(stripped, @"PROBE\s*\([^()]*(?:\([^()]*\)[^()]*)*\)", "",
-            RegexOptions.IgnoreCase);
+            RegexOptions.IgnoreCase, "PROBE text in the displayed predicate", out _);
         return stripped.Trim();
     }
 
@@ -1848,23 +1900,37 @@ public static partial class PlanAnalyzer
     {
         // CASE expression in predicate — check first because CASE bodies
         // often contain CONVERT_IMPLICIT that isn't the root cause
-        if (PlanRegex.IsMatch(CaseInPredicateRegex, predicate))
-            return "CASE expression in predicate";
+        // A check that is cut short (a match timeout or the plan's spent regex budget) must not read as
+        // "this pattern is absent": if nothing is found, the predicate is reported as not fully checked.
+        var incomplete = false;
+
+        if (PlanRegex.TryIsMatch(CaseInPredicateRegex, predicate, "non-SARGable CASE expression", out var hasCase))
+        {
+            if (hasCase)
+                return "CASE expression in predicate";
+        }
+        else
+        {
+            incomplete = true;
+        }
 
         // CONVERT_IMPLICIT — most common non-SARGable pattern, but only when it converts the
         // COLUMN. Converting the parameter up to the column's type costs nothing.
-        if (ConvertImplicitWrapsColumn(predicate, identity))
+        if (ConvertImplicitWrapsColumn(predicate, identity, out var convertIncomplete))
             return "Implicit conversion (CONVERT_IMPLICIT)";
+        incomplete |= convertIncomplete;
 
         // ISNULL / COALESCE wrapping column — on the column side only. ISNULL(@p, 0) on the
         // parameter side is a runtime constant and seeks fine; flagging it contradicted this
         // warning's own "wrapping a column" message. col = ISNULL(@p, col) is still caught,
         // because the column sits inside the function, on its side of the comparison.
-        foreach (Match isnullMatch in PlanRegex.Matches(IsNullCoalesceRegex, predicate))
+        var isnullRun = PlanRegex.Matches(IsNullCoalesceRegex, predicate, "non-SARGable ISNULL/COALESCE");
+        foreach (Match isnullMatch in isnullRun)
         {
             if (IsFunctionOnColumnSide(predicate, isnullMatch, identity))
                 return "ISNULL/COALESCE wrapping column";
         }
+        incomplete |= isnullRun.Incomplete;
 
         // Common function calls on columns — but only if the function wraps a column,
         // not a parameter/variable. Split on comparison operators to check which side
@@ -1872,19 +1938,34 @@ public static partial class PlanAnalyzer
         // Every match, not just the first: a parameter-side CONVERT_IMPLICIT now falls through to
         // here, and it is skipped below. Taking only the first match would let a benign conversion
         // sitting to the left of a real function-on-column hide it.
-        foreach (Match funcMatch in PlanRegex.Matches(FunctionInPredicateRegex, predicate))
+        var funcRun = PlanRegex.Matches(FunctionInPredicateRegex, predicate, "non-SARGable function call");
+        foreach (Match funcMatch in funcRun)
         {
             var funcName = funcMatch.Groups[1].Value.ToUpperInvariant();
             if (funcName != "CONVERT_IMPLICIT" && IsFunctionOnColumnSide(predicate, funcMatch, identity))
                 return $"Function call ({funcName}) on column";
         }
+        incomplete |= funcRun.Incomplete;
 
         // Leading wildcard LIKE
-        if (PlanRegex.IsMatch(LeadingWildcardLikeRegex, predicate))
-            return "Leading wildcard LIKE pattern";
+        if (PlanRegex.TryIsMatch(LeadingWildcardLikeRegex, predicate, "non-SARGable leading wildcard LIKE", out var hasLeadingWildcard))
+        {
+            if (hasLeadingWildcard)
+                return "Leading wildcard LIKE pattern";
+        }
+        else
+        {
+            incomplete = true;
+        }
 
-        return null;
+        return incomplete ? UnverifiedNonSargableReason : null;
     }
+
+    /// <summary>
+    /// The reason <see cref="DetectNonSargablePattern"/> gives when a check ran past the analysis time limit and
+    /// nothing else was found: the rule-12 warning stays, worded as unverified, instead of vanishing.
+    /// </summary>
+    internal const string UnverifiedNonSargableReason = "Predicate not fully checked within the analysis time limit";
 
     /// <summary>
     /// True when a lookup branch under an OR expansion's Concatenation builds its seek value from
@@ -1918,7 +1999,8 @@ public static partial class PlanAnalyzer
     /// </summary>
     internal static bool ReadsAnotherInput(string scalarString)
     {
-        foreach (Match match in PlanRegex.Matches(BracketedNameRegex, scalarString))
+        var names = PlanRegex.Matches(BracketedNameRegex, scalarString, "lookup branch column references");
+        foreach (Match match in names)
         {
             if (!match.Groups["name"].Success || match.Groups["call"].Success)
                 continue; // a string literal, or the name of a function
@@ -1931,7 +2013,8 @@ public static partial class PlanAnalyzer
             return true;
         }
 
-        return false;
+        // A pass cut short proved nothing about the rest of the text: keep the warning, as for an empty list.
+        return names.Incomplete;
     }
 
     /// <summary>
@@ -2683,14 +2766,14 @@ public static partial class PlanAnalyzer
         var text = MaskCommentsAndLiterals(stmtText).ToUpperInvariant();
         var causes = new List<string>(4);
 
-        if (PlanRegex.IsMatch(text, @"\bTOP\b"))
+        if (PlanRegex.IsMatch(text, @"\bTOP\b", RegexOptions.None, "row goal cause: TOP"))
             causes.Add("TOP");
-        if (PlanRegex.IsMatch(text, @"\bEXISTS\b"))
+        if (PlanRegex.IsMatch(text, @"\bEXISTS\b", RegexOptions.None, "row goal cause: EXISTS"))
             causes.Add("EXISTS");
         // IN with subquery — bare "IN (" followed by SELECT, not just "IN (1,2,3)"
-        if (PlanRegex.IsMatch(text, @"\bIN\s*\(\s*SELECT\b"))
+        if (PlanRegex.IsMatch(text, @"\bIN\s*\(\s*SELECT\b", RegexOptions.None, "row goal cause: IN (subquery)"))
             causes.Add("IN (subquery)");
-        if (PlanRegex.IsMatch(text, @"\bFAST\b"))
+        if (PlanRegex.IsMatch(text, @"\bFAST\b", RegexOptions.None, "row goal cause: FAST hint"))
             causes.Add("FAST hint");
 
         return causes.Count > 0
@@ -2778,9 +2861,9 @@ public static partial class PlanAnalyzer
     {
         var comparison = ComparisonContaining(predicate, funcMatch.Index, out var offset);
 
-        var compMatch = PlanRegex.Match(ComparisonOperatorRegex, comparison);
+        var compMatch = PlanRegex.Match(ComparisonOperatorRegex, comparison, "comparison operator in a predicate", out _);
         if (!compMatch.Success)
-            return true; // No comparison found — can't determine side, assume worst case
+            return true; // No comparison found (or the search ran out of time) — can't determine side, assume worst case
 
         var compPos = compMatch.Index;
         var funcPos = funcMatch.Index - offset;
@@ -2811,7 +2894,9 @@ public static partial class PlanAnalyzer
         var start = 0;
         var end = predicate.Length;
 
-        foreach (Match match in PlanRegex.Matches(LogicalOperatorRegex, predicate))
+        // Lazy, so the first AND/OR after the position ends the pass (the break below).
+        var operators = PlanRegex.Matches(LogicalOperatorRegex, predicate, "AND/OR split of a predicate");
+        foreach (Match match in operators)
         {
             if (!match.Groups[1].Success)
                 continue; // a string literal or bracketed name, skipped whole
@@ -2825,6 +2910,14 @@ public static partial class PlanAnalyzer
                 end = match.Index;
                 break;
             }
+        }
+
+        // A pass cut short cannot say where the comparison ends: read the whole predicate as one
+        // comparison, the coarse reading that keeps the warning.
+        if (operators.Incomplete)
+        {
+            start = 0;
+            end = predicate.Length;
         }
 
         offset = start;
@@ -2856,9 +2949,17 @@ public static partial class PlanAnalyzer
     /// own bare columns apart from a bare outer reference off a different one; see
     /// <see cref="IsColumnReference"/>.</para>
     /// </summary>
-    internal static bool ConvertImplicitWrapsColumn(string predicate, ScanIdentity? identity = null)
+    internal static bool ConvertImplicitWrapsColumn(string predicate, ScanIdentity? identity = null) =>
+        ConvertImplicitWrapsColumn(predicate, identity, out var incomplete) || incomplete;
+
+    /// <summary>
+    /// The same check, telling a caller whether the pass was cut short (a match timeout or the plan's spent
+    /// regex budget). A cut-short pass that found no column returns false with <paramref name="incomplete"/> true.
+    /// </summary>
+    private static bool ConvertImplicitWrapsColumn(string predicate, ScanIdentity? identity, out bool incomplete)
     {
-        foreach (Match match in PlanRegex.Matches(ConvertImplicitRegex, predicate))
+        var conversions = PlanRegex.Matches(ConvertImplicitRegex, predicate, "CONVERT_IMPLICIT in a predicate");
+        foreach (Match match in conversions)
         {
             // The regex ends at the opening paren, so its last character is where the args start.
             var arguments = ExtractBalancedArguments(predicate, match.Index + match.Length - 1);
@@ -2866,9 +2967,13 @@ public static partial class PlanAnalyzer
             // Unparseable means we cannot tell what is being converted. Assume the worst, matching
             // IsFunctionOnColumnSide, rather than silently dropping a real conversion.
             if (arguments == null || IsColumnReference(arguments, identity))
+            {
+                incomplete = false;
                 return true;
+            }
         }
 
+        incomplete = conversions.Incomplete;
         return false;
     }
 
@@ -2913,12 +3018,14 @@ public static partial class PlanAnalyzer
     /// </summary>
     private static bool IsColumnReference(string text, ScanIdentity? identity)
     {
+        // A check that cannot finish says "a column": the callers read true as the side that warns.
         if (identity == null)
-            return PlanRegex.IsMatch(ColumnReferenceRegex, text);
+            return PlanRegex.IsMatch(ColumnReferenceRegex, text, "column reference in a predicate", onTimeout: true);
 
         var scan = identity.Value;
 
-        foreach (Match match in PlanRegex.Matches(BracketedNameRegex, text))
+        var names = PlanRegex.Matches(BracketedNameRegex, text, "column reference in a predicate");
+        foreach (Match match in names)
         {
             if (!match.Groups["name"].Success || match.Groups["call"].Success)
                 continue; // a string literal, or the name of a function
@@ -2931,7 +3038,11 @@ public static partial class PlanAnalyzer
             if (FollowedByAsBracket(text, match.Index + match.Length))
                 continue;
 
-            var parts = PlanRegex.Matches(NamePartRegex, name);
+            var partRun = PlanRegex.Matches(NamePartRegex, name, "column reference in a predicate");
+            var parts = partRun.ToList();
+            if (partRun.Incomplete)
+                return true; // the name could not be split: keep the warning
+
             if (parts.Count >= 2)
             {
                 var owner = StripBrackets(parts[^2].Value);
@@ -2962,7 +3073,7 @@ public static partial class PlanAnalyzer
             if (name.StartsWith("[@", StringComparison.Ordinal))
                 continue; // a parameter or a variable: [@p1]
 
-            if (PlanRegex.IsMatch(ExpressionColumnRegex, name))
+            if (PlanRegex.IsMatch(ExpressionColumnRegex, name, "column reference in a predicate", onTimeout: false))
                 continue; // an optimizer-generated expression, not an actual column: [Expr1003]
 
             if (scan.IsTableVariable && string.IsNullOrEmpty(scan.Alias) &&
@@ -2970,7 +3081,8 @@ public static partial class PlanAnalyzer
                 return true; // a bare name — this unaliased table variable's own column
         }
 
-        return false;
+        // A pass cut short proved nothing about the rest of the text: read it as a column, the warning side.
+        return names.Incomplete;
     }
 
     /// <summary>
