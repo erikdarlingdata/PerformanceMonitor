@@ -63,6 +63,7 @@ public sealed class DarlingAlertReadAdapterTests
         DarlingAlertReadAdapter.DmvBlockingSnapshotsSql,
         DarlingAlertReadAdapter.DeadlocksSql,
         DarlingAlertReadAdapter.PoisonWaitsSql,
+        DarlingAlertReadAdapter.RunnableQueueSql,
         DarlingAlertReadAdapter.LongRunningQueriesSqlTemplate,
         DarlingAlertReadAdapter.SpServerDiagnosticsFilter,
         DarlingAlertReadAdapter.WaitForFilter,
