@@ -103,7 +103,7 @@ public sealed class QueryStatsHourLedgerWriterTests
         Assert.Single(Regex.Matches(code, @"new PgCollectorRowWriter\(\)"));
 
         /* The ledger term keeps the transaction non-null for a ledger batch whatever the diversion plan says. */
-        Assert.Matches(@"diversionPlan\.Count > 0 \|\| queryStoreDatabases is not null \|\| ledgerBatch\s*\?\s*await pgConnection\.BeginTransactionAsync", code);
+        Assert.Matches(@"diversionPlan\.Count > 0 \|\| queryStoreDatabases is not null \|\| ledgerBatch \|\| watermarkBatch\s*\?\s*await pgConnection\.BeginTransactionAsync", code);
 
         /* A row that wrote the interval through another overload would be untallied: the batch fails before the COPY completes.
            The comparison lives in EnsureEveryRowTallied (its own test below fails without it), so this pins the CALL: it sits

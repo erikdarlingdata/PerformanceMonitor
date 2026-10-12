@@ -4491,6 +4491,12 @@ public sealed class DarlingCollectorRunner
             writer.CountNonZeroAt(QueryStatsHourLedgerWriter.IntervalPayloadIndex(definition));
         }
 
+        /* #5684: a query_store_stats batch also writes its per-database watermark rows (QueryStoreWatermarks, V178), in the COPY's
+           own transaction below behind its own savepoint. Chosen by the table this COPY writes, the way ledgerBatch is, so a definition
+           aimed at query_store_stats that is not the catalog's QueryStoreCollector (an import or the backfill) writes its rows too.
+           Unlike the ledger, a fault never fails the batch: a missing side row only LOWERS what a reader sees. */
+        var watermarkBatch = string.Equals(definition.TargetTable, QueryStoreCollector.Instance.TargetTable, StringComparison.OrdinalIgnoreCase);
+
         /* #3953: a Query Store batch also maintains the latest-snapshot-per-interval table, in the COPY's own
            transaction behind a savepoint (QueryStoreIntervalLatest). Its two wider reads, the coverage row's
            creation and the hourly gap check, run HERE, before the transaction, so nothing inside it reads raw
@@ -4527,7 +4533,7 @@ public sealed class DarlingCollectorRunner
                transaction; everything else keeps the pre-#1767 single-COPY commit and pays nothing. query_stats diverts
                its text and plans today, so the ledger term does not add a transaction; it is named so that the ledger
                upsert can never be left without the transaction its atomicity with the COPY depends on. */
-            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch
+            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch || watermarkBatch
                 ? await pgConnection.BeginTransactionAsync(cancellationToken)
                 : null;
 
@@ -4705,6 +4711,17 @@ public sealed class DarlingCollectorRunner
                     await _queryStoreIntervalWide.ApplyBatchAsync(
                         pgConnection, transaction, server.ServerId, storedCollectionTime, queryStoreDatabases,
                         skipApply: !queryStoreWidePrepared, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+                }
+
+                /* #5684: the batch's per-database watermark rows, after the COPY and the interval applies, on THIS transaction behind
+                   QueryStoreWatermarks.SavepointName. A fault rolls back to the savepoint and is logged; raw commits either way, and
+                   the missing side row can only lower a reader's answer (the reader treats a pair with no recent side rows as having
+                   no watermark to trust, never a higher one). A batch of 0 rows reads back nothing and writes nothing. */
+                if (watermarkBatch && rowsWritten > 0)
+                {
+                    await QueryStoreWatermarks.TryUpsertBatchAsync(
+                        pgConnection, transaction, server.ServerId, storedCollectionTime,
+                        ServiceCommandDeadlines.CollectionSweepSeconds, _logger, cancellationToken);
                 }
 
                 await transaction.CommitAsync(cancellationToken);
