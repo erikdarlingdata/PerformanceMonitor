@@ -1651,18 +1651,20 @@ public static class DarlingCliCommands
                     BuildViewerConnectionString(
                         handoff.Host, handoff.Port, handoff.Role, handoff.Password, ViewerClientCertificateFileName),
                     generatedUtc),
+                restrictToOperators: true,
                 cancellationToken);
 
-            /* Only this file gets an ACL: it is the only one carrying a secret. The certificate is public by
-               construction and the README has nothing in it — but all three go through the same
-               replace-safely path above, because the ownership and symlink problems are about the PATH, not
-               about what the file contains. */
-            secretProtected = TryHardenExportedSecret(configFile, error);
+            /* Only this file gets an ACL: it is the only one carrying a secret, and it is created with that ACL
+               already in place. The certificate is public by construction and the README has nothing in it — but
+               all three go through the same replace-safely path above, because the ownership and symlink
+               problems are about the PATH, not about what the file contains. */
+            secretProtected = ConfirmExportedSecretIsProtected(configFile, error);
 
-            await WriteExportFileAsync(certificateFile, certificate + Environment.NewLine, cancellationToken);
+            await WriteExportFileAsync(certificateFile, certificate + Environment.NewLine, restrictToOperators: false, cancellationToken);
             await WriteExportFileAsync(
                 readmeFile,
                 BuildViewerConfigReadme(handoff.Host, handoff.Port, handoff.Role, generatedUtc),
+                restrictToOperators: false,
                 cancellationToken);
         }
         catch (Exception ex)
@@ -2080,13 +2082,19 @@ public static class DarlingCliCommands
     /// keeps <c>WRITE_DAC</c> — so writing over a file someone else created would leave them able to undo the
     /// ACL applied afterwards. <c>CreateNew</c> also closes the gap between
     /// <see cref="TryCheckExportTarget"/> and this write: anything that reappears at the path in between
-    /// makes the create FAIL rather than be written through.
+    /// makes the create FAIL rather than be written through. With <paramref name="restrictToOperators"/> (the file
+    /// that carries the live password) the file is created with <see cref="DarlingFileSecurity.CreateHardenedFile"/>'s
+    /// ACL already applied, so no inherited entry from the target folder ever covers it.
     /// </summary>
-    private static async Task WriteExportFileAsync(string path, string content, CancellationToken cancellationToken)
+    [SupportedOSPlatform("windows")]
+    private static async Task WriteExportFileAsync(
+        string path, string content, bool restrictToOperators, CancellationToken cancellationToken)
     {
         File.Delete(path);
 
-        var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        var stream = restrictToOperators
+            ? DarlingFileSecurity.CreateHardenedFile(path, allowInteractiveRead: true)
+            : new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
         await using (stream.ConfigureAwait(false))
         {
             var writer = new StreamWriter(stream);
@@ -2098,30 +2106,17 @@ public static class DarlingCliCommands
     }
 
     /// <summary>
-    /// ACLs the exported darling.json down to SYSTEM + Administrators + this account + INTERACTIVE (the
-    /// admin/viewer-credential posture — the Viewer reads it interactively), so it does not sit in a folder
-    /// that inherited BUILTIN\Users read, then CONFIRMS the result. Returns whether the file is protected —
+    /// Confirms the exported viewer config, which was created restricted to SYSTEM + Administrators + the service
+    /// account + the operator group (the admin/viewer-credential posture — the Viewer reads it as an operator), is
+    /// not readable by ordinary users. Returns whether the file is protected —
     /// "we tried" is not the same claim as "the secret is not readable", which is why the credential-writing
     /// harden sites pair the call with <see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/> and why
     /// the caller's exit code depends on this answer. Never throws: the export's value is the file, so a
     /// failure is reported with the icacls that fixes it rather than throwing the folder away.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static bool TryHardenExportedSecret(string path, TextWriter error)
+    private static bool ConfirmExportedSecretIsProtected(string path, TextWriter error)
     {
-        try
-        {
-            DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true);
-        }
-        catch (Exception ex)
-        {
-            error.WriteLine(
-                $"WARNING: could not restrict the ACL on {path} ({ex.Message}){DarlingFileSecurity.DescribeOwnerAndExposure(path)}. " +
-                "It holds a LIVE password in cleartext. Delete it, or restrict it by hand before leaving this machine: " +
-                $"icacls \"{path}\" /inheritance:r /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}\":F");
-            return false;
-        }
-
         try
         {
             if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
@@ -4081,7 +4076,7 @@ public static class DarlingCliCommands
     ///
     /// <para><b>It verifies rather than claims.</b> Every target is re-read after the attempt and reported as
     /// SECURED or STILL READABLE, and the exit code is 1 if anything is still exposed. "We tried" is not the
-    /// same statement as "the secret is not readable" — a distinction <see cref="TryHardenExportedSecret"/>'s own
+    /// same statement as "the secret is not readable" — a distinction <see cref="ConfirmExportedSecretIsProtected"/>'s own
     /// contract already makes, and the reason a permissions call that silently did nothing was able to hide.</para>
     ///
     /// <para>Idempotent, so it is safe on a healthy box and can simply live in a runbook. Missing targets are

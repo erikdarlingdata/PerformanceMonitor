@@ -371,13 +371,15 @@ internal static class DarlingListenerTls
     /// <param name="detail">The owner-and-exposure parenthetical (<c>DarlingFileSecurity.DescribeOwnerAndExposure</c>),
     /// or an empty string.</param>
     /// <param name="account">The account the service runs as, which the <c>icacls</c> line grants read.</param>
+    [SupportedOSPlatform("windows")]
     internal static string KeyFileReadableWarning(DarlingWebTls.TlsShape shape, string path, string detail, string account)
     {
         var what = shape == DarlingWebTls.TlsShape.Pfx ? "PKCS#12 bundle" : "private key file";
 
         return $"the {what} {path} is readable by ordinary users{detail}. Only SYSTEM, Administrators and the service "
             + $"account should be able to read it. Restrict it with: icacls \"{path}\" /inheritance:r /grant:r "
-            + $"\"NT AUTHORITY\\SYSTEM:(F)\" \"BUILTIN\\Administrators:(F)\" \"{account}:(R)\"";
+            + $"\"NT AUTHORITY\\SYSTEM:(F)\" \"BUILTIN\\Administrators:(F)\" \"{account}:(R)\" "
+            + DarlingFileSecurity.RemoveOrdinaryUserGrantsArgument;
     }
 
     /// <summary>

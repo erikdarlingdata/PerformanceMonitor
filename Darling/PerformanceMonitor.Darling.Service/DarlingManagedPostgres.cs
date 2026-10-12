@@ -5211,6 +5211,11 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     internal static string? StoreFolderProblem(string storeFolder, bool lockedDown)
     {
+        if (IsLink(storeFolder))
+        {
+            return "it is a link (a junction or symbolic link) to another folder";
+        }
+
         if (!lockedDown)
         {
             return "its permissions could not be restricted";
@@ -5229,6 +5234,19 @@ public sealed class DarlingManagedPostgres
         return null;
     }
 
+    /// <summary>Is <paramref name="path"/> a junction or symbolic link? False when it does not exist or cannot be read.</summary>
+    internal static bool IsLink(string path)
+    {
+        try
+        {
+            return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>The fresh-cluster gate on <see cref="StoreFolderProblem"/>: a startup error that names the folder and
     /// the fix. The worker logs it critical and exits, like every other failure of the managed start.</summary>
     [SupportedOSPlatform("windows")]
@@ -5237,6 +5255,16 @@ public sealed class DarlingManagedPostgres
         if (StoreFolderProblem(storeFolder, lockedDown) is not { } reason)
         {
             return;
+        }
+
+        if (IsLink(storeFolder))
+        {
+            /* icacls and takeown follow a link, so the usual fix would change the folder the link points to. */
+            throw new InvalidOperationException(
+                $"Refusing to initialize a new store under {storeFolder}: {reason}. Do not run icacls or takeown on it: " +
+                "they would change the folder it points to. From an ELEVATED prompt remove the link itself (rmdir " +
+                $"\"{storeFolder}\" removes the link and leaves the folder it points to as it is), then start the " +
+                "service again. install-darling.ps1 creates this folder itself.");
         }
 
         throw new InvalidOperationException(
@@ -5255,7 +5283,7 @@ public sealed class DarlingManagedPostgres
     /// because the create refuses to open an existing file rather than write through whatever appeared there.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static void WriteHardenedText(string path, string text)
+    internal static void WriteHardenedText(string path, string text)
     {
         File.Delete(path);
         using var stream = DarlingFileSecurity.CreateHardenedFile(path, allowInteractiveRead: false);
@@ -5531,8 +5559,11 @@ public sealed class DarlingManagedPostgres
         var generated = StoreTlsCertificates.Create(Environment.MachineName, listenIp, ServerCertValidityYears);
 
         File.WriteAllText(certPath, generated.ServerCertChainPem);
-        File.WriteAllText(keyPath, generated.ServerKeyPem);
         File.WriteAllText(rootPath, generated.RootCertPem);
+
+        /* The private key is created with the store's own ACL (replacing whatever file sat at the path), so it is
+           never readable through the folder's inherited access; the check below confirms the result. */
+        WriteHardenedText(keyPath, generated.ServerKeyPem);
         TryHardenCredentialFile(keyPath, allowInteractiveRead: false);
 
         _logger.LogInformation(

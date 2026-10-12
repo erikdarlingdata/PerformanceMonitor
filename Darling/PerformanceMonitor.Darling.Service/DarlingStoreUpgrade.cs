@@ -4371,8 +4371,9 @@ internal sealed class DarlingStoreUpgrade
                     pg_upgrade's internal restore cannot load the extension it is restoring ---- */
             step = "initdb-new-cluster";
             TryDeleteDirectory(newDataDirectory);
-            File.WriteAllText(passwordFile, context.Password + "\n");
-            DarlingFileSecurity.HardenFile(passwordFile, allowInteractiveRead: false);
+            /* Created with the store's own ACL, so the superuser password is never in a file the folder's
+               inherited access covers; a leftover from an earlier attempt is replaced. */
+            DarlingManagedPostgres.WriteHardenedText(passwordFile, context.Password + "\n");
 
             var newInitDb = Path.Combine(context.NewBinDirectory, "initdb.exe");
             var (initExit, initOutput) = await DarlingManagedPostgres.RunToolAsync(
@@ -4693,9 +4694,8 @@ internal sealed class DarlingStoreUpgrade
             PreUpgradeConfFileName);
 
     /// <summary>
-    /// Copies the old data directory's postgresql.conf to <see cref="SavedConfPath"/> and hardens the copy the
-    /// way <see cref="CarryAutoConfAsync"/> hardens its auto.conf original (best effort: a failed harden is a
-    /// warning, and the copy still counts). Returns the path that holds the old lines: the saved copy when it
+    /// Copies the old data directory's postgresql.conf to <see cref="SavedConfPath"/>, creating the copy with the
+    /// store's own ACL the way <see cref="CarryAutoConfAsync"/> creates its auto.conf original. Returns the path that holds the old lines: the saved copy when it
     /// was saved, the retained directory's own postgresql.conf, after a warning, when the copy could not be
     /// made (a copy left by an earlier major upgrade may still sit at the saved path then, and it holds that
     /// upgrade's lines, so it is never the answer), or null when there was no postgresql.conf to save. Never
@@ -4713,7 +4713,13 @@ internal sealed class DarlingStoreUpgrade
             }
 
             preUpgradeCopy = SavedConfPath(newDataDirectory);
-            File.Copy(sourcePath, preUpgradeCopy, overwrite: true);
+
+            /* Created with the store's own ACL rather than copied and restricted after. The previous major
+               upgrade's copy is removed first, because the create refuses an existing file. */
+            File.Delete(preUpgradeCopy);
+            using var source = File.OpenRead(sourcePath);
+            using var copy = DarlingFileSecurity.CreateHardenedFile(preUpgradeCopy, allowInteractiveRead: false);
+            source.CopyTo(copy);
         }
         catch (Exception ex)
         {
@@ -4723,20 +4729,6 @@ internal sealed class DarlingStoreUpgrade
                 "operator lines below the darling-managed.conf include still exist in {Path}.",
                 ex.Message, retainedConf);
             return retainedConf;
-        }
-
-        try
-        {
-            DarlingFileSecurity.HardenFile(preUpgradeCopy, allowInteractiveRead: false);
-        }
-        catch (Exception ex)
-        {
-            /* Best-effort, like the auto.conf original this mirrors — a failure here must not cost the copy
-               itself, only get logged so it can be fixed by hand. */
-            logger.LogWarning(
-                "Could not restrict {Path} to the store's own ACL ({Message}) — it may be readable more " +
-                "broadly than the data directory it was copied from.",
-                preUpgradeCopy, ex.Message);
         }
 
         logger.LogInformation(

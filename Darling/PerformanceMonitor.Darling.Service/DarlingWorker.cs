@@ -2257,7 +2257,7 @@ LIMIT 1";
                install re-homed to a domain account for integrated auth (#1823), granting the virtual
                account would be a fix that cannot work. */
             var remediation =
-                $"icacls \"{path}\" /inheritance:d   then   icacls \"{path}\" /remove:g \"BUILTIN\\Users\"   " +
+                $"icacls \"{path}\" /inheritance:d   then   icacls \"{path}\" {DarlingFileSecurity.RemoveOrdinaryUserGrantsArgument}   " +
                 $"then   icacls \"{path}\" /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}:(F)\"";
 
             _logger.LogError(
@@ -2343,7 +2343,7 @@ LIMIT 1";
                    runnable commands so an elevated human can finish the job the service cannot — naming
                    the identity the service runs as, which is not the virtual account on a re-homed install. */
                 var remediation =
-                    $"icacls \"{backup}\" /inheritance:d   then   icacls \"{backup}\" /remove:g \"BUILTIN\\Users\"   " +
+                    $"icacls \"{backup}\" /inheritance:d   then   icacls \"{backup}\" {DarlingFileSecurity.RemoveOrdinaryUserGrantsArgument}   " +
                     $"then   icacls \"{backup}\" /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}:(F)\"";
 
                 logger.LogError(

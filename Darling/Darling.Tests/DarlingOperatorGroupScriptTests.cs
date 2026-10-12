@@ -73,6 +73,21 @@ public sealed class DarlingOperatorGroupScriptTests
         Assert.DoesNotContain("Add-ADGroupMember", script, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>The lookup asks only this machine's own accounts, and a name that resolves anywhere else is refused
+    /// with the command that creates the local group.</summary>
+    [Theory]
+    [InlineData("install-darling.ps1")]
+    [InlineData("upgrade-darling.ps1")]
+    public void TheLookupIsMachineQualified_AndRefusesAGroupThatIsNotLocal(string scriptName)
+    {
+        var body = ExtractFunction(Script(scriptName), "Initialize-DarlingOperatorGroup", scriptName);
+
+        Assert.Contains("New-Object System.Security.Principal.NTAccount($env:COMPUTERNAME, $groupName)", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("NTAccount($groupName)", body, StringComparison.Ordinal);
+        Assert.Contains("is not a group on this machine", body, StringComparison.Ordinal);
+        Assert.Contains("net localgroup `\"$groupName`\" /add", body, StringComparison.Ordinal);
+    }
+
     /// <summary>The upgrade script reuses the installer's code rather than a look-alike, so a fix to one is a fix
     /// to both.</summary>
     [Fact]
@@ -141,26 +156,47 @@ public sealed class DarlingOperatorGroupScriptTests
         Assert.DoesNotContain("Fail ", between, StringComparison.Ordinal);
     }
 
-    /// <summary>Runs the extracted lookup under Windows PowerShell against a group that exists on every Windows
-    /// machine. An existing group is the path that changes nothing, so this creates nothing.</summary>
+    /// <summary>Runs the extracted lookup under Windows PowerShell against a group that already exists, which is the
+    /// path that changes nothing, so this creates nothing. The group is one of this machine's own accounts when it has
+    /// one; otherwise a built-in group is looked up under the BUILTIN domain in place of the machine name, which
+    /// exercises the same code on a machine with no local group of its own.</summary>
     [Theory]
     [InlineData("install-darling.ps1")]
     [InlineData("upgrade-darling.ps1")]
     public void TheLookupReturnsAnExistingGroupsSid_AndCreatesNothing(string scriptName)
     {
         var script = Script(scriptName);
-        var standIn = new SecurityIdentifier(WellKnownSidType.BuiltinPerformanceLoggingUsersSid, null);
-        var standInName = standIn.Translate(typeof(NTAccount)).Value;
+        var localGroups = RunWindowsPowerShell(
+            "Get-CimInstance Win32_Group -Filter \"LocalAccount=True\" | Where-Object { $_.Domain -eq $env:COMPUTERNAME -and $_.SID -notlike 'S-1-5-32-*' } | ForEach-Object { $_.Name + '|' + $_.SID }");
+
+        string groupName;
+        string expectedSid;
+        var lookup = ExtractFunction(script, "Initialize-DarlingOperatorGroup", scriptName);
+        var setup = "$null = 0";
+        if (localGroups.Count > 0)
+        {
+            var parts = localGroups[0].Split('|');
+            groupName = parts[0];
+            expectedSid = parts[1];
+        }
+        else
+        {
+            var standIn = new SecurityIdentifier(WellKnownSidType.BuiltinPerformanceLoggingUsersSid, null);
+            groupName = standIn.Translate(typeof(NTAccount)).Value.Split('\\')[^1];
+            expectedSid = standIn.Value;
+            setup = "$env:COMPUTERNAME = 'BUILTIN'";
+        }
 
         var probe = string.Join(
             "\n",
+            setup,
             ExtractFunction(script, "Get-DarlingNativeText", scriptName),
-            ExtractFunction(script, "Initialize-DarlingOperatorGroup", scriptName),
-            $"(Initialize-DarlingOperatorGroup '{standInName}').Value");
+            lookup,
+            $"(Initialize-DarlingOperatorGroup '{groupName.Replace("'", "''", StringComparison.Ordinal)}').Value");
 
         var lines = RunWindowsPowerShell(probe);
 
-        Assert.Equal(new[] { standIn.Value }, lines);
+        Assert.Equal(new[] { expectedSid }, lines);
     }
 
     /// <summary>Returns the full <c>function NAME(...) { ... }</c> definition text from the script, signature

@@ -1060,15 +1060,25 @@ function Get-DarlingNativeText($output) {
 function Initialize-DarlingOperatorGroup([string]$groupName) {
     $ErrorActionPreference = 'Continue'
     $sidType = [System.Security.Principal.SecurityIdentifier]
-    $account = New-Object System.Security.Principal.NTAccount($groupName)
-    try { return $account.Translate($sidType) }
+    # Machine-qualified, so only this machine's own account database answers: an unqualified name is also looked
+    # up in the domain and in trusted domains, and a group of that name made there must never be the one granted.
+    $account = New-Object System.Security.Principal.NTAccount($env:COMPUTERNAME, $groupName)
+    $sid = $null
+    try { $sid = $account.Translate($sidType) }
     catch [System.Security.Principal.IdentityNotMappedException] { }
-    $comment = 'Members can run the PerformanceMonitor Darling Viewer and CLI without elevation (read access to darling.json and the store role credentials).'
-    $output = & net.exe localgroup $groupName /add "/comment:$comment" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "net localgroup `"$groupName`" /add failed with exit code $LASTEXITCODE`: $(Get-DarlingNativeText $output)"
+    if (-not $sid) {
+        $comment = 'Members can run the PerformanceMonitor Darling Viewer and CLI without elevation (read access to darling.json and the store role credentials).'
+        $output = & net.exe localgroup $groupName /add "/comment:$comment" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "net localgroup `"$groupName`" /add failed with exit code $LASTEXITCODE`: $(Get-DarlingNativeText $output)"
+        }
+        $sid = $account.Translate($sidType)
     }
-    return $account.Translate($sidType)
+    $owner = $sid.Translate([System.Security.Principal.NTAccount]).Value
+    if (-not ($owner.StartsWith("$env:COMPUTERNAME\", [System.StringComparison]::OrdinalIgnoreCase) -or $owner.StartsWith('BUILTIN\', [System.StringComparison]::OrdinalIgnoreCase))) {
+        throw "the name '$groupName' resolves to $owner, which is not a group on this machine. Create the local group from an elevated prompt (net localgroup `"$groupName`" /add) and run this script again."
+    }
+    return $sid
 }
 
 # The logon account the Darling service is registered to run as, exactly as Windows reports it (LocalSystem,

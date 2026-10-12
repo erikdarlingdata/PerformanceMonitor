@@ -349,7 +349,7 @@ public sealed class DarlingListenerTlsTests
                 $"{labels.Surface} TLS: the {(form == "pem" ? "private key file" : "PKCS#12 bundle")} {file} is readable by ordinary users"
                 + $"{DarlingFileSecurity.DescribeOwnerAndExposure(file)}. Only SYSTEM, Administrators and the service account should be able to read it. "
                 + $"Restrict it with: icacls \"{file}\" /inheritance:r /grant:r \"NT AUTHORITY\\SYSTEM:(F)\" \"BUILTIN\\Administrators:(F)\" "
-                + $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(R)\"",
+                + $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(R)\" /remove:g *S-1-5-32-545 *S-1-5-11 *S-1-1-0 *S-1-5-4",
                 Assert.Single(log.At(LogLevel.Warning)));
         }
     }

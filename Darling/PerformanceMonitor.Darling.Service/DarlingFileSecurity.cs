@@ -71,6 +71,14 @@ public static class DarlingFileSecurity
         new(WellKnownSidType.InteractiveSid, null),
     ];
 
+    /// <summary>
+    /// The <c>icacls</c> argument that removes every explicit grant <see cref="IsReadableByOrdinaryUsers"/> flags
+    /// (Users, Authenticated Users, Everyone and INTERACTIVE), by SID so it works on any display language. Built from
+    /// the same list as the check, so a fix text that uses it names everything the check can flag.
+    /// </summary>
+    public static string RemoveOrdinaryUserGrantsArgument =>
+        "/remove:g " + string.Join(" ", Array.ConvertAll(OrdinaryUserGroups, group => "*" + group.Value));
+
     /* A test cannot create a local group on the build machine, so it substitutes a SID that exists (or null for
        "no group"). Null everywhere else, so the service resolves the real group. */
     private static Func<SecurityIdentifier?>? _operatorGroupOverride;
@@ -94,7 +102,11 @@ public static class DarlingFileSecurity
 
             try
             {
-                return (SecurityIdentifier)new NTAccount(OperatorGroupName).Translate(typeof(SecurityIdentifier));
+                /* Machine-qualified: an unqualified name is also looked up in the domain and in trusted domains, and
+                   a group of that name made there must never be the one that is granted access. */
+                var sid = (SecurityIdentifier)new NTAccount(Environment.MachineName, OperatorGroupName)
+                    .Translate(typeof(SecurityIdentifier));
+                return IsLocalGroup(sid, DomainOf) ? sid : null;
             }
             catch (Exception ex) when (ex is IdentityNotMappedException or SystemException)
             {
@@ -103,13 +115,41 @@ public static class DarlingFileSecurity
         }
     }
 
+    private static string? DomainOf(SecurityIdentifier sid)
+    {
+        var name = ((NTAccount)sid.Translate(typeof(NTAccount))).Value;
+        var slash = name.IndexOf('\\', StringComparison.Ordinal);
+        return slash < 0 ? null : name[..slash];
+    }
+
+    /// <summary>
+    /// Is <paramref name="sid"/> a group of this machine's own account database: its domain part is the machine
+    /// name or BUILTIN? The qualified lookup already asks only that database, and this checks the answer as well, so
+    /// a name that resolves to a domain group is refused rather than granted.
+    /// </summary>
+    internal static bool IsLocalGroup(SecurityIdentifier sid, Func<SecurityIdentifier, string?> domainOf)
+    {
+        string? domain;
+        try
+        {
+            domain = domainOf(sid);
+        }
+        catch (Exception ex) when (ex is IdentityNotMappedException or SystemException)
+        {
+            return false;
+        }
+
+        return string.Equals(domain, Environment.MachineName, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(domain, "BUILTIN", StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>
     /// The warning a harden caller logs when <see cref="OperatorGroup"/> is null: what stays locked out, which
     /// install step creates the group, and what to do on a hand install. One line, so the log reads the same from
     /// every caller.
     /// </summary>
     public static string OperatorGroupMissingWarning =>
-        $"The local group '{OperatorGroupName}' does not exist on this machine, so darling.json and the store's admin " +
+        $"The local group '{OperatorGroupName}' does not exist on this machine (a group of that name in a domain is never used), so darling.json and the store's admin " +
         "and viewer credentials are readable by SYSTEM, Administrators and the service account only, and the Viewer " +
         "and the CLI cannot read them unless run elevated. install-darling.ps1 step 4b creates the group; on a hand " +
         $"install create it from an elevated prompt (net localgroup \"{OperatorGroupName}\" /add), add the people who " +
