@@ -301,6 +301,8 @@ public sealed class StandalonePlanViewerController
                 try
                 {
                     var xml = System.IO.File.ReadAllText(fileName);
+                    // A refused file opens nothing, so the next file still takes this (empty) tab.
+                    if (CallerPlanXmlPrompt.Refuse(xml)) continue;
                     var targetTab = isFirst ? subTab : AddNewEmptyPlanSubTab();
                     // Fire-and-forget (open-file, not paste): discard the Task (CS4014 is an error here).
                     _ = LoadPlanIntoSubTab(targetTab, xml, System.IO.Path.GetFileName(fileName));
@@ -332,7 +334,8 @@ public sealed class StandalonePlanViewerController
                 if (!string.IsNullOrWhiteSpace(xml))
                 {
                     // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
-                    await LoadPlanIntoSubTab(subTab, xml, "Pasted Plan");
+                    if (!CallerPlanXmlPrompt.Refuse(xml))
+                        await LoadPlanIntoSubTab(subTab, xml, "Pasted Plan");
                     return;
                 }
                 MessageBox.Show("The clipboard does not contain any text.", "Paste Plan XML",
@@ -475,6 +478,7 @@ public sealed class StandalonePlanViewerController
             try
             {
                 var xml = System.IO.File.ReadAllText(planFiles[i]);
+                if (CallerPlanXmlPrompt.Refuse(xml)) continue;
                 // Fire-and-forget (drag-drop, not paste): discard the Task (CS4014 is an error here).
                 _ = LoadPlanIntoSubTab(newTab, xml, System.IO.Path.GetFileName(planFiles[i]));
             }
@@ -508,7 +512,7 @@ public sealed class StandalonePlanViewerController
             try
             {
                 var (ok, xml) = await ClipboardText.TryReadAsync();
-                if (ok && !string.IsNullOrWhiteSpace(xml))
+                if (ok && !string.IsNullOrWhiteSpace(xml) && !CallerPlanXmlPrompt.Refuse(xml))
                 {
                     // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
                     await LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
@@ -523,6 +527,7 @@ public sealed class StandalonePlanViewerController
         try
         {
             var xml = System.IO.File.ReadAllText(path);
+            if (CallerPlanXmlPrompt.Refuse(xml)) return;
             // Fire-and-forget (drag-drop, not paste): discard the Task (CS4014 is an error here).
             _ = LoadPlanIntoActivePlanSubTab(xml, System.IO.Path.GetFileName(path));
         }

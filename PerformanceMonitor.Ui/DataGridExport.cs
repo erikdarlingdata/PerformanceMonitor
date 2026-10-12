@@ -37,7 +37,10 @@ public static class DataGridExport
 {
     /* ---- side-effecting wrappers (wired to the context-menu MenuItem handlers) ---- */
 
-    /// <summary>Copies the current cell's value to the clipboard.</summary>
+    /// <summary>
+    /// Copies the current cell's value to the clipboard exactly as it is (see <see cref="GetRawCellValue"/>): a
+    /// single cell is often query text on its way into SSMS, where a leading apostrophe would break it.
+    /// </summary>
     public static void CopyCell(object sender)
     {
         var grid = FindDataGrid(sender);
@@ -46,7 +49,7 @@ public static class DataGridExport
         var cell = grid.CurrentCell;
         if (cell.Column == null || cell.Item == null) return;
 
-        var value = GetCellValue(cell.Column, cell.Item);
+        var value = GetRawCellValue(cell.Column, cell.Item);
         if (value.Length > 0) ClipboardText.TrySetText(value);
     }
 
@@ -63,7 +66,7 @@ public static class DataGridExport
         var item = FindRowItem(sender) ?? grid.CurrentItem ?? grid.SelectedItem;
         if (item == null) return;
 
-        ClipboardText.TrySetText(string.Join("\t", GetRowValues(grid, item)));
+        ClipboardText.TrySetText(string.Join("\t", GetClipboardRowValues(grid, item)));
     }
 
     /// <summary>Copies the whole grid (header + all rows, tab-delimited) to the clipboard.</summary>
@@ -116,7 +119,7 @@ public static class DataGridExport
         sb.AppendLine(string.Join("\t", grid.Columns.Select(DataGridClipboardBehavior.GetHeaderText)));
         foreach (var item in grid.Items)
         {
-            sb.AppendLine(string.Join("\t", GetRowValues(grid, item)));
+            sb.AppendLine(string.Join("\t", GetClipboardRowValues(grid, item)));
         }
         return sb.ToString();
     }
@@ -147,18 +150,47 @@ public static class DataGridExport
     }
 
     /// <summary>
+    /// Gets one string per column for a row as the tab-separated copies write it: like <see cref="GetRowValues"/>,
+    /// but a tab or a line break inside a cell becomes a space, so one cell stays one field when it is pasted.
+    /// </summary>
+    public static List<string> GetClipboardRowValues(DataGrid grid, object item)
+    {
+        var values = new List<string>(grid.Columns.Count);
+        foreach (var column in grid.Columns)
+        {
+            values.Add(GetClipboardCellValue(column, item));
+        }
+        return values;
+    }
+
+    /// <summary>One cell's text for Copy Row and Copy All Rows (see <see cref="FormatForClipboard"/>).</summary>
+    public static string GetClipboardCellValue(DataGridColumn column, object item) =>
+        ReadCell(column, item, FormatForClipboard);
+
+    /// <summary>
     /// Extracts a cell value for any column type. Bound columns read their binding path directly;
     /// template columns are instantiated and inspected for a TextBlock binding. Unhandled column
     /// types yield an empty string so the value count always matches the column count.
     /// </summary>
-    public static string GetCellValue(DataGridColumn column, object item)
+    public static string GetCellValue(DataGridColumn column, object item) =>
+        ReadCell(column, item, FormatForExport);
+
+    /// <summary>
+    /// One cell's text exactly as it is, with no apostrophe added: what Copy Cell puts on the clipboard. Copy Row,
+    /// Copy All Rows, the keyboard copy on selected rows and the CSV export still read through
+    /// <see cref="GetCellValue"/>, because those land in a spreadsheet.
+    /// </summary>
+    public static string GetRawCellValue(DataGridColumn column, object item) =>
+        ReadCell(column, item, FormatRaw);
+
+    private static string ReadCell(DataGridColumn column, object item, Func<object?, string> format)
     {
         if (column is DataGridBoundColumn boundColumn
             && boundColumn.Binding is Binding binding
             && binding.Path != null)
         {
             var property = item.GetType().GetProperty(binding.Path.Path);
-            return FormatForExport(property?.GetValue(item));
+            return format(property?.GetValue(item));
         }
 
         if (column is DataGridTemplateColumn templateColumn && templateColumn.CellTemplate != null)
@@ -170,7 +202,7 @@ public static class DataGridExport
                 if (textBinding != null && textBinding.Path != null)
                 {
                     var property = item.GetType().GetProperty(textBinding.Path.Path);
-                    return FormatForExport(property?.GetValue(item));
+                    return format(property?.GetValue(item));
                 }
             }
         }
@@ -178,22 +210,45 @@ public static class DataGridExport
         return string.Empty;
     }
 
-    /// <summary>Formats a value for export: invariant culture for IFormattable, else ToString.</summary>
-    public static string FormatForExport(object? value)
+    /// <summary>
+    /// Formats a value for export: invariant culture for IFormattable (numbers and dates, which stay as they
+    /// are), else ToString. Text goes through <see cref="SpreadsheetText.Neutralize"/>, so a cell that starts
+    /// with a formula character is written as text. Every grid copy that lands in a spreadsheet and every CSV
+    /// path reads its cells here; only the single-cell Copy Cell reads them raw (<see cref="FormatRaw"/>).
+    /// </summary>
+    public static string FormatForExport(object? value) =>
+        value == null || value is IFormattable
+            ? FormatRaw(value)
+            : SpreadsheetText.Neutralize(FormatRaw(value));
+
+    /// <summary>
+    /// <see cref="FormatForExport"/> for the tab-separated copies: text also has its tabs and line breaks
+    /// collapsed to a space before the formula rule runs. The CSV export keeps its line breaks (the field is
+    /// quoted), so it reads <see cref="FormatForExport"/>.
+    /// </summary>
+    public static string FormatForClipboard(object? value) =>
+        value == null || value is IFormattable
+            ? FormatRaw(value)
+            : SpreadsheetText.NeutralizeClipboardCell(FormatRaw(value));
+
+    /// <summary>The value as text with no neutralizing: invariant culture for IFormattable, else ToString.</summary>
+    public static string FormatRaw(object? value)
     {
         if (value == null) return string.Empty;
         if (value is IFormattable formattable) return formattable.ToString(null, CultureInfo.InvariantCulture);
         return value.ToString() ?? string.Empty;
     }
 
-    /// <summary>Escapes a value for CSV: quote when it contains the separator, a quote, or a newline.</summary>
+    /// <summary>
+    /// Escapes a value for CSV: quote when it contains the separator, a quote, a line break, or a comma,
+    /// semicolon or tab. A spreadsheet splits on its own list separator, which need not be the one the file was
+    /// written with, so those three are quoted whatever the configured separator is.
+    /// </summary>
     public static string CsvEscape(string value, string separator)
     {
         if (string.IsNullOrEmpty(value)) return string.Empty;
         if (value.Contains(separator, StringComparison.Ordinal)
-            || value.Contains('"')
-            || value.Contains('\n')
-            || value.Contains('\r'))
+            || value.AsSpan().IndexOfAny(",;\t\"\r\n".AsSpan()) >= 0)
         {
             return "\"" + value.Replace("\"", "\"\"") + "\"";
         }

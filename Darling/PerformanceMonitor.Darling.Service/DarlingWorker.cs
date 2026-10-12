@@ -3158,6 +3158,9 @@ LIMIT 1";
            holds — including on a store-unreachable boot. Re-published on every reload below. */
         _mcpState.Publish(config.Mcp.Enabled, config.Mcp.Port);
         _webState.Publish(config.Web.Enabled, config.Web.Port);
+        /* The SMTP settings in force (the store's when the view loaded, else darling.json's): a setup that sends its
+           login without encryption is named in the log, because no settings window is open for it. */
+        DarlingSmtpWarning.Log(config.Smtp, _logger);
         /* #2298: publish the effective server set the same way — store-authoritative when the view loaded,
            else the darling.json servers, which is what this run will actually collect from either way. The
            MCP host's plan-fetch resolver reads this instead of re-reading the store as the mcp role. */
@@ -6301,6 +6304,7 @@ LIMIT 1";
         }
 
         StoreConfigProvider.ApplyToConfig(config, view);
+        DarlingSmtpWarning.Log(config.Smtp, _logger); // the reloaded SMTP settings, same warning as at start
         /* #1560/#1562: the MCP + web host supervisors pick these up within their poll interval — the viewer's
            Settings toggles round-trip to a live start/stop/rebind with no service restart. */
         _mcpState.Publish(config.Mcp.Enabled, config.Mcp.Port);
