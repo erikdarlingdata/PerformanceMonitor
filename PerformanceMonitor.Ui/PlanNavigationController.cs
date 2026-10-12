@@ -179,7 +179,12 @@ public sealed class PlanNavigationController
             try
             {
                 _setStatus?.Invoke("Executing query for actual plan...");
-                var executeActual = target?.Execute ?? _executeActual;
+                var executeActual = _executeActual;
+                if (target != null)
+                {
+                    executeActual = ((IActualPlanRunner)target).RunQuery;
+                }
+
                 using (SetBusy())
                     actualPlanXml = await executeActual(databaseName ?? "", queryText, estimatedPlanXml, isolationLevel, _actualPlanCts.Token);
             }
@@ -215,6 +220,43 @@ public sealed class PlanNavigationController
         }
     }
 
+    /// <summary>
+    /// The server one "Get Actual Plan" click was made against, captured at click time by a host whose selected
+    /// server can change while the plan lookup or the prompt is open (#5639). <see cref="ServerName"/> is what the
+    /// prompt names, <see cref="IsCurrent"/> is false once the host's selection has moved on (which stops the
+    /// request before anything runs), and the run itself goes against that same server's connection.
+    /// <para>The run is reachable only from this controller's gated <c>GetActualPlanAsync</c>: the executor is held
+    /// in a private field and handed out through <see cref="IActualPlanRunner"/>, an interface only this class can
+    /// name. (An <c>internal</c> member would not do: this assembly grants internals to both host apps.)</para>
+    /// </summary>
+    public sealed class ActualPlanRunTarget : IActualPlanRunner
+    {
+        private readonly Func<string, string, string?, string?, CancellationToken, Task<string?>> _execute;
+
+        public ActualPlanRunTarget(
+            string serverName,
+            Func<bool> isCurrent,
+            Func<string, string, string?, string?, CancellationToken, Task<string?>> execute)
+        {
+            ServerName = serverName;
+            IsCurrent = isCurrent;
+            _execute = execute;
+        }
+
+        public string ServerName { get; }
+
+        public Func<bool> IsCurrent { get; }
+
+        Task<string?> IActualPlanRunner.RunQuery(string databaseName, string queryText, string? estimatedPlanXml, string? isolationLevel, CancellationToken cancellationToken)
+            => _execute(databaseName, queryText, estimatedPlanXml, isolationLevel, cancellationToken);
+    }
+
+    /// <summary>Runs a target's executor. Private to the controller, so no other type can call it.</summary>
+    private interface IActualPlanRunner
+    {
+        Task<string?> RunQuery(string databaseName, string queryText, string? estimatedPlanXml, string? isolationLevel, CancellationToken cancellationToken);
+    }
+
     private static BusyScope SetBusy()
     {
         Mouse.OverrideCursor = Cursors.Wait;
@@ -226,14 +268,3 @@ public sealed class PlanNavigationController
         public void Dispose() => Mouse.OverrideCursor = null;
     }
 }
-
-/// <summary>
-/// The server one "Get Actual Plan" click was made against, captured at click time by a host whose selected
-/// server can change while the plan lookup or the prompt is open (#5639). <see cref="ServerName"/> is what the
-/// prompt names, <see cref="Execute"/> runs against that same server's connection, and <see cref="IsCurrent"/> is
-/// false once the host's selection has moved on, which stops the request before anything runs.
-/// </summary>
-public sealed record ActualPlanRunTarget(
-    string ServerName,
-    Func<bool> IsCurrent,
-    Func<string, string, string?, string?, CancellationToken, Task<string?>> Execute);

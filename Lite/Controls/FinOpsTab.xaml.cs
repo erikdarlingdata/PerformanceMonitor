@@ -263,7 +263,7 @@ public partial class FinOpsTab : UserControl
         var serverId = GetSelectedServerId();
         var connStr = GetSelectedConnectionString();
         if (string.IsNullOrEmpty(connStr)) return;
-        var target = new ActualPlanRunTarget(
+        var target = new PlanNavigationController.ActualPlanRunTarget(
             server.ServerName,
             () => ServerSelector.SelectedItem is ServerConnection && GetSelectedServerId() == serverId,
             async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
