@@ -102,8 +102,9 @@ public class DataGridExportTests
     [Fact]
     public void CsvEscape_QuotesWhenValueContainsSeparator()
     {
-        // With a semicolon separator a comma is NOT special, but a semicolon is.
-        Assert.Equal("a,b", DataGridExport.CsvEscape("a,b", ";"));
+        // A comma, semicolon or tab is quoted whatever the separator, so a spreadsheet whose list separator
+        // differs cannot split the value into a new cell.
+        Assert.Equal("\"a,b\"", DataGridExport.CsvEscape("a,b", ";"));
         Assert.Equal("\"a;b\"", DataGridExport.CsvEscape("a;b", ";"));
     }
 

@@ -189,6 +189,11 @@ public sealed class DarlingMcpPlanTools
         if (string.IsNullOrWhiteSpace(plan_xml))
             return McpHelpers.Refusal("plan_xml", "No plan XML provided.");
 
+        // The caller wrote this XML, so bound it before it reaches the parser (the stored-plan tools skip this).
+        var tooLarge = CallerPlanXml.RefusalReason(plan_xml);
+        if (tooLarge != null)
+            return McpHelpers.Refusal("plan_xml", tooLarge);
+
         try
         {
             // #4348: the caller's XML has no stored-plan read to filter it, so AnalyzeFilteredPlan runs the statement

@@ -56,12 +56,15 @@ public static class ContextMenuHelper
         return "";
     }
 
+    /* One cell is copied exactly as it is: it is often query text on its way into SSMS, where a leading
+       apostrophe would break it. Copy Row and Copy All Rows also turn a tab or line break inside a cell into a space and neutralize; the CSV
+       export quotes such a cell and neutralizes. */
     public static void CopyCell(object sender)
     {
         var grid = FindParentDataGrid(sender);
         if (grid?.CurrentCell.Column == null || grid.CurrentItem == null) return;
 
-        var value = GetCellValue(grid.CurrentCell.Column, grid.CurrentItem);
+        var value = DataGridExport.GetRawCellValue(grid.CurrentCell.Column, grid.CurrentItem);
         if (value.Length > 0) ClipboardText.TrySetDataObject(value);
     }
 
@@ -73,7 +76,7 @@ public static class ContextMenuHelper
         var sb = new StringBuilder();
         foreach (var col in grid.Columns)
         {
-            sb.Append(GetCellValue(col, grid.CurrentItem));
+            sb.Append(DataGridExport.GetClipboardCellValue(col, grid.CurrentItem));
             sb.Append('\t');
         }
         ClipboardText.TrySetDataObject(sb.ToString().TrimEnd('\t'));
@@ -97,7 +100,7 @@ public static class ContextMenuHelper
         {
             foreach (var col in grid.Columns)
             {
-                sb.Append(GetCellValue(col, item));
+                sb.Append(DataGridExport.GetClipboardCellValue(col, item));
                 sb.Append('\t');
             }
             sb.AppendLine();
@@ -150,22 +153,12 @@ public static class ContextMenuHelper
         }
     }
 
-    private static string FormatForExport(object? value)
-    {
-        if (value == null) return "";
-        if (value is IFormattable formattable)
-            return formattable.ToString(null, CultureInfo.InvariantCulture);
-        return value.ToString() ?? "";
-    }
+    /* One formatter and one quoting rule for every grid copy and CSV export. The shared DataGridExport
+       versions neutralize text that starts with a formula character (SpreadsheetText), so a cell of collected
+       text is not evaluated when the copy or the CSV is opened in a spreadsheet. */
+    private static string FormatForExport(object? value) => DataGridExport.FormatForExport(value);
 
-    private static string CsvEscape(string value, string separator)
-    {
-        if (value.Contains(separator, StringComparison.Ordinal) || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
-        {
-            return "\"" + value.Replace("\"", "\"\"") + "\"";
-        }
-        return value;
-    }
+    private static string CsvEscape(string value, string separator) => DataGridExport.CsvEscape(value, separator);
 
     /// <summary>The time text of a chart CSV export line, the format the export has always used.</summary>
     private const string ChartCsvTimeFormat = "yyyy-MM-dd HH:mm:ss";
@@ -202,7 +195,7 @@ public static class ContextMenuHelper
         return string.Join(separator, new[]
         {
             shown.ToString(ChartCsvTimeFormat, CultureInfo.InvariantCulture),
-            CsvEscape(seriesName, separator),
+            CsvEscape(SpreadsheetText.Neutralize(seriesName), separator),
             y.ToString(CultureInfo.InvariantCulture),
             DisplayZone.UtcOffsetText(plotted, displayZone)
         });

@@ -2616,6 +2616,21 @@ LIMIT 1";
            result rather than the two being one call), so the census below only has to look for the
            pin on the Create line itself — no reassignment in between for a future edit to slip
            an unpinned read behind. */
+
+        /* A string Npgsql cannot use throws from the Create below, leaves this method and ExecuteAsync, and the
+           host logs that exception to the console, the Event Log and the file log with its message and its inner
+           exception. Npgsql's text for that can quote part of the string (a password with an unquoted ';' makes the
+           text after it the "keyword", and a password tail that becomes a Host value with a ':' in it makes the text
+           after the ':' a bad port). So prove the string first, with Npgsql's own construction step (the guard builds
+           and disposes a data source, and opens nothing): the exception that leaves is the formatter's text, with no
+           inner exception, and the host still stops exactly as it did. The keywords added below (search path,
+           application name, session time zone) take part in none of Npgsql's construction checks, so a string that
+           passes here does not throw from the Create below for a parse or a validation reason. */
+        if (DarlingStoreConnection.TryDescribeParseFailure(storeConnectionString) is { } unusableStoreString)
+        {
+            throw new InvalidOperationException("postgres.connectionString could not be used: " + unusableStoreString);
+        }
+
         DarlingSelfAlertEvaluator.CollectionGapReport? collectionGapReport = null;
         await using var postgres = NpgsqlDataSource.Create(
             DarlingStoreConnection.PinSessionTimeZoneUtc(
@@ -3143,6 +3158,9 @@ LIMIT 1";
            holds — including on a store-unreachable boot. Re-published on every reload below. */
         _mcpState.Publish(config.Mcp.Enabled, config.Mcp.Port);
         _webState.Publish(config.Web.Enabled, config.Web.Port);
+        /* The SMTP settings in force (the store's when the view loaded, else darling.json's): a setup that sends its
+           login without encryption is named in the log, because no settings window is open for it. */
+        DarlingSmtpWarning.Log(config.Smtp, _logger);
         /* #2298: publish the effective server set the same way — store-authoritative when the view loaded,
            else the darling.json servers, which is what this run will actually collect from either way. The
            MCP host's plan-fetch resolver reads this instead of re-reading the store as the mcp role. */
@@ -6286,6 +6304,7 @@ LIMIT 1";
         }
 
         StoreConfigProvider.ApplyToConfig(config, view);
+        DarlingSmtpWarning.Log(config.Smtp, _logger); // the reloaded SMTP settings, same warning as at start
         /* #1560/#1562: the MCP + web host supervisors pick these up within their poll interval — the viewer's
            Settings toggles round-trip to a live start/stop/rebind with no service restart. */
         _mcpState.Publish(config.Mcp.Enabled, config.Mcp.Port);
