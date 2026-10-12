@@ -96,7 +96,7 @@ public interface IAlertEngineSettings
     /// <summary>Fire when the selected CPU metric (see <see cref="CpuAlertMode"/>) is at/above this %.</summary>
     int CpuThresholdPercent { get; }
 
-    /// <summary>Fire when the rolling-window blocked-process-report count reaches this value (count-based; see class remarks).</summary>
+    /// <summary>Fire when the rolling-window blocking-WAIT count (one per blocked session, blocker and wait start, not one per blocked-process report; #5644) reaches this value (count-based; see class remarks).</summary>
     int BlockingCountThreshold { get; }
 
     /// <summary>
