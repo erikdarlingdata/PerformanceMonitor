@@ -334,7 +334,7 @@ public partial class ViewerServerTab
     private void ShowQueriesForWaitType(string waitType, DateTime centreUtc)
     {
         var (fromUtc, toUtc) = DrillWindowUtc(centreUtc);
-        var window = new WaitDrillDownWindow(_dataService, _server.ServerId, waitType, fromUtc, toUtc)
+        var window = new WaitDrillDownWindow(_dataService, _server.ServerId, _server.DisplayName, waitType, fromUtc, toUtc)
         {
             Owner = Window.GetWindow(this),
         };

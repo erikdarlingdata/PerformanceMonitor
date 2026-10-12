@@ -27,6 +27,12 @@ public class AnomalousJobInfo
     public long P95DurationSeconds { get; set; }
     public decimal? PercentOfAverage { get; set; }
 
+    /// <summary>The instant this row's source data was last collected (UTC), or null when the host does not
+    /// have a UTC instant for it (#5642). Feeds the alert's newest-sample age line
+    /// (<c>AlertContext.NewestSample</c>). Read from the same <c>MAX(collection_time)</c> the check already
+    /// reads; a pre-UTC local stamp is never put here, so null means "no age line", not "unknown age".</summary>
+    public DateTime? NewestSampleUtc { get; set; }
+
     /// <summary>
     /// When the run started, on the MONITORED SERVER's own clock. <c>running_jobs.start_time</c> is
     /// <c>ja.start_execution_date</c>, which <c>RunningJobsCollector</c> confirms local by taking the

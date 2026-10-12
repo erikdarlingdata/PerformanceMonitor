@@ -138,6 +138,7 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<DatabaseConfigChangeRow>? _databaseConfigChangesFilterMgr;
     private DataGridFilterManager<TraceFlagChangeRow>? _traceFlagChangesFilterMgr;
     private CancellationTokenSource? _actualPlanCts;
+    private bool _actualPlanRequestOpen;
 
     /// <summary>
     /// This server's clock: its time zone where one was collected, else the fixed offset the connect probe read

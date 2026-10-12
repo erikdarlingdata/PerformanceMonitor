@@ -47,7 +47,7 @@ public partial class ProcedureHistoryWindow : Window
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
 
-    public ProcedureHistoryWindow(LocalDataService dataService, int serverId, string databaseName, string schemaName, string objectName, int hoursBack, string? connectionString, Func<TimeZoneInfo> displayZone, Func<ServerClock> serverClock)
+    public ProcedureHistoryWindow(LocalDataService dataService, int serverId, string serverName, string databaseName, string schemaName, string objectName, int hoursBack, string? connectionString, Func<TimeZoneInfo> displayZone, Func<ServerClock> serverClock)
     {
         InitializeComponent();
         _dataService = dataService;
@@ -68,7 +68,7 @@ public partial class ProcedureHistoryWindow : Window
             async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
                 productName: "SQL Server Performance Monitor Lite")),
-            "the monitored server");
+            serverName);
 
         _filterManager = new DataGridFilterManager<ProcedureStatsHistoryRow>(HistoryDataGrid);
         DataGridFilterColumns.AddFilterButtons(HistoryDataGrid, Filter_Click);

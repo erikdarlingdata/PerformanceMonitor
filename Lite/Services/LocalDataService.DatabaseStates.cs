@@ -409,7 +409,7 @@ previous AS (
     FROM {src} ds
     WHERE ds.server_id = $1 AND ds.collection_time = (SELECT t FROM prev)
 )
-SELECT l.database_name, l.eff, COALESCE(e.expected_state, ''), COALESCE(e.last_alerted_state, '')
+SELECT l.database_name, l.eff, COALESCE(e.expected_state, ''), COALESCE(e.last_alerted_state, ''), (SELECT t FROM newest)
 FROM latest l
 JOIN previous p
   ON p.database_name = l.database_name
@@ -436,7 +436,9 @@ ORDER BY l.database_name";
                 ExpectedState = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 /* #2203: what the engine last TOLD an operator about, so alreadyAnnounced can be true in
                    Lite the way it already is in Darling. Empty means never announced. */
-                LastAlertedState = reader.IsDBNull(3) ? "" : reader.GetString(3)
+                LastAlertedState = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                /* #5642: the newest database-state snapshot (naive-UTC collection_time), for the alert's newest-sample age line. */
+                NewestSampleUtc = reader.IsDBNull(4) ? null : DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc)
             });
         }
 

@@ -110,6 +110,11 @@ public sealed class ViewerAlertRow
 
     public bool IsWarning => AlertHistoryRowSeverity.IsWarning(MetricName, ContextJson);
 
+    /* #5642: how old the newest sample was when the alert FIRED, the Newest Sample column. Read off the persisted context
+       (the carrier the engine stamped), never measured against the clock now; empty on a row without one, as Lite's row. */
+    public string NewestSampleDisplay =>
+        AlertDetailText.SampleAgeLine(AlertContextSerializer.TryReadNewestSample(ContextJson)) ?? "";
+
     /// <summary>
     /// This row as the <see cref="AlertMuteContext"/> a <see cref="MuteRule"/> is judged against — the SAME
     /// server name and metric name the row carries (so a rule keyed on them matches this row by construction,

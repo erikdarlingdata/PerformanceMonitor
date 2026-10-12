@@ -87,7 +87,7 @@ public partial class ViewerServerTab
 
         var (startUtc, endUtc) = GetWindowUtc();
         var window = new QueryStatsHistoryWindow(
-            _dataService, _server.ServerId, key.DatabaseName, key.QueryHash, key.QueryText, startUtc, endUtc)
+            _dataService, _server.ServerId, _server.DisplayName, key.DatabaseName, key.QueryHash, key.QueryText, startUtc, endUtc)
         {
             Owner = Window.GetWindow(this),
         };
@@ -113,7 +113,7 @@ public partial class ViewerServerTab
 
         var (startUtc, endUtc) = GetWindowUtc();
         var window = new QueryStoreHistoryWindow(
-            _dataService, _server.ServerId, key.DatabaseName, key.QueryId, key.PlanId, key.QueryText, startUtc, endUtc)
+            _dataService, _server.ServerId, _server.DisplayName, key.DatabaseName, key.QueryId, key.PlanId, key.QueryText, startUtc, endUtc)
         {
             Owner = Window.GetWindow(this),
         };
@@ -126,7 +126,7 @@ public partial class ViewerServerTab
 
         var (startUtc, endUtc) = GetWindowUtc();
         var window = new QueryStoreHistoryWindow(
-            _dataService, _server.ServerId, key.DatabaseName, key.QueryId, key.PlanId, key.QueryText, startUtc, endUtc)
+            _dataService, _server.ServerId, _server.DisplayName, key.DatabaseName, key.QueryId, key.PlanId, key.QueryText, startUtc, endUtc)
         {
             Owner = Window.GetWindow(this),
         };

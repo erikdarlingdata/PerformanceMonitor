@@ -624,9 +624,12 @@ public sealed class TestMapShadowGuardTests : IDisposable
     }
 
     /// <summary>Runs one shard script in a scratch folder with a fake `dotnet` that answers the class listing from
-    /// <paramref name="classes"/> and prints each chunk's -class arguments. Returns the classes the chunks ran, and the output.</summary>
+    /// <paramref name="classes"/> and prints each chunk's -class arguments. Returns the classes the chunks ran, and the output.
+    /// The fake answers the listing the way the real runner does: it prints a `LIST` line with the arguments it was handed,
+    /// and exits 3 on anything that is not a `-list`, `-trait` or `-trait-` option with its value. <paramref name="scopeFilter"/>
+    /// reaches the Darling script the way the build job hands it over, as `-ScopeFilter $env:DARLING_SCOPE_FILTER`.</summary>
     private (int ExitCode, List<string> Ran, string Output) RunShardScript(string script, string suite, string[] classes, string? selectionJson,
-        string eventName = "pull_request")
+        string eventName = "pull_request", string scopeFilter = "")
     {
         var pwsh = FindPwsh();
         Assert.SkipWhen(pwsh is null, "PowerShell 7 (pwsh) is not on PATH, so the shard scripts cannot be run here.");
@@ -647,6 +650,16 @@ public sealed class TestMapShadowGuardTests : IDisposable
             $global:ListFile = Join-Path $PWD 'classes.txt'
             function dotnet {
                 if ($args -contains '-list') {
+                    $all = @($args)
+                    $runner = @($all[[array]::IndexOf($all, '-list')..($all.Count - 1)])
+                    Write-Host ('LIST ' + (($runner | ForEach-Object { "[$_]" }) -join ''))
+                    for ($i = 0; $i -lt $runner.Count; $i += 2) {
+                        if ($runner[$i] -notin '-list', '-trait', '-trait-' -or $i + 1 -ge $runner.Count) {
+                            Write-Host ('unknown option: ' + $runner[$i])
+                            $global:LASTEXITCODE = 3
+                            return
+                        }
+                    }
                     Write-Output 'a dotnet notice line that is not JSON'
                     Write-Output (ConvertTo-Json -Compress -InputObject @(Get-Content -Path $global:ListFile | Where-Object { $_ }))
                     $global:LASTEXITCODE = 0
@@ -659,7 +672,7 @@ public sealed class TestMapShadowGuardTests : IDisposable
             $env:SLOW_REPO = ''
             $env:SLOW_PR = ''
             $env:SLOW_BASE_REF = ''
-            if ($Suite -eq 'darling') { & $Script -Shard 0 -ShardCount 1 -EventName $EventName -SelectionFile $Selection }
+            if ($Suite -eq 'darling') { & $Script -Shard 0 -ShardCount 1 -EventName $EventName -ScopeFilter $env:DARLING_SCOPE_FILTER -SelectionFile $Selection }
             else { & $Script -Shard 0 -ShardCount 1 -JobIndex 0 -EventName $EventName -SelectionFile $Selection }
             exit $LASTEXITCODE
             """);
@@ -670,6 +683,7 @@ public sealed class TestMapShadowGuardTests : IDisposable
             RedirectStandardError = true,
             UseShellExecute = false,
         };
+        psi.Environment["DARLING_SCOPE_FILTER"] = scopeFilter;
         foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-File", harness, "-Script", Script(script), "-Suite", suite,
                      "-Selection", selectionJson is null ? "" : selection, "-EventName", eventName })
         {
@@ -747,5 +761,65 @@ public sealed class TestMapShadowGuardTests : IDisposable
         var run = RunShardScript(script, suite, all, selection);
         Assert.True(run.ExitCode == 0, run.Output);
         Assert.Equal([$"{ns}.OuterTests", $"{ns}.OuterTests+InnerLive"], run.Ran.OrderBy(c => c, StringComparer.Ordinal));
+    }
+
+    private static string ListingArguments(string output) =>
+        output.Split('\n').Select(l => l.TrimEnd('\r')).Single(l => l.StartsWith("LIST ", StringComparison.Ordinal));
+
+    [Fact]
+    public void TheDarlingShardScript_HandsTheScopeFilterToTheClassListingAsSeparateArguments()
+    {
+        // The build job's pass for a pull request that changes only Lite files lists the classes with
+        // `-ScopeFilter "-trait Stage=Guard -trait Reads=Lite"`. The script held the split filter in a variable that
+        // PowerShell treats as the same variable as the typed [string] $ScopeFilter parameter (names are case-insensitive),
+        // so the array became one string again and splatting it gave the runner the string's characters as arguments:
+        // exit code 3 from the listing, on every such pull request. The fake runner here exits 3 the same way.
+        string[] all = [.. Enumerable.Range(1, 5).Select(i => $"Darling.Tests.Class{i:00}Tests")];
+        var selection = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["full"] = false,
+            ["reason"] = "",
+            ["selected"] = new Dictionary<string, string[]> { ["darling"] = ["Class03Tests"] },
+        });
+
+        var scoped = RunShardScript("run-darling-pg-shard.ps1", "darling", all, selection, scopeFilter: "-trait Stage=Guard -trait Reads=Lite");
+        Assert.True(scoped.ExitCode == 0, scoped.Output);
+        Assert.Equal("LIST [-list][classes/json][-trait][Stage=Guard][-trait][Reads=Lite]", ListingArguments(scoped.Output));
+        Assert.Equal("Darling.Tests.Class03Tests", Assert.Single(scoped.Ran));
+
+        // No scope (every other caller): the listing is the bare `-list classes/json`, with no empty argument after it.
+        var whole = RunShardScript("run-darling-pg-shard.ps1", "darling", all, selection);
+        Assert.True(whole.ExitCode == 0, whole.Output);
+        Assert.Equal("LIST [-list][classes/json]", ListingArguments(whole.Output));
+    }
+
+    [Fact]
+    public void TheShardScripts_NeverAssignAVariableThatIsAlsoOneOfTheirParameters()
+    {
+        // PowerShell variable names are case-insensitive, so `$scopeFilter = ...` inside a script with a typed
+        // `[string] $ScopeFilter` parameter assigns the parameter (and converts the value to a string). That broke the
+        // Darling class listing; a script can use `$scopeArgs` or any other name, never the same name in another case.
+        var scripts = Directory.GetFiles(Path.Combine(ParitySource.RepoRoot(), ".github", "scripts"), "*.ps1");
+        Assert.NotEmpty(scripts);
+        foreach (var path in scripts)
+        {
+            var text = File.ReadAllText(path).Replace("\r\n", "\n");
+            var block = Regex.Match(text, @"^param\s*\((?<body>.*?)^\)", RegexOptions.Singleline | RegexOptions.Multiline | RegexOptions.IgnoreCase);
+            if (!block.Success)
+            {
+                continue;
+            }
+
+            var parameters = Regex.Matches(block.Groups["body"].Value, @"^\s*(?:\[[^\]\n]*\]\s*)*\$(?<n>[A-Za-z_]\w*)", RegexOptions.Multiline)
+                .Select(m => m.Groups["n"].Value).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            Assert.NotEmpty(parameters);
+            var rest = text[(block.Index + block.Length)..];
+            var assigned = Regex.Matches(rest, @"^[ \t]*\$(?<a>[A-Za-z_]\w*)\s*[-+*/]?=(?!=)|foreach\s*\(\s*\$(?<f>[A-Za-z_]\w*)\s+in\b",
+                    RegexOptions.Multiline | RegexOptions.IgnoreCase)
+                .Select(m => m.Groups["a"].Success ? m.Groups["a"].Value : m.Groups["f"].Value)
+                .Where(n => parameters.Contains(n)).Distinct(StringComparer.Ordinal).ToList();
+            Assert.True(assigned.Count == 0,
+                Path.GetFileName(path) + " assigns " + string.Join(", ", assigned.Select(n => "$" + n)) + ", which is one of its parameters in another spelling.");
+        }
     }
 }

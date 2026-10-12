@@ -720,19 +720,28 @@ public partial class FinOpsTab
             return;
         }
 
-        var argsJson = ViewerDataService.BuildActualPlanArgs(hi.QueryHash, hi.DatabaseName);
+        /* #5639: an empty or all-zero hash names no particular query. The row holds a SAMPLE text, so the flow
+           reads the text the service will run (the latest stored text for the hash and database) and the
+           prompt, the modification check and the request's digest all use that text. */
+        if (!ViewerActualPlanFlow.TryCheckQueryStatsHash(Window.GetWindow(this)!, hi.QueryHash))
+        {
+            return;
+        }
+
         var label = $"Actual Plan - {hi.QueryHash}";
 
-        var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
+        var capture = await ViewerActualPlanFlow.RequestActualPlanAsync(
             Window.GetWindow(this)!, _dataService, _server.ServerId, _server.DisplayName, hi.DatabaseName,
-            hi.FullQueryText, hi.QueryPlanXml, argsJson,
+            queryText: null, fetchPlanXml: null, argsJson: "",
             onStarted: () => System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait,
             onFinished: () => System.Windows.Input.Mouse.OverrideCursor = null,
-            System.Threading.CancellationToken.None);
+            System.Threading.CancellationToken.None,
+            queryStatsHash: hi.QueryHash);
 
-        if (planXml != null)
+        if (capture != null)
         {
-            PlanRequested?.Invoke(planXml, label, hi.FullQueryText);
+            /* The plan host gets the statement that ran, not the row's sample text. */
+            PlanRequested?.Invoke(capture.PlanXml, label, capture.QueryText);
         }
     }
 

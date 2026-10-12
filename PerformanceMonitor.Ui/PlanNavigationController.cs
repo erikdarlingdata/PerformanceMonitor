@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -29,26 +30,27 @@ public sealed class PlanNavigationController
     private readonly Window _owner;
     private readonly Func<string, string, string?, Task> _showPlan;
     private readonly Func<string, string, string?, string?, CancellationToken, Task<string?>> _executeActual;
-    private readonly string _targetDescription;
+    private readonly string _serverName;
     private readonly Action<string>? _setStatus;
     private CancellationTokenSource? _actualPlanCts;
+    private bool _actualPlanInProgress;
 
     /// <param name="owner">Host window — owns the dialogs and cancels a running capture when closed.</param>
     /// <param name="showPlan">(planXml, label, queryText) =&gt; opens the plan in the app's viewer.</param>
     /// <param name="executeActual">(databaseName, queryText, estimatedPlanXml, isolationLevel, ct) =&gt; captured actual-plan XML.</param>
-    /// <param name="targetDescription">How the confirm dialog names the server (e.g. "the monitored server" or a server name).</param>
+    /// <param name="serverName">The server the confirm dialog names (#5639); a host whose server can change between clicks passes the per-click server in <see cref="ActualPlanRunTarget"/> instead.</param>
     /// <param name="setStatus">Optional status-text callback for hosts that have a status line.</param>
     public PlanNavigationController(
         Window owner,
         Func<string, string, string?, Task> showPlan,
         Func<string, string, string?, string?, CancellationToken, Task<string?>> executeActual,
-        string targetDescription,
+        string serverName,
         Action<string>? setStatus = null)
     {
         _owner = owner;
         _showPlan = showPlan;
         _executeActual = executeActual;
-        _targetDescription = targetDescription;
+        _serverName = serverName;
         _setStatus = setStatus;
 
         // Closing the host cancels any in-flight actual-plan capture.
@@ -92,10 +94,18 @@ public sealed class PlanNavigationController
     /// <summary>
     /// Re-executes <paramref name="queryText"/> against the monitored server (after confirmation) with
     /// SET STATISTICS XML ON and opens the captured actual plan. No-ops gracefully when there is no
-    /// query text (e.g. procedure rows, which carry only a name).
+    /// query text (e.g. procedure rows, which carry only a name). The prompt names the server and database the
+    /// query runs in, shows the query text, and leads with the shared data-modification warning when the stored
+    /// plan shows the query writes data, or when that plan is missing or unreadable (#5639).
     /// </summary>
+    /// <param name="fetchPlanXml">Reads the stored plan the data-modification check judges, BEFORE the prompt (a
+    /// read of collected data or a read-only plan fetch; nothing runs). Null, a null result, or a failed read all
+    /// count as "no plan", which shows the warning.</param>
+    /// <param name="target">The server this one click was made against, when the host can change its server
+    /// between clicks (the shared FinOps tab). The prompt and the run use it, and the run stops if the host's
+    /// selection moved off it.</param>
     public async Task GetActualPlanAsync(string? queryText, string databaseName, string label,
-        string? estimatedPlanXml = null, string? isolationLevel = null)
+        Func<Task<string?>>? fetchPlanXml = null, string? isolationLevel = null, ActualPlanRunTarget? target = null)
     {
         if (string.IsNullOrWhiteSpace(queryText))
         {
@@ -104,51 +114,147 @@ public sealed class PlanNavigationController
             return;
         }
 
-        var confirm = MessageBox.Show(_owner,
-            $"You are about to execute this query against {_targetDescription} in database " +
-            $"[{(string.IsNullOrEmpty(databaseName) ? "default" : databaseName)}].\n\n" +
-            "Make sure you understand what the query does before proceeding.\n" +
-            "The query will execute with SET STATISTICS XML ON to capture the actual plan.\n" +
-            "All data results will be discarded.\n\n" +
-            QueryModificationDetector.CapturedQueryNotice,
-            "Get Actual Plan", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
-        if (confirm != MessageBoxResult.OK) return;
-
-        _actualPlanCts?.Dispose();
-        _actualPlanCts = new CancellationTokenSource();
-
-        string? actualPlanXml;
+        /* #5639: one actual-plan request at a time. The plan lookup below can take a while, and a second click
+           meanwhile would queue a second lookup and a second prompt. */
+        if (_actualPlanInProgress) return;
+        _actualPlanInProgress = true;
         try
         {
-            _setStatus?.Invoke("Executing query for actual plan...");
-            using (SetBusy())
-                actualPlanXml = await _executeActual(databaseName ?? "", queryText, estimatedPlanXml, isolationLevel, _actualPlanCts.Token);
+            string? estimatedPlanXml = null;
+            if (fetchPlanXml != null)
+            {
+                try
+                {
+                    _setStatus?.Invoke("Looking up the stored plan...");
+                    using (SetBusy())
+                        estimatedPlanXml = await fetchPlanXml();
+                }
+                catch (Exception)
+                {
+                    estimatedPlanXml = null; /* a failed lookup is the same as no plan: the warning shows */
+                }
+            }
+
+            if (target != null && !target.IsCurrent())
+            {
+                _setStatus?.Invoke("The selected server changed; nothing was run.");
+                return;
+            }
+
+            /* #5639: the same data-modification check every other actual-plan entry point runs. The stored plan
+               decides it; a missing or unreadable plan is treated as modifying, and the prompt says so. */
+            var modification = QueryModificationDetector.Detect(estimatedPlanXml, queryText);
+            var modificationWarning = QueryModificationDetector.BuildConsentWarning(modification, databaseName);
+
+            var prompt = new StringBuilder();
+            if (modificationWarning.Length > 0)
+            {
+                prompt.AppendLine(modificationWarning);
+                prompt.AppendLine("──────────────────────────────────────────");
+                prompt.AppendLine();
+            }
+            prompt.AppendLine("You are about to execute this query on " +
+                QueryModificationDetector.BuildConsentTarget(target?.ServerName ?? _serverName, databaseName) + ".");
+            prompt.AppendLine();
+            prompt.AppendLine(QueryModificationDetector.BuildConsentQueryText(queryText));
+            prompt.AppendLine("Make sure you understand what the query does before proceeding.");
+            prompt.AppendLine("The query will execute with SET STATISTICS XML ON to capture the actual plan.");
+            prompt.AppendLine("All data results will be discarded.");
+            prompt.AppendLine();
+            prompt.AppendLine(QueryModificationDetector.CapturedQueryNotice);
+
+            var confirm = MessageBox.Show(_owner, prompt.ToString(),
+                QueryModificationDetector.BuildConsentTitle(modification), MessageBoxButton.OKCancel, MessageBoxImage.Warning);
+            if (confirm != MessageBoxResult.OK) return;
+            if (target != null && !target.IsCurrent())
+            {
+                _setStatus?.Invoke("The selected server changed; nothing was run.");
+                return;
+            }
+
+            _actualPlanCts?.Dispose();
+            _actualPlanCts = new CancellationTokenSource();
+
+            string? actualPlanXml;
+            try
+            {
+                _setStatus?.Invoke("Executing query for actual plan...");
+                var executeActual = _executeActual;
+                if (target != null)
+                {
+                    executeActual = ((IActualPlanRunner)target).RunQuery;
+                }
+
+                using (SetBusy())
+                    actualPlanXml = await executeActual(databaseName ?? "", queryText, estimatedPlanXml, isolationLevel, _actualPlanCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                _setStatus?.Invoke("Actual plan capture cancelled.");
+                MessageBox.Show(_owner, "The query was cancelled or timed out.", "Cancelled",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            catch (Exception ex)
+            {
+                _setStatus?.Invoke("Actual plan capture failed.");
+                MessageBox.Show(_owner, $"Failed to get the actual plan:\n\n{ex.Message}", "Error",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(actualPlanXml))
+            {
+                _setStatus?.Invoke("No actual plan captured.");
+                MessageBox.Show(_owner, "The query executed but no execution plan was captured.",
+                    "No Plan", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            _setStatus?.Invoke("Actual plan captured successfully.");
+            await _showPlan(actualPlanXml, label, queryText);
         }
-        catch (OperationCanceledException)
+        finally
         {
-            _setStatus?.Invoke("Actual plan capture cancelled.");
-            MessageBox.Show(_owner, "The query was cancelled or timed out.", "Cancelled",
-                MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
+            _actualPlanInProgress = false;
         }
-        catch (Exception ex)
+    }
+
+    /// <summary>
+    /// The server one "Get Actual Plan" click was made against, captured at click time by a host whose selected
+    /// server can change while the plan lookup or the prompt is open (#5639). <see cref="ServerName"/> is what the
+    /// prompt names, <see cref="IsCurrent"/> is false once the host's selection has moved on (which stops the
+    /// request before anything runs), and the run itself goes against that same server's connection.
+    /// <para>The run is reachable only from this controller's gated <c>GetActualPlanAsync</c>: the executor is held
+    /// in a private field and handed out through <see cref="IActualPlanRunner"/>, an interface only this class can
+    /// name. (An <c>internal</c> member would not do: this assembly grants internals to both host apps.)</para>
+    /// </summary>
+    public sealed class ActualPlanRunTarget : IActualPlanRunner
+    {
+        private readonly Func<string, string, string?, string?, CancellationToken, Task<string?>> _execute;
+
+        public ActualPlanRunTarget(
+            string serverName,
+            Func<bool> isCurrent,
+            Func<string, string, string?, string?, CancellationToken, Task<string?>> execute)
         {
-            _setStatus?.Invoke("Actual plan capture failed.");
-            MessageBox.Show(_owner, $"Failed to get the actual plan:\n\n{ex.Message}", "Error",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-            return;
+            ServerName = serverName;
+            IsCurrent = isCurrent;
+            _execute = execute;
         }
 
-        if (string.IsNullOrWhiteSpace(actualPlanXml))
-        {
-            _setStatus?.Invoke("No actual plan captured.");
-            MessageBox.Show(_owner, "The query executed but no execution plan was captured.",
-                "No Plan", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
+        public string ServerName { get; }
 
-        _setStatus?.Invoke("Actual plan captured successfully.");
-        await _showPlan(actualPlanXml, label, queryText);
+        public Func<bool> IsCurrent { get; }
+
+        Task<string?> IActualPlanRunner.RunQuery(string databaseName, string queryText, string? estimatedPlanXml, string? isolationLevel, CancellationToken cancellationToken)
+            => _execute(databaseName, queryText, estimatedPlanXml, isolationLevel, cancellationToken);
+    }
+
+    /// <summary>Runs a target's executor. Private to the controller, so no other type can call it.</summary>
+    private interface IActualPlanRunner
+    {
+        Task<string?> RunQuery(string databaseName, string queryText, string? estimatedPlanXml, string? isolationLevel, CancellationToken cancellationToken);
     }
 
     private static BusyScope SetBusy()

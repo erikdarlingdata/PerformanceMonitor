@@ -65,7 +65,7 @@ public partial class ServerTab : UserControl
         var (fromDate, toDate) = GetDrillWindow(time, 30, 30);
 
         var window = new Windows.WaitDrillDownWindow(
-            _dataService, _serverId, waitType, 1, GetPickerZone(), fromDate, toDate,
+            _dataService, _serverId, _server.ServerName, waitType, 1, GetPickerZone(), fromDate, toDate,
             _credentialResolver.GetConnectionString(_server));
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();

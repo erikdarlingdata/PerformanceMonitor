@@ -227,7 +227,7 @@ public partial class ServerTab : UserControl
         if (string.IsNullOrEmpty(item.DatabaseName) || string.IsNullOrEmpty(item.QueryHash)) return;
 
         var connStr = _credentialResolver.GetConnectionString(_server);
-        var window = new Windows.QueryStatsHistoryWindow(_dataService, _serverId, item.DatabaseName, item.QueryHash, GetHoursBack(), item.QueryText, connStr, GetPickerZone, () => _serverClock);
+        var window = new Windows.QueryStatsHistoryWindow(_dataService, _serverId, _server.ServerName, item.DatabaseName, item.QueryHash, GetHoursBack(), item.QueryText, connStr, GetPickerZone, () => _serverClock);
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
     }
@@ -238,7 +238,7 @@ public partial class ServerTab : UserControl
         if (string.IsNullOrEmpty(item.DatabaseName) || string.IsNullOrEmpty(item.ObjectName)) return;
 
         var connStr = _credentialResolver.GetConnectionString(_server);
-        var window = new Windows.ProcedureHistoryWindow(_dataService, _serverId, item.DatabaseName, item.SchemaName, item.ObjectName, GetHoursBack(), connStr, GetPickerZone, () => _serverClock);
+        var window = new Windows.ProcedureHistoryWindow(_dataService, _serverId, _server.ServerName, item.DatabaseName, item.SchemaName, item.ObjectName, GetHoursBack(), connStr, GetPickerZone, () => _serverClock);
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
     }
@@ -249,7 +249,7 @@ public partial class ServerTab : UserControl
         if (string.IsNullOrEmpty(item.DatabaseName) || item.QueryId == 0) return;
 
         var connStr = _credentialResolver.GetConnectionString(_server);
-        var window = new Windows.QueryStoreHistoryWindow(_dataService, _serverId, item.DatabaseName, item.QueryId, item.PlanId, item.QueryText, GetHoursBack(), connStr, GetPickerZone);
+        var window = new Windows.QueryStoreHistoryWindow(_dataService, _serverId, _server.ServerName, item.DatabaseName, item.QueryId, item.PlanId, item.QueryText, GetHoursBack(), connStr, GetPickerZone);
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
     }

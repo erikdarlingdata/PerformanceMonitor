@@ -172,7 +172,7 @@ public class AlertIncidentRenderTests
             new[]
             {
                 "AgReplicaIdentity", "AttachmentFileName", "AttachmentXml", "CollectorName", "Details",
-                "Incidents", "Route", "Routing", "SeverityOverride", "WaitType"
+                "Incidents", "NewestSample", "Route", "Routing", "SeverityOverride", "WaitType"
             },
             census);
 
@@ -180,6 +180,8 @@ public class AlertIncidentRenderTests
         context.SeverityOverride = AlertSeverityLevel.Critical;
         context.AttachmentXml = "<graph/>";
         context.AttachmentFileName = "deadlock_graph.xml";
+        /* #5642: the fire-time sample age rides every copy, so the delivered body prints the age line. */
+        context.NewestSample = new AlertNewestSample("CPU", new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc), TimeSpan.FromSeconds(45));
         AlertIncidentRenderer.Apply(context, new[]
         {
             new AlertIncident("stale-census", new[] { "SalesDb.dbo.Orders" }),
@@ -205,6 +207,7 @@ public class AlertIncidentRenderTests
         {
             Assert.Equal(AlertSeverityLevel.Critical, copy.SeverityOverride);
             Assert.Equal("OrdersAG:REPLICA-A", copy.AgReplicaIdentity);
+            Assert.Equal(context.NewestSample, copy.NewestSample);
         }
 
         Assert.Null(filtered!.AttachmentXml);

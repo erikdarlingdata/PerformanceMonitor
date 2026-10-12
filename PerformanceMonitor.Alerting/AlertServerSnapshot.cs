@@ -92,6 +92,27 @@ public sealed record AlertServerSnapshot(
     /// null: their rules never carry an id, so their name-keyed match is the only one that applies.</summary>
     public int? ServerId { get; init; }
 
+    /// <summary>The CPU sample's instant when it came from a TRUE <c>sample_time_utc</c> (#5642), and null
+    /// otherwise. <see cref="CpuSampleTimeUtc"/> falls back to the row's local-clock stamp on a pre-V134 row
+    /// (it is only an identity), so it cannot give an age; this twin is set only from a real UTC instant, and
+    /// null means "no newest-sample age line", never "age unknown".</summary>
+    public DateTime? CpuSampleUtcOnly { get; init; }
+
+    /// <summary>Recent CPU samples, OLDEST FIRST, UTC (#5642): the PostgreSQL check's window (look back 15
+    /// minutes, at most 32 samples). The engine feeds each one through the persistence gate in order instead of
+    /// counting only the latest row per sweep. Null or empty = no list, and the engine uses the single latest
+    /// sample (<see cref="SqlCpuPercent"/>/<see cref="TotalCpuPercent"/>/<see cref="CpuSampleTimeUtc"/>) as
+    /// before. A sample later than the engine's clock is ignored.</summary>
+    public IReadOnlyList<AlertCpuSample>? RecentCpuSamples { get; init; }
+
+    /// <summary>The instant (naive UTC) the CURRENT connection/runtime for this server began collecting
+    /// (#5642). A service restart and a reconnect after a drop each set a new value; a server evaluated from
+    /// its last known target after its runtime dropped keeps the last value. The engine feeds individually only
+    /// the samples at or after this instant; older (backfilled) samples collapse to the newest one, so a spike
+    /// that ended while nobody was watching never alerts. Null = unknown, and the engine collapses the list to
+    /// the single newest sample (the path a missing list takes), never treating every sample as eligible.</summary>
+    public DateTime? WatchingSinceUtc { get; init; }
+
     /// <summary>True when another registration carries the same display name (ordinal), blank-on-host, host-equal
     /// or typed alike. Darling sets it from the registry snapshot; Lite and the Dashboard never do, so their
     /// dedup keys do not change.</summary>
@@ -102,3 +123,8 @@ public sealed record AlertServerSnapshot(
     /// everything shown keep <see cref="ServerName"/>; only fingerprint inputs use this.</summary>
     public string FingerprintServerName => AlertFingerprint.ServerIdentity(ServerName, ServerId, ServerNameIsShared);
 }
+
+/// <summary>One CPU sample for the engine's persistence gate (#5642): the sample's UTC instant and the two CPU
+/// values the gate uses (<see cref="AlertServerSnapshot.SqlCpuPercent"/> and
+/// <see cref="AlertServerSnapshot.TotalCpuPercent"/> for that sample).</summary>
+public sealed record AlertCpuSample(DateTime SampleTimeUtc, double? SqlCpuPercent, double? TotalCpuPercent);

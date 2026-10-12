@@ -799,9 +799,12 @@ public partial class MainWindow : Window
     /// </summary>
     private static string ToastBody(ViewerAlertRow row)
     {
-        if (!string.IsNullOrEmpty(row.DetailText))
+        /* #5642: the trailing sample-age line is not a summary; a detail text that is only that line (CPU's)
+           falls through to the formatted value instead of toasting "Newest CPU sample: ...". */
+        var summaryText = AlertDetailText.StripSampleAge(row.DetailText ?? string.Empty);
+        if (!string.IsNullOrEmpty(summaryText))
         {
-            foreach (var line in row.DetailText.Split('\n'))
+            foreach (var line in summaryText.Split('\n'))
             {
                 var trimmed = line.Trim();
                 if (!string.IsNullOrEmpty(trimmed))

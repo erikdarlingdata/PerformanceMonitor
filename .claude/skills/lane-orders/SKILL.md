@@ -223,11 +223,10 @@ Never edit an existing migration.
   PR for one issue. The coordinator names one lane, usually the last, to write the PR's top `## Why` and
   `## What changes` for the whole issue and its one CHANGELOG entry. Lanes that fix review findings push to the PR's
   own branch.
-- Write the PR body in one Write, from the diff and your numbers. Run
-  `python "C:/Users/edarl/.claude/skills/plain-english/check.py" <body-file>` ONCE, fix the real hits in one pass,
-  and publish (Erik, 2026-10-06; this replaces the 2026-09-25 rule against running it). Don't re-run it to chase a
-  clean score: a lane writes its body at its largest context, and one lane spent 53 minutes and 278k tokens
-  rewriting. The body must be true.
+- Write the PR body in one Write, from the diff and your numbers, and publish. Never run the plain-English checker
+  on a PR body, an issue or a comment (Erik, 2026-10-11: a waste of time and tokens; it is for blogs, social posts and
+  demo script comments). A lane writes its body at its largest context, and one lane once spent 53 minutes and 278k
+  tokens rewriting one. The body must be true.
 - **Don't mark it ready, don't merge, and don't enable auto-merge.** The coordinator does all three after
   verifying.
 - A user-visible change gets a CHANGELOG entry in `<CHANGELOG_BUFFER_DIR>/<PR>-reported.txt`, in this form:

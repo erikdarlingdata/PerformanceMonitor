@@ -647,13 +647,14 @@ public static class DarlingNativeOwner
 # the part that exists), so a root typed one way and a path listed or joined the other compared unequal, which is how a root
 # under a GitHub Windows runner's temp folder (C:\Users\RUNNER~1\...) lost its hard links and its trusted folders. The part
 # of the path that exists is spelled out by GetLongPathName and a name below it that does not exist stays as typed. Returns
-# $null when no part of the path can be worked out, and every caller treats that as not trusted. Kept byte-identical in
-# install-darling.ps1 and upgrade-darling.ps1.
+# $null when no part of the path can be worked out, and every caller treats that as not trusted. The separator it trims and
+# joins with is the runtime's, so a backslash is only a separator on Windows. Kept byte-identical in install-darling.ps1 and
+# upgrade-darling.ps1.
 function Get-DarlingCanonicalPath([string]$path) {
     if ([string]::IsNullOrWhiteSpace($path)) { return $null }
     try {
         $full = [IO.Path]::GetFullPath($path)
-        $trimmed = $full.TrimEnd('\')
+        $trimmed = $full.TrimEnd([IO.Path]::DirectorySeparatorChar)
         if ($trimmed.Length -le 2) { return $full }
         if ($trimmed.IndexOf('~') -lt 0) { return $trimmed }
         if (-not ('DarlingNativePaths' -as [type])) {
@@ -693,7 +694,7 @@ public static class DarlingNativePaths
             $below = @([IO.Path]::GetFileName($existing)) + $below
             $existing = $parent
         }
-        return (@($long.TrimEnd('\')) + $below) -join '\'
+        return (@($long.TrimEnd([IO.Path]::DirectorySeparatorChar)) + $below) -join [IO.Path]::DirectorySeparatorChar
     }
     catch { return $null }
 }
@@ -849,7 +850,8 @@ function Get-DarlingPreLockTrustedSidsForRerun([string]$serviceName, $existingSe
 # comment-stripped text, as Get-DarlingExtraServiceWriteDirectories does, because Windows PowerShell 5.1's
 # ConvertFrom-Json rejects comments and trailing commas. Each value is read on its own, so one that cannot be read as a path
 # is left out and the rest still print: a value holding a control character, a line break or any of < > | " is
-# left out, so is one over 260 characters, and at most 10 are listed. A darling.json that cannot be read counts
+# left out, so is one over 260 characters, and a value that starts with two slashes or two backslashes (a network share
+# or device path) is not looked up and counts as Incomplete, and at most 10 are listed. A darling.json that cannot be read counts
 # as Incomplete; a missing one names nothing. Kept byte-identical in install-darling.ps1 and
 # upgrade-darling.ps1.
 function Get-DarlingConfiguredPathsUnder([string]$folder) {
@@ -872,6 +874,7 @@ function Get-DarlingConfiguredPathsUnder([string]$folder) {
         try {
             $value = ($pair[1] -replace '\\\\', '\').Trim()
             if ($value.Length -gt 260 -or $value -match '[\p{C}\p{Zl}\p{Zp}<>|"]') { $incomplete = $true; continue }
+            if ($value -match '^(\\\\|//)') { $incomplete = $true; continue }
             if ($value -and [IO.Path]::IsPathRooted($value) -and (Test-PathIsAtOrUnder $value $folder)) {
                 $found += "`"$value`" ($($pair[0]))"
             }
@@ -1006,10 +1009,16 @@ function Test-PathIsAtOrUnder([string]$candidate, [string]$parent) {
     if ([string]::IsNullOrWhiteSpace($candidate) -or [string]::IsNullOrWhiteSpace($parent)) { return $false }
 
     try {
-        # Normalizes separators, resolves . and .., and makes the comparison independent of how the path
-        # was typed. Anything GetFullPath rejects is not a path we can reason about, so it is not matched.
-        $c = [IO.Path]::GetFullPath($candidate).TrimEnd('\')
-        $p = [IO.Path]::GetFullPath($parent).TrimEnd('\')
+        # Normalizes separators, resolves . and .., spells 8.3 short names out and makes the comparison
+        # independent of how the path was typed (Get-DarlingCanonicalPath, #5673). A path it cannot work out is
+        # compared as GetFullPath spells it, and anything GetFullPath rejects is not a path we can reason about,
+        # so it is not matched.
+        $c = Get-DarlingCanonicalPath $candidate
+        if ($null -eq $c) { $c = [IO.Path]::GetFullPath($candidate) }
+        $p = Get-DarlingCanonicalPath $parent
+        if ($null -eq $p) { $p = [IO.Path]::GetFullPath($parent) }
+        $c = $c.TrimEnd('\')
+        $p = $p.TrimEnd('\')
     }
     catch {
         return $false
@@ -1449,12 +1458,11 @@ function Test-DarlingRollbackBackupIsRecent($backups, [int]$withinMinutes, [date
 
 # ============================ the install tree ============================
 
-# True when two paths name the same directory. One spelling of path equality for the whole script: the
-# comparison decides whether an upgrade is allowed to touch a tree, and two hand-rolled copies of it is
-# the same "two spellings of one rule" that #2525 is a case study in.
-#
-# Separator from the runtime rather than a hardcoded backslash, for the same reason as the process filter
-# below - a rule that gates a destructive operation should be verifiable off the platform it ships to.
+# True when two paths name the same directory: both go through Get-DarlingCanonicalPath (#5673), so a folder typed as a
+# short path (C:\PROGRA~1\x), with a trailing backslash or in another case gives the same answer as its long spelling, and
+# the two are then compared without regard to case. A path Get-DarlingCanonicalPath cannot work out is compared as
+# GetFullPath spells it. The separator comes from the runtime rather than a hardcoded backslash, so the rule can be run off
+# Windows. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Test-DarlingSamePath([string]$left, [string]$right) {
     if ([string]::IsNullOrWhiteSpace($left) -or [string]::IsNullOrWhiteSpace($right)) { return $false }
 
@@ -1462,14 +1470,97 @@ function Test-DarlingSamePath([string]$left, [string]$right) {
     $alt = [IO.Path]::AltDirectorySeparatorChar
 
     try {
-        $l = [IO.Path]::GetFullPath($left).TrimEnd($sep, $alt)
-        $r = [IO.Path]::GetFullPath($right).TrimEnd($sep, $alt)
+        # The canonical long spelling (#5673); GetFullPath's answer for a path it cannot work out.
+        $l = Get-DarlingCanonicalPath $left
+        if ($null -eq $l) { $l = [IO.Path]::GetFullPath($left) }
+        $r = Get-DarlingCanonicalPath $right
+        if ($null -eq $r) { $r = [IO.Path]::GetFullPath($right) }
+        $l = $l.TrimEnd($sep, $alt)
+        $r = $r.TrimEnd($sep, $alt)
     }
     catch {
         return $false
     }
 
     return $l.Equals($r, [StringComparison]::OrdinalIgnoreCase)
+}
+
+# Rewrites an extended-length path to its ordinary spelling, leaving anything else alone:
+# \\?\UNC\server\share -> \\server\share, and \\?\C:\dir -> C:\dir. The same function is in install-darling.ps1 (#2348).
+# 'UNC' is tested first because it is the longer prefix, and is matched without regard to case.
+function Convert-ExtendedLengthPath([string]$path) {
+    if ([string]::IsNullOrEmpty($path)) { return $path }
+    if ($path.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) { return '\\' + $path.Substring(8) }
+    if ($path.StartsWith('\\?\', [StringComparison]::Ordinal)) { return $path.Substring(4) }
+    return $path
+}
+
+# The ordinary spelling of a folder typed as \\?\C:\dir or \\.\C:\dir (#5673), so the checks that ask whether the
+# running script's folder or the source folder is the install folder see the same folder. Anything else is unchanged.
+function Get-DarlingOrdinaryPath([string]$path) {
+    if ([string]::IsNullOrEmpty($path)) { return $path }
+    return Convert-ExtendedLengthPath ($path -replace '^\\\\\.\\(?=[A-Za-z]:)', '')
+}
+
+# True when two existing folders are the same folder on disk, however each is spelled: a junction or link in the path, a
+# subst or mapped drive letter and a short name all lead to the same volume serial number and file index (#5673). False
+# when either folder cannot be opened, so the caller keeps the answer of the text comparison.
+function Test-DarlingSameFolderIdentity([string]$left, [string]$right) {
+    if ([string]::IsNullOrWhiteSpace($left) -or [string]::IsNullOrWhiteSpace($right)) { return $false }
+    try {
+        if (-not ('DarlingFileIdentity' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class DarlingFileIdentity
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(IntPtr handle, out ByHandleFileInformation info);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    // 'volume:index' of an existing folder (opened with backup semantics, links followed), or null.
+    public static string Of(string folder)
+    {
+        IntPtr handle = CreateFileW(folder, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) { return null; }
+        try
+        {
+            ByHandleFileInformation info;
+            if (!GetFileInformationByHandle(handle, out info)) { return null; }
+            return info.VolumeSerialNumber.ToString("x") + ":" + info.FileIndexHigh.ToString("x") + ":" + info.FileIndexLow.ToString("x");
+        }
+        finally { CloseHandle(handle); }
+    }
+}
+'@
+        }
+        $leftId = [DarlingFileIdentity]::Of($left)
+        $rightId = [DarlingFileIdentity]::Of($right)
+        if ($null -eq $leftId -or $null -eq $rightId) { return $false }
+        return $leftId -eq $rightId
+    }
+    catch { return $false }
 }
 
 # Where the service is ACTUALLY installed, read from the registered ImagePath rather than guessed from
@@ -2228,7 +2319,7 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     }
 }
 
-try { $InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\') }
+try { $InstallRoot = [IO.Path]::GetFullPath((Get-DarlingOrdinaryPath $InstallRoot)).TrimEnd('\') }
 catch { Fail "'$InstallRoot' is not a path this script can resolve." }
 
 if (-not (Test-Path -LiteralPath $InstallRoot -PathType Container)) {
@@ -2381,7 +2472,7 @@ if ([string]::IsNullOrWhiteSpace($Source)) {
     Fail "No -Source given and this script is not running from a file, so there is nothing to install from."
 }
 
-try { $Source = [IO.Path]::GetFullPath($Source).TrimEnd('\') }
+try { $Source = [IO.Path]::GetFullPath((Get-DarlingOrdinaryPath $Source)).TrimEnd('\') }
 catch { Fail "'$Source' is not a path this script can resolve." }
 
 if (-not (Test-Path -LiteralPath $Source)) {
@@ -2419,11 +2510,17 @@ $runningFrom = $PSScriptRoot
 if (Test-DarlingSamePath $runningFrom $InstallRoot) {
     Fail "This script is running from the install directory, so the upgrade would write the new build over the copy of itself that PowerShell is currently reading. Extract the new zip to a staging folder only an administrator can write to (e.g. C:\Program Files\PerformanceMonitorDarling-staging\<version>, never a folder made directly under C:\) and run ITS upgrade-darling.ps1 instead. To prune rollback backups from the installed copy, use -PruneOnly, which copies nothing."
 }
+if (Test-DarlingSameFolderIdentity $runningFrom $InstallRoot) {
+    Fail "This script is running from the install directory (reached by a different path), so the upgrade would write the new build over the copy of itself that PowerShell is currently reading. Extract the new zip to a staging folder only an administrator can write to and run ITS upgrade-darling.ps1 instead."
+}
 
 # And the degenerate case the rule above does not cover: a source folder that IS the install directory,
 # handed in from a script running somewhere else. Copying a tree over itself is not an upgrade.
 if (-not $sourceIsZip -and (Test-DarlingSamePath $sourceRoot $InstallRoot)) {
     Fail "The source folder is the install directory itself, so there is nothing to upgrade from. Point -Source at the new build."
+}
+if (-not $sourceIsZip -and (Test-DarlingSameFolderIdentity $sourceRoot $InstallRoot)) {
+    Fail "The source folder is the install directory itself (reached by a different path), so there is nothing to upgrade from. Point -Source at the new build."
 }
 
 if ($sourceIsZip) {
@@ -2574,7 +2671,7 @@ if ([string]::IsNullOrWhiteSpace($registeredRoot)) {
     # assume it was.
     Warn "Could not read the '$serviceName' service's ImagePath, so this could not confirm that '$InstallRoot' is the directory the service actually runs from. Check that before trusting the result."
 }
-elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot)) {
+elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot) -and -not (Test-DarlingSameFolderIdentity $registeredRoot $InstallRoot)) {
     Fail "The '$serviceName' service runs from '$registeredRoot', not from '$InstallRoot'. NOTHING has been stopped or copied. Stopping and starting act on the service by NAME, so upgrading '$InstallRoot' would have taken the real service down, written the new build somewhere it does not read, and brought it back up on its old binaries - reporting success the whole way. Drop -InstallRoot to upgrade the registered install, or pass -InstallRoot '$registeredRoot' if that is really the one you meant."
 }
 

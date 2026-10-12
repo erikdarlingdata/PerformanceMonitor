@@ -174,7 +174,7 @@ internal static class EmailTemplateBuilder
         /* Detail section: the alert's prose detail (#3297) leads, then the structured items (blocking
            chains, deadlock participants). Either can be absent — a self-alert has only the prose, an
            engine alert only the structure — so the section renders when EITHER is present. */
-        if (prose is not null || context?.Details?.Count > 0)
+        if (prose is not null || context?.Details?.Count > 0 || AlertDetailText.SampleAgeLineFor(context, prose) is not null)
         {
             AppendDetailSection(sb, context, prose);
         }
@@ -249,6 +249,16 @@ internal static class EmailTemplateBuilder
             {
                 sb.Append($"<p style=\"margin:0 0 8px 0;font-family:{FontStack};font-size:13px;color:#E0E0E0;line-height:1.5;\">{WebUtility.HtmlEncode(para)}</p>");
             }
+            sb.Append("</td></tr>");
+        }
+
+        /* #5642: the newest-sample age, once per body. The fire-time age the engine persisted with the alert,
+           not one measured here; the plain-text body prints the same line. */
+        var ageLine = AlertDetailText.SampleAgeLineFor(context, prose);
+        if (ageLine is not null)
+        {
+            sb.Append("<tr><td style=\"padding:2px 24px 8px 24px;\">");
+            sb.Append($"<p style=\"margin:0 0 8px 0;font-family:{FontStack};font-size:13px;color:#B0B0B0;line-height:1.5;\">{WebUtility.HtmlEncode(ageLine)}</p>");
             sb.Append("</td></tr>");
         }
 
@@ -372,7 +382,8 @@ internal static class EmailTemplateBuilder
         /* The HTML body's Details section, in parallel (BuildHtmlBody / AppendDetailSection): the #3297
            prose leads, the structured items follow, and either half alone still opens the section. The two
            bodies are maintained together — a change to one must touch the other. */
-        if (prose is not null || context?.Details?.Count > 0)
+        var plainAgeLine = AlertDetailText.SampleAgeLineFor(context, prose);
+        if (prose is not null || context?.Details?.Count > 0 || plainAgeLine is not null)
         {
             sb.Append($"\r\n--- Details ---\r\n");
 
@@ -382,6 +393,12 @@ internal static class EmailTemplateBuilder
                 {
                     sb.Append($"\r\n  {para}\r\n");
                 }
+            }
+
+            /* #5642: the HTML body's sample-age line, in parallel (AppendDetailSection). */
+            if (plainAgeLine is not null)
+            {
+                sb.Append($"\r\n  {plainAgeLine}\r\n");
             }
 
             foreach (var item in context?.Details ?? EmptyDetails)

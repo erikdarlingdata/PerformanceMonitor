@@ -595,13 +595,14 @@ public static class DarlingNativeOwner
 # the part that exists), so a root typed one way and a path listed or joined the other compared unequal, which is how a root
 # under a GitHub Windows runner's temp folder (C:\Users\RUNNER~1\...) lost its hard links and its trusted folders. The part
 # of the path that exists is spelled out by GetLongPathName and a name below it that does not exist stays as typed. Returns
-# $null when no part of the path can be worked out, and every caller treats that as not trusted. Kept byte-identical in
-# install-darling.ps1 and upgrade-darling.ps1.
+# $null when no part of the path can be worked out, and every caller treats that as not trusted. The separator it trims and
+# joins with is the runtime's, so a backslash is only a separator on Windows. Kept byte-identical in install-darling.ps1 and
+# upgrade-darling.ps1.
 function Get-DarlingCanonicalPath([string]$path) {
     if ([string]::IsNullOrWhiteSpace($path)) { return $null }
     try {
         $full = [IO.Path]::GetFullPath($path)
-        $trimmed = $full.TrimEnd('\')
+        $trimmed = $full.TrimEnd([IO.Path]::DirectorySeparatorChar)
         if ($trimmed.Length -le 2) { return $full }
         if ($trimmed.IndexOf('~') -lt 0) { return $trimmed }
         if (-not ('DarlingNativePaths' -as [type])) {
@@ -641,7 +642,7 @@ public static class DarlingNativePaths
             $below = @([IO.Path]::GetFileName($existing)) + $below
             $existing = $parent
         }
-        return (@($long.TrimEnd('\')) + $below) -join '\'
+        return (@($long.TrimEnd([IO.Path]::DirectorySeparatorChar)) + $below) -join [IO.Path]::DirectorySeparatorChar
     }
     catch { return $null }
 }
@@ -797,7 +798,8 @@ function Get-DarlingPreLockTrustedSidsForRerun([string]$serviceName, $existingSe
 # comment-stripped text, as Get-DarlingExtraServiceWriteDirectories does, because Windows PowerShell 5.1's
 # ConvertFrom-Json rejects comments and trailing commas. Each value is read on its own, so one that cannot be read as a path
 # is left out and the rest still print: a value holding a control character, a line break or any of < > | " is
-# left out, so is one over 260 characters, and at most 10 are listed. A darling.json that cannot be read counts
+# left out, so is one over 260 characters, and a value that starts with two slashes or two backslashes (a network share
+# or device path) is not looked up and counts as Incomplete, and at most 10 are listed. A darling.json that cannot be read counts
 # as Incomplete; a missing one names nothing. Kept byte-identical in install-darling.ps1 and
 # upgrade-darling.ps1.
 function Get-DarlingConfiguredPathsUnder([string]$folder) {
@@ -820,6 +822,7 @@ function Get-DarlingConfiguredPathsUnder([string]$folder) {
         try {
             $value = ($pair[1] -replace '\\\\', '\').Trim()
             if ($value.Length -gt 260 -or $value -match '[\p{C}\p{Zl}\p{Zp}<>|"]') { $incomplete = $true; continue }
+            if ($value -match '^(\\\\|//)') { $incomplete = $true; continue }
             if ($value -and [IO.Path]::IsPathRooted($value) -and (Test-PathIsAtOrUnder $value $folder)) {
                 $found += "`"$value`" ($($pair[0]))"
             }
@@ -943,8 +946,11 @@ function Get-DarlingRefusalAdvice([string]$folder, [string]$serviceName, [string
     return $default
 }
 
-# True when two paths name the same directory: separators trimmed, full paths compared without regard to case.
-# Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+# True when two paths name the same directory: both go through Get-DarlingCanonicalPath (#5673), so a folder typed as a
+# short path (C:\PROGRA~1\x), with a trailing backslash or in another case gives the same answer as its long spelling, and
+# the two are then compared without regard to case. A path Get-DarlingCanonicalPath cannot work out is compared as
+# GetFullPath spells it. The separator comes from the runtime rather than a hardcoded backslash, so the rule can be run off
+# Windows. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Test-DarlingSamePath([string]$left, [string]$right) {
     if ([string]::IsNullOrWhiteSpace($left) -or [string]::IsNullOrWhiteSpace($right)) { return $false }
 
@@ -952,8 +958,13 @@ function Test-DarlingSamePath([string]$left, [string]$right) {
     $alt = [IO.Path]::AltDirectorySeparatorChar
 
     try {
-        $l = [IO.Path]::GetFullPath($left).TrimEnd($sep, $alt)
-        $r = [IO.Path]::GetFullPath($right).TrimEnd($sep, $alt)
+        # The canonical long spelling (#5673); GetFullPath's answer for a path it cannot work out.
+        $l = Get-DarlingCanonicalPath $left
+        if ($null -eq $l) { $l = [IO.Path]::GetFullPath($left) }
+        $r = Get-DarlingCanonicalPath $right
+        if ($null -eq $r) { $r = [IO.Path]::GetFullPath($right) }
+        $l = $l.TrimEnd($sep, $alt)
+        $r = $r.TrimEnd($sep, $alt)
     }
     catch {
         return $false
@@ -993,6 +1004,68 @@ function Get-DarlingInstallRootFromService([string]$name) {
     catch { return $null }
 }
 
+# The folder with every junction and link on the way to it followed (#5673): the final path of the deepest part of $path
+# that exists, with the names below it that do not exist yet put back after it. A junction or link that leads into a
+# profile folder is under that profile whatever it is called, so the profile test is run on this spelling as well as the
+# typed one. Returns $null when no part of the path can be opened. Only in install-darling.ps1.
+function Get-DarlingResolvedFolder([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $null }
+    try {
+        if (-not ('DarlingFinalPath' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class DarlingFinalPath
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(IntPtr handle, StringBuilder path, uint length, uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    // The final path (drive-letter form, links followed) of an existing folder, or null.
+    public static string Of(string folder)
+    {
+        IntPtr handle = CreateFileW(folder, 0x80, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) { return null; }
+        try
+        {
+            StringBuilder buffer = new StringBuilder(1024);
+            uint length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 0);
+            if (length >= buffer.Capacity)
+            {
+                buffer = new StringBuilder((int)length + 1);
+                length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 0);
+            }
+            if (length == 0 || length >= buffer.Capacity) { return null; }
+            return buffer.ToString();
+        }
+        finally { CloseHandle(handle); }
+    }
+}
+'@
+        }
+        $existing = [IO.Path]::GetFullPath($path)
+        if ($existing.Length -gt 3) { $existing = $existing.TrimEnd('\') }
+        $below = @()
+        while ($true) {
+            $real = [DarlingFinalPath]::Of($existing)
+            if ($null -ne $real) { break }
+            $parent = [IO.Path]::GetDirectoryName($existing)
+            if ([string]::IsNullOrEmpty($parent)) { return $null }
+            $below = @([IO.Path]::GetFileName($existing)) + $below
+            $existing = $parent
+        }
+        return (@((Convert-ExtendedLengthPath $real).TrimEnd('\')) + $below) -join '\'
+    }
+    catch { return $null }
+}
+
 # True when $candidate IS $parent or sits underneath it.
 #
 # The separator is appended before the prefix test on purpose: a bare StartsWith reads C:\UsersData as
@@ -1004,10 +1077,16 @@ function Test-PathIsAtOrUnder([string]$candidate, [string]$parent) {
     if ([string]::IsNullOrWhiteSpace($candidate) -or [string]::IsNullOrWhiteSpace($parent)) { return $false }
 
     try {
-        # Normalizes separators, resolves . and .., and makes the comparison independent of how the path
-        # was typed. Anything GetFullPath rejects is not a path we can reason about, so it is not matched.
-        $c = [IO.Path]::GetFullPath($candidate).TrimEnd('\')
-        $p = [IO.Path]::GetFullPath($parent).TrimEnd('\')
+        # Normalizes separators, resolves . and .., spells 8.3 short names out and makes the comparison
+        # independent of how the path was typed (Get-DarlingCanonicalPath, #5673). A path it cannot work out is
+        # compared as GetFullPath spells it, and anything GetFullPath rejects is not a path we can reason about,
+        # so it is not matched.
+        $c = Get-DarlingCanonicalPath $candidate
+        if ($null -eq $c) { $c = [IO.Path]::GetFullPath($candidate) }
+        $p = Get-DarlingCanonicalPath $parent
+        if ($null -eq $p) { $p = [IO.Path]::GetFullPath($parent) }
+        $c = $c.TrimEnd('\')
+        $p = $p.TrimEnd('\')
     }
     catch {
         return $false
@@ -1669,6 +1748,13 @@ $networkKind = Get-NetworkPathKind $classifyRoot
 # is still a profile, and it is the profile whose owner is most likely to be running this script.
 $underProfile = (Test-PathIsAtOrUnder $classifyRoot (Get-ProfilesDirectory)) -or (Test-PathIsAtOrUnder $classifyRoot $env:USERPROFILE)
 
+# A junction or link into a profile folder is under that profile whatever it is called (#5673): the same test, on the
+# folder's final path.
+$resolvedRoot = Get-DarlingResolvedFolder $classifyRoot
+if (-not $underProfile -and $resolvedRoot) {
+    $underProfile = (Test-PathIsAtOrUnder $resolvedRoot (Get-ProfilesDirectory)) -or (Test-PathIsAtOrUnder $resolvedRoot $env:USERPROFILE)
+}
+
 if ($underProfile -or $networkKind) {
     if ($underProfile) {
         $why = @"
@@ -1878,8 +1964,8 @@ if (-not (Test-Path -LiteralPath $configPath)) {
 # Without this check the failure below reads "the config is invalid or a server is unreachable", which points
 # at the wrong file. Only the message counts: 0x80131506 is .NET's general fatal-error code
 # (COR_E_EXECUTIONENGINE), not a CET-only code, so an exit code of 0x80131506 with no such text keeps the
-# ordinary failure path below. $ExitCode is kept in the signature for the call site and for a future signal.
-function Test-CetStartFailure([int64]$ExitCode, [string[]]$Output) {
+# ordinary failure path below.
+function Test-CetStartFailure([string[]]$Output) {
     foreach ($line in @($Output)) {
         if ("$line" -match "doesn't fully support CET") { return $true }
     }
@@ -1896,7 +1982,7 @@ if (-not $SkipPreflight) {
     $preflightOutput = @(& $serviceExe --test-connection 2>&1 | ForEach-Object { Write-Host "$_"; "$_" })
     $preflightExit = $LASTEXITCODE
     $ErrorActionPreference = $savedErrorAction
-    if (Test-CetStartFailure $preflightExit $preflightOutput) {
+    if (Test-CetStartFailure $preflightOutput) {
         Write-Host ''
         Write-Host 'ERROR: Windows on this machine is missing updates that .NET 10 needs, so the service cannot start.' -ForegroundColor Red
         Write-Host 'The service exe printed the CET start error (Your Windows doesn''t fully support CET).' -ForegroundColor Red

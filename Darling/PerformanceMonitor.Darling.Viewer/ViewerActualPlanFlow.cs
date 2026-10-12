@@ -10,6 +10,7 @@ using System;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Input;
 using System.Windows;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitor.Ui;
@@ -30,25 +31,37 @@ namespace PerformanceMonitor.Darling.Viewer;
 public static class ViewerActualPlanFlow
 {
     /// <summary>
-    /// Runs the full shared flow and returns the captured actual-plan XML, or null when it should not be opened
-    /// (read-only seat, declined consent, cancelled, failure, or no plan — every non-null-returning path has
-    /// already shown the user a message). <paramref name="onStarted"/> / <paramref name="onFinished"/> bracket
+    /// Runs the full shared flow and returns the captured actual-plan XML together with the statement text that
+    /// ran, or null when it should not be opened (read-only seat, declined consent, cancelled, failure, or no
+    /// plan — every null-returning path has already shown the user a message). The caller hands the returned
+    /// <see cref="ActualPlanCapture.QueryText"/> to its plan host, never the text a grid row held: for a
+    /// <paramref name="queryStatsHash"/> request that is the stored statement the prompt showed and the service
+    /// ran (#5639); every other request returns the <paramref name="queryText"/> it was given. <paramref name="onStarted"/> / <paramref name="onFinished"/> bracket
     /// the enqueue so each host shows its own progress indicator; consent runs BEFORE <paramref name="onStarted"/>.
     /// </summary>
-    /// <param name="estimatedPlanXml">The stored estimated plan for modification detection (the service re-resolves
-    /// the text by identifier when it executes); null/unparseable makes the detector fail-safe to "modifying".</param>
-    public static async Task<string?> RequestActualPlanAsync(
+    /// <param name="serverDisplayName">The server the prompt names (and the query runs on).</param>
+    /// <param name="fetchPlanXml">Reads the stored estimated plan for modification detection BEFORE the prompt (a
+    /// read of the monitoring store; nothing runs on the monitored server). The service re-resolves the text by
+    /// identifier when it executes. Null, a null result, a failed read or an unparseable plan all make the detector
+    /// fail safe to "modifying" (#5639). Ignored for a <paramref name="queryStatsHash"/> request.</param>
+    /// <param name="queryStatsHash">Set for a <c>query_stats</c> request (Top Queries, Query-Stats history, FinOps
+    /// High Impact). The flow then reads the text the service will run (the latest stored text for this hash and
+    /// <paramref name="databaseName"/>), and the prompt, the modification check and the digest in the request all
+    /// use that text; <paramref name="queryText"/>, <paramref name="fetchPlanXml"/> and <paramref name="argsJson"/>
+    /// are not used (#5639). Query Store and snapshot requests leave it null.</param>
+    public static async Task<ActualPlanCapture?> RequestActualPlanAsync(
         Window owner,
         ViewerDataService dataService,
         int serverId,
         string serverDisplayName,
         string databaseName,
         string? queryText,
-        string? estimatedPlanXml,
+        Func<Task<string?>>? fetchPlanXml,
         string argsJson,
         Action? onStarted,
         Action? onFinished,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? queryStatsHash = null)
     {
         /* A read-only seat can't enqueue a command — short-circuit with the explanation (the enqueue's
            ViewerReadOnlyException is the belt-and-braces backstop, handled below too). */
@@ -58,44 +71,115 @@ public static class ViewerActualPlanFlow
             return null;
         }
 
-        var modification = QueryModificationDetector.Detect(estimatedPlanXml, queryText);
-        if (!Confirm(owner, serverDisplayName, databaseName, modification))
+        /* #5639: one actual-plan request at a time. The plan read below can take a while, and a second click
+           meanwhile would queue a second read and a second prompt. */
+        if (s_requestInProgress)
         {
             return null;
         }
 
-        onStarted?.Invoke();
+        s_requestInProgress = true;
         try
         {
-            var result = await dataService.ExecuteActualPlanAsync(serverId, argsJson, cancellationToken);
-            if (result.Status == ActualPlanStatus.Captured)
+            string? estimatedPlanXml = null;
+            if (queryStatsHash != null)
             {
-                return result.PlanXml;
+                /* #5639: a query_stats request (Top Queries, Query-Stats history, FinOps High Impact) runs the
+                   LATEST stored text for the hash and database, which is often not the text the grid row holds.
+                   Read that text now, from the same database and with the same SQL the service uses, so the
+                   prompt shows it and the request carries its digest. Nothing found, or a failed read, shows a
+                   message and sends nothing. */
+                QueryStatsActualPlanPreparation prepared;
+                try
+                {
+                    Mouse.OverrideCursor = Cursors.Wait;
+                    prepared = await ViewerDataService.PrepareQueryStatsActualPlanAsync(
+                        () => Task.Run(() => dataService.ResolveQueryStatsActualPlanQueryAsync(
+                            serverId, databaseName, queryStatsHash, cancellationToken), cancellationToken),
+                        queryStatsHash, databaseName);
+                }
+                catch (OperationCanceledException)
+                {
+                    return null;
+                }
+                finally
+                {
+                    Mouse.OverrideCursor = null;
+                }
+
+                if (prepared.Lookup != QueryStatsActualPlanLookup.Ready)
+                {
+                    ShowStoredTextUnavailable(owner, prepared);
+                    return null;
+                }
+
+                queryText = prepared.QueryText;
+                estimatedPlanXml = prepared.PlanXml;
+                argsJson = prepared.ArgsJson;
+            }
+            else if (fetchPlanXml != null)
+            {
+                try
+                {
+                    Mouse.OverrideCursor = Cursors.Wait;
+                    estimatedPlanXml = await fetchPlanXml();
+                }
+                catch (Exception)
+                {
+                    estimatedPlanXml = null; /* a failed read is the same as no plan: the warning shows */
+                }
+                finally
+                {
+                    Mouse.OverrideCursor = null;
+                }
             }
 
-            ShowOutcome(owner, result);
-            return null;
-        }
-        catch (OperationCanceledException)
-        {
-            return null;
-        }
-        catch (ViewerReadOnlyException)
-        {
-            ShowReadOnly(owner);
-            return null;
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(owner, $"Failed to capture the actual plan:\n\n{ex.Message}", "Actual Plan Error",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-            return null;
+            var modification = QueryModificationDetector.Detect(estimatedPlanXml, queryText);
+            if (!Confirm(owner, serverDisplayName, databaseName, queryText, modification))
+            {
+                return null;
+            }
+
+            onStarted?.Invoke();
+            try
+            {
+                var result = await dataService.ExecuteActualPlanAsync(serverId, argsJson, cancellationToken);
+                var capture = ActualPlanCapture.FromResult(result, queryText);
+                if (capture != null)
+                {
+                    return capture;
+                }
+
+                ShowOutcome(owner, result);
+                return null;
+            }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
+            catch (ViewerReadOnlyException)
+            {
+                ShowReadOnly(owner);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(owner, $"Failed to capture the actual plan:\n\n{ex.Message}", "Actual Plan Error",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                return null;
+            }
+            finally
+            {
+                onFinished?.Invoke();
+            }
         }
         finally
         {
-            onFinished?.Invoke();
+            s_requestInProgress = false;
         }
     }
+
+    private static bool s_requestInProgress;
 
     /// <summary>
     /// Opens a captured plan in a shared <see cref="PlanViewerControl"/> floated above <paramref name="owner"/>
@@ -142,7 +226,7 @@ public static class ViewerActualPlanFlow
     /// modification detector says it writes data — prepends a PROMINENT, distinct block naming the statement types
     /// and stating plainly that re-executing RE-APPLIES those changes. Returns true only on OK.
     /// </summary>
-    private static bool Confirm(Window owner, string serverDisplayName, string databaseName, QueryModificationInfo modification)
+    private static bool Confirm(Window owner, string serverDisplayName, string databaseName, string? queryText, QueryModificationInfo modification)
     {
         var prompt = new StringBuilder();
 
@@ -154,9 +238,10 @@ public static class ViewerActualPlanFlow
             prompt.AppendLine();
         }
 
-        var db = string.IsNullOrWhiteSpace(databaseName) ? "the default database" : $"[{databaseName}]";
-        prompt.AppendLine($"The service will EXECUTE this query against {serverDisplayName} in database {db} to capture its actual plan.");
+        prompt.AppendLine("The service will EXECUTE this query on " +
+            QueryModificationDetector.BuildConsentTarget(serverDisplayName, databaseName) + " to capture its actual plan.");
         prompt.AppendLine();
+        prompt.AppendLine(QueryModificationDetector.BuildConsentQueryText(queryText));
         prompt.AppendLine("It runs as the service's stored monitoring login, with SET STATISTICS XML ON. All data results are discarded — only the plan is returned.");
         prompt.AppendLine();
         prompt.AppendLine(QueryModificationDetector.CapturedQueryNotice);
@@ -164,11 +249,43 @@ public static class ViewerActualPlanFlow
         var result = MessageBox.Show(
             owner,
             prompt.ToString(),
-            modification.ModifiesData ? "Get Actual Plan (re-run) — DATA WILL BE MODIFIED" : "Get Actual Plan (re-run)",
+            QueryModificationDetector.BuildConsentTitle(modification),
             MessageBoxButton.OKCancel,
             MessageBoxImage.Warning);
 
         return result == MessageBoxResult.OK;
+    }
+
+    /// <summary>
+    /// #5639: the gate before a <c>query_stats</c> actual-plan request (pass the hash on as
+    /// <c>queryStatsHash</c>). A row whose hash is empty or all zeros names no particular query, so it is refused
+    /// here with a message and no request is made.
+    /// </summary>
+    public static bool TryCheckQueryStatsHash(Window owner, string? queryHash)
+    {
+        if (ViewerDataService.TryCheckActualPlanQueryHash(queryHash, out var refusal))
+        {
+            return true;
+        }
+
+        MessageBox.Show(owner, refusal, "Actual Plan", MessageBoxButton.OK, MessageBoxImage.Information);
+        return false;
+    }
+
+    /// <summary>#5639: nothing is prompted or sent when the text the service would run cannot be read.</summary>
+    private static void ShowStoredTextUnavailable(Window owner, QueryStatsActualPlanPreparation prepared)
+    {
+        if (prepared.Lookup == QueryStatsActualPlanLookup.NothingStored)
+        {
+            MessageBox.Show(owner,
+                "No stored query text was found for this query, so there is nothing to run. Nothing was run.",
+                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        MessageBox.Show(owner,
+            $"The stored query text could not be read, so the request was not made. Nothing was run.\n\n{prepared.Error}",
+            "Actual Plan Error", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
     /// <summary>Surfaces a non-captured outcome (no-plan info, or a failure/timeout warning with the service's message).</summary>
