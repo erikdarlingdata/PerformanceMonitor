@@ -32,7 +32,10 @@ LIMIT $3";
     /// that finds no flag stores nothing, so without these the last flag being turned off never shows. Bounded like the change read: the
     /// runs inside the window plus the newest one before it (the baseline for a change on the window's first capture). SUCCESS only, and
     /// <c>rows_collected = 0</c> only (NULL is not recorded). Twin of <c>DarlingCollectorRunFactsReader.EmptyTraceFlagRunsSql</c>.
-    /// $1 server_id, $2 window start, $3 window end.
+    /// The baseline run is bounded below at $4, <see cref="EmptyTraceFlagRunsFloor"/>: an empty run older than the oldest trace_flags rows
+    /// Lite still holds would pair with a later capture as a flag turned on, and the bound also lets DuckDB prune the collection log's
+    /// archive instead of scanning all of it.
+    /// $1 server_id, $2 window start, $3 window end, $4 the baseline floor.
     /// </summary>
     public const string EmptyTraceFlagRunsSql = @"
 (SELECT collection_time
@@ -51,8 +54,17 @@ UNION ALL
  AND   status = 'SUCCESS'
  AND   rows_collected = 0
  AND   collection_time < $2
+ AND   collection_time >= $4
  ORDER BY collection_time DESC
  LIMIT 1)";
+
+    /// <summary>
+    /// The lower bound of the empty-run baseline (#5633 item 19): the window start minus Lite's retention. Lite has ONE horizon for every
+    /// table, <see cref="RetentionService.ArchiveRetentionMonths"/> (its per-collector <c>retention_days</c> does not purge the archive),
+    /// so that is the retention that applies to the trace_flags rows too.
+    /// </summary>
+    internal static DateTime EmptyTraceFlagRunsFloor(DateTime windowStartUtc) =>
+        windowStartUtc.AddMonths(-RetentionService.ArchiveRetentionMonths);
 
     /// <summary>The times of the trace_flags runs that found no flag (<see cref="EmptyTraceFlagRunsSql"/>), for the trace-flag change diff.</summary>
     public async Task<List<DateTime>> GetEmptyTraceFlagRunsAsync(int serverId, DateTime startUtc, DateTime endUtc)
@@ -71,6 +83,7 @@ UNION ALL
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = EmptyTraceFlagRunsFloor(startUtc) });
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

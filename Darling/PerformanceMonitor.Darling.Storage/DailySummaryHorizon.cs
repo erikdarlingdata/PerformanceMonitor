@@ -133,6 +133,36 @@ public static class DarlingRetentionHorizons
             ? days
             : CollectorScheduleDefaults.All[collectorName].RetentionDays;
     }
+
+    /// <summary>
+    /// A SQL expression (in days) for the fleet-wide retention that applies to one collector's rows in this store: the fleet
+    /// override's <c>retention_days</c> in <c>config.config_collector_schedules</c> when it is set and valid (at least one day),
+    /// else the <see cref="CollectorScheduleDefaults"/> default. The same rule as <see cref="ResolveFleetRetentionDays"/> and
+    /// <c>DataWindowFloor</c>'s coverage horizon, written as SQL so a read that has to bound itself by the purge horizon (#5633
+    /// item 19: the trace-flag baseline's empty-run arm) does it in one statement. The name is checked against the catalog and
+    /// to be a plain identifier, so splicing it into the statement is safe.
+    /// </summary>
+    public static string FleetRetentionDaysSql(string collectorName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(collectorName);
+        var defaultDays = CollectorScheduleDefaults.All[collectorName].RetentionDays;
+        var name = collectorName.ToLowerInvariant();
+        if (!System.Text.RegularExpressions.Regex.IsMatch(name, "^[a-z0-9_]+$"))
+        {
+            throw new ArgumentException("A collector name is letters, digits and underscores.", nameof(collectorName));
+        }
+
+        return $"COALESCE((SELECT o.retention_days FROM config.config_collector_schedules AS o WHERE o.server_id IS NULL AND lower(o.collector_name) = '{name}' AND o.retention_days >= 1 LIMIT 1), {defaultDays.ToString(System.Globalization.CultureInfo.InvariantCulture)})";
+    }
+
+    /// <summary>
+    /// The lower bound of the trace-flag change diff's baseline arm, as SQL: the window start (<paramref name="windowStartParameter"/>,
+    /// a naive-UTC timestamp parameter such as <c>$2</c>) minus the trace_flags retention. An empty run older than this is older than
+    /// the oldest trace_flags rows the store can still hold, so a capture after it would be paired with a snapshot that has since been
+    /// purged and read as a flag turned on (#5633 item 19 review). It also bounds the scan of the collection log.
+    /// </summary>
+    public static string TraceFlagsBaselineFloorSql(string windowStartParameter) =>
+        $"(CAST({windowStartParameter} AS timestamp) - make_interval(days => {FleetRetentionDaysSql("trace_flags")}))";
 }
 
 /// <summary>

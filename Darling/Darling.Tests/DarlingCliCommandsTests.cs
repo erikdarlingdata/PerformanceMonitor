@@ -111,13 +111,13 @@ public sealed class DarlingCliCommandsTests
         var hint = DarlingCliCommands.BuildWebLoginHint("192.168.1.205", 5153, tls);
 
         /* The network listener speaks TLS only once a certificate is set, so an http:// URL fails the handshake. */
-        Assert.Equal("    https://192.168.1.205:5153/?token=<your-access-token>", hint[1]);
+        Assert.Equal("    https://192.168.1.205:5153/", hint[1]);
         Assert.DoesNotContain(hint, line => line.Contains("http://", StringComparison.Ordinal));
 
         /* A block the service REFUSES (both forms) leaves the dashboard loopback-only: no remote URL, so http stays. */
         var refused = DarlingCliCommands.BuildWebLoginHint(
             "192.168.1.205", 5153, new WebTlsConfig { PfxPath = "a.pfx", CertPath = "a.crt", KeyPath = "a.key" });
-        Assert.Equal("    http://192.168.1.205:5153/?token=<your-access-token>", refused[1]);
+        Assert.Equal("    http://192.168.1.205:5153/", refused[1]);
     }
 
     [Fact]
@@ -129,11 +129,11 @@ public sealed class DarlingCliCommandsTests
             var hint = DarlingCliCommands.BuildWebLoginHint("192.168.1.205", 5153, tls);
             Assert.Equal(3, hint.Count);
             Assert.Equal("  Remote browser login (after the service restarts):", hint[0]);
-            Assert.Equal("    http://192.168.1.205:5153/?token=<your-access-token>", hint[1]);
+            Assert.Equal("    http://192.168.1.205:5153/", hint[1]);
         }
 
         Assert.Equal(
-            "    http://<a-LAN-IP-of-this-machine>:5153/?token=<your-access-token>",
+            "    http://<a-LAN-IP-of-this-machine>:5153/",
             DarlingCliCommands.BuildWebLoginHint("0.0.0.0", 5153, null)[1]);
 
         /* The one line that changed (F9): loopback presents the token too (#1649), so it no longer says it needs none. */
@@ -143,10 +143,10 @@ public sealed class DarlingCliCommandsTests
     }
 
     [Theory]
-    [InlineData("2001:db8::5", "    http://[2001:db8::5]:5153/?token=<your-access-token>")]
-    [InlineData("[2001:db8::5]", "    http://[2001:db8::5]:5153/?token=<your-access-token>")]
-    [InlineData("::", "    http://<a-LAN-IP-of-this-machine>:5153/?token=<your-access-token>")]
-    [InlineData("0.0.0.0", "    http://<a-LAN-IP-of-this-machine>:5153/?token=<your-access-token>")]
+    [InlineData("2001:db8::5", "    http://[2001:db8::5]:5153/")]
+    [InlineData("[2001:db8::5]", "    http://[2001:db8::5]:5153/")]
+    [InlineData("::", "    http://<a-LAN-IP-of-this-machine>:5153/")]
+    [InlineData("0.0.0.0", "    http://<a-LAN-IP-of-this-machine>:5153/")]
     public void WebLoginHint_Ipv6Listen_IsBracketed(string listen, string expectedUrlLine)
     {
         /* http://2001:db8::5:5153/ is not a URL, and a :: listen printed http://:::5153/ before this. */
@@ -1164,7 +1164,7 @@ public sealed class DarlingConfigureNetworkTests
             Assert.Contains("SAVE THIS NOW", error.ToString(), StringComparison.Ordinal); // STDERR: the warning
 
             /* The next-steps handoff includes the browser login hint — the one step Web does differently. */
-            Assert.Contains("http://192.168.1.205:5153/?token=", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("http://192.168.1.205:5153/", output.ToString(), StringComparison.Ordinal);
         }
         finally
         {
@@ -1462,7 +1462,7 @@ public sealed class DarlingConfigureNetworkTests
             Assert.Contains("--print-viewer-connection", stdout, StringComparison.Ordinal);
             Assert.Contains("PerformanceMonitor Darling MCP (port", stdout, StringComparison.Ordinal);
             Assert.Contains("PerformanceMonitor Darling Web (port", stdout, StringComparison.Ordinal);
-            Assert.Contains("?token=", stdout, StringComparison.Ordinal);
+            Assert.Contains("sign-in form", stdout, StringComparison.Ordinal);
         }
         finally
         {

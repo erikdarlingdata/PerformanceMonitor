@@ -35,7 +35,8 @@ namespace PerformanceMonitor.Collectors;
 /// (PostgreSQL 16 and later write every bind value there unless that setting is 0) is removed the same way,
 /// before the hash is taken, so a value neither reaches the store nor splits one plan shape into one hash
 /// per parameter value (#5103). Quoted literals are then stripped from
-/// EVERY remaining string, which is safe because relation and alias names are not quoted. Bare numbers are
+/// EVERY remaining string, which is safe because relation and alias names are not quoted, and a name
+/// PostgreSQL does quote is read as one token, so an apostrophe inside it opens no literal. Bare numbers are
 /// stripped only inside condition fields: a blanket numeric strip would rewrite a relation genuinely named
 /// <c>transactionitems1</c> into <c>transactionitems?</c>, destroying identity to hide a value that was
 /// never there.</para>
@@ -96,15 +97,21 @@ public static class PgPlanLogParser
        narrower: self-hosted's own SQL regex only ever needed the space family (PostgreSQL's own default),
        so it gained the same timestamp anchor without the colon alternative rather than a capability neither
        transport asked for. */
+    /* Every pattern in this type runs under this match bound (the same one PgSettingRedactor.TimeBoundPattern
+       carries on the fingerprint pair below). A match that runs out of time withholds what it was reading:
+       FromBlock skips that one plan, Extract stops with the plans it has already taken. */
+    private static readonly TimeSpan s_matchTimeout = TimeSpan.FromSeconds(1);
+
     private static readonly Regex s_planBlock = new(
         @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
         + @"(?:[^ \[\n]+ [^\[\n]*\[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
         + @"[ :](-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)",
-        RegexOptions.Compiled | RegexOptions.Multiline);
+        RegexOptions.Compiled | RegexOptions.Multiline,
+        s_matchTimeout);
 
     /* Every log_line_prefix escape (%-something), used to find the FIRST one after %p — the escape that
        actually renders the token this parser's (-?\d+) group captured (#4501). */
-    private static readonly Regex s_anyEscapeToken = new("%.", RegexOptions.Compiled);
+    private static readonly Regex s_anyEscapeToken = new("%.", RegexOptions.Compiled, s_matchTimeout);
 
     /// <summary>
     /// Whether the all-digit token <see cref="s_planBlock"/> captures right after the bracketed pid is a
@@ -140,9 +147,18 @@ public static class PgPlanLogParser
         }
 
         var afterPid = logLinePrefix[(pidIndex + 2)..];
-        var nextEscape = s_anyEscapeToken.Match(afterPid);
 
-        return nextEscape.Success && string.Equals(nextEscape.Value, "%Q", StringComparison.Ordinal);
+        try
+        {
+            var nextEscape = s_anyEscapeToken.Match(afterPid);
+
+            return nextEscape.Success && string.Equals(nextEscape.Value, "%Q", StringComparison.Ordinal);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // Not read to its end: the captured token is not taken as a query id.
+            return false;
+        }
     }
 
     /* Condition fields, where a bare number is a VALUE rather than part of a name. Enumerated rather than
@@ -161,12 +177,13 @@ public static class PgPlanLogParser
        be duplicated across the plan route and the log-event route any more than across the two plan
        transports — a second spelling of the literal pattern is the one that eventually disagrees, and the
        cost of that disagreement is a customer's data. */
-    internal static readonly Regex s_quotedLiteral = new("'(?:[^']|'')*'", RegexOptions.Compiled);
+    internal static readonly PgSettingRedactor.TimeBoundPattern s_quotedLiteral =
+        new("'(?:[^']|'')*'", RegexOptions.Compiled, TimeSpan.FromSeconds(1));
 
     /* Bare numbers NOT glued to an identifier character, so 'transactionitems1' survives and '(id > 100)'
        does not. */
-    internal static readonly Regex s_bareNumber = new(
-        @"(?<![A-Za-z0-9_])\d+(?:\.\d+)?(?![A-Za-z0-9_])", RegexOptions.Compiled);
+    internal static readonly PgSettingRedactor.TimeBoundPattern s_bareNumber = new(
+        @"(?<![A-Za-z0-9_])\d+(?:\.\d+)?(?![A-Za-z0-9_])", RegexOptions.Compiled, TimeSpan.FromSeconds(1));
 
     /// <summary>
     /// Every plan in a raw slab of server log. Used by the transport that receives log TEXT — the RDS API —
@@ -203,6 +220,20 @@ public static class PgPlanLogParser
 
         var trustQueryId = PrefixCarriesQueryIdAfterPid(logLinePrefix);
 
+        try
+        {
+            ExtractInto(plans, logBody, trustQueryId);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // The rest of the body is not read: the plans taken so far stand, and nothing unread is stored.
+        }
+
+        return plans;
+    }
+
+    private static void ExtractInto(List<ParsedPlan> plans, string logBody, bool trustQueryId)
+    {
         foreach (Match match in s_planBlock.Matches(logBody))
         {
             if (!long.TryParse(match.Groups[1].Value, out var capturedQueryId)
@@ -223,8 +254,6 @@ public static class PgPlanLogParser
                 plans.Add(parsed.Value);
             }
         }
-
-        return plans;
     }
 
     /// <summary>
@@ -262,7 +291,16 @@ public static class PgPlanLogParser
         root.Remove("Query Text");
         root.Remove("Query Parameters");
 
-        Redact(plan);
+        try
+        {
+            Redact(plan);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            /* The masking ran out of time on this plan's text: the plan is skipped, the way a block the tail
+               read cut in half is, so no unmasked text is stored and the caller's other plans still map. */
+            return null;
+        }
 
         var json = root.ToJsonString();
 
@@ -313,9 +351,22 @@ public static class PgPlanLogParser
         }
     }
 
+    /* The STORED plan text's own literal pattern, and not the fingerprint pair above. A quoted identifier is
+       a token of its own here: PostgreSQL deparses a name that needs quoting with its quotes, and one holding
+       an apostrophe ("owner's count", "c'") read by the literal pattern alone opens a literal that closes at
+       the next real quote, which leaves the literal after it standing in the stored text. Each quote kind
+       doubles its own quote to embed it, so neither alternative can run past its closing quote. The fingerprint
+       pattern is left as it is, for the statement fingerprint the log-event pipeline takes. This one runs BEFORE
+       ShapeHash, which is taken over the redacted root: so it decides what the stored text keeps AND what the plan
+       hash reads. The hash of a plan whose text held a quoted name with an apostrophe in it, or a literal the
+       fingerprint pattern left standing, therefore changes once, when the plan is next parsed; every other plan
+       keeps its hash. The hash is never taken over a raw value. */
+    internal static readonly PgSettingRedactor.TimeBoundPattern s_storedPlanLiteral = new(
+        @"""(?:[^""]|"""")*""|'(?:[^']|'')*'", RegexOptions.Compiled, TimeSpan.FromSeconds(1));
+
     private static string Scrub(string text, string fieldName)
     {
-        var scrubbed = s_quotedLiteral.Replace(text, "'?'");
+        var scrubbed = s_storedPlanLiteral.Replace(text, static m => m.Value[0] == '"' ? m.Value : "'?'");
 
         if (s_conditionFields.Contains(fieldName))
         {

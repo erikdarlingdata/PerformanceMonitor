@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
@@ -237,11 +239,126 @@ internal static class DarlingHostBinding
         || (!string.IsNullOrEmpty(host) && !string.IsNullOrEmpty(extraAllowedHost)
             && string.Equals(host, extraAllowedHost, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>The fewest characters an access token may have. The <c>--configure-network</c> wizard
+    /// generates 32; a shorter one was typed by hand (a <c>file:</c>/<c>env:</c> reference, or a plaintext
+    /// <c>token</c>), and below this it is too short to protect a network-facing port.</summary>
+    internal const int MinimumTokenLength = 16;
+
+    /// <summary>The fewest different characters an access token may use. Length alone passes a token such as
+    /// sixteen copies of one letter, which a handful of guesses finds; this keeps the floor from being met by
+    /// padding. A generated token (the wizard's 32 random characters, or the README's one-liner) is far above it.</summary>
+    internal const int MinimumDistinctTokenCharacters = 6;
+
+    /// <summary>
+    /// PURE: why a resolved token cannot gate an exposed surface, or null when it can. Empty (nothing to
+    /// compare against), too short (see <see cref="MinimumTokenLength"/>) and too repetitive (see
+    /// <see cref="MinimumDistinctTokenCharacters"/>) all fail closed; the caller logs
+    /// the text at Critical and binds loopback-only. Says nothing about the token's value, and does not give
+    /// its length either: a short token is "shorter than" the floor, never "N characters long".
+    /// </summary>
+    internal static string? DescribeTokenProblem(string? token)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return "resolved to empty after decryption";
+        }
+
+        if (token.Length < MinimumTokenLength)
+        {
+            return $"is shorter than {MinimumTokenLength} characters, and at least {MinimumTokenLength} are required for an exposed surface "
+                + "(--configure-network generates 32; to make one yourself, see the token note in the README)";
+        }
+
+        if (token.Distinct().Count() < MinimumDistinctTokenCharacters)
+        {
+            return $"uses fewer than {MinimumDistinctTokenCharacters} different characters, and at least {MinimumDistinctTokenCharacters} are required for an exposed surface "
+                + "(--configure-network generates a random 32-character token; to make one yourself, see the token note in the README)";
+        }
+
+        return null;
+    }
+
+    /// <summary>What the floor decided for one resolved token: whether the network bind stays on, and the
+    /// <see cref="DescribeTokenProblem"/> text when it does not (null when the token clears the floor).</summary>
+    internal readonly record struct TokenFloorOutcome(bool NetworkMode, string? Problem);
+
+    /// <summary>
+    /// PURE: applies the floor to the token a start resolved. A token under it turns the network bind OFF (the
+    /// host logs <see cref="TokenFloorOutcome.Problem"/> at Critical and binds loopback-only, still gating the
+    /// loopback listener on the token); a token that clears it leaves <paramref name="networkMode"/> as it was.
+    /// Both hosts' start paths call this, so the decision is one function a test drives directly.
+    /// </summary>
+    internal static TokenFloorOutcome ApplyTokenFloor(string token, bool networkMode)
+    {
+        var problem = DescribeTokenProblem(token);
+        return new TokenFloorOutcome(problem is null && networkMode, problem);
+    }
+
+    /// <summary>
+    /// PURE: parses <c>network.trustedProxies</c> — each entry an IP (<c>10.0.0.5</c>, <c>::1</c>) or a CIDR
+    /// (<c>10.0.1.0/24</c>) — into the networks whose forwarded headers the host honors. A bare IP becomes
+    /// its single-address network. Null or empty means none (the default, so the headers are ignored from
+    /// everyone). Returns false with <paramref name="problem"/> set when an entry does not parse, or parses
+    /// but is not written the plain way (<see cref="CidrAllowList.IsPlainCidrText"/>, the rule <c>allowFrom</c>
+    /// follows: <c>192.168.010.0/24</c> and <c>10/8</c> are refused, not read as another network); the caller
+    /// fails closed on it rather than trusting a list it cannot read.
+    /// </summary>
+    internal static bool TryParseTrustedProxies(
+        IReadOnlyList<string>? entries, out IReadOnlyList<IPNetwork> proxies, out string? problem)
+    {
+        problem = null;
+        var parsed = new List<IPNetwork>();
+        if (entries is not null)
+        {
+            foreach (var raw in entries)
+            {
+                var entry = raw?.Trim();
+                if (string.IsNullOrEmpty(entry))
+                {
+                    continue;
+                }
+
+                /* The same plain-text rule allowFrom uses (CidrAllowList.IsPlainCidrText): the parsers read an octal,
+                   hex or short-form address as a different network than the one written. A bare IP is checked as
+                   the address of a CIDR. */
+                if (IPNetwork.TryParse(entry, out var network))
+                {
+                    if (CidrAllowList.IsPlainCidrText(entry))
+                    {
+                        parsed.Add(network);
+                        continue;
+                    }
+                }
+                else if (IPAddress.TryParse(entry, out var address))
+                {
+                    if (CidrAllowList.IsPlainCidrText(entry + "/0"))
+                    {
+                        parsed.Add(new IPNetwork(address, address.AddressFamily == AddressFamily.InterNetworkV6 ? 128 : 32));
+                        continue;
+                    }
+                }
+                else
+                {
+                    proxies = Array.Empty<IPNetwork>();
+                    problem = $"'{entry}' is neither an IP address nor a CIDR";
+                    return false;
+                }
+
+                proxies = Array.Empty<IPNetwork>();
+                problem = $"'{entry}' is not written as a plain address/prefix (four decimal numbers 0-255 with no leading zero, or an IPv6 address)";
+                return false;
+            }
+        }
+
+        proxies = parsed;
+        return true;
+    }
+
     /// <summary>
     /// PURE constant-time token comparison. Both tokens are hashed to a fixed 32 bytes first, so the compare
     /// is constant-time regardless of length and leaks neither token nor its length. An empty
     /// <paramref name="expected"/> never authorizes (the caller should also guard). Used by the MCP host's
-    /// Bearer-header check and the web host's <c>?token=</c> check alike.
+    /// Bearer-header check and the web host's sign-in form check alike.
     /// </summary>
     internal static bool FixedTimeTokenEquals(string? presented, string? expected)
     {

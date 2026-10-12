@@ -260,6 +260,49 @@ public sealed class DiagnosticsBundleHardeningTests
         }
     }
 
+    /// <summary>
+    /// The alias map is written restricted: a protected DACL with none of the broad groups, even when the folder it
+    /// goes into hands Users read to everything created in it. The bundle itself is written the ordinary way.
+    /// </summary>
+    [Fact]
+    public void WriteAtomically_Restricted_WritesAProtectedFile_WithNoBroadGroup()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var root = Directory.CreateTempSubdirectory("darling-bundle-map-");
+        try
+        {
+            var users = new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null);
+            var folderSecurity = root.GetAccessControl();
+            folderSecurity.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                users,
+                System.Security.AccessControl.FileSystemRights.Read,
+                System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                System.Security.AccessControl.PropagationFlags.None,
+                System.Security.AccessControl.AccessControlType.Allow));
+            root.SetAccessControl(folderSecurity);
+
+            var plain = Path.Combine(root.FullName, "bundle.json");
+            var map = Path.Combine(root.FullName, "bundle.aliases.txt");
+            Assert.Null(DiagnosticsBundle.WriteAtomically(plain, "bundle", force: false));
+            Assert.Null(DiagnosticsBundle.WriteAtomically(map, "alias-map", force: false, restricted: true));
+
+            Assert.Equal("alias-map", File.ReadAllText(map));
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(plain), "control: the folder's inherited read reaches an ordinary file");
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(map));
+            Assert.True(new FileInfo(map).GetAccessControl().AreAccessRulesProtected, "the map must not inherit access from the folder");
+
+            /* The move over an existing map with force keeps the restriction. */
+            Assert.Null(DiagnosticsBundle.WriteAtomically(map, "second", force: true, restricted: true));
+            Assert.Equal("second", File.ReadAllText(map));
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(map));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
     /* ── fleet tags, engine keys, alias-then-cut ── */
 
     [Fact]
