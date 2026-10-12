@@ -40,12 +40,17 @@ C:\Program Files\PerformanceMonitorDarling). What it does, in order:
      PostgreSQL refuses to run with administrative privileges), start=auto. If the service
      already exists this is an UPGRADE: it is stopped and its binPath updated in place; your
      darling.json, store data, and credentials are untouched.
-  4b. Restricts darling.json to SYSTEM / Administrators / the service account, plus read for
-     INTERACTIVE (the Viewer). It holds encrypted SQL passwords and the MCP/web access tokens,
-     and an install folder under C:\ otherwise inherits read access for BUILTIN\Users.
+  4b. Restricts darling.json to SYSTEM / Administrators / the service account, plus read for the
+     local group 'PerformanceMonitor Darling Operators' (the Viewer and the CLI, run without
+     elevation). The group is created here, empty: you add each person who should have that access.
+     darling.json holds encrypted SQL passwords and the MCP/web access tokens, and an install
+     folder under C:\ otherwise inherits read access for BUILTIN\Users.
   4b2. Grants the service account read and execute on the locked install folder, and Modify only on the
      runtime folders it writes (pg-runtime and pg-runtime-prev, plus darling-keys with your own PostgreSQL),
      where it extracts its bundled PostgreSQL and keeps its keys, and re-verifies the lock.
+  4b3. Creates the store folder (the parent of postgres.dataDirectory, by default
+     %ProgramData%\PerformanceMonitorDarling) with Administrators as owner and a locked ACL before
+     the service first runs. An ordinary user can otherwise create and own that folder first.
   4c. Creates (or removes) the scoped Windows Firewall rules to match darling.json, via the exe's
      --configure-firewall verb. This requires elevation, which is why it lives here: the service's
      own unprivileged account cannot create them, and only verifies them at runtime.
@@ -92,6 +97,13 @@ $serviceExe = Join-Path $root 'PerformanceMonitor.Darling.Service.exe'
 $viewerExe = Join-Path $root 'viewer\PerformanceMonitor.Darling.Viewer.exe'
 $configPath = Join-Path $root 'darling.json'
 $samplePath = Join-Path $root 'darling.sample.json'
+
+# The local group whose members read darling.json and the store's role credentials without elevation (the
+# Viewer and the CLI verbs). It replaces NT AUTHORITY\INTERACTIVE, which put every logged-on user of a shared
+# host inside the boundary of a secret that anyone who can read the file can decrypt. The name is the service
+# account's name plus a role suffix, like Windows' own "Performance Log Users". It must match
+# DarlingFileSecurity.OperatorGroupName in the service project.
+$operatorGroupName = 'PerformanceMonitor Darling Operators'
 
 # The .NET major both shipped binaries are built against, and the one page that offers every installer
 # for it. Kept beside the other script-scope facts so a framework bump is one edit, and deliberately the
@@ -2071,6 +2083,35 @@ else {
     Write-Host "Could not determine the service's logon account; using the virtual account 'NT SERVICE\$serviceName' that sc create just set." -ForegroundColor Yellow
 }
 
+# What a native command wrote, as one line of text. In Windows PowerShell 5.1 the stderr lines of a redirected
+# native command arrive as error records, and its blank lines stringify as a type name.
+function Get-DarlingNativeText($output) {
+    (@($output) | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" } } | Where-Object { $_ -and $_.Trim() }) -join ' '
+}
+
+# The SID of the local operator group ($operatorGroupName), creating the group - empty - when it is missing.
+# Throws with the reason when it cannot be created.
+#
+# net.exe, not New-LocalGroup: the LocalAccounts module does not load reliably in PowerShell 7, and net.exe
+# behaves the same in both shells. The lookup comes first, so a re-run, an upgrade and a group an
+# administrator already made all leave the group and its members exactly as they are. net.exe is judged by its
+# exit code, with the error preference local to this function, for the reason Lock-DarlingInstallTree gives:
+# under $ErrorActionPreference = 'Stop' Windows PowerShell 5.1 turns the redirected stderr of a native command
+# into a terminating error before its exit code can be read.
+function Initialize-DarlingOperatorGroup([string]$groupName) {
+    $ErrorActionPreference = 'Continue'
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $account = New-Object System.Security.Principal.NTAccount($groupName)
+    try { return $account.Translate($sidType) }
+    catch [System.Security.Principal.IdentityNotMappedException] { }
+    $comment = 'Members can run the PerformanceMonitor Darling Viewer and CLI without elevation (read access to darling.json and the store role credentials).'
+    $output = & net.exe localgroup $groupName /add "/comment:$comment" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "net localgroup `"$groupName`" /add failed with exit code $LASTEXITCODE`: $(Get-DarlingNativeText $output)"
+    }
+    return $account.Translate($sidType)
+}
+
 # -- 4b. Lock down darling.json (#1647) -----------------------------------------------------------
 # The config holds every monitored server's encryptedPassword plus the MCP bearer and web access tokens.
 # They are DPAPI LocalMachine scope with an entropy constant that ships in the open-source repo, so READ
@@ -2080,10 +2121,12 @@ else {
 #
 # Runs AFTER service creation on purpose: the NT SERVICE virtual account has no SID to grant until sc.exe
 # create has made it. Mirrors DarlingFileSecurity.HardenFile exactly - SYSTEM / Administrators / the service
-# account get full control on both, and INTERACTIVE gets read on the LIVE CONFIG ONLY (the Viewer and the CLI
-# verbs run as the interactive operator and must still read darling.json; nothing reads a backup, #1769).
-# Best-effort: a failure warns rather than aborting an otherwise good install, and the service re-asserts the
-# live config's ACL at every startup.
+# account get full control on both, and the operator group gets read on the LIVE CONFIG ONLY (the Viewer and
+# the CLI verbs run as an unelevated operator and must still read darling.json; nothing reads a backup, #1769).
+# NT AUTHORITY\INTERACTIVE gets nothing: it covered every logged-on user, not only the people who run the
+# Viewer. Best-effort: a failure warns rather than aborting an otherwise good install, and the service
+# re-asserts the live config's ACL at every startup. The operator group is the one thing that stops the
+# install, once the files are locked: see the end of this step.
 #
 # Covers darling.json AND its .bak-* siblings (#1721). The CLI's config-editing verbs back the file up
 # before rewriting it, and File.Copy does NOT carry the source DACL - a backup takes the DIRECTORY's
@@ -2096,6 +2139,16 @@ else {
 # edits the DACL and drops that grant. Done AFTER the DACL and in its own try, so a SeRestorePrivilege
 # failure cannot take the DACL down with it - the failure mode we are fixing came from a permissions call
 # that silently did nothing.
+#
+# The operator group is created first because the grant below needs its SID. A failure to create it does not
+# skip the hardening (that would leave darling.json readable by BUILTIN\Users): the files are locked to SYSTEM,
+# Administrators and the service account without the group, which fails closed, and the install stops at the
+# end of this step with the reason.
+$operatorSid = $null
+$operatorGroupProblem = $null
+try { $operatorSid = Initialize-DarlingOperatorGroup $operatorGroupName }
+catch { $operatorGroupProblem = $_.Exception.Message }
+
 # Every path here is named with -LiteralPath (#4745). PowerShell reads [ and ] in a -Path value as wildcard
 # characters, so under an install folder named with either, -Path finds no .bak files at all, and Get-Acl or
 # Set-Acl -Path can resolve to a same-named file in a sibling folder (a[bc]d to abd) and harden that instead.
@@ -2116,7 +2169,6 @@ foreach ($secretFile in @($configPath) + @(Get-DarlingServiceWrittenRootFiles $r
         $wk = [System.Security.Principal.WellKnownSidType]
         $systemSid      = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
         $adminsSid      = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
-        $interactiveSid = New-Object System.Security.Principal.SecurityIdentifier($wk::InteractiveSid, $null)
         $serviceSid     = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate([System.Security.Principal.SecurityIdentifier])
 
         $acl = New-Object System.Security.AccessControl.FileSecurity
@@ -2128,14 +2180,15 @@ foreach ($secretFile in @($configPath) + @(Get-DarlingServiceWrittenRootFiles $r
         foreach ($sid in @($systemSid, $adminsSid, $serviceSid)) {
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $full, $allow)))
         }
-        # INTERACTIVE read goes to the LIVE config only. darling.json is read as the interactive operator by the
-        # Viewer and the CLI verbs; a .bak-* copy is read by nothing (#1769) - the only code that knows the name
-        # is the code that creates it, and restoring one already needs elevation because writing darling.json
-        # does. So a backup granting INTERACTIVE was a second copy of every encrypted password and access token,
-        # readable by any interactively-logged-on user, buying nothing. Mirrors
-        # DarlingFileSecurity.HardenFile(path, allowInteractiveRead: false) for backups.
-        if ($secretFile -eq $configPath) {
-            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($interactiveSid, $read, $allow)))
+        # The operator group's read goes to the LIVE config only. darling.json is read by the Viewer and the CLI
+        # verbs as an unelevated operator; a .bak-* copy is read by nothing (#1769) - the only code that knows the
+        # name is the code that creates it, and restoring one already needs elevation because writing darling.json
+        # does. So a backup granting the group was a second copy of every encrypted password and access token,
+        # readable by every member, buying nothing. Mirrors DarlingFileSecurity.HardenFile for backups. This DACL
+        # is built from scratch, so an INTERACTIVE grant an earlier install left on the file is gone once Set-Acl
+        # applies it, and the verification below fails the file if one is somehow still there.
+        if ($secretFile -eq $configPath -and $operatorSid) {
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($operatorSid, $read, $allow)))
         }
         Set-Acl -LiteralPath $secretFile -AclObject $acl
 
@@ -2163,8 +2216,8 @@ foreach ($secretFile in @($configPath) + @(Get-DarlingServiceWrittenRootFiles $r
         # readable is exactly what went unnoticed for months on a field box.
         $after = Get-Acl -LiteralPath $secretFile
         $exposed = $after.Access | Where-Object {
-            $_.AccessControlType -eq 'Allow' -and
-            $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).IsWellKnown($wk::BuiltinUsersSid)
+            $aceSid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+            $_.AccessControlType -eq 'Allow' -and ($aceSid.IsWellKnown($wk::BuiltinUsersSid) -or $aceSid.IsWellKnown($wk::InteractiveSid))
         }
         if ($exposed -or -not $after.AreAccessRulesProtected) {
             $failed += $secretFile
@@ -2179,7 +2232,12 @@ foreach ($secretFile in @($configPath) + @(Get-DarlingServiceWrittenRootFiles $r
 }
 
 if ($hardened.Count -gt 0) {
-    Write-Host "Restricted $($hardened.Count) credential file(s) to SYSTEM, Administrators, and the service account (they hold encrypted passwords and access tokens). darling.json additionally allows INTERACTIVE read, which the Viewer and the CLI verbs need; its .bak-* copies do not."
+    if ($operatorSid) {
+        Write-Host "Restricted $($hardened.Count) credential file(s) to SYSTEM, Administrators, and the service account (they hold encrypted passwords and access tokens). darling.json additionally allows read for members of the local group '$operatorGroupName', which the Viewer and the CLI verbs need without elevation; its .bak-* copies do not."
+    }
+    else {
+        Write-Host "Restricted $($hardened.Count) credential file(s) to SYSTEM, Administrators, and the service account (they hold encrypted passwords and access tokens). darling.json has no operator read grant yet, because the local group '$operatorGroupName' could not be created."
+    }
     Write-Host 'The service re-verifies and re-applies these ACLs on every start (#1818), so this is a floor rather than a one-time act: a later edit that loosens one is repaired at the next start without re-running the installer.'
 }
 if ($failed.Count -gt 0) {
@@ -2190,10 +2248,32 @@ if ($failed.Count -gt 0) {
     Write-Host '  Those are DPAPI LocalMachine blobs, so READ ACCESS IS THE SECRET - any local user who can open' -ForegroundColor Red
     Write-Host '  the file can recover all of it. Fix each one from an elevated prompt:' -ForegroundColor Red
     Write-Host "    icacls `"<file>`" /inheritance:d" -ForegroundColor Yellow
-    Write-Host "    icacls `"<file>`" /remove:g `"BUILTIN\Users`"" -ForegroundColor Yellow
+    Write-Host "    icacls `"<file>`" /remove:g `"BUILTIN\Users`" *S-1-5-4" -ForegroundColor Yellow
     Write-Host "    icacls `"<file>`" /grant `"$serviceAccount`:(F)`"" -ForegroundColor Yellow
     Write-Host '  ...or move the install out of a world-readable folder such as one created directly under C:\.' -ForegroundColor Red
     Write-Host ''
+}
+
+# Who gets the operator group's access is the administrator's decision, so this script never adds a member. It
+# says who to add and what that person is being trusted with. A group that could not be created stops the
+# install here, after the files above are already locked, so nothing is open to other accounts while it is fixed: an
+# unattended install then reports a non-zero exit instead of finishing with a Viewer nobody can open.
+if ($operatorSid) {
+    Write-Host ''
+    Write-Host "Local group '$operatorGroupName' is in place. This script never adds members to it."
+    Write-Host "Add each person who runs the Viewer or the CLI without elevation to the local group '$operatorGroupName' (Computer Management > Local Users and Groups, or net localgroup `"$operatorGroupName`" DOMAIN\user /add)."
+    Write-Host "Members can read darling.json and the store's admin and viewer credentials, which decrypt every stored password; give it only to people you would give the passwords to."
+    Write-Host 'A person added to the group has to sign out and back in before the membership takes effect.'
+    Write-Host ''
+}
+else {
+    Fail @"
+Could not create the local group '$operatorGroupName': $operatorGroupProblem
+darling.json is restricted to SYSTEM, Administrators and the service account, so nothing is open to other accounts, but the
+Viewer and the CLI cannot read it without elevation until the group exists. The install stops here, before
+the service starts. Create the group from an elevated prompt, then re-run this script:
+  net localgroup "$operatorGroupName" /add
+"@
 }
 
 # -- 4b2. Grant the service its access to the locked tree (#4034) ----------------------------------------
@@ -2204,6 +2284,132 @@ if ($failed.Count -gt 0) {
 # upgrade-darling.ps1 runs the same function, so an install made before these steps is locked at its next
 # upgrade.
 Invoke-InstallTreeLock $serviceAccount
+
+# -- 4b3. Create the store folder before the service does -------------------------------------------------
+# The store folder is the parent of postgres.dataDirectory: %ProgramData%\PerformanceMonitorDarling unless
+# darling.json says otherwise. It holds the PostgreSQL data directory, the service log and every role
+# credential, and the service runs initdb inside it on first start. An ordinary user can create a folder
+# under C:\ProgramData and would then OWN it - owners can rewrite the folder's ACL and read everything the
+# service writes there - so the folder has to exist, owned by Administrators and locked, before the service
+# has a chance to create it. The ACL below is the one the service applies on every start: SYSTEM,
+# Administrators and the service account in full, inherited by everything below, and the operator group
+# Traverse on this folder only, so a member can open a credential file by its known path but cannot list the
+# folder or reach the data directory. Nothing else is granted, and the DACL does not inherit.
+
+# The store folder darling.json names, or $null when there is nothing to do here: a bring-your-own PostgreSQL
+# install (postgres.managed = false) has no store folder, and a config that cannot be read, or a data
+# directory that is not a plain drive-letter path, is left to the service to resolve, which does not change
+# what it will do. Reads darling.json the way Get-DarlingExtraServiceWriteDirectories does, with a regex
+# rather than ConvertFrom-Json, because Windows PowerShell 5.1 rejects the comments and trailing commas
+# darling.json allows. Mirrors DarlingManagedPostgres.ResolveDataDirectory: a null, missing or blank
+# dataDirectory is the default, and the store folder is the data directory's parent.
+function Get-DarlingStoreFolder([string]$configPath) {
+    $text = ''
+    if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+        try { $text = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop }
+        catch { return $null }
+    }
+    $stripped = ($text -split "`r?`n" | ForEach-Object { $_ -replace '(?<!:)//.*$', '' }) -join "`n"
+    $managed = [regex]::Matches($stripped, '"managed"\s*:\s*(true|false)')
+    if ($managed.Count -gt 0 -and $managed[$managed.Count - 1].Groups[1].Value -eq 'false') { return $null }
+    $dataDirectory = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'PerformanceMonitorDarling\pg'
+    $configured = [regex]::Matches($stripped, '"dataDirectory"\s*:\s*(?:null|"((?:[^"\\]|\\.)*)")')
+    if ($configured.Count -gt 0 -and $configured[$configured.Count - 1].Groups[1].Success) {
+        # JSON string escapes ("C:\\Data\\pg"); a value that is not valid JSON is the service's to reject.
+        try { $value = [regex]::Unescape($configured[$configured.Count - 1].Groups[1].Value) }
+        catch { return $null }
+        if (-not [string]::IsNullOrWhiteSpace($value)) { $dataDirectory = $value }
+    }
+    if ($dataDirectory -notmatch '^[A-Za-z]:\\') { return $null }
+    $parent = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($dataDirectory).TrimEnd('\'))
+    if ([string]::IsNullOrEmpty($parent)) { return $null }
+    return $parent
+}
+
+# Creates $folder if it is missing, makes Administrators its owner, and gives it the DACL described above.
+# Throws with the reason when it cannot leave the folder in that state, so the caller stops before the
+# service starts. A folder that already exists is trusted only if its owner is SYSTEM, Administrators,
+# TrustedInstaller or the service account, the same set Lock-DarlingInstallTree trusts: that is what the
+# service leaves behind, so an upgrade passes. A folder owned by anyone else is what a pre-created folder looks
+# like, and what is already inside it was put there by that owner: it is refused unless empty, because
+# taking the folder over cannot make the owner's files trustworthy. A junction or link is refused outright;
+# an ACL set through one would land on whatever it points to.
+function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount, $operatorSid) {
+    $ErrorActionPreference = 'Continue'
+    $wk = [System.Security.Principal.WellKnownSidType]
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $systemSid = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
+    $adminsSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
+    $serviceSid = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate($sidType)
+    $trusted = @($systemSid, $adminsSid, $serviceSid, (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType))
+
+    $existed = Test-Path -LiteralPath $folder
+    if ($existed) {
+        $item = Get-Item -LiteralPath $folder -Force
+        if (-not $item.PSIsContainer) { throw "$folder exists and is a file, not a folder." }
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "$folder is a junction or link. Remove it, or point postgres.dataDirectory in darling.json at a real folder, then re-run this script."
+        }
+    }
+    else {
+        $null = [System.IO.Directory]::CreateDirectory($folder)
+    }
+
+    $owner = (Get-Acl -LiteralPath $folder).GetOwner($sidType)
+    if ($existed -and $trusted -notcontains $owner) {
+        $inside = @(Get-ChildItem -LiteralPath $folder -Force -ErrorAction SilentlyContinue)
+        if ($inside.Count -gt 0) {
+            try { $ownerName = $owner.Translate([System.Security.Principal.NTAccount]).Value }
+            catch { $ownerName = $owner.Value }
+            throw "$folder already exists, is owned by $ownerName, and holds $($inside.Count) item(s) that owner could have put there. If you did not create it, look at what is in it and delete it. If it is your existing store, make Administrators its owner, then re-run this script: icacls `"$folder`" /setowner *$($adminsSid.Value) /T /C /L"
+        }
+    }
+    # icacls, not Set-Acl, for the owner: it enables the privilege that taking ownership of a folder someone else
+    # made needs, and it is what the by-hand fix above tells an administrator to run. Owner before DACL, so the
+    # DACL is written by the owner and cannot be refused.
+    if ($owner -ne $adminsSid) {
+        $output = & icacls.exe $folder /setowner "*$($adminsSid.Value)" /L /Q 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "could not make Administrators the owner of ${folder}: $(Get-DarlingNativeText $output)" }
+    }
+
+    $rights = [System.Security.AccessControl.FileSystemRights]
+    $inheritFlags = [System.Security.AccessControl.InheritanceFlags]
+    $none = [System.Security.AccessControl.PropagationFlags]::None
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @($systemSid, $adminsSid, $serviceSid)) {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $rights::FullControl, ($inheritFlags::ContainerInherit -bor $inheritFlags::ObjectInherit), $none, $allow)))
+    }
+    if ($operatorSid) {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($operatorSid, ($rights::Traverse -bor $rights::Synchronize), $inheritFlags::None, $none, $allow)))
+    }
+    Set-Acl -LiteralPath $folder -AclObject $acl -ErrorAction Stop
+
+    # VERIFY rather than assume: the folder must now be protected, owned by Administrators, and grant exactly
+    # the principals above.
+    $after = Get-Acl -LiteralPath $folder
+    $expected = @(@($systemSid, $adminsSid, $serviceSid) + @($operatorSid | Where-Object { $_ }) | ForEach-Object { $_.Value } | Sort-Object -Unique)
+    $actual = @($after.GetAccessRules($true, $true, $sidType) | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+    if (-not $after.AreAccessRulesProtected -or $after.GetOwner($sidType) -ne $adminsSid -or @(Compare-Object $expected $actual).Count -gt 0) {
+        throw "$folder was not left protected, owned by Administrators, and granting only SYSTEM, Administrators, the service account and the operator group."
+    }
+}
+
+$storeFolder = Get-DarlingStoreFolder $configPath
+if ($storeFolder) {
+    try { Initialize-DarlingStoreFolder $storeFolder $serviceAccount $operatorSid }
+    catch {
+        Fail @"
+The store folder '$storeFolder' could not be secured before the service's first start: $($_.Exception.Message)
+The service was not started: it would run initdb inside a folder this script could not lock. Fix the folder, then re-run this script.
+"@
+    }
+    Write-Host "Store folder '$storeFolder' is owned by Administrators and locked to SYSTEM, Administrators and the service account; the operator group can only traverse it."
+}
+else {
+    Write-Host 'No store folder to secure here: postgres.managed is false, or darling.json could not be read or names a data directory this script does not handle. The service creates and locks its own store folder on first start.'
+}
 
 # -- 4c. Firewall rules (#1771) --------------------------------------------------------------------
 # The service runs as an unprivileged virtual account that CANNOT create firewall rules. It used to try on

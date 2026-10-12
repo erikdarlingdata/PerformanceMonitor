@@ -3028,12 +3028,12 @@ public sealed class DarlingManagedPostgres
 
         /* Create the directory that holds the data dir + the DPAPI credential files, then LOCK it
            down (V8 hardening): strip the inherited world-readable ACLs %ProgramData% would otherwise
-           give it, leaving SYSTEM + Administrators + the service account, plus INTERACTIVE traverse so
+           give it, leaving SYSTEM + Administrators + the service account, plus operator-group traverse so
            the operator's Viewer can reach the admin/viewer credential files beside the data directory.
            Re-applied every start (self-healing, like the conf append) so an existing loose install is
            tightened too. Done BEFORE initdb so the data-dir subtree inherits the locked-down ACL. */
         Directory.CreateDirectory(ParentOf(_dataDirectory));
-        TryHardenDirectory(ParentOf(_dataDirectory));
+        var storeFolderLocked = TryHardenDirectory(ParentOf(_dataDirectory));
 
         /* Age out any pre-upgrade rollback copy BEFORE this start's own upgrade can create a new one.
            Running it afterwards would bump the brand-new copy's counter on the very start that produced
@@ -3075,6 +3075,7 @@ public sealed class DarlingManagedPostgres
                 throw new InvalidOperationException(DarlingStoreUpgrade.DescribeDisplacedStore(_dataDirectory, displaced));
             }
 
+            RefuseInitdbOnUnlockedStoreFolder(ParentOf(_dataDirectory), storeFolderLocked);
             await InitializeClusterAsync(binDirectory, cancellationToken);
 
             /* Read here too, so this first start records the new store's TimescaleDB state under this runtime and
@@ -3663,9 +3664,10 @@ public sealed class DarlingManagedPostgres
         _logger.LogInformation("Initializing managed Postgres cluster in {DataDirectory} (first run)", _dataDirectory);
 
         var password = GeneratePassword();
-        File.WriteAllText(_credentialPath, DarlingSecrets.Protect(password));
         /* The SUPERUSER credential — locked to SYSTEM + Administrators + the service account, NEVER an
-           interactive user (post-split the Viewer connects as admin/viewer, never darling). */
+           interactive user (post-split the Viewer connects as admin/viewer, never darling). Created with that
+           ACL, so it never carries the folder's for the moment before a harden. */
+        WriteHardenedText(_credentialPath, DarlingSecrets.Protect(password));
         TryHardenCredentialFile(_credentialPath, allowInteractiveRead: false);
 
         /* --pwfile is the non-interactive way to hand initdb the superuser password; the file
@@ -3674,7 +3676,7 @@ public sealed class DarlingManagedPostgres
            would corrupt the first (and only) line initdb reads. Same restrictive ACL: it briefly
            holds the superuser password in the clear. */
         var passwordFile = Path.Combine(ParentOf(_dataDirectory), "pg-pwfile.tmp");
-        File.WriteAllText(passwordFile, password + "\n");
+        WriteHardenedText(passwordFile, password + "\n");
         TryHardenCredentialFile(passwordFile, allowInteractiveRead: false);
         try
         {
@@ -5176,12 +5178,14 @@ public sealed class DarlingManagedPostgres
     /// loud but never bricks the service — the fresh-install path (the service account owns the
     /// just-created directory) succeeds, and the trusted-owner read guard is the complementary defense.
     /// </summary>
+    /// <returns>Whether the ACL was applied; a first start refuses initdb when it was not.</returns>
     [SupportedOSPlatform("windows")]
-    private void TryHardenDirectory(string path)
+    private bool TryHardenDirectory(string path)
     {
         try
         {
             DarlingFileSecurity.HardenDirectory(path, allowInteractiveTraverse: true);
+            return true;
         }
         catch (Exception ex)
         {
@@ -5191,7 +5195,71 @@ public sealed class DarlingManagedPostgres
                 "needs ownership or FullControl — so restarting will not clear this; grant the service account " +
                 "FullControl or make it the owner (SYSTEM/Administrators/the service account only).",
                 path, DarlingFileSecurity.DescribeOwnerAndExposure(path), ex.Message);
+            return false;
         }
+    }
+
+    /// <summary>
+    /// Why a first initdb must not run under <paramref name="storeFolder"/>, or null when it may. The data
+    /// directory initdb creates inherits this folder's ACL, and it holds query text, plans and every monitored
+    /// server's encrypted password. An ordinary user can create a folder under ProgramData and own it before the
+    /// service ever starts; the service cannot re-ACL what it does not own (WRITE_DAC comes with ownership or
+    /// FullControl), and until now it logged that failure and ran initdb anyway, so the new store was readable by
+    /// every local user. Only a fresh cluster is judged: an existing store's data is already where it is, and
+    /// refusing to start it would stop collection without protecting anything.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string? StoreFolderProblem(string storeFolder, bool lockedDown)
+    {
+        if (!lockedDown)
+        {
+            return "its permissions could not be restricted";
+        }
+
+        if (!DarlingFileSecurity.IsTrustedOwner(storeFolder))
+        {
+            return "it is not owned by SYSTEM, Administrators or the service account";
+        }
+
+        if (DarlingFileSecurity.IsReadableByOrdinaryUsers(storeFolder))
+        {
+            return "it is readable by Users, Authenticated Users, Everyone or INTERACTIVE";
+        }
+
+        return null;
+    }
+
+    /// <summary>The fresh-cluster gate on <see cref="StoreFolderProblem"/>: a startup error that names the folder and
+    /// the fix. The worker logs it critical and exits, like every other failure of the managed start.</summary>
+    [SupportedOSPlatform("windows")]
+    private void RefuseInitdbOnUnlockedStoreFolder(string storeFolder, bool lockedDown)
+    {
+        if (StoreFolderProblem(storeFolder, lockedDown) is not { } reason)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"Refusing to initialize a new store under {storeFolder}: {reason}" +
+            $"{DarlingFileSecurity.DescribeOwnerAndExposure(storeFolder)}. A data directory created there would inherit " +
+            "that access, and it holds query text, plans and every monitored server's encrypted password. If you did not " +
+            "create the folder, find out who did and remove it. Otherwise, from an ELEVATED prompt:   " +
+            $"takeown /f \"{storeFolder}\" /a   then   icacls \"{storeFolder}\" /inheritance:r /grant \"SYSTEM:(OI)(CI)F\" " +
+            $"\"Administrators:(OI)(CI)F\" \"{DarlingFileSecurity.ServiceAccountDisplayName}:(OI)(CI)F\"   and start the " +
+            "service again. install-darling.ps1 creates this folder with that owner and ACL before the first start.");
+    }
+
+    /// <summary>
+    /// Writes a secret to a file that carries the hardened ACL from its first byte, UTF-8 without a BOM like
+    /// <see cref="File.WriteAllText(string, string)"/>. A leftover from an earlier failed attempt is removed first,
+    /// because the create refuses to open an existing file rather than write through whatever appeared there.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static void WriteHardenedText(string path, string text)
+    {
+        File.Delete(path);
+        using var stream = DarlingFileSecurity.CreateHardenedFile(path, allowInteractiveRead: false);
+        stream.Write(new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(text));
     }
 
     /// <summary>

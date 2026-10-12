@@ -3767,19 +3767,15 @@ internal sealed class DarlingStoreUpgrade
 
         var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(newDataDirectory)))!;
         var preUpgradeCopy = Path.Combine(parent, PreUpgradeAutoConfFileName);
-        File.Copy(sourcePath, preUpgradeCopy, overwrite: true);
-        try
+        /* Created with the store's own ACL rather than copied and hardened after: a plain copy took the folder's
+           inherited access for the moment before the harden, and the file holds whatever the operator put in
+           postgresql.auto.conf. The previous major upgrade's copy is removed first, because the create refuses an
+           existing file rather than write through it. A failure fails the carry the way a failed copy always did. */
+        File.Delete(preUpgradeCopy);
+        using (var source = File.OpenRead(sourcePath))
+        using (var copy = DarlingFileSecurity.CreateHardenedFile(preUpgradeCopy, allowInteractiveRead: false))
         {
-            DarlingFileSecurity.HardenFile(preUpgradeCopy, allowInteractiveRead: false);
-        }
-        catch (Exception ex)
-        {
-            /* Best-effort, like DarlingManagedPostgres.TryHardenCredentialFile this mirrors — a failure here
-               must not cost the carry itself, only get logged so it can be fixed by hand. */
-            _logger.LogWarning(
-                "Could not restrict {Path} to the store's own ACL ({Message}) — it may be readable more " +
-                "broadly than the data directory it was copied from.",
-                preUpgradeCopy, ex.Message);
+            await source.CopyToAsync(copy, cancellationToken);
         }
 
         _logger.LogInformation(

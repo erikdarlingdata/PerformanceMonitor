@@ -136,29 +136,54 @@ public class DarlingInstallLocationTests
     /// <summary>
     /// #2187 weighed fixing the tree's ACLs against refusing, and rejected the fix: it would mean the
     /// product starts silently ACLing directories inside somebody's profile. This pins that decision where
-    /// it can actually be broken — the installer's only <c>Set-Acl</c> targets are the credential files it
-    /// has always hardened, never the install tree.
+    /// it can actually be broken — the installer's only <c>Set-Acl</c> targets are the credential file it
+    /// has always hardened and the store folder it creates before the service does, never the install tree.
+    ///
+    /// <para>The store folder is the parent of <c>postgres.dataDirectory</c>
+    /// (<c>%ProgramData%\PerformanceMonitorDarling</c> unless <c>darling.json</c> says otherwise), not a
+    /// directory of the install tree. It holds the PostgreSQL data directory and every role credential. An
+    /// ordinary user can create a folder under <c>C:\ProgramData</c> and would then own it, so the installer
+    /// makes Administrators its owner and locks it before the service's first start. Its one <c>Set-Acl</c> is
+    /// pinned as tightly as the credential file's two: it sits in the function that locks the store folder,
+    /// and that function's only caller passes the folder <c>Get-DarlingStoreFolder</c> reads out of
+    /// <c>darling.json</c>. Where that setting points is an operator's choice, which no source pin can see.</para>
     /// </summary>
     [Fact]
-    public void TheInstaller_NeverAclsTheInstallTree_OnlyTheCredentialFiles()
+    public void TheInstaller_NeverAclsTheInstallTree_OnlyTheCredentialFilesAndTheStoreFolder()
     {
         var script = InstallScript;
 
         /* The script names every path with -LiteralPath since #4745, so this looks for that spelling: a loop over
-           "Set-Acl -Path " would find no call and check nothing. The window holds the whole 32-character
-           "Set-Acl -LiteralPath $secretFile", which the old 30-character one could not. */
-        var applications = 0;
-        for (var at = script.IndexOf("Set-Acl -LiteralPath ", StringComparison.Ordinal); at >= 0; at = script.IndexOf("Set-Acl -LiteralPath ", at + 1, StringComparison.Ordinal))
+           "Set-Acl -Path " would find no call and check nothing. Each call is read for the path it names, so a
+           call on anything else fails here instead of being counted. */
+        var targets = new List<string>();
+        foreach (Match call in Regex.Matches(script, @"Set-Acl -LiteralPath (\S+)"))
         {
-            applications++;
-            Assert.Contains("Set-Acl -LiteralPath $secretFile", script.Substring(at, Math.Min(40, script.Length - at)), StringComparison.Ordinal);
+            targets.Add(call.Groups[1].Value);
         }
 
-        Assert.True(applications == 2, $"expected exactly 2 Set-Acl calls (the hardened DACL and the owner), found {applications}");
+        targets.Sort(StringComparer.Ordinal);
+        var found = string.Join(", ", targets);
+        Assert.True(
+            found == "$folder, $secretFile, $secretFile",
+            $"expected Set-Acl on the store folder once and on the credential file twice (the hardened DACL and the owner), found: {found}");
 
-        /* And the install root is never granted anything, by either route. The icacls lines the script does
-           contain are remediation instructions PRINTED for the operator, which is a different thing from the
-           product reaching into a profile and changing permissions itself. */
+        /* The one $folder call belongs to the store folder and to nothing else: it is inside the function that
+           locks the store folder, that function has one caller, and the caller passes $storeFolder, which is
+           assigned once, from Get-DarlingStoreFolder. Neither the install root nor the script's own folder
+           reaches it. */
+        Assert.Contains("Set-Acl -LiteralPath $folder", ExtractFunction(script, "Initialize-DarlingStoreFolder"), StringComparison.Ordinal);
+
+        var callers = Regex.Matches(script, @"(?<!function )Initialize-DarlingStoreFolder (\S+)");
+        Assert.True(
+            callers.Count == 1 && callers[0].Groups[1].Value == "$storeFolder",
+            "Initialize-DarlingStoreFolder must have one caller, and it must pass $storeFolder");
+        Assert.Single(Regex.Matches(script, @"\$storeFolder\s*="));
+        Assert.Contains("$storeFolder = Get-DarlingStoreFolder $configPath", script, StringComparison.Ordinal);
+
+        /* And the install root is never the target of Set-Acl, and the script never runs a bare "icacls $root".
+           That is all these three say: Lock-DarlingInstallTree does run icacls.exe on the root, on purpose
+           (#4034), and the icacls lines the script prints for the operator quote the path, so neither matches. */
         Assert.DoesNotContain("Set-Acl -Path $root", script, StringComparison.Ordinal);
         Assert.DoesNotContain("Set-Acl -LiteralPath $root", script, StringComparison.Ordinal);
         Assert.DoesNotContain("icacls $root", script, StringComparison.Ordinal);

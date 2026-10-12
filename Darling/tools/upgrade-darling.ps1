@@ -43,7 +43,12 @@ What it does, in order:
      nothing else, so a dropped dependency or a stranded runtimes\<rid>\lib\<tfm>\ subtree stays in the
      tree forever - in a directory .NET probes for assemblies. The authority is a manifest this script
      writes into the install root after every copy (#2529).
- 11. Starts the service, waits for Running, and prints the post-install health check - which is a STAGE of
+ 11. Creates the local group 'PerformanceMonitor Darling Operators' if it is missing, exactly as
+     install-darling.ps1 does, and says who to add. The group is created empty and this script adds no one.
+     The service grants that group read on darling.json and the store's credential files and drops the
+     NT AUTHORITY\INTERACTIVE entries at its first start on this build, so an install made before the group
+     existed would otherwise leave every non-elevated Viewer and CLI user locked out.
+ 12. Starts the service, waits for Running, and prints the post-install health check - which is a STAGE of
      the install, not a favour.
 
 Every step is safe to re-run. That is not a nicety: steps 5 through 9 leave the service DOWN if anything
@@ -140,6 +145,13 @@ if ([string]::IsNullOrWhiteSpace($Source)) { $Source = $PSScriptRoot }
 $serviceName = 'PerformanceMonitor Darling'
 $serviceExeName = 'PerformanceMonitor.Darling.Service.exe'
 $configName = 'darling.json'
+
+# The local group whose members read darling.json and the store's role credentials without elevation (the
+# Viewer and the CLI verbs). It replaces NT AUTHORITY\INTERACTIVE, which put every logged-on user of a shared
+# host inside the boundary of a secret that anyone who can read the file can decrypt. The name is the service
+# account's name plus a role suffix, like Windows' own "Performance Log Users". It must match
+# DarlingFileSecurity.OperatorGroupName in the service project, and install-darling.ps1's copy of it.
+$operatorGroupName = 'PerformanceMonitor Darling Operators'
 
 # #4466: how long phase two waits for a process that is still exiting after the service reports Stopped,
 # before it refuses. Get-Service reporting Stopped means the SCM's own state machine reached that state,
@@ -1029,6 +1041,35 @@ function Test-PathIsAtOrUnder([string]$candidate, [string]$parent) {
 }
 function Good([string]$message) { Write-Host $message -ForegroundColor Green }
 function Warn([string]$message) { Write-Host "WARNING: $message" -ForegroundColor Yellow }
+
+# What a native command wrote, as one line of text. In Windows PowerShell 5.1 the stderr lines of a redirected
+# native command arrive as error records, and its blank lines stringify as a type name.
+function Get-DarlingNativeText($output) {
+    (@($output) | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" } } | Where-Object { $_ -and $_.Trim() }) -join ' '
+}
+
+# The SID of the local operator group ($operatorGroupName), creating the group - empty - when it is missing.
+# Throws with the reason when it cannot be created.
+#
+# net.exe, not New-LocalGroup: the LocalAccounts module does not load reliably in PowerShell 7, and net.exe
+# behaves the same in both shells. The lookup comes first, so a re-run, an upgrade and a group an
+# administrator already made all leave the group and its members exactly as they are. net.exe is judged by its
+# exit code, with the error preference local to this function, for the reason Lock-DarlingInstallTree gives:
+# under $ErrorActionPreference = 'Stop' Windows PowerShell 5.1 turns the redirected stderr of a native command
+# into a terminating error before its exit code can be read.
+function Initialize-DarlingOperatorGroup([string]$groupName) {
+    $ErrorActionPreference = 'Continue'
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $account = New-Object System.Security.Principal.NTAccount($groupName)
+    try { return $account.Translate($sidType) }
+    catch [System.Security.Principal.IdentityNotMappedException] { }
+    $comment = 'Members can run the PerformanceMonitor Darling Viewer and CLI without elevation (read access to darling.json and the store role credentials).'
+    $output = & net.exe localgroup $groupName /add "/comment:$comment" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "net localgroup `"$groupName`" /add failed with exit code $LASTEXITCODE`: $(Get-DarlingNativeText $output)"
+    }
+    return $account.Translate($sidType)
+}
 
 # The logon account the Darling service is registered to run as, exactly as Windows reports it (LocalSystem,
 # .\name and NT SERVICE\... spellings included), or $null when neither Win32_Service nor sc.exe qc can say.
@@ -3043,6 +3084,37 @@ if ($payload.Ok) {
 # The lock went on before the copy (see there). Run again now that the new build and the stale-file cleanup
 # have landed, so what is reported is the tree the service is about to start from.
 Invoke-UpgradeTreeLock 'after the copy'
+
+# ============================ the operator group ============================
+#
+# The service grants the local group '$operatorGroupName' read on darling.json and on the store's admin and
+# viewer credentials, and at its first start on this build it drops the NT AUTHORITY\INTERACTIVE entries an
+# earlier build left on them. An install made before the group existed has none, and without it every
+# non-elevated Viewer and CLI user loses access at that start. So the group is made here, before the service
+# starts, the way install-darling.ps1 makes it: the lookup comes first, so a group that already exists (an
+# administrator's, or one an earlier run made) and its members are left exactly as they are, and this script
+# adds nobody. Who gets the group's access is the administrator's decision.
+#
+# A group that cannot be made is a warning, and the service still starts. It is stopped and the new build is
+# in place, and a monitoring host that is up is in far better shape than one this script left down over a
+# group: the files stay readable by SYSTEM, Administrators and the service account only, and the service
+# logs the missing group at every start until it exists.
+$operatorSid = $null
+$operatorGroupProblem = $null
+try { $operatorSid = Initialize-DarlingOperatorGroup $operatorGroupName }
+catch { $operatorGroupProblem = $_.Exception.Message }
+
+if ($operatorSid) {
+    Note ''
+    Note "Local group '$operatorGroupName' is in place. This script never adds members to it."
+    Note "Add each person who runs the Viewer or the CLI without elevation to the local group '$operatorGroupName' (Computer Management > Local Users and Groups, or net localgroup `"$operatorGroupName`" DOMAIN\user /add)."
+    Note "Members can read darling.json and the store's admin and viewer credentials, which decrypt every stored password; give it only to people you would give the passwords to."
+    Note 'A person added to the group has to sign out and back in before the membership takes effect.'
+    Note ''
+}
+else {
+    Warn "Could not create the local group '$operatorGroupName': $operatorGroupProblem The service will start, but darling.json and the store's admin and viewer credentials stay readable by SYSTEM, Administrators and the service account only, so the Viewer and the CLI cannot read them without elevation. Create the group from an elevated prompt (net localgroup `"$operatorGroupName`" /add), add the people who run the Viewer or the CLI, then restart the service so it grants the group."
+}
 
 Note "Starting '$serviceName'..."
 Start-Service -Name $serviceName

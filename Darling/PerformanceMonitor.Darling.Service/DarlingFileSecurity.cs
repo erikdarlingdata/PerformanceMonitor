@@ -31,34 +31,89 @@ namespace PerformanceMonitor.Darling.Service;
 /// file are readable ONLY by <c>SYSTEM</c>, <c>Administrators</c>, and the service account — never an
 /// interactive user. Post-split the Viewer no longer needs the superuser credential (it connects as
 /// admin/viewer), so the RCE vector is locked hardest.</item>
-/// <item>The <b>admin/viewer</b> credentials additionally grant read to <c>NT AUTHORITY\INTERACTIVE</c>.
-/// The Viewer runs as the interactive operator, whose identity is unknown at provisioning time;
-/// INTERACTIVE is the concrete principal that lets that Viewer read the credential with zero config
-/// while excluding exactly the non-interactive local attack primitives the design's threat model
-/// calls out (services, SSRF/sandboxed socket code, scheduled tasks — none hold an interactive token).</item>
+/// <item>The <b>admin/viewer</b> credentials, and <c>darling.json</c>, additionally grant read to the local
+/// group <see cref="OperatorGroupName"/>. The Viewer and the CLI run as the interactive operator, whose identity
+/// is unknown at provisioning time; the group is the concrete principal an administrator fills with exactly the
+/// people who run them. It replaced <c>NT AUTHORITY\INTERACTIVE</c>, which every account that logs on to the
+/// machine holds: on a jump host or a terminal server that grant handed every user the admin store credential,
+/// and with it the whole store.</item>
 /// </list>
-/// On the design's default single-operator VM, INTERACTIVE == the operator, so this is tight. On a
-/// shared machine where untrusted users can log on interactively they could read the admin/viewer
-/// credentials (never the superuser one); the tightening path there is a configured operator account
-/// ACL'd specifically — a future knob, not built for the Phase 1 single-operator default.</para>
+/// The installer creates the group (empty) and the service grants it on every start. When the group does not exist
+/// (a hand install) nothing replaces it: the files stay readable by SYSTEM, Administrators and the service account
+/// only, and the Viewer and the CLI fail to read them until the group is created and the service restarted.</para>
 /// </summary>
 [SupportedOSPlatform("windows")]
 public static class DarlingFileSecurity
 {
     private static SecurityIdentifier LocalSystem => new(WellKnownSidType.LocalSystemSid, null);
     private static SecurityIdentifier Administrators => new(WellKnownSidType.BuiltinAdministratorsSid, null);
-    private static SecurityIdentifier Interactive => new(WellKnownSidType.InteractiveSid, null);
 
-    /// <summary>The three "anyone on this box" groups a secret-bearing file must never grant read to
+    /// <summary>
+    /// The local group whose members may read <c>darling.json</c> and the admin and viewer store credentials:
+    /// the people who run the Viewer or the CLI without elevation. Named after the service's own account
+    /// (<c>NT SERVICE\PerformanceMonitor Darling</c>) plus a role, the way Windows names <c>Performance Log
+    /// Users</c>, so it sorts beside the service in Local Users and Groups. The Viewer carries a copy of this
+    /// string, because it does not reference this assembly.
+    /// </summary>
+    public const string OperatorGroupName = DarlingOperatorGroup.Name;
+
+    /// <summary>The four "anyone on this box" groups a secret-bearing file must never grant read to
     /// (<see cref="IsReadableByOrdinaryUsers"/>). <c>BUILTIN\Users</c> is the one that actually bites: a folder
     /// created directly under <c>C:\</c> — the documented install location — inherits Read &amp; Execute for it
-    /// from the root DACL.</summary>
+    /// from the root DACL. <c>INTERACTIVE</c> is here because every account that logs on holds it: an install
+    /// hardened before the operator group existed granted it, and a file that still does is as readable as one
+    /// that grants Users.</summary>
     private static SecurityIdentifier[] OrdinaryUserGroups =>
     [
         new(WellKnownSidType.BuiltinUsersSid, null),
         new(WellKnownSidType.AuthenticatedUserSid, null),
         new(WellKnownSidType.WorldSid, null),
+        new(WellKnownSidType.InteractiveSid, null),
     ];
+
+    /* A test cannot create a local group on the build machine, so it substitutes a SID that exists (or null for
+       "no group"). Null everywhere else, so the service resolves the real group. */
+    private static Func<SecurityIdentifier?>? _operatorGroupOverride;
+
+    /// <summary>Substitutes <paramref name="resolver"/> for the real group lookup; null restores it.</summary>
+    internal static void UseOperatorGroupForTests(Func<SecurityIdentifier?>? resolver) => _operatorGroupOverride = resolver;
+
+    /// <summary>
+    /// The SID of <see cref="OperatorGroupName"/>, or null when no such group exists on this machine. Looked up on
+    /// every call, never cached: the service runs as a virtual account and cannot create the group, so an
+    /// administrator creates it after the fact and the next harden (the next service start) picks it up.
+    /// </summary>
+    public static SecurityIdentifier? OperatorGroup
+    {
+        get
+        {
+            if (_operatorGroupOverride is not null)
+            {
+                return _operatorGroupOverride();
+            }
+
+            try
+            {
+                return (SecurityIdentifier)new NTAccount(OperatorGroupName).Translate(typeof(SecurityIdentifier));
+            }
+            catch (Exception ex) when (ex is IdentityNotMappedException or SystemException)
+            {
+                return null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The warning a harden caller logs when <see cref="OperatorGroup"/> is null: what stays locked out, which
+    /// install step creates the group, and what to do on a hand install. One line, so the log reads the same from
+    /// every caller.
+    /// </summary>
+    public static string OperatorGroupMissingWarning =>
+        $"The local group '{OperatorGroupName}' does not exist on this machine, so darling.json and the store's admin " +
+        "and viewer credentials are readable by SYSTEM, Administrators and the service account only, and the Viewer " +
+        "and the CLI cannot read them unless run elevated. install-darling.ps1 step 4b creates the group; on a hand " +
+        $"install create it from an elevated prompt (net localgroup \"{OperatorGroupName}\" /add), add the people who " +
+        "run the Viewer or the CLI, and restart this service so it grants the group.";
 
     /* #2371: set by --harden-files to the account the SERVICE is registered under, because that verb is the
        one caller that is deliberately NOT the service. Null everywhere else, so the in-service callers keep
@@ -182,10 +237,11 @@ public static class DarlingFileSecurity
 
     /// <summary>
     /// Locks a directory to SYSTEM + Administrators + the service account (full control, inherited by
-    /// children), removing ALL inherited access so no Users / Authenticated Users read survives. When
-    /// <paramref name="allowInteractiveTraverse"/> is set, INTERACTIVE gets traverse (not list) on THIS
-    /// folder only — so the operator's Viewer can reach the admin/viewer credential files beside the
-    /// data directory without that access flowing into the data-directory subtree.
+    /// children), removing ALL inherited access so no Users / Authenticated Users / INTERACTIVE read survives.
+    /// When <paramref name="allowInteractiveTraverse"/> is set and the operator group exists, the group gets
+    /// traverse (not list) on THIS folder only — so the operator's Viewer can reach the admin/viewer credential
+    /// files beside the data directory without that access flowing into the data-directory subtree. (The
+    /// parameter keeps its old name: the grant is still "the interactive operator's", only the principal changed.)
     /// </summary>
     public static void HardenDirectory(string path, bool allowInteractiveTraverse) =>
         new DirectoryInfo(path).SetAccessControl(HardenedDirectorySecurity(allowInteractiveTraverse));
@@ -205,13 +261,13 @@ public static class DarlingFileSecurity
         AddFull(security, Administrators, subtree);
         AddFull(security, ServiceAccount, subtree);
 
-        if (allowInteractiveTraverse)
+        if (allowInteractiveTraverse && OperatorGroup is { } operators)
         {
             /* Traverse + synchronize, THIS FOLDER ONLY (no inheritance) — the operator can open a
                known credential path here but cannot enumerate the folder or descend into the PG data
                directory. */
             security.AddAccessRule(new FileSystemAccessRule(
-                Interactive,
+                operators,
                 FileSystemRights.Traverse | FileSystemRights.Synchronize,
                 InheritanceFlags.None,
                 PropagationFlags.None,
@@ -390,9 +446,12 @@ public static class DarlingFileSecurity
 
 
     /// <summary>
-    /// Locks a file to SYSTEM + Administrators + the service account, dropping inherited access. When
-    /// <paramref name="allowInteractiveRead"/> is set (the admin/viewer credentials the Viewer reads),
-    /// INTERACTIVE gets read. The superuser credential and the transient init pwfile pass false.
+    /// Locks a file to SYSTEM + Administrators + the service account, dropping inherited access, and with it any
+    /// INTERACTIVE entry an earlier version granted. When <paramref name="allowInteractiveRead"/> is set (the
+    /// admin/viewer credentials and the config the Viewer and the CLI read) and the operator group exists, the
+    /// group gets read; with no group, nothing else does. The superuser credential and the transient init pwfile
+    /// pass false. (The parameter keeps its old name: the grant is still "the interactive operator's", only the
+    /// principal changed.)
     /// </summary>
     public static void HardenFile(string path, bool allowInteractiveRead) =>
         new FileInfo(path).SetAccessControl(HardenedFileSecurity(allowInteractiveRead));
@@ -419,9 +478,9 @@ public static class DarlingFileSecurity
         AddFile(security, Administrators, FileSystemRights.FullControl);
         AddFile(security, ServiceAccount, FileSystemRights.FullControl);
 
-        if (allowInteractiveRead)
+        if (allowInteractiveRead && OperatorGroup is { } operators)
         {
-            AddFile(security, Interactive, FileSystemRights.Read | FileSystemRights.Synchronize);
+            AddFile(security, operators, FileSystemRights.Read | FileSystemRights.Synchronize);
         }
 
         return security;
@@ -432,13 +491,15 @@ public static class DarlingFileSecurity
     /// service account)? A file owned by anyone else may have been PRE-PLANTED — for a role credential,
     /// by an attacker who wrote a password they know so the service's <c>ALTER ROLE … PASSWORD</c>
     /// re-assert would hand them that login; for the owner credential, a tamper signal. Callers must not
-    /// trust an untrusted-owned file. Returns false (untrusted) on any error reading the owner.
+    /// trust an untrusted-owned file. Returns false (untrusted) on any error reading the owner. Works on a
+    /// directory too: the store folder is judged the same way before the first initdb, because an ordinary user
+    /// can create and own a folder under ProgramData before the service does.
     /// </summary>
     public static bool IsTrustedOwner(string path)
     {
         try
         {
-            var owner = new FileInfo(path).GetAccessControl().GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+            var owner = SecurityOf(path).GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
             return owner is not null
                 && (owner.Equals(LocalSystem) || owner.Equals(Administrators) || owner.Equals(ServiceAccount));
         }
@@ -451,8 +512,8 @@ public static class DarlingFileSecurity
     /// <summary>
     /// The accounts beyond SYSTEM, Administrators and the service account that hold ANY Allow entry on
     /// <paramref name="path"/>, as one line for a refusal, or null when there are none (#4028). An ALLOWLIST, where
-    /// <see cref="IsReadableByOrdinaryUsers"/> is a denylist of the three broad groups, which INTERACTIVE, Domain
-    /// Users or one named user all pass. For the log-hash key, which nothing but the service reads; the credential
+    /// <see cref="IsReadableByOrdinaryUsers"/> is a denylist of the four broad groups, which Domain Users, the
+    /// operator group or one named user all pass. For the log-hash key, which nothing but the service reads; the credential
     /// files keep the denylist their existing DACLs were built against, so this cannot newly refuse an install's
     /// credentials. Unlike the denylist, a DACL that cannot be read is reported, not passed: this is the check a key
     /// is trusted on.
@@ -649,8 +710,8 @@ public static class DarlingFileSecurity
     {
         try
         {
-            var rules = new FileInfo(path)
-                .GetAccessControl()
+            /* On a directory the same bit is ListDirectory, and everything created in it inherits the grant. */
+            var rules = SecurityOf(path)
                 .GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier));
 
             var ordinary = OrdinaryUserGroups;
@@ -701,7 +762,7 @@ public static class DarlingFileSecurity
 
         try
         {
-            var security = new FileInfo(path).GetAccessControl();
+            var security = SecurityOf(path);
             owner = security.GetOwner(typeof(NTAccount))?.Value;
 
             foreach (FileSystemAccessRule rule in security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier)))
@@ -766,12 +827,33 @@ public static class DarlingFileSecurity
         }
     }
 
+    /// <summary>The DACL and owner of a file or a directory, whichever <paramref name="path"/> is.</summary>
+    private static FileSystemSecurity SecurityOf(string path) =>
+        Directory.Exists(path)
+            ? new DirectoryInfo(path).GetAccessControl()
+            : new FileInfo(path).GetAccessControl();
+
     private static void AddFull(DirectorySecurity security, SecurityIdentifier sid, InheritanceFlags inheritance) =>
         security.AddAccessRule(new FileSystemAccessRule(
             sid, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
 
     private static void AddFile(FileSecurity security, SecurityIdentifier sid, FileSystemRights rights) =>
         security.AddAccessRule(new FileSystemAccessRule(sid, rights, AccessControlType.Allow));
+}
+
+/// <summary>The operator group's name, reachable from code that is not Windows-only (the config loader's error text,
+/// the CLI help): the class above is annotated Windows-only, so a reference to it from unguarded code is a build
+/// warning.</summary>
+public static class DarlingOperatorGroup
+{
+    /// <summary>See <see cref="DarlingFileSecurity.OperatorGroupName"/>.</summary>
+    public const string Name = "PerformanceMonitor Darling Operators";
+
+    /// <summary>What a reader that was refused the config or a credential file tells the person running it.</summary>
+    public static string AccessDeniedAdvice(string path) =>
+        $"{path} is restricted to SYSTEM, Administrators, the service account and members of the local group " +
+        $"'{Name}'. Ask an administrator to add your account to that group (install-darling.ps1 creates it), then " +
+        "sign out and back in so the membership takes effect, or run this from an elevated prompt.";
 }
 
 /// <summary>Path containment for the file-security checks, on every platform (the class above is Windows-only).</summary>

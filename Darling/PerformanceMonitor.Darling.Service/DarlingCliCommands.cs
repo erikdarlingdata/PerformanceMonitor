@@ -1230,12 +1230,13 @@ public static class DarlingCliCommands
             error.WriteLine("It reprints a live credential, so it is a deliberate act rather than something a script or a");
             error.WriteLine("shared shell picks up in passing.");
             error.WriteLine();
-            error.WriteLine("Be clear about what this gate is NOT, though: darling.json grants INTERACTIVE read on purpose");
-            error.WriteLine("(the Viewer and these CLI verbs are run by the interactive operator), and the token is DPAPI-");
-            error.WriteLine("protected at LocalMachine scope with an entropy constant published in this project's source.");
-            error.WriteLine("Anyone who can log on to this box interactively can already decrypt it without this verb. The");
-            error.WriteLine("token's protection is the FILE'S ACL - keep darling.json restricted, and run --harden-files if");
-            error.WriteLine("you are not sure it still is.");
+            error.WriteLine("Be clear about what this gate is NOT, though: darling.json grants read to the local group");
+            error.WriteLine($"'{DarlingOperatorGroup.Name}' on purpose (the Viewer and these CLI verbs run as");
+            error.WriteLine("its members), and the token is DPAPI-protected at LocalMachine scope with an entropy constant");
+            error.WriteLine("published in this project's source. Any member of that group can already decrypt it without");
+            error.WriteLine("this verb. The token's protection is the FILE'S ACL and the group's membership - keep");
+            error.WriteLine("darling.json restricted, keep the group to the people who run the Viewer or the CLI, and run");
+            error.WriteLine("--harden-files if you are not sure it still is.");
             return 1;
         }
 
@@ -3222,10 +3223,14 @@ public static class DarlingCliCommands
                 backupPath = DarlingConfigBackup.BackupPath(resolvedPath, stamp, suffix);
             }
 
-            File.Copy(resolvedPath, backupPath, overwrite: false);
             if (OperatingSystem.IsWindows())
             {
-                HardenConfigBackup(backupPath, error);
+                CopyToHardenedBackup(resolvedPath, backupPath);
+                VerifyConfigBackup(backupPath, error);
+            }
+            else
+            {
+                File.Copy(resolvedPath, backupPath, overwrite: false);
             }
 
             /* WriteAllText TRUNCATES an existing file rather than recreating it, so darling.json keeps
@@ -3261,28 +3266,23 @@ public static class DarlingCliCommands
     /// writing <c>darling.json</c> does — INTERACTIVE only ever had Read here, never Write. So the grant
     /// bought nothing and cost a second copy of every secret, readable by any interactively-logged-on user.</para>
     ///
-    /// <para>Never fatal — the edit that produced the backup has already been decided on and refusing to
-    /// finish it over a permissions problem would leave the operator worse off. But it is reported LOUDLY
-    /// and names the file, because a silent best-effort ACL failure is exactly how #1721 persisted
-    /// unnoticed across months of service starts: the failure was logged once per start and read by nobody
-    /// until a deploy check happened to look. An operator who just ran a command is the one person
-    /// guaranteed to be watching, so tell them while they are there.</para>
+    /// <para>The backup is CREATED with that ACL, not copied and hardened after: the install folder grants Users
+    /// read, and a plain copy carried that for the moment between the copy and the harden. A failure here fails
+    /// the write the way a failed copy always did (the caller reports it and leaves darling.json untouched): an
+    /// unprotected copy of every secret is not an acceptable side effect of an edit.</para>
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static void HardenConfigBackup(string backupPath, TextWriter error)
+    private static void CopyToHardenedBackup(string sourcePath, string backupPath)
     {
-        try
-        {
-            DarlingFileSecurity.HardenFile(backupPath, allowInteractiveRead: false);
-        }
-        catch (Exception ex)
-        {
-            error.WriteLine($"WARNING: could not restrict permissions on the backup {backupPath} ({ex.Message}).");
-            error.WriteLine("         It is a full copy of your encrypted passwords and access tokens. Delete it, or");
-            error.WriteLine("         restrict it by hand, before leaving this machine.");
-            return;
-        }
+        using var source = File.OpenRead(sourcePath);
+        using var backup = DarlingFileSecurity.CreateHardenedFile(backupPath, allowInteractiveRead: false);
+        source.CopyTo(backup);
+    }
 
+    /// <summary>The check the backup's creation is verified by: it must not be readable by ordinary users.</summary>
+    [SupportedOSPlatform("windows")]
+    private static void VerifyConfigBackup(string backupPath, TextWriter error)
+    {
         if (DarlingFileSecurity.IsReadableByOrdinaryUsers(backupPath))
         {
             error.WriteLine($"WARNING: {backupPath} is still readable by ordinary local users after hardening.");
@@ -4118,8 +4118,9 @@ public static class DarlingCliCommands
         var storeRoot = Path.GetDirectoryName(Path.GetFullPath(dataDirectory));
         var targets = new List<HardenTarget>
         {
-            /* INTERACTIVE read, the only file in this list that keeps it: the Viewer (ViewerSettings.ResolveConfigPath)
-               and the CLI verbs run as the operator and must still read the live config. Nothing reads a backup (#1769). */
+            /* Operator-group read (the local group DarlingFileSecurity.OperatorGroupName, when it exists): the Viewer
+               (ViewerSettings.ResolveConfigPath) and the CLI verbs run as the operator and must still read the live
+               config. Nothing reads a backup (#1769). */
             new(resolvedConfig, AllowInteractive: true, IsDirectory: false, "the live config"),
         };
 
@@ -4130,11 +4131,15 @@ public static class DarlingCliCommands
 
         if (!string.IsNullOrEmpty(storeRoot))
         {
-            /* INTERACTIVE traverse, never read: the operator walks through it to the config, never to the credential
-               blobs in it. Mirrors DarlingManagedPostgres' own call. */
+            /* Operator-group traverse, never list: the operator walks through it to the admin and viewer credentials,
+               never to the rest. Mirrors DarlingManagedPostgres' own call. */
             targets.Add(new(storeRoot, AllowInteractive: true, IsDirectory: true, "the store directory"));
             targets.Add(new(Path.Combine(storeRoot, "pg-credential.dpapi"), false, false, "the store credential"));
-            targets.Add(new(Path.Combine(storeRoot, "pg-admin-credential.dpapi"), false, false, "the admin credential"));
+            /* The same posture the service applies on every start (DarlingManagedRoles.EnsureProvisionedAsync): the
+               admin and viewer credentials are read by the operator's Viewer, the mcp credential only by the service. */
+            targets.Add(new(Path.Combine(storeRoot, "pg-admin-credential.dpapi"), AllowInteractive: true, IsDirectory: false, "the admin credential"));
+            targets.Add(new(Path.Combine(storeRoot, "pg-viewer-credential.dpapi"), AllowInteractive: true, IsDirectory: false, "the viewer credential"));
+            targets.Add(new(Path.Combine(storeRoot, "pg-mcp-credential.dpapi"), AllowInteractive: false, IsDirectory: false, "the mcp credential"));
             targets.Add(new(Path.Combine(storeRoot, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
             /* #4253/#4280 Low 2: the last major upgrade's pre-upgrade postgresql.auto.conf, which File.Copy does
                not ACL on its own. Kept until the NEXT major upgrade replaces it (DarlingStoreUpgrade.CarryAutoConfAsync). */
