@@ -31,10 +31,13 @@ public sealed class DarlingStoreFolderScriptTests
 {
     private static string Script => ReadRepoFile("Darling", "tools", "install-darling.ps1").Replace("\r\n", "\n", StringComparison.Ordinal);
 
+    private static string UpgradeScript => ReadRepoFile("Darling", "tools", "upgrade-darling.ps1").Replace("\r\n", "\n", StringComparison.Ordinal);
+
     private static readonly string[] s_functions =
     {
         "Get-DarlingDataDirectory", "Get-DarlingStoreFolder", "Initialize-DarlingNativeStoreFolder", "Get-DarlingItemOwnerSid",
-        "Get-DarlingStoreContentsProblem", "Get-DarlingItemOwnerProblem", "Initialize-DarlingStoreFolder",
+        "Get-DarlingStoreContentsProblem", "Get-DarlingItemOwnerProblem", "Initialize-DarlingStoreFolder", "Get-DarlingServiceSids",
+        "Get-DarlingNativeText", "Get-DarlingProductType", "Test-DarlingDomainController", "Initialize-DarlingOperatorGroup",
     };
 
     private static bool IsElevated() => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
@@ -315,6 +318,190 @@ public sealed class DarlingStoreFolderScriptTests
         var expected = string.Join(",", new[] { "S-1-5-18", "S-1-5-32-544", me }.Distinct().OrderBy(x => x, StringComparer.Ordinal));
         Assert.Contains("rules=" + expected, answers);
         Assert.Contains("again=ok", answers);
+    }
+
+    /// <summary>The owners the installer accepts on an existing store are SYSTEM, Administrators, TrustedInstaller, the
+    /// account the service logs on as and this service's own service SID, the owner of everything the service made while
+    /// it ran as the default virtual account. A store whose Log On account was changed to a domain account or a gMSA is
+    /// owned by that SID, and the service trusts the same list, so the re-install and the upgrade accept it.</summary>
+    [Fact]
+    public void TheTrustedOwners_AreSystemAdministratorsTrustedInstallerTheServiceAccountAndTheServicesOwnSid()
+    {
+        var initialize = ExtractFunction(Script, "Initialize-DarlingStoreFolder");
+        var line = initialize.Split('\n').Single(l => l.TrimStart().StartsWith("$trusted = @(", StringComparison.Ordinal));
+
+        Assert.Contains("$systemSid", line, StringComparison.Ordinal);
+        Assert.Contains("$adminsSid", line, StringComparison.Ordinal);
+        Assert.Contains("$serviceSid", line, StringComparison.Ordinal);
+        Assert.Contains("NT SERVICE\\TrustedInstaller", line, StringComparison.Ordinal);
+        Assert.Contains("Get-DarlingServiceSids '' $serviceName", line, StringComparison.Ordinal);
+        Assert.Contains("[string]$serviceName = ''", initialize.Split('\n')[0], StringComparison.Ordinal);
+
+        /* Both scripts hand the function the service's name. */
+        Assert.Contains("(Get-DarlingDataDirectory $configPath) $serviceName }", Script, StringComparison.Ordinal);
+        Assert.Contains("(Get-DarlingDataDirectory $configPath) $serviceName\n", UpgradeScript, StringComparison.Ordinal);
+    }
+
+    /// <summary>The service SID the script trusts is the one Windows derives from the service's name: the SHA-1 of the
+    /// upper-cased name in UTF-16LE, read as five little-endian integers under S-1-5-80. The service name is computed, not
+    /// looked up, so it is the same whether or not the service is registered.</summary>
+    [Fact]
+    public void TheServicesOwnSid_IsTheOneWindowsDerivesFromTheServiceName()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell");
+
+        const string serviceName = "PerformanceMonitor Darling";
+        var hash = System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.Unicode.GetBytes(serviceName.ToUpperInvariant()));
+        var expected = "S-1-5-80-" + string.Join("-", Enumerable.Range(0, 5).Select(i => BitConverter.ToUInt32(hash, i * 4)));
+
+        var answers = RunWindowsPowerShell(Probe($$"""
+            'sids=' + ((@(Get-DarlingServiceSids '' '{{serviceName}}') | ForEach-Object { $_.Value }) -join ',')
+            'none=' + @(Get-DarlingServiceSids '' '').Count
+            """));
+
+        Assert.Contains("sids=" + expected, answers);
+        Assert.Contains("none=0", answers);
+    }
+
+    /// <summary>A link at <c>pg_wal</c> among the data directory's entries is the operator's own relocation of the
+    /// write-ahead log, which the service accepts; a link at any other name is refused.</summary>
+    [Fact]
+    public void ARelocatedPgWal_IsAccepted_AndEveryOtherLinkInTheDataDirectoryIsRefused()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs and junctions are Windows-only.");
+
+        var answers = RunWindowsPowerShell(Probe($$"""
+            $owner = (Get-Acl -LiteralPath $base).GetOwner([System.Security.Principal.SecurityIdentifier])
+            $target = Join-Path $base 'elsewhere'
+            New-Item -ItemType Directory $target | Out-Null
+            function New-Store([string]$name, [string]$link) {
+                $store = Join-Path $base $name
+                New-Item -ItemType Directory (Join-Path $store 'pg') | Out-Null
+                Set-Content -LiteralPath (Join-Path $store 'pg\postgresql.auto.conf') 'x'
+                if ($link) { cmd /c mklink /J (Join-Path $store ('pg\' + $link)) "$target" | Out-Null }
+                return $store
+            }
+            $store = New-Store 'wal' 'pg_wal'
+            'walProblem=' + [bool](Get-DarlingStoreContentsProblem $store (Join-Path $store 'pg') @($owner))
+            $store = New-Store 'walupper' 'PG_WAL'
+            'walUpperProblem=' + [bool](Get-DarlingStoreContentsProblem $store (Join-Path $store 'pg') @($owner))
+            $store = New-Store 'other' 'pg_other'
+            'other=' + (Get-DarlingStoreContentsProblem $store (Join-Path $store 'pg') @($owner))
+            $store = New-Store 'plain' ''
+            'plainProblem=' + [bool](Get-DarlingStoreContentsProblem $store (Join-Path $store 'pg') @($owner))
+            foreach ($junction in @('wal\pg\pg_wal', 'walupper\pg\PG_WAL', 'other\pg\pg_other')) { cmd /c rmdir (Join-Path $base $junction) | Out-Null }
+            """));
+
+        Assert.Contains("walProblem=False", answers);
+        Assert.Contains("walUpperProblem=False", answers);
+        Assert.Contains(answers, a => a.StartsWith("other=", StringComparison.Ordinal) && a.Contains("pg_other is a junction or link", StringComparison.Ordinal));
+        Assert.Contains("plainProblem=False", answers);
+    }
+
+    /// <summary>On a domain controller (product type 2) the local operator group is neither looked up nor created, because
+    /// net localgroup there makes a domain group; other product types still reach the lookup. The product type is
+    /// faked by redefining the function that reads it, and net.exe by a function of the same name, so nothing is
+    /// created whatever this machine is.</summary>
+    [Fact]
+    public void OnADomainController_NoLocalGroupIsLookedUpOrCreated_AndOtherProductTypesStillGetIt()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell");
+
+        var answers = RunWindowsPowerShell(Probe("""
+            $script:netCalled = $false
+            function net.exe { $script:netCalled = $true; $global:LASTEXITCODE = 0 }
+            $adminsName = (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')).Translate([System.Security.Principal.NTAccount]).Value.Split('\')[1]
+            function Get-DarlingProductType { 2 }
+            'domainController=' + (Test-DarlingDomainController)
+            try { $null = Initialize-DarlingOperatorGroup 'PerformanceMonitor Darling Operators'; 'outcome=returned' }
+            catch { 'outcome=refused'; 'message=' + $_.Exception.Message }
+            'netCalledOnController=' + $script:netCalled
+            foreach ($type in 0, 1, 3) {
+                Set-Item -Path function:Get-DarlingProductType -Value ([scriptblock]::Create("$type"))
+                "controller$type=" + (Test-DarlingDomainController)
+            }
+            $env:COMPUTERNAME = 'BUILTIN'
+            'sid=' + (Initialize-DarlingOperatorGroup $adminsName).Value
+            'netCalledElsewhere=' + $script:netCalled
+            """));
+
+        Assert.Contains("domainController=True", answers);
+        Assert.Contains("outcome=refused", answers);
+        Assert.Contains(answers, a => a.StartsWith("message=", StringComparison.Ordinal) && a.Contains("domain controller", StringComparison.Ordinal));
+        Assert.Contains("netCalledOnController=False", answers);
+        Assert.Contains("controller0=False", answers);
+        Assert.Contains("controller1=False", answers);
+        Assert.Contains("controller3=False", answers);
+        Assert.Contains("sid=S-1-5-32-544", answers);
+        Assert.Contains("netCalledElsewhere=False", answers);
+    }
+
+    /// <summary>The domain controller is decided before step 4 stops an existing service, so a skipped group can never
+    /// leave the service stopped, and the install carries on without the group instead of stopping.</summary>
+    [Fact]
+    public void TheDomainControllerIsDecidedBeforeTheServiceIsStopped_AndTheInstallFinishesWithoutTheGroup()
+    {
+        var script = Script;
+        var decide = script.IndexOf("$onDomainController = Test-DarlingDomainController", StringComparison.Ordinal);
+        var stop = script.IndexOf("Stop-Service -Name $serviceName", StringComparison.Ordinal);
+        var group = script.IndexOf("Initialize-DarlingOperatorGroup $operatorGroupName", StringComparison.Ordinal);
+
+        Assert.True(decide >= 0 && decide < stop, "the domain controller is decided before step 4 stops the service");
+        Assert.True(stop < group, "the group is made after the service was stopped, and only off a domain controller");
+        Assert.Matches(@"if \(-not \$onDomainController\) \{\s+try \{ \$operatorSid = Initialize-DarlingOperatorGroup \$operatorGroupName \}", script);
+        Assert.Contains("elseif ($onDomainController) {", script, StringComparison.Ordinal);
+
+        var body = ExtractFunction(script, "Initialize-DarlingOperatorGroup");
+        Assert.True(
+            body.IndexOf("Test-DarlingDomainController", StringComparison.Ordinal) is var guard && guard >= 0
+            && guard < body.IndexOf("& net.exe localgroup", StringComparison.Ordinal),
+            "the function itself refuses a domain controller before it can run net localgroup");
+    }
+
+    /// <summary>The upgrade script locks the store folder with the installer's own functions (the same text, so they
+    /// cannot drift), after the service has stopped and before it starts, so an upgrade from a release that could not
+    /// lock the folder ends with it locked. A folder it cannot lock is a warning: the upgrade does not stop over it.</summary>
+    [Fact]
+    public void TheUpgradeLocksTheStoreFolder_WithTheInstallersFunctions_AfterTheServiceStopsAndBeforeItStarts()
+    {
+        var upgrade = UpgradeScript;
+        foreach (var name in new[]
+        {
+            "Get-DarlingDataDirectory", "Get-DarlingStoreFolder", "Initialize-DarlingNativeStoreFolder", "Get-DarlingItemOwnerSid",
+            "Get-DarlingStoreContentsProblem", "Get-DarlingItemOwnerProblem", "Initialize-DarlingStoreFolder", "Get-DarlingServiceSids",
+            "Get-DarlingProductType", "Test-DarlingDomainController", "Initialize-DarlingOperatorGroup",
+        })
+        {
+            Assert.Equal(ExtractFunction(Script, name), ExtractFunction(upgrade, name));
+            Assert.Single(Regex.Matches(upgrade, @"(?m)^function " + Regex.Escape(name) + @"\b"));
+        }
+
+        var stop = upgrade.IndexOf("Stop-Service -Name $serviceName", StringComparison.Ordinal);
+        var copied = upgrade.IndexOf("Invoke-UpgradeTreeLock 'after the copy'", StringComparison.Ordinal);
+        var call = upgrade.IndexOf("Initialize-DarlingStoreFolder $storeFolder $logonAccount $operatorSid (Get-DarlingDataDirectory $configPath) $serviceName", StringComparison.Ordinal);
+        var start = upgrade.IndexOf("Start-Service -Name $serviceName", StringComparison.Ordinal);
+        Assert.True(stop >= 0 && stop < call, "the store folder is locked after the service has stopped");
+        Assert.True(copied < call && call < start, "the store folder is locked after the new build is in place and before the service starts");
+        Assert.Single(Regex.Matches(upgrade, @"(?<!function )Initialize-DarlingStoreFolder (\S+)"));
+
+        var between = upgrade.Substring(call, start - call);
+        Assert.Contains("Warn \"The store folder '$storeFolder' could not be secured", between, StringComparison.Ordinal);
+        Assert.DoesNotContain("Fail ", between, StringComparison.Ordinal);
+    }
+
+    /// <summary>The upgrade skips the local operator group on a domain controller, with a warning, and goes on to start the
+    /// service.</summary>
+    [Fact]
+    public void TheUpgradeSkipsTheOperatorGroupOnADomainController_AndStillStartsTheService()
+    {
+        var upgrade = UpgradeScript;
+        var decide = upgrade.IndexOf("$onDomainController = Test-DarlingDomainController", StringComparison.Ordinal);
+        var call = upgrade.IndexOf("Initialize-DarlingOperatorGroup $operatorGroupName", StringComparison.Ordinal);
+        var start = upgrade.IndexOf("Start-Service -Name $serviceName", StringComparison.Ordinal);
+
+        Assert.True(decide >= 0 && decide < call && call < start);
+        Assert.Matches(@"if \(-not \$onDomainController\) \{\s+try \{ \$operatorSid = Initialize-DarlingOperatorGroup \$operatorGroupName \}", upgrade);
+        Assert.Contains("elseif ($onDomainController) {\n    Warn \"This machine is a domain controller", upgrade, StringComparison.Ordinal);
     }
 
     private static string Probe(string body) => string.Join(

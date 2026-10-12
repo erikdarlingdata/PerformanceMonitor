@@ -191,6 +191,8 @@ public sealed class DarlingOperatorGroupScriptTests
             "\n",
             setup,
             ExtractFunction(script, "Get-DarlingNativeText", scriptName),
+            ExtractFunction(script, "Get-DarlingProductType", scriptName),
+            ExtractFunction(script, "Test-DarlingDomainController", scriptName),
             lookup,
             $"(Initialize-DarlingOperatorGroup '{groupName.Replace("'", "''", StringComparison.Ordinal)}').Value");
 

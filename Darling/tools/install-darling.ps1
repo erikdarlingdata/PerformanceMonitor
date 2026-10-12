@@ -2023,6 +2023,28 @@ catch [System.InvalidOperationException] {
     Write-Host "Event Log source '$serviceName' already registered."
 }
 
+# The Windows product type: 1 workstation, 2 domain controller, 3 server (Win32_OperatingSystem.ProductType), or 0 when it
+# cannot be read. Its own function so a test can stand in for the machine. Kept byte-identical in install-darling.ps1 and
+# upgrade-darling.ps1.
+function Get-DarlingProductType {
+    try { return [int](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).ProductType }
+    catch { return 0 }
+}
+
+# True on a domain controller. A domain controller has no local account database: a group made there with net localgroup
+# is a domain group, which the machine-qualified lookup cannot find and which would exist for the whole domain. Nothing
+# here creates or grants a local group on one. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Test-DarlingDomainController {
+    return ((Get-DarlingProductType) -eq 2)
+}
+
+# Decided before step 4 stops an existing service, so a refusal here can never leave it stopped. On a domain controller the
+# operator group is skipped (step 4b says so) and the install finishes; the Viewer and the CLI then run elevated.
+$onDomainController = Test-DarlingDomainController
+if ($onDomainController) {
+    Write-Host "WARNING: this machine is a domain controller, which has no local groups, so the local group '$operatorGroupName' is NOT created and nothing is granted to it. The install continues. The Viewer and the CLI must be run elevated here: darling.json and the store's credentials are readable by SYSTEM, Administrators and the service account only." -ForegroundColor Yellow
+}
+
 # -- 4. Create or upgrade the service -------------------------------------------------------------
 # $existing was resolved back at 1b, which needs to know fresh-versus-upgrade before it decides whether a
 # bad install location is a refusal or a question. Nothing between there and here creates or removes the
@@ -2100,6 +2122,9 @@ function Get-DarlingNativeText($output) {
 # into a terminating error before its exit code can be read.
 function Initialize-DarlingOperatorGroup([string]$groupName) {
     $ErrorActionPreference = 'Continue'
+    if (Test-DarlingDomainController) {
+        throw "this machine is a domain controller, which has no local groups: a group made here with net localgroup is a domain group. No group was created or looked up, and the Viewer and the CLI must be run elevated."
+    }
     $sidType = [System.Security.Principal.SecurityIdentifier]
     # Machine-qualified, so only this machine's own account database answers: an unqualified name is also looked
     # up in the domain and in trusted domains, and a group of that name made there must never be the one granted.
@@ -2156,8 +2181,10 @@ function Initialize-DarlingOperatorGroup([string]$groupName) {
 # end of this step with the reason.
 $operatorSid = $null
 $operatorGroupProblem = $null
-try { $operatorSid = Initialize-DarlingOperatorGroup $operatorGroupName }
-catch { $operatorGroupProblem = $_.Exception.Message }
+if (-not $onDomainController) {
+    try { $operatorSid = Initialize-DarlingOperatorGroup $operatorGroupName }
+    catch { $operatorGroupProblem = $_.Exception.Message }
+}
 
 # Every path here is named with -LiteralPath (#4745). PowerShell reads [ and ] in a -Path value as wildcard
 # characters, so under an install folder named with either, -Path finds no .bak files at all, and Get-Acl or
@@ -2275,6 +2302,9 @@ if ($operatorSid) {
     Write-Host "Members can read darling.json and the store's admin and viewer credentials, which decrypt every stored password; give it only to people you would give the passwords to."
     Write-Host 'A person added to the group has to sign out and back in before the membership takes effect.'
     Write-Host ''
+}
+elseif ($onDomainController) {
+    Write-Host "Domain controller: the local group '$operatorGroupName' was not created and nothing was granted to it (see the warning above). Run the Viewer and the CLI elevated." -ForegroundColor Yellow
 }
 else {
     Fail @"
@@ -2540,7 +2570,8 @@ function Get-DarlingItemOwnerSid([string]$path) {
 # with nothing in it. Checked, directly under $folder: the PostgreSQL data directory ($dataDirectory), pg.log, server.key,
 # server.crt and logs. Each one that exists must not be a link and must be owned by one of $trusted (SYSTEM, Administrators,
 # TrustedInstaller or the service account: what the service leaves behind). The data directory's own entries must be
-# listable and owned the same way. Those names are the ones the service writes into, and initdb, pg_ctl and the key and certificate
+# listable and owned the same way, and a link among them is refused unless it is pg_wal, the one relocation PostgreSQL
+# supports and the service accepts. Those names are the ones the service writes into, and initdb, pg_ctl and the key and certificate
 # writers each open them without asking who made them, so something another user put there would be used as it is.
 function Get-DarlingStoreContentsProblem([string]$folder, [string]$dataDirectory, $trusted) {
     $named = @('pg.log', 'server.key', 'server.crt', 'logs')
@@ -2565,7 +2596,9 @@ function Get-DarlingStoreContentsProblem([string]$folder, [string]$dataDirectory
             try { $children = @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop) }
             catch { return "$($item.FullName) cannot be listed by this script ($($_.Exception.Message)), so what is in it is not known. It is not treated as empty." }
             foreach ($child in $children) {
-                if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return "$($child.FullName) is a junction or link." }
+                # A link at pg_wal is the operator's own relocation of the write-ahead log, which the service accepts
+                # (only its owner is judged). A link at any other name is refused.
+                if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and $child.Name -ine 'pg_wal') { return "$($child.FullName) is a junction or link." }
                 $childProblem = Get-DarlingItemOwnerProblem $child.FullName $trusted
                 if ($childProblem) { return $childProblem }
             }
@@ -2590,20 +2623,25 @@ function Get-DarlingItemOwnerProblem([string]$path, $trusted) {
 # creates it, or opened once without following a link and kept open without sharing delete or rename, and the
 # owner and the DACL are read and written through that one handle (DarlingNativeStoreFolder). A junction or link
 # at the name is refused, the folder's real path must still be its own path, and both are checked again after the
-# write. A folder that already exists is trusted only if its owner is SYSTEM, Administrators, TrustedInstaller or the
-# service account, the same set Lock-DarlingInstallTree trusts: that is what the service leaves behind, so an
-# upgrade passes. A folder owned by anyone else is what a pre-created folder looks like, and it is refused whether
+# write. A folder that already exists is trusted only if its owner is SYSTEM, Administrators, TrustedInstaller, the
+# service account or this service's own service SID (see $trusted below): that is what the service leaves behind, so an
+# upgrade passes, including one after the Log On account was changed. A folder owned by anyone else is what a pre-created folder looks like, and it is refused whether
 # or not it is empty: taking it over cannot make what its owner holds, or can still do through a handle opened
 # earlier, trustworthy. What is in the folder is judged by Get-DarlingStoreContentsProblem before the ACL is
 # written and again once it is in place.
-function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount, $operatorSid, [string]$dataDirectory = '') {
+function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount, $operatorSid, [string]$dataDirectory = '', [string]$serviceName = '') {
     $ErrorActionPreference = 'Continue'
     $wk = [System.Security.Principal.WellKnownSidType]
     $sidType = [System.Security.Principal.SecurityIdentifier]
     $systemSid = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
     $adminsSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
     $serviceSid = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate($sidType)
-    $trusted = @($systemSid, $adminsSid, $serviceSid, (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType))
+    # The owners a store left by an earlier run can have: SYSTEM, Administrators, TrustedInstaller, the account the service
+    # logs on as now, and this service's own service SID (S-1-5-80-...), which owns everything the service made while it ran
+    # as the default virtual account. The Log On account can be changed to a domain account or a gMSA afterwards, and the
+    # items stay owned by that SID. Only this service's processes (or a holder of SeRestorePrivilege) can make something
+    # owned by it, so trusting it gives another user nothing. The service trusts exactly this list.
+    $trusted = @($systemSid, $adminsSid, $serviceSid, (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType)) + @(Get-DarlingServiceSids '' $serviceName)
 
     $full = [System.IO.Path]::GetFullPath($folder).TrimEnd('\')
     $parent = [System.IO.Path]::GetDirectoryName($full)
@@ -2704,7 +2742,7 @@ function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount,
 
 $storeFolder = Get-DarlingStoreFolder $configPath
 if ($storeFolder) {
-    try { Initialize-DarlingStoreFolder $storeFolder $serviceAccount $operatorSid (Get-DarlingDataDirectory $configPath) }
+    try { Initialize-DarlingStoreFolder $storeFolder $serviceAccount $operatorSid (Get-DarlingDataDirectory $configPath) $serviceName }
     catch {
         Fail @"
 The store folder '$storeFolder' could not be secured before the service's first start: $($_.Exception.Message)

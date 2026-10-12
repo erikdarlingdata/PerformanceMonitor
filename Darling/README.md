@@ -374,19 +374,25 @@ With `"auth": "integrated"`, the monitoring identity **is** the service's Log On
 
    ```
    icacls "C:\ProgramData\PerformanceMonitorDarling" /grant "DOMAIN\svc-account:(OI)(CI)F"
+   icacls "C:\ProgramData\PerformanceMonitorDarling\logs" /grant "DOMAIN\svc-account:(OI)(CI)F"
    icacls "C:\Program Files\PerformanceMonitorDarling\darling.json" /grant "DOMAIN\svc-account:F"
    ```
 
-   Adjust the second path to wherever `darling.json` sits beside the service exe; the first covers the logs and, in managed mode, the store's data directory. On its next start the service re-asserts the tight ACL itself — now including the new account — so this does not need repeating.
+   Adjust the last path to wherever `darling.json` sits beside the service exe. The first grant covers the store folder and, in managed mode, the data directory. The `logs` folder has its own protected ACL that does **not** inherit the folder grant, so it gets its own line. On its next start the service re-asserts the tight ACL itself — now including the new account — so this does not need repeating.
 
-   In managed-store mode there is one more, and it needs **ownership**, not a grant: the store's superuser credential `pg-credential.dpapi` (beside the data directory, under `C:\ProgramData\PerformanceMonitorDarling` by default) is trusted only when *owned* by SYSTEM, Administrators, or the service account — an anti-pre-plant check — and `icacls /grant` changes permissions, never ownership, so after the switch the file is still owned by the *previous* service account and the service refuses it. Hand ownership to Administrators (trusted across any future account change, which is why not the new account itself) and grant the new account on the file directly — its ACL is protected and does **not** inherit the folder grant above:
+   In managed-store mode there is one more grant: the store's superuser credential `pg-credential.dpapi` (beside the data directory, under `C:\ProgramData\PerformanceMonitorDarling` by default) also has a protected ACL that does **not** inherit the folder grant, so grant the new account on the file directly:
 
    ```
-   takeown /f "C:\ProgramData\PerformanceMonitorDarling\pg-credential.dpapi" /a
    icacls "C:\ProgramData\PerformanceMonitorDarling\pg-credential.dpapi" /grant "DOMAIN\svc-account:F"
    ```
 
-   The sibling role credentials (the admin/viewer/mcp `.dpapi` files) hit the same ownership check but self-heal — a role password can be re-asserted, a superuser's cannot — so expect one-time `discarding and regenerating` warnings on the first start, not faults.
+   **No ownership step is needed when the service was running as the default virtual account** (the `NT SERVICE\PerformanceMonitor Darling` account `install-darling.ps1` creates). The service and `install-darling.ps1` trust a store item owned by SYSTEM, Administrators, TrustedInstaller, the account the service runs as, or *this service's own service SID* (`NT SERVICE\PerformanceMonitor Darling`, `S-1-5-80-…`), and everything the virtual account created is owned by that SID. Ownership is only a step when the service has already run as *another* account (a second switch, from one domain account or gMSA to the next): that account then owns the items, and the service refuses them as a possible pre-plant. Hand ownership to Administrators, which is trusted across any later account change, from an elevated prompt with the service stopped:
+
+   ```
+   icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner "*S-1-5-32-544" /T /C /L
+   ```
+
+   The sibling role credentials (the admin/viewer/mcp `.dpapi` files) self-heal — a role password can be re-asserted, a superuser's cannot — so expect one-time `discarding and regenerating` warnings on the first start, not faults.
 
 4. **Start the service and verify from its log** (`%ProgramData%\PerformanceMonitorDarling\logs`): the per-server connect lines are the proof that the *service account's* grants work. `--test-connection` from your console runs as you, not the service account — see the [pre-flight note above](#validate-the-config-pre-flight).
 

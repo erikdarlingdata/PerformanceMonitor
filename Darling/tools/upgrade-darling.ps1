@@ -1057,8 +1057,26 @@ function Get-DarlingNativeText($output) {
 # exit code, with the error preference local to this function, for the reason Lock-DarlingInstallTree gives:
 # under $ErrorActionPreference = 'Stop' Windows PowerShell 5.1 turns the redirected stderr of a native command
 # into a terminating error before its exit code can be read.
+# The Windows product type: 1 workstation, 2 domain controller, 3 server (Win32_OperatingSystem.ProductType), or 0 when it
+# cannot be read. Its own function so a test can stand in for the machine. Kept byte-identical in install-darling.ps1 and
+# upgrade-darling.ps1.
+function Get-DarlingProductType {
+    try { return [int](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).ProductType }
+    catch { return 0 }
+}
+
+# True on a domain controller. A domain controller has no local account database: a group made there with net localgroup
+# is a domain group, which the machine-qualified lookup cannot find and which would exist for the whole domain. Nothing
+# here creates or grants a local group on one. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Test-DarlingDomainController {
+    return ((Get-DarlingProductType) -eq 2)
+}
+
 function Initialize-DarlingOperatorGroup([string]$groupName) {
     $ErrorActionPreference = 'Continue'
+    if (Test-DarlingDomainController) {
+        throw "this machine is a domain controller, which has no local groups: a group made here with net localgroup is a domain group. No group was created or looked up, and the Viewer and the CLI must be run elevated."
+    }
     $sidType = [System.Security.Principal.SecurityIdentifier]
     # Machine-qualified, so only this machine's own account database answers: an unqualified name is also looked
     # up in the domain and in trusted domains, and a group of that name made there must never be the one granted.
@@ -1079,6 +1097,412 @@ function Initialize-DarlingOperatorGroup([string]$groupName) {
         throw "the name '$groupName' resolves to $owner, which is not a group on this machine. Create the local group from an elevated prompt (net localgroup `"$groupName`" /add) and run this script again."
     }
     return $sid
+}
+
+# ---- the store folder (also in install-darling.ps1, step 4b3; these functions are byte-identical) ----
+# The store folder is the parent of postgres.dataDirectory. The same functions lock it here as the installer does, so an
+# upgrade from a release that could not lock it ends with it locked, and a store the install trusts is trusted here too.
+
+# The data directory darling.json names, or $null when there is nothing to do here: a bring-your-own PostgreSQL
+# install (postgres.managed = false) has no store folder, and a config that cannot be read, or a data
+# directory that is not a plain drive-letter path, is left to the service to resolve, which does not change
+# what it will do. Reads darling.json the way Get-DarlingExtraServiceWriteDirectories does, with a regex
+# rather than ConvertFrom-Json, because Windows PowerShell 5.1 rejects the comments and trailing commas
+# darling.json allows. Mirrors DarlingManagedPostgres.ResolveDataDirectory: a null, missing or blank
+# dataDirectory is the default.
+function Get-DarlingDataDirectory([string]$configPath) {
+    $text = ''
+    if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+        try { $text = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop }
+        catch { return $null }
+    }
+    $stripped = ($text -split "`r?`n" | ForEach-Object { $_ -replace '(?<!:)//.*$', '' }) -join "`n"
+    $managed = [regex]::Matches($stripped, '"managed"\s*:\s*(true|false)')
+    if ($managed.Count -gt 0 -and $managed[$managed.Count - 1].Groups[1].Value -eq 'false') { return $null }
+    $dataDirectory = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'PerformanceMonitorDarling\pg'
+    $configured = [regex]::Matches($stripped, '"dataDirectory"\s*:\s*(?:null|"((?:[^"\\]|\\.)*)")')
+    if ($configured.Count -gt 0 -and $configured[$configured.Count - 1].Groups[1].Success) {
+        # JSON string escapes ("C:\\Data\\pg"); a value that is not valid JSON is the service's to reject.
+        try { $value = [regex]::Unescape($configured[$configured.Count - 1].Groups[1].Value) }
+        catch { return $null }
+        if (-not [string]::IsNullOrWhiteSpace($value)) { $dataDirectory = $value }
+    }
+    if ($dataDirectory -notmatch '^[A-Za-z]:\\') { return $null }
+    return [System.IO.Path]::GetFullPath($dataDirectory).TrimEnd('\')
+}
+
+# The store folder darling.json names: the data directory's parent, or $null when there is nothing to do here (see
+# Get-DarlingDataDirectory).
+function Get-DarlingStoreFolder([string]$configPath) {
+    $dataDirectory = Get-DarlingDataDirectory $configPath
+    if (-not $dataDirectory) { return $null }
+    $parent = [System.IO.Path]::GetDirectoryName($dataDirectory)
+    if ([string]::IsNullOrEmpty($parent)) { return $null }
+    return $parent
+}
+
+# Opens the store folder itself, never what a junction or link at its name points to, and keeps it open without sharing
+# delete or rename, so the folder cannot be moved or replaced while this script holds it. The folder's owner and
+# DACL are read and written through that handle, never by name, so a link put at the name after the folder was checked has
+# nothing to redirect: what was checked is what is changed. Create makes a folder with a given DACL in the same call that
+# creates it (0 when it made the folder, 183 when one was already there, anything else is the Win32 error). Open takes DELETE
+# and WRITE_DAC always and WRITE_OWNER on request; Error is the Win32 error when it could not open (IsOpen is false then). FinalPath is the real
+# path the open handle resolves to, and ResolvedPath the real path of an existing folder with every link followed, so a
+# link anywhere on the way to the folder shows as a difference between the two. ReadSecurity returns the owner, group and DACL
+# as a self-relative descriptor. WriteDacl installs a protected DACL from its binary form, WriteOwner an owner from a SID's
+# binary form; both return 0 or the Win32 error. IsReparsePoint and Attributes are read from the handle. Written for the C#
+# of Windows PowerShell 5.1.
+function Initialize-DarlingNativeStoreFolder {
+    if ('DarlingNativeStoreFolder' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+public sealed class DarlingNativeStoreFolder : IDisposable
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes { public int Length; public IntPtr Descriptor; public int InheritHandle; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTimeValue { public uint Low; public uint High; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public FileTimeValue CreationTime;
+        public FileTimeValue LastAccessTime;
+        public FileTimeValue LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateDirectoryW(string path, ref SecurityAttributes attributes);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(SafeFileHandle file, StringBuilder path, uint length, uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleFileInformation information);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetKernelObjectSecurity(SafeFileHandle handle, uint requested, byte[] descriptor, uint length, out uint needed);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint SetSecurityInfo(SafeFileHandle handle, int objectType, uint securityInfo, byte[] owner, IntPtr group, byte[] dacl, IntPtr sacl);
+
+    private SafeFileHandle handle;
+    public int Error;
+
+    public bool IsOpen { get { return handle != null; } }
+
+    // The \\?\ spelling of an absolute path (\\?\UNC\ for a UNC path), which Windows does not trim or fold.
+    private static string ExtendedPath(string path)
+    {
+        if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) { return path; }
+        if (path.StartsWith(@"\\", StringComparison.Ordinal)) { return @"\\?\UNC\" + path.Substring(2); }
+        return @"\\?\" + path;
+    }
+
+    private static string FinalPathOf(SafeFileHandle file)
+    {
+        StringBuilder buffer = new StringBuilder(1024);
+        uint length = GetFinalPathNameByHandleW(file, buffer, (uint)buffer.Capacity, 0);
+        if (length >= buffer.Capacity)
+        {
+            buffer = new StringBuilder((int)length + 1);
+            length = GetFinalPathNameByHandleW(file, buffer, (uint)buffer.Capacity, 0);
+        }
+        if (length == 0 || length >= buffer.Capacity) { return null; }
+        string path = buffer.ToString();
+        if (path.StartsWith(@"\\?\UNC\", StringComparison.Ordinal)) { return @"\\" + path.Substring(8); }
+        if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) { return path.Substring(4); }
+        return path;
+    }
+
+    // Creates the folder with the DACL in a self-relative descriptor. 0 = created, 183 = already there, else the Win32 error.
+    public static int Create(string path, byte[] descriptor)
+    {
+        IntPtr unmanaged = Marshal.AllocHGlobal(descriptor.Length);
+        try
+        {
+            Marshal.Copy(descriptor, 0, unmanaged, descriptor.Length);
+            SecurityAttributes attributes = new SecurityAttributes();
+            attributes.Length = Marshal.SizeOf(typeof(SecurityAttributes));
+            attributes.Descriptor = unmanaged;
+            attributes.InheritHandle = 0;
+            if (CreateDirectoryW(ExtendedPath(path), ref attributes)) { return 0; }
+            return Marshal.GetLastWin32Error();
+        }
+        finally { Marshal.FreeHGlobal(unmanaged); }
+    }
+
+    // DELETE | READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES (| WRITE_OWNER); share read and write but not delete; OPEN_EXISTING;
+    // FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS. DELETE is asked for so that the sharing mode counts: Windows
+    // does not check the sharing of a handle that asks for nothing but attributes and permissions, and the folder could then
+    // still be renamed or replaced while it is held. The folder is never deleted through this handle.
+    public static DarlingNativeStoreFolder Open(string path, bool writeOwner)
+    {
+        DarlingNativeStoreFolder folder = new DarlingNativeStoreFolder();
+        uint access = 0x00010000u | 0x00020000u | 0x00040000u | 0x80u | (writeOwner ? 0x00080000u : 0u);
+        SafeFileHandle opened = CreateFileW(ExtendedPath(path), access, 3, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero);
+        if (opened.IsInvalid)
+        {
+            folder.Error = Marshal.GetLastWin32Error();
+            opened.Dispose();
+            return folder;
+        }
+        folder.handle = opened;
+        return folder;
+    }
+
+    // The real path of an existing folder with every link on the way followed, or null.
+    public static string ResolvedPath(string path)
+    {
+        using (SafeFileHandle followed = CreateFileW(ExtendedPath(path), 0x80u, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero))
+        {
+            if (followed.IsInvalid) { return null; }
+            return FinalPathOf(followed);
+        }
+    }
+
+    public string FinalPath { get { return handle == null ? null : FinalPathOf(handle); } }
+
+    // The attribute bits as the handle reports them now; 0xFFFFFFFF when they cannot be read.
+    public uint Attributes
+    {
+        get
+        {
+            ByHandleFileInformation information;
+            if (handle == null || !GetFileInformationByHandle(handle, out information)) { return 0xFFFFFFFFu; }
+            return information.FileAttributes;
+        }
+    }
+
+    public bool IsReparsePoint { get { uint bits = Attributes; return bits == 0xFFFFFFFFu || (bits & 0x400u) != 0; } }
+
+    public bool IsDirectory { get { uint bits = Attributes; return bits != 0xFFFFFFFFu && (bits & 0x10u) != 0; } }
+
+    // OWNER | GROUP | DACL as a self-relative descriptor, or null.
+    public byte[] ReadSecurity()
+    {
+        uint needed;
+        GetKernelObjectSecurity(handle, 7u, null, 0, out needed);
+        if (needed == 0) { Error = Marshal.GetLastWin32Error(); return null; }
+        byte[] descriptor = new byte[needed];
+        if (!GetKernelObjectSecurity(handle, 7u, descriptor, needed, out needed)) { Error = Marshal.GetLastWin32Error(); return null; }
+        return descriptor;
+    }
+
+    // DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION. SE_FILE_OBJECT is 1.
+    public int WriteDacl(byte[] dacl)
+    {
+        return (int)SetSecurityInfo(handle, 1, 0x00000004u | 0x80000000u, null, IntPtr.Zero, dacl, IntPtr.Zero);
+    }
+
+    // OWNER_SECURITY_INFORMATION.
+    public int WriteOwner(byte[] ownerSid)
+    {
+        return (int)SetSecurityInfo(handle, 1, 0x00000001u, ownerSid, IntPtr.Zero, null, IntPtr.Zero);
+    }
+
+    public void Dispose()
+    {
+        if (handle != null) { handle.Dispose(); handle = null; }
+    }
+}
+'@
+}
+
+# The owner of a file or folder as a SID, read by name, or $null when it cannot be read. READ_CONTROL is all it asks for.
+function Get-DarlingItemOwnerSid([string]$path) {
+    try { return (Get-Acl -LiteralPath $path -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]) }
+    catch { return $null }
+}
+
+# Why the store folder's contents cannot be accepted, or $null when they can. Nothing here is ever treated as empty because it
+# could not be listed: a folder this script cannot list, or an item whose owner it cannot read, is a reason to stop, not a folder
+# with nothing in it. Checked, directly under $folder: the PostgreSQL data directory ($dataDirectory), pg.log, server.key,
+# server.crt and logs. Each one that exists must not be a link and must be owned by one of $trusted (SYSTEM, Administrators,
+# TrustedInstaller or the service account: what the service leaves behind). The data directory's own entries must be
+# listable and owned the same way, and a link among them is refused unless it is pg_wal, the one relocation PostgreSQL
+# supports and the service accepts. Those names are the ones the service writes into, and initdb, pg_ctl and the key and certificate
+# writers each open them without asking who made them, so something another user put there would be used as it is.
+function Get-DarlingStoreContentsProblem([string]$folder, [string]$dataDirectory, $trusted) {
+    $named = @('pg.log', 'server.key', 'server.crt', 'logs')
+    $dataName = ''
+    if ($dataDirectory) {
+        $dataParent = [System.IO.Path]::GetDirectoryName($dataDirectory)
+        if ($dataParent -and $dataParent.TrimEnd('\') -ieq $folder.TrimEnd('\')) {
+            $dataName = [System.IO.Path]::GetFileName($dataDirectory)
+            $named = @($dataName) + $named
+        }
+    }
+    try { $entries = @(Get-ChildItem -LiteralPath $folder -Force -ErrorAction Stop) }
+    catch { return "$folder cannot be listed by this script ($($_.Exception.Message)), so what is in it is not known. It is not treated as empty." }
+    foreach ($name in $named) {
+        $match = @($entries | Where-Object { $_.Name -ieq $name })
+        if ($match.Count -eq 0) { continue }
+        $item = $match[0]
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return "$($item.FullName) is a junction or link." }
+        $problem = Get-DarlingItemOwnerProblem $item.FullName $trusted
+        if ($problem) { return $problem }
+        if ($item.PSIsContainer -and $dataName -and $name -ieq $dataName) {
+            try { $children = @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop) }
+            catch { return "$($item.FullName) cannot be listed by this script ($($_.Exception.Message)), so what is in it is not known. It is not treated as empty." }
+            foreach ($child in $children) {
+                # A link at pg_wal is the operator's own relocation of the write-ahead log, which the service accepts
+                # (only its owner is judged). A link at any other name is refused.
+                if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and $child.Name -ine 'pg_wal') { return "$($child.FullName) is a junction or link." }
+                $childProblem = Get-DarlingItemOwnerProblem $child.FullName $trusted
+                if ($childProblem) { return $childProblem }
+            }
+        }
+    }
+    return $null
+}
+
+# Why one file or folder's owner is not acceptable, or $null when it is one of $trusted.
+function Get-DarlingItemOwnerProblem([string]$path, $trusted) {
+    $owner = Get-DarlingItemOwnerSid $path
+    if ($null -eq $owner) { return "The owner of $path cannot be read by this script, so it is not trusted." }
+    if ($trusted -contains $owner) { return $null }
+    try { $ownerName = $owner.Translate([System.Security.Principal.NTAccount]).Value }
+    catch { $ownerName = $owner.Value }
+    return "$path is owned by $ownerName, which is not SYSTEM, Administrators or the service account, so another user may have made it."
+}
+
+# Creates $folder if it is missing, makes Administrators its owner, and gives it the DACL described above.
+# Throws with the reason when it cannot leave the folder in that state, so the caller stops before the
+# service starts. Nothing about the folder is decided by name: the folder is created with its DACL in the call that
+# creates it, or opened once without following a link and kept open without sharing delete or rename, and the
+# owner and the DACL are read and written through that one handle (DarlingNativeStoreFolder). A junction or link
+# at the name is refused, the folder's real path must still be its own path, and both are checked again after the
+# write. A folder that already exists is trusted only if its owner is SYSTEM, Administrators, TrustedInstaller, the
+# service account or this service's own service SID (see $trusted below): that is what the service leaves behind, so an
+# upgrade passes, including one after the Log On account was changed. A folder owned by anyone else is what a pre-created folder looks like, and it is refused whether
+# or not it is empty: taking it over cannot make what its owner holds, or can still do through a handle opened
+# earlier, trustworthy. What is in the folder is judged by Get-DarlingStoreContentsProblem before the ACL is
+# written and again once it is in place.
+function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount, $operatorSid, [string]$dataDirectory = '', [string]$serviceName = '') {
+    $ErrorActionPreference = 'Continue'
+    $wk = [System.Security.Principal.WellKnownSidType]
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $systemSid = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
+    $adminsSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
+    $serviceSid = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate($sidType)
+    # The owners a store left by an earlier run can have: SYSTEM, Administrators, TrustedInstaller, the account the service
+    # logs on as now, and this service's own service SID (S-1-5-80-...), which owns everything the service made while it ran
+    # as the default virtual account. The Log On account can be changed to a domain account or a gMSA afterwards, and the
+    # items stay owned by that SID. Only this service's processes (or a holder of SeRestorePrivilege) can make something
+    # owned by it, so trusting it gives another user nothing. The service trusts exactly this list.
+    $trusted = @($systemSid, $adminsSid, $serviceSid, (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType)) + @(Get-DarlingServiceSids '' $serviceName)
+
+    $full = [System.IO.Path]::GetFullPath($folder).TrimEnd('\')
+    $parent = [System.IO.Path]::GetDirectoryName($full)
+    if ([string]::IsNullOrEmpty($parent)) { throw "$folder is a drive root, not a folder this script will lock. Point postgres.dataDirectory in darling.json at a folder below it." }
+
+    $rights = [System.Security.AccessControl.FileSystemRights]
+    $inheritFlags = [System.Security.AccessControl.InheritanceFlags]
+    $none = [System.Security.AccessControl.PropagationFlags]::None
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @($systemSid, $adminsSid, $serviceSid)) {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $rights::FullControl, ($inheritFlags::ContainerInherit -bor $inheritFlags::ObjectInherit), $none, $allow)))
+    }
+    if ($operatorSid) {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($operatorSid, ($rights::Traverse -bor $rights::Synchronize), $inheritFlags::None, $none, $allow)))
+    }
+    $descriptor = $acl.GetSecurityDescriptorBinaryForm()
+    $raw = New-Object System.Security.AccessControl.RawSecurityDescriptor($descriptor, 0)
+    $daclBytes = New-Object byte[] $raw.DiscretionaryAcl.BinaryLength
+    $raw.DiscretionaryAcl.GetBinaryForm($daclBytes, 0)
+    $adminsBytes = New-Object byte[] $adminsSid.BinaryLength
+    $adminsSid.GetBinaryForm($adminsBytes, 0)
+
+    Initialize-DarlingNativeStoreFolder
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) { $null = [System.IO.Directory]::CreateDirectory($parent) }
+    # Create, never "create if missing": a folder that appeared between a check and this call is reported as already there
+    # (183), and then judged as one that existed, rather than being adopted as the folder this script made.
+    $created = [DarlingNativeStoreFolder]::Create($full, $descriptor)
+    if ($created -ne 0 -and $created -ne 183) { throw "$folder could not be created (Windows error $created)." }
+    $existed = ($created -eq 183)
+
+    $lock = [DarlingNativeStoreFolder]::Open($full, $true)
+    if (-not $lock.IsOpen) {
+        throw "$folder could not be opened to change its permissions (Windows error $($lock.Error)). If another program has it open, close that and re-run this script. If you did not create it, delete it. If it is your existing store, give Administrators full control of it first."
+    }
+    try {
+        # What was opened must be the folder at this name and nothing a link redirects: not a reparse point itself, and its
+        # real path is the real path of its parent plus its own name.
+        $realParent = [DarlingNativeStoreFolder]::ResolvedPath($parent)
+        if (-not $realParent) { throw "$parent could not be resolved." }
+        $expectedPath = (Join-Path $realParent ([System.IO.Path]::GetFileName($full)))
+        $assertSame = {
+            param([string]$when)
+            if (-not $lock.IsDirectory) { throw "$folder exists and is a file, not a folder ($when)." }
+            if ($lock.IsReparsePoint) { throw "$folder is a junction or link ($when). Remove it, or point postgres.dataDirectory in darling.json at a real folder, then re-run this script." }
+            if (-not [string]::Equals($lock.FinalPath, $expectedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "$folder resolves to $($lock.FinalPath) ($when), not to $expectedPath, so a junction or link is on its path. Nothing was changed through it. Remove the link, or point postgres.dataDirectory in darling.json at a real folder, then re-run this script."
+            }
+        }
+        & $assertSame 'before the permissions were changed'
+
+        $before = New-Object System.Security.AccessControl.DirectorySecurity
+        $securityBytes = $lock.ReadSecurity()
+        if ($null -eq $securityBytes) { throw "the permissions of $folder could not be read (Windows error $($lock.Error))." }
+        $before.SetSecurityDescriptorBinaryForm($securityBytes)
+        $owner = $before.GetOwner($sidType)
+        if ($existed -and $trusted -notcontains $owner) {
+            try { $ownerName = $owner.Translate([System.Security.Principal.NTAccount]).Value }
+            catch { $ownerName = $owner.Value }
+            throw "$folder already exists and is owned by $ownerName, which is not SYSTEM, Administrators or the service account, so another user may have made it. If you did not create it, delete it and re-run this script: this script does not take over a folder it did not make. If it is your existing store (for example you changed the service's Log On account), make Administrators the owner of everything in it first, from an elevated prompt, then re-run this script: icacls `"$folder`" /setowner *$($adminsSid.Value) /T /C /L"
+        }
+        if ($existed) {
+            $contents = Get-DarlingStoreContentsProblem $full $dataDirectory $trusted
+            if ($contents) { throw "$contents If you did not create $folder, delete it (take ownership first if Windows refuses) and re-run this script. If it is your existing store, give Administrators ownership of, and full control over, everything in it from an elevated prompt, then re-run this script: icacls `"$folder`" /setowner *$($adminsSid.Value) /T /C /L" }
+        }
+
+        # A folder this script made is owned by whoever created it: Administrators, or the installing user's own account
+        # where policy gives the object's creator ownership. The owner is set before the DACL is, through the same handle.
+        if ($owner -ne $adminsSid) {
+            if ($trusted -notcontains $owner -and ($existed -or $owner -ne [System.Security.Principal.WindowsIdentity]::GetCurrent().User)) {
+                throw "$folder is owned by $($owner.Value), which is not SYSTEM, Administrators or the service account."
+            }
+            $error1 = $lock.WriteOwner($adminsBytes)
+            if ($error1 -ne 0) { throw "could not make Administrators the owner of ${folder} (Windows error $error1)." }
+        }
+        $error2 = $lock.WriteDacl($daclBytes)
+        if ($error2 -ne 0) { throw "could not set the permissions of ${folder} (Windows error $error2)." }
+
+        # VERIFY rather than assume, through the same handle: the folder must now be protected, owned by Administrators,
+        # and grant exactly the principals above, and it must still be the folder that was checked.
+        & $assertSame 'after the permissions were changed'
+        $after = New-Object System.Security.AccessControl.DirectorySecurity
+        $afterBytes = $lock.ReadSecurity()
+        if ($null -eq $afterBytes) { throw "the permissions of $folder could not be read back (Windows error $($lock.Error))." }
+        $after.SetSecurityDescriptorBinaryForm($afterBytes)
+        $expected = @(@($systemSid, $adminsSid, $serviceSid) + @($operatorSid | Where-Object { $_ }) | ForEach-Object { $_.Value } | Sort-Object -Unique)
+        $actual = @($after.GetAccessRules($true, $true, $sidType) | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+        if (-not $after.AreAccessRulesProtected -or $after.GetOwner($sidType) -ne $adminsSid -or @(Compare-Object $expected $actual).Count -gt 0) {
+            throw "$folder was not left protected, owned by Administrators, and granting only SYSTEM, Administrators, the service account and the operator group."
+        }
+        # What a user could put in the folder while it was still open to them is looked at once more under the lock.
+        $contents = Get-DarlingStoreContentsProblem $full $dataDirectory $trusted
+        if ($contents) { throw "$contents This was found after $folder was locked. Delete $folder and re-run this script." }
+    }
+    finally { $lock.Dispose() }
 }
 
 # The logon account the Darling service is registered to run as, exactly as Windows reports it (LocalSystem,
@@ -3111,8 +3535,12 @@ Invoke-UpgradeTreeLock 'after the copy'
 # logs the missing group at every start until it exists.
 $operatorSid = $null
 $operatorGroupProblem = $null
-try { $operatorSid = Initialize-DarlingOperatorGroup $operatorGroupName }
-catch { $operatorGroupProblem = $_.Exception.Message }
+# A domain controller has no local groups, and net localgroup there would make a domain group: it is skipped, and said so.
+$onDomainController = Test-DarlingDomainController
+if (-not $onDomainController) {
+    try { $operatorSid = Initialize-DarlingOperatorGroup $operatorGroupName }
+    catch { $operatorGroupProblem = $_.Exception.Message }
+}
 
 if ($operatorSid) {
     Note ''
@@ -3122,8 +3550,37 @@ if ($operatorSid) {
     Note 'A person added to the group has to sign out and back in before the membership takes effect.'
     Note ''
 }
+elseif ($onDomainController) {
+    Warn "This machine is a domain controller, which has no local groups, so the local group '$operatorGroupName' was NOT created and nothing was granted to it. The service will start. The Viewer and the CLI must be run elevated here: darling.json and the store's credentials are readable by SYSTEM, Administrators and the service account only."
+}
 else {
     Warn "Could not create the local group '$operatorGroupName': $operatorGroupProblem The service will start, but darling.json and the store's admin and viewer credentials stay readable by SYSTEM, Administrators and the service account only, so the Viewer and the CLI cannot read them without elevation. Create the group from an elevated prompt (net localgroup `"$operatorGroupName`" /add), add the people who run the Viewer or the CLI, then restart the service so it grants the group."
+}
+
+# ============================ the store folder ============================
+#
+# The same lock install-darling.ps1 step 4b3 applies, through the same functions: the store folder is made or kept owned by
+# Administrators and locked to SYSTEM, Administrators and the service account (the operator group can only traverse it),
+# after its owner, its contents and any link on its path have been checked. A store made by a release that could not lock
+# it ends locked here, and the service finds it locked at its first start. The service is stopped by now and starts below.
+#
+# A store this cannot lock is a WARNING, not a stop: the service checks the same things itself at its start and says what
+# it refuses, and a host this script left down over a folder is worse off than one that is up. NOTHING here calls Fail.
+$storeFolder = Get-DarlingStoreFolder $configPath
+if (-not $storeFolder) {
+    Note 'No store folder to secure here: postgres.managed is false, or darling.json could not be read or names a data directory this script does not handle.'
+}
+elseif (-not $logonAccount) {
+    Warn "Could not read which account '$serviceName' logs on as, so the store folder '$storeFolder' was NOT locked rather than locked around a guess. Fix the lookup and re-run this script, or run install-darling.ps1."
+}
+else {
+    try {
+        Initialize-DarlingStoreFolder $storeFolder $logonAccount $operatorSid (Get-DarlingDataDirectory $configPath) $serviceName
+        Good "Store folder '$storeFolder' is owned by Administrators and locked to SYSTEM, Administrators and the service account; the operator group can only traverse it."
+    }
+    catch {
+        Warn "The store folder '$storeFolder' could not be secured: $($_.Exception.Message) The service will start, and refuses a store it cannot trust. Fix the folder, then re-run this script."
+    }
 }
 
 Note "Starting '$serviceName'..."
