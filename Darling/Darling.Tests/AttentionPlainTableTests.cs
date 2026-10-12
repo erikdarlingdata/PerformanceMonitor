@@ -157,28 +157,14 @@ public sealed class AttentionPlainTableTests
             await ExecAsync(connection,
                 "ALTER TABLE config.config_alert_settings DROP COLUMN client_timeouts_enabled, DROP COLUMN client_timeouts_warning_per_minute, DROP COLUMN client_timeouts_critical_per_minute", ct);
 
-            /* The viewer's mute-rule list on the store below V179: the gated statement answers, the current one fails with 42703. */
-            await ExecAsync(connection, "SET search_path = collect, config, public", ct);
+            /* A rule saved before the upgrade survives the rung: the added column is nullable, so the old rule has no client-application match. */
             await ExecAsync(connection, "INSERT INTO config.config_mute_rules (id, enabled, created_at_utc) VALUES ('old-rule', TRUE, now() AT TIME ZONE 'UTC')", ct);
-            await using (var gated = new NpgsqlCommand(PerformanceMonitor.Darling.Viewer.ViewerDataService.MuteRulesSelectBeforeClientAppSql, connection))
-            await using (var reader = await gated.ExecuteReaderAsync(ct))
-            {
-                Assert.True(await reader.ReadAsync(ct));
-                Assert.Equal(13, reader.FieldCount);
-                Assert.True(reader.IsDBNull(12));
-            }
-
-            var skew = await Assert.ThrowsAsync<PostgresException>(async () =>
-            {
-                await using var current = new NpgsqlCommand(PerformanceMonitor.Darling.Viewer.ViewerDataService.MuteRulesSelectSql, connection);
-                await using var rejected = await current.ExecuteReaderAsync(ct);
-            });
-            Assert.Equal("42703", skew.SqlState);
 
             await ExecAsync(connection, Rung.Sql, ct);
             Assert.Equal("text:YES:", await ScalarAsync(connection, string.Format(ColumnSql, "config_mute_rules", "client_app_pattern"), ct));
             Assert.Equal("integer:NO:60", await ScalarAsync(connection, string.Format(ColumnSql, "config_alert_settings", "client_timeouts_critical_per_minute"), ct));
             Assert.Equal(1L, await ScalarAsync(connection, "SELECT count(*) FROM pg_indexes WHERE schemaname = 'collect' AND tablename = 'attention_events'", ct));
+            Assert.Equal(1L, await ScalarAsync(connection, "SELECT count(*) FROM config.config_mute_rules WHERE id = 'old-rule' AND client_app_pattern IS NULL", ct));
 
             bodySucceeded = true;
         }
@@ -228,7 +214,7 @@ public sealed class AttentionPlainTableTests
             await ExecAsync(connection, "DELETE FROM collect.attention_events WHERE server_id = " + TestServerId, ct);
             await ExecAsync(connection,
                 "INSERT INTO collect.attention_events (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count) "
-                + "SELECT 700000 + d, (now() AT TIME ZONE 'UTC') - make_interval(days => d), " + TestServerId + ", 'plain-table-test', 'attention', 1 "
+                + "SELECT 700000 + d, (now() AT TIME ZONE 'UTC') - make_interval(days => d), " + TestServerId + ", 'plain-table-test', 'count', 1 "
                 + "FROM unnest(ARRAY[45, 31, 29, 1, 0]) AS d", ct);
 
             var log = new CapturingTestLogger();
@@ -241,6 +227,64 @@ public sealed class AttentionPlainTableTests
 
             /* No drop_chunks attempt on the plain table, so no "failed" warning for it. */
             Assert.DoesNotContain("attention_events", string.Join("\n", log.Joined.Split('\n').Where(l => l.Contains("Warning", StringComparison.Ordinal))), StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task TheCountRowAndTheSamples_GoThroughTheProductsWriter_WithTheRunsTimeAndANullEventTime()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the attention count-row live pin (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var definition = AttentionCollector.Instance;
+            var runTime = new DateTime(2026, 10, 12, 12, 0, 0, DateTimeKind.Unspecified);
+            var sampleTime = runTime.AddDays(-3);
+            var rows = new[]
+            {
+                new AttentionCollector.Row { EventKind = AttentionCollector.KindSample, EventTime = sampleTime, AttentionCount = 0, DatabaseName = "db", StatementText = "SELECT 1" },
+                new AttentionCollector.Row { EventKind = AttentionCollector.KindCount, EventTime = null, AttentionCount = 7 },
+            };
+
+            var writer = new PgCollectorRowWriter();
+            await using (var importer = await connection.BeginBinaryImportAsync(PgCollectorRowWriter.CopyCommandFor(definition), ct))
+            {
+                writer.Importer = importer;
+                foreach (var row in rows)
+                {
+                    await importer.StartRowAsync(ct);
+                    writer.Value(CollectionIdGenerator.Next());
+                    writer.Value(runTime).Value(TestServerId).Value("count-row-test");
+                    writer.BeginPayload();
+                    definition.WritePayload(row, writer, new CollectorContext { ServerId = TestServerId, ServerName = "count-row-test", CollectionTime = runTime, Deltas = null! });
+                    writer.EndPayload(definition.PayloadColumns.Count);
+                }
+
+                await importer.CompleteAsync(ct);
+            }
+
+            /* Both rows carry the run's time as collection_time (the count never takes the sample's older event_time), the count row
+               has no event_time, and the sum of attention_count is the counter's delta alone. */
+            Assert.Equal("count:2026-10-12 12:00:00:<null>:7|sample:2026-10-12 12:00:00:2026-10-09 12:00:00:0", (string)(await ScalarAsync(connection,
+                "SELECT string_agg(event_kind || ':' || to_char(collection_time, 'YYYY-MM-DD HH24:MI:SS') || ':' || COALESCE(to_char(event_time, 'YYYY-MM-DD HH24:MI:SS'), '<null>') || ':' || attention_count, '|' ORDER BY event_kind) "
+                + "FROM collect.attention_events WHERE server_id = " + TestServerId, ct))!);
+            Assert.Equal(7L, await ScalarAsync(connection, "SELECT sum(attention_count)::bigint FROM collect.attention_events WHERE server_id = " + TestServerId, ct));
+
+            /* The watermark read (MAX(event_time)) is the newest SAMPLE, so a count row can never move it. */
+            Assert.Equal(sampleTime, (DateTime)(await ScalarAsync(connection, "SELECT max(event_time) FROM collect.attention_events WHERE server_id = " + TestServerId, ct))!);
 
             bodySucceeded = true;
         }

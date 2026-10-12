@@ -210,6 +210,48 @@ public sealed class CollectorEngineCapabilityTests
     }
 
     /// <summary>
+    /// Collectors whose entry ships ahead of the read that asks about them. <c>attention</c> (#5640) gets its
+    /// <c>get_client_timeouts</c> read in a later part of the same change; until then no gate and no read reaches
+    /// the prose. The exemption cannot outlive that: <see cref="AReadsPendingWiringEntry_IsDroppedOnceTheReadIsWired"/>
+    /// fails the day a read asks, so the line is removed rather than left behind.
+    /// </summary>
+    private static readonly HashSet<string> ReadsPendingWiring = new(StringComparer.Ordinal) { "attention" };
+
+    [Fact]
+    public void AReadsPendingWiringEntry_IsDroppedOnceTheReadIsWired()
+    {
+        var wired = EngineCapabilityReadWiringTests.AllWiredCollectors();
+        foreach (var name in ReadsPendingWiring)
+        {
+            Assert.DoesNotContain(name, wired);
+        }
+    }
+
+    /// <summary>
+    /// The census that would have caught the missing <c>attention</c> entry (#5640): every collector that reads a
+    /// ring-buffer extended-events session through the shred gate (<see cref="XeShredGate"/> in its state keys) is
+    /// a capture path an engine can lack, so a read of it needs a noun phrase to say what is not collected.
+    /// </summary>
+    [Fact]
+    public void EveryShredGatedXeCollector_HasACapturePathEntry()
+    {
+        var shredGated = CollectorCatalog.All
+            .Where(c => c.StateKeys.Contains(XeShredGate.StateKey))
+            .Select(c => c.Name)
+            .ToList();
+
+        /* A scan that found nothing passes for free. deadlocks, blocked_process_report and attention are the three today. */
+        Assert.True(shredGated.Count >= 3, $"only {shredGated.Count} shred-gated collectors found — the scan is broken");
+        foreach (var name in shredGated)
+        {
+            Assert.True(
+                CollectorEngineCapability.CapturePathByCollector.ContainsKey(name),
+                $"'{name}' reads an extended-events ring buffer through XeShredGate but has no CapturePathByCollector entry — " +
+                "a read of it on an engine without the capture would fall back to the generic phrasing");
+        }
+    }
+
+    /// <summary>
     /// The prose table cannot outlive the gates it describes: every key must be a real collector, and every
     /// key must be a collector its OWN <c>AppliesTo</c> gate shuts out somewhere — an entry for a collector
     /// nothing gates is prose no message can ever reach, which is how a stale explanation survives unnoticed.
@@ -235,7 +277,7 @@ public sealed class CollectorEngineCapabilityTests
         {
             Assert.True(catalog.ContainsKey(name), $"CapturePathByCollector names '{name}', which is not a CollectorCatalog collector");
             Assert.True(
-                ExcludedByItsOwnGateSomewhere(catalog[name]) || wired.Contains(name),
+                ExcludedByItsOwnGateSomewhere(catalog[name]) || wired.Contains(name) || ReadsPendingWiring.Contains(name),
                 $"CapturePathByCollector describes '{name}', but its AppliesTo gate now lets it run on every target " +
                 "of its own engine AND no shipped read asks the capability question about it — so the prose is " +
                 "unreachable. Drop the entry, re-check the gate, or wire the read that wanted it");
