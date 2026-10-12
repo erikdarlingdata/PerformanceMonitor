@@ -280,6 +280,23 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.DoesNotContain("monitor.example.com", line, StringComparison.Ordinal);
     }
 
+    /// <summary>The token form's same-site refusal exists with or without OIDC, so its log line names its own gate
+    /// (the same-site check, with web.publicBaseUrl as the setting that fixes a proxied start), never the OIDC flow's.</summary>
+    [Fact]
+    public async Task NetworkMode_ACrossSiteSignInPost_TheRefusalLogLine_NamesTheSameSiteGate_NotTheOidcFlow()
+    {
+        var hostLogger = new CapturingTestLogger();
+        using var server = await BuildServer(networkMode: true, hostLogger: hostLogger);
+        var ctx = await PostSignIn(server, ListenIp, InCidrRemote, Token, configure: c => c.Request.Headers.Origin = "https://other.example");
+        Assert.Equal(StatusCodes.Status403Forbidden, ctx.Response.StatusCode);
+
+        var line = Assert.Single(hostLogger.Lines);
+        Assert.Contains(DarlingHttpRefusalLog.Describe(DarlingRefusalGate.TokenSignInSite), line, StringComparison.Ordinal);
+        Assert.Contains("web.publicBaseUrl", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("OIDC", line, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingHttpRefusalLog.Describe(DarlingRefusalGate.SignIn), line, StringComparison.Ordinal);
+    }
+
     /// <summary>#4220: web.publicBaseUrl's host is admitted as one extra allowed Host value — a DNS name
     /// darling.sample.json suggests but that, before this, the guard refused unconditionally (it only ever
     /// compared against networkListenIp or the loopback names).</summary>

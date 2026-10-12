@@ -37,26 +37,31 @@ public sealed class DarlingWebAuthTests
        — it authenticates like any other remote, mirroring the MCP host. The three loopback rows below are
        the behavior change: same inputs, ShowLogin instead of Allow. */
     [Theory]
-    [InlineData("127.0.0.1", false, false, "ShowLogin")]              // loopback, no credential -> login form, NOT a free pass
-    [InlineData("::1", false, false, "ShowLogin")]                    // IPv6 loopback
-    [InlineData("::ffff:127.0.0.1", false, false, "ShowLogin")]       // IPv4-mapped loopback
-    [InlineData("127.0.0.1", true, false, "Allow")]                   // loopback + valid cookie -> in
-    [InlineData("127.0.0.1", false, true, "SetCookieAndRedirect")]    // loopback + valid token -> cookie + 302, same exchange as a LAN client
-    [InlineData("::ffff:127.0.0.1", false, true, "SetCookieAndRedirect")] // the IPv4-mapped form takes the same path (no unwrap drift)
-    [InlineData("192.168.1.50", false, true, "SetCookieAndRedirect")] // in-CIDR + valid token -> cookie + 302
-    [InlineData("192.168.1.50", true, false, "Allow")]                // in-CIDR + valid cookie
-    [InlineData("192.168.1.50", true, true, "Allow")]                 // cookie is checked before the token
-    [InlineData("10.0.0.5", true, true, "Forbid")]                    // out-of-CIDR, even WITH a cookie+token
-    [InlineData("192.168.1.50", false, false, "ShowLogin")]           // in-CIDR, no cookie/token (or expired/tampered cookie -> hasValidCookie=false)
-    public void DecideWebAuth_RouteMatrix(string remote, bool hasValidCookie, bool hasValidToken, string expected)
+    [InlineData("127.0.0.1", false, "ShowLogin")]              // loopback, no credential -> login form, NOT a free pass
+    [InlineData("::1", false, "ShowLogin")]                    // IPv6 loopback
+    [InlineData("::ffff:127.0.0.1", false, "ShowLogin")]       // IPv4-mapped loopback
+    [InlineData("127.0.0.1", true, "Allow")]                   // loopback + valid cookie -> in
+    [InlineData("192.168.1.50", true, "Allow")]                // in-CIDR + valid cookie
+    [InlineData("10.0.0.5", true, "Forbid")]                   // out-of-CIDR, even WITH a cookie
+    [InlineData("192.168.1.50", false, "ShowLogin")]           // in-CIDR, no cookie (or expired/tampered cookie -> hasValidCookie=false)
+    public void DecideWebAuth_RouteMatrix(string remote, bool hasValidCookie, string expected)
     {
-        var action = DarlingWebHostService.DecideWebAuth(IPAddress.Parse(remote), Cidr, hasValidCookie, hasValidToken);
+        var action = DarlingWebHostService.DecideWebAuth(IPAddress.Parse(remote), Cidr, hasValidCookie);
         Assert.Equal(expected, action.ToString());
     }
 
     [Fact]
     public void DecideWebAuth_NullRemote_Forbids()
-        => Assert.Equal("Forbid", DarlingWebHostService.DecideWebAuth(null, Cidr, hasValidCookie: true, hasValidToken: true).ToString());
+        => Assert.Equal("Forbid", DarlingWebHostService.DecideWebAuth(null, Cidr, hasValidCookie: true).ToString());
+
+    /* A token in the address is never a credential: the verdict sets have no cookie-exchange member, so the
+       only way a token becomes a session is the sign-in form's POST (HandleTokenSignInAsync). */
+    [Fact]
+    public void TheVerdictSets_HaveNoTokenInTheAddressExchange()
+    {
+        Assert.DoesNotContain("SetCookieAndRedirect", Enum.GetNames<DarlingWebHostService.WebAuthAction>());
+        Assert.DoesNotContain("SetCookieAndRedirect", Enum.GetNames<DarlingWebHostService.WebRequestAction>());
+    }
 
     /* ---- Host-header allowlist: the DNS-rebinding guard (security review M1; #1576 extends it to BOTH modes) ----
        The pure decision is unchanged; #1576 wires it into the loopback-only pipeline too (null listen IP), which
@@ -329,18 +334,17 @@ public sealed class DarlingWebAuthTests
        regardless of credential state, and every non-flow request decides exactly as before. */
 
     [Theory]
-    [InlineData("10.0.0.5", true, true, true, "Forbid")]                 // out-of-CIDR beats the flow route — sign-in is not a way past the boundary
-    [InlineData("192.168.1.50", true, false, false, "HandleAuthFlow")]   // in-CIDR flow route, no credential — the pre-auth login leg
-    [InlineData("192.168.1.50", true, true, false, "HandleAuthFlow")]    // flow route wins over a valid cookie (re-login / logout)
-    [InlineData("127.0.0.1", true, false, false, "HandleAuthFlow")]      // loopback may sign in too (localhost redirect URIs)
-    [InlineData("192.168.1.50", false, true, false, "Allow")]            // non-flow rows delegate to the original matrix…
-    [InlineData("192.168.1.50", false, false, true, "SetCookieAndRedirect")]
-    [InlineData("192.168.1.50", false, false, false, "ShowLogin")]
-    [InlineData("10.0.0.5", false, true, true, "Forbid")]
+    [InlineData("10.0.0.5", true, true, "Forbid")]                 // out-of-CIDR beats the flow route - sign-in is not a way past the boundary
+    [InlineData("192.168.1.50", true, false, "HandleAuthFlow")]    // in-CIDR flow route, no credential - the pre-auth login leg
+    [InlineData("192.168.1.50", true, true, "HandleAuthFlow")]     // flow route wins over a valid cookie (re-login / logout)
+    [InlineData("127.0.0.1", true, false, "HandleAuthFlow")]       // loopback may sign in too (localhost redirect URIs)
+    [InlineData("192.168.1.50", false, true, "Allow")]             // non-flow rows delegate to the original matrix
+    [InlineData("192.168.1.50", false, false, "ShowLogin")]
+    [InlineData("10.0.0.5", false, true, "Forbid")]
     public void DecideWebRequest_ComposesFlowAroundDecideWebAuth(
-        string remote, bool isAuthFlowRoute, bool hasValidCookie, bool hasValidToken, string expected)
+        string remote, bool isAuthFlowRoute, bool hasValidCookie, string expected)
         => Assert.Equal(expected, DarlingWebHostService.DecideWebRequest(
-            IPAddress.Parse(remote), Cidr, isAuthFlowRoute, hasValidCookie, hasValidToken).ToString());
+            IPAddress.Parse(remote), Cidr, isAuthFlowRoute, hasValidCookie).ToString());
 
     [Theory]
     [InlineData("/auth/logout", false, true)]                 // logout is a flow path even with OIDC off (token seats hold cookies too)

@@ -45,10 +45,22 @@ public sealed class DarlingWebSignInHardeningTests
     private static readonly IPAddress ProxyRemote = IPAddress.Parse("192.168.1.10");
     private static readonly IPAddress NotAProxyRemote = IPAddress.Parse("192.168.1.11");
 
+    /// <summary>A settable clock for the sign-in wait: frozen until a test advances it, so no test reads real elapsed
+    /// time across the 2 second wait.</summary>
+    private sealed class SettableClock
+    {
+        private DateTime _now = new(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        public DateTime Now() => _now;
+
+        public void Advance(TimeSpan by) => _now += by;
+    }
+
     private static async Task<TestServer> BuildServer(
         bool networkMode, IReadOnlyList<IPNetwork>? trustedProxies = null, DarlingWebOidcClient? oidcClient = null,
-        string? publicBaseUrlHost = "monitor.example.com", bool sendHsts = false)
+        string? publicBaseUrlHost = "monitor.example.com", bool sendHsts = false, SettableClock? clock = null)
     {
+        clock ??= new SettableClock();
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
@@ -75,7 +87,8 @@ public sealed class DarlingWebSignInHardeningTests
             oidcClient: oidcClient,
             publicBaseUrlHost: publicBaseUrlHost,
             trustedProxies: trustedProxies,
-            sendHsts: sendHsts);
+            sendHsts: sendHsts,
+            utcNow: clock.Now);
 
         await app.StartAsync();
         return app.GetTestServer();
@@ -212,6 +225,77 @@ public sealed class DarlingWebSignInHardeningTests
         /* Another source is not held by the first one's failures. */
         var other = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, IPAddress.Parse("192.168.1.51"), Token);
         Assert.Equal(StatusCodes.Status302Found, other.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TheWait_ExpiresWhenTheClockPassesIt_AndNotBefore()
+    {
+        var clock = new SettableClock();
+        using var server = await BuildServer(networkMode: true, clock: clock);
+        for (var i = 0; i <= DarlingSignInThrottle.FreeFailures; i++)
+        {
+            await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, "wrong-" + i);
+        }
+
+        clock.Advance(DarlingSignInThrottle.BaseDelay - TimeSpan.FromMilliseconds(500));
+        var inside = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, Token);
+        Assert.Equal(StatusCodes.Status429TooManyRequests, inside.Response.StatusCode);
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+        var after = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, Token);
+        Assert.Equal(StatusCodes.Status302Found, after.Response.StatusCode);
+    }
+
+    private static string ReturnFieldOf(string html)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(html, @"name='return' id='return' value='(?<v>[^']*)'");
+        Assert.True(match.Success, "the login page must carry its return field");
+        return System.Net.WebUtility.HtmlDecode(match.Groups["v"].Value);
+    }
+
+    [Theory]
+    [InlineData("/alerts", "/alerts")]
+    [InlineData("/servers?name=a&b=c#/x", "/servers?name=a&b=c#/x")]
+    [InlineData("/auth/login", "/")]
+    [InlineData("/auth/oidc/login?return=%2Falerts", "/")]
+    [InlineData("//other.example/path", "/other.example/path")]
+    public async Task AWrongTokenThenTheRightOne_LandsWhereAFirstTrySuccessWould(string requested, string expectedLanding)
+    {
+        using var server = await BuildServer(networkMode: true);
+
+        var first = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, "wrong-token", returnPath: requested);
+        Assert.Equal(StatusCodes.Status200OK, first.Response.StatusCode);
+        Assert.Equal(0, first.Response.Headers.SetCookie.Count);
+
+        /* The form served as the answer to the miss carries the target in its own return field, because the address bar
+           now names the sign-in path, not the page the operator was opening. */
+        var carried = ReturnFieldOf(await BodyOf(first));
+        Assert.Equal(expectedLanding, carried);
+
+        /* A second miss keeps it, and the right token posted with what the form carried lands on the target. */
+        var second = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, "wrong-again", returnPath: carried);
+        Assert.Equal(expectedLanding, ReturnFieldOf(await BodyOf(second)));
+
+        var right = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, Token, returnPath: carried);
+        Assert.Equal(StatusCodes.Status302Found, right.Response.StatusCode);
+        Assert.Equal(expectedLanding, right.Response.Headers.Location.ToString());
+
+        var firstTry = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, IPAddress.Parse("192.168.1.51"), Token, returnPath: requested);
+        Assert.Equal(right.Response.Headers.Location.ToString(), firstTry.Response.Headers.Location.ToString());
+    }
+
+    [Fact]
+    public void TheLoginPage_FillsItsReturnFieldFromTheAddressOnlyWhenTheAddressIsNotTheSignInPath()
+    {
+        foreach (var oidc in new[] { false, true })
+        {
+            var html = DarlingWebHostService.BuildLoginPageHtml(oidc);
+            Assert.Contains("location.pathname.toLowerCase() !== '/auth/login'", html, StringComparison.Ordinal);
+            if (oidc)
+            {
+                Assert.Contains("location.pathname.toLowerCase() === '/auth/login' ? document.getElementById('return').value", html, StringComparison.Ordinal);
+            }
+        }
     }
 
     /* ---------------- the sign-in POST: its origin, its body in bytes, and one atomic count per attempt ---------------- */
