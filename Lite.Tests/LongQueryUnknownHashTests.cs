@@ -83,6 +83,29 @@ public sealed class LongQueryUnknownHashTests : IDisposable
         Assert.Null(QueryHashIdentity.Identity("0", SensitiveStatements.PlaceholderText));
     }
 
+    /* The Lite grid's rebound column is the user-visible half and no compile step sees XAML bindings: pins the Long
+       Queries grid's last column to QueryIdentity (binding and filter tag) under the "Query ID" header, like Darling's
+       twin in its LongQueryUnknownHashTests. Putting the raw QueryHash back fails here. */
+    [Fact]
+    public void TheLiteGrid_BindsTheIdentity_UnderTheQueryIdHeader()
+    {
+        var xaml = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Controls", "ServerTab.xaml"));
+        var grid = xaml[xaml.IndexOf("x:Name=\"LongQueryCompletionsGrid\"", StringComparison.Ordinal)..];
+        var bindAt = grid.IndexOf("{Binding QueryIdentity}", StringComparison.Ordinal);
+        Assert.True(bindAt >= 0, "the Long Queries grid no longer binds QueryIdentity");
+        var column = grid[bindAt..grid.IndexOf("</DataGridTextColumn>", bindAt, StringComparison.Ordinal)];
+        Assert.Contains("Tag=\"QueryIdentity\"", column, StringComparison.Ordinal);
+        Assert.Contains("Text=\"Query ID\"", column, StringComparison.Ordinal);
+        Assert.DoesNotContain("{Binding QueryHash}", grid[..grid.IndexOf("</DataGrid>", StringComparison.Ordinal)], StringComparison.Ordinal);
+
+        var tool = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Mcp", "McpLongQueryTools.cs"));
+        Assert.Contains("query_identity = r.McpQueryIdentity", tool, StringComparison.Ordinal);
+        Assert.Contains("query_hash = QueryHashIdentity.KnownHash(r.QueryHash)", tool, StringComparison.Ordinal);
+    }
+
+    private static string RepoRoot([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>
+        Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, ".."));
+
     private async Task<LocalDataService> StageAsync()
     {
         var dbPath = Path.Combine(_tempDir, "test.duckdb");

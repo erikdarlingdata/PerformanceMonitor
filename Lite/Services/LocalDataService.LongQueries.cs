@@ -176,7 +176,9 @@ public class LongQueryCompletionRow
     public string QueryHash { get; set; } = "";
     /// <summary>#5711: the key to group, filter or label by: the real hash, else a fingerprint of the scrubbed statement
     /// text, else "" (such a row joins no group).</summary>
-    public string QueryIdentity => QueryHashIdentity.Identity(QueryHash, StatementText) ?? "";
+    public string QueryIdentity => McpQueryIdentity ?? "";
+    /// <summary>#5711 review: the same identity, NULL (not "") when the row has none, so the MCP wire says null like Darling does.</summary>
+    public string? McpQueryIdentity => QueryHashIdentity.Identity(QueryHash, StatementText);
     public long? EventSequence { get; set; }
     public long? DurationMicroseconds { get; set; }
     public long? CpuTimeMicroseconds { get; set; }
