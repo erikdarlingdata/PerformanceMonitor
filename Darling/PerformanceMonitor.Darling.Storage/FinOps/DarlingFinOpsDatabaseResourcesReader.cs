@@ -21,10 +21,12 @@ public sealed record DatabaseResourceUsage(
     decimal IoReadMb, decimal IoWriteMb, long IoStallMs, decimal PctCpuShare, decimal PctIoShare);
 
 /// <summary>One database in a top-consumer list. By-total rows carry CPU in <see cref="CpuTimeMs"/>; by-average rows
-/// carry the average CPU per execution there and the total in <see cref="TotalCpuTimeMs"/>.</summary>
+/// carry the total in <see cref="TotalCpuTimeMs"/> and the average CPU per execution, unrounded, in
+/// <see cref="AvgCpuMs"/> (#5644 W4: <see cref="CpuTimeMs"/> on those rows is only the whole-ms rounding of it, kept
+/// for older callers; rank and display on <see cref="AvgCpuMs"/>).</summary>
 public sealed record TopResourceConsumer(
     string DatabaseName, long CpuTimeMs, long ExecutionCount, decimal IoTotalMb, decimal PctCpu, decimal PctIo,
-    long TotalCpuTimeMs, decimal AvgIoMb);
+    long TotalCpuTimeMs, decimal AvgIoMb, decimal AvgCpuMs = 0m);
 
 /// <summary>
 /// The FinOps Database Resources reads (per-database usage and the top consumers), shared by the viewer and the
@@ -363,9 +365,12 @@ ORDER BY c.database_name";
                NULL exactly for those, so testing it here reproduces the old HAVING. */
             if (!reader.IsDBNull(6))
             {
-                avgCandidates.Add(new TopResourceConsumer(dbName, Convert.ToInt64(reader.GetValue(6)), executionCount, ioTotalMb, 0m, 0m,
+                /* #5644 W4: carry the average unrounded. Convert.ToInt64 here turned 2.3, 1.95 and 1.56 into 2, 2 and 2,
+                   so the tie broke on database name and the top-N cut dropped the busiest database. */
+                var avgCpuMs = Convert.ToDecimal(reader.GetValue(6));
+                avgCandidates.Add(new TopResourceConsumer(dbName, (long)Math.Round(avgCpuMs), executionCount, ioTotalMb, 0m, 0m,
                     cpuTimeMs,
-                    reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7))));
+                    reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)), avgCpuMs));
             }
         }
 
@@ -375,7 +380,7 @@ ORDER BY c.database_name";
            tie's order to whichever plan Postgres picked (never a documented contract, and cpu_time_ms /
            avg_cpu_ms are sums of independent per-database deltas, so an exact tie is not expected in practice). */
         var byTotal = totalCandidates.OrderByDescending(r => r.CpuTimeMs).Take(topN).ToList();
-        var byAvg = avgCandidates.OrderByDescending(r => r.CpuTimeMs).Take(topN).ToList();
+        var byAvg = avgCandidates.OrderByDescending(r => r.AvgCpuMs).Take(topN).ToList();
 
         return (byTotal, byAvg);
     }

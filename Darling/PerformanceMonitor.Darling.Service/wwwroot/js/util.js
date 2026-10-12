@@ -135,11 +135,16 @@ export function errorStrip(message) {
   return el("div", { class: "strip error", role: "alert" }, [message]);
 }
 export function emptyStrip(message) {
-  return el("div", { class: "strip empty" }, [message]);
+  return el("div", { class: "strip empty" }, [plainText(message)]);
 }
-/** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). */
+/** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). The sentence may be one the service
+    wrote for an MCP caller (a width note, a truncation note), so it passes through plainText like every message (#5644 W8). */
 export function noticeStrip(message) {
-  return el("div", { class: "strip notice", role: "status" }, [message]);
+  return el("div", { class: "strip notice", role: "status" }, [plainText(message)]);
+}
+/** A note line under a chart, from a payload's own `aggregate_note`: written for an MCP caller, said in the page's words (#5644 W8). */
+export function metricNote(text) {
+  return el("div", { class: "mp-metric-note", text: plainText(text) });
 }
 /**
  * The two collectors the blocking reads draw from (#5244): the blocked-process-report XE session when it holds a row in the window

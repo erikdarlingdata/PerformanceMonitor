@@ -65,6 +65,23 @@ public sealed class DarlingDefaultTraceReaderServerClockTests
     }
 
     [Fact]
+    public async Task TheSameEventStoredSeveralTimes_ComesBackOnce_AndADifferentEventSurvives()
+    {
+        /* #5644 W6: nine stored copies of one Server Memory Change row, and a Begin/Commit pair, are one event each. */
+        var table = NewTable();
+        for (var i = 0; i < 9; i++)
+        {
+            AddEvent(table, Naive(2026, 10, 12, 10, 49), "same");
+        }
+
+        AddEvent(table, Naive(2026, 10, 12, 10, 49), "other");
+
+        var rows = await ReadAsync(table, Eastern(), Naive(2026, 1, 1, 0), Naive(2026, 12, 31, 0));
+
+        Assert.Equal(new[] { "same", "other" }, rows.Select(r => r.DatabaseName).ToArray());
+    }
+
+    [Fact]
     public async Task AnEventInASkippedOrRepeatedLocalHour_DoesNotThrow()
     {
         var table = NewTable();

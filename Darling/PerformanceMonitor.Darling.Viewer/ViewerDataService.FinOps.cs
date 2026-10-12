@@ -97,11 +97,13 @@ public sealed class TopResourceConsumerRow
     public decimal PctIo { get; set; }
     public long TotalCpuTimeMs { get; set; }
     public decimal AvgIoMb { get; set; }
+    /// <summary>The by-average rows' CPU per execution, unrounded (#5644 W4).</summary>
+    public decimal AvgCpuMs { get; set; }
 
     public static TopResourceConsumerRow From(PerformanceMonitor.Darling.Storage.FinOps.TopResourceConsumer d) => new()
     {
         DatabaseName = d.DatabaseName, CpuTimeMs = d.CpuTimeMs, ExecutionCount = d.ExecutionCount, IoTotalMb = d.IoTotalMb,
-        PctCpu = d.PctCpu, PctIo = d.PctIo, TotalCpuTimeMs = d.TotalCpuTimeMs, AvgIoMb = d.AvgIoMb
+        PctCpu = d.PctCpu, PctIo = d.PctIo, TotalCpuTimeMs = d.TotalCpuTimeMs, AvgIoMb = d.AvgIoMb, AvgCpuMs = d.AvgCpuMs
     };
 }
 

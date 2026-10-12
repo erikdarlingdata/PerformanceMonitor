@@ -20,6 +20,7 @@
 import { VIZ } from "../../panels.js";
 import { databaseBox, newBoxChoice } from "./database-box.js";
 import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtInt, fmtNum } from "../../util.js";
+import { plainText } from "../../plain-text.js";
 import { gatedEmptyStrip } from "./gate.js";
 
 // The most recommendations the view lists (#5238). The desktop grid shows every finding, so the tab asks for the ceiling, as the
@@ -163,7 +164,7 @@ export const tab = {
         if (more.length) {
           parts.push(el("details", {}, [
             el("summary", { text: "Analyzer notes (" + more.length + ")" }),
-            ...more.map((t) => el("p", { class: "finops-note", text: t })),
+            ...more.map((t) => el("p", { class: "finops-note", text: plainText(t) })),
           ]));
         }
         parts.push(el("h3", { text: "Reclaimable Space (overall + per database)" }));

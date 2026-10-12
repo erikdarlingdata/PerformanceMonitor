@@ -52,6 +52,8 @@ public class TopResourceConsumerRow
     public decimal PctIo { get; set; }
     public long TotalCpuTimeMs { get; set; }
     public decimal AvgIoMb { get; set; }
+    /// <summary>The by-average rows' CPU per execution, unrounded (#5644 W4).</summary>
+    public decimal AvgCpuMs { get; set; }
 }
 
 public class DatabaseSizeSummaryRow

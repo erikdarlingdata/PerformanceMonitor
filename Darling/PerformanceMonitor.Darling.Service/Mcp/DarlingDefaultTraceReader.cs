@@ -200,6 +200,10 @@ internal static class DarlingDefaultTraceReader
         }
 
         /* OrderByDescending is a stable sort (List.Sort is not), so ties keep the reader's order. */
-        return rows.OrderByDescending(static r => r.EventTimeUtc).ToList();
+        /* #5644 W6: the store holds rows that are the same event twice (an older build kept both the Begin and the
+           Commit of every DDL, and re-stored an event whose datetime StartTime did not round-trip through the
+           watermark parameter). The record's value equality makes Distinct drop the copies, keeping the first of each in
+           reader order, so they stop filling the page limit. */
+        return rows.Distinct().OrderByDescending(static r => r.EventTimeUtc).ToList();
     }
 }
