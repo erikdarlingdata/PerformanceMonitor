@@ -585,6 +585,11 @@ public sealed class QueryModificationDetectorTests
     [InlineData("EXECUTE sp_who2")]
     [InlineData("SELECT 1; EXEC dbo.DoWork")]
     [InlineData("BEGIN\n    EXECUTE dbo.DoWork\nEND")]
+    /* The keyword right next to a quote or a closing bracket is still the keyword. */
+    [InlineData("EXEC\"dbo\".\"p\"")]
+    [InlineData("SELECT 1 AS [a]EXEC dbo.p")]
+    [InlineData("\"x\"EXEC dbo.p")]
+    [InlineData("SELECT 1 AS \"a\"EXECUTE dbo.p")]
     [InlineData("SELECT * FROM OPENQUERY(linked, 'SELECT 1')")]
     [InlineData("select * from openrowset('SQLNCLI', 'Server=x;', 'SELECT 1')")]
     [InlineData("SELECT * FROM OPENDATASOURCE('SQLNCLI', 'Data Source=x').db.dbo.t")]
@@ -597,10 +602,29 @@ public sealed class QueryModificationDetectorTests
         Assert.Contains("could not be analyzed", QueryModificationDetector.BuildConsentWarning(info, "master"), StringComparison.Ordinal);
     }
 
+    /* A plan statement of type EXECUTE PROC runs code the plan does not show, whatever the text says: a call with no
+       EXEC keyword (the procedure name starts the batch, sp_executesql) still gets the warning. */
+    [Theory]
+    [InlineData("EXECUTE PROC", "dbo.DoWork")]
+    [InlineData("EXECUTE PROC", "sp_executesql N'SELECT 1'")]
+    [InlineData("execute proc", "SELECT 1")]
+    [InlineData("EXECUTE PROC", null)]
+    public void AnExecuteStatementType_GetsTheCouldNotBeAnalyzedWarning_WhateverTheTextSays(string statementType, string? text)
+    {
+        var info = QueryModificationDetector.Detect(Plan(statementType), text);
+
+        Assert.True(info.IsUncertain);
+        Assert.True(info.ModifiesData);
+        Assert.Contains("could not be analyzed", QueryModificationDetector.BuildConsentWarning(info, "master"), StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("SELECT execution_count FROM sys.dm_exec_query_stats")]
     [InlineData("SELECT [exec] FROM dbo.t")]
+    [InlineData("SELECT \"exec\" FROM dbo.t")]
+    [InlineData("SELECT [execute] FROM dbo.t")]
     [InlineData("SELECT t.exec FROM dbo.t AS t")]
+    [InlineData("SELECT #exec FROM dbo.t")]
     [InlineData("SELECT @exec = 1")]
     [InlineData("SELECT 1")]
     [InlineData("SELECT * FROM dbo.openqueryish")]
