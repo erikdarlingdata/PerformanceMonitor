@@ -781,31 +781,13 @@ HAVING COUNT(*) > 1";
     /// spilled 2.7 GiB under the old query, which carried the text and plan columns through the aggregate. The
     /// current query aggregates only the key and the measurements. Measured on a generated 159 MiB file with the real
     /// <c>query_store_stats</c> columns, it completed with the temp folder capped at 2 MiB (under 0.013 times the
-    /// file, against 13.6 times before; that is the unsorted join, and the sorted one needs
-    /// <see cref="RewriteSortSpillFactor"/> times the file, which is why the sort is only asked for when the cap can
-    /// hold it), so sizing the ask from the file would skip files the disk can hold. If the
+    /// file, against 13.6 times before), so sizing the ask from the file would skip files the disk can hold. If the
     /// rewrite does run out of its cap, DuckDB fails the statement, the temp file goes, and the original stays.</para>
     /// </summary>
     internal static long RewriteSpillCapBytes(long? freeBytes, long fileBytes, long reserveBytes) =>
         freeBytes is long free
             ? Math.Min(RewriteSpillCeilingBytes, free - RewriteCopyBytes(fileBytes) - reserveBytes)
             : RewriteSpillCeilingBytes;
-
-    /// <summary>
-    /// How many times the file's size the temp folder must be allowed to hold before the rewrite sorts its output
-    /// (#5653). Measured once: sorting the wide rows spilled 9.3 times the file (2.5 GiB for a 272 MiB file with plan
-    /// text), so 12 leaves room. Below it the rewrite skips the sort and keeps the join's order, which is the file's
-    /// order in all but a handful of rows (2 in 2.4 million, in the measurement) and costs no spill.
-    /// </summary>
-    internal const long RewriteSortSpillFactor = 12;
-
-    /// <summary>
-    /// True when the spill cap is big enough to sort the rewritten rows into the file's row order (#5653). A cap that
-    /// is not would turn a file the disk can rewrite into a failure, because the sort needs room the unsorted join
-    /// does not.
-    /// </summary>
-    internal static bool RewriteKeepsExplicitOrder(long capBytes, long fileBytes) =>
-        capBytes >= fileBytes * RewriteSortSpillFactor;
 
     /// <summary>
     /// True when a DuckDB failure is the temp folder filling up: its own cap (<c>max_temp_directory_size</c>) or the
@@ -934,15 +916,7 @@ HAVING COUNT(*) > 1";
             var columnTypes = await ColumnTypesOfParquetAsync(connection, file.Path, cancellationToken);
             var columns = columnTypes.Select(c => c.Name).ToList();
             var key = KeyColumnsFor(columns);
-            var ordered = RewriteKeepsExplicitOrder(spillCapBytes, beforeBytes);
-            var rewrite = BuildRewriteSelect(columnTypes, key, EscapePath(file.Path), ordered);
-            if (!ordered)
-            {
-                _logger?.LogInformation(
-                    "#5653 archive repair of {File}: the temp allowance ({Cap}) is under {Factor} times the file, so the rewrite " +
-                    "keeps the join's row order instead of sorting by file position",
-                    file.Path, FormatBytes(spillCapBytes), RewriteSortSpillFactor);
-            }
+            var rewrite = BuildRewriteSelect(columnTypes, key, EscapePath(file.Path));
 
             /* The COPY runs on its OWN DuckDB instance (OpenRewriteInstanceAsync), so the spill cap and the memory
                limit it sets do not reach the connections the UI is reading through. The store lock above is still
@@ -1129,12 +1103,19 @@ COPY (
     /// The SELECT that rewrites one archive file with its split slices collapsed (#5653).
     ///
     /// <para><b>Shape.</b> A narrow aggregate (the key, the first row's position in the file and the recombined
-    /// measurements, with no text column in it) is joined back to the file on that position, and when
-    /// <paramref name="ordered"/> the result is ordered by that position, so the output is the file's own rows in the
-    /// file's own order. DuckDB does not promise any order through a join: on a 272 MiB generated file with the real
-    /// columns, 2 rows of 2.4 million came out of place without the ORDER BY. The ORDER BY sorts the whole wide row,
-    /// though, and the same file spilled 2.5 GiB (9.3 times its size) and took 2.3 times as long with it, against no
-    /// spill without it. See <see cref="RewriteKeepsExplicitOrder"/> for when the disk is asked for that. The old shape was one wide <c>GROUP BY</c> over every column.
+    /// measurements, with no text column in it) is joined back to the file on that position. The result keeps the
+    /// join's order, which is the file's own order in all but a handful of rows.</para>
+    ///
+    /// <para><b>No ORDER BY, on purpose.</b> DuckDB does not promise any order through a join, and on a 272 MiB
+    /// generated file with the real columns 2 rows of 2.4 million came out of place. Sorting them back would sort the
+    /// whole wide row: the same file took 87.6 s and spilled 2.5 GiB (9.3 times its size) with the ORDER BY, against
+    /// 38.2 s and no spill without it. And <see cref="RewriteArchiveFileAsync"/> holds the store's READ lock for the whole
+    /// rewrite, so a collector write that queues behind that lock blocks every new UI read for as long as the rewrite
+    /// runs. Row order affects only the file's size and how well row groups prune, never the data, and no Lite reader of
+    /// these files depends on file order (every LIMIT that picks a row, and every pick of a "latest" row, carries its
+    /// own ORDER BY or <c>arg_max</c>; the remaining <c>LIMIT 1</c> reads only ask whether any row exists). Do not add the sort back without the time and the lock in view.</para>
+    ///
+    /// <para><b>History.</b> The old shape was one wide <c>GROUP BY</c> over every column.
     /// That carried every attribute through the hash aggregate (a reporter's 199 MiB file spilled 2.7 GiB), and its
     /// output came back in hash order, which lost the time order the archiver wrote and the compression that rides
     /// on it (a file that lost 40 rows grew from 17.4 to 23.4 MB).</para>
@@ -1145,7 +1126,7 @@ COPY (
     /// row's average into NULL when its execution count was 0).</para>
     /// </summary>
     internal static string BuildRewriteSelect(
-        IReadOnlyList<(string Name, string Type)> columns, IReadOnlyList<string> key, string escapedPath, bool ordered)
+        IReadOnlyList<(string Name, string Type)> columns, IReadOnlyList<string> key, string escapedPath)
     {
         var names = columns.Select(c => c.Name).ToList();
         var keySet = new HashSet<string>(key, StringComparer.OrdinalIgnoreCase);
@@ -1156,15 +1137,13 @@ COPY (
                 ? $"t.{c.Name}"
                 : $"CASE WHEN s.__slices > 1 THEN CAST(s.{c.Name} AS {c.Type}) ELSE t.{c.Name} END AS {c.Name}"));
 
-        var orderBy = ordered ? Environment.NewLine + "    ORDER BY t.file_row_number" : "";
-
         return $@"    SELECT {select}
     FROM read_parquet('{escapedPath}', file_row_number = true) AS t
     JOIN (
         SELECT {narrow}, COUNT(*) AS __slices
         FROM read_parquet('{escapedPath}', file_row_number = true)
         GROUP BY {string.Join(", ", key)}
-    ) AS s ON t.file_row_number = s.__survivor{orderBy}";
+    ) AS s ON t.file_row_number = s.__survivor";
     }
 
     /// <summary>
