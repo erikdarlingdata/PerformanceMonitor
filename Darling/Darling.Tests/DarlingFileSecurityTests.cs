@@ -25,7 +25,11 @@ namespace Darling.Tests;
 /// no world-readable ACE (Everyone / Authenticated Users / Users), SYSTEM + Administrators + the
 /// service account granted, INTERACTIVE granted only where the operator's Viewer must read
 /// (admin/viewer credentials), and the trusted-owner guard accepting a file this process created.
+///
+/// <para>In the <c>darling-config-env</c> collection (it runs alone) because the operator-group tests set
+/// <see cref="DarlingFileSecurity.UseOperatorGroupForTests"/>, a static the whole test process shares.</para>
 /// </summary>
+[Collection("darling-config-env")]
 public sealed class DarlingFileSecurityTests
 {
     private static readonly SecurityIdentifier s_system = new(WellKnownSidType.LocalSystemSid, null);
@@ -119,13 +123,18 @@ public sealed class DarlingFileSecurityTests
         }
     }
 
+    /* A local group cannot be created on a build machine, so a built-in group that exists everywhere stands in for
+       the operator group: the ACL builder adds whatever SID the lookup returns. */
+    private static readonly SecurityIdentifier s_operatorStandIn = new(WellKnownSidType.BuiltinPerformanceLoggingUsersSid, null);
+
     [Fact]
-    public void HardenFile_RoleCredential_GrantsInteractiveRead()
+    public void HardenFile_RoleCredential_GrantsTheOperatorGroupRead_NeverInteractive()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
 
         var path = Path.Combine(Path.GetTempPath(), "darling-acl-admin-" + Guid.NewGuid().ToString("N") + ".dpapi");
         File.WriteAllText(path, "blob");
+        DarlingFileSecurity.UseOperatorGroupForTests(() => s_operatorStandIn);
         try
         {
             DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true);
@@ -134,27 +143,88 @@ public sealed class DarlingFileSecurityTests
             var rules = ReadRules(security);
             AssertProtectedAndNoWorldRead(security, rules);
 
-            /* The operator's Viewer (interactive) can READ, but INTERACTIVE gets no more than read. */
-            var interactive = rules.Where(r => r.sid.Equals(s_interactive)).ToList();
-            Assert.NotEmpty(interactive);
-            Assert.All(interactive, r => Assert.True(
+            /* The operator group can READ and no more; INTERACTIVE, which every logged-on account holds, is gone. */
+            Assert.DoesNotContain(rules, r => r.sid.Equals(s_interactive));
+            var operators = rules.Where(r => r.sid.Equals(s_operatorStandIn)).ToList();
+            Assert.NotEmpty(operators);
+            Assert.All(operators, r => Assert.True(
                 (r.rights & FileSystemRights.Read) == FileSystemRights.Read
                 && (r.rights & FileSystemRights.Write) == 0,
-                $"INTERACTIVE should be read-only, was {r.rights}"));
+                $"the operator group should be read-only, was {r.rights}"));
         }
         finally
         {
+            DarlingFileSecurity.UseOperatorGroupForTests(null);
+            File.Delete(path);
+        }
+    }
+
+    /// <summary>A hand install has no operator group: the readable posture then grants nobody beyond SYSTEM,
+    /// Administrators and the service, and in particular not INTERACTIVE as a fallback.</summary>
+    [Fact]
+    public void HardenFile_RoleCredential_WithNoOperatorGroup_GrantsExactlyTheThreeTrustedIdentities()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var path = Path.Combine(Path.GetTempPath(), "darling-acl-nogroup-" + Guid.NewGuid().ToString("N") + ".dpapi");
+        File.WriteAllText(path, "blob");
+        DarlingFileSecurity.UseOperatorGroupForTests(() => null);
+        try
+        {
+            DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true);
+
+            var actual = ReadRules(new FileInfo(path).GetAccessControl()).Select(r => r.sid).Distinct().ToList();
+            var expected = new[] { s_system, s_administrators, WindowsIdentity.GetCurrent().User! };
+            var unexpected = actual.Where(sid => !expected.Any(sid.Equals)).Select(TranslateOrRaw).ToList();
+            Assert.True(unexpected.Count == 0, "granted beyond the trusted three: " + string.Join(", ", unexpected));
+            Assert.Equal(expected.Length, actual.Count);
+        }
+        finally
+        {
+            DarlingFileSecurity.UseOperatorGroupForTests(null);
+            File.Delete(path);
+        }
+    }
+
+    /// <summary>An install hardened before the operator group existed granted INTERACTIVE read; the first harden
+    /// after the upgrade must take it away, not keep it beside the group.</summary>
+    [Fact]
+    public void HardenFile_RemovesAnExistingInteractiveEntry()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var path = Path.Combine(Path.GetTempPath(), "darling-acl-legacy-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, "{}");
+        DarlingFileSecurity.UseOperatorGroupForTests(() => s_operatorStandIn);
+        try
+        {
+            var before = new FileInfo(path).GetAccessControl();
+            before.AddAccessRule(new FileSystemAccessRule(s_interactive, FileSystemRights.Read, AccessControlType.Allow));
+            new FileInfo(path).SetAccessControl(before);
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(path), "INTERACTIVE read must count as ordinary-user access");
+
+            DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true);
+
+            var rules = ReadRules(new FileInfo(path).GetAccessControl());
+            Assert.DoesNotContain(rules, r => r.sid.Equals(s_interactive));
+            Assert.Contains(rules, r => r.sid.Equals(s_operatorStandIn));
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(path));
+        }
+        finally
+        {
+            DarlingFileSecurity.UseOperatorGroupForTests(null);
             File.Delete(path);
         }
     }
 
     [Fact]
-    public void HardenDirectory_StripsInheritance_AndGrantsInteractiveTraverseOnly()
+    public void HardenDirectory_StripsInheritance_AndGrantsTheOperatorGroupTraverseOnly()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
 
         var path = Path.Combine(Path.GetTempPath(), "darling-acl-dir-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path);
+        DarlingFileSecurity.UseOperatorGroupForTests(() => s_operatorStandIn);
         try
         {
             DarlingFileSecurity.HardenDirectory(path, allowInteractiveTraverse: true);
@@ -165,11 +235,12 @@ public sealed class DarlingFileSecurityTests
 
             Assert.Contains(rules, r => r.sid.Equals(s_system));
             Assert.Contains(rules, r => r.sid.Equals(s_administrators));
+            Assert.DoesNotContain(rules, r => r.sid.Equals(s_interactive));
 
-            /* INTERACTIVE gets traverse (execute) but NOT list/read-data, and only on this folder. */
-            var interactive = rules.Where(r => r.sid.Equals(s_interactive)).ToList();
-            Assert.NotEmpty(interactive);
-            Assert.All(interactive, r =>
+            /* The operator group gets traverse (execute) but NOT list/read-data, and only on this folder. */
+            var operators = rules.Where(r => r.sid.Equals(s_operatorStandIn)).ToList();
+            Assert.NotEmpty(operators);
+            Assert.All(operators, r =>
             {
                 Assert.True((r.rights & FileSystemRights.ExecuteFile) == FileSystemRights.ExecuteFile, "traverse missing");
                 Assert.True((r.rights & FileSystemRights.ListDirectory) == 0, "should not grant list");
@@ -178,6 +249,7 @@ public sealed class DarlingFileSecurityTests
         }
         finally
         {
+            DarlingFileSecurity.UseOperatorGroupForTests(null);
             Directory.Delete(path, recursive: true);
         }
     }
@@ -296,6 +368,7 @@ public sealed class DarlingFileSecurityTests
     [Theory]
     [InlineData(WellKnownSidType.AuthenticatedUserSid)]
     [InlineData(WellKnownSidType.WorldSid)]
+    [InlineData(WellKnownSidType.InteractiveSid)]
     public void IsReadableByOrdinaryUsers_AlsoCatchesAuthenticatedUsersAndEveryone(WellKnownSidType sidType)
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");

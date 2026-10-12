@@ -606,6 +606,55 @@ RETURNING story_path";
             string.Equals(storedPath, storyPathHash, StringComparison.Ordinal) ? null : storedPath);
     }
 
+    /* The exact inverse of MuteStorySql's guard: one (scope, hash) pair, where a scope is one server_id and NULL and
+       the legacy 0 both mean "every server". A mute registered for every server is therefore NOT removed by an
+       unmute that names one server, and the reverse, the same way the mute reports already_muted per scope.
+       RETURNING lets the caller count the rows removed without a second statement. */
+    public const string UnmuteStorySql = @"
+DELETE FROM analysis_muted
+WHERE story_path_hash = $1
+  AND COALESCE(server_id, 0) = COALESCE($2, 0)
+RETURNING mute_id";
+
+    /// <summary>
+    /// Removes the mute registered for <paramref name="storyPathHash"/> in one scope, so the pattern appears in
+    /// analysis runs again, and returns how many registry rows it removed (0 when the scope held none, which is
+    /// not an error). <paramref name="serverId"/> 0 is the all-servers scope, as it is for
+    /// <see cref="MuteStoryAsync"/>. Findings the muted pattern would have produced while it was muted were never
+    /// stored, so nothing comes back until the next analysis pass finds the pattern again.
+    ///
+    /// <para><b>WRITE lock, unlike <see cref="MuteStoryAsync"/>.</b> The lock a caller takes is decided by what it
+    /// must exclude (see <c>DuckDbInitializer.s_dbLock</c>): an append of a new row cannot collide with another
+    /// writer, so the mute holds the read lock, but a DELETE of a registry row can lose a race with a second
+    /// DELETE of the same row, and DuckDB fails the loser instead of queueing it. The write lock is what
+    /// serializes two unmutes of one pattern, the same reason <c>DuckDbMuteRuleStore.DeleteAsync</c> takes it.
+    /// The wait has no budget here because the only caller is an MCP tool call, not the UI thread.</para>
+    ///
+    /// <para>Takes the caller's token through every store call, the way <see cref="CountStoredFindingsAsync"/>
+    /// does: the MCP passes none, but a method written like every tokened read here needs no exemption from the
+    /// pass-token census.</para>
+    /// </summary>
+    public async Task<int> UnmuteStoryAsync(int serverId, string storyPathHash, CancellationToken cancellationToken = default)
+    {
+        using var writeLock = _duckDb.AcquireWriteLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = UnmuteStorySql;
+        cmd.Parameters.Add(new DuckDBParameter { Value = storyPathHash });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId == 0 ? (object)DBNull.Value : serverId });
+
+        var removed = 0;
+        using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            removed++;
+        }
+
+        return removed;
+    }
+
     /// <summary>
     /// How many STORED findings currently carry <paramref name="storyPathHash"/> — for one server, or across
     /// every server when <paramref name="serverId"/> is null or the all-servers sentinel 0 — so the MCP mute verb

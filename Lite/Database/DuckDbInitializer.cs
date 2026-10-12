@@ -162,9 +162,11 @@ public partial class DuckDbInitializer : IDisposable
     /// <para>It also answers the pair that made the split look like a contradiction.
     /// <c>DuckDbMuteRuleStore.InsertAsync</c> writing <c>config_mute_rules</c> under a write lock and
     /// <c>FindingStore.MuteStoryAsync</c> writing <c>analysis_muted</c> under a read lock are NOT the same
-    /// species: nothing but the analysis pass ever writes <c>analysis_muted</c>, while
+    /// species: <c>analysis_muted</c> only ever gets appends of new rows, while
     /// <c>config_mute_rules</c> is UPDATEd by an operator and DELETEd by a timer-driven expiry purge that
-    /// can be running at the same moment.</para>
+    /// can be running at the same moment. The one DELETE <c>analysis_muted</c> has,
+    /// <c>FindingStore.UnmuteStoryAsync</c>, is the second kind of statement and takes the write lock for
+    /// the same reason the rule store's deletes do.</para>
     ///
     /// <para><b>The WAIT is a separate question from the lock.</b> <c>AcquireWriteLock()</c> with no
     /// timeout waits behind an archival for however long the archival takes. Eleven current callers do

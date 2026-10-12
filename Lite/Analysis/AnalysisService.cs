@@ -793,6 +793,14 @@ public class AnalysisService
     }
 
     /// <summary>
+    /// Removes the mute registered for a story pattern in one scope and returns how many registry rows it removed;
+    /// the write behind the MCP unmute verb. <paramref name="serverId"/> null or 0 is the all-servers scope. A
+    /// pass-through to <see cref="FindingStore.UnmuteStoryAsync"/>, which says why it holds the write lock.
+    /// </summary>
+    public Task<int> UnmuteFindingAsync(int? serverId, string storyPathHash, CancellationToken cancellationToken = default) =>
+        _findingStore.UnmuteStoryAsync(serverId ?? 0, storyPathHash, cancellationToken);
+
+    /// <summary>
     /// How many stored findings carry <paramref name="storyPathHash"/> for one server (or every server when
     /// <paramref name="serverId"/> is null / the all-servers sentinel 0) — the MCP mute verb's <c>matched_now</c>
     /// disclosure (#3541 A14). A pass-through to <see cref="FindingStore.CountStoredFindingsAsync"/>; see its
