@@ -285,7 +285,7 @@ public class ServerConfigRow
     public bool IsAdvanced { get; set; }
     public string DynamicDisplay => IsDynamic ? "Yes" : "No";
     public string AdvancedDisplay => IsAdvanced ? "Yes" : "No";
-    public bool ValuesMatch => ValueConfigured == ValueInUse;
+    public bool ValuesMatch => PerformanceMonitor.Common.ConfigValuesMatch.Matches(ConfigurationName, ValueConfigured, ValueInUse);
 }
 
 public class DatabaseConfigRow
