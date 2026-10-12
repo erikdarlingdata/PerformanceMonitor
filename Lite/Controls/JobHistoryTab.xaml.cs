@@ -144,7 +144,12 @@ public partial class JobHistoryTab : UserControl
             var (startUtc, rangeEndUtc) = LiteTimeRange.BoundsOf(RangePicker, 24, nowUtc);
             var openTabClocks = _openTabClocks?.Invoke();
 
-            var (all, readClocks) = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc));
+            /* #5703: Status and Category go into the read. The cap keeps the newest runs of the whole fleet, so a filter applied to those
+               rows afterwards (as this tab did) never saw a failure that a busier server's newer runs had pushed past it: All Servers lost
+               runs the single-server grid showed. The read applies them ahead of the cap. */
+            var statusFilter = GetSelectedStatus();
+            var categoryFilter = GetSelectedCategory();
+            var (all, readClocks) = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc, statusFilter, categoryFilter));
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             foreach (var (id, readClock) in readClocks)
@@ -166,33 +171,22 @@ public partial class JobHistoryTab : UserControl
                 }
             }
 
-            /* Populate the Server / Category combos from the full (pre status/category) result, then apply
-               Status + Category client-side — those must NOT go into the reader's window (they'd skew the
-               per-job long-running / last-success baselines, which are computed over every run in the
-               window). The per-column filter popups still layer on top. */
+            /* The Server / Category combos grow from what the reads return and never shrink: a read that Status or Category narrowed
+               holds only the matching runs, and the other choices must stay on offer. The per-column filter popups still layer on top. */
             PopulateServerFilter(all);
             PopulateCategoryFilter(all);
 
-            var statusFilter = GetSelectedStatus();
-            var categoryFilter = GetSelectedCategory();
-
-            var filtered = all.Where(r =>
-                (statusFilter is null || r.RunStatus == statusFilter.Value) &&
-                (categoryFilter is null || string.Equals(r.CategoryName, categoryFilter, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
-
             if (_filterManager != null)
-                _filterManager.UpdateData(filtered);
+                _filterManager.UpdateData(all);
             else
-                JobHistoryDataGrid.ItemsSource = filtered;
+                JobHistoryDataGrid.ItemsSource = all;
 
-            var displayCount = JobHistoryDataGrid.ItemsSource is ICollection<JobHistoryRow> coll ? coll.Count : filtered.Count;
+            var displayCount = JobHistoryDataGrid.ItemsSource is ICollection<JobHistoryRow> coll ? coll.Count : all.Count;
             NoJobsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
             RunTimeHeaderText.Text = TimeColumnTitle.For("Run Time", ServerTimeHelper.CurrentDisplayMode); // D5: the column names its clock
 
-            /* The cap applies to the UNFILTERED read (all.Count), not the client-side-filtered display count:
-               a Status/Category filter narrowing the grid must not make the "newest 2,000" label disappear when
-               the underlying read still hit the cap. */
+            /* The cap applies to the read (all.Count), not the column-filtered display count: a column filter narrowing the
+               grid must not make the "newest 2,000" label disappear when the underlying read still hit the cap. */
             JobCountIndicator.Text = JobHistoryCap.CountText(displayCount, all.Count, RowCap);
             AppLogger.Debug("JobHistory", $"Loaded {displayCount} job run(s) (query returned {all.Count}, since={startUtc:O}, until={(rangeEndUtc.HasValue ? rangeEndUtc.Value.ToString("O") : "now")}, serverId={serverId?.ToString() ?? "all"})");
 
@@ -369,10 +363,18 @@ public partial class JobHistoryTab : UserControl
 
     private void PopulateServerFilter(List<JobHistoryRow> rows)
     {
+        /* #5703: the choices already on offer stay (a read narrowed by Status or Category holds only the servers with matching runs). */
+        var offered = ServerFilterComboBox.Items
+            .OfType<ComboBoxItem>()
+            .Skip(1)
+            .Where(i => int.TryParse(i.Tag?.ToString(), out _) && i.Content is string)
+            .Select(i => (ServerId: int.Parse(i.Tag!.ToString()!, System.Globalization.CultureInfo.InvariantCulture), ServerName: (string)i.Content));
         var servers = rows
             .Select(r => (r.ServerId, r.ServerName))
+            .Concat(offered)
             .Where(s => !string.IsNullOrEmpty(s.ServerName))
-            .Distinct()
+            .GroupBy(s => s.ServerId)
+            .Select(g => g.First())
             .OrderBy(s => s.ServerName)
             .ToList();
 
@@ -420,8 +422,14 @@ public partial class JobHistoryTab : UserControl
 
     private void PopulateCategoryFilter(List<JobHistoryRow> rows)
     {
+        /* #5703: the choices already on offer stay (a read narrowed by Status or Category holds only the matching runs' categories). */
+        var offered = CategoryFilterComboBox.Items
+            .OfType<ComboBoxItem>()
+            .Skip(1)
+            .Select(i => i.Tag?.ToString());
         var categories = rows
             .Select(r => r.CategoryName)
+            .Concat(offered)
             .Where(c => !string.IsNullOrEmpty(c))
             .Select(c => c!)
             .Distinct(StringComparer.OrdinalIgnoreCase)

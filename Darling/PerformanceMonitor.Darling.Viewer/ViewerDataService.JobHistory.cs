@@ -172,13 +172,24 @@ public sealed partial class ViewerDataService
     /// </para>
     /// </summary>
     public async Task<List<ViewerJobHistoryRow>> GetJobHistoryAsync(
-        DateTime sinceUtc, int? serverId = null, int limit = 2000, DateTime? untilUtc = null, CancellationToken cancellationToken = default)
+        DateTime sinceUtc, int? serverId = null, int limit = 2000, DateTime? untilUtc = null, int? runStatus = null, string? category = null,
+        CancellationToken cancellationToken = default)
     {
         /* #5562 R6: a finished range's end goes into the read (the shared reader's UntilUtc), so the SQL bounds the runs before the
            per-server top-N and the row cap count them. A window that ended in the past on a busy fleet keeps every run inside it, not
            the newest N of everything since the start. The reader's end is inclusive; the picker's end is exclusive (a run at the next
-           day's start is not in "yesterday"), so it is taken one microsecond (the store's precision) earlier. */
-        var filter = untilUtc is { } until ? new JobHistoryFilter(UntilUtc: until.AddTicks(-TimeSpan.TicksPerMicrosecond)) : null;
+           day's start is not in "yesterday"), so it is taken one microsecond (the store's precision) earlier.
+           #5703: the tab's Status and Category go into the read the same way. The row cap keeps the newest N runs of the whole fleet,
+           and one busy server (a job every minute) fills it with its latest runs, so a filter applied to the rows afterwards never
+           saw an older failure on a quieter server: the All Servers grid lost runs the single-server grid showed. The reader's
+           filters run inside the per-server top-N, so the cap counts only matching runs. They do not touch the job stats (the long-running
+           flag and the last success come from the job's successful outcomes, whatever status the grid is filtered to). */
+        var filter = untilUtc is null && runStatus is null && string.IsNullOrWhiteSpace(category)
+            ? null
+            : new JobHistoryFilter(
+                RunStatus: runStatus,
+                Category: string.IsNullOrWhiteSpace(category) ? null : category,
+                UntilUtc: untilUtc is { } until ? until.AddTicks(-TimeSpan.TicksPerMicrosecond) : null);
         var dtos = await DarlingJobHistoryReader.GetAsync(
             _dataSource, sinceUtc, serverId, limit, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, filter, cancellationToken);
 

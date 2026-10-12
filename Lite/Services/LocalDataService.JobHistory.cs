@@ -57,17 +57,25 @@ public partial class LocalDataService
     /// </summary>
     public async Task<List<JobHistoryRow>> GetJobHistoryAsync(
         DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null,
-        DateTime? windowEndUtc = null) =>
-        (await GetJobHistoryWithClocksAsync(windowStartUtc, limit, serverId, openTabClocks, windowEndUtc)).Rows;
+        DateTime? windowEndUtc = null, int? runStatus = null, string? category = null) =>
+        (await GetJobHistoryWithClocksAsync(windowStartUtc, limit, serverId, openTabClocks, windowEndUtc, runStatus, category)).Rows;
 
     /// <summary>
     /// <see cref="GetJobHistoryAsync(DateTime, int, int?, IReadOnlyDictionary{int, ServerClock}?, DateTime?)"/> that also returns the clock it
     /// windowed each server on, by server id (#4966). The tab words the note for one server from <c>Clocks[serverId]</c>, so the note
     /// and the read share one clock read and cannot disagree on a clock that changed between two reads.
+    /// <para>
+    /// <paramref name="runStatus"/> (a <c>sysjobhistory</c> code, 0 Failed to 3 Canceled) and <paramref name="category"/> (exact, ignoring
+    /// case) are applied in the SQL, ahead of each server's row cap and of the merged cap (#5703). The cap keeps the newest runs of the
+    /// whole fleet, so one busy server fills it with its latest runs; a filter applied to those rows afterwards never saw an older
+    /// failure on a quieter server, and the All Servers grid lost runs the single-server grid showed. They do not reach
+    /// <c>job_stats</c>: the long-running flag and the last success come from the job's successful outcomes, whatever the grid is
+    /// filtered to.
+    /// </para>
     /// </summary>
     internal async Task<(List<JobHistoryRow> Rows, IReadOnlyDictionary<int, ServerClock> Clocks)> GetJobHistoryWithClocksAsync(
         DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null,
-        DateTime? windowEndUtc = null)
+        DateTime? windowEndUtc = null, int? runStatus = null, string? category = null)
     {
         var serverIds = serverId.HasValue
             ? new List<int> { serverId.Value }
@@ -79,7 +87,7 @@ public partial class LocalDataService
         {
             var clock = await ReadJobHistoryClockAsync(id, openTabClocks is not null && openTabClocks.TryGetValue(id, out var tabClock) ? tabClock : null);
             clocks[id] = clock;
-            rows.AddRange(await ReadJobHistoryForServerAsync(id, clock, windowStartUtc, limit, windowEndUtc));
+            rows.AddRange(await ReadJobHistoryForServerAsync(id, clock, windowStartUtc, limit, windowEndUtc, runStatus, category));
         }
 
         return (ApplyJobHistoryWindow(rows, windowStartUtc, limit, windowEndUtc), clocks);
@@ -242,10 +250,10 @@ ORDER BY server_id";
 
     /// <summary>One server's runs: the newest <paramref name="limit"/> at or after the server-local start of the window,
     /// each with its run time converted to UTC through <paramref name="clock"/>. Not yet held to the exact window.</summary>
-    private async Task<List<JobHistoryRow>> ReadJobHistoryForServerAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit, DateTime? windowEndUtc)
+    private async Task<List<JobHistoryRow>> ReadJobHistoryForServerAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit, DateTime? windowEndUtc, int? runStatus, string? category)
     {
         var readLimit = limit;
-        var items = await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, readLimit, windowEndUtc);
+        var items = await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, readLimit, windowEndUtc, runStatus, category);
         if (windowEndUtc is not { } end || limit <= 0)
         {
             return items;
@@ -265,13 +273,13 @@ ORDER BY server_id";
             }
 
             readLimit += limit - inside;
-            items = await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, readLimit, windowEndUtc);
+            items = await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, readLimit, windowEndUtc, runStatus, category);
         }
 
         return items;
     }
 
-    private async Task<List<JobHistoryRow>> ReadJobHistoryForServerOnceAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit, DateTime? windowEndUtc)
+    private async Task<List<JobHistoryRow>> ReadJobHistoryForServerOnceAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit, DateTime? windowEndUtc, int? runStatus, string? category)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -286,6 +294,11 @@ ORDER BY server_id";
            counts the runs inside the window, not the newer ones after it. The bound is exclusive, on the server-local wall
            clock, widened an hour like the start; the exact instant check and the margin re-read are ReadJobHistoryForServerAsync's. */
         var endClause = windowEndUtc.HasValue ? "AND   run_datetime < $5" : string.Empty;
+
+        /* #5703: Status and Category filter base (the rows the cap counts) and never job_stats. Their parameters follow the end bound's. */
+        var nextParameter = windowEndUtc.HasValue ? 6 : 5;
+        var statusClause = runStatus.HasValue ? $"AND   run_status = ${nextParameter++}" : string.Empty;
+        var categoryClause = string.IsNullOrWhiteSpace(category) ? string.Empty : $"AND   lower(category_name) = lower(${nextParameter++})";
 
         /* #4229 (Darling parity): the per-job average/max used to run as a window function OVER every step
            row the window matched, forcing a full sort/aggregate of the whole set before ORDER BY/LIMIT could
@@ -330,6 +343,8 @@ base AS (
     FROM v_job_history
     WHERE run_datetime >= $1
     {endClause}
+    {statusClause}
+    {categoryClause}
     AND   server_id = $2
     ORDER BY run_datetime DESC, instance_id DESC
     LIMIT $4
@@ -374,6 +389,16 @@ ORDER BY base.run_datetime DESC, base.instance_id DESC";
         if (windowEndUtc.HasValue)
         {
             command.Parameters.Add(new DuckDBParameter { Value = clock.ToServerLocal(windowEndUtc.Value).AddHours(1) });
+        }
+
+        if (runStatus.HasValue)
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = runStatus.Value });
+        }
+
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = category });
         }
 
         var items = new List<JobHistoryRow>();

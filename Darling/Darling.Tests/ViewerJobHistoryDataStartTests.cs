@@ -124,7 +124,8 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
         Assert.Equal(0, Matches(load, @"DateTime\.UtcNow\.AddHours"));
         Assert.Equal(1, Matches(load, @"var dataStartTask = _dataService\.GetJobHistoryDataStartAsync\(serverId,\s*sinceUtc,\s*nowUtc\);"));
         /* #5562 R6: a finished range hands its end to the read, so the end bound lands before the row cap. */
-        Assert.Equal(1, Matches(load, @"var readTask = _dataService\.GetJobHistoryAsync\(sinceUtc,\s*serverId,\s*RowCap,\s*untilUtc:\s*windowIsLive \? null : windowEndUtc\)"));
+        /* #5703: and the tab's Status and Category, so the row cap counts only the runs the grid shows. */
+        Assert.Equal(1, Matches(load, @"var readTask = _dataService\.GetJobHistoryAsync\(sinceUtc,\s*serverId,\s*RowCap,\s*untilUtc:\s*windowIsLive \? null : windowEndUtc,\s*runStatus:\s*statusFilter,\s*category:\s*categoryFilter\)"));
         /* The probe starts beside the read, not after it. */
         Assert.True(
             load.IndexOf("GetJobHistoryDataStartAsync(", StringComparison.Ordinal) < load.IndexOf("var readTask = _dataService.GetJobHistoryAsync(", StringComparison.Ordinal),
@@ -142,11 +143,11 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
     }
 
     [Fact]
-    public void TheNote_ComesAfterTheRowsAreBound_FromTheUnfilteredRead_AndAfterASupersedeCheck()
+    public void TheNote_ComesAfterTheRowsAreBound_FromTheRead_AndAfterASupersedeCheck()
     {
         var load = MethodBody(ViewerFile("JobHistoryTab.xaml.cs"), @"private async Task LoadJobsAsync\(");
 
-        var bind = load.IndexOf("_filterManager.UpdateData(filtered)", StringComparison.Ordinal);
+        var bind = load.IndexOf("_filterManager.UpdateData(all)", StringComparison.Ordinal);
         var settle = load.IndexOf("await ((Task)dataStartTask).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ContinueOnCapturedContext);", StringComparison.Ordinal);
         Assert.DoesNotContain("Task.WhenAny", load, StringComparison.Ordinal);
         var loadingDown = load.LastIndexOf("LoadingMessage.Visibility = Visibility.Collapsed;", settle, StringComparison.Ordinal);
@@ -157,11 +158,11 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
         var between = load[settle..note];
         Assert.Matches(@"if \(_loads\.Superseded\(nameof\(LoadJobsAsync\), gen\)\) return;", between);
 
-        /* The unfiltered read, the one the cap label counts: the Status and Category filters narrow the grid on the client and say
-           nothing about where the data starts. */
+        /* The read the grid shows, the one the cap label counts (#5703: Status and Category narrow it in the query now, so a full page of
+           matching runs names its oldest run, and the filters never hide a cap-boundary the note would otherwise name). */
         Assert.Equal(1, Matches(load, @"await ShowJobHistoryDataStartAsync\(JobHistoryTruncationBanner,\s*dataStartTask,\s*sinceUtc,\s*all\);"));
-        /* #4966: the cap label is built by JobHistoryCap.CountText from the last read's row count, which the load takes from the unfiltered
-           read (all), so the Status and Category filters cannot take the label away; the column-filter handler builds the same text from
+        /* #4966: the cap label is built by JobHistoryCap.CountText from the last read's row count, which the load takes from the read
+           (all), so a Status or Category filter cannot take the label away; the column-filter handler builds the same text from
            the same field (JobHistoryCountTextTests). */
         Assert.Equal(1, Matches(load, @"_lastReadRowCount\s*=\s*all\.Count;"));
         Assert.Equal(1, Matches(load, @"JobHistoryCap\.CountText\(displayCount,\s*_lastReadRowCount,\s*RowCap\)"));

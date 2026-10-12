@@ -130,35 +130,30 @@ public partial class JobHistoryTab : UserControl
             using var readFanOut = ViewerReadFanOut.Of(2);
             var dataStartTask = _dataService.GetJobHistoryDataStartAsync(serverId, sinceUtc, nowUtc);
 
-            /* #5562 R6: a range that ended in the past sends its end to the read, so the end bound is applied before the row cap. */
-            var readTask = _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap, untilUtc: windowIsLive ? null : windowEndUtc);
+            /* #5562 R6: a range that ended in the past sends its end to the read, so the end bound is applied before the row cap.
+               #5703: Status and Category go into the read too. The cap keeps the newest runs of the whole fleet, so a filter applied to
+               those rows afterwards (as this tab did) never saw a failure that a busier server's newer runs had pushed past the cap: All
+               Servers lost runs the single-server grid showed. The reader applies them inside each server's newest rows, ahead of the cap. */
+            var statusFilter = GetSelectedStatus();
+            var categoryFilter = GetSelectedCategory();
+            var readTask = _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap, untilUtc: windowIsLive ? null : windowEndUtc, runStatus: statusFilter, category: categoryFilter);
             await ViewerServerTab.AwaitReadWatchingProbeAsync(readTask, dataStartTask, "Job History");
             var all = await readTask;
             readFanOut.Release();
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
-            /* Populate the Server / Category combos from the full (pre status/category) result, then apply
-               Status + Category client-side — those must NOT go into the reader's window (they'd skew the
-               per-job long-running / last-success baselines, computed over every run in the window). The
-               per-column filter popups still layer on top. */
+            /* The Server / Category combos grow from what the reads return and never shrink: a read that Status or Category narrowed
+               holds only the matching runs, and the other choices must stay on offer. The per-column filter popups still layer on top. */
             PopulateServerFilter(all);
             PopulateCategoryFilter(all);
 
-            var statusFilter = GetSelectedStatus();
-            var categoryFilter = GetSelectedCategory();
-
-            var filtered = all.Where(r =>
-                (statusFilter is null || r.RunStatus == statusFilter.Value) &&
-                (categoryFilter is null || string.Equals(r.CategoryName, categoryFilter, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
-
             if (_filterManager != null)
             {
-                _filterManager.UpdateData(filtered);
+                _filterManager.UpdateData(all);
             }
             else
             {
-                JobHistoryDataGrid.ItemsSource = filtered;
+                JobHistoryDataGrid.ItemsSource = all;
             }
 
             var displayCount = JobHistoryDataGrid.Items.Count;
@@ -246,10 +241,18 @@ public partial class JobHistoryTab : UserControl
 
     private void PopulateServerFilter(List<ViewerJobHistoryRow> rows)
     {
+        /* #5703: the choices already on offer stay (a read narrowed by Status or Category holds only the servers with matching runs). */
+        var offered = ServerFilterComboBox.Items
+            .OfType<ComboBoxItem>()
+            .Skip(1)
+            .Where(i => int.TryParse(i.Tag?.ToString(), out _) && i.Content is string)
+            .Select(i => (ServerId: int.Parse(i.Tag!.ToString()!, System.Globalization.CultureInfo.InvariantCulture), ServerName: (string)i.Content));
         var servers = rows
             .Select(r => (r.ServerId, r.ServerName))
+            .Concat(offered)
             .Where(s => !string.IsNullOrEmpty(s.ServerName))
-            .Distinct()
+            .GroupBy(s => s.ServerId)
+            .Select(g => g.First())
             .OrderBy(s => s.ServerName)
             .ToList();
 
@@ -298,8 +301,14 @@ public partial class JobHistoryTab : UserControl
 
     private void PopulateCategoryFilter(List<ViewerJobHistoryRow> rows)
     {
+        /* #5703: the choices already on offer stay (a read narrowed by Status or Category holds only the matching runs' categories). */
+        var offered = CategoryFilterComboBox.Items
+            .OfType<ComboBoxItem>()
+            .Skip(1)
+            .Select(i => i.Tag?.ToString());
         var categories = rows
             .Select(r => r.CategoryName)
+            .Concat(offered)
             .Where(c => !string.IsNullOrEmpty(c))
             .Select(c => c!)
             .Distinct(StringComparer.OrdinalIgnoreCase)

@@ -186,7 +186,11 @@ export function retainedNote(data) {
 export function limitNote(data) {
   if (!data || data.truncated !== true) return null;
   const shown = Array.isArray(data.runs) ? data.runs.length : data.shown;
-  return "Showing the newest " + shown + " runs; more matched. Raise the row limit or narrow the filters to see the rest.";
+  /* #5703: under All servers the limit keeps the newest runs of the whole fleet, so one busy server's latest runs can fill it and push an
+     older run on another server out; the note names how far back the list reaches and offers a single server. */
+  const oldest = Array.isArray(data.runs) && data.runs.length ? data.runs[data.runs.length - 1].run_time : null;
+  const reach = oldest ? " They reach back to " + localTime(oldest) + "." : "";
+  return "Showing the newest " + shown + " runs; more matched." + reach + " Raise the row limit, pick a server or narrow the filters to see the rest.";
 }
 
 /** The description the tool serves for a server whose collector found no SQL Agent service (DarlingJobReader.NoAgentServiceDescription). */
