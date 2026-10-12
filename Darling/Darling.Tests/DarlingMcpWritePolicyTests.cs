@@ -220,10 +220,17 @@ public sealed class DarlingMcpWritePolicyTests
 
         Assert.Equal(total, adminCount);
 
+        /* The +N figure holds only when a bearer token also resolves: Resolve is AllowWrites && tokenPresent, so
+           the switch on with no token serves the default set, which is the state the instructions' "with a token" covers. */
+        var writesNoToken = DarlingMcpWritePolicy.Resolve(new McpConfig { AllowWrites = true }, tokenPresent: false);
+        var writesWithToken = DarlingMcpWritePolicy.Resolve(new McpConfig { AllowWrites = true }, tokenPresent: true);
+        Assert.Equal(defaultCount, DarlingMcpWritePolicy.FilterToolCollection(all, writesNoToken).Count);
+        Assert.Equal(writesCount, DarlingMcpWritePolicy.FilterToolCollection(all, writesWithToken).Count);
+
         var text = DarlingMcpInstructions.Text;
         Assert.Contains($"This server exposes {total} tools.", text, StringComparison.Ordinal);
         Assert.Contains($" Default {defaultCount}; ", text, StringComparison.Ordinal);
-        Assert.Contains($"+{writesCount - defaultCount} `{DarlingMcpWritePolicy.WritesSetting}`", text, StringComparison.Ordinal);
+        Assert.Contains($"+{writesCount - defaultCount} `{DarlingMcpWritePolicy.WritesSetting}` with a token", text, StringComparison.Ordinal);
         Assert.Contains($"+{adminCount - writesCount} `{DarlingMcpWritePolicy.ServerAdminSetting}`", text, StringComparison.Ordinal);
     }
 
