@@ -166,7 +166,7 @@ const scenarios = {
     btn(w, "Copy row").click(); await flush();
     btn(w, "Copy all").click(); await flush();
     out.texts = texts;
-    out.cells = ["=1", "+x", "-x", "@y", "\t=1", "-5", "-1,234.5", "-1e-3", "-5x", "x\n=1", " =1", "\r@SUM(1)", "  -5", "\u00a0=1", " x", "\n\t =1"].map(tools.tsvCell);
+    out.cells = ["=1", "+x", "-x", "@y", "\t=1", "-5", "-1,234.5", "-1e-3", "-5x", "x\n=1", " =1", "\r@SUM(1)", "  -5", "\u00a0=1", " x", "\n\t =1", "-.5", "-1e5", "-.e5", "-1e"].map(tools.tsvCell);
   },
   async helpers() {
     out.field = [tools.csvField("a,b"), tools.csvField('q"q'), tools.csvField("=1+1"), tools.csvField("+x"), tools.csvField("@y"), tools.csvField(-5), tools.csvField("-5"), tools.csvField("+3.5e-2"), tools.csvField("-5x"), tools.csvField(null), tools.csvField("plain"), tools.csvField("a;b"), tools.csvField("a\tb"), tools.csvField("a b"), tools.csvField("  =1")];

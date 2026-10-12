@@ -17,6 +17,7 @@ namespace Darling.Tests;
 /// The plain text searches the analyzer asks when a regex is skipped must give the answer the regex gives, so a
 /// statement is judged the same way whether or not the plan's time limit has passed.
 /// </summary>
+[Collection("timing")]
 public sealed class PlanTextSearchTests
 {
     private static readonly TimeSpan Limit = TimeSpan.FromSeconds(5);

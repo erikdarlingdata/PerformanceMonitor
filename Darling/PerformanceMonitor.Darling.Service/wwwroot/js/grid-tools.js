@@ -16,13 +16,15 @@ export function plainCell(text) {
 
 /* A spreadsheet runs a cell that starts with one of these as a formula. A leading apostrophe makes it text. A real
    number is left alone (a negative value is data, not a formula), and so is a string that is only a number
-   ("-5", "+3", "1e-3", "-1,234.5"); any other string is neutralised. A spreadsheet drops leading white space and
+   ("-5", "+3", "1e-3", "-1,234.5", "-.5"); any other string is neutralised. A spreadsheet drops leading white space and
    control characters, so the rule looks at the first character after them. A string whose very first character is a
    tab or a carriage return is neutralised as well. Mirrors SpreadsheetText.Neutralize. */
 const FORMULA_LEAD = /^[=+\-@]/;
 const TAB_OR_CR_LEAD = /^[\t\r]/;
 const LEADING_SKIPPED = /^[\s\u0000-\u001f\u007f-\u009f\ufeff]+/;
-const PLAIN_NUMBER = /^[+-]?\d[\d,]*(\.\d+)?([eE][+-]?\d+)?$/;
+// The same strings SpreadsheetText.IsPlainNumber accepts: an optional sign, a run of digits, "." and "," with at
+// least one digit (".5", "1,234.5"), and an optional exponent. The leading [.,]* keeps the match linear.
+const PLAIN_NUMBER = /^[+-]?[.,]*\d[\d.,]*([eE][+-]?\d+)?$/;
 
 /** The text with a leading apostrophe when a spreadsheet would read it as a formula; any other text comes back as it is. */
 export function neutralise(s) {
