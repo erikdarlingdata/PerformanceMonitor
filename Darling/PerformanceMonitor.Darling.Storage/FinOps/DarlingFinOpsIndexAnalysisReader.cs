@@ -375,7 +375,7 @@ LIMIT 1";
            index snapshot in the store, and listed in the analysis, the compression recommendation and the rollups as if it
            were current. Its rows are left out here, at the one read every consumer shares. Unknown (no snapshot) keeps all. */
         return await CurrentDatabaseScope.OmitDroppedAsync(
-            dataSource, inputs, r => serverId, r => r.DatabaseName, DatabaseFilter.All, cancellationToken);
+            dataSource, inputs, r => serverId, r => r.DatabaseName, DatabaseFilter.All, cancellationToken, r => r.CollectionTime);
     }
 
     /// <summary>

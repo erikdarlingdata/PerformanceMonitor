@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Text.Json;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -37,6 +38,29 @@ public sealed class CollectorRunEmptyReasonTests
 
         Assert.Equal("unavailable", Field(json, "status"));
         Assert.Contains("two collection cycles", Field(json, "message"), StringComparison.Ordinal);
+    }
+
+    /// <summary>Review L-b: the UTC stamp in these sentences is a custom format, whose ':' is the CURRENT culture's time separator.
+    /// On a host whose culture uses another one the stamp was mangled; the sentences format with the invariant culture.</summary>
+    [Fact]
+    public void TheUtcStamps_UseTheInvariantTimeSeparator_WhateverTheHostCulture()
+    {
+        var odd = (CultureInfo)CultureInfo.InvariantCulture.Clone();
+        odd.DateTimeFormat.TimeSeparator = ".";
+        var saved = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = odd;
+            var gap = new CollectorRunFacts(2, 0, Last, 0).ProcedureStatsEmpty(6).Message;
+            var traceFlags = new CollectorRunFacts(1, 0, Last, 0).NoTraceFlagsEnabled();
+
+            Assert.Contains("2026-10-12 08:30:00 UTC", gap, StringComparison.Ordinal);
+            Assert.Contains("2026-10-12 08:30:00 UTC", traceFlags, StringComparison.Ordinal);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = saved;
+        }
     }
 
     [Fact]

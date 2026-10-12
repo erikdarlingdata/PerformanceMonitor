@@ -271,7 +271,7 @@ public static class DarlingQueryStoreClutterReader
 
         /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
            database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
-        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, cancellationToken);
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, cancellationToken, r => r.LastSlowestAt);
     }
 
     /* ─────────────────────────── (b) plan churn ─────────────────────────── */
@@ -411,7 +411,7 @@ public static class DarlingQueryStoreClutterReader
 
         /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
            database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
-        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, cancellationToken);
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, cancellationToken, r => r.LastCollection);
     }
 
     /* ─────────────────────────── (c) configuration ─────────────────────────── */
@@ -492,7 +492,7 @@ public static class DarlingQueryStoreClutterReader
 
         /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
            database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
-        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, cancellationToken);
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, cancellationToken, r => r.CapturedAt);
     }
 
     /* ─────────────────────────── (d) QDS waits + the clerk ─────────────────────────── */

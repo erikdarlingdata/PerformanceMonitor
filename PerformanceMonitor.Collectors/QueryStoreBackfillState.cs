@@ -226,6 +226,13 @@ public static class QueryStoreBackfillState
         "SELECT database_name, collection_time FROM database_states WHERE server_id = $1 AND collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1 AND collection_time > $2)";
 
     /// <summary>
+    /// #5633 review M2: <see cref="NewestSnapshotSql"/> for a historical read: the newest snapshot AT OR BEFORE <c>$3</c> (the read's
+    /// as_of), still newer than <c>$2</c>. The same text otherwise, on PostgreSQL and on DuckDB.
+    /// </summary>
+    public const string NewestSnapshotAtOrBeforeSql =
+        "SELECT database_name, collection_time FROM database_states WHERE server_id = $1 AND collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3)";
+
+    /// <summary>
     /// #5483: is there a collected query_store row for one database at or after the snapshot's time:
     /// <c>$1</c> server_id, <c>$2</c> database, <c>$3</c> the snapshot's collection_time. A hit is proof the
     /// database was alive after the snapshot was taken, so its absence from the snapshot means "created since",

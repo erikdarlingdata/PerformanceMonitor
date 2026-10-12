@@ -32,12 +32,14 @@ namespace PerformanceMonitor.Darling.Service;
 internal static class ComposeServerScope
 {
     /// <summary>
-    /// #5633 item 17: maps each scoped name to the registry's stored <c>server_name</c> through the resolver every other server-scoped tool
-    /// uses (exact, then display name, then partial, case-insensitive), so a panel spec naming a server by its display name or a
-    /// case-different spelling reads that server instead of returning no rows. A name the resolver cannot place stays as written: it is
-    /// either a removed or disabled server whose history is still stored (#5525) or a name nobody registered, which the run's
-    /// unknown-server answer (W13) names when nothing is stored under it. A name that matches SEVERAL servers is refused with the
-    /// resolver's own sentence, because reading an arbitrary one of them would be a silent guess. The registry read faulting leaves the
+    /// #5633 item 17: maps each scoped name to the registry's stored <c>server_name</c> by an EXACT match through the resolver every
+    /// other server-scoped tool uses (stored name, then display name, case-insensitive), so a panel spec naming a server by its display
+    /// name or a case-different spelling reads that server instead of returning no rows. The resolver's PARTIAL tier is deliberately not
+    /// used (review M1): "SQL01" would otherwise be remapped to an enabled "SQL01-DR" and show another server's rows. A name with no
+    /// exact match stays as written: it is either a removed or disabled server whose history is still stored (#5525) or a name nobody
+    /// registered, which the run's unknown-server answer (W13, a <c>not_found</c> naming it) reports when nothing is stored under it.
+    /// A name that matches SEVERAL servers exactly is refused with the resolver's own sentence, because reading an arbitrary one of
+    /// them would be a silent guess. The registry read faulting leaves the
     /// scope untouched (the same fail-open the unregistered-name lookup has).
     /// </summary>
     public static async Task<(List<string>? Scope, string? Refusal)> ResolveNamesAsync(
@@ -72,14 +74,22 @@ internal static class ComposeServerScope
                 continue;
             }
 
+            /* #5633 review M1: EXACT matches only (stored name, then display name, either ignoring case). The resolver's partial tier
+               is not used: "SQL01" is a removed or disabled server whose history is still stored (#5525), and "SQL01-DR" is a
+               different server that merely contains it. A name with no exact match stays as written. */
+            var hasExact = servers.Any(s => string.Equals(s.ServerName, name, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(s.DisplayName, name, StringComparison.OrdinalIgnoreCase));
+            if (!hasExact)
+            {
+                resolvedNames.Add(name);
+                continue;
+            }
+
+            /* An exact tier always answers (one server, or several that share the name, which the resolver refuses). */
             var (resolved, error) = DarlingServerResolver.ResolveOrError(servers, name);
             if (error is null)
             {
                 resolvedNames.Add(resolved.ServerName);
-            }
-            else if (McpHelpers.ErrorMessageOf(error).StartsWith("Could not resolve server", StringComparison.Ordinal))
-            {
-                resolvedNames.Add(name);
             }
             else
             {
