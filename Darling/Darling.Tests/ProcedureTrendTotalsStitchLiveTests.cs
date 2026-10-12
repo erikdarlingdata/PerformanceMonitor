@@ -301,7 +301,7 @@ VALUES ($1, $2, 'stitch', 'procedure_stats', $3, $4, $5, 0)", Connection);
             }
 
             await using var tx = await Connection.BeginTransactionAsync(ct);
-            await ProcedureStatsTotalsWriter.UpsertBatchAsync(Connection, tx, serverId, at, rows, 30, ct);
+            await ProcedureStatsTotalsWriter.UpsertBatchAsync(Connection, tx, serverId, at, rows, 30, null, ct);
             await tx.CommitAsync(ct);
         }
 
@@ -512,6 +512,151 @@ VALUES ($1, $2, 'stitch', 'procedure_stats', $3, $4, $5, 0)", Connection);
             /* Two servers with rows x 4 windows x 4 filters that match (the no-rows filter and the unknown server return nothing) x 2 widths. */
             Assert.Equal(64, nonEmpty);
             Assert.True(unrated > 0, "no unrated point was compared");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    private static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return await command.ExecuteScalarAsync(ct);
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static List<ProcedureStatsCollector.Row> GapRows(int salt) => new()
+    {
+        WriterRow(new Spec("A", "p1", 100 + salt, 1 + salt, 300)),
+        WriterRow(new Spec("B", "p2", 200 + salt, 2, 120)),
+    };
+
+    /// <summary>
+    /// Review of #5706, finding 3: a pre-V176 binary (a rollback) wrote collection t2 above the floor, after the server's totals at t1, so t2 has
+    /// raw rows and no totals and the stitched trend (rows only below the floor) would drop it. The next batch (t3) totals every collection
+    /// strictly between the server's newest earlier totals row and itself, and the trend then equals the rows-only oracle.
+    /// </summary>
+    [Fact]
+    public async Task ACollectionAnOlderBinaryWroteAboveTheFloor_IsTotalledByTheNextBatch_AndTheTrendEqualsTheOldStatement()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945310;
+
+        await using var rig = await Rig.OpenAsync(serverId, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                await rig.RunAsync(serverId, At(i).AddSeconds(20), 1500, "SUCCESS", ct);
+            }
+
+            Assert.Equal(2, await rig.WriteAsync(At(0), GapRows(0), ct));
+            Assert.Equal(2, await rig.WriteAsync(At(1), GapRows(10), ct));
+
+            /* The older binary wrote t2: its rows are there, its totals row is not. */
+            await using (var old = new NpgsqlCommand("DELETE FROM collect.procedure_stats_totals WHERE server_id = $1 AND collection_time = $2", rig.Connection))
+            {
+                old.Parameters.AddWithValue(serverId);
+                old.Parameters.AddWithValue(NpgsqlDbType.Timestamp, At(1));
+                Assert.Equal(2, await old.ExecuteNonQueryAsync(ct));
+            }
+
+            /* Not vacuous: before the next batch the stitched trend is missing t2 against the rows-only oracle. */
+            var width = 1;
+            var windowStart = At(0);
+            var windowEnd = At(3);
+            var before = await ReadAsync(rig.DataSource, DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", false), false, null, serverId, windowStart, windowEnd, width, ct);
+            var oracleBefore = await ReadAsync(rig.DataSource, OldSql(false), false, null, serverId, windowStart, windowEnd, width, ct);
+            Assert.NotEqual(oracleBefore.Rows, before.Rows);
+
+            Assert.Equal(2, await rig.WriteAsync(At(2), GapRows(20), ct));
+            Assert.Equal(6L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals WHERE server_id = " + serverId.ToString(CultureInfo.InvariantCulture), ct)));
+
+            foreach (var filtered in new[] { false, true })
+            {
+                foreach (var w in new[] { 1, 60 })
+                {
+                    var expected = await ReadAsync(rig.DataSource, OldSql(filtered), filtered, null, serverId, windowStart, windowEnd, w, ct);
+                    var actual = await ReadAsync(rig.DataSource, DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", filtered), filtered, null, serverId, windowStart, windowEnd, w, ct);
+                    Assert.NotEmpty(expected.Rows);
+                    Assert.Equal(expected.Types, actual.Types);
+                    Assert.Equal(expected.Rows, actual.Rows);
+                }
+            }
+
+            /* The probe is normally empty and indexed: with a totals row at every collection the range holds no raw row, and the plan reads no
+               procedure_stats heap beyond an index range. Functional only (no timing claimed). */
+            await using (var set = new NpgsqlCommand("SET enable_seqscan = off", rig.Connection))
+            {
+                await set.ExecuteNonQueryAsync(ct);
+            }
+
+            var plan = new System.Text.StringBuilder();
+            await using (var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS) " + ProcedureStatsTotals.GapFillSql, rig.Connection))
+            {
+                explain.Parameters.AddWithValue(NpgsqlDbType.Integer, serverId);
+                explain.Parameters.AddWithValue(NpgsqlDbType.Timestamp, At(2));
+                await using var reader = await explain.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    plan.AppendLine(reader.GetString(0));
+                }
+            }
+
+            Assert.DoesNotContain("Seq Scan", plan.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Index", plan.ToString(), StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// Review of #5706, finding 3, the other side: a server with raw rows and no totals row at all needs nothing from the gap fill (its floor is
+    /// infinity, the rows arm reads it), so the first batch totals only itself and the trend still equals the rows-only oracle.
+    /// </summary>
+    [Fact]
+    public async Task AServerWithNoTotalsYet_IsNotBackfilledByTheFirstBatch_AndTheTrendStillEqualsTheOldStatement()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945313;
+
+        await using var rig = await Rig.OpenAsync(serverId, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                await rig.RunAsync(serverId, At(i).AddSeconds(20), 1500, "SUCCESS", ct);
+            }
+
+            /* Rows with no totals at all: what a store holds before the first V176 batch. */
+            Assert.Equal(2, await rig.WriteAsync(At(0), GapRows(0), ct));
+            await ExecAsync(rig.Connection, "DELETE FROM collect.procedure_stats_totals", ct);
+            Assert.Equal(2, await rig.WriteAsync(At(1), GapRows(10), ct));
+            Assert.Equal(2L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals", ct)));
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals WHERE collection_time = '" + At(0).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "'", ct)));
+
+            var expected = await ReadAsync(rig.DataSource, OldSql(false), false, null, serverId, At(0), At(3), 1, ct);
+            var actual = await ReadAsync(rig.DataSource, DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", false), false, null, serverId, At(0), At(3), 1, ct);
+            Assert.NotEmpty(expected.Rows);
+            Assert.Equal(expected.Rows, actual.Rows);
 
             bodySucceeded = true;
         }

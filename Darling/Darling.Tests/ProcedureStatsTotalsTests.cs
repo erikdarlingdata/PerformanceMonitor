@@ -24,6 +24,35 @@ public sealed class ProcedureStatsTotalsTests
 {
     private static string Normalize(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
 
+    /// <summary>Review of #5706: the gap fill is bounded by the server's newest earlier totals row and the batch, and recomputes like the upsert.</summary>
+    [Fact]
+    public void TheGapFill_TotalsTheCollectionsBetweenTheNewestEarlierTotalsAndTheBatch_AndRecomputes()
+    {
+        var sql = Normalize(ProcedureStatsTotals.GapFillSql);
+
+        Assert.Contains("FROM collect.procedure_stats AS s\nWHERE s.server_id = $1::integer\nAND   s.collection_time < $2::timestamp\nAND   s.collection_time >\n(\n    SELECT max(p.collection_time)\n    FROM collect.procedure_stats_totals AS p\n    WHERE p.server_id = $1::integer\n    AND   p.collection_time < $2::timestamp\n)", sql, StringComparison.Ordinal);
+        Assert.Contains("ON CONFLICT (server_id, collection_time, database_name) DO UPDATE SET", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("t.row_count +", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>Review of #5706: the retention predicate carries the floor as a parameter and never scans procedure_stats itself (#1815).</summary>
+    [Fact]
+    public void ThePrunePredicate_TakesTheFloorAsAParameter_AndNeverScansProcedureStats()
+    {
+        Assert.DoesNotContain("procedure_stats", ProcedureStatsTotals.PrunePredicate.Replace("procedure_stats_totals", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("$2", ProcedureStatsTotals.PrunePredicate, StringComparison.Ordinal);
+
+        var delete = DarlingRetention.TimeSlicedDeleteSql(ProcedureStatsTotals.Table, "collection_time", ProcedureStatsTotals.PrunePredicate);
+        Assert.DoesNotContain("FROM collect.procedure_stats)", delete, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM collect.procedure_stats ", delete, StringComparison.Ordinal);
+
+        var retention = Normalize(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingRetention.cs"));
+        var floor = retention.IndexOf("ProcedureStatsTotals.MeasureRawFloorAsync(", StringComparison.Ordinal);
+        var purge = retention.IndexOf("TimeSlicedDeleteSql(ProcedureStatsTotals.Table", StringComparison.Ordinal);
+        Assert.True(floor > 0 && purge > floor, "the floor is measured once, before the DELETE that binds it");
+        Assert.Contains("secondParameter: new NpgsqlParameter", retention, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheRung_IsV176_AndEmbedsTheCreateText()
     {
@@ -63,7 +92,7 @@ public sealed class ProcedureStatsTotalsTests
     {
         var sql = Normalize(ProcedureStatsTotals.UpsertSql);
 
-        Assert.Contains("FROM collect.procedure_stats\nWHERE server_id = $1::integer\nAND   collection_time = $2::timestamp\nGROUP BY server_id, collection_time, database_name", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.procedure_stats\nWHERE server_id = $1::integer\nAND   collection_time = $2::timestamp\nAND   ($3::text[] IS NULL OR database_name = ANY($3::text[]) OR ($4::boolean AND database_name IS NULL))\nGROUP BY server_id, collection_time, database_name", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_elapsed_time)::bigint,", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_execution_count)::bigint,", sql, StringComparison.Ordinal);
         Assert.Contains("COUNT(*),", sql, StringComparison.Ordinal);
@@ -118,7 +147,7 @@ public sealed class ProcedureStatsTotalsTests
         Assert.Contains("EffectivePurgeRetentionDays(\n                \"procedure_stats\",", retention, StringComparison.Ordinal);
 
         var delete = DarlingRetention.TimeSlicedDeleteSql(ProcedureStatsTotals.Table, "collection_time", ProcedureStatsTotals.PrunePredicate);
-        Assert.StartsWith("DELETE FROM collect.procedure_stats_totals WHERE collection_time < $1 AND collection_time < COALESCE((SELECT min(collection_time) FROM collect.procedure_stats), $1)", delete, StringComparison.Ordinal);
+        Assert.StartsWith("DELETE FROM collect.procedure_stats_totals WHERE collection_time < $1 AND collection_time < COALESCE($2::timestamp, $1)", delete, StringComparison.Ordinal);
 
         /* The totals table is a plain table outside the collector catalog: no hypertable conversion, no collector schedule entry. */
         Assert.DoesNotContain(CollectorCatalogTables(), t => string.Equals(t, "procedure_stats_totals", StringComparison.Ordinal));

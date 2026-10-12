@@ -4691,7 +4691,13 @@ public sealed class DarlingCollectorRunner
                 {
                     await ProcedureStatsTotalsWriter.UpsertBatchAsync(
                         pgConnection, transaction, server.ServerId, storedCollectionTime,
-                        rowsWritten, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+                        rowsWritten, ServiceCommandDeadlines.CollectionSweepSeconds,
+                        /* The databases THIS batch holds (one per batch on Azure SQL Database): the read-back is limited to them. Null
+                           (rows of another type, an import) reads the whole collection. */
+                        (object)rows is List<ProcedureStatsCollector.Row> procedureRows
+                            ? procedureRows.Select(static row => (string?)row.DatabaseName).Distinct().ToList()
+                            : null,
+                        cancellationToken);
                 }
 
                 /* #3953: after the COPY and the dimension flush, in the unstamped region (#3095): a fault here is not

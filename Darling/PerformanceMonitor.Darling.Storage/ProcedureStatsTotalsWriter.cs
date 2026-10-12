@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -34,8 +36,11 @@ public static class ProcedureStatsTotalsWriter
 {
     /// <summary>
     /// Upserts the totals of the collection stamped <paramref name="collectionTime"/> for <paramref name="serverId"/> on the COPY's
-    /// transaction (<see cref="ProcedureStatsTotals.UpsertSql"/>). A <paramref name="rowsWritten"/> of 0 or less writes nothing and costs
-    /// no round trip. Returns the totals rows the statement wrote (one per database in the collection).
+    /// transaction (<see cref="ProcedureStatsTotals.UpsertSql"/>), after totalling any collection a pre-V176 binary left above the
+    /// server's floor (<see cref="ProcedureStatsTotals.GapFillSql"/>). A <paramref name="rowsWritten"/> of 0 or less writes nothing and
+    /// costs no round trip. <paramref name="databaseNames"/> are the databases the batch wrote (null entries are the NULL database); the
+    /// read-back is limited to them, and a null collection reads the whole collection. Returns the totals rows the upsert wrote (one per
+    /// database in the batch), not counting gap rows.
     /// </summary>
     public static async Task<int> UpsertBatchAsync(
         NpgsqlConnection connection,
@@ -44,6 +49,7 @@ public static class ProcedureStatsTotalsWriter
         DateTime collectionTime,
         int rowsWritten,
         int commandTimeoutSeconds,
+        IReadOnlyCollection<string?>? databaseNames,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
@@ -54,11 +60,26 @@ public static class ProcedureStatsTotalsWriter
             return 0;
         }
 
+        /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` - see PgCollectorRowWriter. */
+        var stamp = DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified);
+
+        /* The gap first: a collection an older binary wrote between the server's newest totals row and this batch. Normally an
+           empty index-range probe. Not limited to the batch's databases: those collections belong to nobody's batch. */
+        await using (var gap = new NpgsqlCommand(ProcedureStatsTotals.GapFillSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds })
+        {
+            gap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            gap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = stamp });
+            await gap.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         await using var command = new NpgsqlCommand(ProcedureStatsTotals.UpsertSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = stamp });
 
-        /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` - see PgCollectorRowWriter. */
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified) });
+        /* $3: the non-NULL names (NULL array = no limit); $4: whether the batch holds the NULL database. */
+        var names = databaseNames?.Where(static name => name is not null).Distinct(StringComparer.Ordinal).ToArray();
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = names is null ? DBNull.Value : names });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = databaseNames?.Any(static name => name is null) ?? false });
         return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 }

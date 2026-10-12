@@ -56,12 +56,21 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
 
         public required ServerRuntime Server { get; init; }
 
-        public static async Task<Rig> OpenAsync(int serverId, string serverName, CancellationToken ct)
+        public static async Task<Rig> OpenAsync(int serverId, string serverName, CancellationToken ct, bool timescale = false)
         {
             var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
             var connection = new NpgsqlConnection(scratch.ConnectionString);
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
+            if (timescale)
+            {
+                /* TimescaleDB must be installed where this runs (CI's darling-pg job has it): the store's real hypertable conversion, then the
+                   background jobs stopped so no policy compresses or drops a chunk under the test. */
+                Assert.True(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB must be available for the compressed-chunk retention pin");
+                await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+                await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+            }
+
             var deltas = new CollectorDeltaCalculator();
             var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
             return new Rig
@@ -128,6 +137,31 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
     {
         await using var command = new NpgsqlCommand(sql, connection);
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// The sweep's own totals purge, as <c>DarlingRetention</c> runs it: the raw floor measured once (<see cref="ProcedureStatsTotals.MeasureRawFloorAsync"/>)
+    /// and bound as <c>$2</c> of the one-day-slice DELETE. Returns the rows the DELETE removed.
+    /// </summary>
+    private static async Task<int> RetentionDeleteAsync(NpgsqlConnection connection, bool timescaleAvailable, DateTime cutoff, CancellationToken ct)
+    {
+        var floor = await ProcedureStatsTotals.MeasureRawFloorAsync(connection, timescaleAvailable, 60, ct);
+        var sliced = DarlingRetention.TimeSlicedDeleteSql(ProcedureStatsTotals.Table, "collection_time", ProcedureStatsTotals.PrunePredicate);
+        await using var command = new NpgsqlCommand(sliced, connection);
+        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, cutoff);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = floor is { } value ? value : DBNull.Value });
+
+        /* Drained like the sweep's loop (a one-day slice per statement, repeated until a statement deletes nothing). */
+        var total = 0;
+        int deleted;
+        do
+        {
+            deleted = await command.ExecuteNonQueryAsync(ct);
+            total += deleted;
+        }
+        while (deleted > 0);
+
+        return total;
     }
 
     private static string Stamp(DateTime value) => "'" + value.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "'::timestamp";
@@ -229,7 +263,7 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
             /* An upsert that runs again (a re-attempt) changes nothing. */
             await using (var tx = await rig.Connection.BeginTransactionAsync(ct))
             {
-                Assert.Equal(2, await ProcedureStatsTotalsWriter.UpsertBatchAsync(rig.Connection, tx, serverId, at, 4, 30, ct));
+                Assert.Equal(2, await ProcedureStatsTotalsWriter.UpsertBatchAsync(rig.Connection, tx, serverId, at, 4, 30, null, ct));
                 await tx.CommitAsync(ct);
             }
 
@@ -242,7 +276,7 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
             await ExecAsync(rig.Connection, "DELETE FROM collect.procedure_stats_totals WHERE database_name = 'DbB'", ct);
             await using (var tx = await rig.Connection.BeginTransactionAsync(ct))
             {
-                await ProcedureStatsTotalsWriter.UpsertBatchAsync(rig.Connection, tx, serverId, at, 1, 30, ct);
+                await ProcedureStatsTotalsWriter.UpsertBatchAsync(rig.Connection, tx, serverId, at, 1, 30, null, ct);
                 await tx.CommitAsync(ct);
             }
 
@@ -255,7 +289,7 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
             /* And a second upsert still leaves one NULL-database row (the key treats NULL as one group, so it conflicts). */
             await using (var tx = await rig.Connection.BeginTransactionAsync(ct))
             {
-                await ProcedureStatsTotalsWriter.UpsertBatchAsync(rig.Connection, tx, serverId, at, 1, 30, ct);
+                await ProcedureStatsTotalsWriter.UpsertBatchAsync(rig.Connection, tx, serverId, at, 1, 30, null, ct);
                 await tx.CommitAsync(ct);
             }
 
@@ -358,28 +392,161 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
             Assert.DoesNotContain("Seq Scan on procedure_stats", plan.ToString(), StringComparison.Ordinal);
             await ExecAsync(rig.Connection, "RESET enable_seqscan", ct);
 
-            var sliced = DarlingRetention.TimeSlicedDeleteSql(ProcedureStatsTotals.Table, "collection_time", ProcedureStatsTotals.PrunePredicate);
-
             /* Cutoff after day 1 while every raw row is still held: raw holds day 0, so no totals row may go. */
-            await using (var held = new NpgsqlCommand(sliced, rig.Connection))
-            {
-                held.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, T0.AddDays(1).AddHours(1));
-                Assert.Equal(0, await held.ExecuteNonQueryAsync(ct));
-            }
+            Assert.Equal(0, await RetentionDeleteAsync(rig.Connection, false, T0.AddDays(1).AddHours(1), ct));
 
             Assert.Equal(3L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals", ct)));
 
             /* Raw loses day 0 (its purge ran). Now day 0's totals row is older than both the cutoff and the oldest raw row. */
             await ExecAsync(rig.Connection, "DELETE FROM collect.procedure_stats WHERE collection_time < " + Stamp(T0.AddDays(1)), ct);
-            await using (var purge = new NpgsqlCommand(sliced, rig.Connection))
-            {
-                purge.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, T0.AddDays(2).AddHours(1));
-                Assert.Equal(1, await purge.ExecuteNonQueryAsync(ct));
-            }
+            Assert.Equal(1, await RetentionDeleteAsync(rig.Connection, false, T0.AddDays(2).AddHours(1), ct));
 
             /* Day 1's totals row is the oldest raw row's age, so it stays even though the cutoff is past it; day 2 is newer than the cutoff. */
             Assert.Equal(2L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals", ct)));
             Assert.Equal(T0.AddDays(1), (DateTime)(await ScalarAsync(rig.Connection, "SELECT min(collection_time) FROM collect.procedure_stats_totals", ct))!);
+
+            /* The plain-PostgreSQL floor is the table's exact oldest row (day 1), one min() measured before the DELETE. */
+            Assert.Equal(T0.AddDays(1), await ProcedureStatsTotals.MeasureRawFloorAsync(rig.Connection, false, 60, ct));
+
+            /* Every raw row gone: the floor is NULL and the cutoff alone decides, so both remaining totals rows (older than the cutoff) go. */
+            await ExecAsync(rig.Connection, "DELETE FROM collect.procedure_stats", ct);
+            Assert.Null(await ProcedureStatsTotals.MeasureRawFloorAsync(rig.Connection, false, 60, ct));
+            Assert.Equal(2, await RetentionDeleteAsync(rig.Connection, false, T0.AddDays(2).AddHours(1), ct));
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals", ct)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// Review of #5706, finding 2: on Azure SQL Database the collector writes one batch per database at one <c>collection_time</c>. Each batch
+    /// totals only its own databases, so the batches of the other databases are not read back (a sentinel written into DbA's totals survives
+    /// DbC's batch), and the result is still exact: a second DbA batch recomputes DbA from BOTH of its batches, and a NULL database name
+    /// matches its NULL rows through the writer's NULL flag.
+    /// </summary>
+    [Fact]
+    public async Task PerDatabaseBatchesAtOneCollectionTime_TotalOnlyTheirOwnDatabases_AndStayExact()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945311;
+
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotals5", ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var at = T0.AddMinutes(5);
+            var id = serverId.ToString(CultureInfo.InvariantCulture);
+            Assert.Equal(2, await rig.WriteAsync(at, new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 100, 1, 60), Row("DbA", "p2", 200, 2, 30) }, ct));
+            Assert.Equal(1, await rig.WriteAsync(at, new List<ProcedureStatsCollector.Row> { Row("DbB", "p1", 400, 4, 45) }, ct));
+            Assert.Equal("DbA|300|3|2|60;DbB|400|4|1|45", (await CompareAsync(rig.Connection, serverId, at, ct)).Totals);
+
+            /* DbA's totals row is spoiled by hand. A batch of DbC alone must not read DbA back, so the spoiled value survives it. */
+            await ExecAsync(rig.Connection, "UPDATE collect.procedure_stats_totals SET total_elapsed_time = -1 WHERE database_name = 'DbA'", ct);
+            Assert.Equal(1, await rig.WriteAsync(at, new List<ProcedureStatsCollector.Row> { Row("DbC", "p1", 800, 8, 10) }, ct));
+            Assert.Equal(-1L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT total_elapsed_time FROM collect.procedure_stats_totals WHERE database_name = 'DbA'", ct)));
+            Assert.Equal(400L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT total_elapsed_time FROM collect.procedure_stats_totals WHERE database_name = 'DbB'", ct)));
+            Assert.Equal(800L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT total_elapsed_time FROM collect.procedure_stats_totals WHERE database_name = 'DbC'", ct)));
+
+            /* A later batch of DbA recomputes DbA from both of its batches (the rows of the earlier one included): exact. */
+            Assert.Equal(1, await rig.WriteAsync(at, new List<ProcedureStatsCollector.Row> { Row("DbA", "p3", 50, 5, 20) }, ct));
+            var (totals, raw) = await CompareAsync(rig.Connection, serverId, at, ct);
+            Assert.Equal(raw, totals);
+            Assert.Equal("DbA|350|8|3|60;DbB|400|4|1|45;DbC|800|8|1|10", totals);
+
+            /* The NULL database: DbC's rows lose their name (the shape of rows older than the column), and a batch that names only NULL
+               recomputes only the NULL group; DbA's spoiled row survives it, and a batch that names DbB and NULL leaves DbA alone too. */
+            await ExecAsync(rig.Connection, "UPDATE collect.procedure_stats SET database_name = NULL WHERE server_id = " + id + " AND database_name = 'DbC'", ct);
+            await ExecAsync(rig.Connection, "DELETE FROM collect.procedure_stats_totals WHERE database_name = 'DbC'", ct);
+            await ExecAsync(rig.Connection, "UPDATE collect.procedure_stats_totals SET total_elapsed_time = -1 WHERE database_name = 'DbA'", ct);
+            await UpsertAsync(rig, serverId, at, new string?[] { null }, ct);
+            Assert.Equal("DbA|-1|8|3|60;DbB|400|4|1|45;<null>|800|8|1|10", (await CompareAsync(rig.Connection, serverId, at, ct)).Totals);
+
+            await ExecAsync(rig.Connection, "UPDATE collect.procedure_stats_totals SET total_elapsed_time = -2 WHERE database_name = 'DbB'", ct);
+            await UpsertAsync(rig, serverId, at, new string?[] { "DbB", null }, ct);
+            Assert.Equal("DbA|-1|8|3|60;DbB|400|4|1|45;<null>|800|8|1|10", (await CompareAsync(rig.Connection, serverId, at, ct)).Totals);
+
+            /* No names at all (an import) reads the whole collection back. */
+            await UpsertAsync(rig, serverId, at, null, ct);
+            var (allTotals, allRaw) = await CompareAsync(rig.Connection, serverId, at, ct);
+            Assert.Equal(allRaw, allTotals);
+            Assert.Equal("DbA|350|8|3|60;DbB|400|4|1|45;<null>|800|8|1|10", allTotals);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    private static async Task UpsertAsync(Rig rig, int serverId, DateTime at, IReadOnlyCollection<string?>? names, CancellationToken ct)
+    {
+        await using var tx = await rig.Connection.BeginTransactionAsync(ct);
+        await ProcedureStatsTotalsWriter.UpsertBatchAsync(rig.Connection, tx, serverId, at, 1, 30, names, ct);
+        await tx.CommitAsync(ct);
+    }
+
+    /// <summary>
+    /// Review of #5706, finding 4 on a TimescaleDB store: <c>procedure_stats</c> is a hypertable whose oldest chunk is COMPRESSED (no btree
+    /// there, the case that timed out in the field, #1815). The floor the retention DELETE binds comes from the chunk catalog, is never later
+    /// than the oldest raw row, and the sweep's DELETE never removes a totals row at or after it, whatever the cutoff. When the oldest chunk
+    /// leaves, the floor moves up and the totals older than the new floor go.
+    /// </summary>
+    [Fact]
+    public async Task OnTimescaleDb_WithACompressedOldestChunk_TheFloorComesFromTheChunkCatalog_AndRetentionNeverPurgesTotalsAtOrAfterIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -945312;
+
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotals6", ct, timescale: true);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Three collections ten days apart: three chunks. The first chunk is then compressed. */
+            for (var i = 0; i < 3; i++)
+            {
+                Assert.Equal(1, await rig.WriteAsync(T0.AddDays(10 * i), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10 + i, 1, 60) }, ct));
+            }
+
+            Assert.Equal(3L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'procedure_stats'", ct)));
+            await ExecAsync(rig.Connection, "ALTER TABLE collect.procedure_stats SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
+            await ExecAsync(rig.Connection, "SELECT compress_chunk(c) FROM show_chunks('collect.procedure_stats', older_than => " + Stamp(T0.AddDays(5)) + ") c", ct);
+            Assert.True((bool)(await ScalarAsync(rig.Connection,
+                "SELECT bool_and(is_compressed) FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'procedure_stats' AND range_start AT TIME ZONE 'UTC' < " + Stamp(T0.AddDays(5)), ct))!);
+
+            /* The floor is the oldest chunk's range_start: not later than the oldest raw row (and, as the row is mid-chunk, earlier than it). */
+            var floor = await ProcedureStatsTotals.MeasureRawFloorAsync(rig.Connection, true, 60, ct);
+            var chunkStart = (DateTime)(await ScalarAsync(rig.Connection,
+                "SELECT min(range_start AT TIME ZONE 'UTC') FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'procedure_stats'", ct))!;
+            Assert.Equal(chunkStart, floor);
+            Assert.True(floor <= T0, "the chunk floor is never later than the oldest raw row");
+            Assert.True(floor < T0, "the floor is the chunk's start, not the row's own time: it came from the catalog, not from min(collection_time)");
+
+            /* A cutoff far past every collection while the raw chunk is still held: nothing at or after the floor may go. */
+            Assert.Equal(0, await RetentionDeleteAsync(rig.Connection, true, T0.AddDays(100), ct));
+            Assert.Equal(3L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals", ct)));
+
+            /* The oldest chunk leaves (the raw purge ran). The floor moves to the next chunk, and the first collection's totals, now older
+               than every raw row, go; the other two sit at or after the oldest raw row and stay. */
+            await ExecAsync(rig.Connection, "SELECT drop_chunks('collect.procedure_stats', older_than => " + Stamp(T0.AddDays(5)) + ")", ct);
+            var movedFloor = await ProcedureStatsTotals.MeasureRawFloorAsync(rig.Connection, true, 60, ct);
+            Assert.True(movedFloor > floor && movedFloor <= T0.AddDays(10));
+            Assert.Equal(1, await RetentionDeleteAsync(rig.Connection, true, T0.AddDays(100), ct));
+            Assert.Equal(2L, Convert.ToInt64(await ScalarAsync(rig.Connection, "SELECT count(*) FROM collect.procedure_stats_totals", ct)));
+            Assert.Equal(T0.AddDays(10), (DateTime)(await ScalarAsync(rig.Connection, "SELECT min(collection_time) FROM collect.procedure_stats_totals", ct))!);
+
+            /* Every raw row gone: no chunk and no row, so the floor is NULL and the cutoff alone decides (the empty-table behavior). */
+            await ExecAsync(rig.Connection, "SELECT drop_chunks('collect.procedure_stats', older_than => " + Stamp(T0.AddDays(100)) + ")", ct);
+            Assert.Null(await ProcedureStatsTotals.MeasureRawFloorAsync(rig.Connection, true, 60, ct));
+            Assert.Equal(2, await RetentionDeleteAsync(rig.Connection, true, T0.AddDays(100), ct));
 
             bodySucceeded = true;
         }

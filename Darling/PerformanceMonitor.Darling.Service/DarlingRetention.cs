@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
@@ -1014,11 +1015,33 @@ public static class DarlingRetention
                 "procedure_stats",
                 retentionDaysFor?.Invoke("procedure_stats")
                     ?? (CollectorScheduleDefaults.All.TryGetValue("procedure_stats", out var procedureSchedule) ? procedureSchedule.RetentionDays : DataRetentionBaseDays));
-            var procedureTotalsDeleted = await PurgeOneAsync(
-                postgres, ProcedureStatsTotals.Table,
-                TimeSlicedDeleteSql(ProcedureStatsTotals.Table, "collection_time", ProcedureStatsTotals.PrunePredicate),
-                utcNow.AddDays(-procedureTotalsDays), logger, cancellationToken,
-                pacer: walPacer);
+            /* The raw floor is measured ONCE here and bound as $2 (review of #5706, #1815): the predicate used to carry an unbounded
+               min() over procedure_stats that the slice statement expands three times, a whole-table scan each, and the chunk-catalog
+               form is how the digest floor above survives compressed chunks. A floor that cannot be measured skips this table's
+               purge for the cycle (counted failed): without the floor the guard against deleting totals the raw trend still reads
+               is unknown, and the totals only age out a sweep later. */
+            DateTime? procedureRawFloor = null;
+            var procedureRawFloorMeasured = false;
+            try
+            {
+                await using var floorConnection = await postgres.OpenConnectionAsync(cancellationToken);
+                procedureRawFloor = await ProcedureStatsTotals.MeasureRawFloorAsync(
+                    floorConnection, timescaleAvailable, DeleteTimeoutSeconds, cancellationToken);
+                procedureRawFloorMeasured = true;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning("Retention purge: could not measure procedure_stats' floor for the totals purge: {Message}", ex.Message);
+            }
+
+            var procedureTotalsDeleted = procedureRawFloorMeasured
+                ? await PurgeOneAsync(
+                    postgres, ProcedureStatsTotals.Table,
+                    TimeSlicedDeleteSql(ProcedureStatsTotals.Table, "collection_time", ProcedureStatsTotals.PrunePredicate),
+                    utcNow.AddDays(-procedureTotalsDays), logger, cancellationToken,
+                    pacer: walPacer,
+                    secondParameter: new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = procedureRawFloor is { } floorValue ? floorValue : DBNull.Value })
+                : null;
             if (procedureTotalsDeleted is not null)
             {
                 tablesPurged++;
@@ -1839,7 +1862,8 @@ public static class DarlingRetention
         CancellationToken cancellationToken,
         int batchSize = 1,
         string? adaptiveRowCapTimeColumn = null,
-        RetentionWalPacer? pacer = null)
+        RetentionWalPacer? pacer = null,
+        NpgsqlParameter? secondParameter = null)
     {
         /* #5592: a pass whose wall budget is already spent starts no further table: no connection, no statement.
            Every table's purge comes through here, so this is the one place that skips them. Nothing was deleted,
@@ -1896,6 +1920,10 @@ public static class DarlingRetention
             {
                 using var command = new NpgsqlCommand(deleteSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
                 command.Parameters.AddWithValue(cutoff);
+                if (secondParameter is not null)
+                {
+                    command.Parameters.Add(secondParameter);
+                }
 
                 drained = await DrainBatchesAsync(
                     async ct =>
