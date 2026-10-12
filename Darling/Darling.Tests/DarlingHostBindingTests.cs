@@ -670,4 +670,83 @@ public sealed class DarlingHostBindingTests
         Assert.Contains("--enable-web", fallback, StringComparison.Ordinal);
         Assert.DoesNotContain("--enable-mcp", fallback, StringComparison.Ordinal);
     }
+
+    /* ---- the token floor: empty or short tokens fail closed before an exposed bind ---- */
+
+    [Fact]
+    public void DescribeTokenProblem_EmptyToken_IsAProblem()
+    {
+        Assert.NotNull(DarlingHostBinding.DescribeTokenProblem(null));
+        Assert.NotNull(DarlingHostBinding.DescribeTokenProblem("   "));
+    }
+
+    [Fact]
+    public void DescribeTokenProblem_ShortToken_NamesTheFloor_WithoutTheValue()
+    {
+        var problem = DarlingHostBinding.DescribeTokenProblem("hunter2");
+
+        Assert.NotNull(problem);
+        Assert.Contains("7 characters", problem, StringComparison.Ordinal);
+        Assert.Contains(DarlingHostBinding.MinimumTokenLength.ToString(), problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("hunter2", problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DescribeTokenProblem_AtOrAboveTheFloor_IsNull()
+    {
+        Assert.Null(DarlingHostBinding.DescribeTokenProblem(new string('x', DarlingHostBinding.MinimumTokenLength)));
+        Assert.Null(DarlingHostBinding.DescribeTokenProblem(new string('x', 32)));  // what --configure-network generates
+    }
+
+    [Fact]
+    public void TheWebHost_FailsClosedOnATokenProblem()
+    {
+        /* The floor has to reach the bind decision, not just exist as a function: the token block in the
+           web host's start path routes every resolved token through DescribeTokenProblem and degrades to
+           loopback-only on a problem, exactly like the empty-token case it replaced. */
+        var path = System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "DarlingWebHostService.cs");
+        var source = System.IO.File.ReadAllText(path);
+        var call = source.IndexOf("var tokenProblem = DarlingHostBinding.DescribeTokenProblem(token);", StringComparison.Ordinal);
+        Assert.True(call >= 0, "the web host no longer routes the resolved token through DescribeTokenProblem");
+
+        var block = source.Substring(call, 700);
+        Assert.Contains("_logger.LogCritical(", block, StringComparison.Ordinal);
+        Assert.Contains("networkMode = false;", block, StringComparison.Ordinal);
+    }
+
+    /* ---- trustedProxies: IPs and CIDRs, nothing else, none by default ---- */
+
+    [Fact]
+    public void TryParseTrustedProxies_NullOrEmpty_IsNoProxies()
+    {
+        Assert.True(DarlingHostBinding.TryParseTrustedProxies(null, out var none, out var problem));
+        Assert.Empty(none);
+        Assert.Null(problem);
+
+        Assert.True(DarlingHostBinding.TryParseTrustedProxies(new[] { "", "  " }, out var blank, out _));
+        Assert.Empty(blank);
+    }
+
+    [Fact]
+    public void TryParseTrustedProxies_AcceptsIpsAndCidrs()
+    {
+        Assert.True(DarlingHostBinding.TryParseTrustedProxies(
+            new[] { "10.0.0.5", " 10.0.1.0/24 ", "::1", "2001:db8::/32" }, out var proxies, out _));
+
+        Assert.Equal(4, proxies.Count);
+        Assert.True(proxies[0].Contains(IPAddress.Parse("10.0.0.5")));
+        Assert.False(proxies[0].Contains(IPAddress.Parse("10.0.0.6")));   // a bare IP is that one address
+        Assert.True(proxies[1].Contains(IPAddress.Parse("10.0.1.200")));
+        Assert.True(proxies[2].Contains(IPAddress.IPv6Loopback));
+        Assert.True(proxies[3].Contains(IPAddress.Parse("2001:db8::9")));
+    }
+
+    [Fact]
+    public void TryParseTrustedProxies_RefusesAnEntryItCannotRead()
+    {
+        Assert.False(DarlingHostBinding.TryParseTrustedProxies(new[] { "10.0.0.5", "proxy.corp.local" }, out var proxies, out var problem));
+
+        Assert.Empty(proxies);
+        Assert.Contains("proxy.corp.local", problem, StringComparison.Ordinal);
+    }
 }

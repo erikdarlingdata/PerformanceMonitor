@@ -52,6 +52,12 @@ internal sealed class DarlingWebSecurityHeaders
 {
     internal const string ContentSecurityPolicyHeader = "Content-Security-Policy";
 
+    /// <summary>One year of HSTS, no subdomains: the dashboard is served on an address:port of its own and
+    /// speaks for nothing beneath it. Sent only on a response to a request that came over HTTPS (the
+    /// connection's own scheme, or a configured proxy's forwarded scheme): over plain HTTP a browser ignores it,
+    /// and the loopback listeners are plain HTTP by design.</summary>
+    internal const string StrictTransportSecurityValue = "max-age=31536000";
+
     internal const string ContentSecurityPolicy =
         "default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; "
         + "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
@@ -83,6 +89,11 @@ internal sealed class DarlingWebSecurityHeaders
             headers.XFrameOptions = "DENY";
             headers.XContentTypeOptions = "nosniff";
             headers["Referrer-Policy"] = "no-referrer";
+            if (((HttpContext)state).Request.IsHttps)
+            {
+                headers.StrictTransportSecurity = StrictTransportSecurityValue;
+            }
+
             return Task.CompletedTask;
         }, context);
 

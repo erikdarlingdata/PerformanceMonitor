@@ -345,6 +345,9 @@ public sealed class DarlingWebAuthTests
     [Theory]
     [InlineData("/auth/logout", false, true)]                 // logout is a flow path even with OIDC off (token seats hold cookies too)
     [InlineData("/auth/logout", true, true)]
+    [InlineData("/auth/login", false, true)]                  // the token sign-in leg exists in every mode: the form POSTs the token there
+    [InlineData("/auth/login", true, true)]
+    [InlineData("/auth/login/extra", false, false)]
     [InlineData("/auth/oidc/login", true, true)]
     [InlineData("/auth/oidc/callback", true, true)]
     [InlineData("/auth/oidc/login", false, false)]            // OIDC off: the legs fall through to normal auth (login page, no squatting)

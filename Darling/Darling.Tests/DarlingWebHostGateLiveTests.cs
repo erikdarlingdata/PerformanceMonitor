@@ -169,58 +169,82 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.Equal("text/html; charset=utf-8", ctx.Response.ContentType);
     }
 
-    /// <summary>Network mode, the right token, an in-CIDR remote: the gate exchanges the token for a
-    /// session cookie and 302-redirects (<c>WebRequestAction.SetCookieAndRedirect</c>) — proof the request
-    /// got PAST every gate, not a login page and not a refusal.</summary>
+    /// <summary>The login form's own request: a form-encoded POST of the token (and the page to return to)
+    /// to <see cref="DarlingWebHostService.LoginPath"/>, which is the only place the token is accepted.</summary>
+    internal static Task<HttpContext> PostSignIn(
+        TestServer server, string host, IPAddress? remote, string token, string? returnPath = null, Action<HttpContext>? configure = null)
+    {
+        var body = $"token={Uri.EscapeDataString(token)}"
+            + (returnPath is null ? string.Empty : $"&return={Uri.EscapeDataString(returnPath)}");
+        var bytes = System.Text.Encoding.UTF8.GetBytes(body);
+        return server.SendAsync(ctx =>
+        {
+            ctx.Request.Method = "POST";
+            ctx.Request.Path = DarlingWebHostService.LoginPath;
+            ctx.Request.Headers.Host = host;
+            ctx.Request.ContentType = "application/x-www-form-urlencoded";
+            ctx.Request.ContentLength = bytes.Length;
+            ctx.Request.Body = new MemoryStream(bytes);
+            ctx.Connection.RemoteIpAddress = remote;
+            configure?.Invoke(ctx);
+        });
+    }
+
+    /// <summary>Network mode, the right token posted by the form, an in-CIDR remote: the sign-in leg
+    /// exchanges the token for a session cookie and 302-redirects — proof the request got PAST every gate,
+    /// not a login page and not a refusal.</summary>
     [Fact]
     public async Task NetworkMode_RightTokenInCidr_PassesTheGates()
     {
         using var server = await BuildServer(networkMode: true);
-        var ctx = await Send(server, "/", ListenIp, InCidrRemote, token: Token);
+        var ctx = await PostSignIn(server, ListenIp, InCidrRemote, Token);
 
         Assert.Equal(StatusCodes.Status302Found, ctx.Response.StatusCode);
         Assert.True(ctx.Response.Headers.SetCookie.Count > 0, "a valid token must be exchanged for a session cookie");
     }
 
+    /// <summary>The token is accepted from the form's POST body only. The same token in a GET's query string
+    /// is not exchanged, whatever its value: no cookie, no redirect, the login page instead. A URL is the
+    /// one place a credential is copied without anyone meaning to (history, bookmarks, Referer headers).</summary>
+    [Fact]
+    public async Task NetworkMode_RightTokenInUrl_IsNotExchanged()
+    {
+        using var server = await BuildServer(networkMode: true);
+        var ctx = await Send(server, "/", ListenIp, InCidrRemote, token: Token);
+
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        Assert.Equal("text/html; charset=utf-8", ctx.Response.ContentType);
+        Assert.Equal(0, ctx.Response.Headers.SetCookie.Count);
+    }
+
     /// <summary>
-    /// #4221: an alert link is a hash route, and the token form's hidden <c>return</c> field (populated by
-    /// <c>pathname + search + hash</c>) rides along as an ordinary query parameter on the token-strip 302 —
-    /// <c>BuildPathWithoutToken</c> strips only <c>token</c> and preserves everything else untouched. This
-    /// proves the LIVE pipeline (real ASP.NET Core query parsing/redirect, not just the pure
-    /// <c>SanitizeRedirectPath</c>/<c>BuildPathWithoutToken</c> functions in isolation) round-trips a
-    /// fragment-bearing <c>return</c> value byte for byte, with no token left lingering.
+    /// #4221: an alert link is a hash route, and the login form's hidden <c>return</c> field (populated by
+    /// <c>pathname + search + hash</c>) rides the sign-in POST; the 302 that follows lands on it byte for
+    /// byte, through the same open-redirect guard as before, with no token anywhere in the URL. This proves
+    /// the LIVE pipeline (real ASP.NET Core form parsing/redirect, not the pure <c>SanitizeRedirectPath</c>
+    /// in isolation) round-trips a fragment-bearing <c>return</c> value.
     /// </summary>
     [Fact]
     public async Task NetworkMode_RightTokenWithHashReturn_KeepsFragmentInReturnValue()
     {
         using var server = await BuildServer(networkMode: true);
         const string returnValue = "/#/triage?server=a&metric=b";
-        var target = $"/?token={Uri.EscapeDataString(Token)}&return={Uri.EscapeDataString(returnValue)}";
 
-        var ctx = await server.SendAsync(req =>
-        {
-            req.Request.Method = "GET";
-            req.Request.Path = "/";
-            req.Request.QueryString = new QueryString(target[target.IndexOf('?')..]);
-            req.Request.Headers.Host = ListenIp;
-            req.Connection.RemoteIpAddress = InCidrRemote;
-        });
+        var ctx = await PostSignIn(server, ListenIp, InCidrRemote, Token, returnPath: returnValue);
 
         Assert.Equal(StatusCodes.Status302Found, ctx.Response.StatusCode);
         var location = ctx.Response.Headers.Location.ToString();
         Assert.DoesNotContain("token=", location, StringComparison.Ordinal);
-
-        var parsed = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(location[location.IndexOf('?')..]);
-        Assert.Equal(returnValue, parsed["return"].ToString());
+        Assert.Equal(returnValue, location);
     }
 
     /// <summary>Network mode, the right token, but the remote is OUTSIDE <c>allowFrom</c>: the CIDR gate is
-    /// outermost (#2550) and forbids before the token is even considered.</summary>
+    /// outermost (#2550) and forbids before the token is even considered — the sign-in leg included.</summary>
     [Fact]
     public async Task NetworkMode_RightTokenOutsideCidr_IsForbidden()
     {
         using var server = await BuildServer(networkMode: true);
-        var ctx = await Send(server, "/", ListenIp, OutOfCidrRemote, token: Token);
+        var ctx = await PostSignIn(server, ListenIp, OutOfCidrRemote, Token);
 
         Assert.Equal(StatusCodes.Status403Forbidden, ctx.Response.StatusCode);
     }
@@ -375,7 +399,7 @@ public sealed class DarlingWebHostGateLiveTests
         var wrong = await Send(server, "/api/fleet", "localhost", IPAddress.Loopback, token: "not-the-token");
         Assert.Equal(StatusCodes.Status401Unauthorized, wrong.Response.StatusCode);
 
-        var exchange = await Send(server, "/", "localhost", IPAddress.Loopback, token: Token);
+        var exchange = await PostSignIn(server, "localhost", IPAddress.Loopback, Token);
         Assert.Equal(StatusCodes.Status302Found, exchange.Response.StatusCode);
         var setCookie = Assert.Single(exchange.Response.Headers.SetCookie) ?? string.Empty;
         var cookie = setCookie[..setCookie.IndexOf(';')];
@@ -409,7 +433,7 @@ public sealed class DarlingWebHostGateLiveTests
         var wrong = await Send(server, "/api/fleet", "localhost", IPAddress.Loopback, token: "not-the-token");
         Assert.Equal(StatusCodes.Status401Unauthorized, wrong.Response.StatusCode);
 
-        var exchange = await Send(server, "/", "localhost", IPAddress.Loopback, token: Token);
+        var exchange = await PostSignIn(server, "localhost", IPAddress.Loopback, Token);
         Assert.Equal(StatusCodes.Status302Found, exchange.Response.StatusCode);
         var setCookie = Assert.Single(exchange.Response.Headers.SetCookie) ?? string.Empty;
         var cookie = setCookie[..setCookie.IndexOf(';')];
@@ -555,7 +579,7 @@ public sealed class DarlingWebHostGateLiveTests
         var named = await Send(server, "/", ListenIp, IPAddress.Loopback, token: Token);
         Assert.Equal(StatusCodes.Status400BadRequest, named.Response.StatusCode);
 
-        var loopbackName = await Send(server, "/", "localhost", IPAddress.Loopback, token: Token);
+        var loopbackName = await PostSignIn(server, "localhost", IPAddress.Loopback, Token);
         Assert.Equal(StatusCodes.Status302Found, loopbackName.Response.StatusCode);
     }
 
@@ -702,10 +726,10 @@ public sealed class DarlingWebHostGateLiveTests
         return (ctx, await new StreamReader(ctx.Response.Body).ReadToEndAsync());
     }
 
-    /// <summary>A token that itself contains a comma is the one a joined repeated key could equal: <c>?token=left&amp;token=right</c>
-    /// used to read as <c>left,right</c> and pass the gate. It is no token now, and the one-value form still passes.</summary>
+    /// <summary>A token in the URL is never compared, so neither a repeated key that joins to the configured value
+    /// (<c>?token=left&amp;token=right</c> against <c>left,right</c>) nor the single-value form signs a client in.</summary>
     [Fact]
-    public async Task NetworkMode_RepeatedTokenKey_IsNotAToken_AndTheSingleKeyStillPasses()
+    public async Task NetworkMode_TokenInTheUrl_IsNeverAToken_RepeatedOrSingle()
     {
         using var server = await BuildServer(networkMode: true, accessToken: "left,right");
 
@@ -715,28 +739,28 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.Equal(0, repeated.Response.Headers.SetCookie.Count);
 
         var (single, _) = await Fetch(server, "/", "?token=left%2Cright");
-        Assert.Equal(StatusCodes.Status302Found, single.Response.StatusCode);
-        Assert.True(single.Response.Headers.SetCookie.Count > 0);
+        Assert.Equal(StatusCodes.Status200OK, single.Response.StatusCode);
+        Assert.Equal(0, single.Response.Headers.SetCookie.Count);
     }
 
     /// <summary>A repeated <c>?token=</c> is refused and still leaves one Token refusal line, as a wrong single token does:
-    /// the line says the key was sent more than once and holds neither token value (#5245).</summary>
+    /// the line says a token in the URL is not accepted and holds neither token value (#5245).</summary>
     [Theory]
     [InlineData("/", StatusCodes.Status200OK)]
     [InlineData("/api/fleet", StatusCodes.Status401Unauthorized)]
-    public async Task NetworkMode_RepeatedTokenKey_LeavesOneRefusalLine_WithNoTokenValue(string path, int expectedStatus)
+    public async Task NetworkMode_TokenInTheUrl_LeavesOneRefusalLine_WithNoTokenValue(string path, int expectedStatus)
     {
         var hostLogger = new CapturingTestLogger();
         using var server = await BuildServer(networkMode: true, hostLogger: hostLogger);
 
-        var (ctx, _) = await Fetch(server, path, "?token=guess-one-value&token=guess-two-value");
+        var (ctx, _) = await Fetch(server, path, "?token=first-value&token=second-value");
         Assert.Equal(expectedStatus, ctx.Response.StatusCode);
 
         var line = Assert.Single(hostLogger.Lines);
         Assert.StartsWith("Warning: Web dashboard ", line, StringComparison.Ordinal);
-        Assert.Contains("the ?token= key was sent more than once", line, StringComparison.Ordinal);
-        Assert.DoesNotContain("guess-one-value", line, StringComparison.Ordinal);
-        Assert.DoesNotContain("guess-two-value", line, StringComparison.Ordinal);
+        Assert.Contains("a token was presented in the URL", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("first-value", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("second-value", line, StringComparison.Ordinal);
         Assert.DoesNotContain(Token, line, StringComparison.Ordinal);
     }
 

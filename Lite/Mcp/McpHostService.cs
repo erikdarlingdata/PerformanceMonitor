@@ -26,6 +26,7 @@ public sealed class McpHostService : BackgroundService
     private readonly DuckDbInitializer _duckDb;
     private readonly ScheduleManager? _scheduleManager;
     private readonly int _port;
+    private readonly bool _allowWrites;
     private WebApplication? _app;
 
     /// <summary>
@@ -37,7 +38,10 @@ public sealed class McpHostService : BackgroundService
 
     /// <param name="scheduleManager">#3896: the collector schedules, so the analysis tools bound each
     /// latest-value read by the cadence its collector runs at. Null bounds by the shipped defaults.</param>
-    public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, ScheduleManager? scheduleManager = null)
+    /// <param name="allowWrites">Whether the write tools are served (<see cref="McpSettings.AllowWrites"/>, the
+    /// <c>mcp_allow_writes</c> setting). Default off: a write tool is then absent from the served set and a call
+    /// to it fails as an unknown tool. See <see cref="McpWritePolicy"/>.</param>
+    public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, ScheduleManager? scheduleManager = null, bool allowWrites = false)
     {
         _dataService = dataService;
         _serverManager = serverManager;
@@ -45,6 +49,7 @@ public sealed class McpHostService : BackgroundService
         _duckDb = duckDb;
         _port = port;
         _scheduleManager = scheduleManager;
+        _allowWrites = allowWrites;
 
         /* #4999: the health read judges each collector by the interval it is scheduled at on that server, the
            same answer the analysis tools bound their reads by (see RegisterAnalysisService below), not by the
@@ -139,6 +144,11 @@ public sealed class McpHostService : BackgroundService
             var planFetcher = new SqlPlanFetcher(_serverManager);
             /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
             RegisterAnalysisService(builder.Services, _duckDb, planFetcher, _serverManager, _scheduleManager);
+
+            /* The write switch (McpWritePolicy): once the SDK has gathered every registered tool, drop the writes
+               unless mcp_allow_writes is on and stamp the annotation hints. Registered here, ahead of AddMcpServer,
+               so it is a PostConfigure over the SDK's own options and sees the full tool set. */
+            builder.Services.AddMcpWritePolicy(_allowWrites);
 
             /* Register MCP server with all tool classes */
             builder.Services
@@ -240,6 +250,19 @@ public sealed class McpHostService : BackgroundService
             _app.MapMcp();
 
             AppLogger.Info("MCP", $"Starting MCP server on http://localhost:{_port}");
+
+            /* One line at every start, because an install that used the mute tool before the switch existed loses
+               it on upgrade until the operator turns the setting on. */
+            if (_allowWrites)
+            {
+                AppLogger.Warn("MCP",
+                    $"MCP write tools are ON ({McpWritePolicy.WritesSetting}): mute_analysis_finding and unmute_analysis_finding are served to any client that reaches this port.");
+            }
+            else
+            {
+                AppLogger.Info("MCP",
+                    $"MCP write tools are off (the default): mute_analysis_finding and unmute_analysis_finding are not served. To serve them set {McpWritePolicy.WritesSetting} to true in settings.json and restart.");
+            }
 
             await _app.RunAsync(stoppingToken);
         }

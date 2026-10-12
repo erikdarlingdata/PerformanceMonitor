@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Net;
+using System.Net.Sockets;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
@@ -237,11 +238,80 @@ internal static class DarlingHostBinding
         || (!string.IsNullOrEmpty(host) && !string.IsNullOrEmpty(extraAllowedHost)
             && string.Equals(host, extraAllowedHost, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>The fewest characters an access token may have. The <c>--configure-network</c> wizard
+    /// generates 32; a shorter one was typed by hand (a <c>file:</c>/<c>env:</c> reference, or a plaintext
+    /// <c>token</c>), and below this it is too short to protect a network-facing port.</summary>
+    internal const int MinimumTokenLength = 16;
+
+    /// <summary>
+    /// PURE: why a resolved token cannot gate an exposed surface, or null when it can. Empty (nothing to
+    /// compare against) and too short (see <see cref="MinimumTokenLength"/>) both fail closed; the caller logs
+    /// the text at Critical and binds loopback-only. Says nothing about the token's value beyond its length.
+    /// </summary>
+    internal static string? DescribeTokenProblem(string? token)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return "resolved to empty after decryption";
+        }
+
+        if (token.Length < MinimumTokenLength)
+        {
+            return $"is {token.Length} characters long, and at least {MinimumTokenLength} are required for an exposed surface "
+                + "(--configure-network generates 32; set a longer value in the token's file/env/encrypted slot)";
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// PURE: parses <c>network.trustedProxies</c> — each entry an IP (<c>10.0.0.5</c>, <c>::1</c>) or a CIDR
+    /// (<c>10.0.1.0/24</c>) — into the networks whose forwarded headers the host honors. A bare IP becomes
+    /// its single-address network. Null or empty means none (the default, so the headers are ignored from
+    /// everyone). Returns false with <paramref name="problem"/> set when an entry does not parse; the caller
+    /// fails closed on it rather than trusting a list it cannot read.
+    /// </summary>
+    internal static bool TryParseTrustedProxies(
+        IReadOnlyList<string>? entries, out IReadOnlyList<IPNetwork> proxies, out string? problem)
+    {
+        problem = null;
+        var parsed = new List<IPNetwork>();
+        if (entries is not null)
+        {
+            foreach (var raw in entries)
+            {
+                var entry = raw?.Trim();
+                if (string.IsNullOrEmpty(entry))
+                {
+                    continue;
+                }
+
+                if (IPNetwork.TryParse(entry, out var network))
+                {
+                    parsed.Add(network);
+                }
+                else if (IPAddress.TryParse(entry, out var address))
+                {
+                    parsed.Add(new IPNetwork(address, address.AddressFamily == AddressFamily.InterNetworkV6 ? 128 : 32));
+                }
+                else
+                {
+                    proxies = Array.Empty<IPNetwork>();
+                    problem = $"'{entry}' is neither an IP address nor a CIDR";
+                    return false;
+                }
+            }
+        }
+
+        proxies = parsed;
+        return true;
+    }
+
     /// <summary>
     /// PURE constant-time token comparison. Both tokens are hashed to a fixed 32 bytes first, so the compare
     /// is constant-time regardless of length and leaks neither token nor its length. An empty
     /// <paramref name="expected"/> never authorizes (the caller should also guard). Used by the MCP host's
-    /// Bearer-header check and the web host's <c>?token=</c> check alike.
+    /// Bearer-header check and the web host's sign-in form check alike.
     /// </summary>
     internal static bool FixedTimeTokenEquals(string? presented, string? expected)
     {

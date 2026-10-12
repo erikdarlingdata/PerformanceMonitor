@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Net;
 using System.Runtime.Versioning;
 using System.Threading;
@@ -424,12 +425,27 @@ public sealed class DarlingMcpHostService : BackgroundService
                 try
                 {
                     var token = config.Mcp.Network.ResolveToken(out var usedPlaintext);
+
                     if (string.IsNullOrWhiteSpace(token))
                     {
                         _logger.LogCritical(
                             "MCP network token resolved to empty after decryption; MCP server not started.");
                         await DisposeFailedStartAsync();
                         return false;
+                    }
+
+                    /* Under the floor. The wizard generates 32 characters; a shorter one was typed by hand (a
+                       file:/env: reference or a plaintext "token"). It is not used to gate the network: Critical,
+                       then loopback-only, with the token still resolved so it keeps gating the loopback listener,
+                       the way a refused TLS certificate degrades. */
+                    var tokenProblem = DarlingHostBinding.DescribeTokenProblem(token);
+                    if (tokenProblem is not null)
+                    {
+                        _logger.LogCritical(
+                            "MCP network token (mcp.network.token / mcp.network.encryptedToken) {Problem} — refusing to expose; binding loopback-only.",
+                            tokenProblem);
+                        networkMode = false;
+                        bearerToken = token;
                     }
                     else
                     {
@@ -506,6 +522,63 @@ public sealed class DarlingMcpHostService : BackgroundService
                         tlsOutcome.Shape);
                     networkMode = false;
                 }
+            }
+
+            /* The write tools (DarlingMcpWritePolicy) need the bearer token on EVERY request, loopback included:
+               without it any local process or ordinary logon could drive them once MCP is on. bearerToken is
+               already resolved above for every start (the network block, or the loopback block through
+               ResolveLoopbackOnlyToken), and a loopback-only server that holds a token gates on it
+               (requireTokenWhenLoopbackOnly below), so a start that serves the write tools always has the gate in
+               front of them. The token must also clear the same floor as the network bind: one typed by hand and
+               shorter than it gates the write tools no better than none, so they stay off.
+               No usable token, no writes: the tools stay absent and the log names the setting. */
+            var writes = DarlingMcpWritePolicy.Effective.Off;
+            if (config.Mcp.AllowWrites)
+            {
+                var writeTokenProblem = bearerToken.Length > 0 ? DarlingHostBinding.DescribeTokenProblem(bearerToken) : null;
+                writes = DarlingMcpWritePolicy.Resolve(config.Mcp, tokenPresent: bearerToken.Length > 0 && writeTokenProblem is null);
+                if (!writes.Writes && writeTokenProblem is not null)
+                {
+                    _logger.LogCritical(
+                        "MCP bearer token (mcp.network.token / mcp.network.encryptedToken) {Problem} — the MCP write tools stay off.",
+                        writeTokenProblem);
+                }
+                else if (!writes.Writes)
+                {
+                    _logger.LogCritical(
+                        "{Setting} is on but no usable bearer token is available — the MCP write tools stay off. Set mcp.network.encryptedToken " +
+                        "(via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters; every MCP request, loopback " +
+                        "included, must then present it.",
+                        DarlingMcpWritePolicy.WritesSetting,
+                        DarlingHostBinding.MinimumTokenLength);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "MCP write tools are ON ({Setting}; add_servers/remove_server {ServerAdmin}) — every MCP request, " +
+                        "loopback included, must present the bearer token.",
+                        DarlingMcpWritePolicy.WritesSetting,
+                        writes.ServerAdmin ? "on via " + DarlingMcpWritePolicy.ServerAdminSetting : "off");
+
+                    if (writes.ServerAdmin && config.Mcp.AllowWindowsAuthOverUnverifiedTls)
+                    {
+                        _logger.LogWarning(
+                            "{Setting} is on: add_servers accepts Windows authentication with trust_server_certificate or " +
+                            "optional encryption, so a caller can point this service's own account at a server it cannot verify.",
+                            DarlingMcpAddServersPolicy.UnverifiedWindowsAuthSetting);
+                    }
+                }
+            }
+            else
+            {
+                /* One line at every start, because an install that used the write tools before the switch
+                   existed loses them on upgrade until the operator turns it on. */
+                _logger.LogInformation(
+                    "MCP write tools are off (the default): tools that change monitoring configuration are not served. " +
+                    "To serve them set {Setting}=true in darling.json plus a bearer token (mcp.network.encryptedToken or " +
+                    "mcp.network.token); add_servers/remove_server also need {ServerAdminSetting}=true.",
+                    DarlingMcpWritePolicy.WritesSetting,
+                    DarlingMcpWritePolicy.ServerAdminSetting);
             }
 
             /* The REAL primary bind address (network IP when exposed, else loopback): both the port precheck
@@ -724,7 +797,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             /* Register MCP server with the analysis tool class. */
-            ConfigureMcpServices(builder.Services, declaredPeers, _readLatency, _logger, _slowReads);
+            ConfigureMcpServices(
+                builder.Services, declaredPeers, _readLatency, _logger, _slowReads, writes,
+                new DarlingMcpAddServersPolicy(config.Mcp.AllowWindowsAuthOverUnverifiedTls));
 
             _app = builder.Build();
 
@@ -965,8 +1040,13 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// Every line below is identical to before the extraction; only the receiver (<c>builder.Services</c>
     /// there vs. the parameter here) changes.
     /// </summary>
-    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null)
+    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null)
     {
+        /* add_servers takes its caller policy as a service parameter, so the registration has to exist wherever the
+           tools are registered: without it the SDK would serve the parameter as a client argument. Every setting
+           off unless the host passes the one built from darling.json. */
+        services.AddSingleton<DarlingMcpAddServersPolicy>(addServers ?? DarlingMcpAddServersPolicy.Default);
+
         /* #4442 scope 2: the per-tool latency filter needs the SAME accumulator singleton the web host and
            worker flush use (Program.cs registers ONE ReadLatencyAccumulator for the whole process) -- an
            optional parameter, defaulted to a private instance, so every existing test-constructed call site
@@ -983,6 +1063,14 @@ public sealed class DarlingMcpHostService : BackgroundService
            accumulator the filter above records into. Typed-generic AddSingleton<T>, as the seat census
            (McpServiceParameterDiSeatCensusTests) greps this file's source text for it. */
         services.AddSingleton<ReadLatencyRecorder>(new ReadLatencyRecorder(hostReadLatency, readLatencyLogger, slowReads));
+
+        /* The write switch (DarlingMcpWritePolicy). Once the SDK has gathered every registered tool into
+           McpServerOptions.ToolCollection, drop the writes the settings do not offer and stamp every tool's
+           annotation hints. PostConfigure runs after the SDK's own options setup, so it sees the full set, and
+           the narrowed collection is the one every request's session options are cloned from, so / and /core
+           both serve it. Default (no settings): every write tool is absent. */
+        services.PostConfigure<ModelContextProtocol.Server.McpServerOptions>(
+            options => DarlingMcpWritePolicy.Apply(options.ToolCollection, writes));
 
         services
             .AddMcpServer(options =>
@@ -1521,6 +1609,9 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// also true for a loopback-only start with a configured token (<see cref="ResolveLoopbackOnlyToken"/>). A
     /// loopback-only server with no token configured passes false and stays tokenless as before. Optional, so every
     /// other caller is unchanged.</para>
+    ///
+    /// <para><paramref name="utcNow"/> is the clock the bearer gate's per-source wait reads (null is the
+    /// system clock). A test passes a settable one so the wait can be crossed without sleeping.</para>
     /// </summary>
     internal void ConfigurePipeline(
         WebApplication app,
@@ -1529,8 +1620,11 @@ public sealed class DarlingMcpHostService : BackgroundService
         CidrAllowList allowedCidr,
         string bearerToken,
         string? allowedHostName = null,
-        bool requireTokenWhenLoopbackOnly = false)
+        bool requireTokenWhenLoopbackOnly = false,
+        Func<DateTime>? utcNow = null)
     {
+        Func<DateTime> clock = utcNow ?? (() => DateTime.UtcNow);
+
         /* #2479 item 5: every gate below used to refuse silently, so "is my token wrong or my CIDR
            wrong" was answerable only from the client, which sees one opaque status code. One log per
            refusal is rate-limited per (gate, source) because this port is LAN-exposed on purpose and
@@ -1559,6 +1653,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                 /* Keep the raw value, as above. */
             }
         }
+        /* The bearer gate's per-source wait after repeated wrong tokens (DarlingSignInThrottle). Created here
+           for the same reason as the refusal log: one per started server, so a rebind starts clean and no
+           static outlives the listener that earned the failures. */
+        var tokenThrottle = new DarlingSignInThrottle();
 
         /* DNS-rebinding guard (#1648) — the FIRST middleware, in BOTH modes, mirroring the web host's
            #1576 fix. The loopback bind is tokenless unless the operator configured a token (the CIDR check installs only in
@@ -1639,9 +1737,39 @@ public sealed class DarlingMcpHostService : BackgroundService
                    and threading a result type through it to save one parse on an ALREADY-REFUSED request
                    is not a trade worth making. */
                 var authorization = context.Request.Headers.Authorization.ToString();
+                var remote = context.Connection.RemoteIpAddress;
+                var source = DarlingHttpRefusalLog.DescribeSource(remote);
+                var now = clock();
+
+                /* A source that has presented wrong tokens repeatedly waits, and a request inside the wait is
+                   answered 429 without being compared. A CORRECT token presented during the wait is held too:
+                   answering it would tell the caller which attempt was right. The wait is per source address, so
+                   on the loopback bind (write tools on) every local client is one source, and behind a proxy
+                   every client is the proxy's address: this host does not read forwarded headers. */
+                var wait = tokenThrottle.RetryAfter(source, now);
+                if (wait > TimeSpan.Zero)
+                {
+                    var seconds = (int)Math.Ceiling(wait.TotalSeconds);
+                    refusals.Report(
+                        _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status429TooManyRequests, remote,
+                        $"requests from this source are held for {seconds} more second(s) after repeated wrong bearer tokens",
+                        now);
+                    context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                    context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
+                    return;
+                }
 
                 if (!IsBearerTokenAuthorized(authorization, token))
                 {
+                    /* Only a Bearer that was presented and missed is an attempt, so only that counts against the
+                       source. No header, or one that is not a well-formed Bearer, compared nothing: counting
+                       it would let a client that was never given the token hold every other client on its
+                       address, which is exactly what happens on the loopback bind. */
+                    if (ExtractBearerToken(authorization) is not null)
+                    {
+                        tokenThrottle.RecordFailure(source, now);
+                    }
+
                     /* THREE client states, never the token's value. Each one is a different next step
                        for the operator, which is the whole point of logging this at all:
 
@@ -1656,14 +1784,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                        None of the three says anything about what the token IS. */
                     refusals.Report(
                         _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
-                        context.Connection.RemoteIpAddress,
+                        remote,
                         DescribeBearerRefusal(authorization),
-                        DateTime.UtcNow);
+                        now);
                     context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                     context.Response.Headers.WWWAuthenticate = "Bearer";
                     return;
                 }
 
+                tokenThrottle.RecordSuccess(source);
                 await next(context);
             });
         }

@@ -18,9 +18,10 @@
     "enabled": true,
     "port": 5153,
     "network": {
-      "// tls": "Without this the token above and the session cookie it mints cross the network in the clear, and allowFrom 0.0.0.0/0 bounds nothing. To enable: mount a PEM pair as the web_tls_cert / web_tls_key secrets (see docker-compose.yml) and add \"tls\": { \"certPath\": \"/run/secrets/web_tls_cert\", \"keyPath\": \"/run/secrets/web_tls_key\" } here. A bad or expired certificate keeps the dashboard loopback-only rather than falling back to HTTP, which in a container means unreachable — that is the intended failure.",
+      "// tls": "Without this the token above and the session cookie it mints cross the network in the clear, so docker-compose.yml publishes the port on the docker host's loopback address only and the service logs a Critical line at every plain-HTTP network start. To enable: mount a PEM pair as the web_tls_cert / web_tls_key secrets (see docker-compose.yml) and add \"tls\": { \"certPath\": \"/run/secrets/web_tls_cert\", \"keyPath\": \"/run/secrets/web_tls_key\" } here. A bad or expired certificate keeps the dashboard loopback-only rather than falling back to HTTP, which in a container means unreachable — that is the intended failure. Behind a TLS-terminating reverse proxy instead, list the proxy in \"trustedProxies\" (IPs or CIDRs) so the cookie and the OIDC redirect follow the proxy's HTTPS.",
+      "// allowFrom": "The docker bridge range: with the port published on 127.0.0.1, a connection from the docker host arrives inside the container from the bridge gateway, and this placeholder admits exactly that. Widen it to your operators' subnet only when you publish the port on a network interface, with TLS in place.",
       "listen": "0.0.0.0",
-      "allowFrom": "0.0.0.0/0",
+      "allowFrom": "172.16.0.0/12",
       "token": "file:/run/secrets/web_token"
     }
   },
@@ -30,7 +31,7 @@
     "network": {
       "// tls": "Without this the bearer token above and every tool result cross the network in the clear, and allowFrom 0.0.0.0/0 bounds nothing. To enable: mount a PEM pair as the mcp_tls_cert / mcp_tls_key secrets (see docker-compose.yml) and add \"tls\": { \"certPath\": \"/run/secrets/mcp_tls_cert\", \"keyPath\": \"/run/secrets/mcp_tls_key\" } here, and \"hostName\": \"<the DNS name on the certificate>\" so clients can connect by that name. With a 0.0.0.0 listen the one listener then serves HTTPS, so local clients use https too. A bad or expired certificate keeps MCP loopback-only rather than falling back to HTTP, which in a container means unreachable — that is the intended failure.",
       "listen": "0.0.0.0",
-      "allowFrom": "0.0.0.0/0",
+      "allowFrom": "172.16.0.0/12",
       "token": "file:/run/secrets/mcp_token"
     }
   }

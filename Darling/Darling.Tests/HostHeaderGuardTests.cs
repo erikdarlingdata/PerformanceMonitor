@@ -235,7 +235,8 @@ public sealed class HostHeaderGuardTests
             $"{fileName}: the token flag must be derived after the TLS decision and before the pipeline call");
 
         var callText = source[call..source.IndexOf(';', call)];
-        Assert.EndsWith(", requireTokenWhenLoopbackOnly)", callText, StringComparison.Ordinal);
+        /* The web host also hands over its configured proxy list after the flag. */
+        Assert.Matches(@", requireTokenWhenLoopbackOnly(, trustedProxies: trustedProxies)?\)$", callText);
     }
 
     /// <summary>

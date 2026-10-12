@@ -121,17 +121,17 @@ public sealed class AlertNotebookEndpointTests
         });
     }
 
-    /// <summary>The CI finding (pm-pr): the earlier "authenticated" pins presented <c>?token=</c> but never
-    /// followed the token->cookie exchange, so they hit <see cref="WebRequestAction.SetCookieAndRedirect"/>
-    /// (302) instead of the route handler and proved nothing. This performs the SAME two-step exchange
-    /// <c>DarlingWebHostGateLiveTests.NetworkMode_RightTokenInCidr_PassesTheGates</c> proves
-    /// the gate does: present <c>?token=</c> once to mint a session cookie from the <c>Set-Cookie</c> response
+    /// <summary>The CI finding (pm-pr): the earlier "authenticated" pins presented the token but never
+    /// followed the token->cookie exchange, so they hit the exchange's 302 instead of the route handler and
+    /// proved nothing. This performs the SAME two-step exchange
+    /// <c>DarlingWebHostGateLiveTests.NetworkMode_RightTokenInCidr_PassesTheGates</c> proves the gate does:
+    /// POST the token to the sign-in leg once to mint a session cookie from the <c>Set-Cookie</c> response
     /// header, then re-send the real request with that cookie attached, which is what reaches
     /// <c>WebAuthAction.Allow</c> and therefore the endpoint's own lambda.</summary>
     private static async Task<HttpContext> SendAuthenticated(
         TestServer server, string path, IPAddress remote, string host = "192.168.1.205")
     {
-        var exchange = await Send(server, "/", remote, token: "correct-token-value", host: host);
+        var exchange = await DarlingWebHostGateLiveTests.PostSignIn(server, host, remote, "correct-token-value");
         Assert.Equal(StatusCodes.Status302Found, exchange.Response.StatusCode);
         var setCookie = exchange.Response.Headers.SetCookie.ToString();
         Assert.False(string.IsNullOrEmpty(setCookie), "token exchange did not mint a session cookie");

@@ -7,13 +7,14 @@ using PerformanceMonitorLite.Services;
 namespace PerformanceMonitorLite.Mcp;
 
 /// <summary>
-/// The MCP endpoint's two settings, read out of the same settings.json every other Lite setting lives in.
+/// The MCP endpoint's three settings (on/off, port, and whether the write tools are served), read out of the same
+/// settings.json every other Lite setting lives in.
 ///
 /// <para><b>What a broken settings.json does to this endpoint, and why (#2431).</b> The endpoint stays
 /// OFF, Lite still starts, and every reader of this type is told which capability that cost. All three
 /// halves of that were decided rather than inherited from <c>new McpSettings()</c>.</para>
 ///
-/// <para><i>Off rather than on.</i> These two keys are consent and address for a TCP listener. A file we
+/// <para><i>Off rather than on.</i> These keys are consent, address and permissions for a TCP listener. A file we
 /// cannot read supplies neither, so starting anyway means opening a port nobody in this session asked
 /// for, at an address that is a guess — and Lite's firewall rule follows the configured port (#2414), so
 /// the guess is not even the port a client would be aimed at. Failing closed is the only defensible
@@ -47,10 +48,19 @@ internal sealed class McpSettings
     public int Port { get; set; } = DefaultPort;
 
     /// <summary>
+    /// Whether the MCP write tools (<see cref="McpWritePolicy.WriteTools"/>) are served. Default OFF: the
+    /// endpoint answers reads only, and a call to a write tool fails as an unknown tool. Read from the
+    /// <c>mcp_allow_writes</c> key (<see cref="McpWritePolicy.WritesSetting"/>), at start, so a change needs a
+    /// restart, like <c>mcp_enabled</c>. There is no Settings window control for it: it is a file setting on
+    /// purpose, so it is turned on by someone who edited the file rather than by a click.
+    /// </summary>
+    public bool AllowWrites { get; set; } = false;
+
+    /// <summary>
     /// Why the MCP configuration could not be read, or null when it could.
     ///
     /// <para>Non-null covers two shapes that produce the identical user-visible outcome: settings.json is
-    /// present and unparseable, or it parses and one of these two keys holds a value of the wrong type.
+    /// present and unparseable, or it parses and one of these keys holds a value of the wrong type.
     /// Both end with the endpoint off through no decision of the operator's, which is the thing that has
     /// to be said out loud. An ABSENT file is deliberately not one of them — a first run has no
     /// settings.json, off is the correct answer, and there is no endpoint to have lost.</para>
@@ -127,6 +137,18 @@ internal sealed class McpSettings
                 }
 
                 settings.Port = portNumber;
+            }
+
+            if (root.TryGetProperty("mcp_allow_writes", out var allowWrites))
+            {
+                /* Same kind check as mcp_enabled: a quoted "true" from a hand edit is loud, not a silent OFF. The
+                   endpoint stays off with the problem named, exactly as for the other keys. */
+                if (allowWrites.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                {
+                    return Lost(WrongKind("mcp_allow_writes", allowWrites, "true or false"));
+                }
+
+                settings.AllowWrites = allowWrites.GetBoolean();
             }
 
             return settings;

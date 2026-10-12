@@ -21,7 +21,7 @@ internal enum DarlingRefusalGate
     /// <summary>The Host-header allowlist / DNS-rebinding guard. 400, both bind modes.</summary>
     HostAllowlist,
 
-    /// <summary>The access token — the MCP bearer header, or the web dashboard's <c>?token=</c>.</summary>
+    /// <summary>The access token — the MCP bearer header, or the web dashboard's sign-in form field.</summary>
     Token,
 
     /// <summary>The in-app source-address allowlist built from <c>network.allowFrom</c>. 403.</summary>
@@ -257,7 +257,7 @@ internal sealed class DarlingHttpRefusalLog
     /// What actually happened, so the verb agrees with the status code (review catch on #2479).
     ///
     /// <para>Not every gate rejection ends in a 4xx. The web dashboard answers an in-CIDR request carrying
-    /// a WRONG <c>?token=</c> with a 200 and the login page — deliberately, and it is exactly the state an
+    /// a WRONG token with a 200 and the login page — deliberately, and it is exactly the state an
     /// operator asks about when a token they pasted did not work, which is why it is logged at all. But
     /// "refused a request … with 200" is self-contradictory on its face, and it would mislead anyone
     /// reading the log cold or filtering it for denials on status.</para>

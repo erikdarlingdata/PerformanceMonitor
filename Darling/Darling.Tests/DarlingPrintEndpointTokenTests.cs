@@ -121,7 +121,7 @@ public class DarlingPrintEndpointTokenTests
         var error = new StringWriter();
 
         var exit = DarlingCliCommands.PrintEndpointToken(
-            "web", "web dashboard access", "--print-web-token", "presented via ?token=",
+            "web", "web dashboard access", "--print-web-token", "pasted into the sign-in form",
             elevated: true, configured: false, () => null, output, error);
 
         Assert.Equal(1, exit);

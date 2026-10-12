@@ -175,17 +175,24 @@ public sealed partial class DarlingMcpServerAdminTools
     public static Task<string> AddServers(
         NpgsqlDataSource postgres,
         [Description("A JSON ARRAY of server objects to add (see the tool description for the per-object fields and an example).")] string servers_json,
+        DarlingMcpAddServersPolicy policy,
         ILogger? logger = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, logger: logger, policy: policy);
+
+    /// <summary>The same onboarding core for a caller that is not an MCP client (the signed-in web dashboard's add
+    /// route): no MCP caller policy, and a failed connection keeps the generic reply with the driver text in the log.</summary>
+    internal static Task<string> AddServers(NpgsqlDataSource postgres, string servers_json, ILogger? logger) =>
         AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, logger: logger);
 
     /// <summary>The testable core of <c>add_servers</c>: validates + dedupes + probes (through the injected
     /// <paramref name="probe"/> seam) + encrypts + INSERTs, aggregating a per-server result. Structural validation
     /// runs BEFORE any store access, and when NO structurally-valid candidate remains the store is never opened —
-    /// so a call whose entries are all invalid (bad field, MFA auth) returns without a connection or a probe.</summary>
+    /// so a call whose entries are all invalid (bad field, MFA auth) returns without a connection or a probe.
+    /// <paramref name="policy"/> is the MCP caller's rules; null is the operator's own command.</summary>
     internal static Task<string> AddServersAsync(
         NpgsqlDataSource postgres, string servers_json, ServerProbe probe, CancellationToken cancellationToken,
-        IPasswordKeyRing? ring = null, ILogger? logger = null) =>
-        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe, cancellationToken, ring: ring, logger: logger);
+        IPasswordKeyRing? ring = null, ILogger? logger = null, DarlingMcpAddServersPolicy? policy = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe, cancellationToken, ring: ring, logger: logger, policy: policy);
 
     /// <summary>
     /// The add the <c>--add-server</c> verb runs: the same core with the one difference that a password may be an
@@ -202,7 +209,7 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static async Task<string> AddServersAsync(
         IServerDefinitions definitions, string servers_json, ServerProbe probe, CancellationToken cancellationToken,
         bool allowSecretReferences = false, IPasswordKeyRing? ring = null, AwsRoleAllowlist? awsRoleAllowlist = null,
-        ILogger? logger = null, bool revealConnectError = false)
+        ILogger? logger = null, bool revealConnectError = false, DarlingMcpAddServersPolicy? policy = null)
     {
         ring ??= DarlingPasswordKey.Current;
         try
@@ -214,6 +221,9 @@ public sealed partial class DarlingMcpServerAdminTools
             }
 
             var results = new List<ServerResult>(invalidResults);
+
+            /* The MCP caller's policy refuses entries here, before any store access or probe. */
+            entries = DarlingMcpAddServersPolicy.Screen(policy, entries, results);
 
             /* No structurally-valid candidate → never open the store (validate-before-write); the aggregate below
                reports only the per-entry invalids. */

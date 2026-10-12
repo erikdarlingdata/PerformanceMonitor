@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -23,6 +24,8 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.ResponseCompression;
+using ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders;
+using ForwardedHeadersOptions = Microsoft.AspNetCore.Builder.ForwardedHeadersOptions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -59,8 +62,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// with a configured <c>web.network.encryptedToken</c> / <c>token</c> (or that network mode fell back to after its token
 /// resolved, a refused TLS certificate) has this same token-to-cookie gate, because the operator's config says every
 /// client presents the token (<see cref="ResolveLoopbackOnlyToken"/>). A request needs either a valid session
-/// cookie or a valid <c>?token=</c> (constant-time), which is exchanged for an HMAC-signed HttpOnly
-/// SameSite=Strict cookie and 302-redirected to strip the token from the URL; out-of-CIDR is 403; no
+/// cookie or a token posted from the sign-in form (constant-time), which is exchanged for an HMAC-signed HttpOnly
+/// SameSite=Strict cookie and 302-redirected to the page being opened; out-of-CIDR is 403; no
 /// cookie/token gets a minimal inline login form. The cookie signing key is a per-process 32-byte RNG value,
 /// so a restart invalidates sessions (acceptable).</para>
 ///
@@ -505,6 +508,21 @@ public sealed class DarlingWebHostService : BackgroundService
                         await DisposeFailedStartAsync();
                         return false;
                     }
+
+                    /* Shorter than the floor. The wizard generates 32 characters; a short one comes from an
+                       operator-typed value (a file:/env: reference in the compose distribution, or a plaintext
+                       "token"). It is not used to gate the network: Critical, then loopback-only, with the token
+                       still resolved so it keeps gating the loopback listener, the way a refused TLS
+                       certificate degrades. */
+                    var tokenProblem = DarlingHostBinding.DescribeTokenProblem(token);
+                    if (tokenProblem is not null)
+                    {
+                        _logger.LogCritical(
+                            "Web dashboard token {Problem} — refusing to expose; binding loopback-only.",
+                            tokenProblem);
+                        networkMode = false;
+                        accessToken = token;
+                    }
                     else
                     {
                         accessToken = token;
@@ -607,6 +625,21 @@ public sealed class DarlingWebHostService : BackgroundService
                         effectivePort,
                         $"{network.Listen} or localhost");
                 }
+            }
+
+            /* Reverse proxies whose forwarded headers are honored — resolved here like the token, BEFORE the certificate is
+               loaded (so a refusal never leaves a certificate published for a listener that is not exposed), and an entry that does not parse fails closed the same way: Critical, then
+               loopback-only. Assuming a proxy list would either trust a header from nobody (the setting
+               silently doing nothing) or from everybody (any client's X-Forwarded-Proto marks a cookie Secure). */
+            IReadOnlyList<IPNetwork>? trustedProxies = null;
+            if (networkMode
+                && !DarlingHostBinding.TryParseTrustedProxies(network!.TrustedProxies, out trustedProxies, out var proxyProblem))
+            {
+                _logger.LogCritical(
+                    "web.network.trustedProxies is misconfigured ({Problem}) — refusing to expose; binding loopback-only.",
+                    proxyProblem);
+                networkMode = false;
+                trustedProxies = null;
             }
 
             /* #4220: web.publicBaseUrl's host, admitted as one extra allowed Host header value — see
@@ -828,7 +861,7 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly);
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -930,7 +963,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// loopback-only dashboard with no token configured is unaffected by every rule here and stays tokenless.
     ///
     /// <para>Loopback skips the CIDR check (127.0.0.1 is not in a LAN CIDR, so testing it there would 403 the
-    /// operator's own browser) but still needs a session cookie or a valid <c>?token=</c>, exactly like any
+    /// operator's own browser) but still needs a session cookie or a signed-in token, exactly like any
     /// other remote. It previously passed tokenless on the grounds that the web surface was read-only; that
     /// stopped being true when Custom Views v2 added view create/update/delete and <c>/api/compose/run</c>, so
     /// any local process — a scheduled task, SSRF'd code, another user's session — could read the whole store
@@ -940,7 +973,7 @@ public sealed class DarlingWebHostService : BackgroundService
     ///
     /// <para>A non-loopback remote must additionally be inside <paramref name="allowedCidr"/> (a
     /// null/unverifiable remote fails closed to <see cref="WebAuthAction.Forbid"/>). Then a valid session
-    /// cookie passes, a valid <c>?token=</c> is exchanged for one
+    /// cookie passes, a token posted from the sign-in form is exchanged for one
     /// (<see cref="WebAuthAction.SetCookieAndRedirect"/>), and anything else gets the login form.</para>
     /// </summary>
     internal static WebAuthAction DecideWebAuth(IPAddress? remoteIp, CidrAllowList allowedCidr, bool hasValidCookie, bool hasValidToken)
@@ -1048,6 +1081,11 @@ public sealed class DarlingWebHostService : BackgroundService
     /// passes false and registers no auth middleware, as before. The
     /// CIDR check inside the gate is a no-op for loopback, the only peers such a server has. Optional, so every
     /// other caller is unchanged.</param>
+    /// <param name="trustedProxies">The reverse proxies whose <c>X-Forwarded-For</c> / <c>-Proto</c> /
+    /// <c>-Host</c> headers are honored (<c>web.network.trustedProxies</c>, parsed by
+    /// <see cref="DarlingHostBinding.TryParseTrustedProxies"/>). Null or empty (the default) means the headers
+    /// are ignored from every source, so the scheme, the client address and the host are always the
+    /// connection's own.</param>
     internal void ConfigurePipeline(
         WebApplication app,
         NpgsqlDataSource postgres,
@@ -1060,12 +1098,38 @@ public sealed class DarlingWebHostService : BackgroundService
         PostgresConfig? postgresConfig = null,
         PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null,
         bool requireTokenWhenLoopbackOnly = false,
-        byte[]? sessionSigningKeyForTests = null)
+        byte[]? sessionSigningKeyForTests = null,
+        IReadOnlyList<IPNetwork>? trustedProxies = null)
     {
         /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
            because this port is LAN-exposed on purpose - see DarlingHttpRefusalLog. Created per
            started server so a rebind starts with a clean budget. */
         var refusals = new DarlingHttpRefusalLog();
+
+        /* Forwarded headers, from the CONFIGURED proxies only, and ahead of every gate so the Host guard sees
+           the forwarded Host, the CIDR gate and the sign-in throttle see the real client address, and
+           Request.IsHttps (the cookie's Secure flag, HSTS, the OIDC redirect_uri) sees the proxy's scheme.
+           Behind a TLS-terminating proxy the connection to this host is plain HTTP, so without this the cookie
+           lost Secure and the OIDC redirect_uri became http://, which the IdP refuses. The framework's default
+           trusts loopback proxies; cleared, so that only the operator's list is trusted. ForwardLimit stays 1:
+           the rightmost X-Forwarded-For entry is the one the trusted proxy itself appended. It sits ahead of the
+           failure observer too, so the observer's throttled lines carry the client address, not the proxy's. */
+        if (trustedProxies is { Count: > 0 })
+        {
+            var forwarded = new ForwardedHeadersOptions
+            {
+                ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost,
+                ForwardLimit = 1,
+            };
+            forwarded.KnownProxies.Clear();
+            forwarded.KnownIPNetworks.Clear();
+            foreach (var proxy in trustedProxies)
+            {
+                forwarded.KnownIPNetworks.Add(proxy);
+            }
+
+            app.UseForwardedHeaders(forwarded);
+        }
 
         /* Pipeline order: the failure observer (W12, which folded in the #4276 backstop), then response compression (#4188), then the
            Host-allowlist/DNS-rebinding guard (both modes), then (network mode, or a loopback-only server that keeps a configured token,
@@ -1158,10 +1222,14 @@ public sealed class DarlingWebHostService : BackgroundService
             var signingKey = sessionSigningKeyForTests ?? RandomNumberGenerator.GetBytes(SigningKeyBytes);
             var transactionKey = DarlingWebOidc.DeriveTransactionKey(signingKey);
 
+            /* Per-source sign-in throttle, one per started server like the refusal log: a source that keeps
+               failing the token waits longer each time (DarlingSignInThrottle). */
+            var signInThrottle = new DarlingSignInThrottle();
+
             app.Use(async (context, next) =>
             {
                 /* The Host-allowlist / DNS-rebinding guard already ran above (both modes); this gate owns
-                   the network auth decision (session cookie / ?token= / in-CIDR / the sign-in flow). */
+                   the network auth decision (session cookie / in-CIDR / the sign-in flow). */
                 var remote = context.Connection.RemoteIpAddress;
                 var hasValidCookie = TryValidateSessionCookie(
                     context.Request.Cookies[SessionCookieName], signingKey, DateTimeOffset.UtcNow, out var cookieSubject);
@@ -1176,14 +1244,15 @@ public sealed class DarlingWebHostService : BackgroundService
                     seat = DarlingWebSeat.SharedToken;
                 }
 
-                /* A token sent twice is not a token (#5245): joined into "a,b" it is a value nobody sent, and
-                   the gate answers as it would a wrong token rather than reading the first copy. */
-                var tokenSentOnce = DarlingWebEndpoints.TrySingleQueryValue(context.Request.Query, "token", out var presentedToken);
-                var hasValidToken = tokenSentOnce
-                    && DarlingHostBinding.FixedTimeTokenEquals(presentedToken, token);
+                /* The token is accepted from the sign-in form's POST body only (HandleTokenSignInAsync, on
+                   LoginPath). One riding the URL is never compared, whatever its value: a token in the URL lands in
+                   browser history, bookmarks, proxy logs and the Referer of every asset the page loads, so
+                   exchanging it would encourage a habit that stores the token in those places. Its presence is only noted for the
+                   refusal line below, so an operator with an old bookmark learns why it stopped working. */
+                var tokenInUrl = context.Request.Query.ContainsKey("token");
                 var isAuthFlowRoute = IsAuthFlowPath(context.Request.Path.Value ?? "/", oidcClient is not null);
 
-                switch (DecideWebRequest(remote, cidr, isAuthFlowRoute, hasValidCookie, hasValidToken))
+                switch (DecideWebRequest(remote, cidr, isAuthFlowRoute, hasValidCookie, hasValidToken: false))
                 {
                     case WebRequestAction.Allow:
                         /* The seat rides HttpContext.Items so EVERY downstream consumer — /api/session,
@@ -1221,7 +1290,7 @@ public sealed class DarlingWebHostService : BackgroundService
                            abort still propagates — that is not a failure to report. */
                         try
                         {
-                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals);
+                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle);
                         }
                         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                         {
@@ -1241,9 +1310,11 @@ public sealed class DarlingWebHostService : BackgroundService
                         return;
 
                     case WebRequestAction.SetCookieAndRedirect:
+                        /* Not reachable from this gate any more (hasValidToken is passed as false above — the
+                           exchange lives in HandleTokenSignInAsync); the arm stays so the pure matrix's verdict
+                           set and this switch agree, and so a future caller that does pass a token verdict
+                           still gets the strip-and-redirect rather than falling into the login page. */
                         AppendSessionCookie(context, signingKey);
-                        /* 302 (default) to the same path with ?token= stripped, so the token never lingers
-                           in browser history, bookmarks, or a Referer header. */
                         context.Response.Redirect(BuildPathWithoutToken(context.Request));
                         return;
 
@@ -1264,7 +1335,7 @@ public sealed class DarlingWebHostService : BackgroundService
 
                     default: /* ShowLogin */
                         /* A page route gets 200 rather than 401, so it is not a "rejected request" by status -
-                           and it is exactly the state an operator asks about when a ?token= they pasted did not
+                           and it is exactly the state an operator asks about when a token they pasted did not
                            work. An /api/* call gets 401 instead (#4187): the SAME unauthenticated state, but a
                            fetch caller branches on status rather than parsing a body, and the SPA must never
                            mistake the login form for empty data. This arm is reached with no valid cookie AND
@@ -1277,27 +1348,14 @@ public sealed class DarlingWebHostService : BackgroundService
                         var isApiCall = IsApiPath(context.Request.Path.Value ?? "/");
                         var shownStatus = isApiCall ? StatusCodes.Status401Unauthorized : StatusCodes.Status200OK;
 
-                        if (!string.IsNullOrEmpty(presentedToken))
+                        if (tokenInUrl)
                         {
                             refusals.Report(
                                 _logger, "Web dashboard", DarlingRefusalGate.Token, shownStatus,
                                 remote,
                                 isApiCall
-                                    ? "the presented ?token= does not match web.network.encryptedToken, so the API call was refused"
-                                    : "the presented ?token= does not match web.network.encryptedToken, so the login page was served instead",
-                                DateTime.UtcNow);
-                        }
-                        else if (!tokenSentOnce)
-                        {
-                            /* A ?token= sent more than once reads as no token at all (above), so it must be logged on
-                               its own arm: it is a credential that was presented and can never match (#5245). The line
-                               names the key, never a value. */
-                            refusals.Report(
-                                _logger, "Web dashboard", DarlingRefusalGate.Token, shownStatus,
-                                remote,
-                                isApiCall
-                                    ? "the ?token= key was sent more than once, so the API call was refused"
-                                    : "the ?token= key was sent more than once, so the login page was served instead",
+                                    ? "a token was presented in the URL (?token=), which is not accepted; scripted callers sign in with a form POST to " + LoginPath + " and then present the session cookie"
+                                    : "a token was presented in the URL (?token=), which is not accepted; the login page was served instead, and its form posts the token",
                                 DateTime.UtcNow);
                         }
 
@@ -1364,15 +1422,25 @@ public sealed class DarlingWebHostService : BackgroundService
     internal const string OidcCallbackPath = "/auth/oidc/callback";
     internal const string LogoutPath = "/auth/logout";
 
+    /// <summary>The shared-token sign-in: the login form POSTs the token here (<c>token</c> and <c>return</c>
+    /// fields, form-encoded). A GET renders the form. The token is accepted from this POST body and nowhere
+    /// else — see the auth gate's note on a token in the URL.</summary>
+    internal const string LoginPath = "/auth/login";
+
+    /// <summary>The most a sign-in POST body may declare. The form carries a token and a path; anything
+    /// larger is not the form, and this leg is reachable before any credential.</summary>
+    internal const int MaxLoginFormBytes = 4096;
+
     /// <summary>
     /// PURE: is this path one the auth-flow handler owns? The two OIDC legs exist only while OIDC is
     /// enabled (disabled, they fall through to normal auth and render the login page — no route squatting);
     /// logout is ALWAYS a flow path, because the shared-token seat holds a session cookie too and deserves a
-    /// way to drop it.
+    /// way to drop it, and so is the token sign-in (<see cref="LoginPath"/>), which exists in every mode.
     /// </summary>
     internal static bool IsAuthFlowPath(string path, bool oidcEnabled)
     {
-        if (string.Equals(path, LogoutPath, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(path, LogoutPath, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(path, LoginPath, StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
@@ -1626,7 +1694,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <summary>
     /// PURE open-redirect guard for the token-strip 302 target and the OIDC <c>?return=</c> landing (#2550):
     /// forces a single-slash site-relative path. A request path beginning <c>//</c> (or <c>/\</c>) is a
-    /// protocol-relative URL the browser follows off-site, so a crafted <c>//evil.com/?token=...</c> would
+    /// protocol-relative URL the browser follows off-site, so a path such as <c>//other.example/</c> would
     /// 302 the operator away; any leading slash/backslash run is collapsed to one <c>/</c>. Empty maps to
     /// <c>/</c>.
     ///
@@ -1676,10 +1744,18 @@ public sealed class DarlingWebHostService : BackgroundService
         byte[] signingKey,
         byte[] transactionKey,
         DarlingWebSeat currentSeat,
-        DarlingHttpRefusalLog refusals)
+        DarlingHttpRefusalLog refusals,
+        string accessToken,
+        DarlingSignInThrottle signInThrottle)
     {
         var path = context.Request.Path.Value ?? "/";
         var remote = context.Connection.RemoteIpAddress;
+
+        if (string.Equals(path, LoginPath, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null);
+            return;
+        }
 
         if (string.Equals(path, LogoutPath, StringComparison.OrdinalIgnoreCase))
         {
@@ -1919,6 +1995,84 @@ public sealed class DarlingWebHostService : BackgroundService
         await WriteSignedInLandingAsync(context, transaction.ReturnPath);
     }
 
+    /// <summary>
+    /// The shared-token sign-in leg (<see cref="LoginPath"/>). A GET renders the form. A POST carries the
+    /// token in its form body, which keeps it out of the URL, the browser history and every Referer the
+    /// dashboard's assets would otherwise send. Per source, a failed attempt costs a growing wait before the
+    /// next one is even compared (<see cref="DarlingSignInThrottle"/>), so a token cannot be tried at line
+    /// rate; a wait in force answers 429 with <c>Retry-After</c>, and a correct token presented during it is
+    /// still refused, or the wait would tell the caller which attempt was right. A success clears the source's
+    /// history and answers with the session cookie and a 302 to
+    /// the page the form was covering (its <c>return</c> field, through the open-redirect guard).
+    /// </summary>
+    private async Task HandleTokenSignInAsync(
+        HttpContext context,
+        string accessToken,
+        byte[] signingKey,
+        DarlingSignInThrottle signInThrottle,
+        DarlingHttpRefusalLog refusals,
+        bool oidcEnabled)
+    {
+        var remote = context.Connection.RemoteIpAddress;
+        var now = DateTime.UtcNow;
+
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            if (context.Request.Query.ContainsKey("token"))
+            {
+                refusals.Report(
+                    _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status200OK, remote,
+                    "a token was presented in the URL (?token=), which is not accepted; the login page was served instead, and its form posts the token",
+                    now);
+            }
+
+            await WriteLoginPageAsync(context, oidcEnabled);
+            return;
+        }
+
+        var source = DarlingHttpRefusalLog.DescribeSource(remote);
+        var wait = signInThrottle.RetryAfter(source, now);
+        if (wait > TimeSpan.Zero)
+        {
+            var seconds = (int)Math.Ceiling(wait.TotalSeconds);
+            refusals.Report(
+                _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status429TooManyRequests, remote,
+                $"sign-in attempts from this source are held for {seconds} more second(s) after repeated failures",
+                now);
+            context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
+            await WriteSignInErrorAsync(context, StatusCodes.Status429TooManyRequests,
+                $"Too many failed sign-in attempts. Try again in {seconds} seconds.");
+            return;
+        }
+
+        if (!context.Request.HasFormContentType || context.Request.ContentLength is > MaxLoginFormBytes)
+        {
+            refusals.Report(
+                _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status400BadRequest, remote,
+                "the sign-in POST did not carry a small form-encoded body, so it was not read",
+                now);
+            await WriteSignInErrorAsync(context, StatusCodes.Status400BadRequest,
+                "The sign-in request was not the login form. Open the dashboard and use the form.");
+            return;
+        }
+
+        var form = await context.Request.ReadFormAsync(context.RequestAborted);
+        if (!DarlingHostBinding.FixedTimeTokenEquals(form["token"].ToString(), accessToken))
+        {
+            signInThrottle.RecordFailure(source, now);
+            refusals.Report(
+                _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status200OK, remote,
+                "the posted token does not match web.network.encryptedToken, so the login page was served instead",
+                now);
+            await WriteLoginPageAsync(context, oidcEnabled);
+            return;
+        }
+
+        signInThrottle.RecordSuccess(source);
+        AppendSessionCookie(context, signingKey);
+        context.Response.Redirect(SanitizeRedirectPath(form["return"].ToString()));
+    }
+
     /// <summary>Sign-in refusals go through the rate-limited refusal log (#2479): the flow endpoints are
     /// reachable pre-credential by design, so an unthrottled warning per failed callback would hand a
     /// scanner the log-flood the limiter exists to bound. The one deliberate exception is the
@@ -2020,12 +2174,13 @@ public sealed class DarlingWebHostService : BackgroundService
     internal static string BuildLoginPageHtml(bool oidcEnabled)
         => oidcEnabled ? s_loginPageHtmlSso : s_loginPageHtmlPlain;
 
-    /* A minimal, fully self-contained login form (no external references) — a GET form whose only field is the
-       access token, so submitting it re-requests the same URL with ?token=, which the middleware exchanges for
-       a session cookie. It renders BEFORE auth, so it cannot link the gated /css/theme.css (the static files
-       sit behind this same auth gate); instead it INLINES the same custom-property token block as theme.css
-       (keep in sync) and carries the same wordmark/subtitle as index.html, plus an input focus style and the
-       host being accessed. Single-quoted HTML attributes so the C# verbatim string needs no quote-doubling. */
+    /* A minimal, fully self-contained login form (no external references) — a POST form to LoginPath whose
+       fields are the access token and the page to return to, so the token travels in the request body and
+       never in a URL; HandleTokenSignInAsync exchanges it for a session cookie and 302s back to `return`. It
+       renders BEFORE auth, so it cannot link the gated /css/theme.css (the static files sit behind this same
+       auth gate); instead it INLINES the same custom-property token block as theme.css (keep in sync) and
+       carries the same wordmark/subtitle as index.html, plus an input focus style and the host being
+       accessed. Single-quoted HTML attributes so the C# verbatim string needs no quote-doubling. */
     private const string LoginPageHtml = @"<!doctype html>
 <html lang='en'>
 <head>
@@ -2058,16 +2213,15 @@ public sealed class DarlingWebHostService : BackgroundService
 </style>
 </head>
 <body>
-<form method='get' action=''>
+<form method='post' action='/auth/login'>
   <div class='brand'>
     <h1>Darling Web</h1>
     <div class='sub'>SQL Server fleet monitor</div>
   </div>
   <label for='token'>Access token</label>
   <input id='token' name='token' type='password' autocomplete='off' autofocus>
-  <!-- #4221: an empty-action GET form already resubmits to the current pathname+search+hash per the HTML
-       form-submission algorithm (the fragment travels with it), so this survives sign-in without a
-       server-side change; the hidden field makes that intent explicit rather than leaving it spec-dependent. -->
+  <!-- #4221: the page this form is covering (pathname+search+hash, the fragment included) rides the POST as
+       a field, and the sign-in leg 302s back to it, so an alert link survives sign-in. -->
   <input type='hidden' name='return' id='return'>
   <button type='submit'>Enter</button>
 <!--SSO-->
