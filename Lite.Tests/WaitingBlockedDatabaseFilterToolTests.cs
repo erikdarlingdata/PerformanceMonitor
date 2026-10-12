@@ -87,6 +87,44 @@ public sealed class WaitingBlockedDatabaseFilterToolTests : IClassFixture<Shared
         await SeedTaskAsync(Minute(10), "DbC", 33);
     }
 
+    /// <summary>#5633 item 18: a parallel query's threads are ONE row with a thread_count, and a blocker equal to the session itself
+    /// is flagged intra_query_parallelism and never reported as a blocker (it used to be 30 rows, 29 "blocked by" session 97).</summary>
+    [Fact]
+    public async Task WaitingTasks_ParallelQueryThreads_AreOneRow_WithAThreadCount_AndNoSelfBlocker()
+    {
+        for (var thread = 0; thread < 30; thread++)
+        {
+            await ExecAsync(@"
+INSERT INTO waiting_tasks
+    (collection_id, collection_time, server_id, server_name, session_id, wait_type,
+     wait_duration_ms, blocking_session_id, resource_description, database_name)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                _nextId++, Naive(Minute(5)), _serverId, ServerName, 97, "CXCONSUMER", 100L + thread, thread < 29 ? 97 : null, null, "DbA");
+        }
+
+        await ExecAsync(@"
+INSERT INTO waiting_tasks
+    (collection_id, collection_time, server_id, server_name, session_id, wait_type,
+     wait_duration_ms, blocking_session_id, resource_description, database_name)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            _nextId++, Naive(Minute(5)), _serverId, ServerName, 55, "LCK_M_S", 5000L, 60, null, "DbA");
+
+        var root = Parse(await McpWaitTools.GetWaitingTasks(_service, _serverManager, ServerName));
+        var tasks = root.GetProperty("tasks").EnumerateArray().ToList();
+        Assert.Equal(2, tasks.Count);
+
+        var parallel = tasks.Single(t => t.GetProperty("session_id").GetInt32() == 97);
+        Assert.Equal(30, parallel.GetProperty("thread_count").GetInt32());
+        Assert.True(parallel.GetProperty("intra_query_parallelism").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, parallel.GetProperty("blocking_session_id").ValueKind);
+        Assert.Equal(129, parallel.GetProperty("wait_duration_ms").GetInt64());
+
+        var locked = tasks.Single(t => t.GetProperty("session_id").GetInt32() == 55);
+        Assert.Equal(1, locked.GetProperty("thread_count").GetInt32());
+        Assert.False(locked.GetProperty("intra_query_parallelism").GetBoolean());
+        Assert.Equal(60, locked.GetProperty("blocking_session_id").GetInt32());
+    }
+
     [Fact]
     public async Task WaitingTasks_OneName_ReturnsOnlyThatDatabasesTasks_AndEchoesTheName()
     {
