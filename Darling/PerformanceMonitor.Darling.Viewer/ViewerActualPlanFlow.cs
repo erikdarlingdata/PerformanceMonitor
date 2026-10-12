@@ -31,9 +31,12 @@ namespace PerformanceMonitor.Darling.Viewer;
 public static class ViewerActualPlanFlow
 {
     /// <summary>
-    /// Runs the full shared flow and returns the captured actual-plan XML, or null when it should not be opened
-    /// (read-only seat, declined consent, cancelled, failure, or no plan — every non-null-returning path has
-    /// already shown the user a message). <paramref name="onStarted"/> / <paramref name="onFinished"/> bracket
+    /// Runs the full shared flow and returns the captured actual-plan XML together with the statement text that
+    /// ran, or null when it should not be opened (read-only seat, declined consent, cancelled, failure, or no
+    /// plan — every null-returning path has already shown the user a message). The caller hands the returned
+    /// <see cref="ActualPlanCapture.QueryText"/> to its plan host, never the text a grid row held: for a
+    /// <paramref name="queryStatsHash"/> request that is the stored statement the prompt showed and the service
+    /// ran (#5639); every other request returns the <paramref name="queryText"/> it was given. <paramref name="onStarted"/> / <paramref name="onFinished"/> bracket
     /// the enqueue so each host shows its own progress indicator; consent runs BEFORE <paramref name="onStarted"/>.
     /// </summary>
     /// <param name="serverDisplayName">The server the prompt names (and the query runs on).</param>
@@ -46,7 +49,7 @@ public static class ViewerActualPlanFlow
     /// <paramref name="databaseName"/>), and the prompt, the modification check and the digest in the request all
     /// use that text; <paramref name="queryText"/>, <paramref name="fetchPlanXml"/> and <paramref name="argsJson"/>
     /// are not used (#5639). Query Store and snapshot requests leave it null.</param>
-    public static async Task<string?> RequestActualPlanAsync(
+    public static async Task<ActualPlanCapture?> RequestActualPlanAsync(
         Window owner,
         ViewerDataService dataService,
         int serverId,
@@ -141,9 +144,10 @@ public static class ViewerActualPlanFlow
             try
             {
                 var result = await dataService.ExecuteActualPlanAsync(serverId, argsJson, cancellationToken);
-                if (result.Status == ActualPlanStatus.Captured)
+                var capture = ActualPlanCapture.FromResult(result, queryText);
+                if (capture != null)
                 {
-                    return result.PlanXml;
+                    return capture;
                 }
 
                 ShowOutcome(owner, result);

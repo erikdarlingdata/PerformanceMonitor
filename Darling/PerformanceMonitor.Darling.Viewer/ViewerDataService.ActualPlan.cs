@@ -288,3 +288,19 @@ public sealed record QueryStatsActualPlanPreparation(
 
 /// <summary>An actual-plan capture's outcome: the plan XML on success, else a message to surface.</summary>
 public sealed record ActualPlanResult(ActualPlanStatus Status, string? PlanXml, string? Message);
+
+/// <summary>A captured actual plan with the statement text that ran. A query_stats request carries the stored
+/// statement it resolved (the text the prompt showed and the service ran), which can differ from the text a
+/// grid row held; the plan host shows and copies THIS text (#5639).</summary>
+public sealed record ActualPlanCapture(string PlanXml, string? QueryText)
+{
+    /// <summary>The capture for a finished request, or null when the request produced no plan.
+    /// <paramref name="textThatRan"/> is the flow's resolved text, not the grid row's.</summary>
+    public static ActualPlanCapture? FromResult(ActualPlanResult result, string? textThatRan)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        return result.Status == ActualPlanStatus.Captured && result.PlanXml != null
+            ? new ActualPlanCapture(result.PlanXml, textThatRan)
+            : null;
+    }
+}

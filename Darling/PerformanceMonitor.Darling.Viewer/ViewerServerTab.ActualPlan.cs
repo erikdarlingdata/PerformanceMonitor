@@ -51,7 +51,7 @@ public partial class ViewerServerTab
         _planLoadCts?.Dispose();
         _planLoadCts = new CancellationTokenSource();
 
-        var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
+        var capture = await ViewerActualPlanFlow.RequestActualPlanAsync(
             Window.GetWindow(this)!, _dataService, _server.ServerId, _server.DisplayName, stats.DatabaseName,
             queryText: null, fetchPlanXml: null, argsJson: "",
             onStarted: () =>
@@ -63,9 +63,10 @@ public partial class ViewerServerTab
             _planLoadCts.Token,
             queryStatsHash: stats.QueryHash);
 
-        if (planXml != null)
+        if (capture != null)
         {
-            _ = OpenPlanTab(planXml, label, stats.QueryText); /* HidePlanLoading runs inside OpenPlanTab */
+            /* The plan tab gets the statement that ran, not the grid row's text. */
+            _ = OpenPlanTab(capture.PlanXml, label, capture.QueryText); /* HidePlanLoading runs inside OpenPlanTab */
         }
         else
         {
@@ -110,7 +111,7 @@ public partial class ViewerServerTab
         _planLoadCts?.Dispose();
         _planLoadCts = new CancellationTokenSource();
 
-        var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
+        var capture = await ViewerActualPlanFlow.RequestActualPlanAsync(
             Window.GetWindow(this)!, _dataService, _server.ServerId, _server.DisplayName, databaseName,
             queryText,
             () => _dataService.GetQueryStorePlanTextAsync(_server.ServerId, databaseName, queryId, planId), /* #5639: read before the prompt; a failed read counts as no plan */
@@ -123,9 +124,9 @@ public partial class ViewerServerTab
             onFinished: null,
             _planLoadCts.Token);
 
-        if (planXml != null)
+        if (capture != null)
         {
-            _ = OpenPlanTab(planXml, label, queryText); /* HidePlanLoading runs inside OpenPlanTab */
+            _ = OpenPlanTab(capture.PlanXml, label, capture.QueryText); /* HidePlanLoading runs inside OpenPlanTab */
         }
         else
         {

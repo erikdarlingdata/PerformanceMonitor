@@ -466,15 +466,15 @@ public partial class WaitDrillDownWindow : Window
         _actualPlanCts?.Dispose();
         _actualPlanCts = new System.Threading.CancellationTokenSource();
 
-        var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
+        var capture = await ViewerActualPlanFlow.RequestActualPlanAsync(
             this, _dataService, _serverId, _serverName, row.DatabaseName, row.QueryText,
             () => System.Threading.Tasks.Task.FromResult(estimatedPlanXml), argsJson,
             onStarted: () => System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait,
             onFinished: () => System.Windows.Input.Mouse.OverrideCursor = null,
             _actualPlanCts.Token);
 
-        if (planXml != null)
-            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, row.QueryText, row.DatabaseName);
+        if (capture != null)
+            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, capture.PlanXml, label, capture.QueryText, row.DatabaseName);
     }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();

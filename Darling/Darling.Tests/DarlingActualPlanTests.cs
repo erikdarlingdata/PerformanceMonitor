@@ -311,6 +311,93 @@ public sealed class ActualPlanRequestTests
         Assert.Contains("Task.Run(", source, StringComparison.Ordinal); /* off the UI thread */
     }
 
+    /// <summary>
+    /// #5639: the plan host shows (and "copy query text" copies) the statement that ran. For a query_stats request the
+    /// flow resolves the stored statement and runs it, so the capture it returns carries that text, not the text a
+    /// grid row held.
+    /// </summary>
+    [Fact]
+    public async Task TheCapture_CarriesTheResolvedText_NotTheGridRowsText()
+    {
+        const string rowText = "SELECT 1;";
+        var prepared = await ViewerDataService.PrepareQueryStatsActualPlanAsync(
+            () => Task.FromResult<StoredActualPlanQuery?>(new StoredActualPlanQuery(ConfirmedText, "<ShowPlanXML/>")),
+            "0xABCD", "master");
+        Assert.Equal(QueryStatsActualPlanLookup.Ready, prepared.Lookup);
+
+        /* The flow adopts prepared.QueryText before the check and the run, and hands that to FromResult. */
+        var capture = ActualPlanCapture.FromResult(
+            new ActualPlanResult(ActualPlanStatus.Captured, "<ShowPlanXML>actual</ShowPlanXML>", null), prepared.QueryText);
+
+        Assert.NotNull(capture);
+        Assert.Equal("<ShowPlanXML>actual</ShowPlanXML>", capture!.PlanXml);
+        Assert.Equal(ConfirmedText, capture.QueryText);
+        Assert.NotEqual(rowText, capture.QueryText);
+    }
+
+    [Theory]
+    [InlineData(ActualPlanStatus.Captured)]
+    [InlineData(ActualPlanStatus.NoPlanCaptured)]
+    public void TheCapture_IsNullWhenThereIsNoPlan(ActualPlanStatus status)
+        => Assert.Null(ActualPlanCapture.FromResult(new ActualPlanResult(status, null, "msg"), ConfirmedText));
+
+    /// <summary>The flow returns the capture built from the text it resolved, and every caller hands the plan host the
+    /// capture's text. The row's text is never passed to the plan host by a query_stats caller.</summary>
+    [Fact]
+    public void TheFlow_ReturnsACaptureBuiltFromTheResolvedText()
+    {
+        var source = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerActualPlanFlow.cs"));
+        var adopt = source.IndexOf("queryText = prepared.QueryText;", StringComparison.Ordinal);
+        var capture = source.IndexOf("ActualPlanCapture.FromResult(result, queryText)", StringComparison.Ordinal);
+        Assert.True(adopt > 0 && capture > adopt, "the capture must be built from the resolved text the flow adopted");
+        Assert.Contains("Task<ActualPlanCapture?> RequestActualPlanAsync(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("return result.PlanXml;", source, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("FinOpsTab.Loaders.cs", "hi.FullQueryText")]
+    [InlineData("ViewerServerTab.ActualPlan.cs", "stats.QueryText")]
+    [InlineData("QueryStatsHistoryWindow.xaml.cs", "_queryText")]
+    public void TheQueryStatsCallers_HandThePlanHostTheCapturedText_NotTheRowText(string file, string rowTextToken)
+    {
+        var source = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer", file));
+        var call = source.IndexOf("ViewerActualPlanFlow.RequestActualPlanAsync(", StringComparison.Ordinal);
+        Assert.True(call > 0, file + " never calls the flow");
+        var end = source.IndexOf("\n    }", call, StringComparison.Ordinal);
+        var method = source.Substring(call, end - call);
+
+        Assert.Contains("queryStatsHash:", method, StringComparison.Ordinal);
+        Assert.Contains("capture.QueryText", method, StringComparison.Ordinal);
+        Assert.DoesNotContain(rowTextToken, method, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("ViewerServerTab.ActualPlan.cs")]
+    [InlineData("QueryStatsHistoryWindow.xaml.cs")]
+    [InlineData("QueryStoreHistoryWindow.xaml.cs")]
+    [InlineData("WaitDrillDownWindow.xaml.cs")]
+    [InlineData("FinOpsTab.Loaders.cs")]
+    public void EveryFlowCaller_OpensThePlanFromTheCapture(string file)
+    {
+        var source = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer", file));
+        Assert.Contains("var capture = await ViewerActualPlanFlow.RequestActualPlanAsync(", source, StringComparison.Ordinal);
+        Assert.Contains("capture.PlanXml", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>Lite parity: its actual-plan re-run runs the row's own in-process text, so the text the plan host gets is
+    /// the text that ran. The same variable feeds the prompt, the run and the plan host; nothing resolves a second text.</summary>
+    [Fact]
+    public void LitePlanActions_HandThePlanHostTheTextThatRan()
+    {
+        var controller = File.ReadAllText(Path.Combine(RepoRoot(), "PerformanceMonitor.Ui", "PlanNavigationController.cs"));
+        Assert.Contains("executeActual(databaseName ?? \"\", queryText, estimatedPlanXml, isolationLevel,", controller, StringComparison.Ordinal);
+        Assert.Contains("_showPlan(actualPlanXml, label, queryText)", controller, StringComparison.Ordinal);
+
+        var serverTab = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Controls", "ServerTab.Plans.cs"));
+        Assert.Contains("OpenPlanTab(actualPlanXml, label, queryText)", serverTab, StringComparison.Ordinal);
+    }
+
     private static ActualPlanRequest QueryStatsRequest(string? digest, string hash = "0xABCD")
         => new(hash, null, null, null, "master", digest);
 
@@ -544,7 +631,7 @@ public sealed class ActualPlanResultParseTests
     public void Parse_NullPoll_IsTimedOut()
     {
         var result = ViewerDataService.ParseActualPlanResult(null);
-        Assert.Equal(ActualPlanStatus.TimedOut, result.Status);
+        Assert.Equal(ActualPlanStatus.NoPlanCaptured, result.Status);
         Assert.Null(result.PlanXml);
     }
 

@@ -730,7 +730,7 @@ public partial class FinOpsTab
 
         var label = $"Actual Plan - {hi.QueryHash}";
 
-        var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
+        var capture = await ViewerActualPlanFlow.RequestActualPlanAsync(
             Window.GetWindow(this)!, _dataService, _server.ServerId, _server.DisplayName, hi.DatabaseName,
             queryText: null, fetchPlanXml: null, argsJson: "",
             onStarted: () => System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait,
@@ -738,9 +738,10 @@ public partial class FinOpsTab
             System.Threading.CancellationToken.None,
             queryStatsHash: hi.QueryHash);
 
-        if (planXml != null)
+        if (capture != null)
         {
-            PlanRequested?.Invoke(planXml, label, hi.FullQueryText);
+            /* The plan host gets the statement that ran, not the row's sample text. */
+            PlanRequested?.Invoke(capture.PlanXml, label, capture.QueryText);
         }
     }
 

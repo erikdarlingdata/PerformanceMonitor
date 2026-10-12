@@ -286,7 +286,7 @@ public partial class QueryStatsHistoryWindow : Window
         _actualPlanCts?.Dispose();
         _actualPlanCts = new System.Threading.CancellationTokenSource();
 
-        var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
+        var capture = await ViewerActualPlanFlow.RequestActualPlanAsync(
             this, _dataService, _serverId, _serverName, _databaseName,
             queryText: null, fetchPlanXml: null, argsJson: "",
             onStarted: () => System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait,
@@ -294,8 +294,11 @@ public partial class QueryStatsHistoryWindow : Window
             _actualPlanCts.Token,
             queryStatsHash: _queryHash);
 
-        if (planXml != null)
-            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, _queryText, _databaseName);
+        if (capture != null)
+        {
+            /* The plan window gets the statement that ran, not this window's text. */
+            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, capture.PlanXml, label, capture.QueryText, _databaseName);
+        }
     }
 
     /// <summary>"View Cached Plan" — asks the service to read the RIGHT-CLICKED snapshot's plan from the target's

@@ -318,7 +318,7 @@ public partial class QueryStoreHistoryWindow : Window
         _actualPlanCts?.Dispose();
         _actualPlanCts = new System.Threading.CancellationTokenSource();
 
-        var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
+        var capture = await ViewerActualPlanFlow.RequestActualPlanAsync(
             this, _dataService, _serverId, _serverName, _databaseName, _queryText,
             () => _dataService.GetQueryStorePlanTextAsync(_serverId, _databaseName, _queryId, planId), /* #5639: read before the prompt; a failed read counts as no plan */
             argsJson,
@@ -326,8 +326,8 @@ public partial class QueryStoreHistoryWindow : Window
             onFinished: () => System.Windows.Input.Mouse.OverrideCursor = null,
             _actualPlanCts.Token);
 
-        if (planXml != null)
-            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, _queryText, _databaseName);
+        if (capture != null)
+            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, capture.PlanXml, label, capture.QueryText, _databaseName);
     }
 
     // ── Column Filter Popup (mirrors WaitDrillDownWindow / ViewerServerTab.Filters.cs) ──
