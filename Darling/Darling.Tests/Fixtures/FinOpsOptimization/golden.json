@@ -48,10 +48,10 @@
     ],
     "waitCategories": [
       {
-        "Category": "CPU",
-        "TotalWaitTimeMs": 2300,
-        "WaitingTasks": 35,
-        "PctOfTotal": 47.9,
+        "Category": "Parallelism",
+        "TotalWaitTimeMs": 1500,
+        "WaitingTasks": 15,
+        "PctOfTotal": 31.3,
         "TopWaitType": "CXPACKET",
         "TopWaitTimeMs": 1500,
         "MonthlyCostShare": 0
@@ -63,6 +63,15 @@
         "PctOfTotal": 20.8,
         "TopWaitType": "PAGEIOLATCH_SH",
         "TopWaitTimeMs": 700,
+        "MonthlyCostShare": 0
+      },
+      {
+        "Category": "CPU",
+        "TotalWaitTimeMs": 800,
+        "WaitingTasks": 20,
+        "PctOfTotal": 16.7,
+        "TopWaitType": "SOS_SCHEDULER_YIELD",
+        "TopWaitTimeMs": 800,
         "MonthlyCostShare": 0
       },
       {

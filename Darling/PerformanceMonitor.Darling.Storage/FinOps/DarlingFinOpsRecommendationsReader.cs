@@ -272,9 +272,9 @@ ORDER BY database_name";
         await using var cpuReader = await cpuCommand.ExecuteReaderAsync(cancellationToken);
         if (await cpuReader.ReadAsync(cancellationToken) && !cpuReader.IsDBNull(0))
         {
-            var p95Cpu7d = Convert.ToDecimal(cpuReader.GetValue(0), CultureInfo.InvariantCulture);
+            var p95Cpu24h = Convert.ToDecimal(cpuReader.GetValue(0), CultureInfo.InvariantCulture);
             var cpuWindow = RightSizingWindow.Describe(cpuReader.IsDBNull(3) ? 0L : Convert.ToInt64(cpuReader.GetValue(3), CultureInfo.InvariantCulture), cpuReader.IsDBNull(1) || cpuReader.IsDBNull(2) ? TimeSpan.Zero : cpuReader.GetDateTime(2) - cpuReader.GetDateTime(1));
-            return (p95Cpu7d, cpuWindow);
+            return (p95Cpu24h, cpuWindow);
         }
 
         return null;
@@ -407,15 +407,13 @@ ORDER BY database_name";
         }
 
         /* A server enrolled minutes ago holds only the ring-buffer backfill of its first collect ("68 samples over 4 minutes"), which
-           is not a day of load, so each CPU right-sizing rule waits for its own window to be watched, and the two never both land in
-           the list: the one that keeps more cores wins. The 24-hour rule (2, utilization efficiency) reads the last 24 hours, so its
-           oldest sample inside that window has to be 23 hours old; the 7-day rule (12) reads 7 days and keeps a 24-hour span. */
-        var cpuSpanEnough = false;
+           is not a day of load, so the CPU right-sizing advice waits until the 24-hour window is watched: its oldest sample inside
+           the last 24 hours has to be 23 hours old. Both CPU rows (2 and 12) read that same window and the same P95 the Utilization
+           view shows, and speak only when its verdict is OVER_PROVISIONED, so they cannot disagree with it or with each other
+           (#5633 item 11, #5644 W18). They never both land in the list: the one that keeps more cores wins. */
         var cpu24HourWatched = false;
         try
         {
-            cpuSpanEnough = FinOpsRecommendationFigures.CpuSamplesSpanEnough(
-                await GetCpuSampleSpanAsync(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken));
             var now = DateTime.UtcNow;
             cpu24HourWatched = FinOpsRecommendationFigures.Cpu24HourWindowWatched(
                 await GetOldestCpuSampleAsync(dataSource, serverId, DateTime.SpecifyKind(now.AddHours(-24), DateTimeKind.Unspecified), commandTimeoutSeconds, cancellationToken), now);
@@ -555,36 +553,26 @@ ORDER BY database_name";
             if (vmUtil != null && FinOpsUtilizationFigures.HasCpuSample(vmUtil)
                 && await GetEngineEditionAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
-                decimal p95Cpu7d = vmUtil.P95CpuPct;
-                var cpuWindow = "recent samples"; // neutral until the 7-day read supplies its own span; the 24-hour fallback has no span of its own
+                /* The CPU row reads the Utilization view's own window and P95 (the last 24 hours), not a 7-day P95 of its own: two
+                   windows gave two P95s and two verdicts for one server (16.0% beside 7.0%, #5633 item 11). The memory row below
+                   keeps its 7-day window; it has no Utilization verdict to agree with. */
+                decimal p95Cpu24h = vmUtil.P95CpuPct;
+                var cpuWindow = "the last 24 hours";
                 int cpuCount = vmUtil.CpuCount;
                 int physMb = vmUtil.PhysicalMemoryMb;
-
-                // Prefer the 7-day P95 CPU; fall back to the 24-hour P95 already on vmUtil.
-                try
-                {
-                    if (await GetCpuP95Async(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken) is { } cpu)
-                    {
-                        p95Cpu7d = cpu.P95CpuPct;
-                        cpuWindow = cpu.Window;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"Recommendation check (VM right-sizing) 7-day CPU P95 fell back to 24h: {ex.Message}");
-                }
 
                 var (p95MemMb, memSampleCount, memWindow) = await GetMemoryP95Async(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken);
 
                 /* One CPU right-sizing row per server: rule 2 may already have added its row, and this one then takes its place
                    only when it keeps more cores. */
-                var vmCpuTarget = FinOpsRecommendationFigures.VmCpuTargetCores(p95Cpu7d, cpuCount);
-                var vmCpuRowWins = cpuSpanEnough && vmCpuTarget is int vmTarget && FinOpsRecommendationFigures.PrescriptiveCpuRowWins(computeCpuTarget, vmTarget);
+                var vmCpuTarget = FinOpsRecommendationFigures.CpuVerdictAllowsDownsizing(vmUtil)
+                    ? FinOpsRecommendationFigures.VmCpuTargetCores(p95Cpu24h, cpuCount) : null;
+                var vmCpuRowWins = cpu24HourWatched && vmCpuTarget is int vmTarget && FinOpsRecommendationFigures.PrescriptiveCpuRowWins(computeCpuTarget, vmTarget);
                 if (vmCpuRowWins && computeCpuRow != null)
                     recommendations.Remove(computeCpuRow);
 
                 foreach (var vmRecommendation in FinOpsRecommendationFigures.VmRightSizing(
-                    p95Cpu7d, cpuWindow, cpuCount, physMb, p95MemMb, memSampleCount, memWindow, monthlyCost, includeCpuRow: vmCpuRowWins))
+                    p95Cpu24h, cpuWindow, cpuCount, physMb, p95MemMb, memSampleCount, memWindow, monthlyCost, includeCpuRow: vmCpuRowWins))
                     recommendations.Add(vmRecommendation);
             }
         }
