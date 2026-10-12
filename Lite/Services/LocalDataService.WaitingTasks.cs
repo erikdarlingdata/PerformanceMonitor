@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 
@@ -24,6 +25,9 @@ public partial class LocalDataService
     ///
     /// <para>#5633 item 18: one row per session and wait type per snapshot, with <c>ThreadCount</c>; a blocker equal to the session is
     /// <c>IntraQueryParallelism</c>, not a blocker. Darling's twin is <c>DarlingSessionReader.WaitingTasksSql</c>.</para>
+    /// <para>#5633 review L-a: <c>WaitDurationMs</c>, <c>ResourceDescription</c> and <c>BlockingSessionId</c> are the LONGEST-waiting thread's
+    /// (<c>arg_max</c>), not three independent MAXes; when that thread waits on its own session the blocker is the longest-waiting thread
+    /// blocked by another session. <c>BlockingSessionIds</c> lists every distinct other blocker, only when there is more than one.</para>
     /// <para>The cap is a PARAMETER (#3541 A3), null for the grid callers that read the whole window as they
     /// always did. <c>get_waiting_tasks</c> read this UNBOUNDED and then took <c>limit</c> rows in C#, so a busy
     /// window materialised every waiting-task row to return thirty, and the envelope stated no bound at all.
@@ -51,11 +55,18 @@ SELECT
     session_id,
     rtrim(wait_type) AS wait_type,
     MAX(wait_duration_ms) AS wait_duration_ms,
-    MAX(blocking_session_id) FILTER (WHERE blocking_session_id <> session_id) AS blocking_session_id,
-    MAX(resource_description) AS resource_description,
+    COALESCE(
+        (arg_max({{'r': resource_description, 'b': CASE WHEN blocking_session_id <> session_id THEN blocking_session_id END}},
+                 {{'w': COALESCE(wait_duration_ms, -1), 'b': COALESCE(-CAST(blocking_session_id AS BIGINT), -9999999999), 'r': COALESCE(resource_description, '')}})).b,
+        arg_max(blocking_session_id, wait_duration_ms) FILTER (WHERE blocking_session_id <> session_id)) AS blocking_session_id,
+    (arg_max({{'r': resource_description}},
+             {{'w': COALESCE(wait_duration_ms, -1), 'b': COALESCE(-CAST(blocking_session_id AS BIGINT), -9999999999), 'r': COALESCE(resource_description, '')}})).r AS resource_description,
     database_name,
     COUNT(*) AS thread_count,
-    COALESCE(BOOL_OR(blocking_session_id = session_id), FALSE) AS intra_query_parallelism
+    COALESCE(BOOL_OR(blocking_session_id = session_id), FALSE) AS intra_query_parallelism,
+    CASE WHEN COUNT(DISTINCT blocking_session_id) FILTER (WHERE blocking_session_id <> session_id) > 1
+         THEN list_aggregate(list_sort(list_distinct(list(blocking_session_id) FILTER (WHERE blocking_session_id <> session_id))), 'string_agg', ',')
+    END AS blocking_session_ids
 FROM v_waiting_tasks
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -86,7 +97,10 @@ ORDER BY collection_time DESC, MAX(wait_duration_ms) DESC{limitClause}";
                 ResourceDescription = reader.IsDBNull(5) ? "" : reader.GetString(5),
                 DatabaseName = reader.IsDBNull(6) ? "" : reader.GetString(6),
                 ThreadCount = reader.IsDBNull(7) ? 1 : (int)ToInt64(reader.GetValue(7)),
-                IntraQueryParallelism = !reader.IsDBNull(8) && reader.GetBoolean(8)
+                IntraQueryParallelism = !reader.IsDBNull(8) && reader.GetBoolean(8),
+                BlockingSessionIds = reader.IsDBNull(9)
+                    ? null
+                    : reader.GetString(9).Split(',', StringSplitOptions.RemoveEmptyEntries).Select(int.Parse).ToArray()
             });
         }
 
@@ -297,6 +311,9 @@ public class WaitingTaskRow
     public int ThreadCount { get; set; } = 1;
     /// <summary>#5633 item 18: some of those threads wait on their own session (a parallel query's exchange waits); not a blocker.</summary>
     public bool IntraQueryParallelism { get; set; }
+    /// <summary>#5633 review L-a: every distinct blocker other than the session itself, set only when the threads have more than one;
+    /// <see cref="BlockingSessionId"/>, <see cref="ResourceDescription"/> and <see cref="WaitDurationMs"/> are the longest-waiting thread's.</summary>
+    public IReadOnlyList<int>? BlockingSessionIds { get; set; }
 
     public string WaitDurationFormatted => WaitDurationMs < 1000
         ? $"{WaitDurationMs} ms"

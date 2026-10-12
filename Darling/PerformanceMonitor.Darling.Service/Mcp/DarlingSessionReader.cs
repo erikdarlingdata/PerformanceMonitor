@@ -87,7 +87,7 @@ internal static class DarlingSessionReader
     public sealed record WaitingTaskRow(
         DateTime CollectionTime, int SessionId, string? WaitType, long WaitDurationMs,
         int? BlockingSessionId, string? ResourceDescription, string? DatabaseName,
-        int ThreadCount = 1, bool IntraQueryParallelism = false);
+        int ThreadCount = 1, bool IntraQueryParallelism = false, IReadOnlyList<int>? BlockingSessionIds = null);
 
     /* ─────────────────────────── session stats (latest snapshot, per application) ─────────────────────────── */
 
@@ -382,6 +382,13 @@ internal static class DarlingSessionReader
     /// threads waiting on each other) but flagged <c>intra_query_parallelism</c>. A different session blocking any of the threads
     /// is kept as <c>blocking_session_id</c>. The cap applies to the rolled-up rows.</para>
     ///
+    /// <para><b>The row is one thread's wait, not a blend (#5633 review L-a).</b> <c>wait_duration_ms</c>, <c>resource_description</c>
+    /// and <c>blocking_session_id</c> all come from the LONGEST-waiting thread of the group (an ordered <c>array_agg</c>), where they used
+    /// to be three independent <c>MAX</c>es: the alphabetically greatest resource text printed beside another thread's duration, and
+    /// a lower-numbered second blocker was hidden. When that thread waits on its own session (parallelism) the blocker is the
+    /// longest-waiting thread blocked by another session, so a real blocker is never dropped. <c>blocking_session_ids</c> lists every
+    /// distinct blocker other than the session itself, only when the threads have more than one.</para>
+    ///
     /// <para>The cap is a PARAMETER, not a literal (#3541 A3). It was <c>LIMIT 500</c> under a tool that
     /// advertised <c>limit</c>, applied it with <c>Take(limit)</c>, and then published a bare envelope with no
     /// window, no count and no bound — so a caller could not tell thirty tasks from thirty of five thousand.</para>
@@ -392,11 +399,18 @@ internal static class DarlingSessionReader
             session_id,
             wait_type,
             MAX(wait_duration_ms) AS wait_duration_ms,
-            MAX(blocking_session_id) FILTER (WHERE blocking_session_id <> session_id) AS blocking_session_id,
-            MAX(resource_description) AS resource_description,
+            COALESCE(
+                (array_agg(CASE WHEN blocking_session_id <> session_id THEN blocking_session_id END
+                           ORDER BY wait_duration_ms DESC NULLS LAST, blocking_session_id NULLS LAST))[1],
+                (array_agg(blocking_session_id ORDER BY wait_duration_ms DESC NULLS LAST, blocking_session_id)
+                    FILTER (WHERE blocking_session_id <> session_id))[1]) AS blocking_session_id,
+            (array_agg(resource_description ORDER BY wait_duration_ms DESC NULLS LAST, blocking_session_id NULLS LAST, resource_description DESC NULLS LAST))[1] AS resource_description,
             database_name,
             COUNT(*) AS thread_count,
-            COALESCE(BOOL_OR(blocking_session_id = session_id), FALSE) AS intra_query_parallelism
+            COALESCE(BOOL_OR(blocking_session_id = session_id), FALSE) AS intra_query_parallelism,
+            CASE WHEN COUNT(DISTINCT blocking_session_id) FILTER (WHERE blocking_session_id <> session_id) > 1
+                 THEN array_agg(DISTINCT blocking_session_id ORDER BY blocking_session_id) FILTER (WHERE blocking_session_id <> session_id)
+            END AS blocking_session_ids
         FROM waiting_tasks
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -440,7 +454,8 @@ internal static class DarlingSessionReader
                 reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? 1 : (int)reader.GetInt64(7),
-                !reader.IsDBNull(8) && reader.GetBoolean(8)));
+                !reader.IsDBNull(8) && reader.GetBoolean(8),
+                reader.IsDBNull(9) ? null : reader.GetFieldValue<int[]>(9)));
         }
 
         return rows;

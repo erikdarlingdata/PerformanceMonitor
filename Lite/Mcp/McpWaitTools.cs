@@ -275,6 +275,9 @@ public sealed class McpWaitTools
                 thread_count = r.ThreadCount,
                 intra_query_parallelism = r.IntraQueryParallelism,
                 blocking_session_id = r.BlockingSessionId,
+                /* #5633 review L-a: the distinct blockers other than the session itself, present only when the threads have more than one;
+                   blocking_session_id, resource_description and wait_duration_ms are the longest-waiting thread's. */
+                blocking_session_ids = r.BlockingSessionIds,
                 database_name = r.DatabaseName,
                 resource_description = r.ResourceDescription,
                 collection_time = r.CollectionTime.ToString("o")
