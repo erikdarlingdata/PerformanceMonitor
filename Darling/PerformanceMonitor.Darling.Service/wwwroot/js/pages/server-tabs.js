@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, metricNote, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
+import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, metricNote, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
@@ -233,6 +233,7 @@ function fanout(read, params, specs) {
            opts.atTimeItem; Active Queries when it names none. */
         const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours), atTime: spec.atTime === false || !params || !params.server ? null : { server: params.server, item: spec.atTimeItem || "queries" } });
 
+        markPartialSubtitle(shells[i].panel, res.data, spec);
         mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
@@ -4559,13 +4560,13 @@ const JOB_HISTORY_COLUMNS = [
   { key: "status", label: "Status" },
   { key: "duration_formatted", label: "Duration", sortValue: (r) => r.duration_seconds },
   { key: "retries", label: "Retries", format: "int" },
-  { key: "message", label: "Message", wrap: true, render: jobMessageCell },
+  { key: "message", label: "Message", clamp: true, render: jobMessageCell },
 ];
 
-/* The same squeeze as the Job History page's Message column (W2): a readable width, the first 3 lines, and the whole text on hover. */
+/* The same squeeze as the Job History page's Message column (W2): a readable width, ONE line (#5644 W11), and the rest on a click (this tab has no detail pane). */
 function jobMessageCell(r) {
   const text = r && r.message != null ? String(r.message) : "";
-  return el("div", { class: "jh-message", title: text || null, text });
+  return el("div", { class: "jh-message" }, [clampText(text)]);
 }
 
 const PERFMON_COLUMNS = [
@@ -4897,8 +4898,8 @@ const COLLECTOR_COLUMNS = [
      time. Each column is left out unless a row fills it, so a server with no run times shows none of them. */
   { key: "run_at", label: "Run at", hideWhenEmpty: true },
   { key: "next_run_utc", label: "Next run", format: "time", hideWhenEmpty: true },
-  { key: "run_time_note", label: "Run time", wrap: true, hideWhenEmpty: true },
-  { key: "last_error", label: "Last Error", wrap: true, plain: "named" },
+  { key: "run_time_note", label: "Run time", clamp: true, hideWhenEmpty: true },
+  { key: "last_error", label: "Last Error", clamp: true, plain: "named" },
   /* #1837: what a NON-failing run reported (an enumeration that came back with 0 items). Blank for a
      plainly healthy collector; the same column the two WPF grids carry, so the web view is not the one
      Collection Health surface that still hides it. note_summary, not the raw last_note: it carries the
@@ -4906,24 +4907,24 @@ const COLLECTOR_COLUMNS = [
      one, composed server-side from the shared formatter so this table cannot render it a third way.
      A collector's label=value counts read as its latest NOTED run's ("latest run:" only when every run
      carried them), never a window total. */
-  { key: "note_summary", label: "Note", wrap: true, plain: true },
+  { key: "note_summary", label: "Note", clamp: true, plain: true },
   /* #5646: a collector that recovered (its newest 3 runs succeeded after failures) is HEALTHY, and this says so with the
      time of the last failure. Partial rows carry no note_summary, so the sentence rides in its own field. */
-  { key: "recovered_note", label: "Recovered", wrap: true, plain: true, hideWhenEmpty: true },
+  { key: "recovered_note", label: "Recovered", clamp: true, plain: true, hideWhenEmpty: true },
   /* #3017: which of the two zero-output readings a collector that spent and stored nothing is — read and
      found nothing, or could not read. Blank whenever Rows is positive, for the same reason the Note
      column is blank on a plainly healthy collector. Composed server-side from the shared formatter, so
      this table cannot render the sentence a second way. */
-  { key: "output_finding", label: "Output", wrap: true, plain: true },
+  { key: "output_finding", label: "Output", clamp: true, plain: true },
   /* #4620: why a collector that stopped doing what it used to do reads WARNING. The Status column already
      showed the floor, but no column showed the sentence behind it, so a regressed row read WARNING with
      every other cell blank. Composed server-side from the shared formatter, like the two columns above. */
-  { key: "regression_finding", label: "Regression", wrap: true, plain: true },
+  { key: "regression_finding", label: "Regression", clamp: true, plain: true },
   /* #5249: a PostgreSQL collector this server's engine does not collect (a collector this engine kind can never run: an Aurora-only reader on stock PostgreSQL, the sampler on Aurora) has no log row,
      so the server lists it with status not_collected and the sentence saying why. The status paints with the
      neutral Unknown band, not an error one: a gate is not a fault. Left out unless a row has a message, so a
      server with no such collector (and every SQL Server tab) shows no column of dashes. */
-  { key: "message", label: "Why not collected", wrap: true, hideWhenEmpty: true, plain: true },
+  { key: "message", label: "Why not collected", clamp: true, hideWhenEmpty: true, plain: true },
 ];
 
 const HEAVIEST_COLUMNS = [
