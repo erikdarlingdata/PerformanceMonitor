@@ -205,10 +205,10 @@ public sealed class DroppedDatabaseScopeLiveTests
             Databases(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 12, top: 20, as_of: asOf)));
 
         /* The set itself: at or before the anchor, and unknown when that snapshot is older than the horizon from the anchor. */
-        var then = await CurrentDatabaseScope.ReadAsync(dataSource, serverId, ct, asOfUtc: windowTime.AddHours(2));
+        var then = await CurrentDatabaseScope.ReadAsync(dataSource, serverId, asOfUtc: windowTime.AddHours(2), cancellationToken: ct);
         Assert.Equal(new[] { "GoneDb", "LiveDb" }, then!.OrderBy(n => n, StringComparer.Ordinal).ToArray());
-        Assert.Null(await CurrentDatabaseScope.ReadAsync(dataSource, serverId, ct, asOfUtc: windowTime.AddHours(2) + CurrentDatabaseScope.SnapshotHorizon));
-        Assert.Equal(new[] { "LiveDb" }, (await CurrentDatabaseScope.ReadAsync(dataSource, serverId, ct))!.ToArray());
+        Assert.Null(await CurrentDatabaseScope.ReadAsync(dataSource, serverId, asOfUtc: windowTime.AddHours(2) + CurrentDatabaseScope.SnapshotHorizon, cancellationToken: ct));
+        Assert.Equal(new[] { "LiveDb" }, (await CurrentDatabaseScope.ReadAsync(dataSource, serverId, cancellationToken: ct))!.ToArray());
 
         /* A database created after the newest snapshot: its newest capture is newer than the snapshot, so it stays; GoneDb's is older. */
         foreach (var (database, capturedAt) in new[] { ("GoneDb", now.AddHours(-1)), ("LiveDb", now.AddHours(-1)), ("NewDb", now.AddMinutes(-1)) })

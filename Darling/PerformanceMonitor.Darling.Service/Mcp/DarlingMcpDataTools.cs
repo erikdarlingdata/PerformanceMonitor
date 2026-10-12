@@ -1096,8 +1096,8 @@ public sealed class DarlingMcpDataTools
                reaches back past the drop returned nothing else. The omission is in the filter, so the SQL is unchanged. A database
                the caller names is read as asked. Unknown (no snapshot) narrows nothing. */
             /* Review M2: an as_of read takes the newest snapshot at or before the anchor, so a database dropped since the window still ranks. */
-            databases = await CurrentDatabaseScope.NarrowAsync(postgres, resolved.ServerId, databases, cancellationToken,
-                asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd);
+            databases = await CurrentDatabaseScope.NarrowAsync(postgres, resolved.ServerId, databases,
+                asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, cancellationToken: cancellationToken);
             var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, ranking, cancellationToken);
             var rows = routed.Rows;
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";

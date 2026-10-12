@@ -61,15 +61,6 @@ FROM v_memory_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
 
-    /// <summary>7-day P95 of SQL Server CPU utilization, for the VM right-sizing CPU prescription. $1 server_id, $2 cutoff (naive UTC).</summary>
-    public const string CpuP95Sql = @"
-SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu,
-       MIN(collection_time) AS first_sample, MAX(collection_time) AS last_sample,
-       COUNT(sqlserver_cpu_utilization) AS window_samples
-FROM v_cpu_utilization_stats
-WHERE server_id = $1
-AND   collection_time >= $2";
-
     /// <summary>SQL Agent jobs that ran long at least 3 times in the window (maintenance-window efficiency). $1 server_id, $2 cutoff (naive UTC).</summary>
     public const string MaintenanceWindowSql = @"
 SELECT
@@ -204,19 +195,6 @@ ORDER BY database_name";
         return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) ? reader.GetDateTime(0) : null;
     }
 
-    /// <summary>The span from the oldest to the newest CPU sample since <paramref name="cutoff"/>: zero when there is none.</summary>
-    public static async Task<TimeSpan> GetCpuSampleSpanAsync(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
-    {
-        await using var command = dataSource.CreateCommand(CpuSampleSpanSql);
-        command.CommandTimeout = commandTimeoutSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) && !reader.IsDBNull(1)
-            ? reader.GetDateTime(1) - reader.GetDateTime(0)
-            : TimeSpan.Zero;
-    }
-
     /// <summary>Reads the 7-day P95 Total Server Memory (MB) + sample count (shared by the memory + VM right-sizing checks).</summary>
     public static async Task<(int P95Mb, long SampleCount, string Window)> GetMemoryP95Async(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
@@ -259,25 +237,6 @@ ORDER BY database_name";
         }
 
         return runs;
-    }
-
-    /// <summary>Reads the 7-day P95 SQL Server CPU utilization and the window its samples cover, or null when the window holds no CPU sample.</summary>
-    public static async Task<(decimal P95CpuPct, string Window)?> GetCpuP95Async(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
-    {
-        await using var cpuCommand = dataSource.CreateCommand(CpuP95Sql);
-        cpuCommand.CommandTimeout = commandTimeoutSeconds;
-        cpuCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        cpuCommand.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
-
-        await using var cpuReader = await cpuCommand.ExecuteReaderAsync(cancellationToken);
-        if (await cpuReader.ReadAsync(cancellationToken) && !cpuReader.IsDBNull(0))
-        {
-            var p95Cpu24h = Convert.ToDecimal(cpuReader.GetValue(0), CultureInfo.InvariantCulture);
-            var cpuWindow = RightSizingWindow.Describe(cpuReader.IsDBNull(3) ? 0L : Convert.ToInt64(cpuReader.GetValue(3), CultureInfo.InvariantCulture), cpuReader.IsDBNull(1) || cpuReader.IsDBNull(2) ? TimeSpan.Zero : cpuReader.GetDateTime(2) - cpuReader.GetDateTime(1));
-            return (p95Cpu24h, cpuWindow);
-        }
-
-        return null;
     }
 
     /// <summary>Reads the per-database aggregate read/write I/O + stall over the window, in read order, for the storage-tier check.</summary>
@@ -374,7 +333,7 @@ ORDER BY database_name";
         /* #5633 item 4: the databases the server has now (its newest database_states snapshot; null when unknown, which skips
            nothing). A database dropped since its rows were collected is left out of the database-named rules below; the index
            read (compression) applies the same set at its own read. */
-        var currentDatabases = await CurrentDatabaseScope.ReadAsync(dataSource, serverId, cancellationToken);
+        var currentDatabases = await CurrentDatabaseScope.ReadAsync(dataSource, serverId, cancellationToken: cancellationToken);
 
         // 1. Enterprise feature / license audit (collected server_properties + database_config.is_encrypted).
         try

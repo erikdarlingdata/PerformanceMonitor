@@ -928,12 +928,6 @@ HAVING COUNT(*) >= 24";
         return RightSizingWindow.Describe(count, Convert.ToDateTime(reader.GetValue(firstOrdinal + 1)) - Convert.ToDateTime(reader.GetValue(firstOrdinal)));
     }
 
-    /// <summary>How long the server's CPU samples must span before either CPU right-sizing rule may speak.</summary>
-    internal static readonly TimeSpan CpuRightSizingMinSpan = TimeSpan.FromHours(24);
-
-    /// <summary>True when CPU samples spanning <paramref name="span"/> are enough for CPU right-sizing advice: a full day, so the advice is not read off the minutes a first collect backfills.</summary>
-    internal static bool CpuSamplesSpanEnough(TimeSpan span) => span >= CpuRightSizingMinSpan;
-
     /// <summary>How old the oldest CPU sample inside rule 2's 24-hour window must be: most of the window, so its P95 is a day's load and not the minutes since a restart.</summary>
     internal static readonly TimeSpan CpuWindowMinOldestAge = TimeSpan.FromHours(23);
 
@@ -970,33 +964,6 @@ AND   sqlserver_cpu_utilization IS NOT NULL";
         catch (Exception ex)
         {
             AppLogger.Error("FinOps", $"Recommendation check failed (CPU window coverage): {ex.Message}");
-        }
-
-        return TimeSpan.Zero;
-    }
-
-    /// <summary>The span from the oldest to the newest CPU sample in the last 7 days (the window rule 12 reads): zero when there is none or the read fails.</summary>
-    private async Task<TimeSpan> GetCpuSampleSpanAsync(int serverId)
-    {
-        try
-        {
-            using var connection = await OpenConnectionAsync();
-            using var command = connection.CreateCommand();
-            command.CommandText = @"
-SELECT MIN(collection_time), MAX(collection_time)
-FROM v_cpu_utilization_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   sqlserver_cpu_utilization IS NOT NULL";
-            command.Parameters.Add(new DuckDBParameter { Value = serverId });
-            command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
-            using var reader = await command.ExecuteReaderAsync();
-            if (await reader.ReadAsync() && !reader.IsDBNull(0) && !reader.IsDBNull(1))
-                return Convert.ToDateTime(reader.GetValue(1)) - Convert.ToDateTime(reader.GetValue(0));
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error("FinOps", $"Recommendation check failed (CPU sample span): {ex.Message}");
         }
 
         return TimeSpan.Zero;

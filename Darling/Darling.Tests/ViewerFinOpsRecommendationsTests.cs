@@ -380,7 +380,6 @@ public sealed class ViewerFinOpsRecommendationsTests
     [InlineData(nameof(ViewerDataService.RecommendationsEditionFactsSql))]
     [InlineData(nameof(ViewerDataService.RecommendationsEngineEditionSql))]
     [InlineData(nameof(ViewerDataService.RecommendationsMemoryP95Sql))]
-    [InlineData(nameof(ViewerDataService.RecommendationsCpuP95Sql))]
     [InlineData(nameof(ViewerDataService.RecommendationsMaintenanceWindowSql))]
     [InlineData(nameof(ViewerDataService.RecommendationsStorageTierSql))]
     [InlineData(nameof(ViewerDataService.RecommendationsReservedCapacitySql))]

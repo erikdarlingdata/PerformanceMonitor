@@ -112,12 +112,6 @@ public static class FinOpsRecommendationFigures
         && !edition.Contains("Evaluation", StringComparison.OrdinalIgnoreCase)
         && !edition.Contains("Express", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>How long the 7-day CPU right-sizing rule's samples must span before it may speak: its window is 7 days, and a first collect backfills only minutes.</summary>
-    public static readonly TimeSpan CpuRightSizingMinSpan = TimeSpan.FromHours(24);
-
-    /// <summary>True when the 7-day rule's CPU samples spanning <paramref name="span"/> are enough for advice: a full day, so the advice is not read off the minutes a first collect backfills.</summary>
-    public static bool CpuSamplesSpanEnough(TimeSpan span) => span >= CpuRightSizingMinSpan;
-
     /// <summary>How old the oldest CPU sample inside the last 24 hours must be before the 24-hour rule (CPU over-provisioned) may speak.</summary>
     public static readonly TimeSpan Cpu24HourRuleMinOldestAge = TimeSpan.FromHours(23);
 

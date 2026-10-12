@@ -66,14 +66,6 @@ public class FinOpsClickThroughRulesTests
         Assert.False(FinOpsRecommendationFigures.CpuVerdictAllowsDownsizing(null));
     }
 
-    [Fact]
-    public void CpuRightSizing_NeedsAFullDayOfSamples()
-    {
-        Assert.False(FinOpsRecommendationFigures.CpuSamplesSpanEnough(TimeSpan.FromMinutes(4)));
-        Assert.False(FinOpsRecommendationFigures.CpuSamplesSpanEnough(TimeSpan.FromHours(23)));
-        Assert.True(FinOpsRecommendationFigures.CpuSamplesSpanEnough(TimeSpan.FromHours(24)));
-    }
-
     [Theory]
     [InlineData(null, 2, true)]   // no compute row: the prescriptive row stands alone
     [InlineData(4, 2, false)]     // compute row keeps more cores: it stays

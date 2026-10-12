@@ -414,7 +414,8 @@ public sealed class FinOpsOptimizationViewLiveTests
         Assert.Equal(19.73m, queries.GetProperty("rows")[0].GetProperty("est_cost_usd").GetDecimal());
         Assert.Equal(13.15m, queries.GetProperty("rows")[1].GetProperty("est_cost_usd").GetDecimal());
         Assert.Equal(2, Section(tool, "idle_databases").GetProperty("rows").GetArrayLength());
-        Assert.Equal(5, Section(tool, "wait_categories").GetProperty("rows").GetArrayLength());
+        /* Six categories since the hash waits joined CXPACKET as Parallelism (#5633 item 22). */
+        Assert.Equal(6, Section(tool, "wait_categories").GetProperty("rows").GetArrayLength());
     }
 
     [Fact]
@@ -522,7 +523,7 @@ public sealed class FinOpsOptimizationViewLiveTests
         Assert.Equal("monthly cost not set", tool.RootElement.GetProperty("cost_reason").GetString());
         var rows = Section(tool, "wait_categories").GetProperty("rows").EnumerateArray()
             .Concat(Section(tool, "expensive_queries").GetProperty("rows").EnumerateArray()).ToList();
-        Assert.Equal(9, rows.Count);
+        Assert.Equal(10, rows.Count); // six wait categories (Parallelism is its own since #5633 item 22) and four queries
         Assert.All(rows, r => Assert.Equal(JsonValueKind.Null, r.GetProperty("est_cost_usd").ValueKind));
     }
 
