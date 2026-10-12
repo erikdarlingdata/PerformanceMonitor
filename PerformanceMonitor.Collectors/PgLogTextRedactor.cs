@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using TimeBoundPattern = PerformanceMonitor.Collectors.PgSettingRedactor.TimeBoundPattern;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -59,6 +60,12 @@ namespace PerformanceMonitor.Collectors;
 /// </summary>
 public static class PgLogTextRedactor
 {
+    /// <summary>The bound every pattern here runs under. The value forms and the frame heads are linear in the
+    /// field's length (the longest field they read is <see cref="MaxSqlFieldLength"/>), so this is a backstop, not
+    /// a budget: a pattern that outruns it throws, and the field it was reading is withheld
+    /// (<see cref="WithheldValues"/>), never kept as written and never left half masked.</summary>
+    private static readonly TimeSpan s_matchTimeout = TimeSpan.FromSeconds(1);
+
     /* The DETAIL shapes that carry SQL (#3920). A deadlock report opens with its wait-for lines, "Process N
        waits for <lock> on <object>; blocked by process M.", then writes each process's query as "Process N:
        <query>" (errdetail_log, each cut at track_activity_query_size). A crashed backend's report is one query,
@@ -68,38 +75,44 @@ public static class PgLogTextRedactor
        STRICT row count raised, and "Parameters: $1 = 'value', ..." under a logged statement (errdetail_params).
        Prose masking had covered their quoted values. A tab leads each continuation line in a stderr log, nothing
        in csvlog. Any other DETAIL is prose, kept as written. */
-    private static readonly Regex s_deadlockWaitFor = new(
+    private static readonly TimeBoundPattern s_deadlockWaitFor = new(
         @"^\t?Process (?<pid>[0-9]+) waits for .*; blocked by process (?<blocker>[0-9]+)\.$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
-    private static readonly Regex s_deadlockQueryHead = new(
+    private static readonly TimeBoundPattern s_deadlockQueryHead = new(
         @"^\t?Process (?<pid>[0-9]+): ",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
-    private static readonly Regex s_singleQueryHead = new(
+    private static readonly TimeBoundPattern s_singleQueryHead = new(
         @"^(?:Failed process was running: |prepare: |(?<parameters>[Pp]arameters: ))",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /* What a list of values reads as once lexed (#3996's review): `name = '?'` or `name = NULL` pairs, comma
        separated, each name a plain identifier or a `$n`. PL/pgSQL writes a variable's name UNQUOTED
        (format_expr_params), so a name that needed quoting in the function (`"o'k"`, `"a""b"`) opens a literal or an
        identifier the lexer then reads out of step, and a value comes back as a word. Such a list is not this shape,
        and is withheld. */
-    private static readonly Regex s_valueList = new(
+    private static readonly TimeBoundPattern s_valueList = new(
         @"^(?:[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_$\u0080-\uFFFF]*|\$[0-9]+) = (?:'\?'|NULL)(?:, (?:[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_$\u0080-\uFFFF]*|\$[0-9]+) = (?:'\?'|NULL))*$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /* A portal's one bound value (`portal "p" parameter $1 = '...'`), or only its number when the value was not
        logged. */
-    private static readonly Regex s_oneValue = new(
+    private static readonly TimeBoundPattern s_oneValue = new(
         @"^\$[0-9]+(?: = (?:'\?'|NULL))?$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /* A CONTEXT frame that quotes the statement it was running, unescaped (#3920's review): SPI's
        `SQL statement "..."` and PL/pgSQL's expression and assignment frames. */
-    private static readonly Regex s_contextSqlFrame = new(
+    private static readonly TimeBoundPattern s_contextSqlFrame = new(
         @"^\t?(?:SQL statement|SQL expression|PL/pgSQL expression|PL/pgSQL assignment) """,
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /* A CONTEXT frame that writes SQL WITHOUT quoting it, to the frame's end (#3944's review): postgres_fdw's
        `remote SQL command: <sql>`, whose pushed-down constants are literals, the values a statement was bound
@@ -109,14 +122,16 @@ public static class PgLogTextRedactor
        unescaped, so it is matched lazily to the first `" with parameters: ` or `" parameter $` (#3996's review): a
        name holding a double quote had failed the match, and the frame's values were kept as prose. What a portal
        frame's values lex to is checked against their shape as well, so a name holding that text only withholds. */
-    private static readonly Regex s_contextSqlLine = new(
+    private static readonly TimeBoundPattern s_contextSqlLine = new(
         @"^\t?(?:remote SQL command: |query: |(?:unnamed portal|portal "".*?"") (?:(?<list>with parameters: )|(?<one>parameter )(?=\$)))",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /* What can follow an SQL frame: the line after its closing quote starts one of these, or the field ends. */
-    private static readonly Regex s_contextFrameStart = new(
+    private static readonly TimeBoundPattern s_contextFrameStart = new(
         @"^\t?(?:PL/pgSQL function |SQL function |SQL statement ""|SQL expression ""|PL/pgSQL expression ""|PL/pgSQL assignment ""|parallel worker|while |COPY |JSON data, |remote SQL command: |query: |unnamed portal |portal "")",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /// <summary>What a statement becomes when it cannot be read to its end (cut inside a literal, a quoted
     /// identifier or a block comment, or written two ways at once): no mask can be trusted to have covered what
@@ -174,6 +189,18 @@ public static class PgLogTextRedactor
     /// default, fails closed.</param>
     public static string? RedactDetail(string? detail, bool complete = false, string? sqlState = null)
     {
+        try
+        {
+            return RedactDetailCore(detail, complete, sqlState);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return WithheldValues;
+        }
+    }
+
+    private static string? RedactDetailCore(string? detail, bool complete, string? sqlState)
+    {
         if (string.IsNullOrEmpty(detail))
         {
             return detail;
@@ -183,7 +210,7 @@ public static class PgLogTextRedactor
            exception to #3944: a closed list of the server's own fixed formats, in every catalogue). A DETAIL whose
            SQLSTATE puts it in that class, or that opens like one of the forms, and matches none whole is withheld:
            an application's DETAIL under a RAISE with that errcode, or a shape this build does not read. */
-        if (MaskValues(detail, s_detailForms) is { } maskedValues)
+        if (detail.Length <= MaxSqlFieldLength && MaskValues(detail, s_detailForms) is { } maskedValues)
         {
             return maskedValues;
         }
@@ -320,6 +347,18 @@ public static class PgLogTextRedactor
     /// </summary>
     public static string? RedactContext(string? context)
     {
+        try
+        {
+            return RedactContextCore(context);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return WithheldValues;
+        }
+    }
+
+    private static string? RedactContextCore(string? context)
+    {
         if (string.IsNullOrEmpty(context))
         {
             return context;
@@ -336,7 +375,7 @@ public static class PgLogTextRedactor
                of that value. */
             var tab = lines[i].StartsWith('\t') ? "\t" : string.Empty;
             var body = tab.Length == 0 ? lines[i] : lines[i][1..];
-            if (MaskValues(body, s_contextForms) is { } maskedLine)
+            if (context.Length <= MaxSqlFieldLength && MaskValues(body, s_contextForms) is { } maskedLine)
             {
                 output.Add(tab + maskedLine);
                 i++;
@@ -440,14 +479,25 @@ public static class PgLogTextRedactor
     }
 
     /* auto_explain's report (auto_explain.c): "duration: N ms  plan:", and the plan on the lines under it. */
-    private static readonly Regex s_planHead = new(
+    private static readonly TimeBoundPattern s_planHead = new(
         @"^duration: [0-9]+(?:\.[0-9]+)? ms  plan:$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /// <summary>Whether a message is auto_explain's plan head, <c>duration: N ms  plan:</c>, whose plan is on the lines
     /// under it (#5097). The one spelling of the head, shared with <see cref="WithholdPlan"/>.</summary>
-    public static bool IsPlanHead(string? firstLineMessage) =>
-        firstLineMessage is not null && s_planHead.IsMatch(firstLineMessage);
+    public static bool IsPlanHead(string? firstLineMessage)
+    {
+        try
+        {
+            return firstLineMessage is not null && s_planHead.IsMatch(firstLineMessage);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // Not read to its end: withheld the way a plan is.
+            return true;
+        }
+    }
 
     /// <summary>What an auto_explain plan becomes in a stored message: its statement's text rides in it.</summary>
     public const string WithheldPlan = "<plan withheld: auto_explain writes the statement's text into it>";
@@ -461,9 +511,21 @@ public static class PgLogTextRedactor
     public static string? WithholdPlan(string? message)
     {
         var newline = message?.IndexOf('\n') ?? -1;
-        if (newline < 0 || !s_planHead.IsMatch(message![..newline]))
+        if (newline < 0)
         {
             return message;
+        }
+
+        try
+        {
+            if (!s_planHead.IsMatch(message![..newline]))
+            {
+                return message;
+            }
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return WithheldPlan;
         }
 
         var indent = newline + 1 < message.Length && message[newline + 1] == '\t' ? "\t" : string.Empty;
@@ -772,7 +834,8 @@ public static class PgLogTextRedactor
     /* A placeholder in one of the value forms: %s, %d or %llu in order, or %n$s where a catalogue reorders them. */
     private static readonly Regex s_valuePlaceholder = new(
         @"%(?:(?<position>[0-9])\$)?(?<spec>llu|d|s)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /// <summary>Which of a form's slots carry values, and in what inner shape.</summary>
     private enum ValueSlot
@@ -806,32 +869,65 @@ public static class PgLogTextRedactor
         None,
     }
 
-    /// <summary>One value form, compiled: the pattern of a whole field in it, and the literal it opens with.</summary>
+    /// <summary>One value form, compiled: the pattern of a whole field in it, and the literal it opens with.
+    ///
+    /// <para><b>No slot backtracks into another.</b> Each slot before the last ends at the FIRST place the text that
+    /// follows it begins (a tempered, atomic run: <c>(?&gt;(?:(?!separator).)*)</c>), and the last slot, which
+    /// <c>$</c> pins to the field's end, takes the rest. A slot can therefore be read in one pass whatever the
+    /// text holds, where lazy slots tried every split of every separator the text repeated. Text that repeats a
+    /// separator and so does not read as the form whole matches nothing, and is withheld (<see cref="OpensValueForm"/>,
+    /// <see cref="InValueClass"/>) rather than read some other way.</para></summary>
     private sealed class ValueForm
     {
-        public required Regex Whole { get; init; }
+        public required TimeBoundPattern Whole { get; init; }
 
         /// <summary>The literal before the form's first slot, when it has a letter in it; empty otherwise (a
         /// catalogue that writes a slot first, or opens with a bare quote), so it marks nothing.</summary>
         public required string Head { get; init; }
 
+        /// <summary>Whether the form is a message's, which a verbose log's SQLSTATE may precede.</summary>
+        public required bool Message { get; init; }
+
         /// <summary>Two keys of one index must name the same columns; different ones mean the text is not what
         /// PostgreSQL wrote, and it is withheld.</summary>
         public required bool SameNames { get; init; }
 
+        /// <summary>A slot that ends where <paramref name="separator"/> (a pattern) first appears.</summary>
+        private static string Until(string group, string separator, string atom = ".") =>
+            $"(?<{group}>(?>(?:(?!{separator}){atom})*))";
+
+        /// <summary>The form's last slot: whatever is left of the field, up to the text that ends the form.</summary>
+        private static string Rest(string group, string atom = ".") => $"(?<{group}>{atom}*)";
+
         public static ValueForm Compile(string format, ValueSlot slot, bool message)
         {
+            var placeholders = s_valuePlaceholder.Matches(format);
+            var literals = new List<string>(placeholders.Count + 1);
+            var from = 0;
+            foreach (Match placeholder in placeholders)
+            {
+                literals.Add(format[from..placeholder.Index]);
+                from = placeholder.Index + placeholder.Length;
+            }
+
+            literals.Add(format[from..]);
+
             var pattern = new StringBuilder(message ? StatePattern : "^");
             var argument = 0;
-            var from = 0;
             string? head = null;
             var keys = 0;
             var valueOpened = false;
-            foreach (Match placeholder in s_valuePlaceholder.Matches(format))
+            for (var at = 0; at < placeholders.Count; at++)
             {
-                var literal = format[from..placeholder.Index];
+                var placeholder = placeholders[at];
+                var literal = literals[at];
                 head ??= literal;
                 pattern.Append(Regex.Escape(literal));
+
+                /* What the slot ends at, in the text: the literal that follows the placeholder; the form's end when
+                   no slot follows. */
+                var last = at == placeholders.Count - 1;
+                var next = Regex.Escape(literals[at + 1]);
                 var position = placeholder.Groups["position"];
                 argument = position.Success ? position.Value[0] - '0' : argument + 1;
                 if (placeholder.Groups["spec"].Value != "s")
@@ -843,26 +939,28 @@ public static class PgLogTextRedactor
                     switch (slot)
                     {
                         case ValueSlot.Key:
-                            pattern.Append(@"\((?<name>.*?)\)=\((?<value>.*?)\)");
+                            pattern.Append(@"\(").Append(Until("name", @"\)=\(")).Append(@"\)=\(")
+                                .Append(last ? Rest("value") : Until("value", @"\)" + next)).Append(@"\)");
                             keys++;
                             break;
                         case ValueSlot.KeyPair when argument == 2:
                         case ValueSlot.CopyLine when argument == 3:
                         case ValueSlot.CopyColumn when argument == 4:
                         case ValueSlot.Input when argument == 2:
-                            pattern.Append("(?<value>.*?)");
+                            pattern.Append(last ? Rest("value") : Until("value", next));
                             break;
                         case ValueSlot.Row:
-                            pattern.Append(@"\((?<value>.*?)\)");
+                            pattern.Append(@"\(").Append(last ? Rest("value") : Until("value", @"\)" + next)).Append(@"\)");
                             break;
                         case ValueSlot.PartitionKey:
-                            pattern.Append(@"\((?<name>.*?)\) = \((?<value>.*?)\)");
+                            pattern.Append(@"\(").Append(Until("name", @"\) = \(")).Append(@"\) = \(")
+                                .Append(last ? Rest("value") : Until("value", @"\)" + next)).Append(@"\)");
                             break;
                         case ValueSlot.Json when argument >= 2:
                             /* The three slots are adjacent: one value spans them. */
                             if (!valueOpened)
                             {
-                                pattern.Append("(?<value>.*?)");
+                                pattern.Append(Rest("value"));
                                 valueOpened = true;
                             }
 
@@ -871,20 +969,20 @@ public static class PgLogTextRedactor
                             /* A form with no value slot must not read a whole value-bearing line as its one name
                                (`COPY %s` over `COPY t, line 1: "..."`), so its names take no colon, quote or line
                                break; a relation named with one falls to the head rule and is withheld. */
-                            pattern.Append(slot == ValueSlot.None ? @"(?<name>[^\n:""]*?)" : "(?<name>.*?)");
+                            var atom = slot == ValueSlot.None ? @"[^\n:""]" : ".";
+                            pattern.Append(last ? Rest("name", atom) : Until("name", next, atom));
                             break;
                     }
                 }
-
-                from = placeholder.Index + placeholder.Length;
             }
 
-            pattern.Append(Regex.Escape(format[from..])).Append(message ? s_positionPattern : "$");
+            pattern.Append(Regex.Escape(literals[^1])).Append(message ? s_positionPattern : "$");
             head ??= format;
             return new ValueForm
             {
-                Whole = new Regex(pattern.ToString(), RegexOptions.CultureInvariant | RegexOptions.Singleline),
+                Whole = new TimeBoundPattern(pattern.ToString(), RegexOptions.CultureInvariant | RegexOptions.Singleline, s_matchTimeout),
                 Head = head.Any(char.IsLetter) ? head : string.Empty,
+                Message = message,
                 SameNames = keys > 1,
             };
         }
@@ -893,6 +991,13 @@ public static class PgLogTextRedactor
         /// name different columns; null when it is not in this form.</summary>
         public string? Apply(string text)
         {
+            /* A form that opens with words is only tried on text that opens with them (after a verbose log's
+               SQLSTATE, for a message): the pattern could not match otherwise, and skipping it skips the read. */
+            if (Head.Length > 0 && !text.AsSpan(Message ? StatePrefixLength(text) : 0).StartsWith(Head, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
             var match = Whole.Match(text);
             if (!match.Success)
             {
@@ -1194,7 +1299,8 @@ public static class PgLogTextRedactor
     /* A placeholder in a catalogue format: %s in order, or %1$s / %2$s where a catalogue reorders them. */
     private static readonly Regex s_formatArgument = new(
         @"%(?:(?<position>[12])\$)?s",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /* The head is one of the scanner's fixed messages, so it holds no newline and no quote a token is written
        inside. Holding one is what makes a head "not clean" (#3996's round-2 review): `improper use of "*"` puts a
@@ -1251,7 +1357,7 @@ public static class PgLogTextRedactor
     /// by.</summary>
     private sealed class MessageShape
     {
-        public required Regex Whole { get; init; }
+        public required TimeBoundPattern Whole { get; init; }
 
         /// <summary>The form's longest literal: a message without it cannot be in this form.</summary>
         public required string Anchor { get; init; }
@@ -1307,7 +1413,7 @@ public static class PgLogTextRedactor
             var closing = tokenAfter < 0 ? string.Empty : literals[tokenAfter + 1];
             return new MessageShape
             {
-                Whole = new Regex(pattern.ToString(), RegexOptions.CultureInvariant | RegexOptions.Singleline),
+                Whole = new TimeBoundPattern(pattern.ToString(), RegexOptions.CultureInvariant | RegexOptions.Singleline, s_matchTimeout),
                 Anchor = literals.MaxBy(l => l.Length)!,
                 Opening = opening,
                 Closing = closing,
@@ -1345,6 +1451,18 @@ public static class PgLogTextRedactor
     /// cut on its first line).</param>
     public static string? RedactMessage(string? message, bool cut = false, string? sqlState = null)
     {
+        try
+        {
+            return RedactMessageCore(message, cut, sqlState);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return WithheldValues;
+        }
+    }
+
+    private static string? RedactMessageCore(string? message, bool cut, string? sqlState)
+    {
         var kept = WithholdPlan(message);
         if (string.IsNullOrEmpty(kept))
         {
@@ -1354,7 +1472,7 @@ public static class PgLogTextRedactor
         /* The rejected value an input function writes into its message, masked in its slot (the one exception to
            #3944). A message whose SQLSTATE is invalid_text_representation, or that opens like the form, and matches
            none whole is withheld. */
-        if (MaskValues(kept, s_messageForms) is { } maskedValues)
+        if (kept.Length <= MaxSqlFieldLength && MaskValues(kept, s_messageForms) is { } maskedValues)
         {
             return maskedValues;
         }
