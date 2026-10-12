@@ -5597,7 +5597,8 @@ LIMIT 1";
     /// engine pass are two single-flight passes that can overlap when an engine pass outlasts a cadence, so they split
     /// the <see cref="SelfAlertPassWidthFor"/> budget instead of each taking all of it: the engine pass takes half
     /// (at least one), <see cref="SelfAlertStepWidthFor"/> takes the rest. At the widest setting that is 2 and 2 of the
-    /// 4 the pool's alert share allows, so the web viewer's and the MCP tools' half of the reserve stays free.
+    /// 4 the pool's alert share allows, so the web viewer's and the MCP tools' half of the reserve stays free. The one
+    /// exception is a sweep width of 1: the budget is 1, both widths floor to 1, and the two passes hold 2 connections.
     /// </summary>
     internal static int AlertEnginePassWidthFor(int sweepWidth) =>
         Math.Max(1, SelfAlertPassWidthFor(sweepWidth) / 2);
