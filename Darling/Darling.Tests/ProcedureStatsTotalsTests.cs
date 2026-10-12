@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -153,12 +154,24 @@ public sealed class ProcedureStatsTotalsTests
         Assert.DoesNotContain("catch", between, StringComparison.Ordinal);
         Assert.DoesNotContain("SAVEPOINT", between, StringComparison.OrdinalIgnoreCase);
 
-        /* collect.procedure_stats has exactly one writer: the runner's COPY. */
-        foreach (var file in new[] { "DarlingWorker.cs", "DarlingRetention.cs" })
+        /* collect.procedure_stats has exactly one writer, the runner's COPY (built from TargetTable, so it has no literal): no other Darling source file names an INSERT or COPY into it. */
+        var scanned = 0;
+        foreach (var file in Directory.EnumerateFiles(RepoFile.PathTo("Darling"), "*.cs", SearchOption.AllDirectories))
         {
-            var text = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", file);
-            Assert.DoesNotContain("INSERT INTO collect.procedure_stats ", text, StringComparison.Ordinal);
+            var relative = Path.GetRelativePath(RepoFile.Root, file).Replace('\\', '/');
+            if (relative.Contains("/obj/", StringComparison.Ordinal) || relative.Contains("/bin/", StringComparison.Ordinal)
+                || relative.StartsWith("Darling/Darling.Tests/", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            scanned++;
+            var text = File.ReadAllText(file);
+            Assert.False(text.Contains("INSERT INTO collect.procedure_stats ", StringComparison.Ordinal), relative + " writes collect.procedure_stats");
+            Assert.False(text.Contains("COPY collect.procedure_stats ", StringComparison.Ordinal), relative + " COPYs into collect.procedure_stats");
         }
+
+        Assert.True(scanned > 300, "the scan saw " + scanned + " Darling source files");
     }
 
     /// <summary>
