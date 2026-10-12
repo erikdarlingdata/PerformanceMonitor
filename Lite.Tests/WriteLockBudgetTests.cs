@@ -283,9 +283,10 @@ public sealed class WriteLockBudgetTests
     {
         var source = ParitySource.ReadFile("Lite/Services/LocalDataService.cs");
 
-        /* #5650: two entry points, each taking its instance's budget, which defaults to the host's static. */
-        Assert.Contains("AcquireWriteLock(timeout: _backgroundWriteLockBudget)", source, StringComparison.Ordinal);
-        Assert.Contains("AcquireWriteLock(timeout: _userWriteLockBudget)", source, StringComparison.Ordinal);
+        /* #5650: two entry points, each taking its instance's budget, which defaults to the host's static. The call goes on
+           with the caller's name (holderMember, holderFile), so the pin ends at the budget's comma. */
+        Assert.Contains("AcquireWriteLock(timeout: _backgroundWriteLockBudget,", source, StringComparison.Ordinal);
+        Assert.Contains("AcquireWriteLock(timeout: _userWriteLockBudget,", source, StringComparison.Ordinal);
         Assert.Contains(": this(duckDb, WriteLockBudget, UserWriteLockBudget)", source, StringComparison.Ordinal);
         Assert.DoesNotContain("AcquireWriteLock(timeout: TimeSpan.", source, StringComparison.Ordinal);
     }

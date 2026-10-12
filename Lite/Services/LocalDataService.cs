@@ -13,6 +13,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -58,7 +59,9 @@ public partial class LocalDataService
     /// The lock prevents CHECKPOINT and compaction from reorganizing the database file
     /// while this connection is reading from it.
     /// </summary>
-    internal Task<LockedConnection> OpenConnectionAsync() => OpenConnectionAsync(timer: null, CancellationToken.None);
+    internal Task<LockedConnection> OpenConnectionAsync(
+        [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
+        => OpenConnectionAsync(timer: null, CancellationToken.None, holderMember, holderFile);
 
     /// <summary>
     /// The same open, abandonable and timed (#5371). A token that can fire takes <c>AcquireReadLock(CancellationToken)</c>,
@@ -67,12 +70,14 @@ public partial class LocalDataService
     /// original uninterruptible path, so every read that passes no token is unchanged. <paramref name="timer"/> records the
     /// lock wait and the open apart; null times nothing.
     /// </summary>
-    internal async Task<LockedConnection> OpenConnectionAsync(ReadPhaseTimer? timer, CancellationToken cancellationToken)
+    internal async Task<LockedConnection> OpenConnectionAsync(
+        ReadPhaseTimer? timer, CancellationToken cancellationToken,
+        [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
     {
         IDisposable readLock;
         using (timer?.Measure(ReadPhaseTimer.LockWait))
         {
-            readLock = _duckDb.AcquireReadLock(cancellationToken);
+            readLock = _duckDb.AcquireReadLock(cancellationToken, holderMember, holderFile);
         }
 
         try
@@ -223,9 +228,10 @@ public partial class LocalDataService
     /// See <see cref="LocalDataService.GetDatabaseStateDeviationsAsync"/> for what a caller does when it
     /// expires.</para>
     /// </summary>
-    internal async Task<LockedConnection> OpenWriteConnectionAsync()
+    internal async Task<LockedConnection> OpenWriteConnectionAsync(
+        [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
     {
-        var writeLock = _duckDb.AcquireWriteLock(timeout: _backgroundWriteLockBudget);
+        var writeLock = _duckDb.AcquireWriteLock(timeout: _backgroundWriteLockBudget, holderMember, holderFile);
         return await OpenLockedAsync(writeLock);
     }
 
@@ -239,9 +245,10 @@ public partial class LocalDataService
     /// <para>The wait blocks the calling thread, so a UI caller runs it inside <c>Task.Run</c> and shows
     /// that it is waiting (Dismiss in <c>AlertsHistoryTab</c> disables its buttons and says so).</para>
     /// </summary>
-    internal async Task<LockedConnection> OpenUserWriteConnectionAsync()
+    internal async Task<LockedConnection> OpenUserWriteConnectionAsync(
+        [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
     {
-        var writeLock = _duckDb.AcquireWriteLock(timeout: _userWriteLockBudget);
+        var writeLock = _duckDb.AcquireWriteLock(timeout: _userWriteLockBudget, holderMember, holderFile);
         return await OpenLockedAsync(writeLock);
     }
 

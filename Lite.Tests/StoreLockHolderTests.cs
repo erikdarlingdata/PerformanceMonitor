@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Xunit;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Tests;
 
@@ -72,6 +73,34 @@ public sealed class StoreLockHolderTests
             finally
             {
                 stop();
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    /// <summary>
+    /// #5650: the user-write entry point passes the caller's name through, so the hold is recorded under the method that
+    /// asked for the connection, not under <c>LocalDataService.OpenUserWriteConnectionAsync</c>.
+    /// </summary>
+    [Fact]
+    public async Task UserWriteConnection_HolderNamesThisTest_NotTheEntryPoint()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "pmlite-lockholder-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            using var initializer = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
+            var service = new LocalDataService(initializer, TimeSpan.FromMilliseconds(150), TimeSpan.FromSeconds(3));
+            await using (await service.OpenUserWriteConnectionAsync())
+            {
+                /* The write lock is exclusive, so while this hold is open the registry can name no other writer. */
+                var holders = StoreLockHolders.Snapshot();
+                Assert.Contains(holders, h => h.Write
+                    && h.Name == "StoreLockHolderTests." + nameof(UserWriteConnection_HolderNamesThisTest_NotTheEntryPoint));
+                Assert.DoesNotContain(holders, h => h.Name.Contains("OpenUserWriteConnectionAsync", StringComparison.Ordinal));
             }
         }
         finally
