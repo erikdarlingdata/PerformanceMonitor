@@ -269,7 +269,7 @@ JOIN sys.trace_events AS te
   ON ft.EventClass = te.trace_event_id
 WHERE t.is_default = 1
 AND   t.status = 1
-AND   ft.StartTime > {1}
+AND   ft.StartTime > CONVERT(datetime, {1})
 AND
 (
     /*The sp_configure line (msg 15457, an ErrorLog write): kept regardless of the session's database
@@ -307,6 +307,11 @@ AND
                 AND ISNULL(ft.DatabaseID, 0) <> 2
                 AND ISNULL(ft.ObjectName, N'') NOT LIKE N'[_]WA[_]%'
                 AND te.name IN (N'Object:Created', N'Object:Altered', N'Object:Deleted')
+                /*#5644 W6: SQL Server writes each DDL twice, EventSubClass 0 (Begin) and 1 (Commit), identical
+                  but for EventSequence. Keep the Commit: it is the one that took effect. A rolled-back DDL
+                  leaves only its Begin, which the trace shows but nothing changed. NULL stays in case a build
+                  writes no subclass.*/
+                AND ISNULL(ft.EventSubClass, 1) = 1
             )
             OR
             /*Security audit events (audit-change, DBCC, alter-trace)*/

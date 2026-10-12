@@ -838,8 +838,11 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DES
         var endTime = clock.ToServerLocal(windowEndUtc).AddHours(1);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
+        /* #5644 W6: DISTINCT drops the stored copies of one event (the Begin and Commit rows of a DDL that an older
+           build kept, and an event re-stored by the datetime watermark round trip): they match on every column
+           selected here, and only the event_sequence the collector stores tells them apart. */
         command.CommandText = @"
-SELECT
+SELECT DISTINCT
     event_time,
     event_name,
     database_name,

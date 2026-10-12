@@ -84,11 +84,25 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
         Assert.Contains("ELSE t.max_files", text, StringComparison.Ordinal);
         Assert.Contains("t.is_default = 1", text, StringComparison.Ordinal);
         Assert.Contains("t.status = 1", text, StringComparison.Ordinal);
+        /* #5644 W6: the bound is CONVERTed to datetime so it compares like for like with ft.StartTime. A bare datetime2
+           parameter holding 10:49:13.643 sits BELOW the trace's own 10:49:13.6433333 (datetime ticks in 1/300 s),
+           so `>` held the newest stored event true on every poll and stored it again until a newer event came. */
         Assert.Contains(
-            "ft.StartTime > COALESCE(@cutoff_time, DATEADD(HOUR, -24, SYSDATETIME()))",
+            "ft.StartTime > CONVERT(datetime, COALESCE(@cutoff_time, DATEADD(HOUR, -24, SYSDATETIME())))",
             text, StringComparison.Ordinal);
         Assert.Contains("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED", text, StringComparison.Ordinal);
         Assert.Contains("OPTION(RECOMPILE)", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ObjectDdl_KeepsTheCommitRowOnly_NotTheBeginAndCommitPair()
+    {
+        /* #5644 W6: SQL Server writes Object:Created/Altered/Deleted twice, EventSubClass 0 (Begin) and 1 (Commit). */
+        var text = DefaultTraceEventsCollector.Instance.BuildQuery(MakeContext()).Text;
+        var ddl = text.IndexOf("te.name IN (N'Object:Created', N'Object:Altered', N'Object:Deleted')", StringComparison.Ordinal);
+        var subclass = text.IndexOf("AND ISNULL(ft.EventSubClass, 1) = 1", StringComparison.Ordinal);
+
+        Assert.True(ddl > 0 && subclass > ddl, "the Commit-only predicate must follow the Object DDL names, inside the same arm");
     }
 
     [Fact]
