@@ -73,8 +73,9 @@ OPTION(RECOMPILE);";
     /// NOT Azure SQL Database (edition 5): <c>DBCC TRACESTATUS</c> is not supported there. Azure SQL
     /// Managed Instance (edition 8) and on-prem both support it, so they collect. Gated here in the shared
     /// AppliesTo so Lite and Darling skip identically — before this the gate lived only in Lite's
-    /// IsCollectorSupported, and Darling relied on <c>RunTraceFlagsTolerantAsync</c> swallowing the error to
-    /// a 0-row SUCCESS (this makes the skip explicit, matching Lite's SKIPPED record).
+    /// IsCollectorSupported, and Darling relied on a tolerant wrapper swallowing the error to
+    /// a 0-row SUCCESS (this makes the skip explicit, matching Lite's SKIPPED record; #5633 item 19 removed both wrappers, so a failed
+    /// read is a PERMISSIONS or ERROR run in both products, never a SUCCESS with 0 rows).
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) => !target.IsAzureSqlDb;
 
