@@ -78,6 +78,42 @@ VALUES ($1, $2, $3, 'TestSrv', $4, 'Server Memory Change', NULL, NULL, NULL, NUL
         await cmd.ExecuteNonQueryAsync();
     }
 
+    private async Task SeedAutoGrowAsync(DateTime eventTimeServerLocal, string filename, int eventClass)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO default_trace_events
+    (default_trace_event_id, collection_time, server_id, server_name, event_time, event_name, event_class,
+     database_name, filename, duration_us, integer_data, severity, error_number, text_data)
+VALUES ($1, $2, $3, 'TestSrv', $4, 'Data File Auto Grow', $5, 'grow', $6, 1500000, 256, NULL, NULL, NULL)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+        cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = eventTimeServerLocal });
+        cmd.Parameters.Add(new DuckDBParameter { Value = eventClass });
+        cmd.Parameters.Add(new DuckDBParameter { Value = filename });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    [Fact]
+    public async Task DefaultTrace_AutoGrowsForDifferentFilesInOneTick_AreTwoEvents_AndTrueCopiesStayOne()
+    {
+        /* #5644 W6: Lite, the viewer and the MCP reader key on the same full column set (filename and event_class too). */
+        var service = new LocalDataService(_duckDb);
+        var tick = At(2026, 3, 9, 8, 0);
+        await SeedAutoGrowAsync(tick, "a.mdf", 92);
+        await SeedAutoGrowAsync(tick, "b.mdf", 92);
+        await SeedAutoGrowAsync(tick, "b.mdf", 93);
+        await SeedAutoGrowAsync(tick, "a.mdf", 92);   /* a true copy */
+
+        var rows = await service.GetDefaultTraceEventsAsync(
+            ServerId, fromDate: At(2026, 3, 9, 0, 0), toDate: At(2026, 3, 10, 0, 0), serverClock: Eastern());
+
+        Assert.Equal(3, rows.Count(r => r.EventName == "Data File Auto Grow"));
+    }
+
     // ── System Events (Default Trace): server-local event_time converted per row ──
 
     [Fact]

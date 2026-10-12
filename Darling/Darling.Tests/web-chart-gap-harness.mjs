@@ -147,6 +147,20 @@ out.bigMiss = marks(draw(seq(0, 30).concat(seq(37, 60)), { series: [{ key: "a", 
 out.slowCollector = marks(draw(seq(0, 300, 15).concat(seq(330, 600, 15)), { series: [{ key: "a", label: "A", color: "#f00" }] }));
 out.slowCollectorBreak = marks(draw(seq(0, 300, 15).concat(seq(420, 600, 15)), { series: [{ key: "a", label: "A", color: "#f00" }] }));
 
+/* The threshold is per series (#5644 review): a 15 minute overlay on 1 minute buckets is one line when it has no gap of its own,
+   and breaks when it does. The overlay c is set only at every 15th minute. */
+const sparseC = (minutes) => minutes.map((m, i) => ({ t: iso(T0 + m * MIN), a: 10 + (i % 7), c: m % 15 === 0 ? 5 + (i % 3) : null }));
+const drawSparse = (minutes) =>
+  charts.renderLineChart({ points: sparseC(minutes), xKey: "t", series: [{ key: "a", label: "A", color: "#f00" }], series2: { key: "c", label: "C", color: "#00f" } });
+out.coarseOverlayNoGap = marks(drawSparse(noGap));
+out.coarseOverlayGap = marks(drawSparse(withGap));
+/* a coarse PRIMARY series next to a fine one on the same rows */
+out.coarsePrimary = marks(charts.renderLineChart({
+  points: sparseC(noGap).map((r) => ({ ...r, b: 1 })),
+  xKey: "t",
+  series: [{ key: "a", label: "A", color: "#f00" }, { key: "c", label: "C", color: "#0f0" }],
+}));
+
 out.threshold = {
   empty: String(charts.gapThresholdMs([])),
   one: String(charts.gapThresholdMs([0])),

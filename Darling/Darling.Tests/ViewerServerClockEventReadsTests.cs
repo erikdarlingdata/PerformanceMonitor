@@ -54,20 +54,24 @@ public sealed class ViewerDefaultTraceServerClockTests
         table.Columns.Add("severity", typeof(int));
         table.Columns.Add("error_number", typeof(int));
         table.Columns.Add("text_data", typeof(string));
+        table.Columns.Add("filename", typeof(string));
+        table.Columns.Add("event_class", typeof(int));
         return table;
     }
 
     /// <summary>One stored event. <paramref name="label"/> rides in database_name so a test can say which
     /// event came back; the default name is a Default Trace category that is significant as collected.</summary>
     private static void AddEvent(DataTable table, DateTime? local, string label,
-        string eventName = "Data File Auto Grow", int? severity = null)
+        string eventName = "Data File Auto Grow", int? severity = null, string? filename = null, int? eventClass = null)
     {
         table.Rows.Add(
             local.HasValue ? (object)local.Value : DBNull.Value,
             eventName, label, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
             55, 1_500_000L, 256L,
             severity.HasValue ? (object)severity.Value : DBNull.Value,
-            DBNull.Value, DBNull.Value);
+            DBNull.Value, DBNull.Value,
+            filename is null ? DBNull.Value : filename,
+            eventClass.HasValue ? (object)eventClass.Value : DBNull.Value);
     }
 
     private static async Task<List<DefaultTraceEventRow>> ReadAsync(DataTable table, ServerClock clock, DateTime startUtc, DateTime endUtc)
@@ -117,6 +121,24 @@ public sealed class ViewerDefaultTraceServerClockTests
         Assert.Single(rows, r => r.DatabaseName == "same-event" && r.EventTimeUtc == Naive(2026, 3, 9, 12));
         Assert.Single(rows, r => r.DatabaseName == "same-event" && r.EventTimeUtc == Naive(2026, 3, 9, 12, 1));
         Assert.Single(rows, r => r.DatabaseName == "other-database");
+    }
+
+    /// <summary>
+    /// #5644 W6: the three Default Trace readers key on the same full column set. Two Data File Auto Grow rows for
+    /// different files in one tick (or of different classes) are two events here, as in the MCP reader and Lite.
+    /// </summary>
+    [Fact]
+    public async Task TwoAutoGrowsForDifferentFilesInOneTick_AreTwoEvents_AndTrueCopiesStayOne()
+    {
+        var table = NewTable();
+        AddEvent(table, Naive(2026, 3, 9, 8), "grow", filename: "a.mdf", eventClass: 92);
+        AddEvent(table, Naive(2026, 3, 9, 8), "grow", filename: "b.mdf", eventClass: 92);
+        AddEvent(table, Naive(2026, 3, 9, 8), "grow", filename: "b.mdf", eventClass: 93);
+        AddEvent(table, Naive(2026, 3, 9, 8), "grow", filename: "a.mdf", eventClass: 92);   /* a true copy */
+
+        var rows = await ReadAsync(table, Eastern(), Naive(2026, 1, 1, 0), Naive(2026, 12, 31, 0));
+
+        Assert.Equal(3, rows.Count);
     }
 
     [Fact]

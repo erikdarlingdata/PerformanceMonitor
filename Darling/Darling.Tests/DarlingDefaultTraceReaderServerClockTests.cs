@@ -82,6 +82,27 @@ public sealed class DarlingDefaultTraceReaderServerClockTests
     }
 
     [Fact]
+    public async Task TwoAutoGrowsForDifferentFilesInOneTick_AreTwoEvents_AsInTheViewerAndLite()
+    {
+        /* #5644 W6: the viewer, Lite and this reader key on the same full column set, filename (9) and event_class (2)
+           included. */
+        var table = new DataTable();
+        for (var i = 0; i < 15; i++)
+        {
+            table.Columns.Add("c" + i, i == 0 ? typeof(DateTime) : i == 2 ? typeof(int) : typeof(string));
+        }
+
+        foreach (var (file, cls) in new[] { ("a.mdf", 92), ("b.mdf", 92), ("b.mdf", 93), ("a.mdf", 92) })
+        {
+            AddRow(table, (0, Naive(2026, 3, 9, 8)), (1, "Data File Auto Grow"), (2, cls), (4, "grow"), (9, file));
+        }
+
+        var rows = await ReadAsync(table, Eastern(), Naive(2026, 1, 1, 0), Naive(2026, 12, 31, 0));
+
+        Assert.Equal(3, rows.Count);
+    }
+
+    [Fact]
     public async Task AnEventInASkippedOrRepeatedLocalHour_DoesNotThrow()
     {
         var table = NewTable();

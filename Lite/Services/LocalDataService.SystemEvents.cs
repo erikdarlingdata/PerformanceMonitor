@@ -840,7 +840,9 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DES
 
         /* #5644 W6: DISTINCT drops the stored copies of one event (the Begin and Commit rows of a DDL that an older
            build kept, and an event re-stored by the datetime watermark round trip): they match on every column
-           selected here, and only the event_sequence the collector stores tells them apart. */
+           selected here, and only the event_sequence the collector stores tells them apart. filename and event_class are
+           selected for the same reason as the MCP reader and the viewer key on them (the grid does not show them): two
+           Data File Auto Grow rows for different files in one tick are two events. */
         command.CommandText = @"
 SELECT DISTINCT
     event_time,
@@ -855,7 +857,9 @@ SELECT DISTINCT
     integer_data,
     severity,
     error_number,
-    text_data
+    text_data,
+    filename,
+    event_class
 FROM v_default_trace_events
 WHERE server_id = $1
 AND   event_time >= $2

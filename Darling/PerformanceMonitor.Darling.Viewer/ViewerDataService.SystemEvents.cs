@@ -647,7 +647,9 @@ public sealed partial class ViewerDataService
             dte.integer_data,
             dte.severity,
             dte.error_number,
-            dte.text_data
+            dte.text_data,
+            dte.filename,
+            dte.event_class
         FROM default_trace_events AS dte, svr
         WHERE dte.server_id = $1
         AND   dte.event_time - make_interval(mins => svr.offset_minutes) >= $2 - interval '1 hour'
@@ -695,7 +697,7 @@ public sealed partial class ViewerDataService
         DbDataReader reader, ServerClock clock, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
     {
         var rows = new List<DefaultTraceEventRow>();
-        var seen = new HashSet<(DateTime?, string?, string?, string?, string?, string?, string?, int?, long?, long?, int?, int?, string?)>();
+        var seen = new HashSet<(DateTime?, string?, string?, string?, string?, string?, string?, int?, long?, long?, int?, int?, string?, string?, int?)>();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -719,6 +721,8 @@ public sealed partial class ViewerDataService
             var integerData = reader.IsDBNull(9) ? (long?)null : reader.GetInt64(9);
             var errorNumber = reader.IsDBNull(11) ? (int?)null : reader.GetInt32(11);
             var textData = reader.IsDBNull(12) ? null : reader.GetString(12);
+            var filename = reader.IsDBNull(13) ? null : reader.GetString(13);
+            var eventClass = reader.IsDBNull(14) ? (int?)null : reader.GetInt32(14);
 
             /* #5644 W6: the store holds rows that are the same event twice (an older build kept both the Begin and
                the Commit of every DDL, and re-stored an event whose datetime StartTime did not round-trip through
@@ -726,7 +730,7 @@ public sealed partial class ViewerDataService
                collector stores tells them apart, so the first of each in reader order is kept, as the MCP reader
                and Lite's do, and the copies stop filling the grid and the page limit. */
             if (!seen.Add((eventTimeUtc, eventName, databaseName, objectName, loginName, hostName, applicationName,
-                    spid, durationUs, integerData, severity, errorNumber, textData)))
+                    spid, durationUs, integerData, severity, errorNumber, textData, filename, eventClass)))
                 continue;
 
             rows.Add(new DefaultTraceEventRow(
