@@ -1738,37 +1738,46 @@ public sealed class DarlingMcpHostService : BackgroundService
                    is not a trade worth making. */
                 var authorization = context.Request.Headers.Authorization.ToString();
                 var remote = context.Connection.RemoteIpAddress;
-                var source = DarlingHttpRefusalLog.DescribeSource(remote);
+                var source = DarlingSignInThrottle.SourceKey(remote);
                 var now = clock();
 
-                /* A source that has presented wrong tokens repeatedly waits, and a request inside the wait is
-                   answered 429 without being compared. A CORRECT token presented during the wait is held too:
-                   answering it would tell the caller which attempt was right. The wait is per source address, so
-                   on the loopback bind (write tools on) every local client is one source, and behind a proxy
-                   every client is the proxy's address: this host does not read forwarded headers. */
-                var wait = tokenThrottle.RetryAfter(source, now);
-                if (wait > TimeSpan.Zero)
+                /* Only a Bearer that was presented is an attempt. No header, or one that is not a well-formed
+                   Bearer, compares nothing, so it takes no part in the wait: counting it would let a client
+                   that was never given the token hold every other client on its address, which is exactly
+                   what happens on the loopback bind.
+
+                   An attempt is checked against the wait and counted in ONE atomic step BEFORE the token is
+                   compared (BeginAttempt), so attempts that arrive together are counted one by one and only
+                   the allowance is compared. Inside the wait (or when the total budget across every source is
+                   spent) nothing is compared and the answer is 429 + Retry-After; that includes a correct
+                   token, since answering it would tell the caller which attempt was right. The wait is per
+                   source address (IPv6 by its /64), so on the loopback bind every local client is one source,
+                   and behind a proxy every client is the proxy's address: this host does not read forwarded
+                   headers. The wait is in memory; restarting the service clears it. */
+                var attempt = default(SignInAttempt);
+                if (ExtractBearerToken(authorization) is not null)
                 {
-                    var seconds = (int)Math.Ceiling(wait.TotalSeconds);
-                    refusals.Report(
-                        _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status429TooManyRequests, remote,
-                        $"requests from this source are held for {seconds} more second(s) after repeated wrong bearer tokens",
-                        now);
-                    context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-                    context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
-                    return;
+                    attempt = tokenThrottle.BeginAttempt(source, now);
+                    if (attempt.IsHeld)
+                    {
+                        var seconds = (int)Math.Ceiling(attempt.RetryAfter.TotalSeconds);
+                        refusals.Report(
+                            _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status429TooManyRequests, remote,
+                            $"requests from this source are held for {seconds} more second(s) after repeated wrong bearer tokens; no token is compared during the wait, and restarting the service clears it",
+                            now);
+                        context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                        context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
+                        context.Response.ContentType = "text/plain; charset=utf-8";
+                        await context.Response.WriteAsync(
+                            $"Too many wrong bearer tokens from this address. Try again in {seconds} seconds. "
+                            + "No token is compared during the wait. The wait is kept in memory: restarting the service clears it.");
+                        return;
+                    }
                 }
 
                 if (!IsBearerTokenAuthorized(authorization, token))
                 {
-                    /* Only a Bearer that was presented and missed is an attempt, so only that counts against the
-                       source. No header, or one that is not a well-formed Bearer, compared nothing: counting
-                       it would let a client that was never given the token hold every other client on its
-                       address, which is exactly what happens on the loopback bind. */
-                    if (ExtractBearerToken(authorization) is not null)
-                    {
-                        tokenThrottle.RecordFailure(source, now);
-                    }
+                    /* A reserved attempt that missed stays counted; it needs no further call. */
 
                     /* THREE client states, never the token's value. Each one is a different next step
                        for the operator, which is the whole point of logging this at all:
@@ -1792,7 +1801,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                     return;
                 }
 
-                tokenThrottle.RecordSuccess(source);
+                /* Only this attempt's own reservation is given back; other clients' counts behind the same
+                   source stay. */
+                tokenThrottle.Accepted(attempt);
                 await next(context);
             });
         }

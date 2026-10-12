@@ -52,10 +52,12 @@ internal sealed class DarlingWebSecurityHeaders
 {
     internal const string ContentSecurityPolicyHeader = "Content-Security-Policy";
 
-    /// <summary>One year of HSTS, no subdomains: the dashboard is served on an address:port of its own and
-    /// speaks for nothing beneath it. Sent only on a response to a request that came over HTTPS (the
-    /// connection's own scheme, or a configured proxy's forwarded scheme): over plain HTTP a browser ignores it,
-    /// and the loopback listeners are plain HTTP by design.</summary>
+    /// <summary>One year of HSTS, no subdomains. HSTS is kept per HOST NAME and ignores the port (RFC 6797):
+    /// once a browser has reached the dashboard over HTTPS by name, it uses HTTPS for every port of that same
+    /// name for a year, including any other service on that name that speaks plain HTTP. It covers no
+    /// subdomain, because <c>includeSubDomains</c> is not sent. Sent only on a response to a request that came
+    /// over HTTPS (the connection's own scheme, or a configured proxy's forwarded scheme): over plain HTTP a
+    /// browser ignores it, and the loopback listeners are plain HTTP by design.</summary>
     internal const string StrictTransportSecurityValue = "max-age=31536000";
 
     internal const string ContentSecurityPolicy =

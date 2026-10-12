@@ -976,14 +976,15 @@ public sealed class DarlingWebHostService : BackgroundService
     /// cookie passes, a token posted from the sign-in form is exchanged for one
     /// (<see cref="WebAuthAction.SetCookieAndRedirect"/>), and anything else gets the login form.</para>
     /// </summary>
-    internal static WebAuthAction DecideWebAuth(IPAddress? remoteIp, CidrAllowList allowedCidr, bool hasValidCookie, bool hasValidToken)
+    internal static WebAuthAction DecideWebAuth(
+        IPAddress? remoteIp, CidrAllowList allowedCidr, bool hasValidCookie, bool hasValidToken, IPAddress? connectionIp = null)
     {
         /* Loopback determination lives in DarlingWebEndpoints.IsLoopbackRemote so every caller unwraps
            IPv4-mapped-IPv6 (::ffff:127.0.0.1) identically. Loopback is exempt from the CIDR test ONLY — it
            still has to authenticate below. */
-        var isLoopback = DarlingWebEndpoints.IsLoopbackRemote(remoteIp);
+        var isLoopback = IsLoopbackConnection(remoteIp, connectionIp);
 
-        if (!isLoopback && !DarlingHostBinding.IsRemoteAddressAllowed(remoteIp, allowedCidr))
+        if (!isLoopback && !IsInAllowFrom(remoteIp, allowedCidr))
         {
             return WebAuthAction.Forbid;
         }
@@ -1128,6 +1129,10 @@ public sealed class DarlingWebHostService : BackgroundService
                 forwarded.KnownIPNetworks.Add(proxy);
             }
 
+            /* The connection's own address, kept before the middleware below replaces RemoteIpAddress with the
+               forwarded client: only the connection can be loopback for the allowFrom exemption (L2). */
+            app.UseMiddleware<DarlingConnectionAddressStamp>();
+
             app.UseForwardedHeaders(forwarded);
         }
 
@@ -1252,7 +1257,8 @@ public sealed class DarlingWebHostService : BackgroundService
                 var tokenInUrl = context.Request.Query.ContainsKey("token");
                 var isAuthFlowRoute = IsAuthFlowPath(context.Request.Path.Value ?? "/", oidcClient is not null);
 
-                switch (DecideWebRequest(remote, cidr, isAuthFlowRoute, hasValidCookie, hasValidToken: false))
+                var connectionIp = context.Items.TryGetValue(ConnectionIpItemKey, out var stashedIp) ? stashedIp as IPAddress : null;
+                switch (DecideWebRequest(remote, cidr, isAuthFlowRoute, hasValidCookie, hasValidToken: false, connectionIp))
                 {
                     case WebRequestAction.Allow:
                         /* The seat rides HttpContext.Items so EVERY downstream consumer — /api/session,
@@ -1290,7 +1296,7 @@ public sealed class DarlingWebHostService : BackgroundService
                            abort still propagates — that is not a failure to report. */
                         try
                         {
-                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle);
+                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName);
                         }
                         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                         {
@@ -1427,6 +1433,36 @@ public sealed class DarlingWebHostService : BackgroundService
     /// else — see the auth gate's note on a token in the URL.</summary>
     internal const string LoginPath = "/auth/login";
 
+    /// <summary>The <see cref="HttpContext.Items"/> key holding the address of the connection itself, stored
+    /// before the forwarded-headers middleware rewrites <c>RemoteIpAddress</c> to the forwarded client.</summary>
+    internal const string ConnectionIpItemKey = "darling.connectionIp";
+
+    /// <summary>PURE: is <paramref name="remoteIp"/> inside <c>allowFrom</c>? Unlike
+    /// <see cref="DarlingHostBinding.IsRemoteAddressAllowed"/> it has no loopback exemption of its own: the
+    /// exemption is decided once, on the connection's own address (<see cref="IsLoopbackConnection"/>), so a
+    /// forwarded loopback address is tested against the list like any other.</summary>
+    internal static bool IsInAllowFrom(IPAddress? remoteIp, CidrAllowList allowedCidr)
+    {
+        if (remoteIp is null)
+        {
+            return false;
+        }
+
+        return allowedCidr.Contains(remoteIp.IsIPv4MappedToIPv6 ? remoteIp.MapToIPv4() : remoteIp);
+    }
+
+    /// <summary>
+    /// PURE: does this request count as loopback for the <c>allowFrom</c> exemption? Only when the
+    /// connection ITSELF is loopback: a forwarded <c>127.0.0.1</c> / <c>::1</c> (a header a proxy relayed from
+    /// its client) never is, so it is judged against <c>allowFrom</c> like any other address. When a trusted
+    /// proxy on this host forwards a client, the request is loopback only if that client is too, which keeps
+    /// <c>allowFrom</c> in force for clients that reach a local proxy from elsewhere. With no forwarded
+    /// rewrite, <paramref name="connectionIp"/> is null and the remote address decides, as before.
+    /// </summary>
+    internal static bool IsLoopbackConnection(IPAddress? remoteIp, IPAddress? connectionIp)
+        => DarlingWebEndpoints.IsLoopbackRemote(remoteIp)
+           && (connectionIp is null || DarlingWebEndpoints.IsLoopbackRemote(connectionIp));
+
     /// <summary>The most a sign-in POST body may declare. The form carries a token and a path; anything
     /// larger is not the form, and this leg is reachable before any credential.</summary>
     internal const int MaxLoginFormBytes = 4096;
@@ -1471,10 +1507,11 @@ public sealed class DarlingWebHostService : BackgroundService
     /// original matrix decides exactly as before.
     /// </summary>
     internal static WebRequestAction DecideWebRequest(
-        IPAddress? remoteIp, CidrAllowList allowedCidr, bool isAuthFlowRoute, bool hasValidCookie, bool hasValidToken)
+        IPAddress? remoteIp, CidrAllowList allowedCidr, bool isAuthFlowRoute, bool hasValidCookie, bool hasValidToken,
+        IPAddress? connectionIp = null)
     {
-        var isLoopback = DarlingWebEndpoints.IsLoopbackRemote(remoteIp);
-        if (!isLoopback && !DarlingHostBinding.IsRemoteAddressAllowed(remoteIp, allowedCidr))
+        var isLoopback = IsLoopbackConnection(remoteIp, connectionIp);
+        if (!isLoopback && !IsInAllowFrom(remoteIp, allowedCidr))
         {
             return WebRequestAction.Forbid;
         }
@@ -1484,7 +1521,7 @@ public sealed class DarlingWebHostService : BackgroundService
             return WebRequestAction.HandleAuthFlow;
         }
 
-        return DecideWebAuth(remoteIp, allowedCidr, hasValidCookie, hasValidToken) switch
+        return DecideWebAuth(remoteIp, allowedCidr, hasValidCookie, hasValidToken, connectionIp) switch
         {
             WebAuthAction.Allow => WebRequestAction.Allow,
             WebAuthAction.Forbid => WebRequestAction.Forbid,
@@ -1746,14 +1783,15 @@ public sealed class DarlingWebHostService : BackgroundService
         DarlingWebSeat currentSeat,
         DarlingHttpRefusalLog refusals,
         string accessToken,
-        DarlingSignInThrottle signInThrottle)
+        DarlingSignInThrottle signInThrottle,
+        string? publicHostName)
     {
         var path = context.Request.Path.Value ?? "/";
         var remote = context.Connection.RemoteIpAddress;
 
         if (string.Equals(path, LoginPath, StringComparison.OrdinalIgnoreCase))
         {
-            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null);
+            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName);
             return;
         }
 
@@ -1998,11 +2036,16 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <summary>
     /// The shared-token sign-in leg (<see cref="LoginPath"/>). A GET renders the form. A POST carries the
     /// token in its form body, which keeps it out of the URL, the browser history and every Referer the
-    /// dashboard's assets would otherwise send. Per source, a failed attempt costs a growing wait before the
-    /// next one is even compared (<see cref="DarlingSignInThrottle"/>), so a token cannot be tried at line
-    /// rate; a wait in force answers 429 with <c>Retry-After</c>, and a correct token presented during it is
-    /// still refused, or the wait would tell the caller which attempt was right. A success clears the source's
-    /// history and answers with the session cookie and a 302 to
+    /// dashboard's assets would otherwise send. The POST must come from the dashboard's own page
+    /// (<see cref="IsSameSiteSignIn"/>: Origin, or Referer when Origin is missing, names the host it serves),
+    /// and that is checked before anything counts as an attempt. The body is read as bytes up to
+    /// <see cref="MaxLoginFormBytes"/> whatever its framing (chunked bodies included), and only a
+    /// url-encoded form is read at all. Per source, a failed attempt costs a growing wait before the
+    /// next one is even compared (<see cref="DarlingSignInThrottle"/>): the attempt is checked against the wait
+    /// and counted in one atomic step after the body is in, so a staged burst is counted one by one. A wait in
+    /// force answers 429 with <c>Retry-After</c> and compares nothing, a correct token presented during it
+    /// included, or the wait would tell the caller which attempt was right. A success gives back only its own
+    /// reservation and answers with the session cookie and a 302 to
     /// the page the form was covering (its <c>return</c> field, through the open-redirect guard).
     /// </summary>
     private async Task HandleTokenSignInAsync(
@@ -2011,7 +2054,8 @@ public sealed class DarlingWebHostService : BackgroundService
         byte[] signingKey,
         DarlingSignInThrottle signInThrottle,
         DarlingHttpRefusalLog refusals,
-        bool oidcEnabled)
+        bool oidcEnabled,
+        string? publicHostName)
     {
         var remote = context.Connection.RemoteIpAddress;
         var now = DateTime.UtcNow;
@@ -2030,36 +2074,54 @@ public sealed class DarlingWebHostService : BackgroundService
             return;
         }
 
-        var source = DarlingHttpRefusalLog.DescribeSource(remote);
-        var wait = signInThrottle.RetryAfter(source, now);
-        if (wait > TimeSpan.Zero)
+        /* A POST from another site is refused before it is read or counted: a page the operator browses can
+           submit a form to this address from the operator's own browser, and every such post would otherwise
+           count against the operator's source. */
+        if (!IsSameSiteSignIn(context.Request, publicHostName))
         {
-            var seconds = (int)Math.Ceiling(wait.TotalSeconds);
             refusals.Report(
-                _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status429TooManyRequests, remote,
-                $"sign-in attempts from this source are held for {seconds} more second(s) after repeated failures",
+                _logger, "Web dashboard", DarlingRefusalGate.SignIn, StatusCodes.Status403Forbidden, remote,
+                "the sign-in POST came from another site (its Origin or Referer does not name the host this dashboard serves), so it was not read or counted",
                 now);
-            context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
-            await WriteSignInErrorAsync(context, StatusCodes.Status429TooManyRequests,
-                $"Too many failed sign-in attempts. Try again in {seconds} seconds.");
+            await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
+                "The sign-in request did not come from this dashboard's own page. Open the dashboard and use the form.");
             return;
         }
 
-        if (!context.Request.HasFormContentType || context.Request.ContentLength is > MaxLoginFormBytes)
+        var form = await ReadLoginFormAsync(context);
+        if (form is null)
         {
             refusals.Report(
                 _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status400BadRequest, remote,
-                "the sign-in POST did not carry a small form-encoded body, so it was not read",
+                $"the sign-in POST did not carry a url-encoded form of at most {MaxLoginFormBytes} bytes, so it was not used",
                 now);
             await WriteSignInErrorAsync(context, StatusCodes.Status400BadRequest,
                 "The sign-in request was not the login form. Open the dashboard and use the form.");
             return;
         }
 
-        var form = await context.Request.ReadFormAsync(context.RequestAborted);
-        if (!DarlingHostBinding.FixedTimeTokenEquals(form["token"].ToString(), accessToken))
+        /* Checked against the wait and counted in ONE step, after the body is in and with a fresh clock, and
+           before the token is compared: attempts staged on open connections and released together are
+           counted one by one, and only the allowance reaches the comparison. */
+        var source = DarlingSignInThrottle.SourceKey(remote);
+        now = DateTime.UtcNow;
+        var attempt = signInThrottle.BeginAttempt(source, now);
+        if (attempt.IsHeld)
         {
-            signInThrottle.RecordFailure(source, now);
+            var seconds = (int)Math.Ceiling(attempt.RetryAfter.TotalSeconds);
+            refusals.Report(
+                _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status429TooManyRequests, remote,
+                $"sign-in attempts from this source are held for {seconds} more second(s) after repeated failures; no token is compared during the wait, and restarting the service clears it",
+                now);
+            context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
+            await WriteSignInErrorAsync(context, StatusCodes.Status429TooManyRequests,
+                $"Too many failed sign-in attempts. Try again in {seconds} seconds. No token is compared during the wait. "
+                + "The wait is kept in memory: restarting the service clears it.");
+            return;
+        }
+
+        if (!DarlingHostBinding.FixedTimeTokenEquals(form.GetValueOrDefault("token", string.Empty), accessToken))
+        {
             refusals.Report(
                 _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status200OK, remote,
                 "the posted token does not match web.network.encryptedToken, so the login page was served instead",
@@ -2068,9 +2130,127 @@ public sealed class DarlingWebHostService : BackgroundService
             return;
         }
 
-        signInThrottle.RecordSuccess(source);
+        signInThrottle.Accepted(attempt);
         AppendSessionCookie(context, signingKey);
-        context.Response.Redirect(SanitizeRedirectPath(form["return"].ToString()));
+        context.Response.Redirect(SanitizeRedirectPath(form.GetValueOrDefault("return", string.Empty)));
+    }
+
+    /// <summary>
+    /// PURE (reads headers only): did this sign-in POST come from the dashboard's own page? A browser sends
+    /// <c>Origin</c> on a cross-site form post and <c>Referer</c> unless the page opted out; whichever is
+    /// there (Origin first) must name the host this request was addressed to, port included, or
+    /// <c>web.publicBaseUrl</c>'s host. <c>Sec-Fetch-Site: cross-site</c> is refused outright, and an Origin
+    /// that is not a URL (the string <c>null</c>) is refused. A request with neither header is not a
+    /// browser post from another page and passes, which keeps command-line and script sign-ins working.
+    /// </summary>
+    internal static bool IsSameSiteSignIn(HttpRequest request, string? publicHostName)
+    {
+        if (string.Equals(request.Headers["Sec-Fetch-Site"].ToString(), "cross-site", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var claimed = request.Headers.Origin.ToString();
+        if (claimed.Length == 0)
+        {
+            claimed = request.Headers.Referer.ToString();
+        }
+
+        if (claimed.Length == 0)
+        {
+            return true;
+        }
+
+        if (!Uri.TryCreate(claimed, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            return false;
+        }
+
+        if (publicHostName is not null
+            && (string.Equals(uri.Host, publicHostName, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uri.IdnHost, publicHostName, StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        var host = request.Host;
+        if (!host.HasValue)
+        {
+            return false;
+        }
+
+        var portMatches = host.Port is int port ? uri.Port == port : uri.IsDefaultPort;
+        return portMatches
+            && (string.Equals(uri.Host, host.Host, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uri.IdnHost, host.Host, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// The sign-in form's fields, or null when the body is not a url-encoded form of at most
+    /// <see cref="MaxLoginFormBytes"/> bytes. The cap is enforced on the bytes actually read, so a chunked
+    /// body (no Content-Length) is held to it too; a multipart body is not read at all (the form posts
+    /// <c>application/x-www-form-urlencoded</c>, and the framework's multipart reader would spool file parts to
+    /// disk). The server's own per-request body limit is lowered to the cap where the server exposes one.
+    /// </summary>
+    internal static async Task<Dictionary<string, string>?> ReadLoginFormAsync(HttpContext context)
+    {
+        if (!IsUrlEncodedForm(context.Request.ContentType) || context.Request.ContentLength is > MaxLoginFormBytes)
+        {
+            return null;
+        }
+
+        var limit = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+        if (limit is { IsReadOnly: false })
+        {
+            limit.MaxRequestBodySize = MaxLoginFormBytes;
+        }
+
+        var buffer = new byte[MaxLoginFormBytes + 1];
+        var total = 0;
+        try
+        {
+            while (total < buffer.Length)
+            {
+                var read = await context.Request.Body.ReadAsync(buffer.AsMemory(total), context.RequestAborted);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                total += read;
+            }
+        }
+        catch (BadHttpRequestException)
+        {
+            /* The server's own limit tripped at the cap: too large, as above. */
+            return null;
+        }
+
+        if (total > MaxLoginFormBytes)
+        {
+            return null;
+        }
+
+        var fields = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var pair in Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(Encoding.UTF8.GetString(buffer, 0, total)))
+        {
+            fields[pair.Key] = pair.Value.ToString();
+        }
+
+        return fields;
+    }
+
+    private static bool IsUrlEncodedForm(string? contentType)
+    {
+        const string FormType = "application/x-www-form-urlencoded";
+        if (string.IsNullOrEmpty(contentType)
+            || !contentType.StartsWith(FormType, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return contentType.Length == FormType.Length || contentType[FormType.Length] == ';' || contentType[FormType.Length] == ' ';
     }
 
     /// <summary>Sign-in refusals go through the rate-limited refusal log (#2479): the flow endpoints are
@@ -2185,6 +2365,8 @@ public sealed class DarlingWebHostService : BackgroundService
 <html lang='en'>
 <head>
 <meta charset='utf-8'>
+<!-- A same-origin referrer policy for this page: the response header says no-referrer, and under that policy a browser sends 'Origin: null' with this form's POST, which the sign-in cannot tell from a post made by another site. same-origin keeps the real Origin on the post to this host and sends nothing to any other site. -->
+<meta name='referrer' content='same-origin'>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Darling Web</title>
 <style>

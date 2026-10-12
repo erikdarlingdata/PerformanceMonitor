@@ -17,7 +17,7 @@
 #        - publish the port on the interface you mean: change "127.0.0.1:5153:5153" to "<lan-ip>:5153:5153";
 #        - set web.network.allowFrom to the subnet your operators sit on, not the docker bridge placeholder.
 #      Without TLS the access token and the session cookie cross the network in the clear; the service says
-#      so at Critical on every start of a plain-HTTP network listener, and it does not fall back to loopback
+#      so at Warning on every start of a plain-HTTP network listener, and it does not fall back to loopback
 #      on its own (inside a container that would mean unreachable).
 #
 # Secrets never land in darling.json: the config references them (env:NAME / file:/path — #1804 stage 1),

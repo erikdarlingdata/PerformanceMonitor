@@ -8,6 +8,7 @@
 
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -189,7 +190,7 @@ public sealed class DarlingMcpBearerThrottleTests
             await ToolsListAsync(server, "/", host, source, "Bearer wrong-" + i);
         }
 
-        var first = await ToolsListAsync(server, "/", host, source, null);
+        var first = await ToolsListAsync(server, "/", host, source, "Bearer held-probe");
         Assert.Equal(StatusCodes.Status429TooManyRequests, first.Status);
         Assert.Equal(Seconds(DarlingSignInThrottle.BaseDelay), first.RetryAfter);
 
@@ -234,26 +235,119 @@ public sealed class DarlingMcpBearerThrottleTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task ARightToken_ClearsTheSourcesFailures(bool networkMode)
+    public async Task ARightToken_GivesBackOnlyItsOwnAttempt_NeverTheCountOfOtherClientsOnTheSource(bool networkMode)
     {
         var clock = new Clock();
         using var server = await BuildServer(networkMode, requireToken: !networkMode, clock);
         var host = HostFor(networkMode);
         var source = SourceFor(networkMode);
 
-        /* Two batches of the free failures with a success between: had the success not cleared the first
-           batch, the second batch would reach the wait and its later attempts would be 429. */
-        for (var batch = 0; batch < 2; batch++)
+        /* Another client on this address has missed the free number of times. */
+        for (var i = 0; i < DarlingSignInThrottle.FreeFailures; i++)
         {
-            for (var i = 0; i < DarlingSignInThrottle.FreeFailures; i++)
-            {
-                var refused = await ToolsListAsync(server, "/", host, source, "Bearer wrong-" + batch + "-" + i);
-                Assert.Equal(StatusCodes.Status401Unauthorized, refused.Status);
-            }
-
-            var right = await ToolsListAsync(server, "/", host, source, "Bearer " + Token);
-            Assert.Equal(StatusCodes.Status200OK, right.Status);
+            var refused = await ToolsListAsync(server, "/", host, source, "Bearer wrong-" + i);
+            Assert.Equal(StatusCodes.Status401Unauthorized, refused.Status);
         }
+
+        /* The operator presents the right token: served, and that one attempt is given back. */
+        var right = await ToolsListAsync(server, "/", host, source, "Bearer " + Token);
+        Assert.Equal(StatusCodes.Status200OK, right.Status);
+
+        /* The other client's count survived: its next miss is the first one past the free number and starts
+           the wait. Had the success cleared the source, this miss would be the first of a fresh count and the
+           next request would still be served. */
+        var next = await ToolsListAsync(server, "/", host, source, "Bearer wrong-next");
+        Assert.Equal(StatusCodes.Status401Unauthorized, next.Status);
+        var held = await ToolsListAsync(server, "/", host, source, "Bearer " + Token);
+        Assert.Equal(StatusCodes.Status429TooManyRequests, held.Status);
+        Assert.Equal(Seconds(DarlingSignInThrottle.BaseDelay), held.RetryAfter);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ManyConcurrentWrongTokens_FromOneSource_CompareExactlyTheAllowance_AndTheRestAreHeld(bool networkMode)
+    {
+        var clock = new Clock();
+        using var server = await BuildServer(networkMode, requireToken: !networkMode, clock);
+        var host = HostFor(networkMode);
+        var source = SourceFor(networkMode);
+
+        /* The free number of misses plus the one that starts the wait: the most one source gets compared in
+           a window. 64 requests released together must not compare more than that. */
+        const int Burst = 64;
+        var gate = new System.Threading.ManualResetEventSlim(false);
+        var tasks = new Task<Reply>[Burst];
+        for (var i = 0; i < Burst; i++)
+        {
+            var guess = "Bearer burst-" + i;
+            tasks[i] = Task.Run(async () =>
+            {
+                gate.Wait();
+                return await ToolsListAsync(server, "/", host, source, guess);
+            });
+        }
+
+        gate.Set();
+        var replies = await Task.WhenAll(tasks);
+
+        var compared = replies.Count(r => r.Status == StatusCodes.Status401Unauthorized);
+        var held = replies.Where(r => r.Status == StatusCodes.Status429TooManyRequests).ToList();
+        Assert.Equal(DarlingSignInThrottle.FreeFailures + 1, compared);
+        Assert.Equal(Burst - compared, held.Count);
+        Assert.All(held, r => Assert.True(int.Parse(r.RetryAfter!, CultureInfo.InvariantCulture) >= 1));
+
+        /* And the right token is held with the rest while the wait lasts. */
+        var right = await ToolsListAsync(server, "/", host, source, "Bearer " + Token);
+        Assert.Equal(StatusCodes.Status429TooManyRequests, right.Status);
+    }
+
+    [Fact]
+    public async Task Ipv6Addresses_InOneSlash64_ShareTheWait_AndAnotherSlash64DoesNot()
+    {
+        var clock = new Clock();
+        using var server = await BuildServer(networkMode: false, requireToken: true, clock);
+
+        for (var i = 0; i <= DarlingSignInThrottle.FreeFailures; i++)
+        {
+            /* Each miss comes from a different address in the same /64. */
+            var refused = await ToolsListAsync(
+                server, "/", "localhost", IPAddress.Parse("2001:db8:1:2::" + (i + 1).ToString("x", CultureInfo.InvariantCulture)), "Bearer wrong-" + i);
+            Assert.Equal(StatusCodes.Status401Unauthorized, refused.Status);
+        }
+
+        var sameBlock = await ToolsListAsync(server, "/", "localhost", IPAddress.Parse("2001:db8:1:2:aaaa:bbbb:cccc:dddd"), "Bearer " + Token);
+        Assert.Equal(StatusCodes.Status429TooManyRequests, sameBlock.Status);
+
+        var otherBlock = await ToolsListAsync(server, "/", "localhost", IPAddress.Parse("2001:db8:1:3::1"), "Bearer " + Token);
+        Assert.Equal(StatusCodes.Status200OK, otherBlock.Status);
+    }
+
+    [Fact]
+    public async Task TheHeldAnswer_SaysNoTokenIsComparedAndThatARestartClearsTheWait()
+    {
+        var clock = new Clock();
+        using var server = await BuildServer(networkMode: false, requireToken: true, clock);
+
+        for (var i = 0; i <= DarlingSignInThrottle.FreeFailures; i++)
+        {
+            await ToolsListAsync(server, "/", "localhost", IPAddress.Loopback, "Bearer wrong-" + i);
+        }
+
+        var ctx = await server.SendAsync(c =>
+        {
+            c.Request.Method = "POST";
+            c.Request.Path = "/";
+            c.Request.Headers.Host = "localhost";
+            c.Request.Headers.Authorization = "Bearer " + Token;
+            c.Connection.RemoteIpAddress = IPAddress.Loopback;
+        });
+        using var reader = new System.IO.StreamReader(ctx.Response.Body);
+        var body = await reader.ReadToEndAsync();
+
+        Assert.Equal(StatusCodes.Status429TooManyRequests, ctx.Response.StatusCode);
+        Assert.Contains("No token is compared during the wait", body, StringComparison.Ordinal);
+        Assert.Contains("restarting the service clears it", body, StringComparison.Ordinal);
     }
 
     [Fact]
