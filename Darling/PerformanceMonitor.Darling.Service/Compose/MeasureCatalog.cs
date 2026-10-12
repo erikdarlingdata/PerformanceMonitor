@@ -849,6 +849,9 @@ public static class MeasureCatalog
         },
 
         /* ── cpu_scheduler_stats (Gauge, server-grain) ── */
+        /* #5710: a collection stored before the collector fix is split across rows that share a collection_time, each covering some of the
+           schedulers. ComposeCompiler.BuildFactRelation reads this source as ONE combined row per (server, collection_time) (the shared
+           CpuSchedulerCollectionSql rules), so both measures' time aggregates run over collections, not rows. */
         new ComposeMeasure
         {
             Key = "scheduler_runnable_pct", DisplayName = "Runnable-tasks %", Category = CatScheduler, SourceTable = "cpu_scheduler_stats",
