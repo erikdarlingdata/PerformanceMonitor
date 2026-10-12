@@ -61,12 +61,15 @@ public static partial class QueryModificationDetector
             if (types is { Count: > 0 })
             {
                 var modifies = types.Any(IsModifyingStatementType);
-                if (!modifies && TextRunsCodeThePlanDoesNotShow(queryText))
+                if (!modifies && (types.Any(IsExecuteStatementType) || TextRunsCodeThePlanDoesNotShow(queryText)))
                 {
                     /* #5639: an EXEC/EXECUTE statement runs code the plan's StatementType does not describe, and
                        OPENQUERY / OPENROWSET / OPENDATASOURCE send text to another server. Either can write data
                        while the plan reads SELECT, so these get the "could not be analyzed" warning instead of a
-                       clean pass. Only those cases: what a function or procedure does is not analyzed. */
+                       clean pass. A plan statement of type EXECUTE (EXECUTE PROC) is that same case whatever the
+                       text says: a call with no EXEC keyword (a procedure name that starts the batch, sp_executesql)
+                       still runs code the plan does not show. Only those cases: what a function or procedure does is
+                       not analyzed. */
                     return new QueryModificationInfo(ModifiesData: true, types, IsUncertain: true);
                 }
 
@@ -85,13 +88,37 @@ public static partial class QueryModificationDetector
     /// </summary>
     private static bool TextRunsCodeThePlanDoesNotShow(string? queryText)
         => !string.IsNullOrWhiteSpace(queryText)
-           && (s_execStatement.IsMatch(queryText) || s_remoteRowset.IsMatch(queryText));
+           && (HasExecKeyword(queryText) || s_remoteRowset.IsMatch(queryText));
+
+    /// <summary>True when a Showplan <c>StatementType</c> is an EXECUTE one (<c>EXECUTE PROC</c>).</summary>
+    private static bool IsExecuteStatementType(string? statementType)
+        => statementType is not null && statementType.TrimStart().StartsWith("EXECUTE", StringComparison.OrdinalIgnoreCase);
 
     /* EXEC or EXECUTE as a word of its own: not part of a longer name (dm_exec_requests, execution_count), not a
-       bracketed or quoted identifier, not a column reached through a dot or a variable. */
+       column reached through a dot or a variable or temp-table name. A closing bracket or quote right before it
+       (`[a]EXEC dbo.p`) or a quote right after it (`EXEC"dbo"."p"`) is NOT a reason to skip it; only a match that
+       is fully wrapped in a matching pair (`[exec]`, `"exec"`) is an identifier. */
     private static readonly Regex s_execStatement = new(
-        @"(?<![\w@#$.\[\]""])EXEC(?:UTE)?(?![\w\]""])",
+        @"(?<![\w@#$.])EXEC(?:UTE)?(?!\w)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    /// <summary>True when the text has an EXEC / EXECUTE keyword that is not a bracketed or double-quoted identifier.</summary>
+    private static bool HasExecKeyword(string queryText)
+    {
+        foreach (Match match in s_execStatement.Matches(queryText))
+        {
+            var before = match.Index > 0 ? queryText[match.Index - 1] : '\0';
+            var afterIndex = match.Index + match.Length;
+            var after = afterIndex < queryText.Length ? queryText[afterIndex] : '\0';
+            var wrapped = (before == '[' && after == ']') || (before == '"' && after == '"');
+            if (!wrapped)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private static readonly Regex s_remoteRowset = new(
         @"\b(?:OPENQUERY|OPENROWSET|OPENDATASOURCE)\b",

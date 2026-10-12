@@ -211,6 +211,24 @@ public static class ViewerActualPlanFlow
         return result == MessageBoxResult.OK;
     }
 
+    /// <summary>
+    /// #5639: builds the args for a <c>query_stats</c> actual-plan request from the row's hash, database and FULL
+    /// query text (the digest of that text rides the args so the service runs only the text the prompt shows).
+    /// A row whose hash is empty or all zeros, or that holds no text, is refused here with a message and no
+    /// request is made.
+    /// </summary>
+    public static bool TryBuildQueryStatsArgs(
+        Window owner, string? queryHash, string? databaseName, string? queryText, out string argsJson)
+    {
+        if (ViewerDataService.TryBuildActualPlanArgs(queryHash, databaseName, queryText, out argsJson, out var refusal))
+        {
+            return true;
+        }
+
+        MessageBox.Show(owner, refusal, "Actual Plan", MessageBoxButton.OK, MessageBoxImage.Information);
+        return false;
+    }
+
     /// <summary>Surfaces a non-captured outcome (no-plan info, or a failure/timeout warning with the service's message).</summary>
     private static void ShowOutcome(Window owner, ActualPlanResult result)
     {

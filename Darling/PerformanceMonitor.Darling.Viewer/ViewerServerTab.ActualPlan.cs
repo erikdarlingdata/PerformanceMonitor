@@ -39,9 +39,13 @@ public partial class ViewerServerTab
 
         var label = $"Actual Plan - {stats.QueryHash}";
 
-        /* Fetch the stored ESTIMATED plan for modification detection — the viewer reads its own store (the
-           SERVICE re-resolves the query text by identifier when it executes). */
-        var argsJson = ViewerDataService.BuildActualPlanArgs(stats.QueryHash, stats.DatabaseName);
+        /* #5639: the args carry the digest of the row's FULL text; the SERVICE re-resolves the latest text for the
+           hash and runs it only when it matches. The stored ESTIMATED plan for modification detection is read
+           from the viewer's own store below. */
+        if (!ViewerActualPlanFlow.TryBuildQueryStatsArgs(Window.GetWindow(this)!, stats.QueryHash, stats.DatabaseName, stats.QueryText, out var argsJson))
+        {
+            return;
+        }
 
         /* The Plan Viewer overlay's Cancel button cancels this token (shared with Fetch Live Plan). */
         _planLoadCts?.Dispose();

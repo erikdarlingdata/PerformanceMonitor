@@ -720,7 +720,11 @@ public partial class FinOpsTab
             return;
         }
 
-        var argsJson = ViewerDataService.BuildActualPlanArgs(hi.QueryHash, hi.DatabaseName);
+        if (!ViewerActualPlanFlow.TryBuildQueryStatsArgs(Window.GetWindow(this)!, hi.QueryHash, hi.DatabaseName, hi.FullQueryText, out var argsJson))
+        {
+            return;
+        }
+
         var label = $"Actual Plan - {hi.QueryHash}";
 
         var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -62,7 +63,7 @@ public sealed class ActualPlanRequestTests
     {
         /* The two ends of the command channel must agree on the wire shape — build with the viewer, parse with
            the service. */
-        var args = ViewerDataService.BuildActualPlanArgs("0xDEAD", "master");
+        var args = ViewerDataService.BuildActualPlanArgs("0xDEAD", "master", "SELECT 1");
         Assert.True(ActualPlanRequest.TryParse(args, out var req));
         Assert.Equal("0xDEAD", req.QueryHash);
         Assert.Equal("master", req.DatabaseName);
@@ -71,7 +72,7 @@ public sealed class ActualPlanRequestTests
     [Fact]
     public void ViewerBuilder_OmitsBlankDatabase()
     {
-        Assert.True(ActualPlanRequest.TryParse(ViewerDataService.BuildActualPlanArgs("0x06", null), out var req));
+        Assert.True(ActualPlanRequest.TryParse(ViewerDataService.BuildActualPlanArgs("0x06", null, "SELECT 1"), out var req));
         Assert.Null(req.DatabaseName);
     }
 
@@ -82,12 +83,12 @@ public sealed class ActualPlanRequestTests
     [Fact]
     public void Payload_CarriesIdentifierOnly_NeverSqlText()
     {
-        var args = ViewerDataService.BuildActualPlanArgs("0xABCD", "AdventureWorks");
+        var args = ViewerDataService.BuildActualPlanArgs("0xABCD", "AdventureWorks", "SELECT 1");
 
-        /* The serialized wire payload has EXACTLY the two identifier fields — nothing that could hold SQL text. */
+        /* The serialized wire payload has EXACTLY the two identifier fields plus the text digest (#5639) — nothing that could hold SQL text. */
         using var document = JsonDocument.Parse(args);
         var propertyNames = document.RootElement.EnumerateObject().Select(p => p.Name).OrderBy(n => n).ToArray();
-        Assert.Equal(new[] { "databaseName", "queryHash" }, propertyNames);
+        Assert.Equal(new[] { "confirmedSha256", "databaseName", "queryHash" }, propertyNames);
 
         /* A hostile args_json that ALSO smuggles a queryText/sql field is parsed as the identifier ONLY — the
            extra fields are silently dropped because the request model has no property to receive them. */
@@ -163,6 +164,140 @@ public sealed class ActualPlanRequestTests
         Assert.False(ActualPlanRequest.TryParse("{\"snapshotCollectionTime\":\"2026-07-10T12:00:00\"}", out _));
         Assert.False(ActualPlanRequest.TryParse("{\"snapshotSessionId\":55}", out _));
     }
+
+    // ── #5639: the stored-text digest (query_stats source: Top Queries, Query-Stats history, FinOps High Impact) ──
+
+    private const string ConfirmedText = "DELETE TOP (1) FROM dbo.t WHERE id = 7;";
+
+    [Fact]
+    public void Viewer_SendsTheDigestOfTheFullRowText_NotTheDisplayCopy()
+    {
+        /* Longer than the 1,000-character prompt copy: the digest must cover the whole row text. */
+        var full = ConfirmedText + new string(' ', 2000) + "-- tail";
+        Assert.True(ViewerDataService.TryBuildActualPlanArgs("0xABCD", "master", full, out var args, out _));
+        Assert.True(ActualPlanRequest.TryParse(args, out var req));
+        Assert.Equal(QueryTextDigest.Compute(full), req.ConfirmedSha256);
+        Assert.NotEqual(QueryTextDigest.Compute(full[..1000]), req.ConfirmedSha256);
+        /* The digest is hex, not SQL. */
+        Assert.Matches("^[0-9A-F]{64}$", req.ConfirmedSha256!);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("0x0000000000000000")]
+    [InlineData("0X00")]
+    [InlineData("   ")]
+    public void Viewer_RefusesAnUnusableHash(string? hash)
+    {
+        Assert.False(ViewerDataService.TryBuildActualPlanArgs(hash, "master", ConfirmedText, out var args, out var refusal));
+        Assert.Equal("", args);
+        Assert.Contains("no usable query hash", refusal, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void Viewer_RefusesARowWithNoText(string? text)
+        => Assert.False(ViewerDataService.TryBuildActualPlanArgs("0xABCD", "master", text, out _, out _));
+
+    private static ActualPlanRequest QueryStatsRequest(string? digest, string hash = "0xABCD")
+        => new(hash, null, null, null, "master", digest);
+
+    [Fact]
+    public void Service_RunsWhenTheDigestMatchesTheResolvedText()
+    {
+        var request = QueryStatsRequest(QueryTextDigest.Compute(ConfirmedText));
+        Assert.Null(DarlingWorker.RefuseActualPlanRequest(request));
+        Assert.Null(DarlingWorker.RefuseChangedActualPlanText(request, ConfirmedText));
+        /* Hex case does not matter. */
+        Assert.Null(DarlingWorker.RefuseChangedActualPlanText(
+            QueryStatsRequest(QueryTextDigest.Compute(ConfirmedText).ToLowerInvariant()), ConfirmedText));
+    }
+
+    [Fact]
+    public void Service_RefusesWhenTheStoredTextChangedAfterTheConfirm()
+    {
+        var request = QueryStatsRequest(QueryTextDigest.Compute(ConfirmedText));
+        var refusal = DarlingWorker.RefuseChangedActualPlanText(request, "DELETE TOP (100000000) FROM dbo.t WHERE id = 7;");
+        Assert.Equal(
+            "The stored query text changed after you confirmed. Nothing was run. Reopen the plan and confirm again.",
+            refusal);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Service_RefusesARequestWithoutADigest(string? digest)
+    {
+        var refusal = DarlingWorker.RefuseActualPlanRequest(QueryStatsRequest(digest));
+        Assert.NotNull(refusal);
+        Assert.Contains("digest", refusal, StringComparison.Ordinal);
+        /* ... and a digest-less request can never match, even if a caller skipped the first check. */
+        Assert.NotNull(DarlingWorker.RefuseChangedActualPlanText(QueryStatsRequest(digest), ConfirmedText));
+    }
+
+    [Theory]
+    [InlineData("0x0000000000000000")]
+    [InlineData("0x00")]
+    [InlineData("0X0")]
+    public void Service_RefusesAZeroHash(string hash)
+    {
+        var refusal = DarlingWorker.RefuseActualPlanRequest(QueryStatsRequest(QueryTextDigest.Compute(ConfirmedText), hash));
+        Assert.NotNull(refusal);
+        Assert.Contains("no usable query hash", refusal, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Service_LeavesQueryStoreAndSnapshotRequestsUnchecked()
+    {
+        /* They name one stored row exactly (query_id; collection_time + session), so there is no "latest text for
+           a hash" to differ from what the prompt showed. */
+        var queryStore = new ActualPlanRequest(null, 42L, null, null, "master");
+        var snapshot = new ActualPlanRequest(null, null, new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Unspecified), 5, "master");
+        foreach (var request in new[] { queryStore, snapshot })
+        {
+            Assert.Null(DarlingWorker.RefuseActualPlanRequest(request));
+            Assert.Null(DarlingWorker.RefuseChangedActualPlanText(request, ConfirmedText));
+        }
+    }
+
+    [Fact]
+    public void ViewerAndServiceAgreeOnTheDigestWireShape()
+    {
+        Assert.True(ViewerDataService.TryBuildActualPlanArgs("0xABCD", "master", ConfirmedText, out var args, out _));
+        Assert.True(ActualPlanRequest.TryParse(args, out var req));
+        Assert.Null(DarlingWorker.RefuseActualPlanRequest(req));
+        Assert.Null(DarlingWorker.RefuseChangedActualPlanText(req, ConfirmedText));
+        Assert.NotNull(DarlingWorker.RefuseChangedActualPlanText(req, ConfirmedText + " "));
+    }
+
+    [Fact]
+    public void TheHandler_ChecksTheRequestBeforeTheStoreAndTheDigestBeforeTheRun()
+    {
+        var source = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var start = source.IndexOf("private async Task<CommandOutcome> RunExecuteActualPlanAsync(", StringComparison.Ordinal);
+        Assert.True(start > 0);
+        var body = source[start..source.IndexOf("internal static string? RefuseActualPlanRequest(", start, StringComparison.Ordinal)];
+        var refuseRequest = body.IndexOf("RefuseActualPlanRequest(request)", StringComparison.Ordinal);
+        var resolve = body.IndexOf("_postgres.OpenConnectionAsync(", StringComparison.Ordinal);
+        var refuseText = body.IndexOf("RefuseChangedActualPlanText(request, queryText)", StringComparison.Ordinal);
+        var run = body.IndexOf("ActualPlanExecutor.ExecuteForActualPlanAsync(", StringComparison.Ordinal);
+        Assert.True(refuseRequest > 0 && refuseRequest < resolve, "the request check comes before the store read");
+        Assert.True(resolve < refuseText && refuseText < run, "the digest check comes after the resolve and before the run");
+    }
+
+    private static string RepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "PerformanceMonitor.sln")))
+        {
+            dir = dir.Parent;
+        }
+
+        return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
+    }
 }
 
 /// <summary>The command-plane dispatch + read-only stance for <c>execute_actual_plan</c>.</summary>
@@ -178,7 +313,7 @@ public sealed class ActualPlanDispatchTests
     [Fact]
     public void ResolvePlan_RecognizesExecuteActualPlan_WithTargetAndIdentifierArgs()
     {
-        var args = ViewerDataService.BuildActualPlanArgs("0x0600AA", "master");
+        var args = ViewerDataService.BuildActualPlanArgs("0x0600AA", "master", "SELECT 1");
         var command = Command(ViewerDataService.CommandExecuteActualPlan, target: 5, args: args);
         Assert.Equal(CommandKind.ExecuteActualPlan, DarlingCommandExecutor.ResolvePlan(command).Kind);
     }
@@ -187,7 +322,7 @@ public sealed class ActualPlanDispatchTests
     public void ResolvePlan_FailsWithoutTarget()
     {
         /* It re-executes against ONE server, so — like snapshot_now / fetch_plan — a missing target is a fail. */
-        var args = ViewerDataService.BuildActualPlanArgs("0x0600AA", "master");
+        var args = ViewerDataService.BuildActualPlanArgs("0x0600AA", "master", "SELECT 1");
         Assert.Equal(CommandKind.Fail,
             DarlingCommandExecutor.ResolvePlan(Command(ViewerDataService.CommandExecuteActualPlan, target: null, args: args)).Kind);
     }
@@ -212,7 +347,7 @@ public sealed class ActualPlanDispatchTests
     [Fact]
     public void ExecuteActualPlan_IsAHostDelegatedCommand_OnlyReachableThroughTheGuardedCommandPlane()
     {
-        var args = ViewerDataService.BuildActualPlanArgs("0x0600AA", "master");
+        var args = ViewerDataService.BuildActualPlanArgs("0x0600AA", "master", "SELECT 1");
         var plan = DarlingCommandExecutor.ResolvePlan(Command(ViewerDataService.CommandExecuteActualPlan, target: 5, args: args));
 
         /* Host-delegated (not a StoreWrite that a role might allow piecemeal) — it runs only via the command it
@@ -450,6 +585,11 @@ public sealed class QueryModificationDetectorTests
     [InlineData("EXECUTE sp_who2")]
     [InlineData("SELECT 1; EXEC dbo.DoWork")]
     [InlineData("BEGIN\n    EXECUTE dbo.DoWork\nEND")]
+    /* The keyword right next to a quote or a closing bracket is still the keyword. */
+    [InlineData("EXEC\"dbo\".\"p\"")]
+    [InlineData("SELECT 1 AS [a]EXEC dbo.p")]
+    [InlineData("\"x\"EXEC dbo.p")]
+    [InlineData("SELECT 1 AS \"a\"EXECUTE dbo.p")]
     [InlineData("SELECT * FROM OPENQUERY(linked, 'SELECT 1')")]
     [InlineData("select * from openrowset('SQLNCLI', 'Server=x;', 'SELECT 1')")]
     [InlineData("SELECT * FROM OPENDATASOURCE('SQLNCLI', 'Data Source=x').db.dbo.t")]
@@ -462,10 +602,29 @@ public sealed class QueryModificationDetectorTests
         Assert.Contains("could not be analyzed", QueryModificationDetector.BuildConsentWarning(info, "master"), StringComparison.Ordinal);
     }
 
+    /* A plan statement of type EXECUTE PROC runs code the plan does not show, whatever the text says: a call with no
+       EXEC keyword (the procedure name starts the batch, sp_executesql) still gets the warning. */
+    [Theory]
+    [InlineData("EXECUTE PROC", "dbo.DoWork")]
+    [InlineData("EXECUTE PROC", "sp_executesql N'SELECT 1'")]
+    [InlineData("execute proc", "SELECT 1")]
+    [InlineData("EXECUTE PROC", null)]
+    public void AnExecuteStatementType_GetsTheCouldNotBeAnalyzedWarning_WhateverTheTextSays(string statementType, string? text)
+    {
+        var info = QueryModificationDetector.Detect(Plan(statementType), text);
+
+        Assert.True(info.IsUncertain);
+        Assert.True(info.ModifiesData);
+        Assert.Contains("could not be analyzed", QueryModificationDetector.BuildConsentWarning(info, "master"), StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("SELECT execution_count FROM sys.dm_exec_query_stats")]
     [InlineData("SELECT [exec] FROM dbo.t")]
+    [InlineData("SELECT \"exec\" FROM dbo.t")]
+    [InlineData("SELECT [execute] FROM dbo.t")]
     [InlineData("SELECT t.exec FROM dbo.t AS t")]
+    [InlineData("SELECT #exec FROM dbo.t")]
     [InlineData("SELECT @exec = 1")]
     [InlineData("SELECT 1")]
     [InlineData("SELECT * FROM dbo.openqueryish")]

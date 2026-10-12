@@ -273,7 +273,11 @@ public partial class QueryStatsHistoryWindow : Window
     {
         if (string.IsNullOrEmpty(_queryHash)) return;
 
-        var argsJson = ViewerDataService.BuildActualPlanArgs(_queryHash, _databaseName);
+        if (!ViewerActualPlanFlow.TryBuildQueryStatsArgs(this, _queryHash, _databaseName, _queryText, out var argsJson))
+        {
+            return;
+        }
+
         var label = $"Actual Plan - {_queryHash}";
 
         _actualPlanCts?.Dispose();
