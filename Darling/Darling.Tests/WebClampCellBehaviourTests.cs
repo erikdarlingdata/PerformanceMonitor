@@ -88,6 +88,32 @@ public sealed class WebClampCellBehaviourTests
     }
 
     [Fact]
+    public void OnlyAnOptedInMessageColumn_LocalizesAnIsoInstant_SqlTextAndDetailsPrintAsWritten()
+    {
+        // #5644 W20: a query_text of WHERE d >= '2026-01-01T00:00:00' showed as a local date in the browser.
+        var l = Run().GetProperty("localize");
+        Assert.True(l.GetProperty("sqlUnchanged").GetBoolean());
+        Assert.True(l.GetProperty("detailsUnchanged").GetBoolean());
+        var expected = l.GetProperty("expected").GetString();
+        Assert.Equal(expected, l.GetProperty("messageLocal").GetString());
+        Assert.Equal(expected, l.GetProperty("clampedLocal").GetString());
+        Assert.DoesNotContain("T14:37", expected);
+    }
+
+    [Fact]
+    public void TheCollectionHealthMessageColumns_AreOptedIn_AndTheCustomViewAndDefaultTraceTextColumnsAreNot()
+    {
+        var tabs = Wwwroot("js", "pages", "server-tabs.js");
+        var health = tabs[tabs.IndexOf("key: \"run_time_note\"", StringComparison.Ordinal)..tabs.IndexOf("const HEAVIEST_COLUMNS", StringComparison.Ordinal)];
+        Assert.Equal(7, Regex.Matches(health, "clamp: true, localizeText: true").Count);
+        foreach (var f in new[] { "js/read-fields.js", "js/pages/server-tabs.js" })
+        {
+            var src = Wwwroot(f.Split('/'));
+            Assert.DoesNotMatch(new Regex("key: \"(query_text|statement_text|query_sql_text|sql_text|details)\"[^\n]*localizeText"), src);
+        }
+    }
+
+    [Fact]
     public void EnterOpensTheCell_AndOtherKeysDoNot()
     {
         var r = Run();

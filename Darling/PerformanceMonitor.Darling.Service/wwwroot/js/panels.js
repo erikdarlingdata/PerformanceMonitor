@@ -1251,8 +1251,10 @@ function cell(row, c) {
             : c.plain
               ? plainText(String(raw))
               : String(raw);
-  /* #5644 W20: a column with no format shows any ISO instant in its text (a bare timestamp or one inside a sentence) in local time, like the grids beside it. */
-  const text = c.format ? shown : localizeIsoText(shown);
+  /* #5644 W20: a column marked `localizeText` (a message or note: collection-health notes, collector errors) shows any ISO
+     instant in its sentence in local time, like the grids beside it. Opt-in: query text, statement text, details and
+     identifiers are data, and a literal such as '2026-01-01T00:00:00' inside them must show as written. */
+  const text = c.localizeText && !c.format ? localizeIsoText(shown) : shown;
   if (c.clamp) return el("td", { class: cls.join(" ") || null }, [clampText(text)]);
   return el("td", { class: cls.join(" ") || null, text });
 }

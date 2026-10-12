@@ -86,4 +86,26 @@ out.notExpandable = { role: fixed.attrs.role || null, text: fixed.textContent ==
 out.empty = { text: clampText(null).textContent, title: clampText(null).attrs.title || null };
 out.multiline = clampText("one\ntwo").attrs.role;
 
+/* #5644 W20: only a column marked localizeText rewrites an ISO instant in its text; SQL text and details are data and print as written. */
+const sqlText = "SELECT 1 FROM t WHERE d >= '2026-01-01T00:00:00'";
+const msgText = "not collected since 2026-10-09T14:37:35Z";
+const l = VIZ.table({ rows: [{ query_text: sqlText, details: msgText, message: msgText, collection_time: "2026-10-09T14:37:35Z" }] }, {
+  rowsKey: "rows", title: "Localize", tools: false,
+  columns: [
+    { key: "query_text", label: "Query", wrap: true },
+    { key: "details", label: "Details", wrap: true },
+    { key: "message", label: "Message", wrap: true, localizeText: true },
+    { key: "message", label: "Clamped message", clamp: true, localizeText: true },
+  ],
+});
+const lr = l.findAll((n) => n.tag === "tr").filter((n) => n.parent && n.parent.tag === "tbody")[0];
+const ltd = lr.children.map((c) => c.textContent);
+out.localize = {
+  sqlUnchanged: ltd[0] === sqlText,
+  detailsUnchanged: ltd[1] === msgText,
+  messageLocal: ltd[2],
+  clampedLocal: ltd[3],
+  expected: "not collected since " + new Date("2026-10-09T14:37:35Z").toLocaleString(),
+};
+
 console.log(JSON.stringify(out));

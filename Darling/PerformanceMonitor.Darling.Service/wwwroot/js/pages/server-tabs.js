@@ -4807,7 +4807,7 @@ const COLLECTION_LOG_COLUMNS = [
   { key: "sql_store_ms", label: "Store (in SQL)", format: "ms" },
   { key: "store_duration_ms", label: "On Store", format: "ms" },
   { key: "rows_collected", label: "Rows", format: "int" },
-  { key: "error_message", label: "Error", wrap: true },
+  { key: "error_message", label: "Error", wrap: true, localizeText: true },
 ];
 
 /* #5227: the collector picked on the Collectors panel, keyed by server at MODULE scope so the 60 s rebuild of the tab
@@ -4898,8 +4898,8 @@ const COLLECTOR_COLUMNS = [
      time. Each column is left out unless a row fills it, so a server with no run times shows none of them. */
   { key: "run_at", label: "Run at", hideWhenEmpty: true },
   { key: "next_run_utc", label: "Next run", format: "time", hideWhenEmpty: true },
-  { key: "run_time_note", label: "Run time", clamp: true, hideWhenEmpty: true },
-  { key: "last_error", label: "Last Error", clamp: true, plain: "named" },
+  { key: "run_time_note", label: "Run time", clamp: true, localizeText: true, hideWhenEmpty: true },
+  { key: "last_error", label: "Last Error", clamp: true, localizeText: true, plain: "named" },
   /* #1837: what a NON-failing run reported (an enumeration that came back with 0 items). Blank for a
      plainly healthy collector; the same column the two WPF grids carry, so the web view is not the one
      Collection Health surface that still hides it. note_summary, not the raw last_note: it carries the
@@ -4907,24 +4907,24 @@ const COLLECTOR_COLUMNS = [
      one, composed server-side from the shared formatter so this table cannot render it a third way.
      A collector's label=value counts read as its latest NOTED run's ("latest run:" only when every run
      carried them), never a window total. */
-  { key: "note_summary", label: "Note", clamp: true, plain: true },
+  { key: "note_summary", label: "Note", clamp: true, localizeText: true, plain: true },
   /* #5646: a collector that recovered (its newest 3 runs succeeded after failures) is HEALTHY, and this says so with the
      time of the last failure. Partial rows carry no note_summary, so the sentence rides in its own field. */
-  { key: "recovered_note", label: "Recovered", clamp: true, plain: true, hideWhenEmpty: true },
+  { key: "recovered_note", label: "Recovered", clamp: true, localizeText: true, plain: true, hideWhenEmpty: true },
   /* #3017: which of the two zero-output readings a collector that spent and stored nothing is — read and
      found nothing, or could not read. Blank whenever Rows is positive, for the same reason the Note
      column is blank on a plainly healthy collector. Composed server-side from the shared formatter, so
      this table cannot render the sentence a second way. */
-  { key: "output_finding", label: "Output", clamp: true, plain: true },
+  { key: "output_finding", label: "Output", clamp: true, localizeText: true, plain: true },
   /* #4620: why a collector that stopped doing what it used to do reads WARNING. The Status column already
      showed the floor, but no column showed the sentence behind it, so a regressed row read WARNING with
      every other cell blank. Composed server-side from the shared formatter, like the two columns above. */
-  { key: "regression_finding", label: "Regression", clamp: true, plain: true },
+  { key: "regression_finding", label: "Regression", clamp: true, localizeText: true, plain: true },
   /* #5249: a PostgreSQL collector this server's engine does not collect (a collector this engine kind can never run: an Aurora-only reader on stock PostgreSQL, the sampler on Aurora) has no log row,
      so the server lists it with status not_collected and the sentence saying why. The status paints with the
      neutral Unknown band, not an error one: a gate is not a fault. Left out unless a row has a message, so a
      server with no such collector (and every SQL Server tab) shows no column of dashes. */
-  { key: "message", label: "Why not collected", clamp: true, hideWhenEmpty: true, plain: true },
+  { key: "message", label: "Why not collected", clamp: true, localizeText: true, hideWhenEmpty: true, plain: true },
 ];
 
 const HEAVIEST_COLUMNS = [
