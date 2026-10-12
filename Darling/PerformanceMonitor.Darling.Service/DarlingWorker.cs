@@ -7411,28 +7411,6 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// Fills <see cref="AlertContext.NewestSample"/> for a PostgreSQL family at FIRE time (#5642, ruling 6), from the
-    /// instant that family's own read already returned: the twin of <c>AlertEngine.StampNewestSample</c>, which is
-    /// internal to the engine project. The age is computed here once and rides the persisted context; the deliverer
-    /// appends the "Newest ... sample" line to the detail text once, whichever way the family built it. A null or
-    /// MinValue instant, or a Local-kind one, gives no age and leaves the context as it was (null stays null); a
-    /// sample dated later than now ages as zero.
-    /// </summary>
-    internal static AlertContext? StampPgNewestSample(AlertContext? context, string source, DateTime? instantUtc, DateTime now)
-    {
-        if (!instantUtc.HasValue || instantUtc.Value.Kind == DateTimeKind.Local || instantUtc.Value == DateTime.MinValue)
-        {
-            return context;
-        }
-
-        var age = now - instantUtc.Value;
-        context ??= new AlertContext();
-        context.NewestSample = new AlertNewestSample(
-            source, DateTime.SpecifyKind(instantUtc.Value, DateTimeKind.Utc), age < TimeSpan.Zero ? TimeSpan.Zero : age);
-        return context;
-    }
-
-    /// <summary>
     /// The collection time of the row a Tier 0 finding was judged on (#5642): the finding's own database row for
     /// wraparound, its own slot row for slot retention, the winning row for the vacuum horizon. Null when the read
     /// carried none, which gives no age line.
@@ -7451,21 +7429,6 @@ LIMIT 1";
                 slots?.FirstOrDefault(sl => string.Equals(sl.SlotName, finding.Subject, StringComparison.Ordinal))?.NewestSampleUtc,
             _ => null,
         };
-
-    /// <summary>The newest of a PostgreSQL family's row instants, or null when there are none (a default instant is none).</summary>
-    internal static DateTime? NewestPgInstant(IEnumerable<DateTime> instants)
-    {
-        DateTime? newest = null;
-        foreach (var instant in instants)
-        {
-            if (instant != default && (!newest.HasValue || instant > newest.Value))
-            {
-                newest = instant;
-            }
-        }
-
-        return newest;
-    }
 
     /// <summary>
     /// Runs after a PostgreSQL family's fire (#4795), the twin of <c>AlertEngine.AfterFire</c> (#4752) for the
@@ -7669,7 +7632,7 @@ LIMIT 1";
                            silently suppressed for the whole cooldown window. The DedupKey is identity only —
                            no ages or byte counts — so a recurrence of the SAME subject collapses while a
                            different subject does not. */
-                        Context: StampPgNewestSample(
+                        Context: AlertSampleAge.Stamp(
                             new AlertContext
                             {
                                 Incidents = new List<AlertIncident>
@@ -8039,7 +8002,7 @@ LIMIT 1";
                         metricName,
                         $"{lastCapacityPercent!.Value:F0}%",
                         $"{alertSettings.CpuThresholdPercent}%",
-                        Context: StampPgNewestSample(null, "CPU", reading.SampleTimeUtc, now),
+                        Context: AlertSampleAge.Stamp(null, "CPU", reading.SampleTimeUtc, now),
                         /* Both figures, each labelled with what it is a fraction OF — the whole defect
                            #3281 names is a reader taking one for the other. The sustained-for line is
                            #3282's: without it a reader cannot tell this from the single-sample alert that
@@ -8233,12 +8196,12 @@ LIMIT 1";
                         metricName,
                         count.ToString(CultureInfo.InvariantCulture),
                         threshold.ToString(CultureInfo.InvariantCulture),
-                        Context: StampPgNewestSample(
+                        Context: AlertSampleAge.Stamp(
                             new AlertContext
                             {
                                 Incidents = rows.Select(BuildPgDeadlockIncident).ToList(),
                             },
-                            "deadlock", NewestPgInstant(rows.Select(r => r.OccurredAtUtc)), now),
+                            "deadlock", AlertSampleAge.Newest(rows.Select(r => r.OccurredAtUtc)), now),
                         DetailText: null,
                         NumericCurrentValue: count,
                         NumericThresholdValue: threshold,
@@ -8411,12 +8374,12 @@ LIMIT 1";
                         metricName,
                         count.ToString(CultureInfo.InvariantCulture),
                         threshold.ToString(CultureInfo.InvariantCulture),
-                        Context: StampPgNewestSample(
+                        Context: AlertSampleAge.Stamp(
                             new AlertContext
                             {
                                 Incidents = worstPerRoot.Select(BuildPgBlockingIncident).ToList(),
                             },
-                            "blocking capture", NewestPgInstant(worstPerRoot.Select(r => r.CapturedAt)), now),
+                            "blocking capture", AlertSampleAge.Newest(worstPerRoot.Select(r => r.CapturedAt)), now),
                         DetailText: null,
                         NumericCurrentValue: count,
                         NumericThresholdValue: threshold,
@@ -8637,7 +8600,7 @@ LIMIT 1";
                         metricName,
                         $"{rows.Count} query(s), longest {elapsedMinutes}m",
                         $"{thresholdMinutes}m",
-                        Context: StampPgNewestSample(
+                        Context: AlertSampleAge.Stamp(
                             new AlertContext
                             {
                                 Incidents = rows.Select(BuildPgLongRunningQueryIncident).ToList(),
@@ -8651,7 +8614,7 @@ LIMIT 1";
                             },
                             /* #5642, ruling 6: the capture these rows were read from, counted once at fire time. The
                                same label the SQL Server twin uses for its snapshot. */
-                            "query snapshot", NewestPgInstant(rows.Select(r => r.NewestSampleUtc ?? default)), now),
+                            "query snapshot", AlertSampleAge.Newest(rows.Select(r => r.NewestSampleUtc ?? default)), now),
                         DetailText: null,
                         NumericCurrentValue: elapsedMinutes,
                         NumericThresholdValue: thresholdMinutes,
@@ -8897,7 +8860,7 @@ LIMIT 1";
                         finding.ThresholdValue,
                         /* The subject as the #1140 incident fingerprint, identity only — same shape and
                            reasoning as the Tier 0 delivery loop above. */
-                        Context: StampPgNewestSample(
+                        Context: AlertSampleAge.Stamp(
                             new AlertContext
                             {
                             Incidents = new List<AlertIncident>

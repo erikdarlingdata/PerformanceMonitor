@@ -887,43 +887,6 @@ public sealed class AlertEngine
     private readonly record struct CpuObservation(double? Sql, double? Total, DateTime? Instant, DateTime? UtcInstant);
 
     /// <summary>
-    /// Fills <see cref="AlertContext.NewestSample"/> at FIRE time (#5642): the source's label, the newest
-    /// sample's UTC instant and its age against the engine's clock, computed once and persisted with the alert's
-    /// context. A null instant, a LOCAL-kind one (a pre-V134 stamp on the monitored server's clock) or the
-    /// <see cref="DateTime.MinValue"/> sentinel gives no age and leaves the context as it was; a sample dated
-    /// later than now ages as zero. The context is created only when there is an age to carry, so a site whose
-    /// context was null stays null without one.
-    /// </summary>
-    internal static AlertContext? StampNewestSample(AlertContext? context, string source, DateTime? instantUtc, DateTime now)
-    {
-        if (!instantUtc.HasValue || instantUtc.Value.Kind == DateTimeKind.Local || instantUtc.Value == DateTime.MinValue)
-        {
-            return context;
-        }
-
-        var age = now - instantUtc.Value;
-        context ??= new AlertContext();
-        context.NewestSample = new AlertNewestSample(
-            source, DateTime.SpecifyKind(instantUtc.Value, DateTimeKind.Utc), age < TimeSpan.Zero ? TimeSpan.Zero : age);
-        return context;
-    }
-
-    /// <summary>The newest of a set of nullable sample instants, or null when none carries one.</summary>
-    private static DateTime? NewestOf(IEnumerable<DateTime?> instants)
-    {
-        DateTime? newest = null;
-        foreach (var instant in instants)
-        {
-            if (instant.HasValue && (!newest.HasValue || instant.Value > newest.Value))
-            {
-                newest = instant;
-            }
-        }
-
-        return newest;
-    }
-
-    /// <summary>
     /// The observations the CPU gate sees this sweep (#5642), oldest first. Every sample of the host's recent
     /// list that was collected while we were watching (at or after <see cref="AlertServerSnapshot.WatchingSinceUtc"/>)
     /// and is newer than the persisted watermark goes through the gate one by one, so three readings over the
@@ -1067,7 +1030,7 @@ public sealed class AlertEngine
                BOTH the context and the outcome for the reason the deadlock and Poison Wait sites give:
                Lite's deliverer persists only the context, Darling's folds the outcome in. */
             var cpuGrade = GradeCpuFire(alertCpuValue);
-            var cpuContext = StampNewestSample(new AlertContext { SeverityOverride = cpuGrade }, CpuReadingSource, readingUtc, now);
+            var cpuContext = AlertSampleAge.Stamp(new AlertContext { SeverityOverride = cpuGrade }, CpuReadingSource, readingUtc, now);
             /* #5642: the context holds no Details, so the typed field alone would not reach a text channel; the
                hand-built text carries the age line (AlertDetailText.SampleAgeLine, appended once), and the
                channel renderers print the typed field only when the prose does not already carry it. */
@@ -1310,7 +1273,7 @@ public sealed class AlertEngine
                reuses this sweep's fetch (identical query/window). */
             var blockingContext = AlertContextBuilders.BuildBlockingContext(
                 fingerprintServer, blockingRows, excludedDatabases, blockingOccurrences.Decorate);
-            blockingContext = StampNewestSample(blockingContext, "blocked process", NewestOf(blockingRows!.Select(r => r.EventTime)), now);
+            blockingContext = AlertSampleAge.Stamp(blockingContext, "blocked process", AlertSampleAge.Newest(blockingRows!.Select(r => r.EventTime)), now);
             var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
 
             /* :175-183 — SendDetectedAlertAsync's #1141/#1236 delivery-mode fan-out is an
@@ -1664,7 +1627,7 @@ public sealed class AlertEngine
                     ?? new AlertContext();
                 blockingContext.Details.Insert(0, AlertContextBuilders.BuildBlockingWaitGateItem(
                     current, thresholdSeconds, singleSnapshot ? BlockingWaitFiredBySingleSnapshot : BlockingWaitFiredByConsecutive));
-                StampNewestSample(blockingContext, "blocking wait", current.SnapshotTime, now);
+                AlertSampleAge.Stamp(blockingContext, "blocking wait", current.SnapshotTime, now);
                 var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
 
                 /* REAL numerics (#1830): the display text is prose ("745s across 3 blocked session(s)"),
@@ -1790,7 +1753,7 @@ public sealed class AlertEngine
                by construction, the Poison Wait precedent). */
             deadlockContext ??= new AlertContext();
             deadlockContext.SeverityOverride = GradeDeadlockFire(effectiveDeadlockCount, _settings.DeadlockRateThresholds);
-            StampNewestSample(deadlockContext, "deadlock", NewestOf(deadlockRows!.Select(r => r.NewestSampleUtc)), now);
+            AlertSampleAge.Stamp(deadlockContext, "deadlock", AlertSampleAge.Newest(deadlockRows!.Select(r => r.NewestSampleUtc)), now);
             var detailText = AlertContextBuilders.ContextToDetailText(deadlockContext);
 
             /* :252-260 — ShortMessage = the toast body of :244. Numerics carried explicitly (#1830):
@@ -1913,7 +1876,7 @@ public sealed class AlertEngine
                        context above already keys on — an alert-notebook reader can branch on it without
                        parsing the detail heading or the prose. */
                     var poisonContext = new AlertContext { SeverityOverride = worst.Severity, WaitType = worst.WaitType };
-                    StampNewestSample(poisonContext, "wait stats", newestCollectionTime, now);
+                    AlertSampleAge.Stamp(poisonContext, "wait stats", newestCollectionTime, now);
                     foreach (var finding in findings)
                     {
                         poisonContext.Details.Add(new AlertDetailItem
@@ -2144,7 +2107,7 @@ public sealed class AlertEngine
                         lrqContext.Details.Add(AlertContextBuilders.BuildLongRunningQueryExcludedDatabasesItem(_settings.ExcludedDatabases, read.ExcludedByDatabase));
                     }
 
-                    lrqContext = StampNewestSample(lrqContext, "query snapshot", NewestOf(longRunning.Select(q => q.NewestSampleUtc)), now);
+                    lrqContext = AlertSampleAge.Stamp(lrqContext, "query snapshot", AlertSampleAge.Newest(longRunning.Select(q => q.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */
 
                     /* :382-392. ShortMessage = the toast body of :374. */
@@ -2255,7 +2218,7 @@ public sealed class AlertEngine
                        a Warning the operator configured at TempDbSpaceThresholdPercent, honestly labelled. */
                     tempDbContext ??= new AlertContext();
                     tempDbContext.SeverityOverride = AlertSeverityLevel.Warning;
-                    StampNewestSample(tempDbContext, "tempdb", tempDb.CollectionTimeUtc, now);
+                    AlertSampleAge.Stamp(tempDbContext, "tempdb", tempDb.CollectionTimeUtc, now);
                     var detailText = AlertContextBuilders.ContextToDetailText(tempDbContext); /* :441 */
 
                     /* :443-453. ShortMessage = the toast body of :435. */
@@ -2352,7 +2315,7 @@ public sealed class AlertEngine
                     {
                         lowDiskContext.SeverityOverride = AlertSeverityLevel.Critical;
                     }
-                    lowDiskContext = StampNewestSample(lowDiskContext, "volume", NewestOf(breached.Select(v => v.NewestSampleUtc)), now);
+                    lowDiskContext = AlertSampleAge.Stamp(lowDiskContext, "volume", AlertSampleAge.Newest(breached.Select(v => v.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(lowDiskContext); /* :523 */
 
                     /* :525-535. ShortMessage = the toast body of :510. */
@@ -2455,7 +2418,7 @@ public sealed class AlertEngine
                     _lastAlertedPvsPercent[key] = worst.PvsPercent;
 
                     var pvsContext = AlertContextBuilders.BuildPvsPressureContext(fingerprintServer, breached, pvsOccurrences.Decorate);
-                    pvsContext = StampNewestSample(pvsContext, "PVS", NewestOf(breached.Select(v => v.NewestSampleUtc)), now);
+                    pvsContext = AlertSampleAge.Stamp(pvsContext, "PVS", AlertSampleAge.Newest(breached.Select(v => v.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(pvsContext);
 
                     var delivery = await FireAsync(new AlertOutcome(
@@ -2620,7 +2583,7 @@ public sealed class AlertEngine
 
                     var context = AlertContextBuilders.BuildFileGrowthContext(
                         fingerprintServer, breached, fileGrowthOccurrences.Decorate);
-                    context = StampNewestSample(context, "file growth", NewestOf(breached.Select(f => f.ObservedAtUtc)), now);
+                    context = AlertSampleAge.Stamp(context, "file growth", AlertSampleAge.Newest(breached.Select(f => f.ObservedAtUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(context);
 
                     /* The headline names the file, its size and its share of the volume — the three facts that
@@ -2767,7 +2730,7 @@ public sealed class AlertEngine
                     _lastLongRunningJobAlert[jobKey] = now;                         /* :587 */
 
                     var jobContext = AlertContextBuilders.BuildAnomalousJobContext(fingerprintServer, anomalousJobs, jobOccurrences.Decorate); /* :600 */
-                    jobContext = StampNewestSample(jobContext, "running job", NewestOf(anomalousJobs.Select(j => j.NewestSampleUtc)), now);
+                    jobContext = AlertSampleAge.Stamp(jobContext, "running job", AlertSampleAge.Newest(anomalousJobs.Select(j => j.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(jobContext);                     /* :601 */
 
                     /* :603-613. ShortMessage = the toast body of :595. */
@@ -3085,7 +3048,7 @@ public sealed class AlertEngine
                     }
                 });
 
-                StampNewestSample(stateContext, "database state", db.NewestSampleUtc, now);
+                AlertSampleAge.Stamp(stateContext, "database state", db.NewestSampleUtc, now);
                 var detailText = AlertContextBuilders.ContextToDetailText(stateContext);
 
                 var delivery = await FireAsync(new AlertOutcome(
@@ -3321,7 +3284,7 @@ public sealed class AlertEngine
                     }
                 });
 
-                StampNewestSample(context, "query store", failure.ObservedAtUtc, now);
+                AlertSampleAge.Stamp(context, "query store", failure.ObservedAtUtc, now);
                 var detailText = AlertContextBuilders.ContextToDetailText(context);
 
                 var delivery = await FireAsync(new AlertOutcome(

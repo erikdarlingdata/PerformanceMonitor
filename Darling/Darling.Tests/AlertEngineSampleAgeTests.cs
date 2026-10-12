@@ -38,26 +38,26 @@ public sealed class AlertEngineSampleAgeTests
     }
 
     [Fact]
-    public void StampNewestSample_NullLocalAndMinValue_GiveNoAge_AndLeaveTheContextAlone()
+    public void AlertSampleAgeStamp_NullLocalAndMinValue_GiveNoAge_AndLeaveTheContextAlone()
     {
-        Assert.Null(AlertEngine.StampNewestSample(null, "x", null, Noon));
-        Assert.Null(AlertEngine.StampNewestSample(null, "x", DateTime.MinValue, Noon));
-        Assert.Null(AlertEngine.StampNewestSample(null, "x", new DateTime(2026, 7, 1, 11, 0, 0, DateTimeKind.Local), Noon));
+        Assert.Null(AlertSampleAge.Stamp(null, "x", null, Noon));
+        Assert.Null(AlertSampleAge.Stamp(null, "x", DateTime.MinValue, Noon));
+        Assert.Null(AlertSampleAge.Stamp(null, "x", new DateTime(2026, 7, 1, 11, 0, 0, DateTimeKind.Local), Noon));
 
         var existing = new AlertContext();
-        Assert.Same(existing, AlertEngine.StampNewestSample(existing, "x", null, Noon));
+        Assert.Same(existing, AlertSampleAge.Stamp(existing, "x", null, Noon));
         Assert.Null(existing.NewestSample);
     }
 
     [Fact]
-    public void StampNewestSample_ASampleAheadOfTheClock_AgesAsZero_AndTheContextIsCreatedOnlyForAnAge()
+    public void AlertSampleAgeStamp_ASampleAheadOfTheClock_AgesAsZero_AndTheContextIsCreatedOnlyForAnAge()
     {
-        var stamped = AlertEngine.StampNewestSample(null, "x", Noon.AddMinutes(3), Noon);
+        var stamped = AlertSampleAge.Stamp(null, "x", Noon.AddMinutes(3), Noon);
         Assert.NotNull(stamped);
         Assert.Equal(TimeSpan.Zero, stamped!.NewestSample!.Age);
 
         /* An unspecified-kind instant (the store's naive UTC) is read as UTC. */
-        var naive = AlertEngine.StampNewestSample(null, "x", new DateTime(2026, 7, 1, 11, 55, 0, DateTimeKind.Unspecified), Noon);
+        var naive = AlertSampleAge.Stamp(null, "x", new DateTime(2026, 7, 1, 11, 55, 0, DateTimeKind.Unspecified), Noon);
         Assert.Equal(DateTimeKind.Utc, naive!.NewestSample!.InstantUtc.Kind);
         Assert.Equal(TimeSpan.FromMinutes(5), naive.NewestSample.Age);
     }
@@ -258,9 +258,9 @@ public sealed class AlertEngineSampleAgeTests
                      "\"tempdb\"", "\"volume\"", "\"PVS\"", "\"file growth\"", "\"running job\"", "\"database state\"", "\"query store\""
                  })
         {
-            Assert.Contains("StampNewestSample(", source, StringComparison.Ordinal);
+            Assert.Contains("AlertSampleAge.Stamp(", source, StringComparison.Ordinal);
             Assert.True(
-                source.Split(new[] { "StampNewestSample(" }, StringSplitOptions.None).Skip(1)
+                source.Split(new[] { "AlertSampleAge.Stamp(" }, StringSplitOptions.None).Skip(1)
                     .Any(part => part.Contains(label, StringComparison.Ordinal) && part.IndexOf(label, StringComparison.Ordinal) < 160),
                 $"no fire site stamps the age with the source label {label}");
         }

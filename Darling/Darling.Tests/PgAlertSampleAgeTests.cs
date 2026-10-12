@@ -33,45 +33,68 @@ public sealed class PgAlertSampleAgeTests
     private static readonly DateTime Now = new(2026, 10, 11, 15, 48, 49, DateTimeKind.Utc);
 
     [Fact]
-    public void TheAgeIsComputedAtFireTime_FromTheInstant_AndAgreesWithTheEnginesStamp()
+    public void TheAgeIsComputedAtFireTime_FromTheInstant()
     {
         var instant = new DateTime(2026, 10, 11, 15, 43, 29, DateTimeKind.Unspecified);
 
-        var pg = DarlingWorker.StampPgNewestSample(null, "CPU", instant, Now);
-        var engine = AlertEngine.StampNewestSample(null, "CPU", instant, Now);
+        var pg = AlertSampleAge.Stamp(null, "CPU", instant, Now);
 
         Assert.NotNull(pg?.NewestSample);
-        Assert.Equal(engine!.NewestSample, pg!.NewestSample);
-        Assert.Equal(TimeSpan.FromSeconds(320), pg.NewestSample!.Age);
+        Assert.Equal(TimeSpan.FromSeconds(320), pg!.NewestSample!.Age);
         Assert.Equal(DateTimeKind.Utc, pg.NewestSample.InstantUtc.Kind);
         Assert.Equal("Newest CPU sample: 15:43:29 UTC, 5m 20s old", AlertDetailText.SampleAgeLine(pg.NewestSample));
+    }
+
+    /// <summary>
+    /// One definition, aliased not copied (#3684: two copies pinned equal fail only after BOTH drift). The SQL
+    /// Server engine and Darling's PostgreSQL worker both stamp through <c>AlertSampleAge</c> in
+    /// PerformanceMonitor.Notifications, and neither file declares a stamp or newest-instant helper of its own.
+    /// </summary>
+    [Fact]
+    public void TheEngineAndTheWorker_BothStampThroughTheOneSharedHelper_AndDeclareNoCopy()
+    {
+        var engine = ReadRepoFile("PerformanceMonitor.Alerting", "AlertEngine.cs");
+        var worker = ServerConnectBackoffTests.ReadWorkerSource();
+
+        Assert.Contains("AlertSampleAge.Stamp(", engine, StringComparison.Ordinal);
+        Assert.Contains("AlertSampleAge.Newest(", engine, StringComparison.Ordinal);
+        Assert.Contains("AlertSampleAge.Stamp(", worker, StringComparison.Ordinal);
+        Assert.Contains("AlertSampleAge.Newest(", worker, StringComparison.Ordinal);
+
+        var declaration = new Regex(@"static\s+\S+\s+(?:StampNewestSample|StampPgNewestSample|NewestOf|NewestPgInstant)\s*\(");
+        Assert.DoesNotMatch(declaration, engine);
+        Assert.DoesNotMatch(declaration, worker);
+        Assert.DoesNotContain("context.NewestSample = new AlertNewestSample(", engine, StringComparison.Ordinal);
+        Assert.DoesNotContain("context.NewestSample = new AlertNewestSample(", worker, StringComparison.Ordinal);
     }
 
     [Fact]
     public void ANullMinValueOrLocalInstant_GivesNoAge_AndNullStaysNull()
     {
-        Assert.Null(DarlingWorker.StampPgNewestSample(null, "CPU", null, Now));
-        Assert.Null(DarlingWorker.StampPgNewestSample(null, "CPU", DateTime.MinValue, Now));
-        Assert.Null(DarlingWorker.StampPgNewestSample(null, "CPU", DateTime.SpecifyKind(Now.AddMinutes(-1), DateTimeKind.Local), Now));
+        Assert.Null(AlertSampleAge.Stamp(null, "CPU", null, Now));
+        Assert.Null(AlertSampleAge.Stamp(null, "CPU", DateTime.MinValue, Now));
+        Assert.Null(AlertSampleAge.Stamp(null, "CPU", DateTime.SpecifyKind(Now.AddMinutes(-1), DateTimeKind.Local), Now));
 
         var kept = new AlertContext();
-        Assert.Same(kept, DarlingWorker.StampPgNewestSample(kept, "CPU", null, Now));
+        Assert.Same(kept, AlertSampleAge.Stamp(kept, "CPU", null, Now));
         Assert.Null(kept.NewestSample);
     }
 
     [Fact]
     public void AFutureDatedSample_AgesAsZero()
     {
-        var context = DarlingWorker.StampPgNewestSample(null, "deadlock", Now.AddMinutes(3), Now);
+        var context = AlertSampleAge.Stamp(null, "deadlock", Now.AddMinutes(3), Now);
         Assert.Equal(TimeSpan.Zero, context!.NewestSample!.Age);
     }
 
     [Fact]
     public void TheNewestOfAFamilysInstants_IgnoresDefaults_AndIsNullWhenThereAreNone()
     {
-        Assert.Null(DarlingWorker.NewestPgInstant([]));
-        Assert.Null(DarlingWorker.NewestPgInstant([default, default]));
-        Assert.Equal(Now, DarlingWorker.NewestPgInstant([Now.AddMinutes(-9), default, Now, Now.AddMinutes(-1)]));
+        Assert.Null(AlertSampleAge.Newest(Array.Empty<DateTime>()));
+        Assert.Null(AlertSampleAge.Newest(new DateTime[] { default, default }));
+        Assert.Equal(Now, AlertSampleAge.Newest(new DateTime[] { Now.AddMinutes(-9), default, Now, Now.AddMinutes(-1) }));
+        Assert.Equal(Now, AlertSampleAge.Newest(new DateTime?[] { null, Now.AddMinutes(-9), Now, default }));
+        Assert.Null(AlertSampleAge.Newest(new DateTime?[] { null, default }));
     }
 
     /// <summary>
@@ -81,7 +104,7 @@ public sealed class PgAlertSampleAgeTests
     [Fact]
     public void ACpuFiresHandBuiltText_GetsTheLineOnce()
     {
-        var context = DarlingWorker.StampPgNewestSample(null, "CPU", Now.AddSeconds(-320), Now);
+        var context = AlertSampleAge.Stamp(null, "CPU", Now.AddSeconds(-320), Now);
         const string handBuilt = "  Capacity: 91% of ceiling\n  Threshold: 80%\n  Sustained: 3 consecutive samples";
 
         var once = AlertDetailText.WithSampleAge(handBuilt, context);
@@ -100,11 +123,11 @@ public sealed class PgAlertSampleAgeTests
     public void EveryFamilyWhoseReadReturnsAnInstant_StampsItAtFireTime()
     {
         var source = ServerConnectBackoffTests.ReadWorkerSource();
-        Assert.Contains("Context: StampPgNewestSample(null, \"CPU\", reading.SampleTimeUtc, now)", source, StringComparison.Ordinal);
-        Assert.Contains("\"deadlock\", NewestPgInstant(rows.Select(r => r.OccurredAtUtc)), now)", source, StringComparison.Ordinal);
-        Assert.Contains("\"blocking capture\", NewestPgInstant(worstPerRoot.Select(r => r.CapturedAt)), now)", source, StringComparison.Ordinal);
+        Assert.Contains("Context: AlertSampleAge.Stamp(null, \"CPU\", reading.SampleTimeUtc, now)", source, StringComparison.Ordinal);
+        Assert.Contains("\"deadlock\", AlertSampleAge.Newest(rows.Select(r => r.OccurredAtUtc)), now)", source, StringComparison.Ordinal);
+        Assert.Contains("\"blocking capture\", AlertSampleAge.Newest(worstPerRoot.Select(r => r.CapturedAt)), now)", source, StringComparison.Ordinal);
         Assert.Contains("newestCollectionBySubject.TryGetValue(finding.Subject, out var newestWaitCollection)", source, StringComparison.Ordinal);
-        Assert.Equal(6, Regex.Matches(source, @"StampPgNewestSample\(\s*(?:null|new AlertContext)").Count);
+        Assert.Equal(6, Regex.Matches(source, @"AlertSampleAge\.Stamp\(\s*(?:null|new AlertContext)").Count);
     }
 
     // ---- the Tier 0 trio and Long-Running Query (#5642, ruling 6) ----
@@ -192,7 +215,7 @@ public sealed class PgAlertSampleAgeTests
         Assert.Null(DarlingWorker.Tier0NewestSample(MakeFinding(PostgresAlertEvaluator.SlotRetentionMetric, "unknown_slot"), wraparound, xmin, slots));
         Assert.Null(DarlingWorker.Tier0NewestSample(MakeFinding(PostgresAlertEvaluator.WraparoundMetric, "db_a"), null, null, null));
 
-        var context = DarlingWorker.StampPgNewestSample(
+        var context = AlertSampleAge.Stamp(
             new AlertContext(), "collection",
             DarlingWorker.Tier0NewestSample(MakeFinding(PostgresAlertEvaluator.SlotRetentionMetric, "slot_a"), wraparound, xmin, slots), Now);
         Assert.Null(context!.NewestSample);
@@ -202,7 +225,7 @@ public sealed class PgAlertSampleAgeTests
     [Fact]
     public void ATier0Fire_CarriesTheLineOnce_FromItsRowsTime()
     {
-        var context = DarlingWorker.StampPgNewestSample(new AlertContext(), "collection", Now.AddMinutes(-4), Now);
+        var context = AlertSampleAge.Stamp(new AlertContext(), "collection", Now.AddMinutes(-4), Now);
         var text = AlertDetailText.WithSampleAge("  XID age 1,000", context);
         Assert.Single(Regex.Matches(text!, "Newest collection sample"));
         Assert.EndsWith("Newest collection sample: 15:44:49 UTC, 4m 0s old", text, StringComparison.Ordinal);
@@ -218,6 +241,6 @@ public sealed class PgAlertSampleAgeTests
     {
         var source = ServerConnectBackoffTests.ReadWorkerSource();
         Assert.Contains("Tier0NewestSample(finding, wraparound, xmin, slots), now)", source, StringComparison.Ordinal);
-        Assert.Contains("\"query snapshot\", NewestPgInstant(rows.Select(r => r.NewestSampleUtc ?? default)), now)", source, StringComparison.Ordinal);
+        Assert.Contains("\"query snapshot\", AlertSampleAge.Newest(rows.Select(r => r.NewestSampleUtc ?? default)), now)", source, StringComparison.Ordinal);
     }
 }
