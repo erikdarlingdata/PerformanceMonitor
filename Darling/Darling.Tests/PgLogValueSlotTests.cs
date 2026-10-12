@@ -227,14 +227,14 @@ public sealed class PgLogValueSlotTests
             Assert.Equal(W, PgLogTextRedactor.RedactDetail(W, sqlState: state));
         }
 
-        Assert.Equal(W, PgLogTextRedactor.RedactMessage("malformed array literal: \"{Kept-S1\"", sqlState: "22P02"));
+        Assert.Equal(W, PgLogTextRedactor.RedactMessage("malformed array literal: {Kept-S1", sqlState: "22P02"));
         Assert.Equal("Key (email)=(?) already exists.", PgLogTextRedactor.RedactDetail("Key (email)=(Kept-S1) already exists.", sqlState: "23505"));
         Assert.Equal("Failing row contains (?).", PgLogTextRedactor.RedactDetail("Failing row contains (Kept-S1).", sqlState: "23514"));
 
         /* Not in the class: prose is kept, unless it opens like a form without being one. */
         Assert.Equal("Customer Kept-S1 already has an account.", PgLogTextRedactor.RedactDetail("Customer Kept-S1 already has an account.", sqlState: "P0001"));
         Assert.Equal("Customer Kept-S1 already has an account.", PgLogTextRedactor.RedactDetail("Customer Kept-S1 already has an account."));
-        Assert.Equal("malformed array literal: \"{x\"", PgLogTextRedactor.RedactMessage("malformed array literal: \"{x\""));
+        Assert.Equal("malformed array literal: \"?\"", PgLogTextRedactor.RedactMessage("malformed array literal: \"{x\""));
         Assert.Equal(W, PgLogTextRedactor.RedactDetail("Key (email)=(Kept-S1) already exists"));
         Assert.Equal(W, PgLogTextRedactor.RedactDetail("Failing row contains Kept-S1."));
         Assert.Equal(W, PgLogTextRedactor.RedactMessage("invalid input syntax for type integer: Kept-S1"));

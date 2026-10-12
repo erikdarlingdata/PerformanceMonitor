@@ -747,9 +747,7 @@ public static class PgLogTextRedactor
         "COPY %s, riga %llu: \"%s\"", // it
         "COPY %s, linha %llu: \"%s\"", // pt_BR
         "%sのCOPY、行 %llu: \"%s\"", // ja
-        "%sのCOPY、行 %s: \"%s\"", // ja
         "%s 복사, %llu번째 줄: \"%s\"", // ko
-        "%s 복사, %s번째 줄: \"%s\"", // ko
     ];
 
     /// <summary>Every catalogue's <c>COPY %s, line %llu, column %s: "%s"</c>: a COPY frame quoting one column's input.</summary>
@@ -760,9 +758,7 @@ public static class PgLogTextRedactor
         "COPY %s, riga %llu, colonna %s: \"%s\"", // it
         "COPY %s, linha %llu, coluna %s: \"%s\"", // pt_BR
         "%sのCOPY、行 %llu、列 %s: \"%s\"", // ja
-        "%sのCOPY、行 %s、列 %s: \"%s\"", // ja
         "%s 복사, %llu번째 줄, %s 열: \"%s\"", // ko
-        "%s 복사, %s번째 줄, %s 열: \"%s\"", // ko
     ];
 
     /// <summary>Every catalogue's COPY frames that quote no input: the relation alone, the line, the column, and a null input.</summary>
@@ -785,13 +781,8 @@ public static class PgLogTextRedactor
         "%sのCOPY、行 %llu、列 %s", // ja
         "%sのCOPY、行 %llu", // ja
         "%sのCOPY、行 %llu、列 %s: null が入力されました", // ja
-        "%sのCOPY、行 %s、列 %s", // ja
-        "%sのCOPY、行 %s", // ja
-        "%sのCOPY、行 %s、列 %s: null が入力されました", // ja
         "%s 복사, %llu번째 줄, %s 열", // ko
         "%s 복사, %llu번째 줄", // ko
-        "%s 복사, %s번째 줄, %s 열", // ko
-        "%s 복사, %s번째 줄", // ko
     ];
 
     /// <summary>Every catalogue's <c>JSON data, line %d: %s%s%s</c>: the JSON parser's frame, everything after the line number the input around the error.</summary>
