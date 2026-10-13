@@ -132,6 +132,9 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         Assert.Equal(1, server.GetProperty("expanded_server_count").GetInt32());
         Assert.False(server.GetProperty("orphaned").GetBoolean());
         Assert.Equal("*", server.GetProperty("metric_match").GetString());
+        /* A "*" route is the least specific route, not an exact performance metric (it used to read exact_metric / performance). */
+        Assert.Equal("wildcard", server.GetProperty("match_kind").GetString());
+        Assert.Equal(JsonValueKind.Null, server.GetProperty("family").ValueKind);
         Assert.Equal(new[] { "Slack", "PagerDuty" }, server.GetProperty("configured_channels").EnumerateArray().Select(c => c.GetString()).ToArray());
 
         var tag = routes[ids.Tag];
@@ -279,7 +282,7 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         var source = Lite.Tests.ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs");
         var start = source.IndexOf(section, StringComparison.Ordinal);
         Assert.True(start >= 0, "Darling source lost: " + section);
-        var open = source.IndexOf("new", start, StringComparison.Ordinal);
+        var open = source.IndexOf("=> new", start, StringComparison.Ordinal);
         var braceOpen = source.IndexOf('{', open);
         var depth = 0;
         var end = braceOpen;
@@ -292,7 +295,7 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         var body = source[braceOpen..end];
         /* Only the object's own members: drop nested initializers and comments, then take "name =" at the start of a member. */
         body = Regex.Replace(body, @"/\*.*?\*/", "", RegexOptions.Singleline);
-        return Regex.Matches(body, @"(?m)^\s{16,20}([a-z_]+)\s*=").Select(m => m.Groups[1].Value).ToList();
+        return Regex.Matches(body, @"(?m)^\s{8}([a-z_]+)\s*=").Select(m => m.Groups[1].Value).ToList();
     }
 
     [Fact]
@@ -302,9 +305,30 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         using var doc = JsonDocument.Parse(await ReadAsync());
         var lite = doc.RootElement.GetProperty("routes").EnumerateArray().First().EnumerateObject().Select(p => p.Name).ToList();
 
-        var darling = DarlingRouteFields("routes = routes.Select(r => new");
+        /* Darling has ONE route projection: get_notification_routes lists it and set_notification_route_enabled returns it. */
+        var darling = DarlingRouteFields("internal static object RoutePayload(PgNotificationRouteStore.RouteSummary r) => new");
         Assert.NotEmpty(darling);
         Assert.Equal(darling.OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));
+        var source = Lite.Tests.ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs");
+        Assert.Contains("routes = routes.Select(RoutePayload)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("routes.Select(r => new", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BothProducts_SpellTheMatchKindAndFamilyThroughTheOneSharedHelper()
+    {
+        foreach (var path in new[] { "Lite/Mcp/McpAlertTools.cs", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.cs" })
+        {
+            var source = Lite.Tests.ParitySource.ReadFile(path);
+            Assert.Contains("NotificationRouteKinds.MatchKind(r.MetricMatch)", source, StringComparison.Ordinal);
+            Assert.Contains("NotificationRouteKinds.FamilyOf(r.MetricMatch)", source, StringComparison.Ordinal);
+        }
+
+        Assert.Equal("wildcard", NotificationRouteKinds.MatchKind("*"));
+        Assert.Null(NotificationRouteKinds.FamilyOf("*"));
+        Assert.Equal("family", NotificationRouteKinds.MatchKind("Performance"));
+        Assert.Equal("performance", NotificationRouteKinds.FamilyOf("Performance"));
+        Assert.Equal("exact_metric", NotificationRouteKinds.MatchKind("High CPU"));
     }
 
     [Fact]

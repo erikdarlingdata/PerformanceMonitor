@@ -437,8 +437,8 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /// <summary>#3598 (V131): the sparse notification routes, read live through the by-reference config seam
     /// like every sibling — <c>StoreConfigProvider.ApplyToConfig</c> swaps the list on every beacon change,
     /// which the routes table's own trigger bumps, so a route authored in the Viewer lands on the next firing
-    /// with no restart. The ONLY adapter that overrides the interface's empty default: Lite has no routes
-    /// table and resolves every firing to its parent channels.</summary>
+    /// with no restart. Lite's adapter (<c>AppAlertSettings</c>) overrides the interface's empty default too, from its own
+    /// DuckDB routes table (#5750); an adapter with no routes table resolves every firing to its parent channels.</summary>
     public IReadOnlyList<NotificationRoute> NotificationRoutes => Opened.Routes;
 
     /* Scheduled-analysis notifications (AN3): the shared AnalysisNotificationService's severity floor

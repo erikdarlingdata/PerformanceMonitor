@@ -511,8 +511,8 @@ public sealed class McpAlertTools
         {
             route_id = r.RouteId,
             metric_match = r.MetricMatch,
-            match_kind = r.Family is null ? "exact_metric" : "family",
-            family = r.Family ?? AlertFamily.Of(r.MetricMatch),
+            match_kind = NotificationRouteKinds.MatchKind(r.MetricMatch),
+            family = NotificationRouteKinds.FamilyOf(r.MetricMatch),
             configured_channels = channels,
             smtp_recipients = r.SmtpRecipients,
             enabled = r.Enabled,
