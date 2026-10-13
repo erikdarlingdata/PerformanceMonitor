@@ -90,6 +90,12 @@ public class CollectionBackgroundService : BackgroundService
        their per-server evaluated stamps. */
     private readonly SemaphoreSlim _pileupPassGate = new(1, 1);
 
+    /// <summary>#5731: the housekeeping steps that took a second or more, for the skipped-slots report.</summary>
+    private readonly HousekeepingLedger _housekeepingLedger = new();
+
+    /// <summary>The ledger the skipped-slots report reads (a test records into it).</summary>
+    internal HousekeepingLedger HousekeepingLedger => _housekeepingLedger;
+
     /* How far past its budget an in-flight pass must be before the loop starts reporting it. The
        ordinary overrun already gets the "exceeded Ns" warning; this is for the pass that ignored
        the cancellation raised at that budget — wedged inside a single store read, or waiting on
@@ -227,7 +233,8 @@ public class CollectionBackgroundService : BackgroundService
             (wait, token) => Task.Delay(wait, token),
             (loop, step, ex) => _logger?.LogWarning("Housekeeping step {Loop}/{Step} faulted — the next tick re-evaluates: {Message}",
                 loop, step, ex.Message),
-            stoppingToken);
+            stoppingToken,
+            _housekeepingLedger);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -347,9 +354,17 @@ public class CollectionBackgroundService : BackgroundService
     internal async Task ReportSkippedSlotsAsync(DateTime previousCycleStart, DateTime nextCycleStart, TimeSpan cycleElapsed,
         TimeSpan waitElapsed, IReadOnlyList<CycleStep> steps, CancellationToken cancellationToken)
     {
+        var skipped = CollectionCycleSkip.CountSkippedSlots(previousCycleStart, nextCycleStart, CollectionInterval);
+
+        /* #5731: housekeeping is off the collection loop, so the report names the housekeeping steps that overlapped the
+           gap and, when one is known, the writer holding the store lock (a read of the lock registry, never a wait). */
+        var housekeeping = skipped > 0 ? _housekeepingLedger.Overlapping(previousCycleStart, nextCycleStart) : null;
+        var holder = housekeeping is { Count: > 0 }
+            ? StoreLockHolders.Snapshot().FirstOrDefault(h => h.Write && h.Held >= HousekeepingLedger.MinimumLength)
+            : null;
         var report = CollectionCycleSkip.Build(
-            CollectionCycleSkip.CountSkippedSlots(previousCycleStart, nextCycleStart, CollectionInterval),
-            cycleElapsed, waitElapsed, steps, CollectionInterval, previousCycleStart, nextCycleStart);
+            skipped, cycleElapsed, waitElapsed, steps, CollectionInterval, previousCycleStart, nextCycleStart,
+            housekeeping, holder);
         if (report == null)
         {
             return;
@@ -449,9 +464,10 @@ public class CollectionBackgroundService : BackgroundService
         Task firstRound,
         Func<TimeSpan, CancellationToken, Task> delay,
         Action<string, string, Exception> onFault,
-        CancellationToken stoppingToken)
+        CancellationToken stoppingToken,
+        HousekeepingLedger? ledger = null)
     {
-        return loops.Select(loop => RunHousekeepingLoopAsync(loop, interval, canRun, firstRound, delay, onFault, stoppingToken))
+        return loops.Select(loop => RunHousekeepingLoopAsync(loop, interval, canRun, firstRound, delay, onFault, ledger, stoppingToken))
             .ToArray();
     }
 
@@ -462,6 +478,7 @@ public class CollectionBackgroundService : BackgroundService
         Task firstRound,
         Func<TimeSpan, CancellationToken, Task> delay,
         Action<string, string, Exception> onFault,
+        HousekeepingLedger? ledger,
         CancellationToken stoppingToken)
     {
         try
@@ -483,7 +500,16 @@ public class CollectionBackgroundService : BackgroundService
                     token.ThrowIfCancellationRequested();
                     try
                     {
-                        await step.Run(token);
+                        /* #5731: a step of a second or more goes in the ledger (failed ones too), so a skipped-slots
+                           report can name what overlapped its gap. */
+                        if (ledger == null)
+                        {
+                            await step.Run(token);
+                        }
+                        else
+                        {
+                            await ledger.Time(step.Name, () => step.Run(token));
+                        }
                     }
                     catch (OperationCanceledException) when (token.IsCancellationRequested)
                     {
