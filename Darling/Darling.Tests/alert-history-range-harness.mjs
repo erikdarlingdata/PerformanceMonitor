@@ -91,7 +91,15 @@ try {
   const checkbox = (main) => main.all("input").find((i) => i.attrs.type === "checkbox");
   const pick = async (sel, value) => { sel.value = String(value); sel.fire("change"); await new Promise((r) => setTimeout(r, 20)); };
   const bodyRows = (main) => { const t = main.all("table")[0]; return t ? t.children[1].children : []; };
-  const metrics = (main) => bodyRows(main).map((tr) => tr.children[3].textContent);
+  // The Metric column is found by its header, not a fixed index: W14 (#5644) put Triage and Mute before Time, so the
+  // column position moves with the grid's leading columns (and with whether the seat can edit).
+  const metricIndex = (main) => {
+    const t = main.all("table")[0];
+    const i = t ? t.children[0].children[0].children.findIndex((th) => th.textContent.trim().startsWith("Metric")) : -1;
+    if (i < 0) throw new Error("the Alert History grid has no Metric header");
+    return i;
+  };
+  const metrics = (main) => { const i = metricIndex(main); return bodyRows(main).map((tr) => tr.children[i].textContent); };
   const settle = () => new Promise((r) => setTimeout(r, 20));
   const out = {};
 
