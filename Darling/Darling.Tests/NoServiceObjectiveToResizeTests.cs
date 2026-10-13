@@ -37,7 +37,17 @@ public sealed class NoServiceObjectiveToResizeTests
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs"));
-        Assert.Contains("ProvisioningVerdict.NotApplicable", source, StringComparison.Ordinal);
+        /* #5633 item 11: the rules no longer name NotApplicable. Both CPU right-sizing rows start from ONE predicate, the
+           Utilization view's own verdict, and it allows downsizing only for OVER_PROVISIONED - so NotApplicable (and
+           RIGHT_SIZED, and a window with no sample) stands down by construction instead of by a second, separate test.
+           The pin follows that shape: the predicate is defined on OverProvisioned alone, the compute row gates on it,
+           and the prescriptive row gates on it in the reader. The behavior test below executes the stand-down. */
+        Assert.Contains("ProvisioningStatus == ProvisioningVerdict.OverProvisioned", source, StringComparison.Ordinal);
+        Assert.Contains("if (!CpuVerdictAllowsDownsizing(util)", source, StringComparison.Ordinal);
+        var reader = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsRecommendationsReader.cs"));
+        Assert.Contains("FinOpsRecommendationFigures.CpuVerdictAllowsDownsizing(vmUtil)", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("ProvisioningStatus != ProvisioningVerdict.OverProvisioned", source, StringComparison.Ordinal);
     }
 
     [Fact]
