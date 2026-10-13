@@ -28,6 +28,7 @@ class FakeNode {
     return this.children[0] || null;
   }
   appendChild(child) {
+    child.parentNode = this;
     this.children.push(child);
     return child;
   }
@@ -81,7 +82,7 @@ try {
       "export const CATEGORICAL_COLORS = SERIES_COLORS;\n" +
       "export function normalizeColor(color) { return color; }\n" +
       "export function renderLineChart() { return document.createElement('div'); }\n" +
-      "export function zoomableLineChart() { return document.createElement('div'); }\n" +
+      "export function zoomableLineChart(spec) { (globalThis.__charts = globalThis.__charts || []).push({ title: spec.title, labels: (spec.series || []).map((x) => x.label), unit: spec.unit }); return document.createElement('div'); }\n" +
       "export function chartZoomScope() { return ''; }\n"
   );
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
@@ -118,6 +119,13 @@ const BODIES = {
   },
   /* #5644 W16: every deadlock read answers the {status, message} envelope with ITS OWN wording (the trend's carries the collector-run
      count, the table's says "specified time range"); the stats read, which draws Deadlock Severity, says a third thing. */
+  /* #5644 W16: the engine has no deadlock data source (not_collected), or it cannot be read right now (unavailable): neither is a quiet window. */
+  deadlockNotCollected: {
+    trend: { source: null, trend: [] },
+    stats: { status: "not_collected", message: "This is a permanent engine capability gap: Azure SQL Database has no system_health session." },
+    deadlockTrend: { status: "not_collected", message: "This is a permanent engine capability gap: Azure SQL Database has no system_health session." },
+    deadlocks: { status: "unavailable", message: "Deadlock data is unavailable right now: the collector has not run." },
+  },
   deadlockEmpty: {
     trend: { source: null, trend: [] },
     stats: { status: "empty", message: "No blocking or deadlock data in the specified time range." },
@@ -175,4 +183,4 @@ for (const tab of tabs.SERVER_TABS) {
   await settle();
   for (const p of panelsOf(holder)) out.push({ tab: tab.id, ...p });
 }
-console.log(JSON.stringify({ panels: out, rejections }));
+console.log(JSON.stringify({ panels: out, charts: globalThis.__charts || [], rejections }));

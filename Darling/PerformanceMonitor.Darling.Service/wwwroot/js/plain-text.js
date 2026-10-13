@@ -195,8 +195,8 @@ export function plainText(text) {
     /\btop_application_name, top_application_connections, top_host_name and top_host_connections are\b/g,
     "the top application, its connection count, the top host and its connection count are",
   );
-  /* "24 hour(s)", "288 collector run(s)": the count is known, so the word agrees with it ("1 hour", "24 hours"). */
-  t = t.replace(/(?<![\w.])(\d[\d,]*) ((?:[a-z]+ )?[a-z]+)\(s\)/g, (m, n, word) => n + " " + word + (n === "1" ? "" : "s"));
+  /* "24 hour(s)", "288 collector run(s)": the count is known, so the word agrees with it ("1 hour", "24 hours", "2 queries"). */
+  t = t.replace(/(?<![\w.])(\d[\d,]*) ((?:[a-z]+ )?[a-z]+)\(s\)/g, (m, n, word) => n + " " + (n === "1" ? word : /[^aeiou]y$/.test(word) ? word.slice(0, -1) + "ies" : word + "s"));
 
   /* "raise limit": the pages have no row-limit control. "...filter - raise limit to see more." and "...returned; raise limit
      (now 50) for more." lose the clause; ", or raise limit," and ", and raise limit if none ... shows one" lose theirs. */

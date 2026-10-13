@@ -69,14 +69,14 @@ public sealed class WebBlockingSourceBehaviourTests
             .ToArray();
 
     [Theory]
-    [InlineData("xe", "Source: blocked-process-report")]
-    [InlineData("dmv", "Source: DMV snapshot")]
-    public void BlockingEventsAndSeverity_NameTheCollectorThatAnswered(string scenario, string expected)
+    [InlineData("xe", "Source: blocked-process-report", "Blocked process report trend")]
+    [InlineData("dmv", "Source: DMV snapshot", "Blocking snapshot trend")]
+    public void BlockingEventsAndSeverity_NameTheCollectorThatAnswered(string scenario, string expected, string trendTitle)
     {
         var r = Run(scenario);
 
         /* Blocking Events is on the Overview tab and the Blocking tab; Blocking Severity only on the Blocking tab. */
-        var events = Lines(r, "Blocked process report trend");
+        var events = Lines(r, trendTitle);
         Assert.Equal(2, events.Length);
         Assert.All(events, lines => Assert.Equal(new[] { expected }, lines));
         var severity = Lines(r, "Blocking Severity");
@@ -142,6 +142,42 @@ public sealed class WebBlockingSourceBehaviourTests
         Assert.Contains("const BLOCKING_REPORT_SERIES = [{ key: \"count\", label: \"Reports\" }];", tabs);
         Assert.DoesNotContain("No blocking events in this window — an empty trend", tabs);
         Assert.Contains("label: \"Reports\"", templates);
+        /* The axis caption says it too: both tab charts and the starter dashboard panel carry unit "reports". */
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(tabs, "unit: \"reports\",").Count);
+        Assert.Contains("unit: \"reports\",", templates);
+    }
+
+    /// <summary>#5644 W16 review: only a true negative (status "empty") takes the page's one sentence. A not_collected or unavailable
+    /// deadlock read keeps its own message; "No deadlocks in this window." over an Azure SQL Database target would be a false all-clear.</summary>
+    [Fact]
+    public void ANotCollectedOrUnavailableDeadlockRead_KeepsItsOwnMessage_NotTheAllClear()
+    {
+        var r = Run("deadlockNotCollected");
+        const string One = "No deadlocks in this window.";
+        var trend = Assert.Single(Empties(r, "blocking", "Deadlock trend"));
+        var table = Assert.Single(Empties(r, "blocking", "Deadlocks"));
+        var severity = Assert.Single(Empties(r, "blocking", "Deadlock Severity"));
+        Assert.All(new[] { trend, table, severity }, e => { Assert.Single(e); Assert.NotEqual(One, e[0]); Assert.False(string.IsNullOrWhiteSpace(e[0])); });
+        Assert.Equal("Deadlock data is unavailable right now: the collector has not run.", table[0]);
+    }
+
+    /// <summary>#5644 W16 review: when get_blocking_trend falls back to the DMV snapshot its points are snapshot rows, not blocked process
+    /// reports, so the title, legend and axis caption follow the answer's collector tag.</summary>
+    [Theory]
+    [InlineData("xe", "Blocked process report trend", "Reports", "reports")]
+    [InlineData("dmv", "Blocking snapshot trend", "Snapshot rows", "snapshot rows")]
+    public void TheBlockingTrendChart_WordsItselfByTheCollectorThatAnswered(string scenario, string title, string label, string unit)
+    {
+        var r = Run(scenario);
+        var charts = r.GetProperty("charts").EnumerateArray()
+            .Where(c => c.GetProperty("labels").EnumerateArray().Any(l => l.GetString() == label))
+            .ToList();
+        Assert.Equal(2, charts.Count);
+        Assert.All(charts, c =>
+        {
+            Assert.Equal(title, c.GetProperty("title").GetString());
+            Assert.Equal(unit, c.GetProperty("unit").GetString());
+        });
     }
 
     [Fact]
@@ -153,6 +189,6 @@ public sealed class WebBlockingSourceBehaviourTests
             .Where(p => p.GetProperty("strips").GetArrayLength() > 0)
             .Select(p => p.GetProperty("title").GetString())
             .ToArray();
-        Assert.Equal(new[] { "Blocked process report trend", "Blocked process report trend", "Blocking Severity" }, titles);
+        Assert.Equal(new[] { "Blocking snapshot trend", "Blocking snapshot trend", "Blocking Severity" }, titles);
     }
 }

@@ -1058,6 +1058,8 @@ function line(title, read, params, rowsKey, xKey, series, opts = {}) {
     emptyWins: opts.emptyWins === true,
     /* #5244: the answer's field naming the collector that answered (get_blocking_trend's `source`); absent on every other line. */
     sourceKey: opts.sourceKey,
+    /* #5644 W16: wording that follows the collector that answered (see BLOCKING_BY_SOURCE); absent on every other line. */
+    bySource: opts.bySource,
     /* The panel is not drawn when the server answers "not collected" (it does not apply to this kind of server). */
     hideWhenNotCollected: opts.hideWhenNotCollected === true,
     span: opts.span ?? 1,
@@ -1100,8 +1102,10 @@ export const SERVER_TABS = [
       line("Blocked process report trend", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", BLOCKING_REPORT_SERIES, {
         subtitle: ctx.label,
         format: "int",
+        unit: "reports",
         atTimeItem: "blocking",
         sourceKey: "source",
+        bySource: BLOCKING_BY_SOURCE,
         emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
       }),
       line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
@@ -1321,8 +1325,10 @@ export const SERVER_TABS = [
       line("Blocked process report trend", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", BLOCKING_REPORT_SERIES, {
         subtitle: ctx.label,
         format: "int",
+        unit: "reports",
         atTimeItem: "blocking",
         sourceKey: "source",
+        bySource: BLOCKING_BY_SOURCE,
         emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
       }),
       line("Deadlock trend", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
@@ -3179,6 +3185,10 @@ const COUNT_SERIES = [{ key: "count", label: "Events" }];
 /* #5644 W16: get_blocking_trend counts one point per blocked-process REPORT (a single wait can produce several), so the
    chart says "reports" where the tile beside it counts one event per wait. Same read and same count as COUNT_SERIES. */
 const BLOCKING_REPORT_SERIES = [{ key: "count", label: "Reports" }];
+/* When get_blocking_trend has no blocked process reports for the window and falls back to the DMV blocking snapshot (AWS RDS and any
+   server without the blocked process report event), a point counts snapshot rows, not reports: title, legend and axis follow the
+   answer's `source` (panels.js applies it), so the chart never calls snapshot rows reports. */
+const BLOCKING_BY_SOURCE = { "DMV snapshot": { title: "Blocking snapshot trend", label: "Snapshot rows", unit: "snapshot rows" } };
 
 /* #2484: the aggregate lock-wait rate. One numeric key, per the same reasoning as the Current Waits series
    below — the LCK wait type is the grouping the read applied, not a second axis. */

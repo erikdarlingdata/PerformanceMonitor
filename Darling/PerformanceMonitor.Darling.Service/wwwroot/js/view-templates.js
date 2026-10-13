@@ -192,6 +192,7 @@ export const DASHBOARD_TEMPLATES = [
             emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
             series: [{ key: "count", label: "Reports" }],
             format: "int",
+            unit: "reports",
           },
           {
             title: "Deadlocks",

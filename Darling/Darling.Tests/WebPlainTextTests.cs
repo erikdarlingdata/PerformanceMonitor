@@ -110,6 +110,7 @@ public sealed class WebPlainTextTests
             "The session counts are levels, averaged, never summed; top_application_name, top_application_connections, top_host_name and top_host_connections are the newest collection's own values in the bucket.",
             "No query-stats group on SRV in the last 24 hour(s) has a cached plan.",
             "No blocking was recorded in the last 1 hour(s). 288 collector run(s) DID execute; 1 collector run(s) failed.",
+            "3 query(s) failed, 1 query(s) retried, 2 policy(s) skipped.",
         ], out _);
         Assert.DoesNotContain("narrow the bucket", o[0]);
         Assert.Contains("narrow the time range to see it", o[0]);
@@ -120,6 +121,8 @@ public sealed class WebPlainTextTests
         Assert.Contains("the top application, its connection count, the top host and its connection count are", o[3]);
         Assert.Equal("No query-stats group on SRV in the last 24 hours has a cached plan.", o[4]);
         Assert.Equal("No blocking was recorded in the last 1 hour. 288 collector runs DID execute; 1 collector run failed.", o[5]);
+        /* a noun ending in a consonant plus y takes "ies", not a bare "s" */
+        Assert.Equal("3 queries failed, 1 query retried, 2 policies skipped.", o[6]);
     }
 
     /* #5644 W8: the clauses that point an MCP caller at a parameter the page has no control for. */
