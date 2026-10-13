@@ -98,7 +98,7 @@ public sealed class ExternalAlertDrainLiveTests
 
             for (var pass = 0; pass < 4; pass++)
             {
-                await rig.Drain.RunPassAsync(false, rig.Ct);
+                await rig.Drain.RunPassAsync(rig.Ct);
             }
 
             Assert.Equal("delivered", await rig.StatusAsync(fireA));
@@ -118,9 +118,9 @@ public sealed class ExternalAlertDrainLiveTests
         await WithDrainAsync(async rig =>
         {
             await rig.SubmitAsync("fire", "disk", server: "BOX-B");
-            await rig.Drain.RunPassAsync(false, rig.Ct);
+            await rig.Drain.RunPassAsync(rig.Ct);
             var clearA = await rig.SubmitAsync("clear", "disk", server: "BOX-A");
-            await rig.Drain.RunPassAsync(false, rig.Ct);
+            await rig.Drain.RunPassAsync(rig.Ct);
 
             Assert.Equal("ignored", await rig.StatusAsync(clearA));
             Assert.Empty(rig.PagerDutyResolves);
@@ -134,12 +134,12 @@ public sealed class ExternalAlertDrainLiveTests
         await WithDrainAsync(async rig =>
         {
             var fire = await rig.SubmitAsync("fire", "cpu", server: "NEWBOX");
-            await rig.Drain.RunPassAsync(false, rig.Ct);
+            await rig.Drain.RunPassAsync(rig.Ct);
             Assert.Equal("NEWBOX|external:NEWBOX", rig.Sent.Select(o => o.ServerName + "|" + o.ServerKey).Single());
 
             rig.Registry["NEWBOX"] = new ExternalAlertServer(9, "NEWBOX");
             var clear = await rig.SubmitAsync("clear", "cpu", server: "NEWBOX");
-            await rig.Drain.RunPassAsync(false, rig.Ct);
+            await rig.Drain.RunPassAsync(rig.Ct);
 
             Assert.Equal("delivered", await rig.StatusAsync(fire));
             Assert.Equal("delivered", await rig.StatusAsync(clear));
@@ -154,11 +154,11 @@ public sealed class ExternalAlertDrainLiveTests
         await WithDrainAsync(async rig =>
         {
             await rig.SubmitAsync("fire", "cpu", server: "sql01");
-            await rig.Drain.RunPassAsync(false, rig.Ct);
+            await rig.Drain.RunPassAsync(rig.Ct);
 
             rig.Registry.Clear();
             var clear = await rig.SubmitAsync("clear", "cpu", server: "SQL01");
-            await rig.Drain.RunPassAsync(false, rig.Ct);
+            await rig.Drain.RunPassAsync(rig.Ct);
 
             /* The clear differs from the fire in case and in what the registry says; it resolves under the fire's key and name. */
             Assert.Equal("delivered", await rig.StatusAsync(clear));
