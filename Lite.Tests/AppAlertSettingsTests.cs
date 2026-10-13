@@ -27,12 +27,13 @@ namespace PerformanceMonitorLite.Tests;
 /// The pass-through contract is type-uniform (every member is `=> App.X`), so the
 /// SMTP/webhook coverage proves the invariant for the analysis members too.
 ///
-/// Shares a collection with <see cref="AlertSettingsCredentialLoadTests"/> for the same reason: that class
+/// Used to share the app-alert-statics collection with <see cref="AlertSettingsCredentialLoadTests"/> for the same reason: that class
 /// drives App.LoadAlertSettings, which writes the four webhook statics this one asserts on, and xUnit runs
 /// separate classes in parallel. #1965 widened that collection (and renamed it from "app-webhook-statics")
 /// to cover the App.Alert* statics too, after the same parallelism flaked the MCP alert-settings tests.
-/// #5785 moved it to the credential-manager collection, because GetSmtpPassword reads the real Credential Manager. That
-/// collection runs alone, after every parallel class has finished, so the App statics stay as guarded as they were.
+/// Since #5785 this class runs in the credential-manager collection instead (the other class stayed in app-alert-statics),
+/// because GetSmtpPassword reads the real Credential Manager. That collection starts only after the parallel classes
+/// finish, so the App statics stay as guarded as they were.
 /// </summary>
 [Collection("credential-manager")]
 public class AppAlertSettingsTests

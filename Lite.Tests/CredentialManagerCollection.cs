@@ -43,10 +43,12 @@ public sealed class CredentialManagerCollection
 public sealed class CredentialManagerCollectionCensusTests
 {
     /* The calls that reach the real Credential Manager from a test: a real CredentialService or CredentialStore, the one a
-       ServerManager or ProfileManager owns, App's webhook and SMTP helpers, and the app's route-secret access. */
+       ServerManager or ProfileManager owns, App's webhook and SMTP helpers, and the app's route-secret access. The last
+       alternative covers C#'s target-typed new(...): a CredentialStore or CredentialService type mention followed, in the
+       same declaration, by new (. Singleline is set for that alternative's multi-line declarations. */
     private static readonly Regex s_realStore = new(
-        @"new CredentialService\(|new CredentialStore\(|\.CredentialService\b|App\.(SaveWebhookUrl|GetWebhookUrl|GetSmtpPassword|SaveSmtpPassword)\(|RouteSecretAccess\.CredentialManager\(",
-        RegexOptions.CultureInvariant);
+        @"new CredentialService\(|new CredentialStore\(|\.CredentialService\b|App\.(SaveWebhookUrl|GetWebhookUrl|GetSmtpPassword|SaveSmtpPassword)\(|RouteSecretAccess\.CredentialManager\(|\b(CredentialStore|CredentialService)\b[^;{}]{0,160}?\bnew\s*\(",
+        RegexOptions.CultureInvariant | RegexOptions.Singleline);
 
     private const string Membership = "[Collection(\"credential-manager\")]";
 
@@ -57,9 +59,13 @@ public sealed class CredentialManagerCollectionCensusTests
     public void EveryClassThatReachesTheRealCredentialManager_RunsInTheCredentialManagerCollection()
     {
         var thisFile = Path.GetFileName(ThisFile());
-        var reaching = Directory.EnumerateFiles(TestsRoot(), "*.cs", SearchOption.TopDirectoryOnly)
+        var root = TestsRoot();
+        /* Subfolders are scanned too (Helpers/ holds .cs files); build output under bin/ and obj/ is not source. */
+        var reaching = Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories)
             .Where(f => !string.Equals(Path.GetFileName(f), thisFile, StringComparison.OrdinalIgnoreCase))
-            .Select(f => (File: Path.GetFileName(f), Text: File.ReadAllText(f)))
+            .Where(f => !Path.GetRelativePath(root, f).Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .SkipLast(1).Any(seg => seg.Equals("bin", StringComparison.OrdinalIgnoreCase) || seg.Equals("obj", StringComparison.OrdinalIgnoreCase)))
+            .Select(f => (File: Path.GetRelativePath(root, f), Text: File.ReadAllText(f)))
             .Where(f => s_realStore.IsMatch(f.Text))
             .ToList();
 
