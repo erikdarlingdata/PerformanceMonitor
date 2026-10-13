@@ -211,7 +211,8 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
                 break;
         }
 
-        /* A second release of the gate's SemaphoreSlim(1,1) would throw here, or in the finally. */
+        /* A second release logs the measurement line twice, which Assert.Single below catches. (The gate's own
+           ResetScope.Dispose is idempotent, so a double release would not throw.) */
         await service.ArchiveAllAndResetAsync();
 
         /* The gate is free at once: taken, it is held (a second take is refused), and free again after dispose. */
