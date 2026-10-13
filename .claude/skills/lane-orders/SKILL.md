@@ -18,8 +18,6 @@ conflict.
 - `<CHANGELOG_BUFFER_DIR>`.
 
 If your brief leaves one unfilled, don't invent a value. Skip the step that needs it and say so in the PR body.
-In wave E (2026-09-24), a lane whose brief left `<CHANGELOG_BUFFER_DIR>` unfilled wrote its changelog entry to a
-made-up path inside the repo.
 
 Isolated worktrees live under `.claude/worktrees/` inside the repo, so a repo-scanning test must not exclude that
 path.
@@ -28,7 +26,7 @@ path.
 
 Before dispatch:
 - Rank the queue and get the OK the guardrails require.
-- Post every ruling on its issue AND put it in the first prompt.
+- Post every ruling on its issue and put it in the first prompt.
 - Pre-approve any store migration by name. Every other lane stops and reports instead.
 - Fast-forward the main checkout's local `dev`. A `lane` agent loads this skill from that checkout, and a stale
   checkout can lack it.
@@ -42,16 +40,16 @@ At dispatch:
   fixes what the review found.
 - Give each lane its own rig port.
 - Set a wall-clock check at each lane's deadline; don't wait on notifications.
-- Size each lane to finish under 200k. In wave B (2026-09-23), a lane's context grew about 1.9k tokens per call
-  from a 40k base, so 200k is about 80 calls. A #3898 lane that converted three tools used 100-117 calls.
-  In wave C (2026-09-24), the base fell to 24k, but a lane with two twin pairs (two tools on both products) still
-  used 103-167 calls and peaked at 214-242k. Give a #3898 lane ONE twin pair, or two tools on one product.
-- Check that the effort level took effect: grep a lane transcript for `"effort":`. In wave C, `effort: high` in the
-  agent file did not apply, and every lane turn logged the seat's `max`.
-- Every head clause about a status must keep its condition's scope. In wave C, each head-fact fix the coordinator
-  made was a scope error: "nothing collected yet" for "none collected in the window", or one state left out.
+- Size each lane to finish under 200k. A lane's context grows about 1.9k tokens per call from a 24-40k base, so
+  200k is about 80-90 calls. A lane that converts three tools uses 100-117 calls. A lane with two twin pairs (two
+  tools on both products) uses 103-167 calls and peaks at 214-242k. Give a lane that converts tools one twin pair,
+  or two tools on one product.
+- Check that the effort level took effect: grep a lane transcript for `"effort":`. An `effort:` set in the agent
+  file does not always apply, and a lane can then run at the seat's level.
+- Every head clause about a status must keep its condition's scope: "none collected in the window" is not
+  "nothing collected yet". Leave no state out.
 - Paste into the brief the few lines a lane needs (an example, a ruling) instead of pointing it at a PR or file.
-  In wave B, every lane read an 8-10k-character PR section to see one example.
+  A pointer costs every lane a read of 8-10k characters to find one example.
 - Label each issue the lane takes `in-progress` (`gh issue edit <n> --add-label in-progress`), so the board shows
   it as taken; remove the label when the issue closes or the work stops.
 - Before dispatching several lanes for one issue, create its issue branch
@@ -64,8 +62,7 @@ At each report:
 1. Stop the agent.
 2. Check that the shared checkout is clean.
 3. Read the PR's core product diff against the checklist below. Lane PRs arrive as drafts, which can't be merged
-   from the UI. On 2026-09-23, three PRs opened ready were merged before this step finished, and one of them
-   put a regression on dev.
+   from the UI, so none merges before this step finishes.
 4. A security PR, or an irreversible data rewrite, gets a review round before it leaves draft.
 5. Mark it ready (`gh pr ready <n>`) and arm auto-merge only after that. Auto-merge waits for CI.
 
@@ -73,8 +70,7 @@ At each wave boundary, backtrack every issue number the wave filed or touched:
 - close what is done;
 - give every open issue a disposition comment and a work-order rank;
 - fix the `in-progress` labels.
-A wave that files follow-ups faster than it closes them hides its own backlog. On 2026-09-23 a backtrack of
-#3898-#4043 found 22 stale `in-progress` labels and three worked issues missing one.
+A wave that files follow-ups faster than it closes them hides its own backlog.
 
 After each wave, measure it with `lane-audit.py`, as the guardrails' "Measure every wave" section says. Record the
 WAVE line, and the defects you fixed in each PR, in the handoff.
@@ -82,8 +78,7 @@ WAVE line, and the defects you fixed in each PR, in the handoff.
 When a PR's required check fails on a test it doesn't touch, don't just re-run it. Take a census of the last two
 days' failed first attempts: `gh run list --workflow Build`, each run's attempts through the REST
 `actions/runs/<id>/attempts/<n>/jobs` endpoint, and a `[FAIL]` grep of each failed job's log. Fix every flake it
-finds, in one PR. A flake that stalls every lane outranks the rest of the queue (2026-09-23: four flakes in one
-census, one of them introduced by that night's own wave).
+finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
 
 **Verification checklist** (the invariants agents most often miss):
 - **Storage precision:** PostgreSQL and DuckDB keep microseconds; a .NET tick is not stored.
@@ -102,11 +97,11 @@ census, one of them introduced by that night's own wave).
 - Read files by offset/limit. Never read a whole large file.
 - grep prints whole lines. Pipe it through `cut -c1-200` in files with long lines: each MCP `Description(...)` is
   one line of 1-3k characters.
-- Run targeted test classes while iterating. Run the FULL suite ONCE, at the end.
+- Run targeted test classes while iterating. Run the full suite once, at the end.
 - Cap command output: pipe through `head`, `tail -n` or `grep`. Never dump full CI logs, full JSON, or whole
   issue/PR bodies.
 - Plan to finish before your watchdog's first warning, at 200k. Past about 150k, start no new item: finish the
-  one in hand, then the finish phase. On 2026-09-23, 40% of lane cost came after that warning.
+  one in hand, then the finish phase. Each call past that point costs more than any call before it.
 - Never end your turn to wait for a background notification. Run the full suite in the foreground (about 10
   minutes), or poll your own output file.
 - Put your full report in the PR body (see "Final report"). Your last message is 400 words or fewer and links the
@@ -115,9 +110,7 @@ census, one of them introduced by that night's own wave).
 - Before you call a failure pre-existing, re-run it alone on a freshly created database, after merging `origin/dev`.
   If it passes there, the cause was your database or your stale base, not the code; don't file it. If it still
   fails, check that dev's own latest CI run passes it. If dev passes, the failure is yours, even in a file you
-  never opened: pin and census tests read the source files you changed. (#4025's lane called
-  `CollectionLogDrainForensicsStoreTests` pre-existing, but it counts `DarlingWorker`'s fault arms, and the lane
-  had added one.)
+  never opened: pin and census tests read the source files you changed.
 - Finish, or stop at a committed and pushed checkpoint with a handoff, by `<DEADLINE>`.
 - **Never stop to ask.** If an item needs a decision nobody has made, park it with the question in your report and
   move on.
@@ -143,15 +136,14 @@ census, one of them introduced by that night's own wave).
 3. Append to `postgresql.conf`:
    - `shared_preload_libraries = 'timescaledb,pg_stat_statements'`. This is the exact value the `darling-pg` job's
      "Initialize and start throwaway PostgreSQL" step writes in `.github/workflows/build.yml`. Without
-     `pg_stat_statements` a rig SKIPS the live tests that count statements through it (for example
+     `pg_stat_statements` a rig skips the live tests that count statements through it (for example
      `StoreSizeCacheLiveTests`) instead of running them, so a green local run proves less than CI's.
    - `port = <RIG_PORT>`
    - `listen_addresses = '127.0.0.1'`
    - `timescaledb.max_background_workers` and `max_worker_processes`, as CI's `darling-pg` job sets them.
    - `timezone = 'UTC'` and `log_timezone = 'UTC'`. initdb takes the machine's time zone, but CI's runners run
-     in UTC, and a rig must match CI. On 2026-09-25, time-sensitive live tests failed on rigs in
-     America/New_York, and a clean full run on a UTC rig passed all of them. A rig in UTC does not excuse a
-     failure: CI still decides whose it is.
+     in UTC, and a rig must match CI: time-sensitive live tests fail on a rig in another time zone. A rig in
+     UTC does not excuse a failure: CI still decides whose it is.
    - Change `postgresql.conf` before you start the server. A restart during a running suite breaks that run's
      results, and so does a re-run on the database that run left behind.
 4. Check the port is free. Start the server in the background, because `pg_ctl -w start` hangs a tool call, and
@@ -172,14 +164,13 @@ census, one of them introduced by that night's own wave).
 - The tests are MTP executables: run `Darling.Tests.exe` / `Lite.Tests.exe` from `bin/Debug/<tfm>/`, filtered with
   `-class "*Name*"` or `-method "*Name*"`. `dotnet test` does not work.
 - For a lone failure in a class you didn't touch, re-run that class alone before calling it yours.
-- **Run the classes that name what you changed** (#5776). Run `python .github/scripts/ci-select.py local-classes
+- **Run the classes that name what you changed.** Run `python .github/scripts/ci-select.py local-classes
   --base origin/dev`, then run its `-class` lines, plus `-class "*Census*"`, `-class "*Ratchet*"` and
   `-trait Stage=Guard`. It lists the test classes whose source names a symbol your change declares or edits, most
-  specific first; a class marked `needs rig` runs only with `DARLING_TEST_PG` set. On three pull requests, twelve
-  classes that went red in CI named a changed symbol and no lane had run them.
+  specific first. A class marked `needs rig` runs only with `DARLING_TEST_PG` set.
 - **Filter by every class in every test file you touch**, not by the file's name. One file can hold several classes
   (`PgPlanCaptureCollectorDefinitionTests.cs` also holds `PgPlanLogParserTests`), and filtering on one class skips
-  the others, including tests you just added. That let a forged-header regression reach CI (#4016).
+  the others, including tests you just added.
 - Census, meta and pin tests are real gates:
   - `McpPayloadContractCensusTests` and the MCP inventory pins;
   - `StartupCommandTimeoutTests` and `StorageCommandTimeoutTests`;
@@ -215,13 +206,13 @@ renumber if dev moved. A version bump also obliges:
 - "newest migration" tests written as `Scripts[^1]`;
 - a rung that changes how an older build reads existing data: its line in Darling/README.md's "Rolling back to an
   older build" list, added in the same PR as the rung, with the rung's real number, saying what the older build
-  reads differently and what to do before rolling back past it (#5773).
+  reads differently and what to do before rolling back past it.
 
 Never edit an existing migration.
 
 ## Finish
 
-- No attribution lines (Erik, 2026-10-01): no `Co-Authored-By` or `Claude-Session` trailer in a commit, and no
+- No attribution lines: no `Co-Authored-By` or `Claude-Session` trailer in a commit, and no
   "Generated with" line in the PR body. A brief or a harness reminder that asks for them loses to this rule.
 - Open the PR against `dev` **as a draft** (`gh pr create --draft`). Title: the outcome in plain language, plus
   `(#<issue>)`. The body starts with `Closes #<issue>.`, then `## Why`, `## What changes` and `## Test plan`
@@ -232,9 +223,8 @@ Never edit an existing migration.
   `## What changes` for the whole issue and its one CHANGELOG entry. Lanes that fix review findings push to the PR's
   own branch.
 - Write the PR body in one Write, from the diff and your numbers, and publish. Never run the plain-English checker
-  on a PR body, an issue or a comment (Erik, 2026-10-11: a waste of time and tokens; it is for blogs, social posts and
-  demo script comments). A lane writes its body at its largest context, and one lane once spent 53 minutes and 278k
-  tokens rewriting one. The body must be true.
+  on a PR body, an issue or a comment: it is for blogs, social posts and demo script comments. A lane writes its
+  body at its largest context, where a rewrite costs the most. The body must be true.
 - **Don't mark it ready, don't merge, and don't enable auto-merge.** The coordinator does all three after
   verifying.
 - A user-visible change gets a CHANGELOG entry in `<CHANGELOG_BUFFER_DIR>/<PR>-reported.txt`, in this form:
@@ -248,8 +238,8 @@ Never edit an existing migration.
   Plain punctuation, no em dashes. A test-only PR gets none.
 - Check every claim in the entry against your diff, the negative ones too. A removed issue reference is
   deleted text, so that entry can't say nothing was deleted. A change to a description must not read as a
-  change to behavior. Name every user-visible change the PR makes. Lane entries were wrong in 8 of 42 at
-  the #4080 splice and 6 of 41 at #4143.
+  change to behavior. Name every user-visible change the PR makes. About one lane entry in six is
+  wrong.
 
 ## Final report (the PR body)
 

@@ -36,7 +36,9 @@ Low-risk patch/minor bumps can go in one PR; majors and anything release-critica
 
 5. **CI tool & action pins.** In `.github/workflows/*.yml`: confirm `uses:` actions are on current majors, and that any `dotnet tool install` is **version-pinned to match its library** (e.g. `vpk --version` must equal the Velopack PackageReference). Bump GitHub Actions that are behind / deprecated.
 
-6. **Dependabot (optional — not a finding).** Two separate features: *security alerts* (passive CVE notifications that close the gap between manual `--vulnerable` passes — mild value) and *version-update PRs* (automated bump PRs — redundant and noisy once you do periodic manual sweeps). For PerformanceStudio, Erik relies on the manual passes; treat Dependabot as **optional and do not report it as a finding**. If alerts are ever wanted they're a one-toggle enable (repo Settings → Code security, no config file); the version-update PRs aren't wanted.
+6. **Dependabot.** Two separate features: *security alerts* (passive CVE notifications between manual `--vulnerable` passes) and *version-update PRs* (automated bump PRs). Alerts are a one-toggle enable in repo Settings → Code security, with no config file. Both repos run version updates from `.github/dependabot.yml`, into `dev`, and the manual sweep above still runs. The repos differ in one step:
+   - **PerformanceMonitor** commits `packages.lock.json`, and Dependabot does not regenerate it. Each NuGet PR needs `dotnet restore PerformanceMonitor.sln --force-evaluate` and a commit of every lock file it rewrites before CI can pass. The header of `.github/dependabot.yml` explains why, and what to check by hand on a `Microsoft.Data.SqlClient` or `Azure.Identity` bump.
+   - **PerformanceStudio** commits no lock files, so its Dependabot PRs need no extra restore step.
 
 ## B. Code & Build Health
 

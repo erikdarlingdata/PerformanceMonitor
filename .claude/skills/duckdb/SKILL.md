@@ -7,23 +7,22 @@ disable-model-invocation: false
 
 # Query Lite's DuckDB Database
 
-Safely query the PerformanceMonitor Lite DuckDB database using Python. This skill exists because DuckDB only allows one read-write connection at a time. When Lite is running (collecting data), it holds the write connection. External readers MUST connect in read-only mode.
+Safely query the PerformanceMonitor Lite DuckDB database using Python. This skill exists because DuckDB only allows one read-write connection at a time. When Lite is running (collecting data), it holds the write connection, so an external reader connects in read-only mode.
 
 ## Database Location
 
-Since the #1832 fix (data moved OUT of Velopack's install root, which Setup.exe deletes), the store lives at:
+The store lives at:
 ```
 %LOCALAPPDATA%\PerformanceMonitorLite-Data\monitor.duckdb
 ```
-Builds from BEFORE that fix (3.3.0 and earlier) keep it at the old path, and the file only moves when a fixed build first runs:
+Lite 3.3.0 and earlier kept it at the path below, and the file moves to the path above only when a newer build first runs. Check the path above first, and fall back to this one when it does not exist:
 ```
 %LOCALAPPDATA%\PerformanceMonitorLite\monitor.duckdb
 ```
-**Check the -Data path first; fall back to the old path if it does not exist.**
 
-## How to Query (ALWAYS use this pattern)
+## How to Query
 
-Use Python with the `duckdb` module. **ALWAYS connect in read-only mode.**
+Use Python with the `duckdb` module, always with this pattern:
 
 ```python
 python -c "
@@ -40,13 +39,12 @@ con.close()
 "
 ```
 
-## CRITICAL RULES
+## Rules
 
-1. **ALWAYS use `read_only=True`** -- without this, the connection will be blocked by Lite's write lock and hang or fail
-2. **NEVER use `duckdb.connect()` without `read_only=True`** -- the default is read-write which WILL conflict with the running app
-3. **Use forward slashes** in the path (Python on Windows handles this fine)
-4. **Close the connection** when done -- don't leave read locks dangling
-5. **Use Python** -- duckdb 1.4.4 is installed
+1. **Pass `read_only=True` to `duckdb.connect()`.** The default is read-write. Lite's write lock blocks a read-write connection, and it hangs or fails.
+2. **Use forward slashes** in the path (Python on Windows handles this fine)
+3. **Close the connection** when done, so no read lock is left dangling
+4. **Use Python** with its `duckdb` module
 
 ## Common Queries
 

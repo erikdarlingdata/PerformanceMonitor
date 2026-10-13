@@ -24,11 +24,6 @@ from it at build time. Do not add any of those four elements to a csproj: `Produ
 fails the build on a second `<Version>` property anywhere in the tree, on a re-added derived property, and
 on a workflow or script that reads a version from any path but `Directory.Build.props`.
 
-This replaced six independently hand-bumped csproj files (#3222). Two of them had been sitting three
-releases behind, `deprecated/Dashboard/Dashboard.csproj` was declaring 3.6.0 while its binary stamped
-3.3.0.0, and the release gate took its judgement from that file — so nothing in CI compared the version it
-gated on against the version the artifacts were named with. Both now read the file above.
-
 Verify no other files contain hardcoded version strings that need updating.
 
 ### 2. CHANGELOG
@@ -40,7 +35,7 @@ Ensure `CHANGELOG.md` has an entry for the new version with:
 - **Fixed** section for bug fixes
 - Reference links at the bottom for all issue numbers
 
-If a week of parallel PRs left duplicate section headers in `[Unreleased]` (two `### Fixed` blocks from keep-both merges), consolidate them at cut time with a content-preserving script that VERIFIES the entry-line multiset is unchanged — never re-sort by hand (a 242-line silent reorder shipped that way once).
+If a week of parallel PRs left duplicate section headers in `[Unreleased]` (two `### Fixed` blocks from keep-both merges), consolidate them at cut time with a content-preserving script that verifies the entry-line multiset is unchanged. Never re-sort by hand: a hand re-sort can silently reorder hundreds of lines.
 
 If the previous version's changelog entry is missing, add that too.
 
@@ -76,7 +71,7 @@ Do NOT add internal/implementation changes — only user-facing features and beh
 Applies ONLY when `install/` or `upgrades/` changed since the last release (the deprecated Dashboard edition remains on bug-fix support, so its schema discipline still holds when it IS touched):
 
 1. All schema changes MUST go through the `upgrades/{from}-to-{to}/` folder — never ad hoc, never baked into base install scripts. View-only changes flow through `CREATE OR ALTER` re-runs and need no upgrade script.
-2. **List all .sql files in the upgrade folder and compare against `upgrade.txt`** — every script must be listed or it won't run (PR #608 shipped a script not listed in `upgrade.txt`).
+2. **List all .sql files in the upgrade folder and compare against `upgrade.txt`.** A script that is not listed does not run.
 3. Verify each script uses `IF NOT EXISTS` checks for idempotency, and that any column additions in `01_install_database.sql` CREATE TABLE blocks have corresponding ALTER TABLE scripts in the upgrade folder.
 
 ### 4. Build Verification
@@ -120,7 +115,7 @@ Spin up temporary instances with the Azure CLI (`az`) and AWS CLI (`aws`):
    ```
    aws rds create-db-instance --db-instance-identifier pm-release-test --db-instance-class db.t3.xlarge --engine sqlserver-ee --master-username admin --master-user-password "$SQL_TEST_PASSWORD" --allocated-storage 20 --region us-east-1
    ```
-2. **Network reachability is NOT automatic** (bit on v3.3.0: the fresh instance answered "server was not found" until fixed). Verify `PubliclyAccessible` is true, and open 1433 on the instance's security group — the account-default SG has no public inbound:
+2. **Network reachability is not automatic:** a fresh instance answers "server was not found" until it is opened up. Verify `PubliclyAccessible` is true, and open 1433 on the instance's security group — the account-default SG has no public inbound:
    ```
    aws rds describe-db-instances --db-instance-identifier pm-release-test --region us-east-1 --query 'DBInstances[0].[PubliclyAccessible,VpcSecurityGroups[0].VpcSecurityGroupId]' --output text
    aws ec2 authorize-security-group-ingress --group-id <sg-id> --protocol tcp --port 1433 --cidr 0.0.0.0/0 --region us-east-1
