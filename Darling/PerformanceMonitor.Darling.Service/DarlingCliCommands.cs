@@ -4072,29 +4072,46 @@ public static class DarlingCliCommands
     /// </summary>
     private readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
 
-    /// <summary>
-    /// The TLS private-key files darling.json names (#5700): the PKCS#12 bundle (<c>pfxPath</c>) and the PEM key
-    /// (<c>keyPath</c>) of <c>web.network.tls</c> and <c>mcp.network.tls</c>, trimmed as the loader trims them and
-    /// listed once each. A <c>certPath</c> is a public certificate and is not listed. Each entry is the path as
-    /// written and the setting that names it.
-    /// </summary>
-    internal static IReadOnlyList<(string Path, string Setting)> TlsKeyFilesNamed(DarlingConfig config)
+    /// <summary>One file <see cref="TlsKeyFilesNamed"/> lists: the path as written, the setting that names it, and what
+    /// its content has to be.</summary>
+    [SupportedOSPlatform("windows")]
+    internal readonly record struct TlsKeyFileEntry(string Path, string Setting, DarlingFileSecurity.KeyFileKind Kind)
     {
-        var found = new List<(string Path, string Setting)>();
+        /// <summary>What the report calls the file.</summary>
+        internal string What => Kind == DarlingFileSecurity.KeyFileKind.PasswordFile
+            ? $"the TLS key password file, {Setting}"
+            : $"the TLS key file, {Setting}";
+    }
+
+    /// <summary>
+    /// The TLS secret files darling.json names (#5700): the PKCS#12 bundle (<c>pfxPath</c>) and the PEM key
+    /// (<c>keyPath</c>) of <c>web.network.tls</c> and <c>mcp.network.tls</c>, and the file a <c>pfxPassword</c> points at
+    /// when it is a <c>file:</c> reference, trimmed as the loader trims them and listed once each. A <c>certPath</c> is a
+    /// public certificate and is not listed. Each entry is the path as written, the setting that names it, and the kind
+    /// of content the file has to hold.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static IReadOnlyList<TlsKeyFileEntry> TlsKeyFilesNamed(DarlingConfig config)
+    {
+        var found = new List<TlsKeyFileEntry>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        void Add(string? path, string setting)
+        void Add(string? path, string setting, DarlingFileSecurity.KeyFileKind kind)
         {
             var trimmed = path?.Trim();
             if (!string.IsNullOrEmpty(trimmed) && seen.Add(trimmed))
             {
-                found.Add((trimmed, setting));
+                found.Add(new TlsKeyFileEntry(trimmed, setting, kind));
             }
         }
 
         foreach (var (section, tls) in new[] { ("web", config.Web?.Network?.Tls), ("mcp", config.Mcp?.Network?.Tls) })
         {
-            Add(tls?.PfxPath, $"{section}.network.tls.pfxPath");
-            Add(tls?.KeyPath, $"{section}.network.tls.keyPath");
+            Add(tls?.PfxPath, $"{section}.network.tls.pfxPath", DarlingFileSecurity.KeyFileKind.Pfx);
+            Add(tls?.KeyPath, $"{section}.network.tls.keyPath", DarlingFileSecurity.KeyFileKind.PemKey);
+            if (tls?.PfxPassword is { } password && password.StartsWith("file:", StringComparison.Ordinal))
+            {
+                Add(password["file:".Length..], $"{section}.network.tls.pfxPassword", DarlingFileSecurity.KeyFileKind.PasswordFile);
+            }
         }
 
         return found;
@@ -4161,9 +4178,10 @@ public static class DarlingCliCommands
         var exposed = 0;
         var refused = 0;
         var missing = 0;
-        foreach (var (keyFile, setting) in TlsKeyFilesNamed(config))
+        foreach (var entry in TlsKeyFilesNamed(config))
         {
-            var what = $"the TLS key file, {setting}";
+            var (keyFile, _, kind) = entry;
+            var what = entry.What;
             if (TlsKeyPathProblem(keyFile) is { } problem)
             {
                 problems.WriteLine($"  SKIPPED  {keyFile} ({what}): {problem}");
@@ -4192,11 +4210,24 @@ public static class DarlingCliCommands
             if (!IsBelow(installRoot, full))
             {
                 var readable = DarlingFileSecurity.IsReadableByOrdinaryUsers(full);
+                var others = DarlingFileSecurity.AccessBeyondTrusted(full);
+                var ownerTrusted = DarlingFileSecurity.IsTrustedOwner(full);
+                var note = readable ? "ordinary users can read it" : "ordinary users cannot read it";
+                if (others is not null)
+                {
+                    note += $"; other accounts are allowed access to it: {others}";
+                }
+
+                if (!ownerTrusted)
+                {
+                    note += $"; its owner is not SYSTEM, Administrators or the service account{DarlingFileSecurity.DescribeOwnerAndExposure(full)}";
+                }
+
                 problems.WriteLine(
-                    $"  NOT CHANGED (outside the install folder)  {full} ({what}): " +
-                    (readable ? "ordinary users can read it" : "ordinary users cannot read it") +
-                    $". To restrict it to SYSTEM, Administrators and the service account, run from an elevated prompt: {TlsKeyFileIcaclsLine(full)}");
-                if (readable)
+                    $"  NOT CHANGED (outside the install folder)  {full} ({what}): {note}" +
+                    $". To restrict it to SYSTEM, Administrators and the service account, run from an elevated prompt: {TlsKeyFileIcaclsLine(full)}" +
+                    (ownerTrusted ? string.Empty : $" and then make Administrators the owner: takeown /a /f \"{full}\""));
+                if (readable || others is not null || !ownerTrusted)
                 {
                     exposed++;
                 }
@@ -4209,10 +4240,15 @@ public static class DarlingCliCommands
                 /* The leaf and every folder on the path up to the install folder are checked for a junction or symbolic
                    link, and the change itself checks the handle again (final path, reparse bit, one name). */
                 var refusal = ReparsePointOnPath(installRoot, full)
-                    ?? DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks(full, installRoot);
+                    ?? DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks(full, installRoot, kind);
                 if (refusal is not null)
                 {
-                    problems.WriteLine($"  REFUSED  {full} ({what}): {OneLine(refusal)}, so nothing was changed through it. Remove it and re-run.");
+                    /* A file that is not what its setting says is refused by what it holds, not by a link on its path. */
+                    var byContent = refusal.Contains(DarlingFileSecurity.NotAKeyFileReason, StringComparison.Ordinal)
+                        || refusal.Contains(DarlingFileSecurity.NotAPasswordFileReason, StringComparison.Ordinal);
+                    problems.WriteLine(byContent
+                        ? $"  REFUSED  {full} ({what}): {OneLine(refusal)}, so nothing was changed. Name the right file in darling.json and re-run."
+                        : $"  REFUSED  {full} ({what}): {OneLine(refusal)}, so nothing was changed through it. Remove it and re-run.");
                     refused++;
                     continue;
                 }
@@ -4225,14 +4261,9 @@ public static class DarlingCliCommands
             }
 
             /* The claim is the re-read, not the call that returned without throwing. */
-            if (DarlingFileSecurity.IsReadableByOrdinaryUsers(full))
+            if (TlsKeyFileUnsecured(full, what) is { } unsecured)
             {
-                problems.WriteLine($"  STILL READABLE  {full} ({what})");
-                exposed++;
-            }
-            else if (!DarlingFileSecurity.GrantsHardenedAccount(full))
-            {
-                problems.WriteLine($"  LOCKED OUT  {full} ({what}): secured, but {DarlingFileSecurity.ServiceAccountDisplayName} cannot read it, so the service would fail on its next start. Grant that account read and re-run.");
+                problems.WriteLine(unsecured);
                 exposed++;
             }
             else
@@ -4242,6 +4273,38 @@ public static class DarlingCliCommands
         }
 
         return new TlsKeyFileResult(examined, exposed, refused, missing);
+    }
+
+    /// <summary>
+    /// The report line for a TLS key file that is not in the state <see cref="HardenTlsKeyFiles"/> leaves, or null when it
+    /// is (SECURED): not readable by ordinary users, the service account can read it, every Allow entry is SYSTEM,
+    /// Administrators or the service account (an allowlist, so a named user or a domain group does not pass), and the
+    /// owner is one of the three (an owner can always change who may read the file).
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string? TlsKeyFileUnsecured(string full, string what)
+    {
+        if (DarlingFileSecurity.IsReadableByOrdinaryUsers(full))
+        {
+            return $"  STILL READABLE  {full} ({what})";
+        }
+
+        if (!DarlingFileSecurity.GrantsHardenedAccount(full))
+        {
+            return $"  LOCKED OUT  {full} ({what}): secured, but {DarlingFileSecurity.ServiceAccountDisplayName} cannot read it, so the service would fail on its next start. Grant that account read and re-run.";
+        }
+
+        if (DarlingFileSecurity.AccessBeyondTrusted(full) is { } others)
+        {
+            return $"  OTHER ACCESS  {full} ({what}): other accounts are allowed access to it: {others}. Run from an elevated prompt: {TlsKeyFileIcaclsLine(full)}";
+        }
+
+        if (!DarlingFileSecurity.IsTrustedOwner(full))
+        {
+            return $"  UNTRUSTED OWNER  {full} ({what}): its owner is not SYSTEM, Administrators or the service account{DarlingFileSecurity.DescribeOwnerAndExposure(full)}, so the owner can change who may read it. Run from an elevated prompt: takeown /a /f \"{full}\"";
+        }
+
+        return null;
     }
 
     private static string OneLine(string text) => text.ReplaceLineEndings(" ");
@@ -4370,6 +4433,9 @@ public static class DarlingCliCommands
             targets.Add(new(Path.Combine(storeRoot, "pg-viewer-credential.dpapi"), AllowInteractive: true, IsDirectory: false, "the viewer credential"));
             targets.Add(new(Path.Combine(storeRoot, "pg-mcp-credential.dpapi"), AllowInteractive: false, IsDirectory: false, "the mcp credential"));
             targets.Add(new(Path.Combine(storeRoot, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
+            /* #5700: the store's own TLS key, read only by the service like the mcp credential. Absent until the store
+               has TLS on, and then skipped like every other store file that is not there. */
+            targets.Add(new(Path.Combine(storeRoot, DarlingManagedPostgres.ServerKeyFileName), AllowInteractive: false, IsDirectory: false, "the store's TLS key"));
             /* #4253/#4280 Low 2: the last major upgrade's pre-upgrade postgresql.auto.conf, which File.Copy does
                not ACL on its own. Kept until the NEXT major upgrade replaces it (DarlingStoreUpgrade.CarryAutoConfAsync). */
             targets.Add(new(Path.Combine(storeRoot, DarlingStoreUpgrade.PreUpgradeAutoConfFileName), false, false, "the pre-upgrade postgresql.auto.conf"));
@@ -4494,9 +4560,15 @@ public static class DarlingCliCommands
         }
 
         /* #5700: the TLS private-key files darling.json names. */
-        if (loadedConfig is not null)
+        var tlsExamined = 0;
+        if (loadedConfig is null)
+        {
+            error.WriteLine("The TLS key files named in darling.json were not checked, because darling.json did not load. Fix it and re-run --harden-files.");
+        }
+        else
         {
             var tls = HardenTlsKeyFiles(loadedConfig, configDirectory, output, error);
+            tlsExamined = tls.Examined;
             touched += tls.Examined;
             exposed += tls.Exposed;
             refused += tls.Refused;
@@ -4533,7 +4605,13 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        output.WriteLine($"All {touched} item(s) secured. The service re-asserts these ACLs at every start.");
+        /* The service re-asserts the store and config ACLs at every start; it only warns about a TLS key file, and a
+           renewed certificate arrives with the folder's ACL. */
+        output.WriteLine(tlsExamined == 0
+            ? $"All {touched} item(s) secured. The service re-asserts these ACLs at every start."
+            : touched == tlsExamined
+                ? $"All {touched} item(s) secured. Re-run --harden-files after replacing a TLS key file."
+                : $"All {touched} item(s) secured. The service re-asserts the ACLs of the {touched - tlsExamined} item(s) that are not TLS key files at every start. Re-run --harden-files after replacing a TLS key file.");
         return 0;
     }
 

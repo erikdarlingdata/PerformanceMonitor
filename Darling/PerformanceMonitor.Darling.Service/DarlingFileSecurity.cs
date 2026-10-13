@@ -344,10 +344,137 @@ public static class DarlingFileSecurity
     /// handle's final path is not the path asked for, or when the file has more than one name (#5700).
     /// </summary>
     /// <returns>Null once the ACL is applied; otherwise why it was not, and nothing was changed.</returns>
-    public static string? HardenKeyFileWithoutFollowingLinks(string path, string anchorDirectory) =>
-        ApplyWithoutFollowingLinks(path, anchorDirectory, HardenedKeyFileSecurity);
+    public static string? HardenKeyFileWithoutFollowingLinks(string path, string anchorDirectory, KeyFileKind kind) =>
+        ApplyWithoutFollowingLinks(path, anchorDirectory, HardenedKeyFileSecurity, kind);
 
-    private static string? ApplyWithoutFollowingLinks(string path, string anchorDirectory, Func<NativeObjectSecurity> buildSecurity)
+    /// <summary>What a file darling.json names as a TLS secret has to be, checked on its first bytes before its ACL is
+    /// changed (#5700): a DER PKCS#12 bundle, a PEM private key, or a short text file holding a password.</summary>
+    public enum KeyFileKind
+    {
+        /// <summary>A PKCS#12 bundle: an ASN.1 SEQUENCE with a valid DER length.</summary>
+        Pfx,
+
+        /// <summary>A PEM file with a <c>-----BEGIN ... PRIVATE KEY-----</c> header.</summary>
+        PemKey,
+
+        /// <summary>A password file: at most 4 KB, and not one of the product's own file types.</summary>
+        PasswordFile,
+    }
+
+    /// <summary>The reason a file named as a certificate or key is not changed, when its content is neither.</summary>
+    public const string NotAKeyFileReason = "is not a certificate or key file";
+
+    /// <summary>The reason a file named as a password file is not changed, when it is not one.</summary>
+    public const string NotAPasswordFileReason = "is not a password file";
+
+    /// <summary>The largest password file <see cref="KeyFileKind.PasswordFile"/> accepts.</summary>
+    internal const int PasswordFileMaxBytes = 4096;
+
+    /// <summary>The most of a PEM file read to find its private-key header (a chain of certificates can come first).</summary>
+    private const int PemReadLimit = 1024 * 1024;
+
+    private static readonly string[] ProductFileExtensions = { ".exe", ".dll", ".json", ".ps1", ".pdb", ".config", ".xml" };
+
+    /// <summary>Why <paramref name="head"/>, the first bytes of a file <paramref name="length"/> bytes long, does not start
+    /// like a DER PKCS#12 bundle; null when it does. The first byte is the SEQUENCE tag (0x30) and the length that follows
+    /// is a definite DER length: short form below 0x80, otherwise one to four length bytes with no leading zero byte (and
+    /// at least 0x80 when there is only one), and the whole value has to fit in the file.</summary>
+    internal static string? PfxContentRefusal(ReadOnlySpan<byte> head, long length)
+    {
+        if (head.Length >= 2 && head[0] == 0x30)
+        {
+            var first = head[1];
+            long content;
+            var headerLength = 2;
+            if (first < 0x80)
+            {
+                content = first;
+            }
+            else
+            {
+                var count = first & 0x7F;
+                if (first == 0x80 || count > 4 || head.Length < 2 + count || head[2] == 0 || (count == 1 && head[2] < 0x80))
+                {
+                    return NotAKeyFileReason;
+                }
+
+                content = 0;
+                for (var i = 0; i < count; i++)
+                {
+                    content = (content << 8) | head[2 + i];
+                }
+
+                headerLength += count;
+            }
+
+            if (content > 0 && headerLength + content <= length)
+            {
+                return null;
+            }
+        }
+
+        return NotAKeyFileReason;
+    }
+
+    /// <summary>Why <paramref name="text"/>, the start of a file, is not a PEM private key; null when it holds a
+    /// <c>-----BEGIN ... PRIVATE KEY-----</c> line.</summary>
+    internal static string? PemContentRefusal(ReadOnlySpan<byte> text)
+    {
+        var decoded = System.Text.Encoding.Latin1.GetString(text);
+        return System.Text.RegularExpressions.Regex.IsMatch(decoded, "-----BEGIN [A-Z ]*PRIVATE KEY-----", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            ? null
+            : NotAKeyFileReason;
+    }
+
+    /// <summary>Why <paramref name="path"/>, <paramref name="length"/> bytes long, is not a password file; null when it
+    /// could be one.</summary>
+    internal static string? PasswordFileRefusal(string path, long length)
+    {
+        var extension = Path.GetExtension(path);
+        if (ProductFileExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+        {
+            return $"{NotAPasswordFileReason} (a {extension.ToLowerInvariant()} file)";
+        }
+
+        return length > PasswordFileMaxBytes
+            ? $"{NotAPasswordFileReason} (it is larger than 4 KB)"
+            : null;
+    }
+
+    /// <summary>Reads the first bytes of the file behind <paramref name="handle"/> (at most <paramref name="count"/>).</summary>
+    private static byte[] ReadHead(Microsoft.Win32.SafeHandles.SafeFileHandle handle, long length, int count)
+    {
+        var buffer = new byte[(int)Math.Min(length, count)];
+        var read = 0;
+        while (read < buffer.Length)
+        {
+            var got = RandomAccess.Read(handle, buffer.AsSpan(read), read);
+            if (got <= 0)
+            {
+                break;
+            }
+
+            read += got;
+        }
+
+        return read == buffer.Length ? buffer : buffer[..read];
+    }
+
+    private static string? KeyFileContentRefusal(Microsoft.Win32.SafeHandles.SafeFileHandle handle, string path, KeyFileKind kind)
+    {
+        var length = RandomAccess.GetLength(handle);
+        switch (kind)
+        {
+            case KeyFileKind.Pfx:
+                return PfxContentRefusal(ReadHead(handle, length, 16), length);
+            case KeyFileKind.PemKey:
+                return PemContentRefusal(ReadHead(handle, length, PemReadLimit));
+            default:
+                return PasswordFileRefusal(path, length);
+        }
+    }
+
+    private static string? ApplyWithoutFollowingLinks(string path, string anchorDirectory, Func<NativeObjectSecurity> buildSecurity, KeyFileKind? keyKind = null)
     {
         var anchor = Path.TrimEndingDirectorySeparator(Path.GetFullPath(anchorDirectory));
         var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
@@ -362,7 +489,28 @@ public static class DarlingFileSecurity
             anchorFinal = FinalPath(anchorHandle);
         }
 
-        using var handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | FileReadAttributes);
+        /* A key file is also read through this handle (its content is checked before anything is changed) and, when the
+           caller may, has its owner set to Administrators; a caller that cannot take the owner right still gets the rest. */
+        var ownerRight = false;
+        Microsoft.Win32.SafeHandles.SafeFileHandle handle;
+        if (keyKind is null)
+        {
+            handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | FileReadAttributes);
+        }
+        else
+        {
+            try
+            {
+                handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | WriteOwner | FileReadData | FileReadAttributes);
+                ownerRight = true;
+            }
+            catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == ErrorAccessDenied)
+            {
+                handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | FileReadData | FileReadAttributes);
+            }
+        }
+
+        using var handleScope = handle;
         if ((File.GetAttributes(handle) & FileAttributes.ReparsePoint) != 0)
         {
             return $"{full} is a junction or symbolic link";
@@ -388,6 +536,11 @@ public static class DarlingFileSecurity
             return $"{full} resolves to {actual}, so a junction or symbolic link is on its path";
         }
 
+        if (keyKind is { } kind && KeyFileContentRefusal(handle, full, kind) is { } contentRefusal)
+        {
+            return $"{full} {contentRefusal}";
+        }
+
         var security = buildSecurity();
         var descriptor = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
         var dacl = new byte[descriptor.DiscretionaryAcl!.BinaryLength];
@@ -408,9 +561,29 @@ public static class DarlingFileSecurity
             pinned.Free();
         }
 
+        if (ownerRight)
+        {
+            /* The tree lock's rule for the same file: Administrators own it. A refusal (the process does not hold the
+               Administrators group) is not an error here: the owner is read back and judged by the caller. */
+            var owner = new byte[Administrators.BinaryLength];
+            Administrators.GetBinaryForm(owner, 0);
+            var ownerPin = System.Runtime.InteropServices.GCHandle.Alloc(owner, System.Runtime.InteropServices.GCHandleType.Pinned);
+            try
+            {
+                _ = SetSecurityInfo(handle, FileObject, OwnerSecurityInformation, ownerPin.AddrOfPinnedObject(), IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            }
+            finally
+            {
+                ownerPin.Free();
+            }
+        }
+
         return null;
     }
 
+    private const int ErrorAccessDenied = 5;
+    private const uint FileReadData = 0x00000001;
+    private const uint WriteOwner = 0x00080000;
     private const uint GenericRead = 0x80000000;
     private const uint ReadControl = 0x00020000;
     private const uint WriteDac = 0x00040000;

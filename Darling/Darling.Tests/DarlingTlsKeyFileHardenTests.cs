@@ -46,12 +46,23 @@ public class DarlingTlsKeyFileHardenTests
         return path;
     }
 
+    /// <summary>A DER SEQUENCE header with a two-byte length (256), then 256 bytes: starts like a PKCS#12 bundle.</summary>
+    private static byte[] DerBundle() => new byte[] { 0x30, 0x82, 0x01, 0x00 }.Concat(new byte[256]).ToArray();
+
+    private const string PemKeyText = "-----BEGIN PRIVATE KEY-----\nTUlJRXZ3SUJBREFOQmdrcWhraUc5dzBCQVFFRkFBU0M=\n-----END PRIVATE KEY-----\n";
+
+    /// <summary>The content a key file of that name has to have: a bundle for .pfx, a PEM key for .key, a short password for .txt.</summary>
+    private static byte[] ContentFor(string name) =>
+        name.EndsWith(".pfx", StringComparison.OrdinalIgnoreCase) ? DerBundle()
+        : name.EndsWith(".key", StringComparison.OrdinalIgnoreCase) ? System.Text.Encoding.ASCII.GetBytes(PemKeyText)
+        : System.Text.Encoding.ASCII.GetBytes("example-password");
+
     /// <summary>A file that inherits the folder's Users read, checked to be readable by ordinary users.</summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static string MakeKey(string folder, string name)
+    private static string MakeKey(string folder, string name, byte[]? content = null)
     {
         var path = Path.Combine(folder, name);
-        File.WriteAllText(path, "placeholder");
+        File.WriteAllBytes(path, content ?? ContentFor(name));
         Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(path), $"{path} should start out readable by Users");
         return path;
     }
@@ -172,7 +183,7 @@ public class DarlingTlsKeyFileHardenTests
             Assert.Equal(victimBefore, Snapshot(victim));
 
             /* The change itself checks the handle it changes, so a link that appears after the path check is refused too. */
-            var refusal = DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks(viaLink, install);
+            var refusal = DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks(viaLink, install, DarlingFileSecurity.KeyFileKind.Pfx);
             Assert.NotNull(refusal);
             Assert.Equal(victimBefore, Snapshot(victim));
         }
@@ -381,6 +392,512 @@ public class DarlingTlsKeyFileHardenTests
 
         var program = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Program.cs"));
         Assert.Contains("DarlingCliCommands.HardenTlsKeyFilesOnly(", program, StringComparison.Ordinal);
+    }
+
+    /// <summary>A file named as a bundle or key that is neither is refused with the reason, and its descriptor (owner and
+    /// DACL) is byte-identical afterwards. A real key beside it is still secured.</summary>
+    [Theory]
+    [InlineData("pfxPath", "notes.txt", "this is not a bundle")]
+    [InlineData("pfxPath", "darling.dll", "MZ")]
+    [InlineData("keyPath", "web.crt", "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")]
+    [InlineData("keyPath", "settings.json", "{\"a\":1}")]
+    public void AFileThatIsNotACertificateOrKey_IsRefused_AndItsAclIsUnchanged(string setting, string name, string text)
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-content-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var notAKey = MakeKey(install, name, System.Text.Encoding.ASCII.GetBytes(text));
+            var before = Snapshot(notAKey);
+            var config = WriteConfig(install, "{\"" + setting + "\":" + Json(notAKey) + "}");
+
+            var (exit, output, error) = Run(config);
+
+            Assert.Equal(0, exit);
+            Assert.Equal("", error);
+            Assert.StartsWith($"  REFUSED  {notAKey} (the TLS key file, web.network.tls.{setting}): ", output, StringComparison.Ordinal);
+            Assert.Contains("is not a certificate or key file", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("SECURED", output, StringComparison.Ordinal);
+            Assert.Equal(before, Snapshot(notAKey));
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(notAKey), "the refused file should keep the folder's ACL");
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>The same check through the full verb: the refusal counts, and the exit code says so.</summary>
+    [Fact]
+    public void TheFullVerb_RefusesANonKeyFileNamedAsTheBundle_AndExitsNonzero()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        Assert.SkipWhen(DarlingFileSecurity.RegisteredServiceAccount("PerformanceMonitor Darling") is not null,
+            "The Darling service is registered on this machine.");
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-verb-refused-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var notAKey = MakeKey(install, "notes.txt", System.Text.Encoding.ASCII.GetBytes("hello"));
+            var before = Snapshot(notAKey);
+            var config = WriteStoreLessConfig(install, scratch.FullName, "{\"pfxPath\":" + Json(notAKey) + "}");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = DarlingCliCommands.HardenFiles(config, output, error);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("is not a certificate or key file", error.ToString(), StringComparison.Ordinal);
+            Assert.Equal(before, Snapshot(notAKey));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    private static string WriteStoreLessConfig(string install, string scratch, string tlsJson)
+    {
+        var config = Path.Combine(install, "darling.json");
+        File.WriteAllText(config,
+            "{\"postgres\":{\"managed\":false,\"connectionString\":\"Host=127.0.0.1;Username=darling\",\"dataDirectory\":"
+            + Json(Path.Combine(scratch, "store", "pg")) + "},"
+            + "\"web\":{\"network\":{\"tls\":" + tlsJson + "}}}");
+        return config;
+    }
+
+    [Theory]
+    [InlineData(new byte[] { 0x30, 0x05, 1, 2, 3, 4, 5 }, true)]
+    [InlineData(new byte[] { 0x30, 0x81, 0x80 }, false)]
+    [InlineData(new byte[] { 0x30, 0x80, 0x02, 0x01, 0x03 }, false)]
+    [InlineData(new byte[] { 0x30, 0x81, 0x05, 1, 2, 3, 4, 5 }, false)]
+    [InlineData(new byte[] { 0x30, 0x82, 0x00, 0x05, 1, 2, 3, 4, 5 }, false)]
+    [InlineData(new byte[] { 0x02, 0x01, 0x03 }, false)]
+    [InlineData(new byte[] { 0x30 }, false)]
+    [InlineData(new byte[] { 0x30, 0x00 }, false)]
+    [InlineData(new byte[] { 0x30, 0x85, 1, 0, 0, 0, 0 }, false)]
+    [InlineData(new byte[] { 0x4D, 0x5A, 0x90, 0x00 }, false)]
+    public void ABundleHeader_IsAcceptedOnlyAsAnAsn1SequenceWithAValidDerLength(byte[] file, bool valid)
+    {
+        /* The declared length also has to fit in the file: the 0x30 0x81 0x80 case claims 128 bytes after a 3-byte file. */
+        var head = file.Length > 16 ? file[..16] : file;
+        Assert.Equal(valid, DarlingFileSecurity.PfxContentRefusal(head, file.Length) is null);
+    }
+
+    [Fact]
+    public void ABundleHeader_ThatClaimsMoreThanTheFileHolds_IsRefused()
+    {
+        Assert.NotNull(DarlingFileSecurity.PfxContentRefusal(new byte[] { 0x30, 0x82, 0x01, 0x00 }, 100));
+        Assert.Null(DarlingFileSecurity.PfxContentRefusal(new byte[] { 0x30, 0x82, 0x01, 0x00 }, 4 + 256));
+    }
+
+    [Theory]
+    [InlineData("-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n", true)]
+    [InlineData("-----BEGIN RSA PRIVATE KEY-----\nAA==\n", true)]
+    [InlineData("-----BEGIN ENCRYPTED PRIVATE KEY-----\nAA==\n", true)]
+    [InlineData("-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n-----BEGIN EC PRIVATE KEY-----\nAA==\n", true)]
+    [InlineData("-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n", false)]
+    [InlineData("BEGIN PRIVATE KEY", false)]
+    [InlineData("-----BEGIN PUBLIC KEY-----\nAA==\n", false)]
+    [InlineData("", false)]
+    public void APemKey_IsAcceptedOnlyWithAPrivateKeyHeader(string text, bool valid)
+    {
+        Assert.Equal(valid, DarlingFileSecurity.PemContentRefusal(System.Text.Encoding.ASCII.GetBytes(text)) is null);
+    }
+
+    /// <summary>A key owned by an ordinary account ends owned by Administrators (the tree lock's rule), which needs the
+    /// Administrators group in the token, so this runs elevated (CI) and is skipped otherwise.</summary>
+    [Fact]
+    public void AKeyOwnedByAnOrdinaryAccount_EndsOwnedByAdministrators()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        using var identity = WindowsIdentity.GetCurrent();
+        Assert.SkipUnless(new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator),
+            "Setting the owner to Administrators needs an elevated process.");
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-owner-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var pfx = MakeKey(install, "web.pfx");
+            var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+            var mine = new FileInfo(pfx).GetAccessControl();
+            mine.SetOwner(ServiceSid);
+            new FileInfo(pfx).SetAccessControl(mine);
+            Assert.Equal(ServiceSid, new FileInfo(pfx).GetAccessControl().GetOwner(typeof(SecurityIdentifier)));
+            var config = WriteConfig(install, "{\"pfxPath\":" + Json(pfx) + "}");
+
+            /* The service runs as some other account, so the current user is not a trusted owner. */
+            var other = new SecurityIdentifier("S-1-5-80-5700-1-2-3-4");
+            try
+            {
+                var (exit, output, error) = Run(config, account: other);
+
+                Assert.Equal(0, exit);
+                Assert.Equal("", error);
+                Assert.Equal($"  SECURED  {pfx} (the TLS key file, web.network.tls.pfxPath)", output.TrimEnd());
+                Assert.Equal(administrators, new FileInfo(pfx).GetAccessControl().GetOwner(typeof(SecurityIdentifier)));
+            }
+            finally
+            {
+                DarlingFileSecurity.HardenForAccount(ServiceSid);
+            }
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>Wherever the owner cannot be changed, a key owned by an account outside the three is reported, not SECURED.</summary>
+    [Fact]
+    public void AKeyWithAnOwnerOutsideTheThree_IsNotReportedSecured()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-untrusted-owner-");
+        try
+        {
+            var folder = MakeFolder(Path.Combine(scratch.FullName, "keys"));
+            var key = MakeKey(folder, "web.pfx");
+            var other = new SecurityIdentifier("S-1-5-80-5700-1-2-3-4");
+            var security = new FileInfo(key).GetAccessControl();
+            security.SetOwner(ServiceSid);
+            security.SetAccessRuleProtection(true, false);
+            foreach (FileSystemAccessRule rule in security.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+            {
+                security.RemoveAccessRuleAll(rule);
+            }
+
+            foreach (var sid in new[] { new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null) })
+            {
+                security.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl, AccessControlType.Allow));
+            }
+
+            security.AddAccessRule(new FileSystemAccessRule(other, FileSystemRights.Read | FileSystemRights.Synchronize, AccessControlType.Allow));
+            new FileInfo(key).SetAccessControl(security);
+            try
+            {
+                DarlingFileSecurity.HardenForAccount(other);
+
+                var line = DarlingCliCommands.TlsKeyFileUnsecured(key, "the TLS key file, web.network.tls.pfxPath");
+
+                Assert.NotNull(line);
+                Assert.StartsWith($"  UNTRUSTED OWNER  {key} (", line, StringComparison.Ordinal);
+                Assert.Contains("takeown /a /f", line, StringComparison.Ordinal);
+            }
+            finally
+            {
+                DarlingFileSecurity.HardenForAccount(ServiceSid);
+            }
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>An Allow entry for any account beyond SYSTEM, Administrators and the service account (a named user, a
+    /// domain group) keeps the file from being reported SECURED, though none of the four broad groups can read it.</summary>
+    [Fact]
+    public void AnExtraAllowEntryForAnotherAccount_IsNotReportedSecured()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        DarlingFileSecurity.HardenForAccount(ServiceSid);
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-extra-ace-");
+        try
+        {
+            var folder = MakeFolder(Path.Combine(scratch.FullName, "keys"));
+            var key = MakeKey(folder, "web.pfx");
+            var security = new FileInfo(key).GetAccessControl();
+            security.SetAccessRuleProtection(true, false);
+            foreach (FileSystemAccessRule rule in security.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+            {
+                security.RemoveAccessRuleAll(rule);
+            }
+
+            foreach (var sid in new[] { new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null) })
+            {
+                security.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl, AccessControlType.Allow));
+            }
+
+            security.AddAccessRule(new FileSystemAccessRule(ServiceSid, FileSystemRights.Read | FileSystemRights.Synchronize, AccessControlType.Allow));
+            new FileInfo(key).SetAccessControl(security);
+            const string what = "the TLS key file, web.network.tls.pfxPath";
+            Assert.Null(DarlingCliCommands.TlsKeyFileUnsecured(key, what));
+
+            var withExtra = new FileInfo(key).GetAccessControl();
+            withExtra.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null), FileSystemRights.Read, AccessControlType.Allow));
+            new FileInfo(key).SetAccessControl(withExtra);
+
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(key), "the extra entry is not one of the four broad groups");
+            var line = DarlingCliCommands.TlsKeyFileUnsecured(key, what);
+            Assert.NotNull(line);
+            Assert.StartsWith($"  OTHER ACCESS  {key} ({what}): ", line, StringComparison.Ordinal);
+            Assert.Contains("LOCAL SERVICE", line, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>An outside key's line reports an owner outside the three, and an extra entry, as well as the broad groups.</summary>
+    [Fact]
+    public void AnOutsideKey_ReportsItsOwnerAndOtherAccess_InTheNotChangedLine()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-out-owner-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var outside = MakeFolder(Path.Combine(scratch.FullName, "outside"));
+            var key = MakeKey(outside, "mcp.key");
+            var security = new FileInfo(key).GetAccessControl();
+            security.SetOwner(ServiceSid);
+            new FileInfo(key).SetAccessControl(security);
+            var config = WriteConfig(install, "{\"keyPath\":" + Json(key) + "}");
+            var other = new SecurityIdentifier("S-1-5-80-5700-1-2-3-4");
+            try
+            {
+                var (exit, output, _) = Run(config, account: other);
+
+                Assert.Equal(0, exit);
+                Assert.Contains("its owner is not SYSTEM, Administrators or the service account", output, StringComparison.Ordinal);
+                Assert.Contains("takeown /a /f", output, StringComparison.Ordinal);
+                Assert.Contains(DarlingCliCommands.TlsKeyFileIcaclsLine(key), output, StringComparison.Ordinal);
+            }
+            finally
+            {
+                DarlingFileSecurity.HardenForAccount(ServiceSid);
+            }
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>With TLS key files counted, the closing line says the service re-asserts only the other items and tells
+    /// the operator to re-run the verb after replacing a key file; with none counted it is the old sentence.</summary>
+    [Fact]
+    public void TheFullVerbsClosingLine_DoesNotCountKeyFilesAsReAsserted()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        Assert.SkipWhen(DarlingFileSecurity.RegisteredServiceAccount("PerformanceMonitor Darling") is not null,
+            "The Darling service is registered on this machine.");
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-closing-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var pfx = MakeKey(install, "web.pfx");
+            var config = WriteStoreLessConfig(install, scratch.FullName, "{\"pfxPath\":" + Json(pfx) + "}");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = DarlingCliCommands.HardenFiles(config, output, error);
+
+            Assert.Equal(0, exit);
+            Assert.Equal("", error.ToString());
+            var closing = output.ToString().TrimEnd().Split(Environment.NewLine).Last();
+            Assert.Equal(
+                "All 2 item(s) secured. The service re-asserts the ACLs of the 1 item(s) that are not TLS key files at every start. "
+                + "Re-run --harden-files after replacing a TLS key file.",
+                closing);
+            Assert.DoesNotContain("re-asserts these ACLs", output.ToString(), StringComparison.Ordinal);
+
+            /* No key file named: the sentence is unchanged. */
+            File.WriteAllText(config, "{\"postgres\":{\"managed\":false,\"connectionString\":\"Host=127.0.0.1;Username=darling\",\"dataDirectory\":"
+                + Json(Path.Combine(scratch.FullName, "store", "pg")) + "}}");
+            var plain = new StringWriter();
+            Assert.Equal(0, DarlingCliCommands.HardenFiles(config, plain, new StringWriter()));
+            Assert.EndsWith("All 1 item(s) secured. The service re-asserts these ACLs at every start.", plain.ToString().TrimEnd(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>A darling.json that does not load leaves no key file to check, and the verb says so instead of finishing as
+    /// if it had.</summary>
+    [Fact]
+    public void TheFullVerb_SaysTheKeyFilesWereNotChecked_WhenTheConfigDoesNotLoad()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        Assert.SkipWhen(DarlingFileSecurity.RegisteredServiceAccount("PerformanceMonitor Darling") is not null,
+            "The Darling service is registered on this machine.");
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-noload-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var config = Path.Combine(install, "darling.json");
+            File.WriteAllText(config, "{ this is not json");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            DarlingCliCommands.HardenFiles(config, output, error);
+
+            Assert.Contains("NOTE: could not load", output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("The TLS key files named in darling.json were not checked, because darling.json did not load.", error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>A pfxPassword that is a file: reference is a key file too: inside the install folder it is hardened like a key
+    /// (SYSTEM and Administrators full control, the service read only); outside it is reported and left alone.</summary>
+    [Fact]
+    public void AFilePasswordReference_IsHardenedInsideTheInstallFolder_AndReportedOutsideIt()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-password-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var outside = MakeFolder(Path.Combine(scratch.FullName, "outside"));
+            var inside = MakeKey(install, "pfx-password.txt");
+            var away = MakeKey(outside, "mcp-password.txt");
+            var awayBefore = Snapshot(away);
+            var config = Path.Combine(install, "darling.json");
+            File.WriteAllText(config,
+                "{\"postgres\":{\"managed\":false,\"connectionString\":\"Host=127.0.0.1;Username=darling\"},"
+                + "\"web\":{\"network\":{\"tls\":{\"pfxPassword\":" + Json("file: " + inside) + "}}},"
+                + "\"mcp\":{\"network\":{\"tls\":{\"pfxPassword\":" + Json("file:" + away) + "}}}}");
+
+            var (exit, output, error) = Run(config);
+
+            Assert.Equal(0, exit);
+            Assert.Equal("", error);
+            var lines = output.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+            Assert.Equal(2, lines.Length);
+            Assert.Equal($"  SECURED  {inside} (the TLS key password file, web.network.tls.pfxPassword)", lines[0]);
+            Assert.StartsWith($"  NOT CHANGED (outside the install folder)  {away} (the TLS key password file, mcp.network.tls.pfxPassword): ordinary users can read it", lines[1], StringComparison.Ordinal);
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(inside));
+            Assert.Equal(awayBefore, Snapshot(away));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>A password file over 4 KB, or one of the product's own file types, is refused and left as it was; a
+    /// plaintext or env: password names no file.</summary>
+    [Theory]
+    [InlineData("big.txt", 4097)]
+    [InlineData("settings.json", 20)]
+    [InlineData("tool.DLL", 20)]
+    [InlineData("run.ps1", 20)]
+    [InlineData("app.config", 20)]
+    public void APasswordFileThatIsTooBigOrAProductFile_IsRefused(string name, int size)
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-password-refused-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var file = MakeKey(install, name, Enumerable.Repeat((byte)'a', size).ToArray());
+            var before = Snapshot(file);
+            var config = WriteConfig(install, "{\"pfxPassword\":" + Json("file:" + file) + "}");
+
+            var (exit, output, error) = Run(config);
+
+            Assert.Equal(0, exit);
+            Assert.Equal("", error);
+            Assert.StartsWith($"  REFUSED  {file} (the TLS key password file, web.network.tls.pfxPassword): ", output, StringComparison.Ordinal);
+            Assert.Contains("is not a password file", output, StringComparison.Ordinal);
+            Assert.Equal(before, Snapshot(file));
+
+            Assert.Empty(DarlingCliCommands.TlsKeyFilesNamed(DarlingConfig.Load(WriteConfig(install, "{\"pfxPassword\":\"env:EXAMPLE_PASSWORD\"}"))));
+            Assert.Empty(DarlingCliCommands.TlsKeyFilesNamed(DarlingConfig.Load(WriteConfig(install, "{\"pfxPassword\":\"literal\"}"))));
+            Assert.Empty(DarlingCliCommands.TlsKeyFilesNamed(DarlingConfig.Load(WriteConfig(install, "{\"pfxPassword\":\"FILE:C:\\\\x.txt\"}"))));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>The store's own TLS key is a --harden-files target (read by the service only, no operator read); one that is
+    /// not there is skipped like the other store files.</summary>
+    [Fact]
+    public void TheStoresTlsKey_IsAHardenFilesTarget()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        Assert.SkipWhen(DarlingFileSecurity.RegisteredServiceAccount("PerformanceMonitor Darling") is not null,
+            "The Darling service is registered on this machine.");
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-serverkey-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var store = MakeFolder(Path.Combine(scratch.FullName, "store"));
+            var serverKey = MakeKey(store, DarlingManagedPostgres.ServerKeyFileName);
+            var config = WriteStoreLessConfig(install, scratch.FullName, "{}");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = DarlingCliCommands.HardenFiles(config, output, error);
+
+            Assert.Equal(0, exit);
+            Assert.Contains($"  SECURED  {serverKey} (the store's TLS key)", output.ToString(), StringComparison.Ordinal);
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(serverKey));
+
+            File.Delete(serverKey);
+            var again = new StringWriter();
+            Assert.Equal(0, DarlingCliCommands.HardenFiles(config, again, new StringWriter()));
+            Assert.DoesNotContain("TLS key", again.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
     }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
