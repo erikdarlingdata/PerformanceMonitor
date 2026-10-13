@@ -255,8 +255,10 @@ public sealed class ExternalAlertDrain
 
         /* The firing state is written before the send, so a clear that follows pairs with this fire even when the send
            has to be retried or a stopped run never marked it. A repeat fire only refreshes it. */
-        var (wasFiring, previousSeverity) = await _store.RecordFireAsync(
+        var fired = await _store.RecordFireAsync(
             row.SourceId, row.AlertKey, server.StateLabel, server.BucketId, server.Key, server.Label, row.Severity, cancellationToken);
+        var wasFiring = fired.WasFiring;
+        var previousSeverity = fired.PreviousSeverity;
 
         var context = new AlertContext { External = new AlertExternalOrigin(row.SourceName, row.AlertKey, row.PendingId) };
         var currentText = row.Value is { } value
@@ -265,7 +267,7 @@ public sealed class ExternalAlertDrain
         var detailText = detail.Length == 0 ? title : $"{title} - {detail}";
 
         var outcome = new AlertOutcome(
-            server.Key, server.Label, metric, currentText, "",
+            fired.ServerKey, fired.ServerName, metric, currentText, "",
             Context: context, DetailText: detailText,
             NumericCurrentValue: row.Value ?? 0, NumericThresholdValue: null,
             Muted: muted, Severity: severity,

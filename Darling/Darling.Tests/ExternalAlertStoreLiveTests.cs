@@ -250,14 +250,14 @@ public sealed class ExternalAlertStoreLiveTests
             Assert.Null(await store.GetStateAsync(sourceId, "disk:c", "", ct));
             Assert.Null(await store.RecordClearAsync(sourceId, "disk:c", "", ct));
 
-            Assert.Equal((false, (string?)null), await store.RecordFireAsync(sourceId, "disk:c", "", 0, "external:External (state_svc)", "External (state_svc)", "critical", ct));
+            Assert.Equal(new ExternalAlertFireResult(false, null, 0, "external:External (state_svc)", "External (state_svc)"), await store.RecordFireAsync(sourceId, "disk:c", "", 0, "external:External (state_svc)", "External (state_svc)", "critical", ct));
             var firing = await store.GetStateAsync(sourceId, "disk:c", "", ct);
             Assert.NotNull(firing);
             Assert.True(firing!.Firing);
             Assert.Equal("critical", firing.FiredSeverity);
             Assert.NotNull(firing.LastFiredAtUtc);
             Assert.Equal((0, "external:External (state_svc)", "External (state_svc)"), (firing.ServerId, firing.ServerKey, firing.ServerName));
-            Assert.Equal((true, "critical"), await store.RecordFireAsync(sourceId, "disk:c", "", 0, "external:External (state_svc)", "External (state_svc)", "warning", ct));
+            Assert.Equal(new ExternalAlertFireResult(true, "critical", 0, "external:External (state_svc)", "External (state_svc)"), await store.RecordFireAsync(sourceId, "disk:c", "", 0, "external:External (state_svc)", "External (state_svc)", "warning", ct));
             Assert.Equal("warning", (await store.GetStateAsync(sourceId, "disk:c", "", ct))!.FiredSeverity);
 
             /* The same key on another server name is its own subject. */
@@ -300,6 +300,17 @@ public sealed class ExternalAlertStoreLiveTests
             var stateB = await store.GetStateAsync(sourceId, "k", "b", ct);
             Assert.Equal(("external:B", "B", true), (stateB!.ServerKey, stateB.ServerName, stateB.Firing));
             Assert.Equal("warning", await store.RecordClearAsync(sourceId, "k", "b", ct));
+
+            /* A repeat fire of a subject that is still firing keeps the identity its episode began with; a fire after a clear takes the new one. */
+            var kept = await store.RecordFireAsync(sourceId, "k2", "z", 0, "external:Z", "Z", "warning", ct);
+            Assert.Equal(new ExternalAlertFireResult(false, null, 0, "external:Z", "Z"), kept);
+            Assert.Equal(new ExternalAlertFireResult(true, "warning", 0, "external:Z", "Z"),
+                await store.RecordFireAsync(sourceId, "k2", "z", 9, "9", "Zed", "critical", ct));
+            var stateZ = await store.GetStateAsync(sourceId, "k2", "z", ct);
+            Assert.Equal((0, "external:Z", "Z"), (stateZ!.ServerId, stateZ.ServerKey, stateZ.ServerName));
+            Assert.Equal("critical", await store.RecordClearAsync(sourceId, "k2", "z", ct));
+            Assert.Equal(new ExternalAlertFireResult(false, "critical", 9, "9", "Zed"),
+                await store.RecordFireAsync(sourceId, "k2", "z", 9, "9", "Zed", "warning", ct));
 
             /* A clear for a name that never fired closes nothing. */
             Assert.Null(await store.RecordClearAsync(sourceId, "k", "c", ct));

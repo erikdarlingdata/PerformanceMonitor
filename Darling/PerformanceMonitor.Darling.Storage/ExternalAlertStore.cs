@@ -69,6 +69,14 @@ public sealed class ExternalAlertStateLockTimeoutException : Exception
 }
 
 /// <summary>
+/// What a fire recorded: whether the subject was already firing and at what severity, and the identity the episode is sent
+/// under. A fire that finds the subject firing keeps the identity the episode began with; a fire on a cleared or new subject
+/// takes the one it brought.
+/// </summary>
+public sealed record ExternalAlertFireResult(
+    bool WasFiring, string? PreviousSeverity, int ServerId, string ServerKey, string ServerName);
+
+/// <summary>
 /// The remembered firing state of one <c>(source, key, submitted server name)</c> subject, with the identity its fire was
 /// sent under: the server id (0 for a name that was not registered), the server key and the display name. A clear closes
 /// the incident under these, whatever the server registry says by then.
@@ -269,7 +277,9 @@ WHERE source_id = $1 AND alert_key = $2 AND server_label = $3";
     /// <summary>
     /// Records a fire and returns what the subject was before it. $1 source_id, $2 alert_key, $3 server_label,
     /// $4 server_id, $5 server_key, $6 server_name, $7 severity. The returned row is the state read before the write, so a
-    /// repeat fire reports <c>true</c>. The identity the fire is sent under is kept with the state.
+    /// repeat fire reports <c>true</c>. The identity the fire is sent under is kept with the state, and a repeat fire of a
+    /// subject that is still firing keeps the identity the episode began with (the columns it returns are the kept ones), so a
+    /// server registered or renamed mid-episode re-triggers the same incident.
     /// </summary>
     public const string RecordFireSql = @"
 WITH prev AS (
@@ -282,15 +292,15 @@ up AS (
         (source_id, alert_key, server_label, server_id, server_key, server_name, firing, fired_severity, last_fired_at)
     VALUES ($1, $2, $3, $4, $5, $6, true, $7, now())
     ON CONFLICT (source_id, alert_key, server_label) DO UPDATE SET
-        server_id = EXCLUDED.server_id,
-        server_key = EXCLUDED.server_key,
-        server_name = EXCLUDED.server_name,
+        server_id = CASE WHEN config.external_alert_state.firing THEN config.external_alert_state.server_id ELSE EXCLUDED.server_id END,
+        server_key = CASE WHEN config.external_alert_state.firing THEN config.external_alert_state.server_key ELSE EXCLUDED.server_key END,
+        server_name = CASE WHEN config.external_alert_state.firing THEN config.external_alert_state.server_name ELSE EXCLUDED.server_name END,
         firing = true,
         fired_severity = EXCLUDED.fired_severity,
         last_fired_at = EXCLUDED.last_fired_at
-    RETURNING 1
+    RETURNING server_id, server_key, server_name
 )
-SELECT COALESCE((SELECT firing FROM prev), false), (SELECT fired_severity FROM prev)
+SELECT COALESCE((SELECT firing FROM prev), false), (SELECT fired_severity FROM prev), up.server_id, up.server_key, up.server_name
 FROM up";
 
     /// <summary>
@@ -543,7 +553,7 @@ RETURNING fired_severity";
     /// <paramref name="serverKey"/> and <paramref name="serverName"/> are the identity this fire is sent under, kept so the
     /// clear closes the same incident.
     /// </summary>
-    public async Task<(bool WasFiring, string? PreviousSeverity)> RecordFireAsync(
+    public async Task<ExternalAlertFireResult> RecordFireAsync(
         int sourceId, string alertKey, string serverLabel, int serverId, string serverKey, string serverName, string severity,
         CancellationToken cancellationToken = default)
     {
@@ -562,7 +572,8 @@ RETURNING fired_severity";
                 command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = severity });
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 await reader.ReadAsync(cancellationToken);
-                return (reader.GetBoolean(0), reader.IsDBNull(1) ? null : reader.GetString(1));
+                return new ExternalAlertFireResult(
+                    reader.GetBoolean(0), reader.IsDBNull(1) ? null : reader.GetString(1), reader.GetInt32(2), reader.GetString(3), reader.GetString(4));
             },
             cancellationToken);
     }

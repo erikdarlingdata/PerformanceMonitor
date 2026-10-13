@@ -149,6 +149,31 @@ public sealed class ExternalAlertDrainLiveTests
     }
 
     [Fact]
+    public async Task AServerRegisteredBetweenTwoFiresOfOneEpisode_RetriggersTheSameIncident_AndTheClearResolvesIt()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            await rig.SubmitAsync("fire", "cpu", server: "NEWBOX");
+            await rig.Drain.RunPassAsync(false, rig.Ct);
+
+            rig.Registry["NEWBOX"] = new ExternalAlertServer(9, "NEWBOX");
+            await rig.SubmitAsync("fire", "cpu", server: "NEWBOX");
+            await rig.Drain.RunPassAsync(false, rig.Ct);
+
+            /* Both triggers carry the first fire's identity, and the state still holds it. */
+            Assert.Equal(new[] { "NEWBOX|external:NEWBOX", "NEWBOX|external:NEWBOX" }, rig.Sent.Select(o => o.ServerName + "|" + o.ServerKey).ToArray());
+            Assert.Equal("external:NEWBOX", await rig.ScalarAsync("SELECT server_key FROM config.external_alert_state"));
+            Assert.Equal("0", await rig.ScalarAsync("SELECT server_id::text FROM config.external_alert_state"));
+
+            var clear = await rig.SubmitAsync("clear", "cpu", server: "NEWBOX");
+            await rig.Drain.RunPassAsync(false, rig.Ct);
+
+            Assert.Equal("delivered", await rig.StatusAsync(clear));
+            Assert.Equal(new[] { "NEWBOX|external:NEWBOX" }, rig.PagerDutyIdentities.ToArray());
+        });
+    }
+
+    [Fact]
     public async Task AServerRenamedOrRemovedBetweenAFireAndItsClear_StillResolvesTheIncidentTheFireOpened()
     {
         await WithDrainAsync(async rig =>
