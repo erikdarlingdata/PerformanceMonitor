@@ -79,7 +79,7 @@ internal static class LiteSeed
             ["TrustServerCertificate"] = true,
             ["IsEnabled"] = true,
         };
-        File.WriteAllText(Path.Combine(config, "servers.json"), JsonSerializer.Serialize(new[] { server }));
+        File.WriteAllText(Path.Combine(config, "servers.json"), JsonSerializer.Serialize(new Dictionary<string, object?> { ["Servers"] = new[] { server } }));
         File.WriteAllText(Path.Combine(config, "settings.json"), "{ \"default_time_range\": \"2d\" }");
     }
 
