@@ -56,13 +56,15 @@ public sealed class ViewerDefaultTraceServerClockTests
         table.Columns.Add("text_data", typeof(string));
         table.Columns.Add("filename", typeof(string));
         table.Columns.Add("event_class", typeof(int));
+        table.Columns.Add("event_sequence", typeof(long));
         return table;
     }
 
     /// <summary>One stored event. <paramref name="label"/> rides in database_name so a test can say which
     /// event came back; the default name is a Default Trace category that is significant as collected.</summary>
     private static void AddEvent(DataTable table, DateTime? local, string label,
-        string eventName = "Data File Auto Grow", int? severity = null, string? filename = null, int? eventClass = null)
+        string eventName = "Data File Auto Grow", int? severity = null, string? filename = null, int? eventClass = null,
+        long? eventSequence = null)
     {
         table.Rows.Add(
             local.HasValue ? (object)local.Value : DBNull.Value,
@@ -71,7 +73,8 @@ public sealed class ViewerDefaultTraceServerClockTests
             severity.HasValue ? (object)severity.Value : DBNull.Value,
             DBNull.Value, DBNull.Value,
             filename is null ? DBNull.Value : filename,
-            eventClass.HasValue ? (object)eventClass.Value : DBNull.Value);
+            eventClass.HasValue ? (object)eventClass.Value : DBNull.Value,
+            eventSequence.HasValue ? (object)eventSequence.Value : DBNull.Value);
     }
 
     private static async Task<List<DefaultTraceEventRow>> ReadAsync(DataTable table, ServerClock clock, DateTime startUtc, DateTime endUtc)
@@ -139,6 +142,28 @@ public sealed class ViewerDefaultTraceServerClockTests
         var rows = await ReadAsync(table, Eastern(), Naive(2026, 1, 1, 0), Naive(2026, 12, 31, 0));
 
         Assert.Equal(3, rows.Count);
+    }
+
+    /// <summary>
+    /// #5644 H4b: two real events with identical columns (the same DBCC or audit event from one spid in one 3.33 ms
+    /// tick) differ only in event_sequence, so both show; a stored copy repeats the sequence and collapses; rows
+    /// stored before the column existed (NULL sequence) keep the column-only key.
+    /// </summary>
+    [Fact]
+    public async Task TwoRealEventsWithIdenticalColumns_AreTwoRows_AndStoredCopiesOfOneStayOne()
+    {
+        var table = NewTable();
+        AddEvent(table, Naive(2026, 3, 9, 8), "real", eventSequence: 100);
+        AddEvent(table, Naive(2026, 3, 9, 8), "real", eventSequence: 101);
+        AddEvent(table, Naive(2026, 3, 9, 8), "real", eventSequence: 101);   /* a copy of the second */
+        AddEvent(table, Naive(2026, 3, 9, 8), "old");
+        AddEvent(table, Naive(2026, 3, 9, 8), "old");                        /* NULL sequence: a copy */
+
+        var rows = await ReadAsync(table, Eastern(), Naive(2026, 1, 1, 0), Naive(2026, 12, 31, 0));
+
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(2, rows.Count(r => r.DatabaseName == "real"));
+        Assert.Single(rows, r => r.DatabaseName == "old");
     }
 
     [Fact]

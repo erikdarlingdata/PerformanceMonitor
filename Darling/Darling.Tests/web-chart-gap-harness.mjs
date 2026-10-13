@@ -161,6 +161,16 @@ out.coarsePrimary = marks(charts.renderLineChart({
   series: [{ key: "a", label: "A", color: "#f00" }, { key: "c", label: "C", color: "#0f0" }],
 }));
 
+/* #5644 H4b: a series of EVENTS has no cadence. Clusters of rows with minutes to hours between them have a tiny median
+   interval, so the 5 minute floor used to cut them into lone dots. They draw one line; a sampled series that went silent
+   (above) still breaks. */
+const events = [0, 1, 2, 9, 10, 31, 70, 150, 151, 152, 400, 405, 410, 600, 640, 660];
+out.eventsLine = marks(draw(events, { series: [{ key: "a", label: "A", color: "#f00" }] }));
+out.eventsArea = marks(draw(events, { mode: "area", series: [{ key: "a", label: "A", color: "#f00" }] }));
+out.eventsThreshold = String(charts.gapThresholdMs(events.map((m) => m * MIN)));
+/* a 1 minute series that is missing a quarter of its samples at random is still sampled: it breaks at the 7 hour silence */
+out.jitterGap = marks(draw(withGap.filter((m, i) => i % 5 !== 3), { series: [{ key: "a", label: "A", color: "#f00" }] }));
+
 out.threshold = {
   empty: String(charts.gapThresholdMs([])),
   one: String(charts.gapThresholdMs([0])),

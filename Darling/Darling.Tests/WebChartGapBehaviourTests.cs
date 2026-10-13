@@ -162,6 +162,28 @@ public sealed class WebChartGapBehaviourTests
     }
 
     [Fact]
+    public void ASeriesOfEvents_HasNoCadenceToBeSilentAgainst_SoItDrawsOneLineAndNoLoneDots()
+    {
+        // #5644 H4b: clusters of events with minutes to hours between them have a tiny median interval; the 5 minute floor
+        // used to cut that into mostly lone dots.
+        var r = Run();
+        Assert.Equal(1, N(r, "eventsLine", "lines"));
+        Assert.Equal(0, N(r, "eventsLine", "dots"));
+        Assert.Equal(1, N(r, "eventsArea", "lines"));
+        Assert.Equal(1, N(r, "eventsArea", "areas"));
+        Assert.Equal(0, N(r, "eventsArea", "dots"));
+        Assert.Equal("Infinity", r.GetProperty("eventsThreshold").GetString());
+    }
+
+    [Fact]
+    public void ASampledSeriesMissingSomeSamples_StillBreaksAtALongSilence()
+    {
+        var r = Run();
+        Assert.Equal(2, N(r, "jitterGap", "lines"));
+        Assert.Equal(0, N(r, "jitterGap", "dots"));
+    }
+
+    [Fact]
     public void TheThreshold_HasNothingToCompareUnderThreeBuckets_AndNeverFallsUnderTheFloor()
     {
         var r = Run().GetProperty("threshold");

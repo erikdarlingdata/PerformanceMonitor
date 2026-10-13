@@ -78,7 +78,7 @@ VALUES ($1, $2, $3, 'TestSrv', $4, 'Server Memory Change', NULL, NULL, NULL, NUL
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task SeedAutoGrowAsync(DateTime eventTimeServerLocal, string filename, int eventClass)
+    private async Task SeedAutoGrowAsync(DateTime eventTimeServerLocal, string filename, int eventClass, long? eventSequence = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var conn = await SeedConnectionAsync();
@@ -86,14 +86,15 @@ VALUES ($1, $2, $3, 'TestSrv', $4, 'Server Memory Change', NULL, NULL, NULL, NUL
         cmd.CommandText = @"
 INSERT INTO default_trace_events
     (default_trace_event_id, collection_time, server_id, server_name, event_time, event_name, event_class,
-     database_name, filename, duration_us, integer_data, severity, error_number, text_data)
-VALUES ($1, $2, $3, 'TestSrv', $4, 'Data File Auto Grow', $5, 'grow', $6, 1500000, 256, NULL, NULL, NULL)";
+     database_name, filename, duration_us, integer_data, severity, error_number, text_data, event_sequence)
+VALUES ($1, $2, $3, 'TestSrv', $4, 'Data File Auto Grow', $5, 'grow', $6, 1500000, 256, NULL, NULL, NULL, $7)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = eventTimeServerLocal });
         cmd.Parameters.Add(new DuckDBParameter { Value = eventClass });
         cmd.Parameters.Add(new DuckDBParameter { Value = filename });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)eventSequence ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 
@@ -107,6 +108,26 @@ VALUES ($1, $2, $3, 'TestSrv', $4, 'Data File Auto Grow', $5, 'grow', $6, 150000
         await SeedAutoGrowAsync(tick, "b.mdf", 92);
         await SeedAutoGrowAsync(tick, "b.mdf", 93);
         await SeedAutoGrowAsync(tick, "a.mdf", 92);   /* a true copy */
+
+        var rows = await service.GetDefaultTraceEventsAsync(
+            ServerId, fromDate: At(2026, 3, 9, 0, 0), toDate: At(2026, 3, 10, 0, 0), serverClock: Eastern());
+
+        Assert.Equal(3, rows.Count(r => r.EventName == "Data File Auto Grow"));
+    }
+
+    [Fact]
+    public async Task DefaultTrace_TwoRealEventsWithIdenticalColumns_AreTwoRows_AndStoredCopiesOfOneStayOne()
+    {
+        /* #5644 H4b: two identical DBCC or audit events from one spid in one tick differ only in event_sequence, so
+           both show; a stored copy repeats the sequence and collapses; NULL-sequence rows (stored before the column
+           existed) keep the column-only key. */
+        var service = new LocalDataService(_duckDb);
+        var tick = At(2026, 3, 9, 8, 0);
+        await SeedAutoGrowAsync(tick, "a.mdf", 92, eventSequence: 100);
+        await SeedAutoGrowAsync(tick, "a.mdf", 92, eventSequence: 101);
+        await SeedAutoGrowAsync(tick, "a.mdf", 92, eventSequence: 101);   /* a copy of the second */
+        await SeedAutoGrowAsync(tick, "old.mdf", 92);
+        await SeedAutoGrowAsync(tick, "old.mdf", 92);                    /* NULL sequence: a copy */
 
         var rows = await service.GetDefaultTraceEventsAsync(
             ServerId, fromDate: At(2026, 3, 9, 0, 0), toDate: At(2026, 3, 10, 0, 0), serverClock: Eastern());
