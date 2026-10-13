@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -40,7 +41,12 @@ internal static class DarlingLongQueryReader
         public int? ClientPid { get; set; }
         public string? NtUserName { get; set; }
         public string? ServerPrincipalName { get; set; }
+        /// <summary>The stored <c>query_hash</c>, or NULL when the engine gave none (#5711: the trace's batch-level events
+        /// carry 0, which is "unknown", never one shared query).</summary>
         public string? QueryHash { get; set; }
+        /// <summary>#5711: the key a caller groups by: the real hash, else a fingerprint of the scrubbed statement text,
+        /// else NULL (such a row joins no group).</summary>
+        public string? QueryIdentity => QueryHashIdentity.Identity(QueryHash, StatementText);
         public long? EventSequence { get; set; }
         public long? DurationMicroseconds { get; set; }
         public long? CpuTimeMicroseconds { get; set; }
@@ -121,7 +127,7 @@ internal static class DarlingLongQueryReader
                 ClientPid = reader.IsDBNull(5) ? null : reader.GetInt32(5),
                 NtUserName = reader.IsDBNull(6) ? null : reader.GetString(6),
                 ServerPrincipalName = reader.IsDBNull(7) ? null : reader.GetString(7),
-                QueryHash = reader.IsDBNull(8) ? null : reader.GetString(8),
+                QueryHash = reader.IsDBNull(8) ? null : QueryHashIdentity.KnownHash(reader.GetString(8)),
                 EventSequence = reader.IsDBNull(9) ? null : reader.GetInt64(9),
                 DurationMicroseconds = reader.IsDBNull(10) ? null : reader.GetInt64(10),
                 CpuTimeMicroseconds = reader.IsDBNull(11) ? null : reader.GetInt64(11),

@@ -397,6 +397,18 @@ public static class DurationTrendRouting
     /// stored collections per run.) A run that failed stores nothing and is no point: the next point's gap
     /// covers it. Without a log (imported or old data) the axis is the stored collections alone.</para>
     ///
+    /// <para><b>Where a stored collection's sums come from (#5638).</b> The collector writes one row per (collection, database) to
+    /// <see cref="ProcedureStatsTotals"/> in the same transaction as the procedure rows, so a collection's sums are the sums of a
+    /// handful of totals rows in place of about a thousand <c>procedure_stats</c> rows. The two sources are stitched at the server's
+    /// FLOOR, <c>MIN(collection_time)</c> of the totals table for <c>$1</c> (<c>totals_floor</c>; <c>infinity</c> when the server has
+    /// none): a collection at or after it reads the totals, a collection before it (written before the upgrade, which backfills
+    /// nothing) reads the rows, so no collection is read from both. Each measure is the same aggregate of the same values (the sums of
+    /// the per-database sums, the max of the per-database maxes, <c>matched_rows</c> = the sum of <c>row_count</c> over the chosen
+    /// databases), NULL where every row's value was NULL, so the three-state interval contract reads the same from either source. The
+    /// floor is its own scalar CTE so the rows arm carries <c>collection_time &lt; floor</c> as an index range (and TimescaleDB
+    /// excludes chunks past it) and reads nothing for a window after the floor. A store below the V176 rung has no table; the
+    /// Viewer's connect gate blocks it and the service migrates before it reads.</para>
+    ///
     /// <para><b>A point's seconds</b> are the gap to the previous point, or NULL (an unrated point, counted by the bucket) when the
     /// gap passes <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/>, the collector's own limit: a longer outage is
     /// out of the bucket's seconds, and a shorter one sits in the next point's gap, whose deltas measured it. A stored
@@ -424,10 +436,26 @@ public static class DurationTrendRouting
               + $"        COUNT(*) FILTER (WHERE {match}) AS matched_rows,"
             : "SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,\n"
               + "        SUM(delta_execution_count) AS total_executions,";
+
+        // #5638: the same three measures from the per-collection totals table, one row per (collection, database). SUM of the per-database
+        // sums is the sum of the rows, and the filter picks the same databases (a NULL database never matches, here or on the rows).
+        // row_count is COUNT(*), so its filtered sum is matched_rows; SUM(bigint) is numeric, so it is cast back to the bigint COUNT(*) gives.
+        var totalsSums = withDatabaseFilter
+            ? $"COALESCE(SUM(total_elapsed_time) FILTER (WHERE {match}), 0) / 1000.0 AS total_elapsed_ms,\n"
+              + $"        COALESCE(SUM(total_execution_count) FILTER (WHERE {match}), 0) AS total_executions,\n"
+              + $"        COALESCE(SUM(row_count) FILTER (WHERE {match}), 0)::bigint AS matched_rows,"
+            : "SUM(total_elapsed_time) / 1000.0 AS total_elapsed_ms,\n"
+              + "        SUM(total_execution_count) AS total_executions,";
         var matched = withDatabaseFilter ? ", matched_rows" : "";
         var idleMatched = withDatabaseFilter ? ", CAST(0 AS bigint)" : "";
 
         return $"""
+        totals_floor AS
+        (
+            SELECT COALESCE(MIN(collection_time), 'infinity'::timestamp) AS floor_time
+            FROM {ProcedureStatsTotals.Table}
+            WHERE server_id = $1
+        ),
         stored AS
         (
             SELECT
@@ -435,6 +463,17 @@ public static class DurationTrendRouting
                 {sums}
                 MAX(sample_interval_seconds) AS max_interval_seconds
             FROM procedure_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+            AND   collection_time <= $3
+            AND   collection_time < (SELECT floor_time FROM totals_floor)
+            GROUP BY collection_time
+            UNION ALL
+            SELECT
+                collection_time,
+                {totalsSums}
+                MAX(max_sample_interval_seconds) AS max_interval_seconds
+            FROM {ProcedureStatsTotals.Table}
             WHERE server_id = $1
             AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
             AND   collection_time <= $3

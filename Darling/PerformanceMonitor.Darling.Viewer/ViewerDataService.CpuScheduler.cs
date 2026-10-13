@@ -77,11 +77,9 @@ public sealed partial class ViewerDataService
     /// (single row per collection), so the three counts plot directly — no delta normalization.
     /// $1 server_id, $2 window start, $3 window end (all naive UTC), $4 the bucket width in minutes.
     ///
-    /// <para>#3936: <c>collection_id</c> is a secondary sort inside the raw CTE, not a filter — a
-    /// same-instant collision (rare, see
-    /// <see cref="PerformanceMonitor.Collectors.CollectionTimeClock"/>) still plots both real snapshots
-    /// into the same bucket, just in a deterministic left-to-right order rather than whatever physical
-    /// row order the plan happens to return them in.</para>
+    /// <para>#5710: the raw CTE is ONE row per <c>collection_time</c> (a collection written before the collector fix can
+    /// be split across several rows; see <see cref="CpuSchedulerCollectionSql"/>), so <c>collection_count</c> counts
+    /// collections, not stored rows.</para>
     ///
     /// <para>#4234: BUCKETED. All three counts are gauges (ruling item 2, point-in-time snapshot columns,
     /// no delta math): a bucket's value is the plain average of its collections. 10,080 rows over 7 days
@@ -96,13 +94,17 @@ public sealed partial class ViewerDataService
     /// The CPU Scheduler latest-snapshot read: the single most recent cpu_scheduler_stats row in the
     /// window (all pressure columns), for the metric grid. $1 server_id, $2 start, $3 end (naive UTC).
     ///
-    /// <para>#3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A
-    /// run-overlap or clock-resolution collision can store two DIFFERENT snapshots under one
-    /// <c>collection_time</c> — <c>collection_id</c> is the per-process monotonic counter every row already
-    /// carries, so it orders two same-instant rows the same way on every read instead of a bare
-    /// <c>LIMIT 1</c> returning either one depending on physical row order.</para>
+    /// <para>#5710: the newest <c>collection_time</c> is found first, then ALL of its rows are combined into one
+    /// (<see cref="CpuSchedulerCollectionSql"/>): a collection written before the collector fix can be split across
+    /// several rows that each cover some of the schedulers. Sums are added, the average is the summed total over
+    /// <c>scheduler_count</c> (the online count), the request and memory column groups each come from one stored row, the other single-row DMV columns take their MAX. This replaces the #3936 tiebreak: with every
+    /// same-instant row folded into one, no physical row order can change the answer.</para>
     /// </summary>
-    public const string CpuSchedulerSnapshotSql = """
+    public static readonly string CpuSchedulerSnapshotSql = $"""
+        WITH newest AS
+        (
+            {CpuSchedulerCollectionSql.PerCollection("v_cpu_scheduler_stats", "server_id = $1 AND collection_time >= $2 AND collection_time <= $3", newestOnly: true)}
+        )
         SELECT
             collection_time,
             max_workers_count,
@@ -131,12 +133,7 @@ public sealed partial class ViewerDataService
             nodes_online_count,
             offline_cpu_count,
             offline_cpu_warning
-        FROM v_cpu_scheduler_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        ORDER BY collection_time DESC, collection_id DESC
-        LIMIT 1
+        FROM newest
         """;
 
     /// <summary>

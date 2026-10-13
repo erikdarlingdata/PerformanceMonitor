@@ -94,6 +94,20 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpTrendTools
 {
+    /// <summary>
+    /// The wall clock the duration-trend tools hand to the tier decision (#5638), captured ONCE per call. With no
+    /// <paramref name="asOf"/> the window ends at the instant <see cref="McpHelpers.ValidateWindow(int, string, int, out DateTime)"/>
+    /// took, so that instant IS the wall clock and the tier is decided against the very instant the window was computed. Without
+    /// it, <c>ResolveDurationTrendRoute</c> defaulted its clock to a second <c>DateTime.UtcNow</c> read a few milliseconds LATER, and
+    /// a window whose start sits exactly on the raw boundary (<see cref="TimescaleSupport.RawRetentionSpan"/> less
+    /// <see cref="DarlingTrendReader.RawTierMargin"/>, 95 h) fell just past it and flipped to the hourly tier on a read that should
+    /// always be raw. With an <paramref name="asOf"/> the window's end is an anchor in the past and is NEVER the clock:
+    /// <see cref="DarlingTrendReader.ShouldUseRawTier"/> (#2353) measures against the wall clock because retention drops by age,
+    /// so the clock is one <paramref name="wallClock"/> reading (the real clock unless a test passes one).
+    /// </summary>
+    internal static DateTime TierClock(string? asOf, DateTime windowEndUtc, Func<DateTime>? wallClock = null) =>
+        string.IsNullOrWhiteSpace(asOf) ? windowEndUtc : (wallClock?.Invoke() ?? DateTime.UtcNow);
+
     [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage over time in time buckets: total server, target, buffer pool and plan cache memory, with granted memory from the memory-grant series joined per bucket. total_granted_mb is null where that series has no snapshot (granted_note says why); use get_memory_grants for grant detail." + BaselineDiscontinuities.DescriptionSentence)]
     public static Task<string> GetMemoryTrend(
         NpgsqlDataSource postgres,
@@ -552,7 +566,7 @@ public sealed class DarlingMcpTrendTools
                 as_of anchor decides the window, not how old its rows are.
             */
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
-            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(startUtc, rollups, coverage, windowEndUtc: now);
+            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(startUtc, rollups, coverage, nowUtc: TierClock(as_of, now), windowEndUtc: now);
 
             /* #3897: the hourly rollup's points are whole hours, so a width it cannot serve is refused rather than
                quietly answered at another, and an automatic width is never finer than the rollup's hour. */
@@ -639,7 +653,7 @@ public sealed class DarlingMcpTrendTools
             /* #3541 A2 — the same routing as get_query_duration_trend, over the procedure pair, and #3897 the same
                width rule on the hourly tier. */
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
-            var route = DarlingTrendReader.ResolveProcedureDurationTrendRoute(startUtc, rollups, coverage, windowEndUtc: now);
+            var route = DarlingTrendReader.ResolveProcedureDurationTrendRoute(startUtc, rollups, coverage, nowUtc: TierClock(as_of, now), windowEndUtc: now);
             if (route.Tier == RetentionTier.Hourly)
             {
                 var hourlyError = TrendBuckets.RequireWholeHours(bucket_minutes, RawRetentionDays);

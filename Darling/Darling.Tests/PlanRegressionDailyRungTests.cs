@@ -336,7 +336,8 @@ public sealed class PlanRegressionDailyRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
@@ -344,7 +345,7 @@ public sealed class PlanRegressionDailyRungTests
         var parameters = method.GetParameters();
 
         /* A newer rung's sentinel (V175's, #5631) is the last argument. */
-        Assert.Equal(ProbeOrdinal + 7, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 8, parameters.Length - 1);
         Assert.Equal("hasPlanRegressionDaily", parameters[ProbeOrdinal].Name);
 
         /* Every sentinel true is a fully-migrated store, which maps to exactly this build's version. */
