@@ -365,6 +365,25 @@ public sealed class CollectionCycleSkipTests : IDisposable
     }
 
     [Fact]
+    public async Task ASkippedCycle_NamesTheHousekeepingStepsThatOverlappedTheGap_InTheLogAndTheRow()
+    {
+        var f = await OpenAsync();
+        /* #5731: archival ran 4 minutes inside the gap; a step from the day before did not overlap it. */
+        f.Loop.HousekeepingLedger.Record("archival", T0 + TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(4));
+        f.Loop.HousekeepingLedger.Record("retention", T0 - TimeSpan.FromHours(20), TimeSpan.FromMinutes(2));
+
+        await f.Loop.ReportSkippedSlotsAsync(T0, T0 + TimeSpan.FromMinutes(6), TimeSpan.FromSeconds(312), TimeSpan.FromSeconds(48),
+            Steps(), CancellationToken.None);
+
+        var warning = Assert.Single(f.Log);
+        Assert.Contains(" Housekeeping in that window: archival 240s.", warning.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("retention 120s", warning.Message, StringComparison.Ordinal);
+        var row = (await RowsAsync(f.DuckDb))[RemoteCollectorService.GetServerId(f.Enabled1)];
+        Assert.Equal(warning.Message, row.Message);
+        Assert.Equal("archival", row.SlowestItem); /* slowest_item is still the cycle's own slowest step */
+    }
+
+    [Fact]
     public async Task AWaitThatOverran_WritesTheWaitAsTheSlowestItem()
     {
         var f = await OpenAsync();
@@ -547,9 +566,9 @@ public sealed class CollectionCycleSkipTests : IDisposable
         var body = source[source.IndexOf("protected override async Task ExecuteAsync", StringComparison.Ordinal)..];
         body = body[..body.IndexOf("The pileup loop ends on the same token", StringComparison.Ordinal)];
 
+        /* #5731: the six housekeeping awaits (and their Laps) moved to the housekeeping loops; what is left is timed. */
         var lastIndex = -1;
-        foreach (var step in new[] { "connection_check", "collectors", "archival", "query_store_backfill", "retention",
-                     "findings_cleanup", "dismissed_alerts_cleanup", "analysis" })
+        foreach (var step in new[] { "connection_check", "collectors" })
         {
             var index = body.IndexOf($"Lap(\"{step}\")", StringComparison.Ordinal);
             Assert.True(index > lastIndex, $"step {step} is not timed in loop order");
@@ -559,8 +578,12 @@ public sealed class CollectionCycleSkipTests : IDisposable
         var wait = body.IndexOf("await WaitForNextCycleAsync(", StringComparison.Ordinal);
         var report = body.IndexOf("await ReportSkippedSlotsAsync(previousCycleStart, cycleStart", StringComparison.Ordinal);
         Assert.True(wait > 0 && report > wait, "the skipped-slot report must follow the wait that returns the new stamp");
-        /* A step added to the loop without a Lap falls out of the report: every awaited housekeeping call is followed by one. */
-        Assert.Equal(8, System.Text.RegularExpressions.Regex.Matches(body, @"Lap[(]""").Count);
-        Assert.Equal(6, System.Text.RegularExpressions.Regex.Matches(body, @"await Run\w+IfDueAsync\([^)]*\);\s*Lap\(").Count);
+        /* A step added to the loop without a Lap falls out of the report. Housekeeping is not one of them any more: no
+           Run*IfDueAsync is awaited from the collection loop, and the loops that run them are started before it (#5731). */
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(body, @"Lap[(]""").Count);
+        Assert.DoesNotMatch(@"await Run\w+IfDueAsync\(", body);
+        var housekeeping = body.IndexOf("StartHousekeepingLoops(", StringComparison.Ordinal);
+        var cycle = body.IndexOf("while (!stoppingToken.IsCancellationRequested)", StringComparison.Ordinal);
+        Assert.True(housekeeping > 0 && cycle > housekeeping, "the housekeeping loops must start before the collection loop");
     }
 }

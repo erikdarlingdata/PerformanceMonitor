@@ -95,21 +95,36 @@ public partial class LocalDataService
 
         using var connection = await OpenConnectionAsync(timer: null, cancellationToken);
         using var command = connection.CreateCommand();
+        /* arg_max skips a row whose ARGUMENT is NULL, so four separate arg_max calls would each resolve their own newest
+           non-NULL row and the "last" fields could describe different cycles. The four travel as one struct, as in
+           LocalDataService.CollectionHealth.cs: a NULL slowest_item on the newest row stays NULL, and every field
+           comes from the SAME row (#5731). */
         command.CommandText = @"
 SELECT
-    COUNT(*),
-    SUM(COALESCE(fanout_item_count, 0)),
-    MAX(collection_time),
-    arg_max(slowest_item, (collection_time, log_id)),
-    arg_max(slowest_item_ms, (collection_time, log_id)),
-    arg_max(error_message, (collection_time, log_id)),
-    arg_max(duration_ms, (collection_time, log_id))
-FROM v_collection_log
-WHERE server_id = $1
-AND   collector_name = $2
-AND   status = $3
-AND   collection_time >= $4
-AND   collection_time <= $5";
+    cycles,
+    slots,
+    last_at,
+    pick.slowest_item,
+    pick.slowest_item_ms,
+    pick.error_message,
+    pick.duration_ms
+FROM
+(
+    SELECT
+        COUNT(*) AS cycles,
+        SUM(COALESCE(fanout_item_count, 0)) AS slots,
+        MAX(collection_time) AS last_at,
+        arg_max(struct_pack(slowest_item := slowest_item,
+                            slowest_item_ms := slowest_item_ms,
+                            error_message := error_message,
+                            duration_ms := duration_ms), (collection_time, log_id)) AS pick
+    FROM v_collection_log
+    WHERE server_id = $1
+    AND   collector_name = $2
+    AND   status = $3
+    AND   collection_time >= $4
+    AND   collection_time <= $5
+) t";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = CollectionCycleSkip.CollectorName });

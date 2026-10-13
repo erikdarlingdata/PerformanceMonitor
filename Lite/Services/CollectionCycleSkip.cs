@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -28,8 +29,11 @@ internal sealed record CycleSkipReport(int SlotsSkipped, int CycleMs, string Slo
 /// </summary>
 internal static class CollectionCycleSkip
 {
-    /// <summary>The <c>collection_log.collector_name</c> of a skipped-slots row. It is not a collector: every reader of
-    /// the log leaves it out of any collector list, rate, streak and "last success".</summary>
+    /// <summary>The <c>collection_log.collector_name</c> of a skipped-slots row. It is not a collector: every reader that
+    /// summarises the log leaves it out of any collector list, rate, streak and "last success". The two reads that
+    /// return the log as rows (the Collection Log grid and <c>get_collection_log</c>, and their fleet forms) show
+    /// the row on purpose, filterable by <c>status = SKIPPED</c>; <c>get_collection_log</c> counts it in
+    /// <c>skipped_cycle_rows</c> and not in <c>run_count</c> (#5731).</summary>
     internal const string CollectorName = "collection_cycle";
 
     /// <summary>The <c>collection_log.status</c> of a skipped-slots row.</summary>
@@ -68,11 +72,55 @@ internal static class CollectionCycleSkip
     /// the time left in the interval after the cycle): the computer slept or hibernated, or the clock stepped forward,
     /// and the line says so with the wait's length. When both hold the line prints both, and says the slots passed
     /// across the two. With neither (the stamps alone show a gap) the line is the wait's. The slot count is always the
-    /// whole gap. When the two stamps are given the line ends by naming the gap from one to the other.
+    /// whole gap. When the two stamps are given the line ends by naming the gap from one to the other. Housekeeping steps that overlapped the gap
+    /// (<paramref name="housekeeping"/>, from <see cref="HousekeepingLedger.Overlapping"/>) add one sentence naming them and
+    /// the longest of them, and <paramref name="storeLockHolder"/> (when known) the store lock's holder; with no
+    /// housekeeping entries the message is unchanged.
     /// </summary>
     internal static CycleSkipReport? Build(
         int slotsSkipped, TimeSpan cycleElapsed, TimeSpan waitElapsed, IReadOnlyList<CycleStep> steps, TimeSpan interval,
-        DateTime? previousCycleStart = null, DateTime? nextCycleStart = null)
+        DateTime? previousCycleStart = null, DateTime? nextCycleStart = null,
+        IReadOnlyList<HousekeepingEntry>? housekeeping = null, StoreLockHolder? storeLockHolder = null)
+    {
+        var report = BuildCycleReport(slotsSkipped, cycleElapsed, waitElapsed, steps, interval, previousCycleStart, nextCycleStart);
+        if (report == null || housekeeping == null || housekeeping.Count == 0)
+        {
+            return report;
+        }
+
+        /* #5731: housekeeping runs on its own loops, so the cycle's own steps no longer show it. Only a gap that a
+           housekeeping step overlapped gets the extra sentences; with none the message is the cycle's alone. */
+        return report with { Message = report.Message + HousekeepingSentence(housekeeping, storeLockHolder) };
+    }
+
+    /// <summary>
+    /// " Housekeeping in that window: archival 252s, retention 3s." The longest four by name (a name that ran twice is
+    /// summed), each marked when it failed or was still running, then the store write-lock holder when one is known.
+    /// No equals sign: the baseline marker read keys on one.
+    /// </summary>
+    private static string HousekeepingSentence(IReadOnlyList<HousekeepingEntry> entries, StoreLockHolder? holder)
+    {
+        var byName = entries
+            .GroupBy(e => e.Name)
+            .Select(g => (Name: g.Key, Ms: (long)g.Sum(e => e.Length.TotalMilliseconds),
+                Failed: g.Any(e => e.Failed), Running: g.Any(e => e.Running)))
+            .OrderByDescending(g => g.Ms)
+            .Take(4)
+            .Select(g => g.Name.Replace('_', ' ') + " " + Format(g.Ms)
+                + (g.Failed ? " (failed)" : "") + (g.Running ? " (still running)" : ""));
+        var sentence = " Housekeeping in that window: " + string.Join(", ", byName) + ".";
+        if (holder != null)
+        {
+            sentence += " The store " + (holder.Write ? "write" : "read") + " lock was held by " + holder.Name + " for "
+                + Format((long)holder.Held.TotalMilliseconds) + " when this was written.";
+        }
+
+        return sentence;
+    }
+
+    private static CycleSkipReport? BuildCycleReport(
+        int slotsSkipped, TimeSpan cycleElapsed, TimeSpan waitElapsed, IReadOnlyList<CycleStep> steps, TimeSpan interval,
+        DateTime? previousCycleStart, DateTime? nextCycleStart)
     {
         if (slotsSkipped <= 0)
         {

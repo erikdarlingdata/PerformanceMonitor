@@ -81,10 +81,8 @@ public abstract class WalkBase : IAsyncLifetime
         Shot("00-main-window");
 
         // The named server picker lists the seeded server.
-        var picker = Step("server picker", () => Find(main, "ServerPicker"));
-        var pickerItem = Step("server picker item", () => WaitFor(() =>
-            picker.FindAllDescendants(cf => cf.ByControlType(ControlType.ListItem))
-                .FirstOrDefault(i => i.Name == ServerName), "a ServerPicker item named " + ServerName));
+        Step("server picker", () => Find(main, "ServerPicker"));
+        Step("server picker item", () => WaitFor(() => FindPickerItem(main), "a ServerPicker item named " + ServerName));
 
         // Overview: the fleet card for the seeded server, read through its server-name text.
         Step("Overview tab", () => SelectTab(main, "Overview"));
@@ -93,7 +91,9 @@ public abstract class WalkBase : IAsyncLifetime
                 .FirstOrDefault(c => c.Name == ServerName), "an OverviewServerCardName reading " + ServerName));
 
         // Open the server (double-click the picker row), then walk its tabs.
-        Step("open the server", () => { pickerItem.DoubleClick(); return true; });
+        // The element is looked up again at the click: the viewer rebinds the picker's items on each refresh, so an
+        // element found earlier can belong to a row that has been replaced and has no clickable point (#5761).
+        Step("open the server", () => OpenServer(main));
 
         Step("Wait Stats tab", () => SelectTab(main, "Wait Stats"));
         Step("wait types", () => WaitForRows(main, "WaitStatsTypeList", ControlType.ListItem));
@@ -102,6 +102,25 @@ public abstract class WalkBase : IAsyncLifetime
         Step("Top Queries by Duration", () => SelectTab(main, "Top Queries by Duration"));
         Step("query stats rows", () => WaitForRows(main, "QueryStatsGrid", ControlType.DataItem));
         Shot("99-after-walk");
+    }
+
+    private AutomationElement? FindPickerItem(AutomationElement main) =>
+        main.FindFirstDescendant(cf => cf.ByAutomationId("ServerPicker"))
+            ?.FindAllDescendants(cf => cf.ByControlType(ControlType.ListItem))
+            .FirstOrDefault(i => i.Name == ServerName);
+
+    /// <summary>Double-clicks the seeded server's picker row, looking the row up afresh on every attempt.</summary>
+    private bool OpenServer(AutomationElement main)
+    {
+        var r = Retry.WhileFalse(() =>
+        {
+            var item = FindPickerItem(main);
+            if (item is null) return false;
+            item.DoubleClick();
+            return true;
+        }, s_wait, TimeSpan.FromMilliseconds(500), ignoreException: true);
+        Assert.True(r.Result, "could not double-click the " + ServerName + " picker row within " + s_wait);
+        return true;
     }
 
     private T Step<T>(string name, Func<T> action)
