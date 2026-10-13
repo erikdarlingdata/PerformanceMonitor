@@ -1198,13 +1198,24 @@ SELECT
     /// simply carries no size — which is the first loop tick of a brand-new store, the disk check running
     /// ahead of the self-metrics sweep in the same tick. No parameters.</para>
     /// </summary>
-    public const string LatestStoreSizeSql = $@"
-SELECT total_bytes
+    public const string LatestStoreSizeSql = "SELECT total_bytes" + LatestStoreSizeTail;
+
+    /// <summary>The shared tail of <see cref="LatestStoreSizeSql"/> and <see cref="LatestStoreSizeWithTimeSql"/>:
+    /// one definition, so the recorded-size predicate and ordering cannot drift between the two (#5718).</summary>
+    private const string LatestStoreSizeTail = $@"
 FROM collect.store_metrics
 WHERE object_kind = '{StoreObjectKind}'
 AND   total_bytes IS NOT NULL
 ORDER BY metric_time DESC
 LIMIT 1";
+
+    /// <summary>
+    /// <see cref="LatestStoreSizeSql"/> with the row's <c>metric_time</c> (naive UTC) added (#5718): the
+    /// polled <c>get_store_host</c> reads take the store size from the hourly sweep instead of paying
+    /// <c>pg_database_size</c> on every poll, and report how old the figure is. Same predicate and ordering,
+    /// so the same backward scan serves it. No parameters.
+    /// </summary>
+    public const string LatestStoreSizeWithTimeSql = "SELECT total_bytes, metric_time" + LatestStoreSizeTail;
 
     /// <summary>The sweep's own retention — one bounded DELETE, no policy machinery. $1 cutoff (naive UTC,
     /// metric_time minus <see cref="RetentionDays"/> days).</summary>
