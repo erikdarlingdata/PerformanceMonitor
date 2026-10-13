@@ -79,21 +79,35 @@ public sealed class WebCollectionHealthRunAtColumnTests
             Assert.Equal(1, tools.Split(field, StringSplitOptions.None).Length - 1);
         }
 
-        /* The compact and the partial row each have a second shape for a collector that has a run time, and that is the
-           only place their run_at and next_run_utc are written, so a collector with none adds no bytes to either row (Lite
-           carries the same two fields under the same rule). The note is the partial row's own: it rides in that shape too. */
+        /* The compact row has a second shape for a collector that has a run time, and that is the only place its run_at and
+           next_run_utc are written, so a collector with none adds no bytes to it (Lite carries the same two fields under
+           the same rule). */
         foreach (var field in new[] { "run_at = (string?)runTime.RunAt,", "next_run_utc = runTime.NextRunUtcText," })
         {
-            Assert.Equal(2, tools.Split(field, StringSplitOptions.None).Length - 1);
+            Assert.Equal(1, tools.Split(field, StringSplitOptions.None).Length - 1);
         }
 
-        Assert.Equal(1, tools.Split("run_time_note = runTime.SkippedDayNote,", StringSplitOptions.None).Length - 1);
+        /* #5748: the partial row is one dictionary that leaves out a null, false or 0 key. Its run time keys are written
+           in exactly one place, under `if (runTime is not null)`, so a collector with no run time adds no bytes to it. The
+           note rides there too and is left out when null, so only a collector with a run time that skipped a day has one. */
+        var partialAt = tools.IndexOf("static Dictionary<string, object?> PartialCollectionHealthRow(", StringComparison.Ordinal);
+        Assert.True(partialAt > 0);
+        var guardAt = tools.IndexOf("if (runTime is not null)", partialAt, StringComparison.Ordinal);
+        Assert.True(guardAt > partialAt);
+        foreach (var call in new[]
+        {
+            "AddUnlessDefault(row, \"run_at\", runTime.RunAt);",
+            "AddUnlessDefault(row, \"next_run_utc\", runTime.NextRunUtcText);",
+            "AddUnlessDefault(row, \"run_time_note\", runTime.SkippedDayNote);",
+        })
+        {
+            Assert.Equal(1, tools.Split(call, StringSplitOptions.None).Length - 1);
+            Assert.True(tools.IndexOf(call, StringComparison.Ordinal) > guardAt, call + " must sit under the runTime guard");
+        }
 
-        /* The note is the full row's always, and the partial row's only for a collector that has a run time, the same
-           condition as its run_at and next_run_utc. So the key is written in exactly those two places: the partial row
-           built for a collector with no run time has no run_time_note at all, not a null one, and a compact row never has
-           one. */
-        Assert.Equal(2, tools.Split("run_time_note = ", StringSplitOptions.None).Length - 1);
+        /* The note is the full row's always, so the plain assignment form appears once, in the full row. A compact row
+           never has one. */
+        Assert.Equal(1, tools.Split("run_time_note = ", StringSplitOptions.None).Length - 1);
         Assert.DoesNotContain("run_time_note = (string?)null", tools, StringComparison.Ordinal);
     }
 

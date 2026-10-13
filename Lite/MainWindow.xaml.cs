@@ -870,6 +870,7 @@ public partial class MainWindow : Window
         {
             "blocked_process_report" => "blocking",
             "deadlocks" => "deadlock",
+            "attention" => "client-timeout",
             "long_query_completions" => "long-query",
             _ => name,
         }));

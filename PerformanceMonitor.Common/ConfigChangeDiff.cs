@@ -234,10 +234,28 @@ public static class ConfigChangeDiff
     /// newest first.
     /// </summary>
     public static List<TraceFlagChange> DiffTraceFlagChanges(
-        IReadOnlyList<TraceFlagSnapshot> snapshots, DateTime startUtc, DateTime endUtc)
+        IReadOnlyList<TraceFlagSnapshot> snapshots, DateTime startUtc, DateTime endUtc) =>
+        DiffTraceFlagChanges(snapshots, [], startUtc, endUtc);
+
+    /// <summary>
+    /// The same diff, with the collector's EMPTY runs as snapshots (#5633 item 19). A trace_flags run that finds no flag
+    /// enabled stores no rows, so the rows alone never show the last flag being turned off. Each time in
+    /// <paramref name="emptyRunTimes"/> is a SUCCESSFUL run that stored zero rows: it is a capture with no flags, so flags on
+    /// followed by an empty run read as <c>disabled</c> at that run's time, and an empty run followed by a flag reads as
+    /// <c>enabled</c>. A failed or missing run is never passed here (the caller reads only SUCCESS rows with
+    /// <c>rows_collected = 0</c>), and a time that already holds flag rows is ignored: the rows are the better evidence.
+    /// </summary>
+    public static List<TraceFlagChange> DiffTraceFlagChanges(
+        IReadOnlyList<TraceFlagSnapshot> snapshots, IEnumerable<DateTime> emptyRunTimes, DateTime startUtc, DateTime endUtc)
     {
         var changes = new List<TraceFlagChange>();
-        var byCapture = snapshots.GroupBy(s => s.CaptureTime).OrderBy(g => g.Key).ToList();
+        var groups = snapshots.GroupBy(s => s.CaptureTime).ToDictionary(g => g.Key, g => g.ToList());
+        foreach (var emptyAt in emptyRunTimes)
+        {
+            groups.TryAdd(emptyAt, []);
+        }
+
+        var byCapture = groups.OrderBy(g => g.Key).ToList();
 
         for (var i = 1; i < byCapture.Count; i++)
         {
@@ -247,8 +265,8 @@ public static class ConfigChangeDiff
                 continue;
             }
 
-            var prevSnap = byCapture[i - 1].GroupBy(s => s.TraceFlag).ToDictionary(g => g.Key, g => g.First());
-            var curSnap = byCapture[i].GroupBy(s => s.TraceFlag).ToDictionary(g => g.Key, g => g.First());
+            var prevSnap = byCapture[i - 1].Value.GroupBy(s => s.TraceFlag).ToDictionary(g => g.Key, g => g.First());
+            var curSnap = byCapture[i].Value.GroupBy(s => s.TraceFlag).ToDictionary(g => g.Key, g => g.First());
 
             foreach (var (flag, c) in curSnap)
             {

@@ -354,6 +354,11 @@ public sealed class DarlingAnalysisService
     /// day-of-week baseline, which is keyed off the window rather than off the clock; that is what makes
     /// the answer for a past window the same KIND of answer, and not merely a differently-filtered one.
     /// An anchored pass does not persist — see <see cref="AnalysisContext.PersistFindings"/>.</para>
+    /// <para><b><c>persistCollectionCaveats</c> (#5633 item 13).</b> True only for the SCHEDULED pass (the worker, as
+    /// the service role): <c>collect.analysis_collection_caveats</c> is that pass's state, so it is the only caller
+    /// that writes it. Every on-demand pass (the MCP <c>analyze_server</c> tool, anchored or not) leaves it false:
+    /// it still computes its caveats for its own response and the in-process ledger, and the <c>mcp</c> role holds
+    /// no write on the table. Defaults to false so a new on-demand caller cannot write it by forgetting a flag.</para>
     /// </summary>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
         Justification = "The two tokens are at positions 4 and 5 and the Darling worker passes them POSITIONALLY. " +
@@ -362,7 +367,7 @@ public sealed class DarlingAnalysisService
                         "only edit that cannot do that, and Lite's twin keeps the same order so the two stay transplantable.")]
     public async Task<List<AnalysisFinding>> AnalyzeAsync(
         int serverId, string serverName, int hoursBack = 4, CancellationToken cancellationToken = default,
-        CancellationToken shutdownToken = default, DateTime? asOfUtc = null)
+        CancellationToken shutdownToken = default, DateTime? asOfUtc = null, bool persistCollectionCaveats = false)
     {
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
@@ -387,13 +392,13 @@ public sealed class DarlingAnalysisService
             ShutdownToken = shutdownToken
         };
 
-        return await AnalyzeAsync(context);
+        return await AnalyzeAsync(context, persistCollectionCaveats);
     }
 
     /// <summary>
     /// Runs the full analysis pipeline with a specific context.
     /// </summary>
-    public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context)
+    public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context, bool persistCollectionCaveats = false)
     {
         if (IsAnalyzing)
             return [];
@@ -483,8 +488,14 @@ public sealed class DarlingAnalysisService
                 .Select(g => new CollectionCaveatStore.UnreadFamily(g.Key, CollectionFailure.Label(g.Last().Outcome)))
                 .ToArray();
 
-            await CollectionCaveatStore.ApplyPassAsync(
-                _postgres, context.ServerId, unreadFamilies, DateTime.UtcNow, _logger, context.CancellationToken);
+            /* #5633 item 13: the table is the SCHEDULED pass's state. An on-demand pass (MCP analyze_server, with
+               or without as_of) computed unreadFamilies for its own response above and must not replace the
+               standing rows: it ran over a window the caller chose, as a role that holds no write on the table. */
+            if (persistCollectionCaveats)
+            {
+                await CollectionCaveatStore.ApplyPassAsync(
+                    _postgres, context.ServerId, unreadFamilies, DateTime.UtcNow, _logger, context.CancellationToken);
+            }
 
             if (context.CollectionFailures.Count > 0)
             {
@@ -1161,11 +1172,43 @@ AND   capture_time >= COALESCE(
 ORDER BY database_name, capture_time";
 
     /// <summary>
+    /// The successful <c>trace_flags</c> runs that stored ZERO rows (#5633 item 19), the empty snapshots the trace-flag diff
+    /// needs: the collector writes no row when no flag is enabled, so without these "the last flag was disabled" is invisible.
+    /// Bounded like <see cref="TraceFlagSnapshotsForAttributionSql"/>: the runs inside the window plus the newest one before it,
+    /// that one no older than the window start minus the trace_flags retention (<see cref="DarlingRetentionHorizons.TraceFlagsBaselineFloorSql"/>).
+    /// SUCCESS only and <c>rows_collected = 0</c> only (NULL is not recorded). <c>$1</c> server_id, <c>$2</c> window start,
+    /// <c>$3</c> window end.
+    /// <para>This is NOT <see cref="DarlingRetentionHorizons.EmptyTraceFlagRunsSql"/> on purpose (#5633 review): that one reads
+    /// <c>v_collection_log</c> (hot rows plus the archive) for the MCP tool and the viewer, while the analysis engine reads the base
+    /// <c>collection_log</c> like every other attribution read here, so the two cannot share text. Only the shape and the retention
+    /// floor are the same, and <c>TraceFlagEmptyRunLivePostgresTests</c> runs both against one seed.</para>
+    /// </summary>
+    public static readonly string EmptyTraceFlagRunsForAttributionSql = $@"
+(SELECT collection_time
+ FROM collection_log
+ WHERE server_id = $1
+ AND   collector_name = 'trace_flags'
+ AND   status = 'SUCCESS'
+ AND   rows_collected = 0
+ AND   collection_time >= $2
+ AND   collection_time <= $3)
+UNION ALL
+(SELECT collection_time
+ FROM collection_log
+ WHERE server_id = $1
+ AND   collector_name = 'trace_flags'
+ AND   status = 'SUCCESS'
+ AND   rows_collected = 0
+ AND   collection_time < $2
+ AND   collection_time >= {DarlingRetentionHorizons.TraceFlagsBaselineFloorSql("$2")}
+ ORDER BY collection_time DESC
+ LIMIT 1)";
+
+    /// <summary>
     /// The <c>trace_flags</c> snapshots the attribution set-diffs (#3653 A10, slice two): the same window
     /// rule again, over the per-enabled-flag rows <c>DBCC TRACESTATUS(-1)</c> yields. The baseline subquery
     /// finds the last capture WITH rows before the window — the collector writes none when no flag is enabled,
-    /// so a zero-flag capture is invisible to this read and to the diff alike (the blind spot
-    /// <c>ConfigChangeAttribution</c>'s remarks state). <c>$1</c> server_id, <c>$2</c> window start, <c>$3</c>
+    /// so a zero-flag capture is read separately, from <see cref="EmptyTraceFlagRunsForAttributionSql"/>. <c>$1</c> server_id, <c>$2</c> window start, <c>$3</c>
     /// window end.
     /// </summary>
     public const string TraceFlagSnapshotsForAttributionSql = @"
@@ -1315,6 +1358,7 @@ ORDER BY event_time_local";
 
             var databaseSnapshots = await ReadDatabaseConfigSnapshotsAsync(context);
             var traceFlagSnapshots = await ReadTraceFlagSnapshotsAsync(context);
+            var emptyTraceFlagRuns = await ReadEmptyTraceFlagRunsAsync(context);
 
             var serverEvents = ConfigChangeAttribution.GroupIntoEvents(
                 ConfigChangeDiff.DiffServerConfigChanges(snapshots, context.TimeRangeStart, context.TimeRangeEnd)
@@ -1327,9 +1371,9 @@ ORDER BY event_time_local";
                     .Select(c => (c.ChangeTime, ConfigChangeAttribution.SettingChange.ForDatabase(c.DatabaseName, c.SettingName, c.OldValue, c.NewValue))),
                 databaseSnapshots.Select(s => s.CaptureTime));
             var traceFlagEvents = ConfigChangeAttribution.GroupIntoEvents(
-                ConfigChangeDiff.DiffTraceFlagChanges(traceFlagSnapshots, context.TimeRangeStart, context.TimeRangeEnd)
+                ConfigChangeDiff.DiffTraceFlagChanges(traceFlagSnapshots, emptyTraceFlagRuns, context.TimeRangeStart, context.TimeRangeEnd)
                     .Select(c => (c.ChangeTime, ConfigChangeAttribution.SettingChange.ForTraceFlag(c.TraceFlag, c.ChangeType, c.Scope, c.PreviousStatus, c.NewStatus))),
-                traceFlagSnapshots.Select(s => s.CaptureTime));
+                traceFlagSnapshots.Select(s => s.CaptureTime).Concat(emptyTraceFlagRuns));
             var events = ConfigChangeAttribution.MergeSameConnectEvents(serverEvents.Concat(databaseEvents).Concat(traceFlagEvents));
             if (events.Count == 0)
                 return;
@@ -1415,6 +1459,26 @@ ORDER BY event_time_local";
         }
 
         return rows;
+    }
+
+    /// <summary>The times of the successful trace_flags runs that stored no row (#5633 item 19), through
+    /// <see cref="EmptyTraceFlagRunsForAttributionSql"/>. No catch of its own, for the reason <see cref="ReadDatabaseConfigSnapshotsAsync"/> states.</summary>
+    private async Task<List<DateTime>> ReadEmptyTraceFlagRunsAsync(AnalysisContext context)
+    {
+        var times = new List<DateTime>();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        using var cmd = new NpgsqlCommand(EmptyTraceFlagRunsForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeStart, DateTimeKind.Unspecified));
+        cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeEnd, DateTimeKind.Unspecified));
+
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            times.Add(reader.GetDateTime(0));
+        }
+
+        return times;
     }
 
     /// <summary>

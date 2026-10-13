@@ -127,6 +127,8 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool BlockingEnabled => _config.Alerts.BlockingEnabled;
     public bool DeadlockEnabled => _config.Alerts.DeadlockEnabled;
     public bool PoisonWaitEnabled => _config.Alerts.PoisonWaitEnabled;
+    public bool RunnableQueueEnabled => _config.Alerts.RunnableQueueEnabled;
+    public bool ClientTimeoutsEnabled => _config.Alerts.ClientTimeoutsEnabled;
     public bool LongRunningQueryEnabled => _config.Alerts.LongRunningQueryEnabled;
     public bool TempDbSpaceEnabled => _config.Alerts.TempDbSpaceEnabled;
     public bool LowDiskEnabled => _config.Alerts.LowDiskEnabled;
@@ -162,6 +164,17 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
         _config.Alerts.DeadlockCountThreshold);
     /* #3539 A4: pass-through of a knob the engine no longer reads — see the interface member's doc. */
     public int PoisonWaitThresholdMs => _config.Alerts.PoisonWaitThresholdMs;
+    /* #5641: the pair as the engine reads it - Warning at least 1, Critical never below Warning. The MCP write bound
+       is the same floor, so update_alert_settings cannot accept a value this clamp then rewrites. */
+    public int RunnableQueueWarningPerScheduler =>
+        RunnableQueueEvaluator.ClampBars(_config.Alerts.RunnableQueueWarningPerScheduler, _config.Alerts.RunnableQueueCriticalPerScheduler).Warning;
+    public int RunnableQueueCriticalPerScheduler =>
+        RunnableQueueEvaluator.ClampBars(_config.Alerts.RunnableQueueWarningPerScheduler, _config.Alerts.RunnableQueueCriticalPerScheduler).Critical;
+    /* #5640: the Client Timeouts pair as the engine reads it - Warning at least 1, Critical never below Warning. */
+    public int ClientTimeoutsWarningPerMinute =>
+        AttentionEvaluator.ClampBars(_config.Alerts.ClientTimeoutsWarningPerMinute, _config.Alerts.ClientTimeoutsCriticalPerMinute).Warning;
+    public int ClientTimeoutsCriticalPerMinute =>
+        AttentionEvaluator.ClampBars(_config.Alerts.ClientTimeoutsWarningPerMinute, _config.Alerts.ClientTimeoutsCriticalPerMinute).Critical;
     public int LongRunningQueryThresholdMinutes => _config.Alerts.LongRunningQueryThresholdMinutes;
     public int TempDbSpaceThresholdPercent => _config.Alerts.TempDbSpaceThresholdPercent;
     public int LowDiskThresholdPercent => Math.Clamp(_config.Alerts.LowDiskThresholdPercent, 0, 100);

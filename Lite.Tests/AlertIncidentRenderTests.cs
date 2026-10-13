@@ -172,14 +172,18 @@ public class AlertIncidentRenderTests
             new[]
             {
                 "AgReplicaIdentity", "AttachmentFileName", "AttachmentXml", "CollectorName", "Details",
-                "Incidents", "NewestSample", "Route", "Routing", "SeverityOverride", "WaitType"
+                "EscalationBypassesCooldown", "External", "Incidents", "NewestSample", "Route", "Routing", "SeverityOverride", "WaitType"
             },
             census);
 
         var context = AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A");
         context.SeverityOverride = AlertSeverityLevel.Critical;
+        /* #5654: the external origin rides every copy, so a delivered card keeps its title mark. */
+        context.External = new AlertExternalOrigin("billing", "queue-depth", 1);
         context.AttachmentXml = "<graph/>";
         context.AttachmentFileName = "deadlock_graph.xml";
+        /* #5641: a tier escalation's cooldown bypass rides every copy (the cooldown reads it off the context it is handed). */
+        context.EscalationBypassesCooldown = true;
         /* #5642: the fire-time sample age rides every copy, so the delivered body prints the age line. */
         context.NewestSample = new AlertNewestSample("CPU", new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc), TimeSpan.FromSeconds(45));
         AlertIncidentRenderer.Apply(context, new[]
@@ -207,8 +211,21 @@ public class AlertIncidentRenderTests
         {
             Assert.Equal(AlertSeverityLevel.Critical, copy.SeverityOverride);
             Assert.Equal("OrdersAG:REPLICA-A", copy.AgReplicaIdentity);
+            Assert.Equal(context.External, copy.External);
             Assert.Equal(context.NewestSample, copy.NewestSample);
+            Assert.True(copy.EscalationBypassesCooldown);
         }
+
+        /* The per-event split's messages are the third copy; each is delivered (and cooled down) on its own. */
+        foreach (var message in PerEventNotification.Split(context, 10))
+        {
+            Assert.True(message.Context.EscalationBypassesCooldown);
+        }
+
+        /* And an alert that is NOT an escalation stays unflagged through every copy (the default is not forced on). */
+        var plain = AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A");
+        AlertIncidentRenderer.Apply(plain, new[] { new AlertIncident("fresh-census", new[] { "SalesDb.dbo.Shipments" }) });
+        Assert.False(IncidentDeliveryFilter.ForDelivery(plain, null, new[] { "fresh-census" }).Context!.EscalationBypassesCooldown);
 
         Assert.Null(filtered!.AttachmentXml);
         Assert.Null(filtered!.AttachmentFileName);

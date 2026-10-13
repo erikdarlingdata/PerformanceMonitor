@@ -321,6 +321,162 @@ REVOKE ALL ON FUNCTION {config}.{InfoFunctionName}() FROM PUBLIC;";
     /// </summary>
     public static string BuildGrantSql(string configSchema, IReadOnlyList<string> roles)
     {
+        return BuildGrantSqlCore(configSchema, roles);
+    }
+
+    /// <summary>
+    /// Takes from PUBLIC the SELECT the extension's install script gives on its views, and EXECUTE on the functions behind them
+    /// (#5654), so a login that holds nothing else (an external alert source login) cannot read every role's statement
+    /// statistics, then gives the same SELECT and EXECUTE to <c>pg_read_all_stats</c>, which <c>pg_monitor</c> includes. A
+    /// login with that role keeps reading the statistics of the database this store lives in when it monitors that database as
+    /// a PostgreSQL target. The readers are the SECURITY DEFINER functions above, run as their owner, so they are unaffected. A
+    /// role that may not revoke or grant them (not the extension's owner) gets a warning from the server and changes nothing.
+    /// </summary>
+    public static string BuildRevokePublicSql(string extensionSchema, bool withInfoView)
+    {
+        var schema = "\"" + extensionSchema.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+        var sql = $@"
+REVOKE SELECT ON {schema}.pg_stat_statements FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION {schema}.pg_stat_statements(boolean) FROM PUBLIC;
+GRANT SELECT ON {schema}.pg_stat_statements TO pg_read_all_stats;
+GRANT EXECUTE ON FUNCTION {schema}.pg_stat_statements(boolean) TO pg_read_all_stats;";
+        return withInfoView
+            ? sql + $@"
+REVOKE SELECT ON {schema}.pg_stat_statements_info FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION {schema}.pg_stat_statements_info() FROM PUBLIC;
+GRANT SELECT ON {schema}.pg_stat_statements_info TO pg_read_all_stats;
+GRANT EXECUTE ON FUNCTION {schema}.pg_stat_statements_info() TO pg_read_all_stats;"
+            : sql;
+    }
+
+    /// <summary>
+    /// The text of the warning the service logs, and <c>tools/provision-roles.sql</c> raises, when PUBLIC still reads
+    /// <c>pg_stat_statements</c> after the revoke (#5654). A <c>pg_catalog.format</c> string: the extension's schema, its
+    /// owner twice, then the statements that owner runs. Both sides build it from this text, so the two say the same.
+    /// </summary>
+    public const string PublicReadsWarningFormat =
+        "Statement statistics: PUBLIC can still read %s.pg_stat_statements, so every login that may connect to this database reads the statement statistics of every role, the external alert source logins included. Only the owner of the extension, %s, or a superuser can revoke that. Have %s run, in this database: %s";
+
+    /// <summary>
+    /// One row about the extension's grants (#5654), or no row when it is not installed. <c>may_change</c>: this role may
+    /// revoke and grant on the view (a superuser, or a role with the privileges of the view's owner); any other role gets an
+    /// ERROR from REVOKE when it holds nothing on the view, so the setup leaves the grants alone. <c>statements</c>: the
+    /// revoke from PUBLIC and the grants to <c>pg_read_all_stats</c> and to every store owner that is not a superuser and
+    /// does not own the view (the owner of <c>config.config_monitored_servers</c> and of the reader functions, which run as
+    /// their owner and read the view with its privileges). <c>warning</c>: <see cref="PublicReadsWarningFormat"/> filled
+    /// in when PUBLIC still holds SELECT on either view or EXECUTE on either function behind them, else NULL. $1 is the
+    /// config schema. Every name is <c>pg_catalog</c>-qualified, and the objects are found by name in <c>pg_class</c>, not
+    /// with <c>to_regclass</c>, which needs USAGE on the schema it looks in.
+    /// </summary>
+    public const string PublicReadsSql = @"
+WITH ext AS
+(
+    SELECT
+        n.nspname,
+        e.extowner,
+        e.extnamespace,
+        (
+            SELECT c.oid
+            FROM pg_catalog.pg_class AS c
+            WHERE c.relnamespace = e.extnamespace
+            AND   c.relname OPERATOR(pg_catalog.=) 'pg_stat_statements'
+        ) AS view_oid,
+        (
+            SELECT c.oid
+            FROM pg_catalog.pg_class AS c
+            WHERE c.relnamespace = e.extnamespace
+            AND   c.relname OPERATOR(pg_catalog.=) 'pg_stat_statements_info'
+        ) AS info_oid
+    FROM pg_catalog.pg_extension AS e
+    JOIN pg_catalog.pg_namespace AS n
+      ON n.oid = e.extnamespace
+    WHERE e.extname = 'pg_stat_statements'
+),
+facts AS
+(
+    SELECT
+        ext.*,
+        (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = ext.view_oid) AS view_owner,
+        (
+            SELECT pg_catalog.string_agg(pg_catalog.quote_ident(r.rolname), ', ' ORDER BY r.rolname)
+            FROM pg_catalog.pg_roles AS r
+            WHERE NOT r.rolsuper
+            AND   r.oid IS DISTINCT FROM (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = ext.view_oid)
+            AND   r.oid IN
+                  (
+                      SELECT c.relowner
+                      FROM pg_catalog.pg_class AS c
+                      JOIN pg_catalog.pg_namespace AS cn
+                        ON cn.oid = c.relnamespace
+                      WHERE cn.nspname OPERATOR(pg_catalog.=) $1::text
+                      AND   c.relname OPERATOR(pg_catalog.=) 'config_monitored_servers'
+                      UNION ALL
+                      SELECT p.proowner
+                      FROM pg_catalog.pg_proc AS p
+                      JOIN pg_catalog.pg_namespace AS pn
+                        ON pn.oid = p.pronamespace
+                      WHERE pn.nspname OPERATOR(pg_catalog.=) $1::text
+                      AND   p.proname IN ('store_statement_stats', 'store_statement_stats_info')
+                  )
+        ) AS owners,
+        (
+            EXISTS
+            (
+                SELECT 1
+                FROM pg_catalog.pg_class AS c
+                CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) AS a
+                WHERE c.oid IN (ext.view_oid, ext.info_oid)
+                AND   a.grantee = 0
+                AND   a.privilege_type = 'SELECT'
+            )
+            OR EXISTS
+            (
+                SELECT 1
+                FROM pg_catalog.pg_proc AS p
+                CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) AS a
+                WHERE p.pronamespace = ext.extnamespace
+                AND   p.proname IN ('pg_stat_statements', 'pg_stat_statements_info')
+                AND   a.grantee = 0
+                AND   a.privilege_type = 'EXECUTE'
+            )
+        ) AS public_reads
+    FROM ext
+),
+built AS
+(
+    SELECT
+        f.*,
+        'pg_read_all_stats' || COALESCE(', ' || f.owners, '') AS grantees
+    FROM facts AS f
+),
+statements AS
+(
+    SELECT
+        b.*,
+        pg_catalog.format('REVOKE SELECT ON %1$I.pg_stat_statements FROM PUBLIC; REVOKE EXECUTE ON FUNCTION %1$I.pg_stat_statements(boolean) FROM PUBLIC; GRANT SELECT ON %1$I.pg_stat_statements TO %2$s; GRANT EXECUTE ON FUNCTION %1$I.pg_stat_statements(boolean) TO %2$s;', b.nspname, b.grantees)
+        || CASE
+               WHEN b.info_oid IS NULL THEN ''
+               ELSE pg_catalog.format(' REVOKE SELECT ON %1$I.pg_stat_statements_info FROM PUBLIC; REVOKE EXECUTE ON FUNCTION %1$I.pg_stat_statements_info() FROM PUBLIC; GRANT SELECT ON %1$I.pg_stat_statements_info TO %2$s; GRANT EXECUTE ON FUNCTION %1$I.pg_stat_statements_info() TO %2$s;', b.nspname, b.grantees)
+           END AS sql_text
+    FROM built AS b
+)
+SELECT
+    COALESCE((SELECT r.rolsuper FROM pg_catalog.pg_roles AS r WHERE r.rolname OPERATOR(pg_catalog.=) current_user), false)
+        OR (s.view_owner IS NOT NULL AND pg_catalog.pg_has_role(current_user, s.view_owner, 'USAGE')) AS may_change,
+    s.sql_text,
+    CASE
+        WHEN s.public_reads THEN pg_catalog.format(
+            '" + PublicReadsWarningFormat + @"',
+            pg_catalog.quote_ident(s.nspname),
+            pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(s.extowner)),
+            pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(s.extowner)),
+            s.sql_text)
+    END AS warning
+FROM statements AS s
+WHERE s.view_oid IS NOT NULL";
+
+    private static string BuildGrantSqlCore(string configSchema, IReadOnlyList<string> roles)
+    {
         if (roles is null)
         {
             throw new ArgumentNullException(nameof(roles));
@@ -480,6 +636,8 @@ FROM
             await grant.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        await RevokeFromPublicAsync(connection, configSchema, logger, cancellationToken);
+
         if (!loaded)
         {
             logger?.LogDebug(
@@ -516,6 +674,59 @@ FROM
         logger?.LogDebug("Statement statistics ready: {Extension} is loaded and {Schema}.{Function}() is granted to the reader roles.", ExtensionName, configSchema, FunctionName);
         return SetupOutcome.Ready;
     }
+
+    /// <summary>
+    /// Takes <c>pg_stat_statements</c> from PUBLIC (#5654) when this role may (<see cref="PublicReadsSql"/>), granting it to
+    /// <c>pg_read_all_stats</c> and to each store owner that is not a superuser, so the reader functions keep reading it.
+    /// Then reads the grants again: when PUBLIC still holds them (the extension belongs to a superuser and this role is not
+    /// one), logs a warning, once per process, that names the extension's owner and the statements it runs.
+    /// </summary>
+    private static async Task RevokeFromPublicAsync(NpgsqlConnection connection, string configSchema, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var (mayChange, statements, _) = await ReadPublicReadsAsync(connection, configSchema, cancellationToken);
+        if (mayChange && statements is not null)
+        {
+            await using var revoke = new NpgsqlCommand(statements, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await revoke.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var (_, _, warning) = await ReadPublicReadsAsync(connection, configSchema, cancellationToken);
+        if (warning is null)
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref s_publicReadsWarned, 1) != 0)
+        {
+            logger?.LogDebug("Statement statistics: PUBLIC can still read pg_stat_statements on this store.");
+            return;
+        }
+
+        logger?.LogWarning("{Warning}", warning);
+    }
+
+    private static async Task<(bool MayChange, string? Statements, string? Warning)> ReadPublicReadsAsync(
+        NpgsqlConnection connection, string configSchema, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(PublicReadsSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+        command.Parameters.AddWithValue(configSchema);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return (false, null, null);
+        }
+
+        return (
+            reader.GetBoolean(0),
+            await reader.IsDBNullAsync(1, cancellationToken) ? null : reader.GetString(1),
+            await reader.IsDBNullAsync(2, cancellationToken) ? null : reader.GetString(2));
+    }
+
+    /* Once per process, like the utility-tracking warning: the hourly pass would otherwise repeat it all day. */
+    private static int s_publicReadsWarned;
+
+    /// <summary>Re-arms the once-per-process PUBLIC-reads warning, for the test that asserts it.</summary>
+    internal static void ResetPublicReadsWarning() => Interlocked.Exchange(ref s_publicReadsWarned, 0);
 
     /// <summary>Per-statement budget for the setup steps: catalog DDL and a scan of at most
     /// <c>pg_stat_statements.max</c> entries, so generous rather than tight.</summary>

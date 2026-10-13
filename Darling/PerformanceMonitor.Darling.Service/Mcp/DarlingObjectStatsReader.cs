@@ -66,7 +66,7 @@ internal static class DarlingObjectStatsReader
     /// <param name="DaysOfData">Whole calendar days between the earliest and latest snapshots — how much history the
     /// growth figures can honestly span. 0 means one day of snapshots: no growth is knowable.</param>
     public sealed record ObjectSizeGrowthRow(
-        string DatabaseName, string SchemaName, string TableName, double CurrentReservedMb, double CurrentUsedMb,
+        string DatabaseName, string SchemaName, string TableName, double? CurrentReservedMb, double? CurrentUsedMb,
         long TotalRows, int IndexCount,
         double? ReservedMb7dAgo, double? ReservedMb30dAgo, double? ReservedMbOldest,
         DateTime? Snapshot7dTime, DateTime? Snapshot30dTime, DateTime EarliestSnapshotTime, DateTime LatestSnapshotTime, int DaysOfData)
@@ -129,7 +129,7 @@ internal static class DarlingObjectStatsReader
     public sealed record DatabaseSizeRow(
         DateTime CollectionTime, string DatabaseName, string? FileName, string? FileTypeDesc, double? TotalSizeMb,
         double? UsedSizeMb, double? AutoGrowthMb, double? MaxSizeMb, string? VolumeMountPoint, double? VolumeTotalMb, double? VolumeFreeMb,
-        int? FileId = null)
+        int? FileId = null, bool? IsPercentGrowth = null, double? GrowthPct = null)
     {
         /// <summary>True for the one row another database on an Azure SQL Database server gets: it holds the
         /// database's data size, and its log size is not reported.</summary>
@@ -176,6 +176,7 @@ internal static class DarlingObjectStatsReader
             FROM v_index_object_stats
             WHERE server_id = $1 AND collection_time = (SELECT latest_time FROM boundaries)
             AND ($5::text[] IS NULL OR database_name = ANY($5))
+            AND LEFT(table_name, 1) IS DISTINCT FROM '#'
             GROUP BY database_name, schema_name, table_name
         ),
         past_7d AS (
@@ -220,7 +221,7 @@ internal static class DarlingObjectStatsReader
         LEFT JOIN past_7d p7 ON p7.database_name = l.database_name AND p7.schema_name = l.schema_name AND p7.table_name = l.table_name
         LEFT JOIN past_30d p30 ON p30.database_name = l.database_name AND p30.schema_name = l.schema_name AND p30.table_name = l.table_name
         LEFT JOIN oldest o ON o.database_name = l.database_name AND o.schema_name = l.schema_name AND o.table_name = l.table_name
-        ORDER BY l.current_reserved_mb DESC
+        ORDER BY l.current_reserved_mb DESC NULLS LAST, l.database_name, l.schema_name, l.table_name
         LIMIT $4
         """;
 
@@ -250,8 +251,9 @@ internal static class DarlingObjectStatsReader
                 reader.IsDBNull(0) ? "" : reader.GetString(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? "" : reader.GetString(2),
-                reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                /* #5633 item 15: a table with no measured size stays null, never 0 (the sort puts it last, below). */
+                reader.IsDBNull(3) ? null : reader.GetDouble(3),
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
                 reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                 reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
                 /* The baselines stay NULL when the store has none — a missing baseline is not a 0 baseline. */
@@ -325,6 +327,10 @@ internal static class DarlingObjectStatsReader
             COALESCE(user_updates, 0) AS user_updates,
             GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,
             CASE
+                /* #5633 item 16: a heap or a clustered index IS the table, not a drop candidate: with no reads it is
+                   'Table not read' whatever its update count, and with reads it falls through to 'Active'. */
+                WHEN (index_type_desc = 'HEAP' OR index_type_desc LIKE 'CLUSTERED%')
+                     AND COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 'Table not read'
                 WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
                      AND COALESCE(user_updates, 0) = 0 THEN 'Unused'
                 WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
@@ -336,7 +342,8 @@ internal static class DarlingObjectStatsReader
         AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
         ORDER BY
-            CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 0 ELSE 1 END,
+            CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
+                 AND index_type_desc IS DISTINCT FROM 'HEAP' AND COALESCE(index_type_desc, '') NOT LIKE 'CLUSTERED%' THEN 0 ELSE 1 END,
             reserved_mb DESC NULLS LAST,
             database_name,
             schema_name,
@@ -693,7 +700,9 @@ internal static class DarlingObjectStatsReader
             volume_mount_point,
             CAST(volume_total_mb AS double precision) AS volume_total_mb,
             CAST(volume_free_mb AS double precision) AS volume_free_mb,
-            file_id
+            file_id,
+            is_percent_growth,
+            CAST(growth_pct AS double precision) AS growth_pct
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   collection_time = $2
@@ -759,7 +768,10 @@ internal static class DarlingObjectStatsReader
                 reader.IsDBNull(9) ? null : reader.GetDouble(9),
                 reader.IsDBNull(10) ? null : reader.GetDouble(10),
                 /* NULL is the one row another database on an Azure SQL Database server gets: it has no file id. */
-                reader.IsDBNull(11) ? null : reader.GetInt32(11)));
+                reader.IsDBNull(11) ? null : reader.GetInt32(11),
+                /* #5633 item 6: a percent-growth file stores its step as a percentage (growth_pct), so auto_growth_mb alone read as null. */
+                reader.IsDBNull(12) ? null : reader.GetBoolean(12),
+                reader.IsDBNull(13) ? null : reader.GetDouble(13)));
         }
 
         return rows;

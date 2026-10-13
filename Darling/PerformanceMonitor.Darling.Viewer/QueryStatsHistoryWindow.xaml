@@ -87,7 +87,7 @@
                     <ComboBoxItem Content="Execution Count Delta" Tag="DeltaExecutions"/>
                     <ComboBoxItem Content="CPU Delta (ms)" Tag="DeltaCpuMs"/>
                     <ComboBoxItem Content="Logical Reads Delta" Tag="DeltaLogicalReads"/>
-                    <ComboBoxItem Content="Spills Delta" Tag="DeltaSpills"/>
+                    <ComboBoxItem Content="Spilled Pages Delta" Tag="DeltaSpills"/>
                 </ComboBox>
                 <scottplot:WpfPlot x:Name="HistoryChart" Margin="0,0,0,0"/>
             </Grid>
@@ -133,8 +133,8 @@
                 <DataGridTextColumn Header="Physical Reads" Binding="{Binding DeltaPhysicalReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                 <DataGridTextColumn Header="Avg Phys Reads" Binding="{Binding AvgPhysicalReads, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                 <DataGridTextColumn Header="Total Phys Reads" Binding="{Binding TotalPhysicalReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
-                <DataGridTextColumn Header="Spills" Binding="{Binding DeltaSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="70"/>
-                <DataGridTextColumn Header="Total Spills" Binding="{Binding TotalSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="95"/>
+                <DataGridTextColumn Header="Spilled Pages" Binding="{Binding DeltaSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                <DataGridTextColumn Header="Total Spilled Pages" Binding="{Binding TotalSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                 <DataGridTextColumn Header="Min CPU (ms)" Binding="{Binding MinCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                 <DataGridTextColumn Header="Max CPU (ms)" Binding="{Binding MaxCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                 <DataGridTextColumn Header="Min Duration (ms)" Binding="{Binding MinElapsedMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
@@ -145,8 +145,8 @@
                 <DataGridTextColumn Header="Max Phys Reads" Binding="{Binding MaxPhysicalReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                 <DataGridTextColumn Header="Min Rows" Binding="{Binding MinRows, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
                 <DataGridTextColumn Header="Max Rows" Binding="{Binding MaxRows, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
-                <DataGridTextColumn Header="Min Spills" Binding="{Binding MinSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
-                <DataGridTextColumn Header="Max Spills" Binding="{Binding MaxSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
+                <DataGridTextColumn Header="Min Spilled Pages" Binding="{Binding MinSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                <DataGridTextColumn Header="Max Spilled Pages" Binding="{Binding MaxSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                 <DataGridTextColumn Header="Min Grant KB" Binding="{Binding MinGrantKb, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                 <DataGridTextColumn Header="Max Grant KB" Binding="{Binding MaxGrantKb, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                 <DataGridTextColumn Header="Min Used Grant KB" Binding="{Binding MinUsedGrantKb, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120"/>

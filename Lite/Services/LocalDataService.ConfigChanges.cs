@@ -137,7 +137,9 @@ public partial class LocalDataService
         using var _q = TimeQuery("GetTraceFlagChangesAsync", "v_trace_flags snapshot diff");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var snapshots = await ReadTraceFlagSnapshotsAsync(serverId, endTime);
-        return ConfigChangeDiff.DiffTraceFlagChanges(snapshots, startTime, endTime)
+        /* #5633 item 19: a successful run that stored no row is an empty snapshot, so the LAST flag being turned off is a change. */
+        var emptyRuns = await GetEmptyTraceFlagRunsAsync(serverId, startTime, endTime);
+        return ConfigChangeDiff.DiffTraceFlagChanges(snapshots, emptyRuns, startTime, endTime)
             .Select(c => new TraceFlagChangeRow(c))
             .ToList();
     }

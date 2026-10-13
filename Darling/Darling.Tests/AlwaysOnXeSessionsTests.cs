@@ -43,6 +43,7 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public void TheSharedSessionStartsWithTheDatabase_AndThisInstallsOwnFallbackSessionDoesNot(AlwaysOnXeSessionKind kind)
     {
         var shared = AlwaysOnXeSessions.BuildAzureCreateSql(kind, AlwaysOnXeSessions.SharedNameFor(kind));
@@ -67,10 +68,15 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         public List<string> Statements { get; } = new();
         public Exception? CreateFailure { get; set; }
 
+        /* #5640: a create whose text holds this is refused with error 25744, as Azure SQL Database refuses an action it lacks. */
+        public string? RefuseActionText { get; set; }
+
+        public IEnumerable<int> ErrorNumbers(Exception exception) => DarlingXeSessions.ErrorNumbersOf(exception);
+
         public Task<AlwaysOnXeCatalog> ReadCatalogAsync(AlwaysOnXeSessionKind kind, string sessionName, CancellationToken cancellationToken) =>
             Task.FromResult(
                 !Started.ContainsKey(sessionName) ? AlwaysOnXeCatalog.Missing
-                : WrongEvent.Contains(sessionName) && kind == AlwaysOnXeSessionKind.Deadlock ? AlwaysOnXeCatalog.WrongEvent
+                : WrongEvent.Contains(sessionName) && kind is AlwaysOnXeSessionKind.Deadlock or AlwaysOnXeSessionKind.Attention ? AlwaysOnXeCatalog.WrongEvent
                 : AlwaysOnXeCatalog.Present);
 
         public Task<bool> IsStartedAsync(string sessionName, CancellationToken cancellationToken) =>
@@ -86,6 +92,11 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
                 if (CreateFailure is not null)
                 {
                     throw CreateFailure;
+                }
+
+                if (RefuseActionText is not null && statement.Contains(RefuseActionText, StringComparison.Ordinal))
+                {
+                    throw LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(25744, 16, "The action 'sqlserver.sql_text' is not available for Azure SQL Database.");
                 }
 
                 if (Started.ContainsKey(name))
@@ -310,6 +321,129 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.Contains("N'PerformanceMonitor_Deadlock'", DeadlocksCollector.Instance.BuildQuery(AzureContext(null)).Text, StringComparison.Ordinal);
         Assert.Contains($"N'{ownBlocked}'", BlockedProcessReportCollector.Instance.BuildQuery(AzureContext(ownBlocked)).Text, StringComparison.Ordinal);
         Assert.DoesNotContain("N'PerformanceMonitor_BlockedProcess'", BlockedProcessReportCollector.Instance.BuildQuery(AzureContext(ownBlocked)).Text, StringComparison.Ordinal);
+    }
+
+    /* ── #5640 review round 1: H2 (a denied create is PERMISSIONS), L4 (definition probe), L5 (collector gate), L6 (Azure retry) ── */
+
+    private static bool IsAttentionStatement(string s) => s.Contains(AlwaysOnXeSessions.AttentionXeSessionName, StringComparison.Ordinal);
+
+    [Fact]
+    public async Task H2_ACreateDeniedInEveryDatabase_LeavesAPermissionFault_ThatTheWorkerKeepsForTheRun()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Alpha.CreateFailure = LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(15247, 14, "User does not have permission to perform this action.");
+        rig.Beta.CreateFailure = rig.Alpha.CreateFailure;
+
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, DateTime.UtcNow, NullLogger.Instance, CancellationToken.None);
+
+        Assert.NotNull(rig.State.AttentionXePermissionFault);
+        Assert.Contains("ALTER ANY EVENT SESSION", rig.State.AttentionXePermissionFault, StringComparison.Ordinal);
+        /* The run raises the denied exception (PERMISSIONS) for the attention collector alone; Capture Down reads SESSION_MISSING only. */
+        Assert.Equal(rig.State.AttentionXePermissionFault, DarlingWorker.AttentionPermissionFaultFor("attention", rig.State));
+        Assert.Null(DarlingWorker.AttentionPermissionFaultFor("deadlocks", rig.State));
+    }
+
+    [Fact]
+    public async Task H2_ADenialInSomeDatabases_AnOtherFailure_AndAGrant_LeaveNoFault_SoTheReadStaysSessionMissing()
+    {
+        var denial = LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(15247, 14, "denied");
+
+        var some = BuildRig();
+        some.Runner.XeEnsureOverrideForTests = null;
+        some.Alpha.CreateFailure = denial;
+        Assert.Null(await DarlingXeSessions.EnsureAllAsync(some.Runtime, some.Runner, NullLogger.Instance, CancellationToken.None));
+
+        var other = BuildRig();
+        other.Runner.XeEnsureOverrideForTests = null;
+        other.Alpha.CreateFailure = new InvalidOperationException("The create was refused.");
+        other.Beta.CreateFailure = other.Alpha.CreateFailure;
+        Assert.Null(await DarlingXeSessions.EnsureAllAsync(other.Runtime, other.Runner, NullLogger.Instance, CancellationToken.None));
+
+        /* A session dropped by hand on a login that may create one: recreated, no fault; a stale fault is replaced by the ensure. */
+        var granted = BuildRig();
+        granted.Runner.XeEnsureOverrideForTests = null;
+        granted.State.AttentionXePermissionFault = "stale";
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(granted.State, granted.Runner, DateTime.UtcNow, NullLogger.Instance, CancellationToken.None);
+        Assert.Null(granted.State.AttentionXePermissionFault);
+        Assert.Null(DarlingWorker.AttentionPermissionFaultFor("attention", granted.State));
+        Assert.Contains(granted.Alpha.Statements, IsAttentionStatement);
+    }
+
+    [Fact]
+    public void H2_OnPremFaultClassification_ReadsThePermissionNumbers()
+    {
+        Assert.NotNull(DarlingXeSessions.AttentionFaultFor(LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(15247, 14, "denied")));
+        Assert.NotNull(DarlingXeSessions.AttentionFaultFor(LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(262, 14, "denied")));
+        Assert.Null(DarlingXeSessions.AttentionFaultFor(LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(1105, 17, "The filegroup is full.")));
+        var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        Assert.Contains("throw new DarlingXeSessionDeniedException(attentionFault);", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task L5_ADisabledCollector_GetsNoSession_AndNothingIsDropped_AndEnablingItEnsuresAtOnce()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        var start = DateTime.UtcNow;
+
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, start, NullLogger.Instance, CancellationToken.None, attentionEnabled: false);
+        Assert.DoesNotContain(rig.Alpha.Statements, IsAttentionStatement);
+        Assert.Contains(rig.Alpha.Statements, s => s.Contains("PerformanceMonitor_Deadlock", StringComparison.Ordinal));
+        Assert.DoesNotContain(rig.Alpha.Statements, s => s.StartsWith("DROP", StringComparison.Ordinal));
+
+        /* Enabled within the hour: ensured at the next sweep, not after the hour. */
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, start.AddMinutes(1), NullLogger.Instance, CancellationToken.None, attentionEnabled: true);
+        Assert.Contains(rig.Alpha.Statements, IsAttentionStatement);
+
+        var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        Assert.Contains("ResolveSchedule(\"attention\", server.Config.ServerId, _scheduleOverrides).Enabled", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task L6_ARefusedStatementTextAction_RetriesOnceWithoutIt_AndNotesIt()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Alpha.RefuseActionText = "sqlserver.sql_text";
+        var logger = new CapturingLogger();
+
+        await DarlingXeSessions.EnsureAllAsync(rig.Runtime, rig.Runner, logger, CancellationToken.None);
+
+        var creates = rig.Alpha.Statements.Where(s => IsAttentionStatement(s) && s.TrimStart().StartsWith("CREATE", StringComparison.Ordinal)).ToList();
+        Assert.Equal(2, creates.Count);
+        Assert.Contains("sqlserver.sql_text", creates[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("sqlserver.sql_text", creates[1], StringComparison.Ordinal);
+        Assert.Contains("sqlserver.client_hostname", creates[1], StringComparison.Ordinal);
+        Assert.Contains(logger.Lines, l => l.Contains("without statement text", StringComparison.Ordinal));
+        Assert.True(rig.Alpha.Started[AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Attention)]);
+    }
+
+    [Fact]
+    public void L4_TheServerProbe_ComparesEventsActionsAndTargets_AndAnswersTwoForAnotherDefinition()
+    {
+        var sql = AlwaysOnXeSessions.BuildAttentionServerProbeSql("PerformanceMonitorDarling");
+
+        Assert.Contains("sys.server_event_session_events", sql, StringComparison.Ordinal);
+        Assert.Contains("sys.server_event_session_actions", sql, StringComparison.Ordinal);
+        Assert.Contains("sys.server_event_session_targets", sql, StringComparison.Ordinal);
+        foreach (var action in new[] { "client_app_name", "client_hostname", "database_name", "session_id", "sql_text" })
+        {
+            Assert.Contains($"N'{action}'", sql, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("N'event_counter'", sql, StringComparison.Ordinal);
+        Assert.Contains("N'ring_buffer'", sql, StringComparison.Ordinal);
+        Assert.Contains(") = 5", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE 2", sql, StringComparison.Ordinal);
+        Assert.Equal(2, AlwaysOnXeSessions.AttentionDefinitionMismatch);
+        Assert.Equal("DROP EVENT SESSION [PerformanceMonitor_Attention] ON SERVER;", AlwaysOnXeSessions.BuildAttentionServerDropSql());
+
+        /* Azure: the database-scoped catalog, sql_text allowed and not required, so a session created without it still matches. */
+        var azure = AlwaysOnXeSessions.BuildAzureCatalogProbeSql(AlwaysOnXeSessionKind.Attention, "PerformanceMonitorDarling");
+        Assert.Contains("sys.database_event_session_actions", azure, StringComparison.Ordinal);
+        Assert.Contains(") = 4", azure, StringComparison.Ordinal);
+        Assert.Contains("ELSE 1", azure, StringComparison.Ordinal);
     }
 
     private static CollectorContext AzureContext(string? sessionName) => new()

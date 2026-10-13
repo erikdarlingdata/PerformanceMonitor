@@ -705,6 +705,45 @@ public class PagerDutyWebhookTests
     }
 
     /// <summary>
+    /// #5654: an external alert's clear closes the PagerDuty incident through <c>TrySendPagerDutyResolveAsync</c>, and a
+    /// DELIVERED resolve forgets the cooldown stamp the fire left, as the built-in pairs' close does. The next fire of
+    /// the same key inside the window opens a new incident (a trigger) rather than being throttled against the stamp of
+    /// the incident that was just closed.
+    /// </summary>
+    [Fact]
+    public async Task ExternalResolve_Delivered_ClearsTheCooldown_SoTheNextFireInsideTheWindowTriggers()
+    {
+        var endpoint = new CapturingPagerDuty();
+        var settings = new WebhookSettings { PagerDutyRoutingKey = "rk-test", PagerDutyAutoResolve = true, Capture = endpoint };
+        var service = ServiceFor(settings, endpoint);
+        const string metric = "External:billing:queue-depth";
+        var context = new AlertContext { External = new AlertExternalOrigin("billing", "queue-depth", 1) };
+
+        Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, metric, "external:Billing", context));
+        Assert.Equal(AlertChannelOutcome.Delivered, await service.TrySendPagerDutyResolveAsync(metric, "Billing", "external:Billing", "cleared"));
+        Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, metric, "external:Billing", context));
+
+        Assert.Equal(new[] { "trigger", "resolve", "trigger" }, endpoint.Bodies.Select(WireAction).ToArray());
+    }
+
+    /// <summary>The control for the clear: a resolve that did not post leaves the stamp, so the fire is still throttled.</summary>
+    [Fact]
+    public async Task ExternalResolve_NotDelivered_LeavesTheCooldown_SoTheNextFireInsideTheWindowIsThrottled()
+    {
+        var endpoint = new CapturingPagerDuty();
+        var settings = new WebhookSettings { PagerDutyRoutingKey = "rk-test", PagerDutyAutoResolve = false, Capture = endpoint };
+        var service = ServiceFor(settings, endpoint);
+        const string metric = "External:billing:queue-depth";
+        var context = new AlertContext { External = new AlertExternalOrigin("billing", "queue-depth", 1) };
+
+        Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, metric, "external:Billing", context));
+        Assert.Equal(AlertChannelOutcome.NotAttempted, await service.TrySendPagerDutyResolveAsync(metric, "Billing", "external:Billing", "cleared"));
+        Assert.NotEqual(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, metric, "external:Billing", context));
+
+        Assert.Equal(new[] { "trigger" }, endpoint.Bodies.Select(WireAction).ToArray());
+    }
+
+    /// <summary>
     /// One alert through the real <see cref="WebhookAlertService"/> fan-out with the PagerDuty post
     /// captured. Each <see cref="WebhookAlertService"/> is constructed per send (no shared state leaks
     /// between the sends an A/B case sequences); the shared per-test cooldown is the POINT of the

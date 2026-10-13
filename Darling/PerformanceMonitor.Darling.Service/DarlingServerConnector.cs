@@ -52,6 +52,13 @@ public sealed class ServerRuntime
 
     public bool HasMsdbAccess { get; init; }
 
+    /// <summary>
+    /// True once the ensure of the server-scoped client-timeout session has dropped and recreated a session of that name that had
+    /// another definition (#5640). Per connection, so it happens at most once per connect: if the recreated session still read
+    /// as another definition, the next ensure leaves it alone and does not drop it again.
+    /// </summary>
+    public bool AttentionXeDefinitionReplaced { get; set; }
+
     public bool IsAwsRds { get; init; }
 
     /// <summary>

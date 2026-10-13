@@ -95,9 +95,9 @@ public sealed class NotificationRoutingTests
     }
 
     [Fact]
-    public void TheFourFamilies_AreTheIssuesFour_AndTheFallThroughIsPerformance()
+    public void TheFiveFamilies_AreTheIssuesFourPlusExternal_AndTheFallThroughIsPerformance()
     {
-        Assert.Equal(new[] { "self-monitor", "reports", "agent-jobs", "performance" }, AlertFamily.All);
+        Assert.Equal(new[] { "self-monitor", "reports", "agent-jobs", "performance", "external" }, AlertFamily.All);
         Assert.Equal(AlertFamily.Performance, AlertFamily.Of("Some Alert Nobody Has Written Yet"));
         Assert.False(AlertFamily.IsClassified("Some Alert Nobody Has Written Yet"));
 
@@ -105,6 +105,15 @@ public sealed class NotificationRoutingTests
         Assert.Equal(AlertFamily.Performance, AlertFamily.Of(CustomAlertEvaluator.MetricNameFor(42)));
         Assert.Equal(AlertFamily.Performance, AlertFamily.Of("Analysis: PLAN_REGRESSION [a1b2c3]"));
         Assert.True(AlertFamily.IsClassified(CustomAlertEvaluator.MetricNameFor(42)));
+
+        /* #5654: an external alert's name classifies by its prefix into its own family, whatever the key spells,
+           and the self-alert name for undelivered external alerts is self-monitor. */
+        Assert.Equal(AlertFamily.External, AlertFamily.Of("External:nagios:disk_full"));
+        Assert.Equal(AlertFamily.External, AlertFamily.Of("External:nagios:disk_full Resolved"));
+        Assert.True(AlertFamily.IsClassified("External:nagios:disk_full"));
+        Assert.Equal(AlertFamily.SelfMonitor, AlertFamily.Of(DarlingSelfAlertEvaluator.ExternalAlertsUndeliveredMetric));
+        Assert.True(AlertFamily.IsFamily(" External "));
+        Assert.Equal("external", AlertFamily.NormalizeFamily("EXTERNAL"));
 
         /* Family names are matched case-insensitively and trimmed — an operator's spelling, not a key. */
         Assert.True(AlertFamily.IsFamily(" Self-Monitor "));
@@ -537,6 +546,14 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.PolicyJobFailingMetric,
             /* #3783: the store's TOAST slack and checkpointer pressure, both fired through the constant. */
             DarlingSelfAlertEvaluator.ToastSlackMetric, DarlingSelfAlertEvaluator.CheckpointerPressureMetric,
+            /* #5654: the external-alert delivery health check's alert. */
+            DarlingSelfAlertEvaluator.ExternalAlertsUndeliveredMetric,
+            /* #5641: the Runnable Queue alert fires from AlertEngine.CheckRunnableQueueAsync through
+               RunnableQueueEvaluator.MetricName (a constant, so the AlertOutcome literal scan below cannot see it),
+               listed here like the engine's other constant-fired names. */
+            RunnableQueueEvaluator.MetricName,
+            /* #5640: the Client Timeouts alert fires from AlertEngine.CheckAttentionAsync through AttentionEvaluator.MetricName. */
+            AttentionEvaluator.MetricName,
         };
 
         /* The literals: the third argument of every `new AlertOutcome(` in the shared engine and the worker

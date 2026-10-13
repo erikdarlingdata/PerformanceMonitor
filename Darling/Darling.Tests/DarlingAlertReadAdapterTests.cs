@@ -63,6 +63,7 @@ public sealed class DarlingAlertReadAdapterTests
         DarlingAlertReadAdapter.DmvBlockingSnapshotsSql,
         DarlingAlertReadAdapter.DeadlocksSql,
         DarlingAlertReadAdapter.PoisonWaitsSql,
+        DarlingAlertReadAdapter.RunnableQueueSql,
         DarlingAlertReadAdapter.LongRunningQueriesSqlTemplate,
         DarlingAlertReadAdapter.SpServerDiagnosticsFilter,
         DarlingAlertReadAdapter.WaitForFilter,
@@ -455,7 +456,7 @@ public sealed class DarlingAlertReadAdapterTests
                 TestServerKey, thresholdMinutes: 5, maxResults: 10,
                 excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
                 excludeMiscWaits: true, excludeCdc: true,
-                excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.None, ct);
+                excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.None, cancellationToken: ct);
             Assert.Equal(0, lrqRead.ExcludedByProgramPrefix);
             Assert.Equal(0, lrqRead.ExcludedByLogin);
             Assert.Equal(0, lrqRead.ExcludedCount);
@@ -477,7 +478,7 @@ public sealed class DarlingAlertReadAdapterTests
                 TestServerKey, thresholdMinutes: 5, maxResults: 5,
                 excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
                 excludeMiscWaits: true, excludeCdc: true,
-                excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.None, ct);
+                excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.None, cancellationToken: ct);
             Assert.Equal(new[] { 76, 76, 74, 75, 71 }, pageOfFive.Sessions.Select(q => q.SessionId).ToArray());
             Assert.DoesNotContain(pageOfFive.Sessions, q => string.Equals(q.DatabaseName, "ExcludedDb", StringComparison.OrdinalIgnoreCase));
             Assert.Equal(8, pageOfFive.ExcludedByDatabase);
@@ -489,7 +490,7 @@ public sealed class DarlingAlertReadAdapterTests
                 TestServerKey, thresholdMinutes: 5, maxResults: 5,
                 excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
                 excludeMiscWaits: true, excludeCdc: true,
-                excludedDatabases: new List<string>(), LongRunningQueryExclusions.None, ct);
+                excludedDatabases: new List<string>(), LongRunningQueryExclusions.None, cancellationToken: ct);
             Assert.Equal(new[] { 86, 85, 84, 83, 82 }, unfiltered.Sessions.Select(q => q.SessionId).ToArray());
             Assert.Equal(0, unfiltered.ExcludedByDatabase);
 
@@ -505,7 +506,7 @@ public sealed class DarlingAlertReadAdapterTests
                 TestServerKey, thresholdMinutes: 5, maxResults: 1,
                 excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
                 excludeMiscWaits: true, excludeCdc: true,
-                excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.Defaults, ct);
+                excludedDatabases: new List<string> { "excludeddb" }, LongRunningQueryExclusions.Defaults, cancellationToken: ct);
             Assert.Equal(71, Assert.Single(seededRead.Sessions).SessionId);
             Assert.Equal(3, seededRead.ExcludedByProgramPrefix);
             Assert.Equal(1, seededRead.ExcludedByLogin);
@@ -519,7 +520,7 @@ public sealed class DarlingAlertReadAdapterTests
                 excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
                 excludeMiscWaits: true, excludeCdc: true,
                 excludedDatabases: new List<string> { "excludeddb" },
-                LongRunningQueryExclusions.From(LongRunningQueryExclusions.DefaultProgramNamePrefixes, null), ct);
+                LongRunningQueryExclusions.From(LongRunningQueryExclusions.DefaultProgramNamePrefixes, null), cancellationToken: ct);
             Assert.Equal(new[] { 76, 76 }, prefixOnlyRead.Sessions.Select(q => q.SessionId).ToArray()); /* its two request rows fill the cap of 2 */
             Assert.Equal(3, prefixOnlyRead.ExcludedByProgramPrefix);
             Assert.Equal(0, prefixOnlyRead.ExcludedByLogin);
@@ -536,7 +537,7 @@ public sealed class DarlingAlertReadAdapterTests
                 TestServerKey, thresholdMinutes: 5, maxResults: 10,
                 excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true,
                 excludeMiscWaits: true, excludeCdc: true,
-                excludedDatabases: new List<string> { "excludeddb", "StackOverflow" }, LongRunningQueryExclusions.None, ct);
+                excludedDatabases: new List<string> { "excludeddb", "StackOverflow" }, LongRunningQueryExclusions.None, cancellationToken: ct);
             Assert.Equal(88, Assert.Single(noDatabaseRead.Sessions).SessionId);
             Assert.Equal("", noDatabaseRead.Sessions[0].DatabaseName);
             Assert.Equal(12, noDatabaseRead.ExcludedByDatabase);   /* 8 ExcludedDb + 71, 74, 75, 76 in StackOverflow */

@@ -99,6 +99,52 @@ public interface IAlertReadAdapter
         string serverKey, int windowMinutes, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// The scheduler run-queue samples for the Runnable Queue alert (#5641), from the <c>cpu_scheduler_stats</c> rows
+    /// the collector already stores: one <see cref="RunnableQueueSample"/> per <c>collection_time</c> in the last
+    /// <paramref name="lookbackMinutes"/> minutes, newest first.
+    /// <para>
+    /// <b>One sample per collection, not per row.</b> The collector can write several rows for one collection_time,
+    /// each covering a subset of the schedulers while every row says the full scheduler count (#5710; old rows stay
+    /// split). A sample with one row uses that row's <c>avg_runnable_tasks_count</c> exactly; a sample with several
+    /// uses <c>SUM(total_runnable_tasks_count) / MAX(scheduler_count)</c>. Runnable tasks per visible online scheduler
+    /// is the number the bars were measured on; never the node or offline-CPU columns (#5656).
+    /// </para>
+    /// <para>
+    /// <b>Dumb by contract.</b> No threshold and no window rule is applied here: the engine grades against
+    /// <see cref="RunnableQueueEvaluator.Read"/>. A row whose <c>avg_runnable_tasks_count</c> is NULL is not counted.
+    /// No samples comes back as an empty list, never null. The read is bounded below on <c>collection_time</c> with
+    /// the same naive-UTC parameter style the poison-wait read uses; both stores keep microseconds.
+    /// <paramref name="lookbackMinutes"/> is passed so the read's cutoff and the evaluator's fallback are one number
+    /// by construction (<see cref="RunnableQueueEvaluator.ReadLookbackMinutes"/>: long enough to hold the cadence-scaled fallback window and to show the cadence).
+    /// </para>
+    /// </summary>
+    Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The Client Timeouts alert's read (#5640) over <c>attention_events</c> and the collection log, for the last
+    /// <paramref name="lookbackMinutes"/> minutes.
+    /// <para>
+    /// <b>What comes back.</b> (1) Every SUCCESSFUL attention collector run time, from the collection log
+    /// (<c>collector_name = 'attention'</c>, <c>status = 'SUCCESS'</c>), newest first: a quiet run writes no row to
+    /// <c>attention_events</c>, so the log is the only proof the collector ran. (2) The <c>count</c> rows with their own
+    /// <c>collection_time</c>: each holds the exact attentions since the prior count row. (3) The <c>sample</c> rows
+    /// counted per (collection_time, database_name, client_app_name): the ring buffer's kept events, detail and never the
+    /// total. (4) The top 5 statement fingerprints (with one sample text each), databases and client applications by
+    /// sampled events over the lookback.
+    /// </para>
+    /// <para>
+    /// <b>Dumb by contract.</b> No threshold, no covered span and no window rule is applied here: the engine grades with
+    /// <see cref="AttentionEvaluator.Read"/>. A server with no runs and no rows comes back as
+    /// <see cref="AttentionWindow.Empty"/>, never null. The floor is the same naive-UTC parameter style the other reads use;
+    /// both stores keep microseconds. <paramref name="lookbackMinutes"/> is passed so the read's cutoff and the evaluator's
+    /// fallback are one number by construction (<see cref="AttentionEvaluator.ReadLookbackMinutes"/>).
+    /// </para>
+    /// </summary>
+    Task<AttentionWindow> GetAttentionWindowAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Currently-running queries over <paramref name="thresholdMinutes"/> elapsed, longest first,
     /// from the LATEST collection snapshot only (and only if that snapshot is under 10 minutes
     /// old — a stale store must not alert). Mirrors Lite's read exactly: user sessions only
@@ -116,6 +162,12 @@ public interface IAlertReadAdapter
     /// payload can show what the page does not. <see cref="LongRunningQueryExclusions.None"/> with an empty
     /// database list reads exactly as the pre-knob read did.
     /// </para>
+    /// <para>
+    /// <b><paramref name="orderByCpu"/> (#5641, after review).</b> False (the default) is the long-running order,
+    /// longest elapsed first. True ranks the same rows by CPU time first (NULL last), then elapsed, then session id,
+    /// ahead of the cap, so a caller that wants the heaviest CPU consumers (the Runnable Queue card) gets them even when
+    /// longer-elapsed blocked requests would fill the cap. It sits ahead of the token (CA1068); callers that pass the token positionally name it.
+    /// </para>
     /// </summary>
     Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         string serverKey,
@@ -128,6 +180,7 @@ public interface IAlertReadAdapter
         bool excludeCdc,
         IReadOnlyList<string> excludedDatabases,
         LongRunningQueryExclusions exclusions,
+        bool orderByCpu = false,
         CancellationToken cancellationToken = default);
 
     /// <summary>

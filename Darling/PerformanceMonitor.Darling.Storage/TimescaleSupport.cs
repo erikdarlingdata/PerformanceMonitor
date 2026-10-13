@@ -158,11 +158,14 @@ public static partial class TimescaleSupport
     private const int BackfillTimeoutSeconds = 6 * 60 * 60;
 
     /// <summary>
-    /// The tables converted to hypertables — exactly the shared collector catalog, pinned by
-    /// test so scope can never silently widen to the registry/config/analysis tables (see the
-    /// class remarks for why those stay plain).
+    /// The tables converted to hypertables — the shared collector catalog less the entries that declare
+    /// <see cref="ICollectorSchemaInfo.StaysPlainTable"/> (the attention table, #5640: the 73rd hypertable is a
+    /// grid decision, and its rows are low volume). Pinned by test so scope can never silently widen to the
+    /// registry/config/analysis tables (see the class remarks for why those stay plain) nor silently narrow:
+    /// <c>AttentionPlainTableTests</c> lists the opt-outs.
     /// </summary>
-    public static IReadOnlyList<ICollectorSchemaInfo> HypertableTables => CollectorCatalog.All;
+    public static IReadOnlyList<ICollectorSchemaInfo> HypertableTables { get; } =
+        CollectorCatalog.All.Where(c => !c.StaysPlainTable).ToArray();
 
     /// <summary>
     /// The TRUE number of TimescaleDB hypertables in the store: the collector catalog
@@ -172,6 +175,22 @@ public static partial class TimescaleSupport
     /// another non-catalog table is ever converted (pinned by test).
     /// </summary>
     public static int HypertableCount => HypertableTables.Count + 1;
+
+    /// <summary>
+    /// The number of continuous aggregates <see cref="EnsureContinuousAggregatesAsync"/> creates: the hourly,
+    /// daily, baseline, off-grid and frozen tiers (distinct views). Worker sizing counts these next to
+    /// <see cref="HypertableCount"/> because each carries up to three policy jobs (compression, refresh,
+    /// retention), 70 of the 142 jobs of a migrated store (#5633 item 14). Pinned against a migrated store's
+    /// real aggregate count by a live test.
+    /// </summary>
+    public static int ContinuousAggregateCount =>
+        HourlyAggregates.Select(a => a.View)
+            .Concat(DailyAggregates.Select(a => a.View))
+            .Concat(BaselineAggregates.Select(a => a.View))
+            .Concat(OffGridAggregates.Select(a => a.View))
+            .Concat(FrozenRollupAggregates.Select(a => a.View))
+            .Distinct(StringComparer.Ordinal)
+            .Count();
 
     /// <summary>
     /// Is the timescaledb extension installed AND created in this database (extensions are

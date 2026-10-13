@@ -177,7 +177,7 @@ public sealed class PgServerConfigScopeRungTests
 
         /* No table, no collector: the two censuses did not move; the payload grew by exactly two. */
         Assert.Equal(72, TimescaleSupport.HypertableCount);
-        Assert.Equal(71, CollectorCatalog.All.Count);
+        Assert.Equal(71, TimescaleSupport.HypertableTables.Count);
         Assert.Equal(15, PgServerConfigCollector.Instance.PayloadColumns.Count);
     }
 

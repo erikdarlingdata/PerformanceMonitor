@@ -20,7 +20,7 @@ namespace PerformanceMonitor.Notifications;
 /// (serverId, metricName) cooldown that silently dropped a genuinely distinct incident arriving inside
 /// the window: the cooldown is now keyed per #1140 dedup fingerprint, so a DISTINCT fingerprint is
 /// delivered while a REPEAT of the same fingerprint stays suppressed (#1091). Alerts with no
-/// fingerprintable incidents (Incidents null/empty — CPU/memory/poison-wait/tempdb/failed-job) fall back
+/// fingerprintable incidents (Incidents null/empty — CPU/memory/poison-wait/runnable-queue/tempdb/failed-job) fall back
 /// to the metric-level key, byte-identical to the pre-#1154 behavior.
 /// </summary>
 public sealed class IncidentCooldown
@@ -91,9 +91,16 @@ public sealed class IncidentCooldown
     /// delivered the recovery, PagerDuty returned an error), the seed skips and the next outage posts, where
     /// without a restart it would stay throttled. That is one extra notice, never a swallowed one.
     /// </param>
+    /// <param name="bypassCooldown">
+    /// #5641: the firing is a tier escalation (a Warning incident just graded Critical), delivered at once whatever
+    /// the window says. <see cref="Decision.ShouldSend"/> is then true even when every key is inside its window,
+    /// and the caller's stamp after a successful send restarts the window. The keys are still read, seeded and
+    /// reported as usual, so <see cref="Decision.AnyFirstNotice"/> stays truthful. False (every caller but the
+    /// engine's opted-in two-level alerts) leaves the evaluation byte-identical.
+    /// </param>
     public async Task<Decision> EvaluateAsync(
         string serverId, string metricName, IReadOnlyList<AlertIncident>? incidents, TimeSpan window,
-        string? scope = null, string? pairedEdge = null)
+        string? scope = null, string? pairedEdge = null, bool bypassCooldown = false)
     {
         var now = DateTime.UtcNow;
         Evict(now, window);
@@ -162,7 +169,11 @@ public sealed class IncidentCooldown
             if (dedupKey is not null)
             {
                 fingerprinted = true;
-                if (fresh)
+                /* #5641: a bypassed send delivers the whole alert, so every fingerprint it carries is
+                   deliverable, not just the ones whose window has elapsed. Left on the freshness list, an
+                   escalation inside the window would go out with no dedup keys and the delivery filter would
+                   cut every incident from the card. */
+                if (fresh || bypassCooldown)
                     deliverable.Add(dedupKey);
             }
         }
@@ -171,7 +182,8 @@ public sealed class IncidentCooldown
            "every one of its fingerprints is in cooldown" are different answers, and the render has to be
            able to tell them apart (an empty list would read as "show nothing"). */
         return new Decision(
-            anyFresh, keys.Select(k => k.Key).ToList(), now, fingerprinted ? deliverable : null, anyFirstNotice);
+            anyFresh || bypassCooldown, keys.Select(k => k.Key).ToList(), now, fingerprinted ? deliverable : null,
+            anyFirstNotice, bypassCooldown);
     }
 
     /// <summary>
@@ -302,10 +314,17 @@ public sealed class IncidentCooldown
     /// lets the aggregate ceiling drop something. The compiler finding a second producer is cheaper than
     /// that.</para>
     /// </param>
+    /// <param name="Bypassed">
+    /// #5641: the caller asked for the window to be ignored (<c>bypassCooldown</c>) because this firing is a tier
+    /// escalation, so <see cref="ShouldSend"/> is true whether or not a key was fresh. The stamp after a send is
+    /// unchanged, which restarts the window; <see cref="RepeatDeliveryBudget"/> reads this to let the escalation
+    /// past its repeat ceiling too.
+    /// </param>
     public sealed record Decision(
         bool ShouldSend,
         IReadOnlyList<string> Keys,
         DateTime EvaluatedAtUtc,
         IReadOnlyList<string>? DeliverableDedupKeys,
-        bool AnyFirstNotice);
+        bool AnyFirstNotice,
+        bool Bypassed = false);
 }

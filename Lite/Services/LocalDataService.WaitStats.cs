@@ -857,7 +857,8 @@ LIMIT 2000";
         bool excludeMiscWaits = true,
         bool excludeCdc = true,
         LongRunningQueryExclusions? exclusions = null,
-        IReadOnlyList<string>? excludedDatabases = null)
+        IReadOnlyList<string>? excludedDatabases = null,
+        bool orderByCpu = false)
     {
         exclusions ??= LongRunningQueryExclusions.None;
 
@@ -889,6 +890,12 @@ LIMIT 2000";
            predicates so this read and Darling's cannot drift. #3742: the shared excludedDatabases list is the
            third arm, its operands appended after the logins. */
         var exclusionSql = exclusions.BuildSqlPredicates("r.program_name", "r.login_name", "r.database_name", excludedDatabases, firstParameterOrdinal: 5);
+
+        // #5641: the Runnable Queue card ranks by CPU, so it reads the heaviest CPU consumers directly; the cap
+        // would otherwise fill with the longest-elapsed (often blocked) requests. DuckDB's NULL order is spelled.
+        string orderBy = orderByCpu
+            ? "ORDER BY r.cpu_time_ms DESC NULLS LAST, r.total_elapsed_time_ms DESC, r.session_id"
+            : "ORDER BY r.total_elapsed_time_ms DESC";
 
         command.CommandText = @$"
                 WITH candidates AS (
@@ -941,7 +948,7 @@ LIMIT 2000";
                     r.collection_time AS newest_sample
                 FROM candidates AS r
                 WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login OR r.excluded_by_database)
-                ORDER BY r.total_elapsed_time_ms DESC
+                {orderBy}
                 LIMIT $3;";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

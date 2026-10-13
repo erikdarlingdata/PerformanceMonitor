@@ -52,6 +52,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
 
     private readonly IAlertHistoryStore _historyStore;
     private readonly EmailSendCore _core;
+    private readonly WebhookAlertService _webhooks;
     private readonly ILogger _logger;
     private readonly DarlingAlertSettings _settings;
     private readonly Func<string, AlertNotificationMode?> _resolveServerOverride;
@@ -74,7 +75,17 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _resolveServerOverride = resolveServerOverride ?? (_ => null);
         _core = new EmailSendCore(settings, historyStore, webhookAlertService, s_branding, logger);
+        _webhooks = webhookAlertService;
     }
+
+    /// <summary>
+    /// Closes the PagerDuty incident an external alert's fire opened (#5654), and posts nowhere else. See
+    /// <see cref="WebhookAlertService.TrySendPagerDutyResolveAsync"/>: it sends only with PagerDuty auto-resolve on.
+    /// </summary>
+    public Task<AlertChannelOutcome> TryResolvePagerDutyAsync(
+        string firingMetric, string serverName, string serverKey, string? detailText,
+        CancellationToken cancellationToken = default) =>
+        _webhooks.TrySendPagerDutyResolveAsync(firingMetric, serverName, serverKey, detailText, cancellationToken);
 
     public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default) =>
         DeliverAndReportAsync(outcome, cancellationToken);

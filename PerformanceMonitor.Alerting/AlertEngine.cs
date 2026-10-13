@@ -128,6 +128,30 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastBlockingWaitAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastDeadlockAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueCollectionTime = new();
+    private readonly ConcurrentDictionary<string, bool> _activeRunnableQueueAlert = new();
+    /* The sweep time of the last EVALUATED Runnable Queue reading per server (round 1 of #5709): a standing alert
+       with no evaluation for RunnableQueueEvaluator.StaleIncidentMinutes is resolved, with the reason stated. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueEvaluation = new();
+    /* #5641: the highest tier delivered for the open Runnable Queue incident, so a Warning that worsens to Critical
+       is delivered at once instead of waiting out the cooldown. Runnable Queue and Client Timeouts (#5640) opt in. */
+    private readonly TierEscalation _runnableQueueEscalation = new();
+
+    /* #5640: the Client Timeouts alert's per-server state, shaped like Runnable Queue's (cooldown stamp, newest run fired on,
+       active flag, last evaluation for the stale resolve, and the escalation tier). */
+    private readonly ConcurrentDictionary<string, DateTime> _lastAttentionAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastAttentionRunTime = new();
+    private readonly ConcurrentDictionary<string, bool> _activeAttentionAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastAttentionEvaluation = new();
+    private readonly TierEscalation _attentionEscalation = new();
+
+    /* Round 2 of #5714 (H1): a Muted Client Timeouts fire is not a delivery. The proportional mute changes from one run to the
+       next on its own (the sample mix decides it), so a Muted Critical that stamped the delivery cooldown or recorded its tier
+       held back the next real Critical and killed the escalation bypass. Muted fires keep a cooldown stamp and a run marker of
+       their own, so a muted storm writes one Muted history row per cooldown and not one a minute. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastAttentionMutedAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastAttentionMutedRunTime = new();
 
     /* The collection_time of the newest wait_stats row inside the window last actually fired on. Read
        adapters answer "how much poison wait accumulated over the last 10 minutes, and when was the
@@ -420,6 +444,8 @@ public sealed class AlertEngine
         await CheckBlockingAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, blockingDeadlockExcluded, ct);
         await CheckDeadlocksAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, blockingDeadlockExcluded, ct);
         await CheckPoisonWaitsAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckRunnableQueueAsync(snapshot, key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckAttentionAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         await CheckLongRunningQueriesAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckTempDbSpaceAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
@@ -1000,7 +1026,7 @@ public sealed class AlertEngine
                     excludeCdc: false,
                     Array.Empty<string>(),
                     LongRunningQueryExclusions.None,
-                    ct);
+                    cancellationToken: ct);
                 maintenanceDetail = AlertContextBuilders.BuildActiveMaintenanceDetail(activeSessions.Sessions);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1946,6 +1972,412 @@ public sealed class AlertEngine
         }
     }
 
+    /* ---------------- runnable queue (#5641) ---------------- */
+
+    /// <summary>
+    /// The Runnable Queue alert (#5641): runnable tasks per visible online scheduler, the AVERAGE of the stored
+    /// <c>cpu_scheduler_stats</c> collections, graded like Poison Wait: Warning at or above the
+    /// Warning bar (8 by default), Critical at or above the Critical bar (16). No alert read scheduler queue depth
+    /// before this one: on 2026-10-09 a 4-vCPU read replica sat at about 57 runnable tasks per scheduler and client
+    /// timeouts began about six minutes before the first (High CPU) alert. The bars and their measurement are on
+    /// <see cref="RunnableQueueEvaluator"/>.
+    ///
+    /// <para><b>The window rule</b> is <see cref="RunnableQueueEvaluator.Read"/>'s: 3 or more collections in the last
+    /// 5 minutes, else the newest 3 if all are inside the cadence-scaled fallback window (10 minutes, or 4 times the median of the newest 5 collection gaps when that is longer: the Low-Impact preset collects every 5 minutes, and the cadence is read from the newest gaps so a switch to it registers within three collections). Anything else is not an observation. The check does
+    /// not evaluate: it fires nothing and clears nothing, so a collection gap cannot page on one busy sample and
+    /// cannot announce "Cleared" on silence (the #3282 rule Poison Wait applies to an empty read). A standing alert
+    /// clears only when an evaluated reading sits under the Warning bar, or after 30 minutes with no evaluation, when it resolves with that reason stated. The 30-minute clock runs from the last evaluated reading (a null reading never restarts it), not from the last fire or from the first null.</para>
+    ///
+    /// <para>Cooldown, mute, the fresh-sample guard and the resolution notice are Poison Wait's, with one addition:
+    /// a Warning that worsens to Critical is delivered at once, past the cooldown (<see cref="TierEscalation"/>,
+    /// this alert's opt-in; the email and webhook cooldowns let it through on the context's flag). The alert
+    /// is one per server; its mute context carries no wait type.</para>
+    /// </summary>
+    private async Task CheckRunnableQueueAsync(
+        AlertServerSnapshot snapshot, string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+    {
+        if (!_settings.RunnableQueueEnabled)
+        {
+            return;
+        }
+
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            var samples = await _readAdapter.GetRunnableQueueSamplesAsync(key, RunnableQueueEvaluator.ReadLookbackMinutes, ct);
+            readClock.Restart();
+
+            /* Neither 3 collections in 5 minutes nor the newest 3 inside the fallback window (10 minutes, or 4 times
+               the collection cadence when longer): not an observation, so neither a fire nor a clear. The one
+               exception is a standing alert that has gone unevaluated for 30 minutes (below). */
+            var reading = RunnableQueueEvaluator.Read(samples, now);
+            if (reading is null)
+            {
+                if (_activeRunnableQueueAlert.TryGetValue(key, out var standing) && standing
+                    && _lastRunnableQueueEvaluation.TryGetValue(key, out var lastEvaluated)
+                    && now - lastEvaluated >= TimeSpan.FromMinutes(RunnableQueueEvaluator.StaleIncidentMinutes))
+                {
+                    /* Round 1 of #5709: the collector was disabled, slowed past the window, or keeps failing while the
+                       alert stood, so no reading can ever clear it. It resolves through the normal resolve path with
+                       the reason in the text; never a silent clear. */
+                    _activeRunnableQueueAlert[key] = false;
+                    _runnableQueueEscalation.Close(key);
+                    _lastRunnableQueueEvaluation.TryRemove(key, out _);
+                    if (!suppressed)
+                    {
+                        await NotifyResolutionAsync(new AlertResolution(
+                            key, serverName, RunnableQueueEvaluator.MetricName,
+                            "Runnable Queue Cleared",
+                            string.Create(CultureInfo.InvariantCulture,
+                                $"{serverName}: Runnable Queue alert resolved - no fresh scheduler data for {RunnableQueueEvaluator.StaleIncidentMinutes} minutes, so the queue could not be re-checked (the cpu_scheduler_stats collector may be disabled, slow or failing)")), ct);
+                        readClock.Restart();
+                    }
+                }
+                return;
+            }
+
+            _lastRunnableQueueEvaluation[key] = now;
+
+            var finding = RunnableQueueEvaluator.Evaluate(
+                reading, _settings.RunnableQueueWarningPerScheduler, _settings.RunnableQueueCriticalPerScheduler);
+
+            if (finding is not null)
+            {
+                _activeRunnableQueueAlert[key] = true;
+
+                /* The reading is a rolling average, so a cooldown-elapsed re-ask against an unrefreshed store hands
+                   back the SAME newest collection (Poison Wait's guard, same reasoning): a fire waits for a
+                   collection newer than the one last fired on. The cadence-scaled fallback window keeps the guard right: a late
+                   collector holds the same newest collection for minutes, and the standing alert stays standing
+                   without re-firing until a new collection arrives. */
+                bool hasFreshCollection = !_lastRunnableQueueCollectionTime.TryGetValue(key, out var lastCollectionTime)
+                    || finding.NewestCollectionTime > lastCollectionTime;
+
+                /* #5641: a Warning incident that is now graded Critical is delivered at once. The cooldown stamp it
+                   leaves (set below, like any fire) restarts the clock, and queueContext carries the flag so the
+                   email and webhook cooldowns let it through as well. A fresh collection is still required: the
+                   escalation must rest on a reading newer than the one the Warning was delivered on. */
+                var escalation = _runnableQueueEscalation.IsEscalation(key, finding.Severity);
+
+                if (!suppressed && hasFreshCollection
+                    && (escalation || CooldownElapsed(_lastRunnableQueueAlert, key, now, alertCooldown)))
+                {
+                    var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = RunnableQueueEvaluator.MetricName };
+                    bool isMuted = _isAlertMuted(muteCtx);
+                    _lastRunnableQueueAlert[key] = now;
+                    _lastRunnableQueueCollectionTime[key] = finding.NewestCollectionTime;
+
+                    /* Severity rides on the context override as well as the outcome, for the reason the Poison Wait
+                       site gives (the channel builders read the context; Darling's deliverer folds the outcome's in
+                       only when the context has none). */
+                    var queueContext = new AlertContext
+                    {
+                        SeverityOverride = finding.Severity,
+                        EscalationBypassesCooldown = escalation,
+                    };
+                    /* The tier is recorded before the send (the history row of a muted fire must not be late), and put
+                       back below when every channel failed: a fire nobody received has not delivered this tier. */
+                    var priorTier = _runnableQueueEscalation.Highest(key);
+                    _runnableQueueEscalation.Record(key, finding.Severity);
+                    AlertSampleAge.Stamp(queueContext, "scheduler stats", finding.NewestCollectionTime, now);
+
+                    /* #5641: the card's detail, in AlertContext.Details so every channel that renders another
+                       alert's details (both email bodies, the webhook, the toast text, the history row) renders
+                       it. CPU percent for the same minutes comes from the samples the snapshot already holds (the
+                       5-minute window, or the longer span when the fallback window judged the queue, clamped to the 15 minutes
+                       the CPU samples cover);
+                       the top requests come from the newest query snapshot, through the same unfiltered
+                       threshold-zero read the High CPU card's maintenance probe uses. ANNOTATION, NEVER
+                       SUPPRESSION: the fire is decided before this read, a failed read costs the card its
+                       request items and nothing else (logged and counted on the #3013 surface, Warning because
+                       the condition was evaluated correctly), and the read sits inside the cooldown-bounded fire
+                       branch, so a quiet sweep pays nothing. Taken for muted fires too, so the history row
+                       carries the detail the delivered card would have. */
+                    var cpuItem = AlertContextBuilders.BuildRunnableQueueCpuItem(
+                        snapshot.RecentCpuSamples, snapshot.SqlCpuPercent, snapshot.TotalCpuPercent,
+                        now, Math.Max(RunnableQueueEvaluator.WindowMinutes, finding.SpanMinutes));
+                    if (cpuItem is not null)
+                    {
+                        queueContext.Details.Add(cpuItem);
+                    }
+
+                    await AddRunnableQueueRequestItemsAsync(queueContext, key, serverName, ct);
+                    readClock.Restart();
+
+                    var detailText = AlertContextBuilders.ContextToDetailText(queueContext);
+
+                    var delivery = await FireAsync(new AlertOutcome(
+                        key, serverName, RunnableQueueEvaluator.MetricName,
+                        finding.CurrentValueText,
+                        finding.ThresholdText,
+                        queueContext, detailText,
+                        NumericCurrentValue: finding.AveragePerScheduler,
+                        NumericThresholdValue: finding.BarCrossed,
+                        Muted: isMuted, Severity: finding.Severity,
+                        ShortMessage: finding.Summary), ct);
+                    AfterFire(RunnableQueueEvaluator.MetricName, _lastRunnableQueueAlert, key, now, alertCooldown, delivery);
+
+                    /* A fire nobody received forgets the sample marker, so the retry counts the window as fresh (#4752). */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        _lastRunnableQueueCollectionTime.TryRemove(key, out _);
+
+                        /* Round 2 of #5709: the tier goes back too (AfterFire's note: a second "already reported" marker
+                           is put back at the call site). Left at Critical, the retry a minute later would not be an
+                           escalation, would go out without the bypass flag, and the email and webhook cooldowns the
+                           Warning stamped would hold the Critical for the rest of their window. */
+                        _runnableQueueEscalation.Restore(key, priorTier);
+                    }
+                    readClock.Restart();
+                }
+            }
+            else if (_activeRunnableQueueAlert.TryGetValue(key, out var wasActive) && wasActive)
+            {
+                _activeRunnableQueueAlert[key] = false;
+                _runnableQueueEscalation.Close(key);
+                if (!suppressed)
+                {
+                    await NotifyResolutionAsync(new AlertResolution(
+                        key, serverName, RunnableQueueEvaluator.MetricName,
+                        "Runnable Queue Cleared",
+                        string.Create(CultureInfo.InvariantCulture,
+                            $"{serverName}: Runnable tasks per scheduler averaged over the last {reading.SampleCount} collections are back below threshold")), ct);
+                    readClock.Restart();
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Failed to check runnable queue for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "runnable queue", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /* ---------------- client timeouts (#5640) ---------------- */
+
+    /// <summary>
+    /// The Client Timeouts alert (#5640): client attentions (a client cancelled or timed out a query) per minute, from the
+    /// attention collector's <c>attention_events</c>, graded Warning at the Warning bar (10 per minute by default) and Critical
+    /// at the Critical bar (60). OFF by default. The count model, the rate rule, the not-observed rule and the proportional
+    /// mute are on <see cref="AttentionEvaluator"/>.
+    ///
+    /// <para>Everything around the grade is Runnable Queue's: a window that is not an observation neither fires nor clears
+    /// (a collector gap cannot announce "Cleared" on silence), a standing alert unevaluated for
+    /// <see cref="AttentionEvaluator.StaleIncidentMinutes"/> resolves with that reason stated, a fire waits for a collector run
+    /// newer than the one last fired on, and a Warning that worsens to Critical is delivered past the cooldown
+    /// (<see cref="TierEscalation"/>).</para>
+    ///
+    /// <para><b>Mute.</b> The mute check runs per sampled (database, client application) group, inside the evaluation
+    /// (<see cref="AttentionEvaluator.Evaluate"/>), because the judged count depends on which groups are muted. A fire whose
+    /// exact count crossed a bar but whose unmuted share did not is recorded Muted, like any muted fire. A Muted finding is not
+    /// a delivery: it neither starts the delivery cooldown nor records an escalation tier, and it is throttled by a cooldown of
+    /// its own (round 2 of #5714).</para>
+    /// </summary>
+    private async Task CheckAttentionAsync(
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+    {
+        if (!_settings.ClientTimeoutsEnabled)
+        {
+            return;
+        }
+
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            var window = await _readAdapter.GetAttentionWindowAsync(key, AttentionEvaluator.ReadLookbackMinutes, ct);
+            readClock.Restart();
+
+            var reading = AttentionEvaluator.Read(window, now);
+            if (reading is null)
+            {
+                if (_activeAttentionAlert.TryGetValue(key, out var standing) && standing
+                    && _lastAttentionEvaluation.TryGetValue(key, out var lastEvaluated)
+                    && now - lastEvaluated >= TimeSpan.FromMinutes(AttentionEvaluator.StaleIncidentMinutes))
+                {
+                    /* The collector was disabled, slowed past the window, or keeps failing while the alert stood, so no
+                       reading can ever clear it. It resolves through the normal resolve path with the reason in the text. */
+                    _activeAttentionAlert[key] = false;
+                    _attentionEscalation.Close(key);
+                    _lastAttentionEvaluation.TryRemove(key, out _);
+                    if (!suppressed)
+                    {
+                        await NotifyResolutionAsync(new AlertResolution(
+                            key, serverName, AttentionEvaluator.MetricName,
+                            "Client Timeouts Cleared",
+                            string.Create(CultureInfo.InvariantCulture,
+                                $"{serverName}: Client Timeouts alert resolved - no fresh attention collector runs for {AttentionEvaluator.StaleIncidentMinutes} minutes, so the rate could not be re-checked (the attention collector may be disabled, slow or failing)")), ct);
+                        readClock.Restart();
+                    }
+                }
+
+                return;
+            }
+
+            _lastAttentionEvaluation[key] = now;
+
+            var finding = AttentionEvaluator.Evaluate(
+                reading, _settings.ClientTimeoutsWarningPerMinute, _settings.ClientTimeoutsCriticalPerMinute,
+                (database, app) => _isAlertMuted(new AlertMuteContext
+                {
+                    ServerName = serverName,
+                    ServerId = serverId,
+                    MetricName = AttentionEvaluator.MetricName,
+                    DatabaseName = database,
+                    ClientAppName = app,
+                }));
+
+            if (finding is not null)
+            {
+                _activeAttentionAlert[key] = true;
+
+                /* The rate is a rolling reading, so a cooldown-elapsed re-ask against an unrefreshed store hands back the same
+                   newest run: a fire waits for a run newer than the one last fired on (Runnable Queue's guard).
+
+                   A Muted finding (round 2 of #5714, H1) is judged against its own stamp and run marker and is never an
+                   escalation: it is recorded for the history, but it is not a delivery, so it neither starts the delivery
+                   cooldown nor records a tier. An unmuted fire right after a Muted one goes out at once, and a later
+                   Warning-to-Critical worsening keeps its bypass. (Runnable Queue's mute changes only when a user edits a
+                   rule, so it keeps its single stamp.) */
+                var stamps = finding.Muted ? _lastAttentionMutedAlert : _lastAttentionAlert;
+                var runTimes = finding.Muted ? _lastAttentionMutedRunTime : _lastAttentionRunTime;
+                bool hasFreshRun = !runTimes.TryGetValue(key, out var lastRun)
+                    || finding.NewestRunTime > lastRun;
+
+                var escalation = !finding.Muted && _attentionEscalation.IsEscalation(key, finding.Severity);
+
+                if (!suppressed && hasFreshRun
+                    && (escalation || CooldownElapsed(stamps, key, now, alertCooldown)))
+                {
+                    stamps[key] = now;
+                    runTimes[key] = finding.NewestRunTime;
+
+                    /* Severity rides on the context override as well as the outcome (the channel builders read the context). */
+                    var attentionContext = new AlertContext
+                    {
+                        SeverityOverride = finding.Severity,
+                        EscalationBypassesCooldown = escalation,
+                    };
+                    var priorTier = _attentionEscalation.Highest(key);
+                    if (!finding.Muted)
+                    {
+                        _attentionEscalation.Record(key, finding.Severity);
+                    }
+
+                    AlertSampleAge.Stamp(attentionContext, "attention collector runs", finding.NewestRunTime, now);
+
+                    foreach (var item in AlertContextBuilders.BuildClientTimeoutItems(finding, window))
+                    {
+                        attentionContext.Details.Add(item);
+                    }
+
+                    var detailText = AlertContextBuilders.ContextToDetailText(attentionContext);
+
+                    var delivery = await FireAsync(new AlertOutcome(
+                        key, serverName, AttentionEvaluator.MetricName,
+                        finding.CurrentValueText,
+                        finding.ThresholdText,
+                        attentionContext, detailText,
+                        NumericCurrentValue: finding.RatePerMinute,
+                        NumericThresholdValue: finding.BarCrossed,
+                        Muted: finding.Muted, Severity: finding.Severity,
+                        ShortMessage: finding.Summary), ct);
+                    /* Final round of #5714 (L1): a Muted fire has no channel to back off, so it neither resets nor advances the
+                       unmuted path's failed-send streak (same family and key). Its own stamp was set above. */
+                    if (!finding.Muted)
+                    {
+                        AfterFire(AttentionEvaluator.MetricName, stamps, key, now, alertCooldown, delivery);
+                    }
+
+                    /* A fire nobody received forgets the run marker and puts the tier back, so the retry counts as fresh and
+                       is still the escalation (Runnable Queue's reasoning, rounds 1 and 2 of #5709). */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        runTimes.TryRemove(key, out _);
+                        _attentionEscalation.Restore(key, priorTier);
+                    }
+
+                    readClock.Restart();
+                }
+            }
+            else if (_activeAttentionAlert.TryGetValue(key, out var wasActive) && wasActive)
+            {
+                _activeAttentionAlert[key] = false;
+                _attentionEscalation.Close(key);
+                if (!suppressed)
+                {
+                    await NotifyResolutionAsync(new AlertResolution(
+                        key, serverName, AttentionEvaluator.MetricName,
+                        "Client Timeouts Cleared",
+                        string.Create(CultureInfo.InvariantCulture,
+                            $"{serverName}: Client timeouts over the last {reading.CoveredMinutes:N0} minutes are back below threshold")), ct);
+                    readClock.Restart();
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Failed to check client timeouts for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "client timeouts", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>
+    /// Adds the Runnable Queue card's top-request items (#5641) from the newest query snapshot: the unfiltered,
+    /// threshold-zero active-session read the High CPU card's maintenance probe uses, ranked by CPU time in
+    /// <see cref="AlertContextBuilders.BuildRunnableQueueRequestItems"/>. Its own method with its own clock, like the
+    /// High CPU probe, so a fault here records the time THIS read ran and not the window read's.
+    ///
+    /// <para>Log-and-degrade, never suppress: a failed read costs the card its request items and nothing else. The
+    /// condition was evaluated correctly and the fire has been decided, so Warning rather than Error, counted on the
+    /// #3013 surface because it IS a store read the alert pass swallowed.</para>
+    /// </summary>
+    private async Task AddRunnableQueueRequestItemsAsync(
+        AlertContext queueContext, string key, string serverName, CancellationToken ct)
+    {
+        var requestClock = Stopwatch.StartNew();
+        try
+        {
+            var activeRequests = await _readAdapter.GetLongRunningQueriesAsync(
+                key,
+                thresholdMinutes: 0,
+                maxResults: ActiveMaintenanceProbeMaxRows,
+                excludeSpServerDiagnostics: false,
+                excludeWaitFor: false,
+                excludeBackups: false,
+                excludeMiscWaits: false,
+                excludeCdc: false,
+                Array.Empty<string>(),
+                LongRunningQueryExclusions.None,
+                orderByCpu: true,
+                cancellationToken: ct);
+            /* The read is CPU-ranked ahead of its cap (round 1 of #5709), so the top 3 are the top 3 of the whole
+               snapshot. A full page means rows beyond it exist, so the trailer says "at least N more". */
+            foreach (var requestItem in AlertContextBuilders.BuildRunnableQueueRequestItems(
+                activeRequests.Sessions, readHitCap: activeRequests.Sessions.Count >= ActiveMaintenanceProbeMaxRows))
+            {
+                queueContext.Details.Add(requestItem);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning("Could not read active sessions for the Runnable Queue card's top requests on {Server} after {ElapsedMs} ms - the alert fires without them: {Message}",
+                serverName, requestClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "runnable queue top requests", requestClock.ElapsedMilliseconds);
+        }
+    }
+
     /* ---------------- long-running queries (Lite AlertEngine.cs:341-411) ---------------- */
 
     private async Task CheckLongRunningQueriesAsync(
@@ -1979,7 +2411,7 @@ public sealed class AlertEngine
                 _settings.LongRunningQueryExcludeCdc,
                 _settings.ExcludedDatabases,
                 exclusions,
-                ct);
+                cancellationToken: ct);
             var longRunning = read.Sessions;
             readClock.Restart();
 

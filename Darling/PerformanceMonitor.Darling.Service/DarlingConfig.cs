@@ -373,14 +373,19 @@ public sealed class DarlingConfig
 
     private HeartbeatConfig _heartbeat = new();
 
-    public static string ResolveConfigPath(string? explicitPath = null)
+    public static string ResolveConfigPath(string? explicitPath = null) =>
+        ResolveConfigPath(explicitPath, Environment.GetEnvironmentVariable);
+
+    /// <summary><see cref="ResolveConfigPath(string?)"/> reading the environment through <paramref name="environment"/>, so a
+    /// test can supply <c>DARLING_CONFIG</c> without setting it for the whole process.</summary>
+    internal static string ResolveConfigPath(string? explicitPath, Func<string, string?> environment)
     {
         if (!string.IsNullOrWhiteSpace(explicitPath))
         {
             return explicitPath;
         }
 
-        var fromEnvironment = Environment.GetEnvironmentVariable("DARLING_CONFIG");
+        var fromEnvironment = environment("DARLING_CONFIG");
         if (!string.IsNullOrWhiteSpace(fromEnvironment))
         {
             return fromEnvironment;
@@ -791,6 +796,39 @@ public sealed class AlertsConfig
     /// store's control-plane row keep round-tripping.</summary>
     [JsonPropertyName("poisonWaitThresholdMs")]
     public int PoisonWaitThresholdMs { get; set; } = 500;
+
+    /// <summary>The Runnable Queue alert (#5641) switch: runnable tasks per visible online scheduler, averaged over
+    /// <see cref="RunnableQueueEvaluator.WindowMinutes"/> minutes. ON by default, like Poison Wait. Persisted as the
+    /// store column <c>runnable_queue_enabled</c> (V177).</summary>
+    [JsonPropertyName("runnableQueueEnabled")]
+    public bool RunnableQueueEnabled { get; set; } = true;
+
+    /// <summary>Runnable Queue Warning bar (#5641), runnable tasks per scheduler, window average. Shipped 8 (the
+    /// measurement is on <see cref="RunnableQueueEvaluator"/>). Read through <see cref="RunnableQueueEvaluator.ClampBars"/>.
+    /// Store column <c>runnable_queue_warning_per_scheduler</c> (V177).</summary>
+    [JsonPropertyName("runnableQueueWarningPerScheduler")]
+    public int RunnableQueueWarningPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultWarningPerScheduler;
+
+    /// <summary>Runnable Queue Critical bar (#5641). Shipped 16. Never read below the Warning bar. Store column
+    /// <c>runnable_queue_critical_per_scheduler</c> (V177).</summary>
+    [JsonPropertyName("runnableQueueCriticalPerScheduler")]
+    public int RunnableQueueCriticalPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultCriticalPerScheduler;
+
+    /// <summary>The Client Timeouts alert (#5640) switch: client attentions (a client cancelled or timed out a query) per
+    /// minute, from the attention collector. OFF by default: the bars are a guess until checked against captured data.
+    /// Persisted as the store column <c>client_timeouts_enabled</c> (V179).</summary>
+    [JsonPropertyName("clientTimeoutsEnabled")]
+    public bool ClientTimeoutsEnabled { get; set; }
+
+    /// <summary>Client Timeouts Warning bar (#5640), attentions per minute over the covered span. Shipped 10. Read through
+    /// <see cref="AttentionEvaluator.ClampBars"/>. Store column <c>client_timeouts_warning_per_minute</c> (V179).</summary>
+    [JsonPropertyName("clientTimeoutsWarningPerMinute")]
+    public int ClientTimeoutsWarningPerMinute { get; set; } = AttentionEvaluator.DefaultWarningPerMinute;
+
+    /// <summary>Client Timeouts Critical bar (#5640). Shipped 60. Never read below the Warning bar. Store column
+    /// <c>client_timeouts_critical_per_minute</c> (V179).</summary>
+    [JsonPropertyName("clientTimeoutsCriticalPerMinute")]
+    public int ClientTimeoutsCriticalPerMinute { get; set; } = AttentionEvaluator.DefaultCriticalPerMinute;
 
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;
@@ -2160,8 +2198,10 @@ public static class DarlingNetwork
     /// read-only <c>viewer</c> ones — which the roles have always supported and the single generated
     /// <c>hostssl</c> line did not.
     ///
-    /// <para>Accepts <c>"admin"</c>, <c>"viewer"</c>, or both in one string separated by a comma, a plus or
-    /// whitespace (<c>"admin,viewer"</c>, <c>"admin+viewer"</c>). A JSON array would be the tidier surface
+    /// <para>Accepts <c>"admin"</c>, <c>"viewer"</c> and <c>"sources"</c> (#5654: every external alert source login, through
+    /// the <c>darling_alert_sources</c> group), alone or several in one string separated by a comma, a plus or
+    /// whitespace (<c>"admin,viewer"</c>, <c>"viewer+sources"</c>). <c>sources</c> is a token, not a role name: the pg_hba
+    /// line writes it as <c>+darling_alert_sources</c> (<c>DarlingManagedPostgres.PgHbaRoleField</c>). A JSON array would be the tidier surface
     /// and is not worth a breaking change to a field that has shipped: everything already written stays
     /// valid, and a list is expressible without it.</para>
     ///
@@ -2201,7 +2241,7 @@ public static class DarlingNetwork
         {
             var normalized = part.ToLowerInvariant();
 
-            if (normalized is not ("viewer" or "admin"))
+            if (normalized is not ("viewer" or "admin" or "sources"))
             {
                 return null;
             }
@@ -2214,7 +2254,7 @@ public static class DarlingNetwork
 
         /* Stable order regardless of how it was written, so the generated pg_hba block is identical for
            "admin,viewer" and "viewer,admin" — otherwise the reconciler rewrites the file and reloads the
-           server every time somebody reorders the field. */
+           server every time somebody reorders the field. Ordinal order: admin, sources, viewer. */
         seen.Sort(StringComparer.Ordinal);
         return seen;
     }

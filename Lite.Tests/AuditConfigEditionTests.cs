@@ -73,16 +73,17 @@ public sealed class AuditConfigEditionTests : IClassFixture<SharedDuckDbFixture>
         try { Directory.Delete(_configDir, recursive: true); } catch (IOException) { /* temp dir */ }
     }
 
-    /// <summary>Edition 8 is Managed Instance (the old switch appended a "(HADR)" that is not an edition), 6 is
-    /// Azure Synapse Analytics (the old switch called it Managed Instance), and an edition nothing has probed
-    /// stays "Unknown" rather than the shared table's "Unknown (0)".</summary>
+    /// <summary>#5633 item 10: the Edition string the store holds (what get_server_properties reports) is the answer on
+    /// every engine edition, with no note. The engine-edition names (8 Managed Instance, 6 Azure Synapse Analytics, 5 Azure
+    /// SQL Database, 3 "Enterprise", 0 "Unknown") are only the fallback for a store with no Edition string, and are pinned
+    /// by <c>McpToolAudit5633L3Tests</c> and <c>McpDescriptionTruthPinTests</c>.</summary>
     [Theory]
-    [InlineData(8, "Azure SQL Managed Instance")]
-    [InlineData(6, "Azure Synapse Analytics")]
-    [InlineData(5, "Azure SQL Database")]
-    [InlineData(3, "Enterprise")]
-    [InlineData(0, "Unknown")]
-    public async Task AuditConfig_NamesTheEdition_FromTheSharedEditionTable(int engineEdition, string expected)
+    [InlineData(8)]
+    [InlineData(6)]
+    [InlineData(5)]
+    [InlineData(3)]
+    [InlineData(0)]
+    public async Task AuditConfig_ReportsTheStoredEditionString_OnEveryEngineEdition(int engineEdition)
     {
         await SeedServerPropertiesAsync(_serverId, ServerName, engineEdition);
         await SeedServerConfigAsync(_serverId, ServerName);
@@ -91,7 +92,8 @@ public sealed class AuditConfigEditionTests : IClassFixture<SharedDuckDbFixture>
             new AnalysisService(_duckDb), new LocalDataService(_duckDb), _serverManager, ServerName);
 
         using var doc = JsonDocument.Parse(json);
-        Assert.Equal(expected, doc.RootElement.GetProperty("edition").GetString());
+        Assert.Equal("Test Edition", doc.RootElement.GetProperty("edition").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, doc.RootElement.GetProperty("edition_note").ValueKind);
         Assert.True(doc.RootElement.GetProperty("summary").GetProperty("settings_checked").GetInt32() > 0);
     }
 

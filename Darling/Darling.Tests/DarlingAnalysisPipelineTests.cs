@@ -84,7 +84,8 @@ public sealed class DarlingAnalysisPipelineTests
         /* Both AnalyzeAsync shapes: the (serverId, serverName, hoursBack) window builder and
            the explicit-context pipeline entry. */
         Assert.Equal(2, type.GetMethods().Count(m => m.Name == "AnalyzeAsync"));
-        Assert.NotNull(type.GetMethod("AnalyzeAsync", new[] { typeof(AnalysisContext) }));
+        /* #5633 item 13: the Darling pass also takes persistCollectionCaveats (scheduled passes only), optional and defaulted off. */
+        Assert.NotNull(type.GetMethod("AnalyzeAsync", new[] { typeof(AnalysisContext), typeof(bool) }));
 
         /* The twins' run-state surface + completion event. */
         Assert.NotNull(type.GetProperty("IsAnalyzing"));

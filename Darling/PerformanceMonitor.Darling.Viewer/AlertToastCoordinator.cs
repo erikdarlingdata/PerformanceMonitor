@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -63,6 +64,11 @@ public sealed class AlertToastCoordinator
 
     /// <summary>condKey (server_id|metric) → the last toast's nowUtc, for the cooldown gate + pruning.</summary>
     private readonly Dictionary<string, DateTime> _lastToast = new(StringComparer.Ordinal);
+
+    /// <summary>#5641: the conditions whose last toast was a Critical row, so a Warning toast followed by a Critical
+    /// row of an escalation-opted-in metric (<see cref="TierEscalation.IsOptedIn"/>) toasts at once instead of
+    /// waiting out the tray cooldown. Kept in step with <see cref="_lastToast"/>.</summary>
+    private readonly HashSet<string> _lastToastWasCritical = new(StringComparer.Ordinal);
 
     /// <param name="seenRetention">
     /// How long to remember a row so the overlapping poll window doesn't re-toast it. Pass at least the
@@ -155,7 +161,18 @@ public sealed class AlertToastCoordinator
             }
 
             var conditionKey = ConditionKey(row);
+
+            /* #5641: the service delivers a Warning-to-Critical escalation of an opted-in alert past its own
+               cooldown, so the tray must not hold the same row back for ITS cooldown: the last toast for this
+               condition was a Warning and this row is Critical. A Critical row after a Critical toast, and
+               every Warning row, follow the cooldown as before. */
+            var escalation = row.IsCritical
+                && TierEscalation.IsOptedIn(row.MetricName)
+                && _lastToast.ContainsKey(conditionKey)
+                && !_lastToastWasCritical.Contains(conditionKey);
+
             if (cooldown > TimeSpan.Zero
+                && !escalation
                 /* #4732: a stamp ahead of the clock (it stepped back since the toast) is replaced by this reading, so the
                    condition is held one cooldown from here, not the step plus the cooldown. */
                 && PerformanceMonitor.Common.LastFiredStamp.TryGet(_lastToast, conditionKey, nowUtc, out var last)
@@ -165,6 +182,15 @@ public sealed class AlertToastCoordinator
             }
 
             _lastToast[conditionKey] = nowUtc;
+            if (row.IsCritical)
+            {
+                _lastToastWasCritical.Add(conditionKey);
+            }
+            else
+            {
+                _lastToastWasCritical.Remove(conditionKey);
+            }
+
             toasts.Add(row);
         }
 
@@ -217,6 +243,7 @@ public sealed class AlertToastCoordinator
         foreach (var key in _lastToast.Where(kv => kv.Value < toastCutoff).Select(kv => kv.Key).ToList())
         {
             _lastToast.Remove(key);
+            _lastToastWasCritical.Remove(key);
         }
     }
 }

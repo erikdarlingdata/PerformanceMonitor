@@ -367,6 +367,7 @@ public partial class RemoteCollectorService
                     {
                         DeadlocksCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.Deadlock),
                         BlockedProcessReportCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.BlockedProcess),
+                        AttentionCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.Attention),
                         _ => null,
                     };
 

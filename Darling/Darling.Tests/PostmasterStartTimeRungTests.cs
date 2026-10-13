@@ -155,7 +155,7 @@ public sealed class PostmasterStartTimeRungTests
         }
 
         Assert.Equal(72, TimescaleSupport.HypertableCount);
-        Assert.Equal(71, CollectorCatalog.All.Count);
+        Assert.Equal(71, TimescaleSupport.HypertableTables.Count);
         Assert.Equal(27, PgWriteStatsCollector.Instance.PayloadColumns.Count);
     }
 

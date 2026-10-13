@@ -574,6 +574,10 @@ SELECT
     COALESCE(user_updates, 0) AS user_updates,
     GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,
     CASE
+        /* #5633 item 16: a heap or a clustered index IS the table, not a drop candidate: with no reads it is
+           'Table not read' whatever its update count, and with reads it falls through to 'Active'. */
+        WHEN (index_type_desc = 'HEAP' OR index_type_desc LIKE 'CLUSTERED%')
+             AND COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 'Table not read'
         WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
              AND COALESCE(user_updates, 0) = 0 THEN 'Unused'
         WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0

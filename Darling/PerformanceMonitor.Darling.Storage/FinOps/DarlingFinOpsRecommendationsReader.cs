@@ -14,6 +14,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -58,15 +59,6 @@ SELECT
     MAX(collection_time) AS last_sample,
     COUNT(total_server_memory_mb) AS window_samples
 FROM v_memory_stats
-WHERE server_id = $1
-AND   collection_time >= $2";
-
-    /// <summary>7-day P95 of SQL Server CPU utilization, for the VM right-sizing CPU prescription. $1 server_id, $2 cutoff (naive UTC).</summary>
-    public const string CpuP95Sql = @"
-SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu,
-       MIN(collection_time) AS first_sample, MAX(collection_time) AS last_sample,
-       COUNT(sqlserver_cpu_utilization) AS window_samples
-FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
 
@@ -204,19 +196,6 @@ ORDER BY database_name";
         return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) ? reader.GetDateTime(0) : null;
     }
 
-    /// <summary>The span from the oldest to the newest CPU sample since <paramref name="cutoff"/>: zero when there is none.</summary>
-    public static async Task<TimeSpan> GetCpuSampleSpanAsync(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
-    {
-        await using var command = dataSource.CreateCommand(CpuSampleSpanSql);
-        command.CommandTimeout = commandTimeoutSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) && !reader.IsDBNull(1)
-            ? reader.GetDateTime(1) - reader.GetDateTime(0)
-            : TimeSpan.Zero;
-    }
-
     /// <summary>Reads the 7-day P95 Total Server Memory (MB) + sample count (shared by the memory + VM right-sizing checks).</summary>
     public static async Task<(int P95Mb, long SampleCount, string Window)> GetMemoryP95Async(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
@@ -259,25 +238,6 @@ ORDER BY database_name";
         }
 
         return runs;
-    }
-
-    /// <summary>Reads the 7-day P95 SQL Server CPU utilization and the window its samples cover, or null when the window holds no CPU sample.</summary>
-    public static async Task<(decimal P95CpuPct, string Window)?> GetCpuP95Async(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
-    {
-        await using var cpuCommand = dataSource.CreateCommand(CpuP95Sql);
-        cpuCommand.CommandTimeout = commandTimeoutSeconds;
-        cpuCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        cpuCommand.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
-
-        await using var cpuReader = await cpuCommand.ExecuteReaderAsync(cancellationToken);
-        if (await cpuReader.ReadAsync(cancellationToken) && !cpuReader.IsDBNull(0))
-        {
-            var p95Cpu7d = Convert.ToDecimal(cpuReader.GetValue(0), CultureInfo.InvariantCulture);
-            var cpuWindow = RightSizingWindow.Describe(cpuReader.IsDBNull(3) ? 0L : Convert.ToInt64(cpuReader.GetValue(3), CultureInfo.InvariantCulture), cpuReader.IsDBNull(1) || cpuReader.IsDBNull(2) ? TimeSpan.Zero : cpuReader.GetDateTime(2) - cpuReader.GetDateTime(1));
-            return (p95Cpu7d, cpuWindow);
-        }
-
-        return null;
     }
 
     /// <summary>Reads the per-database aggregate read/write I/O + stall over the window, in read order, for the storage-tier check.</summary>
@@ -366,10 +326,15 @@ ORDER BY database_name";
     /// <param name="onCheckFailed">Optional. Invoked once per failed check with that check's label and the exception.
     /// It is not invoked for the VM check's inner CPU fallback, which degrades to the 24-hour window and still emits.</param>
     public static async Task<List<FinOpsRecommendation>> GetRecommendationsAsync(NpgsqlDataSource dataSource, int serverId, decimal monthlyCost, int commandTimeoutSeconds, Action<string, Exception>? onCheckFailed = null,
-        IReadOnlyCollection<string>? secondaryDatabases = null, CancellationToken cancellationToken = default)
+        IReadOnlyCollection<string>? secondaryDatabases = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var recommendations = new List<FinOpsRecommendation>();
         var memoryCutoff = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified);
+
+        /* #5633 item 4: the databases the server has now (its newest database_states snapshot; null when unknown, which skips
+           nothing). A database dropped since its rows were collected is left out of the database-named rules below; the index
+           read (compression) applies the same set at its own read. */
+        var currentDatabases = await CurrentDatabaseScope.ReadAsync(dataSource, serverId, logger: logger, cancellationToken: cancellationToken);
 
         // 1. Enterprise feature / license audit (collected server_properties + database_config.is_encrypted).
         try
@@ -389,7 +354,8 @@ ORDER BY database_name";
                     /* #5558: a secondary copy's TDE is the primary's to report. When every TDE database here is a secondary copy,
                        "no Enterprise-only features" would be false and the blocker is the primary's, so the audit says nothing
                        (a secondary-role instance keeps its own edition note, which never reads this list). */
-                    tdeDbNames = AgReplicaScope.WithoutSecondaries(tdeAllNames, secondaryDatabases);
+                    tdeDbNames = AgReplicaScope.WithoutSecondaries(tdeAllNames, secondaryDatabases)
+                        .Where(name => !CurrentDatabaseScope.IsDropped(currentDatabases, name)).ToList();
                     tdeSecondaryOnly = tdeAllNames.Count > 0 && tdeDbNames.Count == 0
                         && !string.Equals(f.AgReplicaRole.Trim(), "Secondary", StringComparison.OrdinalIgnoreCase);
                 }
@@ -407,15 +373,13 @@ ORDER BY database_name";
         }
 
         /* A server enrolled minutes ago holds only the ring-buffer backfill of its first collect ("68 samples over 4 minutes"), which
-           is not a day of load, so each CPU right-sizing rule waits for its own window to be watched, and the two never both land in
-           the list: the one that keeps more cores wins. The 24-hour rule (2, utilization efficiency) reads the last 24 hours, so its
-           oldest sample inside that window has to be 23 hours old; the 7-day rule (12) reads 7 days and keeps a 24-hour span. */
-        var cpuSpanEnough = false;
+           is not a day of load, so the CPU right-sizing advice waits until the 24-hour window is watched: its oldest sample inside
+           the last 24 hours has to be 23 hours old. Both CPU rows (2 and 12) read that same window and the same P95 the Utilization
+           view shows, and speak only when its verdict is OVER_PROVISIONED, so they cannot disagree with it or with each other
+           (#5633 item 11, #5644 W18). They never both land in the list: the one that keeps more cores wins. */
         var cpu24HourWatched = false;
         try
         {
-            cpuSpanEnough = FinOpsRecommendationFigures.CpuSamplesSpanEnough(
-                await GetCpuSampleSpanAsync(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken));
             var now = DateTime.UtcNow;
             cpu24HourWatched = FinOpsRecommendationFigures.Cpu24HourWindowWatched(
                 await GetOldestCpuSampleAsync(dataSource, serverId, DateTime.SpecifyKind(now.AddHours(-24), DateTimeKind.Unspecified), commandTimeoutSeconds, cancellationToken), now);
@@ -473,7 +437,7 @@ ORDER BY database_name";
         //    has native Index Analysis, so the sp_IndexCleanup-existence prompt is obsolete).
         try
         {
-            var indexes = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+            var indexes = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, serverId, commandTimeoutSeconds, logger, cancellationToken);
             var rec = FinOpsRecommendationFigures.Compression(
                 indexes.Where(i => !AgReplicaScope.IsSkipped(secondaryDatabases, i.DatabaseName)));
             if (rec != null)
@@ -495,7 +459,8 @@ ORDER BY database_name";
                database idle. */
             var idleDbs = (await DarlingFinOpsOptimizationReader.GetIdleDatabaseReadAsync(
                 dataSource, serverId, DateTime.UtcNow.AddDays(-7), commandTimeoutSeconds, cancellationToken)).Rows
-                .Where(d => !AgReplicaScope.IsSkipped(secondaryDatabases, d.DatabaseName)).ToList();
+                .Where(d => !AgReplicaScope.IsSkipped(secondaryDatabases, d.DatabaseName)
+                    && !CurrentDatabaseScope.IsDropped(currentDatabases, d.DatabaseName)).ToList();
             if (idleDbs.Count > 0)
             {
                 var allocatedTotalMb = 0m;
@@ -523,7 +488,8 @@ ORDER BY database_name";
         {
             var devDbs = FinOpsRecommendationFigures.MatchDevTestDatabases(
                 (await GetDatabaseEncryptionFactsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken))
-                    .Select(r => r.DatabaseName).Where(name => !AgReplicaScope.IsSkipped(secondaryDatabases, name)));
+                    .Select(r => r.DatabaseName).Where(name => !AgReplicaScope.IsSkipped(secondaryDatabases, name)
+                        && !CurrentDatabaseScope.IsDropped(currentDatabases, name)));
             var devTestRecommendation = FinOpsRecommendationFigures.DevTest(devDbs);
             if (devTestRecommendation != null)
                 recommendations.Add(devTestRecommendation);
@@ -555,36 +521,26 @@ ORDER BY database_name";
             if (vmUtil != null && FinOpsUtilizationFigures.HasCpuSample(vmUtil)
                 && await GetEngineEditionAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
-                decimal p95Cpu7d = vmUtil.P95CpuPct;
-                var cpuWindow = "recent samples"; // neutral until the 7-day read supplies its own span; the 24-hour fallback has no span of its own
+                /* The CPU row reads the Utilization view's own window and P95 (the last 24 hours), not a 7-day P95 of its own: two
+                   windows gave two P95s and two verdicts for one server (16.0% beside 7.0%, #5633 item 11). The memory row below
+                   keeps its 7-day window; it has no Utilization verdict to agree with. */
+                decimal p95Cpu24h = vmUtil.P95CpuPct;
+                var cpuWindow = "the last 24 hours";
                 int cpuCount = vmUtil.CpuCount;
                 int physMb = vmUtil.PhysicalMemoryMb;
-
-                // Prefer the 7-day P95 CPU; fall back to the 24-hour P95 already on vmUtil.
-                try
-                {
-                    if (await GetCpuP95Async(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken) is { } cpu)
-                    {
-                        p95Cpu7d = cpu.P95CpuPct;
-                        cpuWindow = cpu.Window;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"Recommendation check (VM right-sizing) 7-day CPU P95 fell back to 24h: {ex.Message}");
-                }
 
                 var (p95MemMb, memSampleCount, memWindow) = await GetMemoryP95Async(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken);
 
                 /* One CPU right-sizing row per server: rule 2 may already have added its row, and this one then takes its place
                    only when it keeps more cores. */
-                var vmCpuTarget = FinOpsRecommendationFigures.VmCpuTargetCores(p95Cpu7d, cpuCount);
-                var vmCpuRowWins = cpuSpanEnough && vmCpuTarget is int vmTarget && FinOpsRecommendationFigures.PrescriptiveCpuRowWins(computeCpuTarget, vmTarget);
+                var vmCpuTarget = FinOpsRecommendationFigures.CpuVerdictAllowsDownsizing(vmUtil)
+                    ? FinOpsRecommendationFigures.VmCpuTargetCores(p95Cpu24h, cpuCount) : null;
+                var vmCpuRowWins = cpu24HourWatched && vmCpuTarget is int vmTarget && FinOpsRecommendationFigures.PrescriptiveCpuRowWins(computeCpuTarget, vmTarget);
                 if (vmCpuRowWins && computeCpuRow != null)
                     recommendations.Remove(computeCpuRow);
 
                 foreach (var vmRecommendation in FinOpsRecommendationFigures.VmRightSizing(
-                    p95Cpu7d, cpuWindow, cpuCount, physMb, p95MemMb, memSampleCount, memWindow, monthlyCost, includeCpuRow: vmCpuRowWins))
+                    p95Cpu24h, cpuWindow, cpuCount, physMb, p95MemMb, memSampleCount, memWindow, monthlyCost, includeCpuRow: vmCpuRowWins))
                     recommendations.Add(vmRecommendation);
             }
         }
@@ -599,7 +555,8 @@ ORDER BY database_name";
         {
             var storageRows = await GetStorageTierIoAsync(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken);
 
-            var storageRecommendation = FinOpsRecommendationFigures.StorageTier(storageRows);
+            var storageRecommendation = FinOpsRecommendationFigures.StorageTier(
+                storageRows.Where(r => !CurrentDatabaseScope.IsDropped(currentDatabases, r.DatabaseName)));
             if (storageRecommendation != null)
                 recommendations.Add(storageRecommendation);
         }

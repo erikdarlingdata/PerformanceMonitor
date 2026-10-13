@@ -42,6 +42,12 @@ public sealed class AlertEngineTests
         public bool BlockingEnabled { get; set; }
         public bool DeadlockEnabled { get; set; }
         public bool PoisonWaitEnabled { get; set; }
+        public bool RunnableQueueEnabled { get; set; }
+        public int RunnableQueueWarningPerScheduler { get; set; } = 8;
+        public int RunnableQueueCriticalPerScheduler { get; set; } = 16;
+        public bool ClientTimeoutsEnabled { get; set; }
+        public int ClientTimeoutsWarningPerMinute { get; set; } = 10;
+        public int ClientTimeoutsCriticalPerMinute { get; set; } = 60;
         public bool LongRunningQueryEnabled { get; set; }
         public bool TempDbSpaceEnabled { get; set; }
         public bool LowDiskEnabled { get; set; }
@@ -107,6 +113,10 @@ public sealed class AlertEngineTests
            unfiltered — the seam contract is a dumb window sum; the engine does the thresholding. */
         public List<PoisonWaitAccumulation> PoisonWaits { get; } = new();
         public int PoisonWaitWindowMinutesAsked { get; private set; }
+        /* #5641: the collections the engine grades; whatever a test puts here comes back as is (newest first). */
+        public List<RunnableQueueSample> RunnableQueue { get; set; } = new();
+        public int RunnableQueueLookbackMinutesAsked { get; private set; }
+        public int RunnableQueueReads { get; private set; }
         public List<LongRunningQueryInfo> LongRunning { get; } = new();
         public List<VolumeFreeSpaceInfo> Volumes { get; } = new();
         public List<PvsPressureInfo> PvsDatabases { get; } = new();
@@ -151,14 +161,44 @@ public sealed class AlertEngineTests
             return Task.FromResult(new List<PoisonWaitAccumulation>(PoisonWaits));
         }
 
+        public AttentionWindow Attention { get; set; } = AttentionWindow.Empty;
+
+        public int AttentionLookbackMinutesAsked;
+
+        public int AttentionReads;
+
+        public Task<AttentionWindow> GetAttentionWindowAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
+
+        {
+
+            AttentionLookbackMinutesAsked = lookbackMinutes;
+
+            AttentionReads++;
+
+            return Task.FromResult(Attention);
+
+        }
+
+        
+
+        public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
+        {
+            RunnableQueueLookbackMinutesAsked = lookbackMinutes;
+            RunnableQueueReads++;
+            return Task.FromResult<IReadOnlyList<RunnableQueueSample>>(new List<RunnableQueueSample>(RunnableQueue));
+        }
+
         /* #3495's degrade arm: the CPU card's fire-time maintenance probe rides this same seam, and the
            pin that a failed probe costs the annotation and never the alert needs a read that faults. */
         public bool ThrowOnLongRunningRead { get; set; }
 
+        /// <summary>#5641 round 1: whether the last active-session read asked for CPU order.</summary>
+        public bool LastLrqOrderedByCpu { get; set; }
+
         public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
             string serverKey, int thresholdMinutes, int maxResults,
             bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc,
-            IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default)
+            IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, bool orderByCpu = false, CancellationToken cancellationToken = default)
         {
             if (ThrowOnLongRunningRead)
             {
@@ -167,13 +207,18 @@ public sealed class AlertEngineTests
 
             LastLrqArgs = (thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits, excludeCdc, excludedDatabases);
             LastLrqExclusions = exclusions;
+            LastLrqOrderedByCpu = orderByCpu;
             /* #3742: the database list is applied HERE, ahead of the cap, exactly as both SQL reads now apply it —
                the rule the reads' third flag spells (exact, case-insensitive, normalised, a row with no database
                name is kept) — so an engine-level pin can plant six excluded-database sessions ahead of one real
                one and see the real one on a page of five. */
             var excluded = LongRunningQueryExclusions.Normalize(excludedDatabases);
             bool InExcludedDatabase(LongRunningQueryInfo q) => LongRunningQueryExclusions.MatchesExact(q.DatabaseName, excluded);
-            var kept = LongRunning.Where(q => !exclusions.Excludes(q.ProgramName, q.LoginName) && !InExcludedDatabase(q)).Take(Math.Clamp(maxResults, 1, 1000)).ToList();
+            /* #5641 round 1: orderByCpu ranks by CPU ahead of the cap, as both SQL reads do (CPU, then elapsed, then session id). */
+            IEnumerable<LongRunningQueryInfo> source = orderByCpu
+                ? LongRunning.OrderByDescending(q => q.CpuTimeMs).ThenByDescending(q => q.ElapsedSeconds).ThenBy(q => q.SessionId)
+                : LongRunning;
+            var kept = source.Where(q => !exclusions.Excludes(q.ProgramName, q.LoginName) && !InExcludedDatabase(q)).Take(Math.Clamp(maxResults, 1, 1000)).ToList();
             /* Counts in SESSIONS (distinct session_id), split by arm through the shared Classify — a session matching
                both arms lands under ProgramPrefix, exactly as the two SQL scalars count it; the database arm is LAST,
                taken AND NOT either knob arm, as the third scalar counts it. */
@@ -4678,7 +4723,12 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
-        public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(string serverKey, int thresholdMinutes, int maxResults, bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc, IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default) =>
+        public Task<AttentionWindow> GetAttentionWindowAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("store down");
+        
+        public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("store down");
+        public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(string serverKey, int thresholdMinutes, int maxResults, bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc, IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, bool orderByCpu = false, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");

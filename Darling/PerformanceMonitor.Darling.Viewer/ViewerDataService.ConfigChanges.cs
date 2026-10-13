@@ -162,7 +162,8 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
         var snapshots = await ReadTraceFlagSnapshotsAsync(serverId, endUtc, cancellationToken);
-        return ConfigChangeDiff.DiffTraceFlagChanges(snapshots, startUtc, endUtc)
+        var emptyRuns = await ReadEmptyTraceFlagRunsAsync(serverId, startUtc, endUtc, cancellationToken);
+        return ConfigChangeDiff.DiffTraceFlagChanges(snapshots, emptyRuns, startUtc, endUtc)
             .Select(c => new TraceFlagChangeRow(c))
             .ToList();
     }
@@ -241,6 +242,24 @@ public sealed partial class ViewerDataService
         }
 
         return rows;
+    }
+
+    private async Task<List<DateTime>> ReadEmptyTraceFlagRunsAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
+    {
+        var times = new List<DateTime>();
+        await using var command = _dataSource.CreateCommand(DarlingRetentionHorizons.EmptyTraceFlagRunsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            times.Add(reader.GetDateTime(0));
+        }
+
+        return times;
     }
 
     private async Task<List<ConfigChangeDiff.TraceFlagSnapshot>> ReadTraceFlagSnapshotsAsync(

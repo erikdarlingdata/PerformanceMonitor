@@ -238,7 +238,7 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
 
         /* No table, no collector: the censuses did not move; the health payload grew by exactly two. */
         Assert.Equal(72, TimescaleSupport.HypertableCount);
-        Assert.Equal(71, CollectorCatalog.All.Count);
+        Assert.Equal(71, TimescaleSupport.HypertableTables.Count);
         Assert.Equal(12, QueryStoreHealthCollector.Instance.PayloadColumns.Count);
     }
 

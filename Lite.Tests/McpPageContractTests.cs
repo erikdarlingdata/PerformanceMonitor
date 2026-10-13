@@ -445,7 +445,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(
             new[]
             {
-                "alert_time", "server_id", "server_name", "metric_name", "current_value", "threshold_value", "alert_sent",
+                "alert_time", "server_id", "server_name", "metric_name",
+                /* #5654: Darling's external-alert source for the row; always null in Lite. */
+                "external_source", "current_value", "threshold_value", "alert_sent",
                 "notification_type", "send_error", "muted", "dismissed", "severity", "severity_source", "route", "routing",
                 "routing_reason", "detail_text",
                 /* #5642: the newest sample the alert judged and its age at fire time, read from the persisted context. */
@@ -1141,6 +1143,20 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
             var limit = method.GetParameters().Single(p => p.Name == "limit");
             Assert.Contains("truncated", limit.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// #5640: <c>get_client_timeouts</c>' <c>limit</c> pages only the SAMPLED events, never the count or the top lists, and the
+    /// description says samples are a subset. The boundary pair (limit equal to the sample count is not truncated, one below is)
+    /// runs against DuckDB in <c>ClientTimeoutsReadTests</c>; Darling's twin pins the shared payload source.
+    /// </summary>
+    [Fact]
+    public void GetClientTimeouts_LimitPagesOnlyTheSamples_AndTheDescriptionSaysSamplesAreASubset()
+    {
+        var method = ToolMethod(typeof(McpClientTimeoutTools), "get_client_timeouts");
+        Assert.Contains("subset", method.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
+        var limit = method.GetParameters().Single(p => p.Name == "limit");
+        Assert.Contains("Never cuts the count or top lists", limit.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
     }
 
     /// <summary>

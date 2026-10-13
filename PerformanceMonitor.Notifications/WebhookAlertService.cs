@@ -14,6 +14,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -257,7 +258,8 @@ public class WebhookAlertService
             }
 
             var decision = await _cooldown.EvaluateAsync(
-                serverId, metricName, context?.Incidents, window, cooldownScope, pairedEdge);
+                serverId, metricName, context?.Incidents, window, cooldownScope, pairedEdge,
+                bypassCooldown: context?.EscalationBypassesCooldown == true /* #5641 */);
 
             if (!decision.ShouldSend)
             {
@@ -390,7 +392,7 @@ public class WebhookAlertService
             if (route.PagerDuty.Destination is { } pagerDutyKey)
             {
                 attempted = true;
-                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken);
+                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken: cancellationToken);
                 Record(NotificationRouter.PagerDutyChannel, pagerDutyError);
 
                 /* With auto-resolve on, a DELIVERED close re-opens the lifecycle: the cooldown entry the
@@ -720,6 +722,98 @@ public class WebhookAlertService
         context?.Incidents is { Count: > 0 } incidents ? incidents[0].Database : null;
 
     /// <summary>
+    /// Slack mrkdwn treats <c>&lt;!channel&gt;</c>, <c>&lt;@U123&gt;</c> and <c>&lt;https://...|label&gt;</c> as live
+    /// mentions and masked links, so alert text (a title, a detail, a server label, a query) is escaped before it is
+    /// placed in a mrkdwn string: <c>&amp;</c>, <c>&lt;</c> and <c>&gt;</c> become their entities, which Slack shows as the
+    /// characters themselves. Darling's own formatting (<c>*Server:*</c> and the like) is written outside this call.
+    /// </summary>
+    internal static string SlackEscape(string? text) =>
+        string.IsNullOrEmpty(text)
+            ? text ?? string.Empty
+            : text.Replace("&", "&amp;", StringComparison.Ordinal)
+                  .Replace("<", "&lt;", StringComparison.Ordinal)
+                  .Replace(">", "&gt;", StringComparison.Ordinal);
+
+    /// <summary>
+    /// A MessageCard text and fact value render markdown, so alert text is placed in them with the characters that form
+    /// links, images, emphasis and mentions backslash-escaped: <c>[ ] * `</c>, a <c>_</c> that is not inside a
+    /// word (markdown reads <c>query_stats</c> literally), a <c>~</c> in a <c>~~</c> pair, and a backslash that precedes
+    /// punctuation (markdown reads that pair as an escape, so a path such as <c>C:\temp</c> is left as it is).
+    /// <c>&amp;</c>, <c>&lt;</c> and <c>&gt;</c> become the entities <c>&amp;amp;</c>, <c>&amp;lt;</c> and <c>&amp;gt;</c>
+    /// (the ampersand first, so no entity is escaped twice): an entity shows as the character under a markdown
+    /// reader and under a reader of the card's limited inline HTML alike.
+    /// A MessageCard has no plain-text field, so the escape is the smaller change. Darling's own formatting (the
+    /// <c>_label_</c> and backtick spans of a record) is written outside this call.
+    /// </summary>
+    internal static string TeamsEscape(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return text ?? string.Empty;
+        }
+
+        static bool IsWordChar(string s, int i) => i >= 0 && i < s.Length && char.IsLetterOrDigit(s[i]);
+        static bool IsAsciiPunctuation(char c) => c is >= '!' and <= '/' or >= ':' and <= '@' or >= '[' and <= '`' or >= '{' and <= '~';
+
+        var builder = new StringBuilder(text.Length + 8);
+        for (var i = 0; i < text.Length; i++)
+        {
+            var ch = text[i];
+            switch (ch)
+            {
+                case '&':
+                    builder.Append("&amp;");
+                    continue;
+                case '<':
+                    builder.Append("&lt;");
+                    continue;
+                case '>':
+                    builder.Append("&gt;");
+                    continue;
+            }
+
+            var escape = ch switch
+            {
+                '[' or ']' or '*' or '`' => true,
+                '_' => !(IsWordChar(text, i - 1) && IsWordChar(text, i + 1)),
+                '~' => (i > 0 && text[i - 1] == '~') || (i + 1 < text.Length && text[i + 1] == '~'),
+                '\\' => i + 1 < text.Length && IsAsciiPunctuation(text[i + 1]),
+                _ => false,
+            };
+            if (escape)
+            {
+                builder.Append('\\');
+            }
+
+            builder.Append(ch);
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// A record text as the inside of a single-backtick code span: a backtick becomes a straight quote (it would
+    /// end the span), and each run of line breaks (CR, LF, CR LF, NEL, and the line and paragraph separators) becomes one
+    /// space. A markdown reader ends a paragraph, and with it an open span, at a blank line, so the text stays on one
+    /// line and the span closes where the card closes it.
+    /// </summary>
+    internal static string TeamsCodeSpanText(string? text) =>
+        string.IsNullOrEmpty(text)
+            ? string.Empty
+            : TeamsLineBreakRun.Replace(text.Replace('`', '\''), " ");
+
+    private static readonly Regex TeamsLineBreakRun = new(@"[\r\n\u0085\p{Zl}\p{Zp}]+", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The title an alert shows in a header or subject. An alert another service submitted (#5654) is marked
+    /// <c>[External: source] title</c>, so it cannot pass as one of Darling's own alerts.
+    /// </summary>
+    internal static string ExternalTitle(string title, AlertContext? context) =>
+        context?.External is { } external
+            ? $"[External: {external.Source}] {title}"
+            : title;
+
+    /// <summary>
     /// Builds an O365 MessageCard payload for Teams incoming webhooks.
     /// The themeColor property renders as a colored accent bar at the top of the card.
     /// <para>#2710: a non-null <paramref name="triageUrl"/> adds a <c>potentialAction</c> OpenUri button —
@@ -755,7 +849,7 @@ public class WebhookAlertService
         var prose = AlertDetailText.ProseForDelivery(detailText, context);
         /* Title/summary show the human name when present; ForMetric above stays on the immutable metric
            name (the severity key), and a null/empty display name renders the metric name unchanged. */
-        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
+        var titleName = ExternalTitle(string.IsNullOrEmpty(displayName) ? metricName : displayName, context);
         var themeColor = hexColor.TrimStart('#');
         /* One instant, with the local rendering DERIVED from it rather than read separately: two reads can
            land either side of a second, which would have the card's own "Time (UTC)" and "Time (Local)"
@@ -773,15 +867,15 @@ public class WebhookAlertService
         }
         else
         {
-            facts.Add(new { name = "Server", value = serverName });
+            facts.Add(new { name = "Server", value = TeamsEscape(serverName) });
             var resourceName = DeriveResourceName(context);
             if (resourceName is not null)
-                facts.Add(new { name = "Resource", value = resourceName });
+                facts.Add(new { name = "Resource", value = TeamsEscape(resourceName) });
             var database = DeriveResourceDatabase(context);
             if (!string.IsNullOrEmpty(database))
-                facts.Add(new { name = "Database", value = database });
-            facts.Add(new { name = "Current Value", value = currentValue });
-            facts.Add(new { name = "Threshold", value = thresholdValue });
+                facts.Add(new { name = "Database", value = TeamsEscape(database) });
+            facts.Add(new { name = "Current Value", value = TeamsEscape(currentValue) });
+            facts.Add(new { name = "Threshold", value = TeamsEscape(thresholdValue) });
             facts.Add(new { name = "Time (UTC)", value = utcNow.ToString("yyyy-MM-dd HH:mm:ss") });
             facts.Add(new { name = "Time (Local)", value = localNow.ToString("yyyy-MM-dd HH:mm:ss") });
         }
@@ -796,7 +890,7 @@ public class WebhookAlertService
         /* #3297: ahead of the per-incident sections — it is the actionable half of the alert. */
         if (prose is not null)
         {
-            itemSections.Add(new { activityTitle = "Details", text = prose, markdown = true });
+            itemSections.Add(new { activityTitle = "Details", text = TeamsEscape(prose), markdown = true });
         }
 
         if (context?.Details != null)
@@ -816,11 +910,11 @@ public class WebhookAlertService
                        Investigation/Remediation paragraph (split on the blank line).
                        Body is exclusive with Fields, matching the email and Slack surfaces
                        which skip Fields when Body is present. */
-                    facts.Add(new { name = "Advice", value = detail.Heading });
+                    facts.Add(new { name = "Advice", value = TeamsEscape(detail.Heading) });
                     foreach (var para in detail.Body.Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
                     {
                         var (label, text) = SplitProseLabel(para);
-                        facts.Add(new { name = label, value = text });
+                        facts.Add(new { name = TeamsEscape(label), value = TeamsEscape(text) });
                     }
                     continue;
                 }
@@ -838,7 +932,7 @@ public class WebhookAlertService
                        quote (a T-SQL text never carries one; a PostgreSQL text rarely). */
                     foreach (var record in detail.Records)
                     {
-                        var value = new StringBuilder(record.Summary);
+                        var value = new StringBuilder(TeamsEscape(record.Summary));
                         foreach (var (label, text) in record.Texts)
                         {
                             if (value.Length > 0)
@@ -848,10 +942,10 @@ public class WebhookAlertService
 
                             if (record.Texts.Count > 1)
                             {
-                                value.Append('_').Append(label).Append("_  \n");
+                                value.Append('_').Append(TeamsEscape(label)).Append("_  \n");
                             }
 
-                            value.Append('`').Append(text.Replace('`', '\'')).Append('`');
+                            value.Append('`').Append(TeamsCodeSpanText(text)).Append('`');
                         }
 
                         itemFacts.Add(new { name = string.Create(CultureInfo.InvariantCulture, $"#{record.Ordinal}"), value = value.ToString() });
@@ -861,13 +955,13 @@ public class WebhookAlertService
                 {
                     foreach (var (label, value) in detail.Fields)
                     {
-                        itemFacts.Add(new { name = label, value });
+                        itemFacts.Add(new { name = TeamsEscape(label), value = TeamsEscape(value) });
                     }
                 }
 
                 itemSections.Add(new
                 {
-                    activityTitle = detail.Heading,
+                    activityTitle = TeamsEscape(detail.Heading),
                     facts = itemFacts,
                     markdown = true
                 });
@@ -883,14 +977,14 @@ public class WebhookAlertService
 
         var title = isTest
             ? $"{emoji} TEST — {metricName}"
-            : $"{emoji} {badgeText} — {titleName}";
+            : $"{emoji} {badgeText} — {TeamsEscape(titleName)}";
 
         var sections = new List<object>
         {
             new
             {
                 activityTitle = title,
-                activitySubtitle = isTest ? branding.EditionName : $"{branding.EditionName} — {serverName}",
+                activitySubtitle = isTest ? branding.EditionName : $"{branding.EditionName} — {TeamsEscape(serverName)}",
                 facts,
                 markdown = true
             }
@@ -1081,6 +1175,9 @@ public class WebhookAlertService
     /// leave it no capacity at all.
     /// </summary>
     private const int SlackDetailHeadingLimit = 500;
+
+    /// <summary>Slack's cap on a <c>header</c> block's text, in characters.</summary>
+    internal const int SlackHeaderTextLimit = 150;
 
     /// <summary>
     /// The most one record of a record-shaped detail (<see cref="AlertDetailItem.Records"/>, #3644) may
@@ -1474,10 +1571,7 @@ public class WebhookAlertService
             list.Append(details[i].Heading);
         }
 
-        var listed = list.ToString();
-        var headings = listed.Length <= SlackOmittedHeadingsLimit
-            ? listed
-            : listed[..SlackCutLength(listed, SlackOmittedHeadingsLimit)] + "...";
+        var headings = SlackEscapedBounded(list.ToString(), SlackOmittedHeadingsLimit);
 
         var noun = dropped == 1 ? "detail" : "details";
         var omission = string.Create(CultureInfo.InvariantCulture,
@@ -1503,7 +1597,7 @@ public class WebhookAlertService
     private static List<object> RenderSlackDetail(AlertDetailItem detail, int bodyBlockBudget)
     {
         var run = new List<object> { new { type = "divider" } };
-        var heading = SlackHeading(detail.Heading);
+        var heading = SlackEscapedHeading(detail.Heading);
 
         if (detail.IsCodeBlock)
         {
@@ -1517,7 +1611,7 @@ public class WebhookAlertService
             /* Advice prose flows as mrkdwn sections; the synthesized Body is
                "Investigation: ...\n\nRemediation: ..." which Slack renders verbatim. One section when it
                fits the ceiling (every observed body does); split on line boundaries when it does not. */
-            AddSlackProseSections(run, $"*{heading}*\n", detail.Body, bodyBlockBudget);
+            AddSlackProseSections(run, $"*{heading}*\n", SlackEscape(detail.Body), bodyBlockBudget);
             return run;
         }
 
@@ -1609,9 +1703,7 @@ public class WebhookAlertService
     /// <see cref="SlackRecordLimit"/>.</summary>
     private static string SlackRecordText(AlertDetailRecord record)
     {
-        var summary = record.Summary.Length <= SlackRecordSummaryLimit
-            ? record.Summary
-            : record.Summary[..SlackCutLength(record.Summary, SlackRecordSummaryLimit)] + "...";
+        var summary = SlackEscapedBounded(record.Summary, SlackRecordSummaryLimit);
         var unit = new StringBuilder();
         unit.Append("*#").Append(record.Ordinal.ToString(CultureInfo.InvariantCulture));
         if (summary.Length > 0)
@@ -1640,7 +1732,7 @@ public class WebhookAlertService
         {
             if (labelled)
             {
-                unit.Append("\n_").Append(label).Append('_');
+                unit.Append("\n_").Append(SlackEscape(label)).Append('_');
             }
 
             unit.Append("\n```\n").Append(SlackBoundedText(string.Empty, text, share)).Append("\n```");
@@ -1655,6 +1747,55 @@ public class WebhookAlertService
     /// different thing.</summary>
     private static string SlackHeading(string heading) =>
         heading.Length <= SlackDetailHeadingLimit ? heading : heading[..SlackCutLength(heading, SlackDetailHeadingLimit)] + "...";
+
+    /// <summary>
+    /// A heading as mrkdwn: cut as raw text (<see cref="SlackHeading"/>), then escaped, then held to what a
+    /// field's <c>*heading*</c> may carry (<see cref="SlackFieldTextLimit"/> less the two asterisks) at the last
+    /// whole entity, because a heading made of <c>&amp;</c> grows fivefold when it is escaped.
+    /// </summary>
+    private static string SlackEscapedHeading(string heading) =>
+        SlackEscapedBounded(SlackHeading(heading), SlackFieldTextLimit - 2);
+
+    /// <summary>
+    /// <paramref name="raw"/> escaped for mrkdwn and inside <paramref name="limit"/> characters of escaped text.
+    /// The text is cut BEFORE it is escaped, on a whole character, so a cut never lands inside an entity; one that
+    /// still has to be cut ends in <c>...</c>.
+    /// </summary>
+    private static string SlackEscapedBounded(string? raw, int limit)
+    {
+        if (string.IsNullOrEmpty(raw))
+        {
+            return string.Empty;
+        }
+
+        var escaped = SlackEscape(raw);
+        return escaped.Length <= limit
+            ? escaped
+            : SlackEscape(raw[..SlackEscapedFit(raw, limit)]) + "...";
+    }
+
+    /// <summary>
+    /// The length of the longest leading stretch of <paramref name="raw"/>, ending on a whole character, whose
+    /// escaped form (<see cref="SlackEscape"/>) is at most <paramref name="limit"/> characters.
+    /// </summary>
+    private static int SlackEscapedFit(string raw, int limit)
+    {
+        var cost = 0;
+        var fit = 0;
+        while (fit < raw.Length)
+        {
+            var next = raw[fit] switch { '&' => 5, '<' or '>' => 4, _ => 1 };
+            if (cost + next > limit)
+            {
+                break;
+            }
+
+            cost += next;
+            fit++;
+        }
+
+        return SlackCutLength(raw, fit);
+    }
 
     /// <summary>
     /// One detail field's text object, <c>*label:*</c> over its value, inside
@@ -1673,7 +1814,7 @@ public class WebhookAlertService
     /// narrower than the room held for it, and the field stays inside its limit.</para>
     /// </summary>
     private static string SlackFieldText(string label, string value) =>
-        SlackBoundedText($"*{label}:*\n", value, SlackFieldTextLimit);
+        SlackBoundedText($"*{SlackEscape(label)}:*\n", value, SlackFieldTextLimit);
 
     /// <summary>
     /// <paramref name="prefix"/> over <paramref name="value"/> inside <paramref name="limit"/>, the cut
@@ -1682,11 +1823,14 @@ public class WebhookAlertService
     /// code-blocked text (<see cref="SlackRecordText"/>, empty prefix, the record's share) states its cut in
     /// exactly the words and the characters a cut field does. One note, one arithmetic, two sites.
     /// </summary>
-    private static string SlackBoundedText(string prefix, string value, int limit)
+    private static string SlackBoundedText(string prefix, string rawValue, int limit)
     {
-        if (prefix.Length + value.Length <= limit)
+        /* The value arrives raw and is escaped after it is cut (see SlackEscapedBounded), so the cut never
+           lands inside an entity and the omitted count is in the characters the reader would count. */
+        var escapedValue = SlackEscape(rawValue);
+        if (prefix.Length + escapedValue.Length <= limit)
         {
-            return prefix + value;
+            return prefix + escapedValue;
         }
 
         static string Note(int omitted) => string.Create(CultureInfo.InvariantCulture,
@@ -1699,14 +1843,14 @@ public class WebhookAlertService
             prefix = prefix[..SlackCutLength(prefix, limit / 2)];
         }
 
-        var keep = SlackCutLength(value, Math.Max(0, limit - prefix.Length - Note(value.Length).Length));
+        var keep = SlackEscapedFit(rawValue, Math.Max(0, limit - prefix.Length - Note(rawValue.Length).Length));
         /* Counting the omitted characters IS a walk of the omitted tail — the pre-#3622 subtraction counted
            units, which is the thing that was wrong — so this costs the tail's length, once, on the
            truncation path only. Every producer bounds its values upstream (the analysis formatter cuts
            drill-down text at 300 characters; the longest measured field is 318), so the tail is short in
            practice and the cost is the value's own length in the worst case (review note on #3625). */
-        var note = Note(new StringInfo(value[keep..]).LengthInTextElements);
-        return prefix + value[..keep] + note;
+        var note = Note(new StringInfo(rawValue[keep..]).LengthInTextElements);
+        return prefix + SlackEscape(rawValue[..keep]) + note;
     }
 
     /// <summary>
@@ -1781,11 +1925,38 @@ public class WebhookAlertService
 
         if (cut > 0)
         {
-            return cut;
+            return SlackBeforeEntity(text, cut);
         }
 
         /* No whole element fits: a code-point boundary keeps the payload valid and the caller moving. */
         return char.IsHighSurrogate(text[limit - 1]) && char.IsLowSurrogate(text[limit]) ? limit - 1 : limit;
+    }
+
+    /// <summary>
+    /// <paramref name="cut"/>, moved back to the start of the entity (<c>&amp;amp;</c>, <c>&amp;lt;</c>, <c>&amp;gt;</c>) it
+    /// would otherwise fall inside, so escaped text is never cut into half an entity. Unchanged when it falls
+    /// on no entity, or when backing off would leave nothing.
+    /// </summary>
+    private static int SlackBeforeEntity(ReadOnlySpan<char> text, int cut)
+    {
+        for (var back = 1; back <= 4 && back <= cut; back++)
+        {
+            var start = cut - back;
+            if (text[start] != '&')
+            {
+                continue;
+            }
+
+            var tail = text[start..];
+            if ((tail.StartsWith("&amp;", StringComparison.Ordinal) && back < 5)
+                || (tail.StartsWith("&lt;", StringComparison.Ordinal) && back < 4)
+                || (tail.StartsWith("&gt;", StringComparison.Ordinal) && back < 4))
+            {
+                return start > 0 ? start : cut;
+            }
+        }
+
+        return cut;
     }
 
     /// <summary>
@@ -1821,7 +1992,7 @@ public class WebhookAlertService
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var prose = AlertDetailText.ProseForDelivery(detailText, context);
         /* Human name in the header when present; ForMetric above keeps the immutable metric-name key. */
-        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
+        var titleName = ExternalTitle(string.IsNullOrEmpty(displayName) ? metricName : displayName, context);
         /* One instant, local derived from it — see the Teams builder's note. */
         var utcNow = nowUtc ?? DateTime.UtcNow;
         var localNow = DateTime.SpecifyKind(utcNow, DateTimeKind.Utc).ToLocalTime();
@@ -1829,6 +2000,13 @@ public class WebhookAlertService
         var title = isTest
             ? $"{emoji} TEST — {metricName}"
             : $"{emoji} {badgeText} — {titleName}";
+
+        /* A header's text is capped by Slack at 150 characters; a longer one is cut on a whole character and
+           ends in an ellipsis. */
+        if (title.Length > SlackHeaderTextLimit)
+        {
+            title = title[..SlackCutLength(title, SlackHeaderTextLimit - 3)] + "...";
+        }
 
         var blocks = new List<object>
         {
@@ -1848,15 +2026,15 @@ public class WebhookAlertService
         }
         else
         {
-            fields.Add(new { type = "mrkdwn", text = $"*Server:*\n{serverName}" });
+            fields.Add(new { type = "mrkdwn", text = $"*Server:*\n{SlackEscape(serverName)}" });
             var resourceName = DeriveResourceName(context);
             if (resourceName is not null)
-                fields.Add(new { type = "mrkdwn", text = $"*Resource:*\n{resourceName}" });
+                fields.Add(new { type = "mrkdwn", text = $"*Resource:*\n{SlackEscape(resourceName)}" });
             var database = DeriveResourceDatabase(context);
             if (!string.IsNullOrEmpty(database))
-                fields.Add(new { type = "mrkdwn", text = $"*Database:*\n{database}" });
-            fields.Add(new { type = "mrkdwn", text = $"*Current Value:*\n{currentValue}" });
-            fields.Add(new { type = "mrkdwn", text = $"*Threshold:*\n{thresholdValue}" });
+                fields.Add(new { type = "mrkdwn", text = $"*Database:*\n{SlackEscape(database)}" });
+            fields.Add(new { type = "mrkdwn", text = $"*Current Value:*\n{SlackEscape(currentValue)}" });
+            fields.Add(new { type = "mrkdwn", text = $"*Threshold:*\n{SlackEscape(thresholdValue)}" });
             fields.Add(new { type = "mrkdwn", text = $"*Time (UTC):*\n{utcNow:yyyy-MM-dd HH:mm:ss}" });
             fields.Add(new { type = "mrkdwn", text = $"*Time (Local):*\n{localNow:yyyy-MM-dd HH:mm:ss}" });
         }
@@ -1936,7 +2114,7 @@ public class WebhookAlertService
            at least one, because the details reserved it. */
         if (prose is not null)
         {
-            AddSlackProseSections(blocks, SlackProseHeader, prose,
+            AddSlackProseSections(blocks, SlackProseHeader, SlackEscape(prose),
                 blockBudget: SlackMessageBlockLimit - blocks.Count - detailBlocks.Count - footerBlocks.Count);
         }
 
@@ -2289,7 +2467,13 @@ public class WebhookAlertService
     /// </summary>
     private static AlertContext RedactForWebhook(AlertContext context)
     {
-        var redacted = new AlertContext { Incidents = context.Incidents, NewestSample = context.NewestSample };
+        var redacted = new AlertContext
+        {
+            Incidents = context.Incidents,
+            NewestSample = context.NewestSample,
+            /* #5641: transient and never serialized, but a copy that drops a member is the drift this census-pinned type guards against. */
+            EscalationBypassesCooldown = context.EscalationBypassesCooldown
+        };
         foreach (var detail in context.Details)
         {
             if (detail.IsCodeBlock)
@@ -2531,6 +2715,58 @@ public class WebhookAlertService
 
     #region PagerDuty
 
+    /// <summary>
+    /// Closes the PagerDuty incident an external alert's fire opened (#5654), and does nothing else: a clear is never an
+    /// email, Teams, Slack or generic webhook post. Sends a <c>resolve</c> on the dedup key the fire's trigger used
+    /// (<paramref name="firingMetric"/> on <paramref name="serverId"/>), to the routing key the route resolves for that
+    /// metric, and only when PagerDuty auto-resolve is on. Returns <see cref="AlertChannelOutcome.NotAttempted"/> when it
+    /// is off or PagerDuty is not routed for the metric, <see cref="AlertChannelOutcome.Delivered"/> or
+    /// <see cref="AlertChannelOutcome.Failed"/> otherwise. Never throws except for the caller's own cancellation.
+    /// </summary>
+    public async Task<AlertChannelOutcome> TrySendPagerDutyResolveAsync(
+        string firingMetric, string serverName, string serverId, string? detailText,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var delivery = _settings.SnapshotForDelivery();
+            if (!delivery.PagerDutyAutoResolve)
+            {
+                return AlertChannelOutcome.NotAttempted;
+            }
+
+            var route = NotificationRouter.Resolve(firingMetric, delivery.NotificationRoutes, delivery);
+            if (route.PagerDuty.Destination is not { } pagerDutyKey)
+            {
+                return AlertChannelOutcome.NotAttempted;
+            }
+
+            var error = await TrySendPagerDutyAlertAsync(
+                delivery, autoResolve: true, pagerDutyKey, firingMetric, serverName, "resolved", "", serverId,
+                context: null, triageUrl: null, detailText, _utcNow(), displayName: null,
+                resolveIncident: true, cancellationToken: cancellationToken);
+            if (error is null)
+            {
+                /* As the built-in pairs do after a delivered close: the cooldown entry the fire stamped describes an
+                   incident PagerDuty just closed, so the next fire of the same key must open a new one instead of being
+                   throttled against it. Only a resolve that posted clears it (#5654). */
+                _cooldown.ClearMetric(serverId, firingMetric, null);
+                return AlertChannelOutcome.Delivered;
+            }
+
+            return AlertChannelOutcome.Failed;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"PagerDuty resolve error for {firingMetric}: {ex.Message}");
+            return AlertChannelOutcome.Failed;
+        }
+    }
+
     internal Func<string, string, Task<string?>>? PostPagerDutyAsyncOverride { get; set; }
 
     /// <summary>Posts to PagerDuty Events v2. Null when the post succeeded, the error text when it did not
@@ -2549,6 +2785,7 @@ public class WebhookAlertService
         string? detailText,
         DateTime nowUtc,
         string? displayName = null,
+        bool resolveIncident = false,
         CancellationToken cancellationToken = default)
     {
         try
@@ -2564,7 +2801,7 @@ public class WebhookAlertService
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 routingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc,
-                autoResolve: autoResolve);
+                autoResolve: autoResolve, resolveIncident: resolveIncident);
 
             /* #4752: test-only override for the PagerDuty send above (below). A test funneling an
                alert THROUGH the service must read the payload the wire saw — which a real post won't let
@@ -2644,13 +2881,14 @@ public class WebhookAlertService
         string? detailText = null,
         string? displayName = null,
         DateTime? nowUtc = null,
-        bool autoResolve = false)
+        bool autoResolve = false,
+        bool resolveIncident = false)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var severity = MapToPagerDutySeverity(badgeText);
         /* The PD summary (the incident title) shows the human name when present; severity above and the
            dedup_key below stay on the immutable metric name so correlation/dedup are rename-safe. */
-        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
+        var titleName = ExternalTitle(string.IsNullOrEmpty(displayName) ? metricName : displayName, context);
         var utcNow = nowUtc ?? DateTime.UtcNow;
 
         /* Auto-resolve is opt-in and PagerDuty-only: the closing edge of an edge-type pair (the
@@ -2659,7 +2897,9 @@ public class WebhookAlertService
            (the default), the closing edge is an info-severity trigger and the incident stays open, so the
            tool never auto-resolves a third-party incident unasked. A test notification always triggers (it
            carries a throwaway key and has no incident to close). */
-        var eventAction = !isTest && autoResolve && AlertFamily.RecoveryPairs.ContainsKey(metricName)
+        /* #5654: an external alert's clear closes the incident its fire opened. The caller names it with
+           resolveIncident (and only with auto-resolve on), because an external name has no static pair. */
+        var eventAction = !isTest && autoResolve && (resolveIncident || AlertFamily.RecoveryPairs.ContainsKey(metricName))
             ? "resolve"
             : "trigger";
 

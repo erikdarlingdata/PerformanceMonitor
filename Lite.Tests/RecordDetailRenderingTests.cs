@@ -286,13 +286,13 @@ public class RecordDetailRenderingTests
         foreach (var record in item.Records)
         {
             expected.Append('\n').Append(string.Create(CultureInfo.InvariantCulture, $"*#{record.Ordinal} · {record.Summary}*"))
-                .Append("\n```\n").Append(record.Texts[0].Text).Append("\n```");
+                .Append("\n```\n").Append(record.Texts[0].Text.Replace(">", "&gt;", StringComparison.Ordinal)).Append("\n```"); /* #5654: mrkdwn text is entity-escaped */
         }
 
         Assert.Equal(expected.ToString(), text);
 
         /* And the reading order is vertical: #1's text comes before #2's summary. */
-        var text1 = text.IndexOf(QueryText(0), StringComparison.Ordinal);
+        var text1 = text.IndexOf(QueryText(0).Replace(">", "&gt;", StringComparison.Ordinal), StringComparison.Ordinal);
         var summary2 = text.IndexOf("*#2 · ", StringComparison.Ordinal);
         Assert.True(text1 > 0 && summary2 > text1);
         Assert.DoesNotContain("*#1 Database:*", text, StringComparison.Ordinal);
@@ -480,7 +480,7 @@ public class RecordDetailRenderingTests
         /* Teams: one fact per field, per detail section. */
         using var teams = JsonDocument.Parse(Teams(context));
         var chain = Assert.Single(teams.RootElement.GetProperty("sections").EnumerateArray(), s => s.TryGetProperty("activityTitle", out var t) && t.GetString() == "Blocking Chain 1");
-        Assert.Equal(context.Details[3].Fields.Select(f => (f.Label, f.Value)),
+        Assert.Equal(context.Details[3].Fields.Select(f => (f.Label, f.Value.Replace("*", @"\*", StringComparison.Ordinal))), /* #5654: markdown characters in card text are backslash-escaped */
             chain.GetProperty("facts").EnumerateArray().Select(f => (f.GetProperty("name").GetString()!, f.GetProperty("value").GetString()!)));
 
         /* Email: the fields table, label column then value, the SQL-labelled ones in <pre>. */

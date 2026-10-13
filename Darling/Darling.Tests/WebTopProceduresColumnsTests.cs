@@ -119,7 +119,7 @@ public sealed class WebTopProceduresColumnsTests
     public void TheDetailParameterIsAnAppendedOptionalWhoseDefaultIsSummary()
     {
         var src = Tools();
-        Assert.Contains("string? as_of = null,\n        [Description(\"'summary' (default) or 'full': full adds the remaining desktop columns (times, read/write/spill extremes), omitting nulls.\")] string detail = \"summary\",\n        CancellationToken cancellationToken = default)",
+        Assert.Contains("string? as_of = null,\n        [Description(\"'summary' (default) or 'full': full adds the remaining desktop columns (times, read/write/spill extremes), omitting nulls.\")] string detail = \"summary\",\n        ILogger? logger = null,\n        CancellationToken cancellationToken = default)",
             src, StringComparison.Ordinal);
         var web = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Matches(@"\[""get_top_procedures_by_cpu""\] = R\([^\n]*PAsOf\(\), PTextDefault\(""detail"", ""summary""\)\)", web);

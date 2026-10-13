@@ -110,9 +110,12 @@ public static class PerEventNotification
             AttachmentXml = attachment?.Xml,
             AttachmentFileName = attachment?.FileName,
             AgReplicaIdentity = source.AgReplicaIdentity,
+            External = source.External,
             /* #5642: the sample age is about the alert's read, not one incident, so every split message
                carries it. */
-            NewestSample = source.NewestSample
+            NewestSample = source.NewestSample,
+            /* #5641: an escalation's cooldown bypass describes the firing, so every split message carries it. */
+            EscalationBypassesCooldown = source.EscalationBypassesCooldown
         };
     }
 

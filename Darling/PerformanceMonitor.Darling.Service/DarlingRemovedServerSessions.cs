@@ -36,7 +36,7 @@ internal static class DarlingRemovedServerSessions
     /// <summary>How long a server's removal waits for its sessions to drop, for the whole step.</summary>
     internal static readonly TimeSpan Timeout = TimeSpan.FromSeconds(15);
 
-    private static readonly AlwaysOnXeSessionKind[] FallbackKinds = { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess };
+    private static readonly AlwaysOnXeSessionKind[] FallbackKinds = { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess, AlwaysOnXeSessionKind.Attention };
 
     /// <summary>
     /// What the removal needs from each server the reconcile is about to forget: the definition, the runtime and the

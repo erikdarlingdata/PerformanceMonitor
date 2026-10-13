@@ -92,7 +92,8 @@ export function getPanelSignal() {
 export function renderPanel(desc, onSettled) {
   const signal = panelSignal;
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
-  const panel = el("div", { class: "panel card" + (desc.span === 2 ? " span-2" : "") }, [
+  /* #5701: `data-panel` (the read) and `data-title` are the hooks the web UI smoke check finds a panel by. */
+  const panel = el("div", { class: "panel card" + (desc.span === 2 ? " span-2" : ""), "data-panel": desc.read || desc.title, "data-title": desc.title }, [
     /* The database-scope chip (#5245): while the page's database filter is active it says whether this panel's read took it
        (dbScopeChip in util.js; `desc.dbScope` overrides the read's own class for a panel fed by a shared read). */
     el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null, dbScopeChip(desc.read, desc.dbScope)]),
@@ -289,8 +290,15 @@ export function gridTable(rows, desc) {
   const table = el("table", { class: "data" }, [el("thead", {}, [head]), tbody]);
   const wrap = el("div", { class: "table-wrap" }, filterBar ? [filterBar, table] : [table]);
   const picker = columnPicker(desc, cols, head, tbody);
-  if (desc.tools === false) return picker ? el("div", { class: "grid-box" }, [picker, wrap]) : wrap;
-  return el("div", { class: "grid-box" }, picker ? [picker, gridTools(desc, cols, tbody), wrap] : [gridTools(desc, cols, tbody), wrap]);
+  /* #5701: `data-grid` names the grid for the web UI smoke check. A tools-less, picker-less grid is the bare wrapper, which
+     carries the hook itself so the check finds every grid the same way. */
+  const gridName = String(desc.id || desc.sortId || desc.read || desc.title || "grid");
+  if (desc.tools === false && !picker) {
+    wrap.setAttribute("data-grid", gridName);
+    return wrap;
+  }
+  if (desc.tools === false) return el("div", { class: "grid-box", "data-grid": gridName }, [picker, wrap]);
+  return el("div", { class: "grid-box", "data-grid": gridName }, picker ? [picker, gridTools(desc, cols, tbody), wrap] : [gridTools(desc, cols, tbody), wrap]);
 }
 
 /* Column groups (#4843). A descriptor with `groups: ["Memory detail", ...]` and `defaultGroups: [...]` marks wide
