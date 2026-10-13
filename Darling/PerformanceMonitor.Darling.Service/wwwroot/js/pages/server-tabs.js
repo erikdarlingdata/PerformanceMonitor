@@ -2289,7 +2289,7 @@ export const POSTGRES_TABS = [
           title: "Top Query Shapes",
           subtitle: ctx.label + ", by total execution time",
           viz: "table",
-          rowsKey: "queries",
+          rowsKey: "queriesX",
           columns: PG_TOP_QUERY_COLUMNS,
           emptyText: "No query statistics in this window.",
           noteKey: "evictions.note",
