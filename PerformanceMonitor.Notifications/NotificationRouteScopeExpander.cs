@@ -33,13 +33,21 @@ public static class NotificationRouteScopeExpander
     /// <param name="tagParents">Tag id to parent tag id (null for a root). A tag absent from the keys does not exist.</param>
     /// <param name="serverTags">Server id to the tag ids it is mapped to. Servers not in
     /// <paramref name="knownServerIds"/> and tags not in <paramref name="tagParents"/> are ignored.</param>
-    /// <returns>The routes in the same order, scoped ones carrying <see cref="NotificationRoute.ExpandedServerIds"/>,
+    /// <param name="tagsReadable">False when the tag tables could not be read (the caller then passes empty tag maps). A
+    /// tag-scoped route is returned unexpanded, so it matches nothing: fail closed, and not marked orphaned, since the tag
+    /// may still exist. Server-scoped and fleet-wide routes expand as usual. This rule lives here, not in each store, so the
+    /// two products cannot drift on it.</param>
+    /// <returns>One route per input route, in the same order and so always the input's length (callers index the output
+    /// by position), scoped ones carrying <see cref="NotificationRoute.ExpandedServerIds"/>,
     /// <see cref="NotificationRoute.ScopeTagDepth"/> and <see cref="NotificationRoute.Orphaned"/>.</returns>
+    /// <exception cref="ArgumentException">An element of <paramref name="routes"/> is null (a caller bug); the message
+    /// names its index.</exception>
     public static IReadOnlyList<NotificationRoute> Expand(
         IReadOnlyList<NotificationRoute> routes,
         IReadOnlyCollection<int> knownServerIds,
         IReadOnlyDictionary<int, int?> tagParents,
-        IReadOnlyDictionary<int, IReadOnlyCollection<int>> serverTags)
+        IReadOnlyDictionary<int, IReadOnlyCollection<int>> serverTags,
+        bool tagsReadable = true)
     {
         ArgumentNullException.ThrowIfNull(routes);
         ArgumentNullException.ThrowIfNull(knownServerIds);
@@ -50,15 +58,17 @@ public static class NotificationRouteScopeExpander
         var coverCache = new Dictionary<int, HashSet<int>>();
         var result = new List<NotificationRoute>(routes.Count);
 
-        foreach (var route in routes)
+        for (var i = 0; i < routes.Count; i++)
         {
-            if (route is null || !route.IsScoped)
+            var route = routes[i];
+            if (route is null)
             {
-                if (route is not null)
-                {
-                    result.Add(route);
-                }
+                throw new ArgumentException($"Route at index {i} is null.", nameof(routes));
+            }
 
+            if (!route.IsScoped || (!tagsReadable && route.ScopeTagId.HasValue))
+            {
+                result.Add(route);
                 continue;
             }
 

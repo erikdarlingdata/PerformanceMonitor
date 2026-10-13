@@ -344,6 +344,40 @@ public sealed class NotificationRouterScopeTests
     }
 
     [Fact]
+    public void Expand_TagsUnreadable_LeavesATagRouteUnexpanded_AndStillExpandsAServerRoute()
+    {
+        /* The fail-closed rule lives in the shared expander (#5750 review), so both products get it from one place. */
+        var fleet = Fleet(5, Metric, slack: "fleet");
+        var routes = new[] { TagRoute(1, 7), ServerRoute(2, ServerA), fleet };
+
+        var expanded = NotificationRouteScopeExpander.Expand(
+            routes, new[] { ServerA }, new Dictionary<int, int?>(), new Dictionary<int, IReadOnlyCollection<int>>(), tagsReadable: false);
+
+        Assert.Equal(routes.Length, expanded.Count);
+        Assert.Same(routes[0], expanded[0]);
+        Assert.False(expanded[0].Orphaned);
+        Assert.False(expanded[0].CanMatch);
+        Assert.Equal(new[] { ServerA }, expanded[1].ExpandedServerIds!.ToArray());
+        Assert.Same(fleet, expanded[2]);
+
+        /* Readable tags (the default): the same tag route is orphaned, since tag 7 exists nowhere. */
+        var readable = NotificationRouteScopeExpander.Expand(
+            routes, new[] { ServerA }, new Dictionary<int, int?>(), new Dictionary<int, IReadOnlyCollection<int>>());
+        Assert.True(readable[0].Orphaned);
+    }
+
+    [Fact]
+    public void Expand_ANullRoute_ThrowsNamingItsIndex_SoTheOutputIsNeverShorterThanTheInput()
+    {
+        var routes = new NotificationRoute?[] { ServerRoute(1, ServerA), null, TagRoute(3, 1) };
+
+        var ex = Assert.Throws<ArgumentException>(() => NotificationRouteScopeExpander.Expand(
+            routes!, new[] { ServerA }, new Dictionary<int, int?>(), new Dictionary<int, IReadOnlyCollection<int>>()));
+
+        Assert.Contains("index 1", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Expand_ACycleInTheParentMap_IsCapped_NotLoopedOn()
     {
         // 1 -> 3 -> 2 -> 1 (cycle), 4 hangs off 3, 5 points at a parent that does not exist.

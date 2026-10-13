@@ -2155,22 +2155,8 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// Expands the stored routes with the given inputs (#5750). When the tag tables were unreadable, a tag-scoped route is returned
     /// unexpanded (so it matches nothing: fail closed, and not marked orphaned, since the tag may still exist).
     /// </summary>
-    public static IReadOnlyList<NotificationRoute> ExpandRoutes(IReadOnlyList<NotificationRoute> routes, RouteScopeInputs inputs)
-    {
-        var expanded = NotificationRouteScopeExpander.Expand(routes, inputs.KnownServerIds, inputs.TagParents, inputs.ServerTags);
-        if (inputs.TagsReadable)
-        {
-            return expanded;
-        }
-
-        var result = new List<NotificationRoute>(expanded.Count);
-        for (var i = 0; i < expanded.Count; i++)
-        {
-            result.Add(routes[i].ScopeTagId.HasValue ? routes[i] : expanded[i]);
-        }
-
-        return result;
-    }
+    public static IReadOnlyList<NotificationRoute> ExpandRoutes(IReadOnlyList<NotificationRoute> routes, RouteScopeInputs inputs) =>
+        NotificationRouteScopeExpander.Expand(routes, inputs.KnownServerIds, inputs.TagParents, inputs.ServerTags, inputs.TagsReadable);
 
     private static async Task<IReadOnlyList<NotificationRoute>> ReadNotificationRoutesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken ct)
     {
