@@ -47,8 +47,7 @@ public static class BlockingWaits
 {
     /// <summary>How far apart (milliseconds) two reports' derived wait starts may be and still be one wait. The
     /// threshold is at least 5 s, so 2 s cannot merge two blocked-process-report waits and is far above the few
-    /// milliseconds of timestamp jitter between reports of one wait (and the whole-second rounding of a store
-    /// that keeps only seconds). It alone is not enough for DMV snapshots: see <see cref="WaitStartJitterMs"/>.</summary>
+    /// milliseconds of timestamp jitter between reports of one wait. It alone is not enough for DMV snapshots: see <see cref="WaitStartJitterMs"/>.</summary>
     public const long WaitStartToleranceMs = 2000;
 
     /// <summary>
@@ -60,9 +59,9 @@ public static class BlockingWaits
     /// <c>wait_duration_ms</c>; the derived start is therefore the true start minus that run's lead time, which
     /// varies from run to run (not measured). PostgreSQL and DuckDB keep microseconds, so the store adds none.
     /// 150 ms stays under the 200 ms re-block gap #5743 reports (the ceiling: a larger value would merge that case
-    /// again). A continuing wait splits by mistake only when its next row's lead time is longer than its first
-    /// row's by more than the first row's wait time plus this value. The collector keeps only waits of at least
-    /// 500 ms (page latches; 1 s, 2 s and 5 s for the other wait types it reads), so that takes a run-to-run lead
+    /// again). A continuing wait splits by mistake only when two of its rows' lead times differ by more than
+    /// the wait time of the row with the longer lead plus this value. The collector keeps only waits of at least
+    /// 500 ms (page latches; 1 s, 2 s and 5 s for the other wait types it reads), so that takes a lead
     /// difference above 650 ms.
     /// </summary>
     public const long WaitStartJitterMs = 150;
@@ -150,6 +149,12 @@ public static class BlockingWaits
         DuckDb,
     }
 
+    /// <summary>A timestamp column as epoch milliseconds, in the SQL of the given store.</summary>
+    private static string EpochMsSql(SqlDialect dialect, string column) =>
+        dialect == SqlDialect.DuckDb
+            ? $"(CAST(epoch_us({column}) AS DOUBLE) / 1000.0)"
+            : $"(date_part('epoch', {column}) * 1000.0)";
+
     /// <summary>
     /// The CTE chain that turns a report relation into one row per wait, written for both stores from this one
     /// text. <paramref name="source"/> is a SELECT that must return <c>blocked_spid</c>, <c>blocking_spid</c>,
@@ -174,10 +179,8 @@ public static class BlockingWaits
         var reportColumn = reportCount
             ? $", COUNT(*) OVER (PARTITION BY {partition}, n.wait_no) AS wait_reports"
             : string.Empty;
-        var epochMs = dialect == SqlDialect.DuckDb
-            ? "(CAST(epoch_us(s.event_time) AS DOUBLE) / 1000.0)"
-            : "(date_part('epoch', s.event_time) * 1000.0)";
-        var epochMsM = epochMs.Replace("s.event_time", "m.event_time", StringComparison.Ordinal);
+        var epochMs = EpochMsSql(dialect, "s.event_time");
+        var epochMsM = EpochMsSql(dialect, "m.event_time");
         var tolerance = WaitStartToleranceMs.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var jitter = WaitStartJitterMs.ToString(System.Globalization.CultureInfo.InvariantCulture);
         return $@"
