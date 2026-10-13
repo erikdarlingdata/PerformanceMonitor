@@ -227,11 +227,12 @@ namespace PerformanceMonitor.Common
                count of sweeps the rollup covered, its threshold column the same 0 sentinel for the same
                stated reason. "Analysis Singles Digest" (#3712) is the third document of that shape: its value
                is the count of distinct uncorroborated findings the digest named. "Notification Channel
-               Failing" (#4750) counts a webhook channel's failures in a row. */
+               Failing" (#4750) counts a webhook channel's failures in a row. "External Alerts Undelivered" (#5654)
+               counts the external alerts the drain gave up on in the last hour. */
             "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job"
                 or "Custom Alert Rules Unhealthy" or "Stale Mute Rules" or "Store Settings Need Attention"
                 or "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest"
-                or "Notification Channel Failing" => $"{value:F0}",
+                or "Notification Channel Failing" or "External Alerts Undelivered" => $"{value:F0}",
 
             /* #1846: a state-only metric never had a number — its display value is a role, a connection
                state, a version or the literal "resolved", and the stored double is the 0 sentinel the
