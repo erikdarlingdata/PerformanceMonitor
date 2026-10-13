@@ -1778,6 +1778,7 @@ COPY (
            Null means a collection outlasted the drain timeout, and the right response is to DEFER. This is
            size-triggered, the store is a little over a soft threshold, and the next tick will try again;
            resetting on schedule matters far less than not resetting under a live collector. */
+        var gateHeld = Stopwatch.StartNew();
         var resetScope = await CollectionResetGate.TryBeginResetAsync();
 
         if (resetScope is null)
@@ -1802,6 +1803,22 @@ COPY (
         var promoted = new List<string>();
         var resetStarted = false;
         string? preId = null;
+        long exportedRows = 0;
+
+        /* #5733: the gate is released the moment the reset proper is done, not at the end of the method. Called from
+           the success path before compaction and again from the finally for every other exit; the second call finds
+           the flag set and does nothing, so the gate is released and the line logged exactly once on every path. */
+        var gateReleased = false;
+        void ReleaseCollectionGate()
+        {
+            if (gateReleased) return;
+            gateReleased = true;
+            resetScope.Dispose();
+            _logger?.LogInformation(
+                "Database reset held collection for {Seconds:F1} s ({Tables} tables, {Rows} rows)",
+                gateHeld.Elapsed.TotalSeconds, exports.Count, exportedRows);
+        }
+
         try
         {
             await RemoveUnfinishedResetExportsAndRefreshViewsAsync();
@@ -1870,6 +1887,7 @@ COPY (
                             await exportCmd.ExecuteNonQueryAsync();
                         });
 
+                        exportedRows += rowCount;
                         _logger?.LogInformation("Archived {Count} rows from {Table}", rowCount, table);
                     }
                     catch (Exception ex)
@@ -2047,11 +2065,19 @@ COPY (
 
             _logger?.LogInformation("Database reset complete — archive views now serve all historical data from Parquet");
 
+            /* The reset proper is done: the database is fresh and initialized, so collection can write to it. The gate
+               is released here, before compaction (#5733). Compaction merges each month's new per-cycle files with
+               that month's existing merged file, so it grows through the month (seconds on the 1st, minutes by month
+               end), and while the gate was held across it every collection round sat waiting for it. s_archiveLock
+               and IsArchiving stay held to the end: compaction still must not run against periodic archival, and the
+               UI still reads this as archiving. */
+            ReleaseCollectionGate();
+
             /* Compact per-cycle files into monthly parquet files, then refresh the views over the result.
                This runs after the reset rather than before it, so the files the marker above names still
                exist under those names until the reset is through. The merges run on an in-memory DuckDB
-               connection and only touch files on disk, so they do not contend with the collectors now
-               writing to the fresh database; each group's swap and view rebuild briefly hold the write
+               connection and only touch files on disk; the collectors, no longer held by the gate, write to the
+               fresh database meanwhile, and each group's swap and view rebuild briefly hold the write
                lock (#4720). */
             _logger?.LogInformation("Compacting parquet files into monthly archives");
             try
@@ -2092,7 +2118,7 @@ COPY (
         finally
         {
             IsArchiving = false;
-            resetScope.Dispose();
+            ReleaseCollectionGate();
             s_archiveLock.Release();
         }
     }
