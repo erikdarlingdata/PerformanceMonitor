@@ -178,6 +178,38 @@ SET status = 'interrupted',
 WHERE status = 'claimed'
   AND claimed_at < now() - $1";
 
+    /// <summary>
+    /// The reap with the delivered-if-logged refinement (#5654). $1 the age a claim must have reached, as an interval.
+    /// A claimed row that old becomes <c>delivered</c> when a history row written after the claim carries its pending id
+    /// in <c>context_json</c> and is not a send that failed on every channel (the drain writes that row after the send, so its existence is the proof the send
+    /// happened), else <c>interrupted</c>. Either way it is never claimed again and never sent again. The history scan is
+    /// bounded below by the claim time, so it reads only rows written since.
+    /// </summary>
+    public const string ReapWithHistorySql = @"
+WITH reaped AS (
+    UPDATE config.external_alert_pending p
+    SET status = CASE WHEN EXISTS (
+                         SELECT 1
+                         FROM config.config_alert_log l
+                         WHERE l.alert_time >= (p.claimed_at AT TIME ZONE 'UTC') - interval '1 minute'
+                           AND (l.alert_sent OR l.send_error IS NULL)
+                           AND l.context_json LIKE '%""PendingId"":' || p.pending_id::text || '}%')
+                     THEN 'delivered' ELSE 'interrupted' END,
+        completed_at = now(),
+        reason = CASE WHEN EXISTS (
+                         SELECT 1
+                         FROM config.config_alert_log l
+                         WHERE l.alert_time >= (p.claimed_at AT TIME ZONE 'UTC') - interval '1 minute'
+                           AND (l.alert_sent OR l.send_error IS NULL)
+                           AND l.context_json LIKE '%""PendingId"":' || p.pending_id::text || '}%')
+                     THEN 'the run that claimed it ended before marking it; its history row shows it was sent'
+                     ELSE 'the run that claimed it ended before reporting a result; not sent again' END
+    WHERE p.status = 'claimed'
+      AND p.claimed_at < now() - $1
+    RETURNING p.status
+)
+SELECT status, count(*)::int FROM reaped GROUP BY status";
+
     /// <summary>Reads one subject's firing state. $1 source_id, $2 alert_key, $3 server_id.</summary>
     public const string GetStateSql = @"
 SELECT firing, fired_severity, last_fired_at
@@ -342,6 +374,38 @@ RETURNING fired_severity";
         command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<TimeSpan> { TypedValue = claimedFor });
         return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// <see cref="ReapAsync"/> with the delivered-if-logged refinement (#5654): a row a dead run left claimed is
+    /// <c>delivered</c> if the alert history holds a row carrying its pending id, else <c>interrupted</c>. Returns how
+    /// many rows went each way. Never sends anything.
+    /// </summary>
+    public async Task<(int Delivered, int Interrupted)> ReapWithHistoryAsync(
+        TimeSpan claimedFor, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(claimedFor, TimeSpan.Zero);
+        await using var command = _dataSource.CreateCommand(ReapWithHistorySql);
+        command.CommandTimeout = _commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<TimeSpan> { TypedValue = claimedFor });
+
+        var delivered = 0;
+        var interrupted = 0;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var count = reader.GetInt32(1);
+            if (string.Equals(reader.GetString(0), "delivered", StringComparison.Ordinal))
+            {
+                delivered += count;
+            }
+            else
+            {
+                interrupted += count;
+            }
+        }
+
+        return (delivered, interrupted);
     }
 
     /// <summary>Reads one subject's firing state. Null when the subject has never fired.</summary>

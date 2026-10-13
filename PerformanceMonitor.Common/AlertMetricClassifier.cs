@@ -74,6 +74,16 @@ namespace PerformanceMonitor.Common
             if (string.IsNullOrEmpty(metricName))
                 return false;
 
+            /* #5654: an external alert's metric name is External:<source>:<key>, and the key is the other
+               service's own spelling, so a fire for a key like "backup_resolved" must not read as a resolution.
+               Only the row Darling writes when a clear arrives, "<name> Resolved", is one. The self-alert pair's
+               recovery, "External Alerts Delivered Again", has none of the words below and is named here. */
+            if (metricName.StartsWith("External:", StringComparison.Ordinal))
+                return metricName.EndsWith(" Resolved", StringComparison.Ordinal);
+
+            if (string.Equals(metricName, "External Alerts Delivered Again", StringComparison.Ordinal))
+                return true;
+
             return metricName.Contains("Cleared", StringComparison.Ordinal)
                 || metricName.Contains("Resolved", StringComparison.Ordinal)
                 || metricName.Contains("Restored", StringComparison.Ordinal)

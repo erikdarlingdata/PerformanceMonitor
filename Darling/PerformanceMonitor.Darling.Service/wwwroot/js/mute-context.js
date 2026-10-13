@@ -38,6 +38,8 @@ export function parseDetailContext(detailText, metricName) {
   const ctx = { database: null, waitType: null, jobName: null, queryText: null };
   if (!detailText) return ctx;
   if (typeof metricName === "string" && metricName.startsWith("Custom:")) return ctx;
+  /* #5654: an external alert carries another service's text; no dimension is pre-filled from it. */
+  if (typeof metricName === "string" && metricName.startsWith("External:")) return ctx;
 
   let query = null;
   const flush = () => {

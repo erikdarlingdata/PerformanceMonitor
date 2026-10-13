@@ -593,6 +593,16 @@ internal sealed class DarlingSelfAlertEvaluator
     /// resolution suffix ("Recovered") so the shared <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
     internal const string CustomRuleHealthResolvedMetric = "Custom Alert Rules Recovered";
 
+    /// <summary>
+    /// #5654: the self-alert for external alerts the drain could not deliver (rows that expired, were interrupted by a
+    /// stopped run, or failed every send). The health check that fires it is a later part; the name is fixed here
+    /// so the family census and the history classifier already know it.
+    /// </summary>
+    internal const string ExternalAlertsUndeliveredMetric = "External Alerts Undelivered";
+
+    /// <summary>#5654: the resolution row of <see cref="ExternalAlertsUndeliveredMetric"/>, history only.</summary>
+    internal const string ExternalAlertsDeliveredAgainMetric = "External Alerts Delivered Again";
+
     /// <summary>How many unhealthy rules the aggregated alert lists by name before eliding the rest — a pg_*
     /// rename can break many rules at once, and the whole point is ONE bounded alert, not a wall of text.</summary>
     private const int MaxListedUnhealthyRules = 20;

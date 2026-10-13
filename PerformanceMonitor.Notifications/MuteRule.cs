@@ -245,6 +245,10 @@ public class AlertMuteContext
            could forge a label line. Skip it for custom alerts; their mute context is ServerName + MetricName. */
         if (metricName is not null && metricName.StartsWith("Custom:", StringComparison.Ordinal)) return;
 
+        /* #5654: an external alert's text is another service's. Its prose is one sanitized line, but a title that
+           begins "Database: x" would still read as a label line, so no dimension is pre-filled for it either. */
+        if (metricName is not null && metricName.StartsWith(AlertFamily.ExternalMetricPrefix, StringComparison.Ordinal)) return;
+
         System.Text.StringBuilder? queryBuilder = null;
         var lines = detailText.Split('\n');
 

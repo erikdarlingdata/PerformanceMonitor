@@ -390,7 +390,7 @@ public class WebhookAlertService
             if (route.PagerDuty.Destination is { } pagerDutyKey)
             {
                 attempted = true;
-                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken);
+                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken: cancellationToken);
                 Record(NotificationRouter.PagerDutyChannel, pagerDutyError);
 
                 /* With auto-resolve on, a DELIVERED close re-opens the lifecycle: the cooldown entry the
@@ -2531,6 +2531,49 @@ public class WebhookAlertService
 
     #region PagerDuty
 
+    /// <summary>
+    /// Closes the PagerDuty incident an external alert's fire opened (#5654), and does nothing else: a clear is never an
+    /// email, Teams, Slack or generic webhook post. Sends a <c>resolve</c> on the dedup key the fire's trigger used
+    /// (<paramref name="firingMetric"/> on <paramref name="serverId"/>), to the routing key the route resolves for that
+    /// metric, and only when PagerDuty auto-resolve is on. Returns <see cref="AlertChannelOutcome.NotAttempted"/> when it
+    /// is off or PagerDuty is not routed for the metric, <see cref="AlertChannelOutcome.Delivered"/> or
+    /// <see cref="AlertChannelOutcome.Failed"/> otherwise. Never throws except for the caller's own cancellation.
+    /// </summary>
+    public async Task<AlertChannelOutcome> TrySendPagerDutyResolveAsync(
+        string firingMetric, string serverName, string serverId, string? detailText,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var delivery = _settings.SnapshotForDelivery();
+            if (!delivery.PagerDutyAutoResolve)
+            {
+                return AlertChannelOutcome.NotAttempted;
+            }
+
+            var route = NotificationRouter.Resolve(firingMetric, delivery.NotificationRoutes, delivery);
+            if (route.PagerDuty.Destination is not { } pagerDutyKey)
+            {
+                return AlertChannelOutcome.NotAttempted;
+            }
+
+            var error = await TrySendPagerDutyAlertAsync(
+                delivery, autoResolve: true, pagerDutyKey, firingMetric, serverName, "resolved", "", serverId,
+                context: null, triageUrl: null, detailText, _utcNow(), displayName: null,
+                resolveIncident: true, cancellationToken: cancellationToken);
+            return error is null ? AlertChannelOutcome.Delivered : AlertChannelOutcome.Failed;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"PagerDuty resolve error for {firingMetric}: {ex.Message}");
+            return AlertChannelOutcome.Failed;
+        }
+    }
+
     internal Func<string, string, Task<string?>>? PostPagerDutyAsyncOverride { get; set; }
 
     /// <summary>Posts to PagerDuty Events v2. Null when the post succeeded, the error text when it did not
@@ -2549,6 +2592,7 @@ public class WebhookAlertService
         string? detailText,
         DateTime nowUtc,
         string? displayName = null,
+        bool resolveIncident = false,
         CancellationToken cancellationToken = default)
     {
         try
@@ -2564,7 +2608,7 @@ public class WebhookAlertService
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 routingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc,
-                autoResolve: autoResolve);
+                autoResolve: autoResolve, resolveIncident: resolveIncident);
 
             /* #4752: test-only override for the PagerDuty send above (below). A test funneling an
                alert THROUGH the service must read the payload the wire saw — which a real post won't let
@@ -2644,7 +2688,8 @@ public class WebhookAlertService
         string? detailText = null,
         string? displayName = null,
         DateTime? nowUtc = null,
-        bool autoResolve = false)
+        bool autoResolve = false,
+        bool resolveIncident = false)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var severity = MapToPagerDutySeverity(badgeText);
@@ -2659,7 +2704,9 @@ public class WebhookAlertService
            (the default), the closing edge is an info-severity trigger and the incident stays open, so the
            tool never auto-resolves a third-party incident unasked. A test notification always triggers (it
            carries a throwaway key and has no incident to close). */
-        var eventAction = !isTest && autoResolve && AlertFamily.RecoveryPairs.ContainsKey(metricName)
+        /* #5654: an external alert's clear closes the incident its fire opened. The caller names it with
+           resolveIncident (and only with auto-resolve on), because an external name has no static pair. */
+        var eventAction = !isTest && autoResolve && (resolveIncident || AlertFamily.RecoveryPairs.ContainsKey(metricName))
             ? "resolve"
             : "trigger";
 

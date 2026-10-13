@@ -657,6 +657,7 @@ public sealed class DarlingMcpAlertTools
         AlertFamily.Reports => "Scheduled prose (the collector-cost digest, the fleet sweep rollup) — to read, never to be paged by.",
         AlertFamily.AgentJobs => "SQL Server Agent: failed and anomalously long jobs, and the Agent service being down.",
         AlertFamily.Performance => "A monitored server's health: blocking, deadlocks, CPU, long-running queries, space, availability groups, connection loss, custom rules and analysis findings. Also the fall-through for any metric the taxonomy does not name.",
+        AlertFamily.External => "Alerts another service raised through its own database login (External:<source>:<key>). Route them to their own channel, or leave them on the parent channels.",
         _ => "",
     };
 

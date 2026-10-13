@@ -3487,6 +3487,28 @@ LIMIT 1";
         var commandExecutor = new DarlingCommandExecutor(postgres, commandHost, serviceInstance, _logger);
         var commandLoop = RunCommandLoopAsync(commandExecutor, stoppingToken);
 
+        /* #5654: the drain for alerts other services queue through config.submit_external_alert. The SAME deliverer, mute
+           check and history store as the custom alerts above, so an external alert obeys every route and mute rule and
+           lands in the same history. A registered server name maps to its id under the servers lock; an unregistered
+           name stays a label in the server_id 0 bucket. */
+        var externalAlertDrain = new ExternalAlertDrain(
+            new ExternalAlertStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds),
+            (outcome, token) => deliverer.DeliverAndReportAsync(outcome, token),
+            (metric, serverName, serverKey, detail, token) => deliverer.TryResolvePagerDutyAsync(metric, serverName, serverKey, detail, token),
+            historyStore,
+            muteRuleService.IsAlertMuted,
+            name =>
+            {
+                lock (_serversLock)
+                {
+                    var match = servers.Find(s => string.Equals(s.Config.DisplayName, name, StringComparison.OrdinalIgnoreCase));
+                    return match is null ? null : new ExternalAlertServer(match.Config.ServerId, match.Config.DisplayName);
+                }
+            },
+            serviceInstance,
+            _loggerFactory.CreateLogger<ExternalAlertDrain>());
+        var externalAlertReapDone = false;
+
         /* #2022 phase 2: the Query Store backfill worker, on its own tick (see s_queryStoreBackfillInterval).
            Fills the two windows the live path discards by design — the 60-minute first-contact tail and
            clamp-bounded outage holes — newest-first, byte-budgeted, strictly BELOW the live path's floor, and
@@ -3988,6 +4010,33 @@ LIMIT 1";
             if (_selfAlerts is not null)
             {
                 await _selfAlerts.EvaluateNotificationChannelsAsync(stoppingToken);
+            }
+
+            /* #5654: external alerts, every pass, beside the custom-alert work above. Expiry always runs, so rows that
+               waited out a pause or a disabled master switch still age out and the self-monitor can count them (they
+               expire as usual, not on resume); the claim and the sends run only while alerts are enabled. The first pass
+               of a run also takes back what a stopped run left claimed: delivered if the history has its row, else
+               interrupted, never sent again. Failure-isolated so a throw never stops the fleet loop. */
+            try
+            {
+                var externalPass = await externalAlertDrain.RunPassAsync(
+                    reapFirst: !externalAlertReapDone, deliver: alertSettings.AlertsEnabled, stoppingToken);
+                externalAlertReapDone = true;
+                if (externalPass.Claimed > 0 || externalPass.Expired > 0)
+                {
+                    _logger.LogInformation(
+                        "External alerts: claimed {Claimed} (delivered {Delivered}, muted {Muted}, no channel {NoChannel}, retry {Retried}, failed {Failed}, ignored {Ignored}, interrupted {Interrupted}), expired {Expired}",
+                        externalPass.Claimed, externalPass.Delivered, externalPass.Muted, externalPass.NoChannel,
+                        externalPass.Retried, externalPass.Failed, externalPass.Ignored, externalPass.Interrupted, externalPass.Expired);
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "External alert pass failed; it is tried again next pass");
             }
 
             /* #3514: the web-dashboard TLS certificate expiry self-alert. The web host loads the certificate
