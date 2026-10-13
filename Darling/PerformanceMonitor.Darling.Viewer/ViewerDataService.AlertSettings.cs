@@ -84,7 +84,11 @@ public sealed partial class ViewerDataService
            tri-state on the row (NULL = the file governs), APPENDED for the same reason. */
         "analysis_uncorroborated_route, " +
         /* #5641 (V177): the Runnable Queue alert's switch and two bars, APPENDED for the same reason. */
-        "runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler";
+        "runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler, " +
+        /* #5640 (V179): the Client Timeouts alert's switch and two bars, APPENDED for the same reason. The viewer refuses a
+           store below StorageVersion.SchemaVersion (RequiredStoreSchemaVersion, checked at connect in MainWindow), so
+           the columns always exist where this runs and the SELECT and upsert need no per-version gate (#5641 had none either). */
+        "client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -101,7 +105,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73,
+        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -177,6 +181,9 @@ ON CONFLICT (id) DO UPDATE SET
     runnable_queue_enabled = EXCLUDED.runnable_queue_enabled,
     runnable_queue_warning_per_scheduler = EXCLUDED.runnable_queue_warning_per_scheduler,
     runnable_queue_critical_per_scheduler = EXCLUDED.runnable_queue_critical_per_scheduler,
+    client_timeouts_enabled = EXCLUDED.client_timeouts_enabled,
+    client_timeouts_warning_per_minute = EXCLUDED.client_timeouts_warning_per_minute,
+    client_timeouts_critical_per_minute = EXCLUDED.client_timeouts_critical_per_minute,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -295,6 +302,11 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.RunnableQueueEnabled });          // $71 (#5641, V177)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = rqWarning });                        // $72 (#5641, V177)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = rqCritical });                       // $73 (#5641, V177)
+        /* #5640 (V179): the Client Timeouts switch and bars, through the engine's own clamp for the same reason. */
+        var (ctWarning, ctCritical) = AttentionEvaluator.ClampBars(r.ClientTimeoutsWarningPerMinute, r.ClientTimeoutsCriticalPerMinute);
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.ClientTimeoutsEnabled });         // $74 (#5640, V179)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ctWarning });                        // $75 (#5640, V179)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ctCritical });                       // $76 (#5640, V179)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -389,6 +401,10 @@ ON CONFLICT (id) DO UPDATE SET
         RunnableQueueEnabled = reader.GetBoolean(70),
         RunnableQueueWarningPerScheduler = reader.GetInt32(71),
         RunnableQueueCriticalPerScheduler = reader.GetInt32(72),
+        /* #5640 (V179) Client Timeouts switch and bars appended at ordinals 73-75 (NOT NULL, DEFAULT false / 10 / 60). */
+        ClientTimeoutsEnabled = reader.GetBoolean(73),
+        ClientTimeoutsWarningPerMinute = reader.GetInt32(74),
+        ClientTimeoutsCriticalPerMinute = reader.GetInt32(75),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -521,6 +537,12 @@ public sealed class AlertSettingsRow
     public int RunnableQueueWarningPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultWarningPerScheduler;
     /// <summary>#5641 (V177): Critical bar, runnable tasks per scheduler. Default 16; never below the Warning bar.</summary>
     public int RunnableQueueCriticalPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultCriticalPerScheduler;
+    /// <summary>#5640 (V179): the Client Timeouts alert's switch. OFF by default: no measured normal rate exists yet (#5736 sets the bars from field data).</summary>
+    public bool ClientTimeoutsEnabled { get; set; }
+    /// <summary>#5640 (V179): Warning bar, client attentions (cancels and timeouts) per minute over the covered span. Default 10.</summary>
+    public int ClientTimeoutsWarningPerMinute { get; set; } = AttentionEvaluator.DefaultWarningPerMinute;
+    /// <summary>#5640 (V179): Critical bar, attentions per minute. Default 60; never below the Warning bar.</summary>
+    public int ClientTimeoutsCriticalPerMinute { get; set; } = AttentionEvaluator.DefaultCriticalPerMinute;
     public bool LongRunningQueryEnabled { get; set; } = true;
     public int LongRunningQueryThresholdMinutes { get; set; } = 30;
     public bool TempDbSpaceEnabled { get; set; } = true;
@@ -638,6 +660,9 @@ public sealed class AlertSettingsRow
             && RunnableQueueEnabled == other.RunnableQueueEnabled
             && RunnableQueueWarningPerScheduler == other.RunnableQueueWarningPerScheduler
             && RunnableQueueCriticalPerScheduler == other.RunnableQueueCriticalPerScheduler
+            && ClientTimeoutsEnabled == other.ClientTimeoutsEnabled
+            && ClientTimeoutsWarningPerMinute == other.ClientTimeoutsWarningPerMinute
+            && ClientTimeoutsCriticalPerMinute == other.ClientTimeoutsCriticalPerMinute
             && LongRunningQueryEnabled == other.LongRunningQueryEnabled
             && LongRunningQueryThresholdMinutes == other.LongRunningQueryThresholdMinutes
             && TempDbSpaceEnabled == other.TempDbSpaceEnabled
