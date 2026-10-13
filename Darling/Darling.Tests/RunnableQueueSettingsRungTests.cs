@@ -85,21 +85,27 @@ public sealed class RunnableQueueSettingsRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        /* V179's (#5640) sentinel is appended after this one, so this rung is no longer the top. */
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal("hasRunnableQueueSettings", parameters[^1].Name);
-        Assert.Equal(ProbeOrdinal, parameters.Length - 1);
+        Assert.Equal("hasRunnableQueueSettings", parameters[ProbeOrdinal].Name);
+        Assert.Equal(ProbeOrdinal + 1, parameters.Length - 1);
         Assert.Equal("hasProcedureStatsTotals", parameters[ProbeOrdinal - 1].Name);
 
         /* The sentinel resolves to 177 and is the top arm: every sentinel present answers 177 (this build's version),
            and with only the sentinel below it (V176's procedure totals table) the answer is 176. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(RungVersion, (int)method.Invoke(null, all)!);
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        var withoutThis = (object[])all.Clone();
+        /* With V179's sentinel (the top, appended after this one) absent, this rung is the answer. */
+        var withoutTop = (object[])all.Clone();
+        withoutTop[ProbeOrdinal + 1] = false;
+        Assert.Equal(RungVersion, (int)method.Invoke(null, withoutTop)!);
+
+        var withoutThis = (object[])withoutTop.Clone();
         withoutThis[ProbeOrdinal] = false;
         Assert.Equal(176, (int)method.Invoke(null, withoutThis)!);
 
@@ -137,7 +143,7 @@ public sealed class RunnableQueueSettingsRungTests
                the store to the newest rung. */
             Assert.Equal(Expected, await ScalarAsync(connection, ColumnsSql, ct));
             Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct));
-            Assert.Equal(RungVersion, Convert.ToInt32(await ScalarAsync(connection, "SELECT max(version) FROM darling_schema_version", ct), CultureInfo.InvariantCulture));
+            Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await ScalarAsync(connection, "SELECT max(version) FROM darling_schema_version", ct), CultureInfo.InvariantCulture));
 
             /* An upgrade: one rung behind (the columns gone, the version row gone) with a settings row that must survive
                the rung and read the defaults afterwards. Every other NOT NULL column of the row has its own default. */

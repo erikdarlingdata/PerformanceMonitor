@@ -541,6 +541,8 @@ public sealed class NotificationRoutingTests
                RunnableQueueEvaluator.MetricName (a constant, so the AlertOutcome literal scan below cannot see it),
                listed here like the engine's other constant-fired names. */
             RunnableQueueEvaluator.MetricName,
+            /* #5640: the Client Timeouts alert fires from AlertEngine.CheckAttentionAsync through AttentionEvaluator.MetricName. */
+            AttentionEvaluator.MetricName,
         };
 
         /* The literals: the third argument of every `new AlertOutcome(` in the shared engine and the worker

@@ -79,7 +79,7 @@ public sealed class RunnableQueueSettingsSurfaceTests
         var viewerColumns = ViewerDataService.AlertSettingsSelectSql
             .Replace("SELECT ", "", StringComparison.Ordinal).Split(" FROM ")[0]
             .Split(',').Select(c => c.Trim()).ToList();
-        Assert.Equal(73, viewerColumns.Count);
+        Assert.Equal(73, viewerColumns.Count); /* the viewer upsert gains V179 columns in lane E of #5640 */
         Assert.Equal(expected, viewerColumns.Skip(70).ToArray());
 
         var service = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "StoreConfigProvider.cs"));
@@ -88,7 +88,7 @@ public sealed class RunnableQueueSettingsSurfaceTests
         var select = service[start..];
         select = select[(select.IndexOf("SELECT", StringComparison.Ordinal) + 6)..select.IndexOf("FROM config_alert_settings WHERE id = 1", StringComparison.Ordinal)];
         var serviceColumns = select.Split(',').Select(c => c.Trim()).Where(c => c.Length > 0).ToList();
-        Assert.Equal(73, serviceColumns.Count);
+        Assert.Equal(76, serviceColumns.Count); /* V179 (#5640) appends three more */
         Assert.Equal(expected, serviceColumns.Skip(70).ToArray());
         Assert.Contains("RunnableQueueEnabled = reader.GetBoolean(70),", service, StringComparison.Ordinal);
         Assert.Contains("RunnableQueueWarningPerScheduler = reader.GetInt32(71),", service, StringComparison.Ordinal);

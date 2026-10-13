@@ -47,6 +47,7 @@ public sealed class TierEscalation
     private static readonly HashSet<string> s_optedIn = new(StringComparer.Ordinal)
     {
         RunnableQueueEvaluator.MetricName,
+        AttentionEvaluator.MetricName,
     };
 
     /// <summary>The metrics whose Warning-to-Critical escalation is delivered past the cooldown.</summary>
