@@ -105,6 +105,46 @@ export function disclosure(summaryText, detail, opts = {}) {
   return el("details", { class: "disclosure" }, [summary, el("div", { class: "disc-body" }, detail)]);
 }
 
+/* Text longer than this many characters (or holding a line break) gets the expand toggle; shorter text fits a cell as is. */
+const CLAMP_MIN_CHARS = 60;
+
+/**
+ * A long text cell shown on ONE line (#5644 W11): the full text stays in the node (so a selection, the tooltip and a
+ * screen reader read all of it) and the stylesheet clips it with an ellipsis (`.clamp-text`); a click, or Enter/Space,
+ * opens the rest in place (`.open`) and closes it again. Long collector notes, errors and job messages made rows
+ * hundreds of pixels tall. Copy and CSV export read the row data, not this node, so they still give the full text.
+ * `expandable: false` is for a cell whose row already opens the whole text elsewhere (the Job History detail pane).
+ * The toggle stops its event so a clickable row (Collectors) is not also activated.
+ */
+export function clampText(text, opts = {}) {
+  const full = String(text == null ? "" : text);
+  const node = el("span", { class: "clamp-text", title: full || null, text: full });
+  const long = full.length > CLAMP_MIN_CHARS || /[\r\n]/.test(full);
+  if (opts.expandable === false || !long) return node;
+  node.setAttribute("role", "button");
+  node.setAttribute("tabindex", "0");
+  node.setAttribute("aria-expanded", "false");
+  const toggle = (e) => {
+    /* A click that ends a text selection inside the cell is the reader copying, not opening it. */
+    if (e && e.type === "click" && typeof window !== "undefined" && window.getSelection) {
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed && String(sel).length > 0 && sel.anchorNode && node.contains(sel.anchorNode)) return;
+    }
+    if (e && e.stopPropagation) e.stopPropagation();
+    const open = node.getAttribute("aria-expanded") !== "true";
+    node.setAttribute("aria-expanded", open ? "true" : "false");
+    node.classList.toggle("open", open);
+  };
+  node.addEventListener("click", toggle);
+  node.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      toggle(e);
+    }
+  });
+  return node;
+}
+
 /*
  * #3031: a stable id for one of a rollup tile's text rows, so the tile's NUMBER can point at it.
  *
@@ -135,12 +175,61 @@ export function errorStrip(message) {
   return el("div", { class: "strip error", role: "alert" }, [message]);
 }
 export function emptyStrip(message) {
-  return el("div", { class: "strip empty" }, [message]);
+  return el("div", { class: "strip empty" }, [localizeIsoText(plainText(message))]);
 }
-/** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). */
+/** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). The sentence may be one the service
+    wrote for an MCP caller (a width note, a truncation note), so it passes through plainText like every message (#5644 W8). */
 export function noticeStrip(message) {
-  return el("div", { class: "strip notice", role: "status" }, [message]);
+  return el("div", { class: "strip notice", role: "status" }, [localizeIsoText(plainText(message))]);
 }
+/** A note line under a chart, from a payload's own `aggregate_note`: written for an MCP caller, said in the page's words (#5644 W8). */
+export function metricNote(text) {
+  return el("div", { class: "mp-metric-note", text: plainText(text) });
+}
+
+/**
+ * Rewrites every UTC instant inside a sentence (a server message, a status line, a note, an alert body) into the grids'
+ * local-time format (#5644 W20): "stored at 2026-10-09T14:37:35.0158630", "since 2026-10-12T19:18:38Z", "until
+ * 2026-10-11 12:48:52Z" (the alert text's space-separated form) and "2026-10-12 23:13:00 UTC" printed raw UTC beside grids
+ * in local time. The separator is a "T" or a space and the fraction is 0-7 digits. A "T" stamp with no zone is UTC, as
+ * parseUtc reads it everywhere; a space-separated one is rewritten ONLY with a "Z" or " UTC" after it, because the same
+ * shape without one is a monitored server's own wall clock ("2026-09-27 21:32:43 (server clock)") and shifting it would
+ * state the wrong hour. Text with no such stamp, and a non-string, come back as given.
+ */
+export function localizeIsoText(text) {
+  if (typeof text !== "string") return text;
+  return text.replace(/(\d{4}-\d\d-\d\d)([T ])(\d\d:\d\d:\d\d)(?:\.(\d{1,7}))?(Z(?![A-Za-z])| UTC(?![A-Za-z])|[+-]\d\d:?\d\d)?/g, (m, date, sep, time, frac, zone) => {
+    if (sep === " " && !zone) return m;
+    const iso = date + "T" + time + (frac ? "." + frac.slice(0, 3).padEnd(3, "0") : "") + (zone === " UTC" ? "Z" : zone || "");
+    const d = parseUtc(iso);
+    return d ? d.toLocaleString() : m;
+  });
+}
+
+/**
+ * An alert's stored body text in the grids' local-time format (#5644 W20, Alert History and Triage). The instants the alert
+ * builders write ("Incident Since: 2026-10-12 23:13:00Z", "Failed At: 2026-10-12 07:00:00Z", and the Started, Snapshot, From,
+ * To and Window lines) go through localizeIsoText. Only those labelled lines do: the same body carries "Blocked Query", "Query"
+ * and "Victim SQL" lines, and a literal such as '2026-01-01 00:00:00Z' inside a statement is data. The sample-age line ("Newest blocked process sample: 23:12:45 UTC, 5m 20s old") carries a time of day
+ * with no date, which cannot be shifted safely alone, so it takes its date from the row's own `newest_sample.instant_utc`
+ * (the carrier the engine persisted when the alert fired) and only when that instant's UTC time of day IS the one written
+ * on the line. The stored and emailed text is not changed (the same line feeds email, webhooks and Lite's windows); only
+ * what this page shows is. A copy of the text for the clipboard or CSV keeps the stored form.
+ */
+export function localizeAlertDetail(text, sample) {
+  if (typeof text !== "string") return text;
+  let out = text.replace(/^(\s*(?:Incident Since|Started|Failed At|Snapshot|From|To|Window): )(.*)$/gm,
+    (m, lead, value) => lead + localizeIsoText(value));
+  const at = sample && typeof sample.instant_utc === "string" ? parseUtc(sample.instant_utc) : null;
+  if (at) {
+    const two = (n) => String(n).padStart(2, "0");
+    const clock = two(at.getUTCHours()) + ":" + two(at.getUTCMinutes()) + ":" + two(at.getUTCSeconds());
+    out = out.replace(/^(\s*(?:Newest .+? sample|.+? reading)): (\d\d:\d\d:\d\d) UTC(?=, .* old\s*$)/gm,
+      (m, lead, time) => (time === clock ? lead + ": " + at.toLocaleString() : m));
+  }
+  return out;
+}
+
 /**
  * The two collectors the blocking reads draw from (#5244): the blocked-process-report XE session when it holds a row in the window
  * for the chosen databases, and the DMV snapshot only when it holds none. The MCP answers name the one that answered in `source`;
@@ -248,12 +337,83 @@ export function keptWindowStrip(res) {
  * `floorKey`, and the fields are read from there instead of from the top level. The note is text, never markup (R4).
  */
 export function windowFloorStrip(data, desc) {
-  if (!desc || desc.windowNote === false || (desc.viz !== "table" && desc.viz !== "stat")) return null;
+  if (!desc || desc.windowNote === false) return null;
+  const chart = desc.viz === "line";
+  if (desc.viz !== "table" && desc.viz !== "stat" && !chart) return null;
   if (desc.noteKey === "truncation_note" || (desc.moreNoteKeys || []).includes("truncation_note")) return null;
   const source = desc.floorKey ? getPath(data, desc.floorKey) : data;
-  if (!source || source.window_truncated !== true) return null;
-  const note = source.truncation_note;
-  return typeof note === "string" && note.trim() ? noticeStrip(note) : null;
+  if (source && source.window_truncated === true) {
+    const note = source.truncation_note;
+    if (typeof note !== "string" || !note.trim()) return null;
+    if (!chart) return noticeStrip(note);
+    /* A chart draws only the row-capped note (#5644 W12): its time axis already shows the empty span of a data start that
+       falls after the window's start, but a chart built from the newest N rows plots nothing before its oldest row while
+       the axis and the title claim the whole window. That note names the oldest row shown (oldest_shown_utc). */
+    if (typeof source.oldest_shown_utc !== "string") return null;
+    return noticeStrip(note.replace("this grid shows", "this chart shows").replace("The grid covers", "The chart covers"));
+  }
+  const capped = cappedReadNote(data, desc);
+  return capped ? noticeStrip(capped.text) : null;
+}
+
+/*
+ * The partial-window facts of a read that stopped at its row limit (#5644 W12), or null. Two shapes carry them: the server's
+ * window-floor fields (`window_truncated` with `oldest_shown_utc`: the reads WebDataStartNote lists, rewritten by readTool), and a
+ * newest-first page that says it was cut (`truncated: true` with `oldest_returned_collection_time` and an `*_desc` order: the
+ * active-query page, whose cap of 50 rows covers about an hour of a "last 24 hours" panel). A cut that names no time (a list
+ * ranked by something other than time) is not a partial window, so it gets nothing. `{ text, oldest }`: the sentence for a
+ * strip above the panel, and the page's oldest instant.
+ */
+export function cappedReadNote(data, desc) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  if (desc && (desc.windowNote === false || (desc.viz !== "table" && desc.viz !== "line"))) return null;
+  if (desc && (desc.noteKey === "truncation_note" || (desc.moreNoteKeys || []).includes("truncation_note"))) return null;
+  if (data.window_truncated === true) return null;
+  if (data.truncated !== true) return null;
+  const oldest = data.oldest_returned_collection_time;
+  if (typeof oldest !== "string" || !parseUtc(oldest)) return null;
+  if (!/_desc$|newest/.test(String(data.order == null ? "" : data.order))) return null;
+  const noun = desc && desc.viz === "line" ? "chart" : "grid";
+  const shown = Number(data.snapshots_returned);
+  const total = Number(data.total_snapshots);
+  const counts = shown > 0 && total > shown ? shown.toLocaleString() + " of " + total.toLocaleString() + " snapshots" : "rows";
+  return {
+    text: "partial window: this " + noun + " shows only the newest " + counts + ", back to " + localTime(oldest) + ", because it stops at its row limit.",
+    oldest,
+  };
+}
+
+/**
+ * The subtitle a row-capped panel gets in place of its window label (#5644 W12): "last 24 hours" over a page that reaches back
+ * one hour claimed a window the data does not cover. Null when the panel is not a row-capped one (the label stays).
+ */
+export function partialWindowSubtitle(data, desc) {
+  if (desc && desc.windowNote === false) return null;
+  if (data && typeof data === "object" && data.window_truncated === true) {
+    if (typeof data.oldest_shown_utc !== "string" || !parseUtc(data.oldest_shown_utc)) return null;
+    if (desc && desc.viz !== "table" && desc.viz !== "line") return null;
+    return "newest rows only, back to " + localTime(data.oldest_shown_utc);
+  }
+  const capped = cappedReadNote(data, desc);
+  return capped ? "newest rows only, back to " + localTime(capped.oldest) : null;
+}
+
+/** Replaces the window label in a panel's heading (its `.panel-sub` span) when the read was row-capped. A no-op otherwise. */
+export function markPartialSubtitle(panel, data, desc) {
+  const text = partialWindowSubtitle(data, desc);
+  if (!text || !panel) return;
+  const find = (node) => {
+    for (const c of Array.from(node.children || [])) {
+      const k = c.className || (typeof c.getAttribute === "function" ? c.getAttribute("class") : null);
+      if (k === "panel-sub") return c;
+      const deeper = find(c);
+      if (deeper) return deeper;
+    }
+    return null;
+  };
+  const head = Array.from(panel.children || [])[0];
+  const sub = head ? find(head) : null;
+  if (sub) sub.textContent = " " + text;
 }
 
 /**

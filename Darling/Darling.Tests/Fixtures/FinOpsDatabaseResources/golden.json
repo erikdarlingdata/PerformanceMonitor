@@ -106,7 +106,8 @@
           "PctCpu": 36.51,
           "PctIo": 5.56,
           "TotalCpuTimeMs": 0,
-          "AvgIoMb": 0
+          "AvgIoMb": 0,
+          "AvgCpuMs": 0
         },
         {
           "DatabaseName": "Bravo",
@@ -116,7 +117,8 @@
           "PctCpu": 15.87,
           "PctIo": 0.88,
           "TotalCpuTimeMs": 0,
-          "AvgIoMb": 0
+          "AvgIoMb": 0,
+          "AvgCpuMs": 0
         },
         {
           "DatabaseName": "Charlie",
@@ -126,7 +128,8 @@
           "PctCpu": 15.87,
           "PctIo": 0.00,
           "TotalCpuTimeMs": 0,
-          "AvgIoMb": 0
+          "AvgIoMb": 0,
+          "AvgCpuMs": 0
         }
       ],
       "byAvg": [
@@ -138,7 +141,8 @@
           "PctCpu": 0,
           "PctIo": 0,
           "TotalCpuTimeMs": 5000,
-          "AvgIoMb": 0.2000
+          "AvgIoMb": 0.2000,
+          "AvgCpuMs": 500.00
         },
         {
           "DatabaseName": "Charlie",
@@ -148,7 +152,8 @@
           "PctCpu": 0,
           "PctIo": 0,
           "TotalCpuTimeMs": 5000,
-          "AvgIoMb": 0.0000
+          "AvgIoMb": 0.0000,
+          "AvgCpuMs": 500.00
         },
         {
           "DatabaseName": "",
@@ -158,7 +163,8 @@
           "PctCpu": 0,
           "PctIo": 0,
           "TotalCpuTimeMs": 4000,
-          "AvgIoMb": 0.0000
+          "AvgIoMb": 0.0000,
+          "AvgCpuMs": 500.00
         }
       ]
     },

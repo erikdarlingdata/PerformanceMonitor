@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -264,19 +265,28 @@ ORDER BY SUM(wait_time_ms) DESC";
        EventWindowFloor for $2: blocked_process_reports is partitioned on collection_time, which an
        event_time bound gives the planner nothing to exclude chunks on. The bucket moves with the window:
        a bucket origin on one column over rows windowed on the other would split the peak across buckets. */
-    private const string BlockingSqlHead = @"
-WITH reports AS (
+    /* #5644 W1: the rows the fact counts are WAITS, not blocked-process reports. SQL Server writes a report for
+       a still-blocked session every threshold seconds, so one one-minute wait was about eleven events and the
+       graded rate overstated blocking by the same factor. BlockingWaits.WaitsCteSql is the one definition (a
+       blocked session, its blocker and the wait's derived start; the longest wait time kept) that the alert
+       engine and the fleet tile share, so this fact's event_count, the alert value and the Blocking tile agree.
+       The wait lands in the 4-hour bucket of its longest-wait (latest) report. The (10, 50) grading pair was
+       measured on reports; it now meets waits, and the PR notes that. */
+    private static string BuildBlockingSql(string extraWhere) => @"
+WITH " + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "waits",
+        @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms, blocking_status
+    FROM blocked_process_reports
+    WHERE server_id = $1
+    AND   event_time >= $2
+    AND   event_time <= $3" + extraWhere) + @",
+reports AS (
     SELECT
         wait_time_ms,
         blocking_spid,
         blocking_status,
         date_bin('4 hours', event_time, $2) AS bucket_start
-    FROM blocked_process_reports
-    WHERE server_id = $1
-    AND   event_time >= $2
-    AND   event_time <= $3";
-
-    private const string BlockingSqlTail = @"
+    FROM waits
 ),
 buckets AS (
     SELECT COUNT(*) AS bucket_event_count
@@ -289,19 +299,22 @@ SELECT
     MAX(wait_time_ms) AS max_wait_time_ms,
     COUNT(DISTINCT blocking_spid) AS distinct_head_blockers,
     COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count,
-    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count
+    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count,
+    /* #5644: the report rows before they collapse to waits, the unit the health band's per-hour count tiers were
+       measured in. Appended last so every ordinal above is where it was; the fleet tile and the viewer band read it. */
+    (SELECT COUNT(*) FROM waits_marked) AS report_count
 FROM reports";
 
-    public const string BlockingSql = BlockingSqlHead + @"
-    AND   collection_time >= $4" + BlockingSqlTail;
+    public static string BlockingSql => BuildBlockingSql(@"
+    AND   collection_time >= $4");
 
     /// <summary>The same read for an Azure SQL Database master target: $4 is the names of the databases monitored
     /// as their own targets, whose events are skipped (a NULL database still counts), and $5 the event-window
     /// floor. The list keeps its number from the scoped read and the floor takes the next one, so the floor is
     /// $4 in <see cref="BlockingSql"/> and $5 here.</summary>
-    public const string BlockingSqlSkippingSeparate = BlockingSqlHead + @"
+    public static string BlockingSqlSkippingSeparate => BuildBlockingSql(@"
     AND   collection_time >= $5
-    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))" + BlockingSqlTail;
+    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))");
 
     /// <summary>The peak sub-window's width in hours — the grain the (10, 50) grading pair was measured
     /// on (#3871). The peak rate divides by <c>min(this, observed hours)</c>, never by the constant

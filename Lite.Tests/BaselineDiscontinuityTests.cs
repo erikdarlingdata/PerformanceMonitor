@@ -112,8 +112,34 @@ public sealed class BaselineDiscontinuityTests
         Assert.Equal(T0, one.At);
         Assert.Equal(BaselineDiscontinuities.RestartReason, one.Reason);
         Assert.Contains("2026-09-01 08:00:00 → 2026-09-20 03:11:40", one.Detail, StringComparison.Ordinal);
-        Assert.Contains("server name NODE1 → NODE1", one.Detail, StringComparison.Ordinal);
+        /* #5644 W17: the name did not move, so it is not listed as a change. */
+        Assert.DoesNotContain("server name", one.Detail, StringComparison.Ordinal);
         Assert.EndsWith("observed by wait_stats", one.Detail, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5644 W17: only the sides that changed are named. A rename shows the name pair alone; a failover shows both;
+    /// a name that differs by case only is not a change (the epoch test compares names case-insensitively).</summary>
+    [Fact]
+    public void Compose_NamesOnlyTheSidesThatChanged()
+    {
+        var oldStart = new DateTime(2026, 10, 8, 0, 10, 55);
+        var newStart = oldStart.AddHours(24);
+        var rows = new[] { Marker(T0, "wait_stats", "identity_epoch_changes=1") };
+
+        var restart = Assert.Single(BaselineDiscontinuities.Compose(rows, Pair("wait_stats", T0, new(oldStart, "AG1"), new(newStart, "ag1")))).Detail;
+        Assert.Contains("start time 2026-10-08 00:10:55 → 2026-10-09 00:10:55 (server clock)", restart, StringComparison.Ordinal);
+        Assert.DoesNotContain("server name", restart, StringComparison.Ordinal);
+
+        var rename = Assert.Single(BaselineDiscontinuities.Compose(rows, Pair("wait_stats", T0, new(oldStart, "OLD"), new(oldStart, "NEW")))).Detail;
+        Assert.Contains("server name OLD → NEW", rename, StringComparison.Ordinal);
+        Assert.DoesNotContain("start time", rename, StringComparison.Ordinal);
+
+        var failover = Assert.Single(BaselineDiscontinuities.Compose(rows, Pair("wait_stats", T0, new(oldStart, "OLD"), new(newStart, "NEW")))).Detail;
+        Assert.Contains("start time 2026-10-08 00:10:55 → 2026-10-09 00:10:55 (server clock), server name OLD → NEW", failover, StringComparison.Ordinal);
+        // #5644 W20: the pair is the target's local clock, so the banner names it and never writes an ISO instant with a "Z"
+        // (the web would shift a "Z" stamp into the browser's zone and show a start time that never happened).
+        Assert.DoesNotMatch(@"\d{4}-\d\d-\d\dT|\dZ", restart);
+        Assert.DoesNotMatch(@"\d{4}-\d\d-\d\dT|\dZ", failover);
     }
 
     [Fact]

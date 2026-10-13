@@ -213,7 +213,7 @@ public sealed class WebDataStartNoteEventReadsTests
         Assert.Equal(unavailable, await WebDataStartNote.AddAsync(store, read, "sql01", 48, WindowEnd, unavailable, null, Cancelled));
     }
 
-    /// <summary>The system_health CPU line shares its read with the Entries table, and a chart draws no note: the page's note helper
+    /// <summary>The system_health CPU line shares its read with the Entries table, and a chart draws no data-start note: the page note helper
     /// returns null for any viz other than a table or a stat, so the listed read adds no strip above the line (#4966).</summary>
     [Fact]
     public void TheSystemHealthCpuLine_IsAChart_AndTheNoteHelperDrawsNothingForACharts()
@@ -224,7 +224,9 @@ public sealed class WebDataStartNoteEventReadsTests
         Assert.Contains("viz: \"line\"", tabs.AsSpan(line, 200).ToString(), StringComparison.Ordinal);
 
         var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js");
-        Assert.Contains("(desc.viz !== \"table\" && desc.viz !== \"stat\")) return null;", util, StringComparison.Ordinal);
+        Assert.Contains("if (desc.viz !== \"table\" && desc.viz !== \"stat\" && !chart) return null;", util, StringComparison.Ordinal);
+        // ...and a chart draws only the row-capped note that names the oldest row shown (#5644 W12), which the data-start note does not.
+        Assert.Contains("if (typeof source.oldest_shown_utc !== \"string\") return null;", util, StringComparison.Ordinal);
     }
 
     /// <summary>The four reads' premises, in the tools' source: the payload fields the rules read.</summary>

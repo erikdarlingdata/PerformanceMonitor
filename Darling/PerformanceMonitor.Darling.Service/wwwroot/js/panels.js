@@ -44,6 +44,10 @@ import {
   dbScopeChip,
   dbFilteredEmptyText,
   sourceStrip,
+  clampText,
+  markPartialSubtitle,
+  localizeIsoText,
+  localizeAlertDetail,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
 import { plainText, plainTextNamed } from "./plain-text.js";
@@ -83,6 +87,38 @@ export function setPanelSignal(signal) {
 /** The signal the next renderPanel() would capture, so a caller can swap its own in for one panel and put this back (#5227). */
 export function getPanelSignal() {
   return panelSignal;
+}
+
+/**
+ * The sentence an empty envelope shows (#5644 W16). A panel that sets `emptyWins` has ONE agreed sentence for its
+ * empty state (the Blocking tab's deadlock panels, whose reads each worded "nothing happened" differently), and it
+ * replaces the read's own message; every other panel keeps the server's message.
+ */
+export function emptyHeadline(desc, res) {
+  /* Only a TRUE negative (status "empty") takes the panel's sentence. A "not_collected" (an Azure SQL Database has no system_health
+     session), "unavailable" or "precondition" envelope is a different statement, and "No deadlocks" over it would be a false
+     all-clear that also drops the server's own engine-gate line; those keep the read's message. */
+  return desc && desc.emptyWins && desc.emptyText && res.status === "empty" ? desc.emptyText : res.message;
+}
+
+/**
+ * A panel whose wording depends on which collector answered (#5644 W16, the blocking trend: blocked process reports, or the DMV
+ * snapshot rows it falls back to). `desc.bySource` maps the answer's `desc.sourceKey` value to `{ title, label, unit }`; the
+ * returned descriptor carries the series label and axis unit, and the heading's title text is replaced in place. A descriptor
+ * without `bySource`, or an answer whose source has no entry, comes back as given.
+ */
+export function applySourceWording(desc, data, panel) {
+  const alt = desc.bySource && desc.sourceKey ? desc.bySource[getPath(data, desc.sourceKey)] : null;
+  if (!alt) return desc;
+  const head = panel ? Array.from(panel.children || [])[0] : null;
+  const titleNode = head ? head.firstChild : null;
+  if (titleNode && alt.title) titleNode.textContent = alt.title;
+  return {
+    ...desc,
+    title: alt.title || desc.title,
+    unit: alt.unit ?? desc.unit,
+    series: Array.isArray(desc.series) ? desc.series.map((x) => ({ ...x, label: alt.label || x.label })) : desc.series,
+  };
 }
 
 /**
@@ -166,7 +202,7 @@ async function loadPanelBody(desc, body, signal) {
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
        new server's empty week does not read as a quiet one. windowFloorStrip is null for a chart and for an envelope
        without the note. */
-    mount(body, [kept, windowFloorStrip(res.data, desc), emptyStrip(res.message)]);
+    mount(body, [kept, windowFloorStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);
     return;
   }
 
@@ -193,9 +229,12 @@ async function loadPanelBody(desc, body, signal) {
     const moreNotes = (desc.moreNoteKeys || []).map((k) => getPath(res.data, k));
     /* #4966: a grid says where its table's data starts when that is after the window's start (windowFloorStrip). */
     const floor = windowFloorStrip(res.data, desc);
+    /* #5644 W12: a row-capped panel stops claiming the window it was asked for in its heading. */
+    markPartialSubtitle(body.parentNode, res.data, desc);
     /* A narrowed read draws its chart over the hours it answered for, not the Range it was asked for (#2802).
        A copy, so the caller's descriptor keeps the window it asked for. */
     if (res.keptHours) desc = { ...desc, windowHours: res.keptHours };
+    desc = applySourceWording(desc, res.data, body.parentNode);
     const rendered = render(res.data, desc);
 
     mount(body, [
@@ -234,7 +273,7 @@ export const VIZ = {
  */
 const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-detect fields.";
 
-/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copy,copyValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
+/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,clamp,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copy,copyValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
 
    Column-header sort (#4843). A header click cycles ascending -> descending -> the server's own order, with a ▲/▼
    indicator and aria-sort; Enter and Space on the focused header do the same. The comparison reads the RAW row value
@@ -1219,7 +1258,8 @@ function cell(row, c) {
      query-text expander. It owns its own content; wrap/mono classes still apply if the column asks for them. */
   if (typeof c.render === "function") {
     const rcls = [];
-    if (c.wrap) rcls.push("wrap");
+    if (c.clamp) rcls.push("clamp");
+    else if (c.wrap) rcls.push("wrap");
     if (c.mono) rcls.push("mono");
     if (c.pre) rcls.push("pre");
     if (typeof c.cellClass === "function") { const k = c.cellClass(row); if (k) rcls.push(k); }
@@ -1228,7 +1268,8 @@ function cell(row, c) {
   const raw = getPath(row, c.key);
   const cls = [];
   if (isNumericCol(c)) cls.push("num");
-  if (c.wrap) cls.push("wrap");
+  if (c.clamp) cls.push("clamp");
+  else if (c.wrap) cls.push("wrap");
   if (c.mono) cls.push("mono");
   if (c.pre) cls.push("pre");
   if (c.sevKey) cls.push(sevClass(getPath(row, c.sevKey)));
@@ -1238,7 +1279,7 @@ function cell(row, c) {
      "n/a (log service)" for the log file of a Hyperscale database). The server wrote the sentence; the page only
      shows it in place of the bare em dash. */
   const why = raw == null && c.nullKey ? getPath(row, c.nullKey) : null;
-  const text =
+  const shown =
     why != null && why !== ""
       ? String(why)
       : typeof c.display === "function"
@@ -1252,6 +1293,16 @@ function cell(row, c) {
             : c.plain
               ? plainText(String(raw))
               : String(raw);
+  /* #5644 W20: a column marked `localizeText` (a message or note: collection-health notes, collector errors) shows any ISO
+     instant in its sentence in local time, like the grids beside it. Opt-in: query text, statement text, details and
+     identifiers are data, and a literal such as '2026-01-01T00:00:00' inside them must show as written. */
+  /* #5644 W20: `localizeAlertDetail` is the same opt-in for an alert's stored body (get_alert_history's detail_text): only the
+     labelled time lines ("Incident Since:", "Started:", "From:", "To:", "Window:", ...) and the sample-age line shift, because the
+     same body carries query and SQL lines that must print as written. Never use `localizeText` on a column that holds SQL. */
+  const text = c.localizeAlertDetail && !c.format
+    ? localizeAlertDetail(shown, getPath(row, "newest_sample"))
+    : c.localizeText && !c.format ? localizeIsoText(shown) : shown;
+  if (c.clamp) return el("td", { class: cls.join(" ") || null }, [clampText(text)]);
   return el("td", { class: cls.join(" ") || null, text });
 }
 

@@ -1411,7 +1411,8 @@ public class CollectorHealthRow
         CollectorHealthClassifier.FormatOutputFinding(
                 RowsStored, TotalRuns, DeniedSinceLastSuccess, NoteCount,
                 faultedRuns: ErrorCount + SessionMissingCount,
-                isEventCollector: CollectorHealthClassifier.IsEventCollector(CollectorName))
+                isEventCollector: CollectorHealthClassifier.IsEventCollector(CollectorName),
+                isZeroNormal: CollectorHealthClassifier.IsZeroNormalCollector(CollectorName))
             is { Length: > 0 } finding
             ? finding
             : null;

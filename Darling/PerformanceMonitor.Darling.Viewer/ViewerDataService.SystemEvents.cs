@@ -647,7 +647,10 @@ public sealed partial class ViewerDataService
             dte.integer_data,
             dte.severity,
             dte.error_number,
-            dte.text_data
+            dte.text_data,
+            dte.filename,
+            dte.event_class,
+            dte.event_sequence
         FROM default_trace_events AS dte, svr
         WHERE dte.server_id = $1
         AND   dte.event_time - make_interval(mins => svr.offset_minutes) >= $2 - interval '1 hour'
@@ -695,6 +698,7 @@ public sealed partial class ViewerDataService
         DbDataReader reader, ServerClock clock, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
     {
         var rows = new List<DefaultTraceEventRow>();
+        var seen = new HashSet<(DateTime?, string?, string?, string?, string?, string?, string?, int?, long?, long?, int?, int?, string?, string?, int?, long?)>();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -708,21 +712,46 @@ public sealed partial class ViewerDataService
             if (!SystemEventSignificance.IsSignificantDefaultTraceEvent(eventName, severity))
                 continue;
 
+            var databaseName = reader.IsDBNull(2) ? null : reader.GetString(2);
+            var objectName = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var loginName = reader.IsDBNull(4) ? null : reader.GetString(4);
+            var hostName = reader.IsDBNull(5) ? null : reader.GetString(5);
+            var applicationName = reader.IsDBNull(6) ? null : reader.GetString(6);
+            var spid = reader.IsDBNull(7) ? (int?)null : reader.GetInt32(7);
+            var durationUs = reader.IsDBNull(8) ? (long?)null : reader.GetInt64(8);
+            var integerData = reader.IsDBNull(9) ? (long?)null : reader.GetInt64(9);
+            var errorNumber = reader.IsDBNull(11) ? (int?)null : reader.GetInt32(11);
+            var textData = reader.IsDBNull(12) ? null : reader.GetString(12);
+            var filename = reader.IsDBNull(13) ? null : reader.GetString(13);
+            var eventClass = reader.IsDBNull(14) ? (int?)null : reader.GetInt32(14);
+            var eventSequence = reader.IsDBNull(15) ? (long?)null : reader.GetInt64(15);
+
+            /* #5644 W6: the store holds rows that are the same event twice (an older build kept both the Begin and
+               the Commit of every DDL, and re-stored an event whose datetime StartTime did not round-trip through
+               the watermark parameter). A copy repeats every column read here AND the event_sequence the collector
+               stores, so the first of each in reader order is kept, as the MCP reader and Lite's do, and the copies
+               stop filling the grid and the page limit. Two real events with identical columns (the same DBCC or
+               audit event from one spid in one 3.33 ms tick) carry different sequences, so both stay; a row stored
+               before the column existed has a NULL sequence and keeps the column-only key. */
+            if (!seen.Add((eventTimeUtc, eventName, databaseName, objectName, loginName, hostName, applicationName,
+                    spid, durationUs, integerData, severity, errorNumber, textData, filename, eventClass, eventSequence)))
+                continue;
+
             rows.Add(new DefaultTraceEventRow(
                 eventTimeUtc,
                 SystemEventSignificance.ClassifyDefaultTraceEvent(eventName),
                 eventName,
-                reader.IsDBNull(2) ? null : reader.GetString(2),   /* database_name */
-                reader.IsDBNull(3) ? null : reader.GetString(3),   /* object_name */
-                reader.IsDBNull(4) ? null : reader.GetString(4),   /* login_name */
-                reader.IsDBNull(5) ? null : reader.GetString(5),   /* host_name */
-                reader.IsDBNull(6) ? null : reader.GetString(6),   /* application_name */
-                reader.IsDBNull(7) ? (int?)null : reader.GetInt32(7),   /* spid */
-                reader.IsDBNull(8) ? (long?)null : reader.GetInt64(8),  /* duration_us */
-                reader.IsDBNull(9) ? (long?)null : reader.GetInt64(9),  /* integer_data */
+                databaseName,
+                objectName,
+                loginName,
+                hostName,
+                applicationName,
+                spid,
+                durationUs,
+                integerData,
                 severity,
-                reader.IsDBNull(11) ? (int?)null : reader.GetInt32(11), /* error_number */
-                reader.IsDBNull(12) ? null : reader.GetString(12)));    /* text_data */
+                errorNumber,
+                textData));
         }
 
         /* OrderByDescending is a stable sort (List.Sort is not), so ties keep the reader's order. */

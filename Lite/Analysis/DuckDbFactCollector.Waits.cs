@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 
@@ -246,14 +247,22 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
         using var command = connection.CreateCommand();
         var scopeList = context.SeparatelyMonitoredDatabases;
         var scopeFilter = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
+        /* #5644 W1: the rows the fact counts are WAITS (BlockingWaits.WaitsCteSql: a blocked session, its blocker
+           and the wait's derived start, the longest wait time kept), not blocked-process reports, which SQL
+           Server writes for a still-blocked session every threshold seconds. The PG collector counts the same
+           way, from the same definition. */
         command.CommandText = (@"
-WITH reports AS (
+WITH " + BlockingWaits.WaitsCteSql(
+            BlockingWaits.SqlDialect.DuckDb, "waits",
+            @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms, blocking_status
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3{SCOPE}") + @" AS ev") + @",
+reports AS (
     SELECT
         wait_time_ms,
         blocking_spid,
         blocking_status,
         time_bucket(INTERVAL '4 hours', event_time, $2) AS bucket_start
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3{SCOPE}") + @" AS ev
+    FROM waits
 ),
 buckets AS (
     SELECT COUNT(*) AS bucket_event_count

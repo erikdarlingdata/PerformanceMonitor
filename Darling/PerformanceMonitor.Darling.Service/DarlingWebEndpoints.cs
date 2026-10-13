@@ -16,6 +16,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -342,8 +343,23 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         /* The pre-banded fleet roll-up (also surfaced as the get_fleet_overview MCP tool). */
         app.MapGet("/api/fleet", async (HttpContext context) =>
         {
-            var hours = Math.Clamp(QueryInt(context, "hours_back", "hours", DefaultFleetHours), 1, 168);
-            var worstCount = Math.Max(0, QueryInt(context, "worst_count", null, DarlingFleetReader.DefaultWorstCount));
+            /* #5644 W22: a present, non-integer window or count is refused like an out-of-range one. */
+            if (NonIntegerParamRefusal(context) is { } fleetRefusal)
+            {
+                return ToHttpResult(fleetRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, 0, context.RequestAborted);
+            }
+
+            /* #5644 (review of W22): an out-of-range window or count is refused with the {"status":"invalid"} 400
+               the read loop answers, never clamped to a different window and answered 200 (REVIEW-TRAPS: counts
+               are refused, not clamped). The refusal names the spelling the caller sent (hours or hours_back).
+               The in-product callers send neither (apiGetFleet asks for the bare /api/fleet, the one-hour default). */
+            var hours = QueryInt(context, "hours_back", "hours", DefaultFleetHours);
+            var worstCount = QueryInt(context, "worst_count", null, DarlingFleetReader.DefaultWorstCount);
+            if (FleetParamRefusal(hours, worstCount, key => First(context, key)) is { } fleetRangeRefusal)
+            {
+                return ToHttpResult(fleetRangeRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, 0, context.RequestAborted);
+            }
+
             var now = DateTime.UtcNow;
             var result = await DarlingFleetReader.GetFleetOverviewAsync(
                 postgres, now.AddHours(-hours), now, now, worstCount,
@@ -390,6 +406,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 readScope.Scope.CaptureStatements = true;
                 try
                 {
+                    /* #5644 W22: ?hours=abc / ?hours=1.5 (or any other integer knob) was read as the default and answered
+                       200 for a different window than the one asked for, while ?hours=500 got a 400. Refused up front now,
+                       before any tool runs, in the same envelope the range refusals use. */
+                    if (NonIntegerParamRefusal(context) is { } nonIntegerRefusal)
+                    {
+                        return ToHttpResult(nonIntegerRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                    }
+
                     /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
                        taken once here and handed to both the read and the note check. A request with its own anchor
                        is left as sent. */
@@ -401,6 +425,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     }
 
                     result = await handler(context, postgres, analysis);
+
+                    /* #5644 W22: the tools' own window parameter is hours_back, but a web caller sends hours; a refusal for an
+                       out-of-range one (?hours=-5, ?hours=500) is worded in the caller's own parameter. */
+                    result = NameWindowParameterTheCallerSent(result, key => First(context, key));
 
                     /* #4966: a grid over a window says where its table's data starts when that is after the window's
                        start. Added to the web mirror only, never to the tool, so the MCP payloads are unchanged. A
@@ -5596,7 +5624,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                web viewer has always shown the whole query text. The row pins its OWN default to true so
                #4198's MCP-side budget cut does not silently truncate what the viewer renders. */
             ["get_plan_corrections"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), AsOf(c), QueryBool(c, "full_text", true), databases, null, c.RequestAborted)
+                ? DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), AsOf(c), QueryBool(c, "full_text", true), databases, null, c.RequestAborted, collapse: true)
                 : DatabaseNamesRefusal(c),
 
             /* ── config (current + history) ── */
@@ -6435,6 +6463,95 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         Task.FromResult(McpHelpers.Refusal(key, $"Invalid value for parameter '{key}'. {expected ?? "Expected a number."}"));
 
 
+    /// <summary>
+    /// Every query-string knob the dispatch reads as a whole number through <see cref="QueryInt"/> / <see cref="Rows"/> /
+    /// <see cref="Hours"/> (#5644 W22). <see cref="ParseInt"/> reads an unreadable one as the default, so a window or row
+    /// count the caller got wrong was answered, with a 200, for a different one than the one asked for.
+    /// </summary>
+    internal static readonly string[] IntegerQueryKeys =
+    [
+        "hours", "hours_back", "days_back", "trend_hours_back", "baseline_hours_back", "limit", "top",
+        "bucket_minutes", "min_dop", "worst_count"
+    ];
+
+    /// <summary>
+    /// The 400 envelope for the first <see cref="IntegerQueryKeys"/> knob that is present but not a whole number
+    /// (<c>?hours=abc</c>, <c>?hours=1.5</c>), else null. An absent or empty knob still takes the tool's default, and a number out of
+    /// range is left to the tool, which owns that refusal. Pure over the lookup, so a test pins it without a server.
+    /// </summary>
+    internal static string? NonIntegerParamRefusal(Func<string, string?> lookup)
+    {
+        foreach (var key in IntegerQueryKeys)
+        {
+            var raw = lookup(key);
+            if (!string.IsNullOrEmpty(raw) && !int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+            {
+                return McpHelpers.Refusal(key, $"Invalid {key} value '{McpHelpers.Truncate(raw, 40)}'. Must be a whole number.");
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// #5644 W22: the window refusal (<c>hints.parameter</c> <c>hours_back</c>) a web caller got for <c>?hours=</c> out of range, said in
+    /// the parameter the caller sent. The tools name <c>hours_back</c> (the MCP parameter, kept as it is for MCP callers); the web
+    /// accepts both spellings, and a request that sent only <c>hours</c> was told off for a parameter it never used. A request that
+    /// sent <c>hours_back</c> (alone or beside <c>hours</c>), a refusal for any other parameter, and a result that is not a refusal
+    /// envelope come back unchanged. Only the standalone word is renamed: <c>baseline_hours_back</c> stays.
+    /// </summary>
+    internal static string NameWindowParameterTheCallerSent(string result, Func<string, string?> lookup)
+    {
+        if (!McpHelpers.IsRefusalEnvelope(result) || string.IsNullOrEmpty(lookup("hours")) || !string.IsNullOrEmpty(lookup("hours_back")))
+        {
+            return result;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(result) is not JsonObject envelope
+                || envelope["hints"] is not JsonObject hints
+                || hints["parameter"]?.GetValue<string>() != "hours_back")
+            {
+                return result;
+            }
+
+            hints["parameter"] = "hours";
+            if (envelope["message"]?.GetValue<string>() is { } message)
+            {
+                envelope["message"] = Regex.Replace(message, @"(?<![A-Za-z0-9_])hours_back(?![A-Za-z0-9_])", "hours");
+            }
+
+            return envelope.ToJsonString();
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
+        {
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// #5644: the refusal envelope for an out-of-range <c>/api/fleet</c> window (<paramref name="hours"/> outside 1..168) or a
+    /// negative <paramref name="worstCount"/>, else null. Same envelope and sentences as the MCP tool's
+    /// <see cref="McpHelpers.ValidateHoursBack(int)"/>, with the window parameter named as the caller sent it
+    /// (<see cref="NameWindowParameterTheCallerSent"/>). Pure over the lookup, so a test pins it without a server.
+    /// </summary>
+    internal static string? FleetParamRefusal(int hours, int worstCount, Func<string, string?> lookup)
+    {
+        var window = McpHelpers.ValidateHoursBack(hours);
+        if (window is not null)
+        {
+            return NameWindowParameterTheCallerSent(window, lookup);
+        }
+
+        return worstCount < 0
+            ? McpHelpers.Refusal("worst_count", $"Invalid worst_count value '{worstCount}'. Must be zero or a positive integer.")
+            : null;
+    }
+
+    private static string? NonIntegerParamRefusal(HttpContext context) =>
+        NonIntegerParamRefusal(key => First(context, key));
+
     private static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
         ParseInt(First(context, key) ?? (aliasKey is null ? null : First(context, aliasKey)), def);
 
@@ -6446,7 +6563,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>
     /// A row-count knob (<c>?limit=</c> / <c>?top=</c>), clamped to [1, <see cref="MaxRowLimit"/>] at the
     /// dispatch layer so an authenticated/loopback caller can't request an unbounded result set from a reader
-    /// that binds the value straight into <c>LIMIT $N</c> (the /api/fleet window is clamped the same way).
+    /// that binds the value straight into <c>LIMIT $N</c> (the /api/fleet window is refused out of range instead, #5644).
     /// </summary>
     private static int Rows(HttpContext context, string key, int def) =>
         ClampRows(QueryInt(context, key, null, def));

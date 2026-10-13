@@ -1358,29 +1358,21 @@ public sealed class AlertEngine
                    and the fired alert's context (:172) — see class remarks adaptation (1). */
                 blockingRows = await _readAdapter.GetRecentBlockedProcessReportsAsync(key, hoursBack: RollingCountWindowHours, ct);
 
-                /* Lite's overview count semantics (LocalDataService.Overview.cs:74-77): prefer the
-                   XE blocked-process-report count; fall back to the DMV snapshot count when the XE
-                   count is zero (AWS RDS / unset blocked-process threshold). The merged adapter
-                   list contains all XE rows plus only uncovered DMV rows, so when no XE row exists
-                   the merged count IS the DMV count. */
-                int xeCount = blockingRows.Count(r => r.Source == BlockedProcessAlertRow.XeReportSource);
-                effectiveBlockingCount = xeCount > 0 ? xeCount : blockingRows.Count;
-
-                /* :118-127 — with excluded databases configured and the raw count at/over the
-                   threshold, recount only rows outside the excluded set (no-database rows pass). */
-                if (excludedDatabases.Count > 0
-                    && effectiveBlockingCount >= _settings.BlockingCountThreshold)
-                {
-                    /* The recount applies the raw count's own rule to the same row set: XE rows when any
-                       exist, otherwise every row. */
-                    var recountRows = xeCount > 0
-                        ? blockingRows.Where(r => r.Source == BlockedProcessAlertRow.XeReportSource)
-                        : blockingRows;
-                    effectiveBlockingCount = recountRows
-                        .Count(r => string.IsNullOrEmpty(r.DatabaseName) ||
-                            !excludedDatabases.Any(e =>
-                                string.Equals(e, r.DatabaseName, StringComparison.OrdinalIgnoreCase)));
-                }
+                /* #5644 W1/W2: the value is the number of blocking WAITS, not blocked-process reports.
+                   SQL Server reports a still-blocked session every threshold seconds, so a one-minute wait
+                   is about eleven report rows; counting rows alerted on one wait eleven times over. One
+                   event is one blocked session, blocker and wait start, with its longest wait time.
+                   BlockingWaitRows is the one place that set is built, and the card's "Blocking chain (xN)"
+                   groups are drawn from the SAME list, so the value is the sum of the chain counts. It also
+                   carries Lite's overview semantics (LocalDataService.Overview.cs:74-77): the XE
+                   blocked-process-report waits when there are any, else the DMV-snapshot waits (AWS RDS /
+                   unset blocked-process threshold), and the excluded-database filter (:118-127), whose rows
+                   with no database always pass. The XE-or-DMV choice is made on the rows BEFORE the excluded
+                   filter, as before: XE reports that sit only in excluded databases count zero and
+                   do not fall back to DMV waits. The old shape counted every row, then recounted outside
+                   the excluded set only once the raw count reached the threshold; filtering before counting
+                   keeps that fire decision and gives a watermark that tracks the filtered count throughout. */
+                effectiveBlockingCount = AlertContextBuilders.BlockingWaitRows(blockingRows, excludedDatabases).Count;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {

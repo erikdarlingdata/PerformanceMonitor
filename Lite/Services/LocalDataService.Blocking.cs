@@ -581,7 +581,7 @@ LIMIT $4";
 
     /// <summary>
     /// Gets lightweight blocking + deadlock counts and latest event time for alert badge updates.
-    /// Much cheaper than fetching full rows with XML — just COUNT(*) and MAX(time).
+    /// Much cheaper than fetching full rows with XML — a count of waits and MAX(time).
     /// </summary>
     /// <remarks>
     /// <paramref name="fromDate"/>/<paramref name="toDate"/> are the tab's custom range as naive-UTC instants
@@ -601,11 +601,20 @@ LIMIT $4";
 
         /* blocking_count prefers the blocked-process-report; falls back to the always-on DMV snapshot when
            BPR captured nothing (AWS RDS). latest_event_time includes DMV blocking recency too. */
+        /* #5644: the count is WAITS, not report rows (BlockingWaits.WaitsCteSql, the definition the Overview tile, the
+           alert and the analysis fact share): SQL Server writes a report for a still-blocked session every threshold
+           seconds, so one one-minute wait put about eleven on this badge beside a tile that said 1. */
         command.CommandText = @"
+WITH " + BlockingWaits.WaitsCteSql(
+            BlockingWaits.SqlDialect.DuckDb, "xe_waits",
+            @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev") + "," + BlockingWaits.WaitsCteSql(
+            BlockingWaits.SqlDialect.DuckDb, "dmv_waits",
+            @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms
+    FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3") + @"
 SELECT
-    COALESCE(NULLIF((SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev), 0),
-     (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)) AS blocking_count,
+    COALESCE(NULLIF((SELECT COUNT(*) FROM xe_waits), 0), (SELECT COUNT(*) FROM dmv_waits)) AS blocking_count,
     (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3) AS deadlock_count,
     (SELECT MAX(t) FROM (
         SELECT MAX(event_time) AS t FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev

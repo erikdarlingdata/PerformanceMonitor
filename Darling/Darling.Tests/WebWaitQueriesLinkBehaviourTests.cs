@@ -163,7 +163,7 @@ public sealed class WebWaitQueriesLinkBehaviourTests
         Assert.Equal("#/server/A/waits", r.GetProperty("hashAfterShowAll").GetString());
 
         // A filtered miss names the wait: the server's envelope does, and so does the panel's own text.
-        Assert.Equal(new[] { "No active-query snapshots with wait_type 'WRITELOG' were collected in this window." }, Strings(r.GetProperty("emptyEnvelopeText")));
+        Assert.Equal(new[] { "No active-query snapshots with wait type 'WRITELOG' were collected in this window." }, Strings(r.GetProperty("emptyEnvelopeText")));
         Assert.Equal(new[] { "No active queries waiting on WRITELOG were captured in this window." }, Strings(r.GetProperty("emptyRowsText")));
     }
 

@@ -183,15 +183,18 @@ export const DASHBOARD_TEMPLATES = [
       definition: {
         panels: [
           {
-            title: "Blocking Events",
+            /* #5644 W16: a Custom View panel has no collector tag, and get_blocking_trend falls back from blocked process
+               reports to DMV snapshot rows, so the title, legend and axis caption are true for both. */
+            title: "Blocking trend (reports or snapshot rows)",
             read: "get_blocking_trend",
             params: { server, hours: 24 },
             viz: "line",
             rowsKey: "trend",
             xKey: "time",
-            emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
-            series: [{ key: "count", label: "Events" }],
+            emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
+            series: [{ key: "count", label: "Reports or snapshot rows" }],
             format: "int",
+            unit: "reports or snapshot rows",
           },
           {
             title: "Deadlocks",

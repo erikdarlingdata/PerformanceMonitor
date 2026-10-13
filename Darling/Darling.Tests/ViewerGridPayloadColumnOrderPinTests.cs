@@ -182,16 +182,17 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
     [InlineData("TOP_QUERY_COLUMNS", "database_name", "query_text", 10)]
     [InlineData("QUERY_STORE_COLUMNS", "database_name", "query_text", 8)]
     [InlineData("LONG_QUERY_COLUMNS", "event_time", "statement", 8)]
-    [InlineData("PLAN_CORRECTION_COLUMNS", "collection_time", "query_text", 8)]
+    [InlineData("PLAN_CORRECTION_COLUMNS", "capture_count", "query_text", 8, 2)]
     [InlineData("BLOCKING_COLUMNS", "event_time", "blocked_sql_text", 9)]
     [InlineData("DEADLOCK_COLUMNS", "deadlock_time", "victim_sql_text", 5)]
-    public void EveryWebGridWithQueryText_PutsItRightOfTheAnchor(string array, string anchor, string text, int minKeys)
+    public void EveryWebGridWithQueryText_PutsItRightOfTheAnchor(string array, string anchor, string text, int minKeys, int anchorAt = 0)
     {
         // Array order IS the rendered column order — the page hands the array straight to the table renderer.
         var keys = JsColumnKeys(ReadRepoFile(ServerPageJs), array);
         Assert.True(keys.Count >= minKeys, $"only {keys.Count} {array} keys parsed — the scan is broken.");
-        Assert.Equal(anchor, keys[0]);
-        Assert.Equal(text, keys[1]);
+        // anchorAt is 0 except Plan Corrections, whose First seen and Last seen stamps lead (#5644 W21) and Captures is the anchor.
+        Assert.Equal(anchor, keys[anchorAt]);
+        Assert.Equal(text, keys[anchorAt + 1]);
 
         // Without this, re-adding a second text column at the BACK would leave the pin green — the same hole
         // EveryPinnedPayloadColumnIsUniqueInItsGrid closes on the XAML side.

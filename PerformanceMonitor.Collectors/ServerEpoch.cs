@@ -317,8 +317,7 @@ public static class ServerEpoch
             {
                 context.Deltas.ClearServer(
                     context.ServerId,
-                    "identity epoch changed — start time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime)
-                    + ", server name " + Describe(replaced.Name) + " → " + Describe(current.Name)
+                    "identity epoch changed — " + DescribeChange(replaced, current)
                     + ": every delta baseline and pass window for this server was forgotten, so this pass re-baselines "
                     + "and the next reports the first interval measured on the instance the connection now reaches");
                 /* What was observed, not the merge with the prior: the prior's components describe the OLD
@@ -466,6 +465,43 @@ public static class ServerEpoch
         {
             context.PendingState[stateKey] = text;
         }
+    }
+
+    /// <summary>Said after a SQL Server start-time pair (#5644 W20 leftover). <c>sqlserver_start_time</c> is the target's LOCAL clock
+    /// and the host does not know its offset, so the pair is not UTC and must not be written as an instant with a "Z": the web's
+    /// <c>localizeIsoText</c> would shift it by the server's UTC offset and show a start time that never happened. The banner names the clock
+    /// instead, so a reader does not take the pair for the browser's zone or for UTC.</summary>
+    internal const string ServerClockNote = " (server clock)";
+
+    /// <summary>
+    /// The sides of an identity change that actually moved, for a banner or a log line (#5644 W17): "start time A → B"
+    /// and/or "server name X → Y", joined by a comma. A side that did not change is left out, because listing
+    /// "server name X → X" reads as a rename that never happened. "Moved" is exactly <see cref="IsNewEpoch"/>'s
+    /// own test (known on both sides and different; names case-insensitive). When neither side moved by that
+    /// test (a defensive case: the caller only asks about an epoch), both pairs are printed as before.
+    /// </summary>
+    public static string DescribeChange(Stamp replaced, Stamp current)
+    {
+        var parts = new List<string>(2);
+        if (replaced.StartTime.HasValue && current.StartTime.HasValue
+            && replaced.StartTime.Value != current.StartTime.Value)
+        {
+            parts.Add("start time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime) + ServerClockNote);
+        }
+
+        if (replaced.Name is not null && current.Name is not null
+            && !string.Equals(replaced.Name, current.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            parts.Add("server name " + Describe(replaced.Name) + " → " + Describe(current.Name));
+        }
+
+        if (parts.Count == 0)
+        {
+            parts.Add("start time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime) + ServerClockNote);
+            parts.Add("server name " + Describe(replaced.Name) + " → " + Describe(current.Name));
+        }
+
+        return string.Join(", ", parts);
     }
 
     private static string Describe(DateTime? value)

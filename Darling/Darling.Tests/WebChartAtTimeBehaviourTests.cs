@@ -176,10 +176,11 @@ public sealed class WebChartAtTimeBehaviourTests
         Assert.Contains("panel: \"Blocking\"", charts);
         Assert.Matches(@"table\(\s*""Blocking"",", blocking);
         Assert.Contains("panel: \"Deadlocks\"", charts);
-        // Both the chart and the grid are titled "Deadlocks", and the scroll takes the later one, so the grid must be the later.
-        var chart = blocking.IndexOf("line(\"Deadlocks\",", StringComparison.Ordinal);
+        // The Blocking tab's chart is "Deadlock trend" (#5644 W16), so the scroll to "Deadlocks" finds the grid; it still sits below its chart.
+        var chart = blocking.IndexOf("line(\"Deadlock trend\",", StringComparison.Ordinal);
         var grid = Regex.Match(blocking, @"table\(\s*""Deadlocks"",");
-        Assert.True(chart >= 0 && grid.Success && grid.Index > chart, "the Deadlocks grid must come after the Deadlocks chart on the Blocking tab");
+        Assert.DoesNotContain("line(\"Deadlocks\",", blocking, StringComparison.Ordinal);
+        Assert.True(chart >= 0 && grid.Success && grid.Index > chart, "the Deadlocks grid must come after the Deadlock trend chart on the Blocking tab");
     }
 
     [Fact]
@@ -352,8 +353,9 @@ public sealed class WebChartAtTimeBehaviourTests
         // deadlock charts "Show Deadlocks at This Time". Every other server-tab line chart keeps the Active Queries default.
         var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
 
-        // line() panels: Blocking Events and Deadlocks sit on both the Overview tab and the Blocking tab.
-        foreach (var (title, item, count) in new[] { ("Blocking Events", "blocking", 2), ("Deadlocks", "deadlocks", 2), ("Lock Waits", "blocking", 1) })
+        // line() panels: Blocking Events sits on both the Overview tab and the Blocking tab; the deadlock chart is "Deadlocks" on Overview and
+        // "Deadlock trend" on the Blocking tab (#5644 W16, so the Deadlocks grid below it is the only panel with that title there).
+        foreach (var (title, item, count) in new[] { ("Blocked process report trend", "blocking", 2), ("Deadlocks", "deadlocks", 1), ("Deadlock trend", "deadlocks", 1), ("Lock Waits", "blocking", 1) })
         {
             var calls = Regex.Matches(tabs, @"line\(""" + title + @""",");
             Assert.Equal(count, calls.Count);

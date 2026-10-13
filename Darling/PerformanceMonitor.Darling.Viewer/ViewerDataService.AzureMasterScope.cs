@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
@@ -149,7 +150,7 @@ WHERE s.is_enabled
     /// The master's windowed XE blocking count and worst wait without the separately monitored databases'
     /// events (<see cref="PgFactCollector.BlockingSqlSkippingSeparate"/>, the read the service's analysis uses).
     /// </summary>
-    private async Task<(int Count, long MaxWaitMs)> ReadScopedBlockingAsync(
+    private async Task<(int Count, long MaxWaitMs, int Reports)> ReadScopedBlockingAsync(
         int serverId, DateTime start, DateTime end, IReadOnlyList<string> separate, CancellationToken cancellationToken)
     {
         await ScopeReadStageAsync("blocking");
@@ -163,12 +164,13 @@ WHERE s.is_enabled
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
-            return (0, 0);
+            return (0, 0, 0);
         }
 
         return (
             reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0)),
-            reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2)));
+            reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2)),
+            reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)));
     }
 
     /// <summary>The master's windowed deadlock count without the deadlocks wholly in the separately monitored databases.</summary>
@@ -182,10 +184,18 @@ WHERE s.is_enabled
             serverId, start, end, separate, cancellationToken, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
     }
 
-    private const string FleetMasterUnscopedSql = @"
+    /* #5644 W1: waits, not report rows (BlockingWaits.WaitsCteSql), so it subtracts like for like from the fleet totals. */
+    private static readonly string FleetMasterUnscopedSql = @"
+WITH " + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "xe_waits",
+        @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_blocked_process_reports
+    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $4") + "," + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "dmv_waits",
+        @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $4") + @"
 SELECT
-    (SELECT COUNT(*) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $4),
-    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots   WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $4),
+    (SELECT COUNT(*) FROM xe_waits),
+    (SELECT COUNT(*) FROM dmv_waits),
     (SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3 AND collection_time >= $4)";
 
     /// <summary>

@@ -185,6 +185,51 @@ function watchPlotWidth(host, draw, key, drawnW) {
   observer.observe(host);
 }
 
+/* Collection gaps (#5644 W7). The service host is off overnight, so a series has a stretch with no samples; a line drawn
+   point to point would run a straight diagonal across it and read as data. A gap is a jump between two neighbouring
+   timestamps of more than GAP_FACTOR times the series' own median interval, never less than GAP_FLOOR_MS (a collector can
+   miss a cycle without that being worth a break). Fewer than three points have no normal interval to compare against, so
+   they never break. Every time-series line, area and stacked chart goes through this, so no caller inserts null points.
+   A break is for a SAMPLED series that went silent, so it needs a cadence to be silent against. A series of events
+   (clusters of rows with hours between them) has none: its spacing runs from seconds to hours, the median is tiny, and
+   the floor would cut it into lone dots. A series has a cadence when its interquartile spacing is tight (the 75th
+   percentile of the intervals is within GAP_FACTOR times the 25th); one with no cadence never breaks (#5644 H4b). */
+const GAP_FACTOR = 3;
+const GAP_FLOOR_MS = 5 * 60 * 1000;
+
+/* The break threshold, in ms, for ascending timestamps (epoch ms); Infinity when there is nothing to compare against or
+   the series has no regular cadence (events). */
+export function gapThresholdMs(times) {
+  const deltas = [];
+  for (let i = 1; i < times.length; i++) {
+    const d = times[i] - times[i - 1];
+    if (d > 0) deltas.push(d);
+  }
+  if (deltas.length < 2) return Infinity;
+  deltas.sort((a, b) => a - b);
+  const mid = deltas.length >> 1;
+  const quantile = (p) => deltas[Math.round((deltas.length - 1) * p)];
+  if (quantile(0.75) > GAP_FACTOR * quantile(0.25)) return Infinity;
+  const median = deltas.length % 2 ? deltas[mid] : (deltas[mid - 1] + deltas[mid]) / 2;
+  return Math.max(GAP_FACTOR * median, GAP_FLOOR_MS);
+}
+
+/* Splits ascending positions (indices into times) into runs of neighbours no further apart than thresholdMs. */
+export function splitAtGaps(indices, times, thresholdMs) {
+  const runs = [];
+  let run = null;
+  let prev = -1;
+  for (const i of indices) {
+    if (run === null || times[i] - times[prev] > thresholdMs) {
+      run = [];
+      runs.push(run);
+    }
+    run.push(i);
+    prev = i;
+  }
+  return runs;
+}
+
 /**
  * Render a multi-series time chart into a returned `.chart` node.
  * spec: { points, xKey, series:[{key,label,color}], formatValue?, clampMax?, unit?, mode?, thresholds? }
@@ -281,6 +326,8 @@ export function renderLineChart(spec) {
   const tMin = hasWindow ? windowStart : dataTMin;
   const tMax = hasWindow ? windowEnd : dataTMax;
   const spanMs = tMax - tMin;
+  const rowTimes = rows.map((p) => p.t.getTime());
+  const gapMs = gapThresholdMs(rowTimes);
 
   /* A numeric reader: null/NaN reads as null for line/area (a gap), or 0 for a stacked mode (a continuous baseline). */
   const readVal = (r, key) => {
@@ -485,76 +532,94 @@ export function renderLineChart(spec) {
       } else {
         /* Filled bands drawn top series first so lower bands paint over the seams; each band is bounded above by its
            own cumulative top and below by the previous series' cumulative top (the x-axis for series 0). */
+        /* A collection gap (#5644 W7) ends one run of bands and starts the next, so the bands do not ramp across it;
+           a run of one bucket has no extent, so it is dots at the stack tops, as the single-bucket case above. */
+        const runs = splitAtGaps(rows.map((_, i) => i), rowTimes, gapMs);
         for (let k = series.length - 1; k >= 0; k--) {
-          const top = [];
-          const bottom = [];
-          for (let i = 0; i < rows.length; i++) {
-            top.push(xs[i] + "," + plotY(stackTops[i][k]));
-            bottom.push(xs[i] + "," + plotY(k === 0 ? 0 : stackTops[i][k - 1]));
+          for (const run of runs) {
+            if (run.length === 1) {
+              root.appendChild(svg("circle", { class: "series-dot", cx: xs[run[0]], cy: plotY(stackTops[run[0]][k]), r: 4, fill: normalizeColor(series[k].color) }));
+              continue;
+            }
+            const top = [];
+            const bottom = [];
+            for (const i of run) {
+              top.push(xs[i] + "," + plotY(stackTops[i][k]));
+              bottom.push(xs[i] + "," + plotY(k === 0 ? 0 : stackTops[i][k - 1]));
+            }
+            bottom.reverse();
+            root.appendChild(
+              svg("polygon", {
+                class: "series-area",
+                "clip-path": clipAttr,
+                points: top.concat(bottom).join(" "),
+                fill: normalizeColor(series[k].color),
+                "fill-opacity": "0.72",
+              })
+            );
           }
-          bottom.reverse();
-          root.appendChild(
-            svg("polygon", {
-              class: "series-area",
-              "clip-path": clipAttr,
-              points: top.concat(bottom).join(" "),
-              fill: normalizeColor(series[k].color),
-              "fill-opacity": "0.72",
-            })
-          );
         }
       }
     } else {
       /* Area fill (each series to the baseline) then the line on top; or just the line. Nulls drop the gap. */
       for (const s of series) {
-        const linePts = [];
+        const plottable = [];
         for (let i = 0; i < rows.length; i++) {
           const v = readVal(rows[i].r, s.key);
           if (v == null) continue;
-          linePts.push(xs[i] + "," + plotY(v));
+          plottable.push(i);
         }
-        /* A lone plottable point has no segment to stroke, so draw it as a dot — one bucket still shows its
-           reading. (Its resting marker matches the hover dot; static class so it does not vanish on mouseout.) */
-        if (linePts.length === 1) {
-          const [cx, cy] = linePts[0].split(",");
-          root.appendChild(svg("circle", { class: "series-dot", cx, cy, r: 4, fill: normalizeColor(s.color) }));
-          continue;
+        /* One run per stretch with samples (#5644 W7): a collection gap ends a run, so no line or fill crosses it. The
+           threshold comes from THIS series' own spacing: a 15-minute series on a chart of 1-minute buckets is not a
+           run of gaps. */
+        for (const run of splitAtGaps(plottable, rowTimes, gapThresholdMs(plottable.map((i) => rowTimes[i])))) {
+          const linePts = run.map((i) => xs[i] + "," + plotY(readVal(rows[i].r, s.key)));
+          /* A lone plottable point has no segment to stroke, so draw it as a dot — one bucket still shows its
+             reading. (Its resting marker matches the hover dot; static class so it does not vanish on mouseout.) */
+          if (linePts.length === 1) {
+            const [cx, cy] = linePts[0].split(",");
+            root.appendChild(svg("circle", { class: "series-dot", cx, cy, r: 4, fill: normalizeColor(s.color) }));
+            continue;
+          }
+          if (filled) {
+            const first = linePts[0].split(",")[0];
+            const last = linePts[linePts.length - 1].split(",")[0];
+            root.appendChild(
+              svg("polygon", {
+                class: "series-area",
+                "clip-path": clipAttr,
+                points: `${first},${baseY} ${linePts.join(" ")} ${last},${baseY}`,
+                fill: normalizeColor(s.color),
+                "fill-opacity": "0.15",
+              })
+            );
+          }
+          root.appendChild(svg("polyline", { class: "series-line", "clip-path": clipAttr, points: linePts.join(" "), stroke: normalizeColor(s.color) }));
         }
-        if (linePts.length < 2) continue;
-        if (filled) {
-          const first = linePts[0].split(",")[0];
-          const last = linePts[linePts.length - 1].split(",")[0];
-          root.appendChild(
-            svg("polygon", {
-              class: "series-area",
-              "clip-path": clipAttr,
-              points: `${first},${baseY} ${linePts.join(" ")} ${last},${baseY}`,
-              fill: normalizeColor(s.color),
-              "fill-opacity": "0.15",
-            })
-          );
-        }
-        root.appendChild(svg("polyline", { class: "series-line", "clip-path": clipAttr, points: linePts.join(" "), stroke: normalizeColor(s.color) }));
       }
     }
 
     /* The dual-axis overlay line (#1606): plotted against ITS axis (scaleY2), clamped into the plot box,
        nulls dropped as gaps — same discipline as a primary line. Always a plain line (never filled/stacked). */
     if (series2 && scaleY2) {
-      const pts2 = [];
+      const plottable2 = [];
       for (let i = 0; i < rows.length; i++) {
         const v = rows[i].r[series2.key];
         if (v == null || isNaN(v)) continue;
-        const y2 = Math.max(M.t, Math.min(M.t + PLOT_H, scaleY2(Number(v))));
-        pts2.push(xs[i] + "," + y2);
+        plottable2.push(i);
       }
-      if (pts2.length === 1) {
-        /* Same single-bucket rule as the primary series: a lone overlay reading draws as a dot, not a dropped
-           series, so "a dot per series" holds for the right axis too. */
-        const [cx, cy] = pts2[0].split(",");
-        root.appendChild(svg("circle", { class: "series-dot", cx, cy, r: 4, fill: normalizeColor(series2.color) }));
-      } else if (pts2.length >= 2) {
-        root.appendChild(svg("polyline", { class: "series-line series-line-overlay", "clip-path": clipAttr, points: pts2.join(" "), stroke: normalizeColor(series2.color) }));
+      /* Broken at collection gaps like a primary line (#5644 W7), by its own spacing (a 15-minute overlay over
+         1-minute buckets draws one line, not a dot per sample). */
+      for (const run of splitAtGaps(plottable2, rowTimes, gapThresholdMs(plottable2.map((i) => rowTimes[i])))) {
+        const pts2 = run.map((i) => xs[i] + "," + Math.max(M.t, Math.min(M.t + PLOT_H, scaleY2(Number(rows[i].r[series2.key])))));
+        if (pts2.length === 1) {
+          /* Same single-bucket rule as the primary series: a lone overlay reading draws as a dot, not a dropped
+             series, so "a dot per series" holds for the right axis too. */
+          const [cx, cy] = pts2[0].split(",");
+          root.appendChild(svg("circle", { class: "series-dot", cx, cy, r: 4, fill: normalizeColor(series2.color) }));
+        } else {
+          root.appendChild(svg("polyline", { class: "series-line series-line-overlay", "clip-path": clipAttr, points: pts2.join(" "), stroke: normalizeColor(series2.color) }));
+        }
       }
     }
 
@@ -1312,7 +1377,7 @@ export async function openServerTabAt(server, tMs, item, { beforeRoute = null, s
     if (typeof beforeRoute === "function") beforeRoute();
     /* Bring the item's own grid into view once the router has built the tab. The router's hashchange listener was
        added first (app.js), and for a server already on screen renderServer paints the tab synchronously, so the new
-       panels are in place when this one runs. A chart and a grid share the title "Deadlocks"; the grid is the later one.
+       panels are in place when this one runs. The Blocking tab's chart is "Deadlock trend" (#5644 W16), so the grid is the one "Deadlocks" panel there.
        The listener is once-only, and added after the range is taken, so a refused range leaves none behind. */
     if (typeof window.addEventListener === "function") {
       window.addEventListener(

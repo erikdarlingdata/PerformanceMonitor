@@ -64,9 +64,9 @@ public sealed class MuteRulesPageTests
     {
         var alerts = Wwwroot("js", "pages", "alerts.js");
         Assert.Contains("canMute = !!(await getSession()).can_edit;", alerts);
-        /* #5654: the external-source column joins the base list when the page shows it; the mute and select columns still
-           come only to an editing seat. */
-        Assert.Contains("return canMute ? [SELECT_COLUMN].concat(base, [MUTE_COLUMN]) : base;", alerts);
+        /* #5654: the external-source column joins the base list when the page shows it; #5644 W14 puts Triage (and, for
+           an editing seat, Select and Mute) ahead of it. */
+        Assert.Contains("return canMute ? [SELECT_COLUMN, TRIAGE_COLUMN, MUTE_COLUMN].concat(base) : [TRIAGE_COLUMN].concat(base);", alerts);
         Assert.Contains("link(\"Mute this alert\", mutePrefillParams(a))", alerts);
         Assert.DoesNotContain("server_name: a.server_name", alerts);
         Assert.Contains("stored_server_name = r.StoredServerName", File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs")));

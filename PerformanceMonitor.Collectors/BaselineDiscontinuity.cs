@@ -333,8 +333,7 @@ public static class BaselineDiscontinuities
         {
             var reason = DeriveIdentityReason(replaced, current);
             return new Resolved(o.At, o.Collector, o.Label, reason,
-                "instance identity changed — start time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime)
-                + ", server name " + Describe(replaced.Name) + " → " + Describe(current.Name)
+                "instance identity changed — " + ServerEpoch.DescribeChange(replaced, current)
                 + "; every delta baseline for this server was forgotten and re-established on the next pass",
                 Specific: reason != IdentityReason);
         }

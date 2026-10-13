@@ -31,10 +31,16 @@ public sealed class DarlingDefaultTraceReaderServerClockTests
 {
     /* Column 0 is the server-local event time; 4 is database_name, which carries a label so a test can say
        which event came back. The other columns stay NULL. */
-    private static DataTable NewTable() => Table(15, 0);
+    private static DataTable NewTable()
+    {
+        var table = Table(15, 0);
+        table.Columns.Add("c15", typeof(long));   /* event_sequence */
+        return table;
+    }
 
-    private static void AddEvent(DataTable table, DateTime? local, string label) =>
-        AddRow(table, (0, local.HasValue ? (object)local.Value : DBNull.Value), (1, "Data File Auto Grow"), (4, label));
+    private static void AddEvent(DataTable table, DateTime? local, string label, long? eventSequence = null) =>
+        AddRow(table, (0, local.HasValue ? (object)local.Value : DBNull.Value), (1, "Data File Auto Grow"), (4, label),
+            (15, eventSequence.HasValue ? (object)eventSequence.Value : DBNull.Value));
 
     private static async Task<List<DarlingDefaultTraceReader.DefaultTraceEventRow>> ReadAsync(
         DataTable table, ServerClock clock, DateTime startUtc, DateTime endUtc)
@@ -62,6 +68,64 @@ public sealed class DarlingDefaultTraceReaderServerClockTests
         Assert.Equal(Naive(2026, 3, 9, 12), byLabel["after-spring"]);
         Assert.Equal(Naive(2026, 10, 31, 12), byLabel["before-fall"]);
         Assert.Equal(Naive(2026, 11, 2, 13), byLabel["after-fall"]);
+    }
+
+    [Fact]
+    public async Task TheSameEventStoredSeveralTimes_ComesBackOnce_AndADifferentEventSurvives()
+    {
+        /* #5644 W6: nine stored copies of one Server Memory Change row, and a Begin/Commit pair, are one event each. */
+        var table = NewTable();
+        for (var i = 0; i < 9; i++)
+        {
+            AddEvent(table, Naive(2026, 10, 12, 10, 49), "same");
+        }
+
+        AddEvent(table, Naive(2026, 10, 12, 10, 49), "other");
+
+        var rows = await ReadAsync(table, Eastern(), Naive(2026, 1, 1, 0), Naive(2026, 12, 31, 0));
+
+        Assert.Equal(new[] { "same", "other" }, rows.Select(r => r.DatabaseName).ToArray());
+    }
+
+    [Fact]
+    public async Task TwoRealEventsWithIdenticalColumns_AreTwoRows_AndStoredCopiesOfOneStayOne()
+    {
+        /* #5644 H4b: two identical DBCC or audit events from one spid in one 3.33 ms tick match on every column
+           and differ only in event_sequence, so both show. A stored COPY repeats the sequence too and collapses.
+           Rows stored before the column existed (NULL sequence) keep the column-only key. */
+        var table = NewTable();
+        AddEvent(table, Naive(2026, 10, 12, 10, 49), "real", eventSequence: 100);
+        AddEvent(table, Naive(2026, 10, 12, 10, 49), "real", eventSequence: 101);
+        AddEvent(table, Naive(2026, 10, 12, 10, 49), "real", eventSequence: 101);   /* a copy of the second */
+        AddEvent(table, Naive(2026, 10, 12, 10, 49), "old");
+        AddEvent(table, Naive(2026, 10, 12, 10, 49), "old");                        /* NULL sequence: a copy */
+
+        var rows = await ReadAsync(table, Eastern(), Naive(2026, 1, 1, 0), Naive(2026, 12, 31, 0));
+
+        Assert.Equal(new[] { "real", "real", "old" }, rows.Select(r => r.DatabaseName).ToArray());
+    }
+
+    [Fact]
+    public async Task TwoAutoGrowsForDifferentFilesInOneTick_AreTwoEvents_AsInTheViewerAndLite()
+    {
+        /* #5644 W6: the viewer, Lite and this reader key on the same full column set, filename (9) and event_class (2)
+           included. */
+        var table = new DataTable();
+        for (var i = 0; i < 15; i++)
+        {
+            table.Columns.Add("c" + i, i == 0 ? typeof(DateTime) : i == 2 ? typeof(int) : typeof(string));
+        }
+
+        table.Columns.Add("c15", typeof(long));   /* event_sequence */
+
+        foreach (var (file, cls) in new[] { ("a.mdf", 92), ("b.mdf", 92), ("b.mdf", 93), ("a.mdf", 92) })
+        {
+            AddRow(table, (0, Naive(2026, 3, 9, 8)), (1, "Data File Auto Grow"), (2, cls), (4, "grow"), (9, file));
+        }
+
+        var rows = await ReadAsync(table, Eastern(), Naive(2026, 1, 1, 0), Naive(2026, 12, 31, 0));
+
+        Assert.Equal(3, rows.Count);
     }
 
     [Fact]
