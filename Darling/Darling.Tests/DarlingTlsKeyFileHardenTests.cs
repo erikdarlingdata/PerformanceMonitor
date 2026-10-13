@@ -1017,7 +1017,6 @@ public class DarlingTlsKeyFileHardenTests
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 Assert.Skip("A file symbolic link needs an elevated process or developer mode: " + ex.Message);
-                return;
             }
 
             var refusal = DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks(leaf, install, DarlingFileSecurity.KeyFileKind.Pfx);
@@ -1032,8 +1031,9 @@ public class DarlingTlsKeyFileHardenTests
     }
 
     /// <summary>
-    /// While the key's ACL is applied, the key and every folder from the volume root down to its folder are held open: none
-    /// can be renamed (a share check refuses the delete access a rename needs). Once the call returns they are released.
+    /// Every folder from the volume root down to the key's folder is held open before the key is opened, and the key too
+    /// until the ACL is applied: none can be renamed (a share check refuses the delete access a rename needs). Once the
+    /// call returns they are released.
     /// </summary>
     [Fact]
     public void EveryFolderOnTheKeysPath_IsHeldAgainstARename_WhileTheAclIsApplied()
@@ -1051,6 +1051,7 @@ public class DarlingTlsKeyFileHardenTests
             var certs = MakeFolder(Path.Combine(install, "certs"));
             var pfx = MakeKey(certs, "web.pfx");
             var attempts = new System.Collections.Generic.List<string>();
+            var folderStage = new System.Collections.Generic.List<string>();
 
             void TryRename(string from, string label)
             {
@@ -1078,19 +1079,29 @@ public class DarlingTlsKeyFileHardenTests
 
             var refusal = DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks(
                 pfx, install, DarlingFileSecurity.KeyFileKind.Pfx,
-                () =>
+                stage =>
                 {
-                    TryRename(pfx, "the key");
-                    TryRename(certs, "the key's folder");
-                    TryRename(install, "the install folder");
-                    TryRename(outer, "the folder above the install folder");
-                    TryRename(scratch.FullName, "the scratch folder");
+                    /* The key is not open yet at the first stage, so a folder held then is held by the folder chain alone. */
+                    if (stage == DarlingFileSecurity.PinnedFolders)
+                    {
+                        TryRename(certs, "the key's folder");
+                        TryRename(install, "the install folder");
+                        TryRename(outer, "the folder above the install folder");
+                        TryRename(scratch.FullName, "the scratch folder");
+                        folderStage.AddRange(attempts);
+                        attempts.Clear();
+                    }
+                    else
+                    {
+                        TryRename(pfx, "the key");
+                    }
                 });
 
             Assert.Null(refusal);
             Assert.Equal(
-                new[] { "the key: held", "the key's folder: held", "the install folder: held", "the folder above the install folder: held", "the scratch folder: held" },
-                attempts);
+                new[] { "the key's folder: held", "the install folder: held", "the folder above the install folder: held", "the scratch folder: held" },
+                folderStage);
+            Assert.Equal(new[] { "the key: held" }, attempts);
 
             /* Nothing is held once the call returns. */
             Directory.Move(outer, outer + "-after");

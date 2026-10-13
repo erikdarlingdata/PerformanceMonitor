@@ -352,10 +352,18 @@ public static class DarlingFileSecurity
         ApplyWithoutFollowingLinks(path, anchorDirectory, HardenedKeyFileSecurity, kind);
 
     /// <summary><see cref="HardenKeyFileWithoutFollowingLinks(string, string, KeyFileKind)"/> that calls
-    /// <paramref name="whilePinned"/> once every folder on the path and the key are held open and checked, just before the
-    /// ACL is applied, so a test can try to rename a held folder at the moment it matters.</summary>
-    internal static string? HardenKeyFileWithoutFollowingLinks(string path, string anchorDirectory, KeyFileKind kind, Action whilePinned) =>
+    /// <paramref name="whilePinned"/> twice, so a test can try to rename a held folder at the moments that matter: with
+    /// <see cref="PinnedFolders"/> once every folder on the path is held and checked and the key is not yet open, and with
+    /// <see cref="PinnedKey"/> once the key is open and checked, just before the ACL is applied.</summary>
+    internal static string? HardenKeyFileWithoutFollowingLinks(string path, string anchorDirectory, KeyFileKind kind, Action<string> whilePinned) =>
         ApplyWithoutFollowingLinks(path, anchorDirectory, HardenedKeyFileSecurity, kind, whilePinned);
+
+    /// <summary>The stage the hooked <see cref="HardenKeyFileWithoutFollowingLinks(string, string, KeyFileKind)"/> reports
+    /// once the folders on the key's path are held.</summary>
+    internal const string PinnedFolders = "folders";
+
+    /// <summary>The stage it reports once the key itself is open and checked.</summary>
+    internal const string PinnedKey = "key";
 
     /// <summary>What a file darling.json names as a TLS secret has to be, checked on its first bytes before its ACL is
     /// changed (#5700): a DER PKCS#12 bundle, a PEM private key, or a short text file holding a password.</summary>
@@ -485,7 +493,7 @@ public static class DarlingFileSecurity
     }
 
     private static string? ApplyWithoutFollowingLinks(
-        string path, string anchorDirectory, Func<NativeObjectSecurity> buildSecurity, KeyFileKind? keyKind = null, Action? whilePinned = null)
+        string path, string anchorDirectory, Func<NativeObjectSecurity> buildSecurity, KeyFileKind? keyKind = null, Action<string>? whilePinned = null)
     {
         var anchor = Path.TrimEndingDirectorySeparator(Path.GetFullPath(anchorDirectory));
         var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
@@ -504,6 +512,7 @@ public static class DarlingFileSecurity
                 return folderRefusal;
             }
 
+            whilePinned?.Invoke(PinnedFolders);
             return ApplyToOpenedFile(full, anchor, buildSecurity, keyKind, whilePinned);
         }
         finally
@@ -557,7 +566,7 @@ public static class DarlingFileSecurity
     }
 
     private static string? ApplyToOpenedFile(
-        string full, string anchor, Func<NativeObjectSecurity> buildSecurity, KeyFileKind? keyKind, Action? whilePinned)
+        string full, string anchor, Func<NativeObjectSecurity> buildSecurity, KeyFileKind? keyKind, Action<string>? whilePinned)
     {
         string anchorFinal;
         using (var anchorHandle = OpenForSecurity(anchor, followLink: true, access: FileReadAttributes))
@@ -617,7 +626,7 @@ public static class DarlingFileSecurity
             return $"{full} {contentRefusal}";
         }
 
-        whilePinned?.Invoke();
+        whilePinned?.Invoke(PinnedKey);
         var security = buildSecurity();
         var descriptor = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
         var dacl = new byte[descriptor.DiscretionaryAcl!.BinaryLength];
