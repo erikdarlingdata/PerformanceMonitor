@@ -23,7 +23,8 @@ import pixelmatch from "pixelmatch";
 
 export const FIXED_ANCHOR_MS = Date.UTC(2026, 2, 15, 12, 0, 0);
 const AS_OF_AFTER_ANCHOR_MS = 60000;
-const MAX_DIFF_PIXEL_RATIO = 0.01;
+/* Zero differing pixels, like toHaveScreenshot. Measured (#5744): unedited pages render 0 pixels apart run to run, and a one-label Fleet change is only 238 pixels (0.023%), which a 1% limit let through. */
+const MAX_DIFF_PIXELS = 0;
 const PIXEL_THRESHOLD = 0.1;
 const MAX_SHOT_TRIES = 8;
 /* A timestamp farther than this from the seed anchor is not seed-relative (a build date, a plan's compile time): left alone. */
@@ -194,10 +195,10 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
       const diff = new PNG({ width: base.width, height: base.height });
       const differing = pixelmatch(base.data, actual.data, diff.data, base.width, base.height, { threshold: PIXEL_THRESHOLD });
       const ratio = differing / (base.width * base.height);
-      if (ratio > MAX_DIFF_PIXEL_RATIO) {
+      if (differing > MAX_DIFF_PIXELS) {
         writeFileSync(join(failDir, `${spec.name}.diff.png`), PNG.sync.write(diff));
-        problems.push(`screenshot ${spec.name}: ${differing} pixels differ (${(ratio * 100).toFixed(2)}%, limit ${MAX_DIFF_PIXEL_RATIO * 100}%); baseline, actual and diff are in shot-failures`);
-        console.log(`FAIL shot ${spec.name}: ${(ratio * 100).toFixed(2)}% differ`);
+        problems.push(`screenshot ${spec.name}: ${differing} pixels differ (${(ratio * 100).toFixed(3)}%, none allowed); baseline, actual and diff are in shot-failures`);
+        console.log(`FAIL shot ${spec.name}: ${differing} pixels (${(ratio * 100).toFixed(3)}%) differ`);
       } else {
         /* A pass keeps no triple: the failure folder holds only what failed. */
         for (const suffix of ["actual", "baseline"]) rmQuiet(join(failDir, `${spec.name}.${suffix}.png`));

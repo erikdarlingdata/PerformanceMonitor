@@ -57,9 +57,9 @@ you call `node smoke.mjs` yourself.
 ## Screenshot baselines
 
 Four pages have a baseline PNG in `baselines/`: `fleet`, `ui-sql-overview`, `ui-sql-queries` and `admin-servers`. After the
-smoke walk, `shots.mjs` renders each one at 1280 by 800 and compares it with its baseline. The check fails when more than 1%
-of the pixels differ. A page is marked by a `screenshot` key in `pages.json`. The key lists CSS selectors to paint over, for
-text that changes from run to run.
+smoke walk, `shots.mjs` renders each one at 1280 by 800 and compares it with its baseline. The check fails when any pixel
+differs by more than a small color threshold. The renders are the same from run to run, so there is no allowance. A page is marked by a `screenshot` key in `pages.json`.
+The key lists CSS selectors to paint over, for text that changes from run to run.
 
 How the page is kept the same on every run:
 
