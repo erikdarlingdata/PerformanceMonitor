@@ -1207,7 +1207,7 @@ BEGIN
       CREATE ROLE darling_alert_sources NOLOGIN NOINHERIT;
       COMMENT ON ROLE darling_alert_sources IS 'darling-alert-source-group';
    ELSIF pg_catalog.shobj_description((SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'darling_alert_sources'), 'pg_authid') IS DISTINCT FROM 'darling-alert-source-group' THEN
-      RAISE EXCEPTION 'Role "darling_alert_sources" already exists and was not created by Darling (missing the ''darling-alert-source-group'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated role.';
+      RAISE EXCEPTION 'The group role "darling_alert_sources" already exists and was not created by Darling (missing the ''darling-alert-source-group'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated role.';
    END IF;
 
    SELECT oid INTO group_oid FROM pg_catalog.pg_roles WHERE rolname = 'darling_alert_sources';

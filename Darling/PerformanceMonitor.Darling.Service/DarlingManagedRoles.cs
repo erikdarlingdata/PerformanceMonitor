@@ -1893,7 +1893,7 @@ BEGIN
       CREATE ROLE {AlertSourceGroupRoleName} NOLOGIN NOINHERIT;
       COMMENT ON ROLE {AlertSourceGroupRoleName} IS '{AlertSourceGroupRoleMarker}';
    ELSIF shobj_description((SELECT oid FROM pg_catalog.pg_roles WHERE rolname = '{AlertSourceGroupRoleName}'), 'pg_authid') IS DISTINCT FROM '{AlertSourceGroupRoleMarker}' THEN
-      RAISE EXCEPTION 'Role ""{AlertSourceGroupRoleName}"" already exists and was not created by Darling (missing the ''{AlertSourceGroupRoleMarker}'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated role.';
+      RAISE EXCEPTION 'The group role ""{AlertSourceGroupRoleName}"" already exists and was not created by Darling (missing the ''{AlertSourceGroupRoleMarker}'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated role.';
    END IF;
 
    SELECT oid INTO group_oid FROM pg_catalog.pg_roles WHERE rolname = '{AlertSourceGroupRoleName}';
@@ -1911,10 +1911,10 @@ BEGIN
          || ' CASCADE';
    END LOOP;
 
-   EXECUTE format('REVOKE ALL ON DATABASE %I FROM {AlertSourceGroupRoleName}', current_database());
+   EXECUTE format('REVOKE CONNECT, CREATE, TEMPORARY ON DATABASE %I FROM {AlertSourceGroupRoleName}', current_database());
    REVOKE ALL ON SCHEMA {config}, {PgSchemaGenerator.CollectSchema} FROM {AlertSourceGroupRoleName};
-   REVOKE ALL ON ALL TABLES IN SCHEMA {config}, {PgSchemaGenerator.CollectSchema} FROM {AlertSourceGroupRoleName};
-   REVOKE ALL ON ALL SEQUENCES IN SCHEMA {config}, {PgSchemaGenerator.CollectSchema} FROM {AlertSourceGroupRoleName};
+   EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I, %I FROM %I', '{config}', '{PgSchemaGenerator.CollectSchema}', '{AlertSourceGroupRoleName}');
+   EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I, %I FROM %I', '{config}', '{PgSchemaGenerator.CollectSchema}', '{AlertSourceGroupRoleName}');
    REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {AlertSourceGroupRoleName};
 
    FOR membership IN
