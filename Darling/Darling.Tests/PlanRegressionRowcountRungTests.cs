@@ -148,8 +148,6 @@ public sealed class PlanRegressionRowcountRungTests
 
         var behind = (object[])withoutLater.Clone();
         behind[ProbeOrdinal] = false;
-        behind[ProbeOrdinal + 1] = false;
-        behind[ProbeOrdinal + 3] = false;
         Assert.Equal(RungVersion - 1, (int)method.Invoke(null, behind)!);
 
         /* In the source the arm sits ABOVE V174's and returns this rung's version. */

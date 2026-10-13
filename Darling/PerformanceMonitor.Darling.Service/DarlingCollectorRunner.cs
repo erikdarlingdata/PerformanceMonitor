@@ -4499,7 +4499,9 @@ public sealed class DarlingCollectorRunner
 
         /* #5684: a query_store_stats batch also writes its per-database watermark rows (QueryStoreWatermarks, V178), in the COPY's
            own transaction below behind its own savepoint. Chosen by the table this COPY writes, the way ledgerBatch is, so a definition
-           aimed at query_store_stats that is not the catalog's QueryStoreCollector (an import or the backfill) writes its rows too.
+           aimed at query_store_stats that is not the catalog's QueryStoreCollector (an import or the backfill) opens the transaction too.
+           Only QueryStoreCollector.Row rows are summarised (OfType below), so a definition that writes another row type to
+           query_store_stats writes no side row, and the reader then reads raw (safe).
            Unlike the ledger, a fault never fails the batch: a missing side row only LOWERS what a reader sees. */
         var watermarkBatch = string.Equals(definition.TargetTable, QueryStoreCollector.Instance.TargetTable, StringComparison.OrdinalIgnoreCase);
 
@@ -4751,7 +4753,7 @@ public sealed class DarlingCollectorRunner
                    the missing side row can only lower a reader's answer (a pair with no side row above the floor reads raw). The rows
                    are summarised in memory per database: the COPY above is a straight binary import, so every row of the batch is in
                    raw once this transaction commits, and no read-back of the shared collection_time is needed (#5707). A batch of 0
-                   rows writes nothing. */
+                   rows writes nothing. Only QueryStoreCollector.Row rows are summarised; any other row type writes no side row (safe, as above). */
                 if (watermarkBatch && rowsWritten > 0)
                 {
                     await QueryStoreWatermarks.TryUpsertBatchAsync(
