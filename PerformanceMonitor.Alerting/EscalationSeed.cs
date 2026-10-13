@@ -49,7 +49,12 @@ public static class EscalationSeed
             throw new ArgumentNullException(nameof(store));
         }
 
+        /* A fire row with no persisted tier means what the history grids make of it (AlertHistoryRowSeverity's name arm):
+           Volume Free Space writes a tier only for a Critical fire, so its tierless row is a Warning. */
         return (query, _) => store.GetLastFiredTierAsync(
-            query.ServerKey, query.MetricName, query.ResolutionTitle, query.SinceUtc, query.CountMuted);
+            query.ServerKey, query.MetricName, query.ResolutionTitle, query.SinceUtc, query.CountMuted,
+            PerformanceMonitor.Common.AlertMetricClassifier.IsCritical(query.MetricName)
+                ? AlertSeverityLevel.Critical
+                : AlertSeverityLevel.Warning);
     }
 }

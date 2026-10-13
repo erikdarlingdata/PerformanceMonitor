@@ -457,6 +457,8 @@ public sealed class AlertEngineTests
            pin above builds an engine that counts nothing and no test can leak into another's totals or
            into the process-wide AlertReadFailureCounter.Shared. */
         public AlertReadFailureCounter? ReadFailures { get; set; }
+        /// <summary>#5715 part B: the alert-history reader that seeds the escalation tier; null (the default) leaves the engine memory-only.</summary>
+        public Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? EscalationSeedReader { get; set; }
 
         /* #3497: the Agent-job resolver seam, null by default so every pre-existing pin builds the
            pre-#3497 engine. Tests set AgentJobNames (the answer map), flip AgentJobResolverThrows for
@@ -486,7 +488,8 @@ public sealed class AlertEngineTests
             resolutionCallback: (r, _) => { Resolutions.Add(r); return Task.CompletedTask; },
             logger: null,
             utcNow: () => Now,
-            readFailures: ReadFailures);
+            readFailures: ReadFailures,
+            escalationSeedReader: EscalationSeedReader);
 
         /* #3282: every snapshot gets a DISTINCT, increasing CPU sample instant unless the test says
            otherwise, because that is the realistic case — the sweep sees a new ring-buffer sample each

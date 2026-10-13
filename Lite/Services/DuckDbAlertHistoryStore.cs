@@ -346,7 +346,8 @@ AND   metric_name = $2"
     /// logs it and retries on the next sweep, and "could not read" must not look like "no history".
     /// </summary>
     public async Task<AlertSeverityLevel?> GetLastFiredTierAsync(
-        string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true)
+        string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true,
+        AlertSeverityLevel? tierWhenRowCarriesNone = null)
     {
         /* Same identity scope as GetLastEmailSentUtcAsync (#3456). */
         var sid = AlertHistoryServerIdentity.SeedScope(serverId);
@@ -405,7 +406,7 @@ AND   metric_name = $2";
             ? null
             : DateTime.SpecifyKind(Convert.ToDateTime(resolved), DateTimeKind.Utc);
 
-        return AlertHistoryEscalationSeed.Resolve(fireAt, contextJson, resolvedAt);
+        return AlertHistoryEscalationSeed.Resolve(fireAt, contextJson, resolvedAt, tierWhenRowCarriesNone);
     }
 
     /// <summary>

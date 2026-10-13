@@ -109,8 +109,10 @@ public interface IAlertHistoryStore
     /// #5715 part B: the tier of the newest FIRE row for (<paramref name="serverId"/>, <paramref name="metricName"/>)
     /// at or after <paramref name="sinceUtc"/>, or null. Seeds <c>TierEscalation</c> across a restart, so a Warning
     /// delivered just before the restart still lets the Critical that follows inside the cooldown through at once.
-    /// <para>Null when no such row exists, when the newest one carries no tier in its context JSON (read as
-    /// <c>AlertHistoryRowSeverity.FiredAt</c> reads it), or when a resolution row (<paramref name="resolutionMetricName"/>,
+    /// <para>The tier is read from the row's context JSON as <c>AlertHistoryRowSeverity.FiredAt</c> reads it; a row with
+    /// none (Volume Free Space persists a tier only for a Critical fire) is <paramref name="tierWhenRowCarriesNone"/>,
+    /// which the host sets to the answer the history grids give such a row, or null to seed nothing for it.</para>
+    /// <para>Null when no such row exists, when the newest one carries no tier and no fallback is given, or when a resolution row (<paramref name="resolutionMetricName"/>,
     /// the resolution's title: "CPU Resolved", "Volume Free Space Resolved") is as new as the fire or newer. At an exact
     /// tie the resolution wins (<see cref="AlertHistoryEscalationSeed.Resolve"/>).</para>
     /// <para>Counted: a muted fire (the engine records its tier in process; pass <paramref name="countMuted"/> false for
@@ -125,7 +127,8 @@ public interface IAlertHistoryStore
     /// real stores override it, and a test pins that.</para>
     /// </summary>
     Task<AlertSeverityLevel?> GetLastFiredTierAsync(
-        string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true) =>
+        string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true,
+        AlertSeverityLevel? tierWhenRowCarriesNone = null) =>
         Task.FromResult<AlertSeverityLevel?>(null);
 }
 

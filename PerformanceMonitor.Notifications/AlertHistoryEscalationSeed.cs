@@ -33,8 +33,12 @@ public static class AlertHistoryEscalationSeed
     /// resolution wins: the incident closed no later than the fire, and a seed that revived it would bypass a cooldown
     /// for an incident that is over. Both values come back from the same column type, so equal stored instants compare
     /// equal, microsecond for microsecond.
+    /// <para>A fire row can carry no tier: Volume Free Space persists one only when the fire is Critical, so its Warning
+    /// rows have none. <paramref name="tierWhenRowCarriesNone"/> is what such a row means, the host passing the same
+    /// answer the row grids give it (the metric name's own tier); null seeds nothing for it.</para>
     /// </summary>
-    public static AlertSeverityLevel? Resolve(DateTime? fireAtUtc, string? contextJson, DateTime? resolvedAtUtc)
+    public static AlertSeverityLevel? Resolve(
+        DateTime? fireAtUtc, string? contextJson, DateTime? resolvedAtUtc, AlertSeverityLevel? tierWhenRowCarriesNone = null)
     {
         if (fireAtUtc is not { } fired)
         {
@@ -46,6 +50,6 @@ public static class AlertHistoryEscalationSeed
             return null;
         }
 
-        return AlertContextSerializer.TryReadSeverity(contextJson);
+        return AlertContextSerializer.TryReadSeverity(contextJson) ?? tierWhenRowCarriesNone;
     }
 }

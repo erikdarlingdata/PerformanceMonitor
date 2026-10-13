@@ -171,7 +171,8 @@ AND   notification_type IN ('webhook', 'email+webhook')", "WebhookAlert");
     /// microsecond-precision naive UTC; the window bound is sent the same way.
     /// </summary>
     public async Task<AlertSeverityLevel?> GetLastFiredTierAsync(
-        string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true)
+        string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true,
+        AlertSeverityLevel? tierWhenRowCarriesNone = null)
     {
         /* Same identity scope as GetLastEmailSentUtcAsync (#3456). */
         var sid = AlertHistoryServerIdentity.SeedScope(serverId);
@@ -222,7 +223,7 @@ AND   metric_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapter.
             ? null
             : DateTime.SpecifyKind(Convert.ToDateTime(resolved, CultureInfo.InvariantCulture), DateTimeKind.Utc);
 
-        return AlertHistoryEscalationSeed.Resolve(fireAt, contextJson, resolvedAt);
+        return AlertHistoryEscalationSeed.Resolve(fireAt, contextJson, resolvedAt, tierWhenRowCarriesNone);
     }
 
     /// <summary>The #3712 seed exclusion, as SQL text. A literal rather than a parameter for the reason the
