@@ -206,7 +206,7 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
     /// compact, must keep its headroom as collectors are added. The 75% line (24,576 B) is the ruling's target:
     /// at 43 collectors the partial_detail rows used to answer 33,084 B, over the budget, because each row spelled out
     /// ~20 keys including the null, false and 0 ones. A partial row now omits those, so a collector costs far fewer
-    /// bytes. Lite's twin of Darling's McpReadToolBudgetLiveTests check.
+    /// bytes. Lite's twin of Darling's CollectionHealthPayloadBudgetLiveTests.WorstCase_EveryCollectorNeedsALook_AnswersUnder75PercentOfTheBudget.
     /// </summary>
     [Fact]
     public async Task CollectionHealthWorstCaseAnswersUnder75PercentOfTheBudget()
@@ -215,10 +215,11 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
 
         var json = await McpHealthTools.GetCollectionHealth(_dataService, _serverManager);
         var bytes = Encoding.UTF8.GetByteCount(json);
-        TestContext.Current.TestOutputHelper?.WriteLine(CollectionHealthBreakdown(json));
+        var breakdown = CollectionHealthBreakdown(json);
+        TestContext.Current.TestOutputHelper?.WriteLine(breakdown);
 
         Assert.True(bytes <= McpResponseBudget.DefaultBytes * 3 / 4,
-            $"get_collection_health's worst case answered {bytes:N0} B, over 75% of the {McpResponseBudget.DefaultBytes:N0} B budget (#5748). " + CollectionHealthBreakdown(json));
+            $"get_collection_health's worst case answered {bytes:N0} B, over 75% of the {McpResponseBudget.DefaultBytes:N0} B budget (#5748). " + breakdown);
     }
 
     /// <summary>The byte breakdown #5748 asked for: partial rows, split into key names, null/false/0 values and the
