@@ -108,4 +108,31 @@ out.localize = {
   expected: "not collected since " + new Date("2026-10-09T14:37:35Z").toLocaleString(),
 };
 
+/* H2 (#5644 W20 leftovers): the shapes the alert text, the sweep notes and the collection-health regression text use. Each is localized in an
+   opted-in cell and printed as written in a cell that is not opted in; a SQL text cell holding a Z-marked literal stays as written. */
+const shapes = [
+  { raw: "until 2026-10-11 12:48:52Z", stamp: "2026-10-11T12:48:52Z", lead: "until " },
+  { raw: "service started 2026-10-12T23:01:13.7792072Z", stamp: "2026-10-12T23:01:13.779Z", lead: "service started " },
+  { raw: "Failed At: 2026-10-12 07:00:00Z", stamp: "2026-10-12T07:00:00Z", lead: "Failed At: " },
+  { raw: "Incident Since: 2026-10-12 23:13:00 UTC", stamp: "2026-10-12T23:13:00Z", lead: "Incident Since: " },
+  { raw: "at 2026-10-12 23:13:00.1234567Z", stamp: "2026-10-12T23:13:00.123Z", lead: "at " },
+];
+const sqlZ = "SELECT * FROM t WHERE d = '2026-01-01 00:00:00Z'";
+const serverClock = "start time 2026-09-27 21:32:43 (server clock)";
+const l2 = VIZ.table({ rows: [...shapes.map((x) => ({ query_text: sqlZ, message: x.raw, other: x.raw })), { query_text: sqlZ, message: serverClock, other: serverClock }] }, {
+  rowsKey: "rows", title: "Localize shapes", tools: false,
+  columns: [
+    { key: "query_text", label: "Query", wrap: true },
+    { key: "other", label: "Other", wrap: true },
+    { key: "message", label: "Message", wrap: true, localizeText: true },
+    { key: "message", label: "Clamped message", clamp: true, localizeText: true },
+  ],
+});
+const l2rows = l2.findAll((n) => n.tag === "tr").filter((n) => n.parent && n.parent.tag === "tbody");
+out.shapes = l2rows.map((tr, i) => {
+  const t = tr.children.map((c) => c.textContent);
+  return { sql: t[0], notOpted: t[1], opted: t[2], clamped: t[3], expected: i < shapes.length ? shapes[i].lead + new Date(shapes[i].stamp).toLocaleString() : null, raw: i < shapes.length ? shapes[i].raw : serverClock };
+});
+out.sqlZ = sqlZ;
+
 console.log(JSON.stringify(out));

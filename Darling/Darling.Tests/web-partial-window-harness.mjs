@@ -31,7 +31,7 @@ globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (
 globalThis.location = { hash: "#/server/a/events" };
 
 const root = process.argv[2];
-const { windowFloorStrip, cappedReadNote, partialWindowSubtitle, markPartialSubtitle, localizeIsoText, emptyStrip, noticeStrip, el, localTime } = await import(pathToFileURL(root + "/util.js").href);
+const { windowFloorStrip, cappedReadNote, partialWindowSubtitle, markPartialSubtitle, localizeIsoText, localizeAlertDetail, emptyStrip, noticeStrip, el, localTime } = await import(pathToFileURL(root + "/util.js").href);
 
 const text = (n) => (n ? n.textContent : null);
 const OLDEST = "2026-10-12T13:29:59.5027090Z";
@@ -100,5 +100,36 @@ out.bothNotice = noticeStrip("TRUNCATED: " + both).textContent;
 /* G1a: the restart banner names the server clock for a SQL Server start-time pair (the pair is not UTC, so no "Z" and no shift) */
 out.bannerText = "baseline discontinuity at 10/12/2026, 8:15:00 AM (restart) — instance identity changed — start time 2026-10-09 14:00:00 → 2026-10-12 08:15:00 (server clock); every delta baseline for this server was forgotten";
 out.bannerNotice = noticeStrip(out.bannerText).textContent;
+
+/* H2: the alert text and the sweep notes (#5644 W20 leftovers) */
+const here = (s) => new Date(s).toLocaleString();
+const alertBody = [
+  "Blocking chain (x2)",
+  "  Incident Since: 2026-10-12 23:13:00Z",
+  "  Blocked Query: SELECT 1 WHERE d = '2026-01-01 00:00:00Z'",
+  "  Failed At: 2026-10-12 07:00:00Z",
+  "  Started: 2026-09-27 21:32:43 (server clock, UTC offset not collected)",
+  "  Window: 2026-10-12 07:00:00Z → 2026-10-12 08:00:00Z",
+  "",
+  "Newest blocked process sample: 23:12:45 UTC, 5m 20s old",
+].join("\n");
+const sample = { source: "blocked process", instant_utc: "2026-10-12T23:12:45.0000000Z", age_seconds: 320 };
+out.h2 = {
+  spaceZ: localizeIsoText("until 2026-10-11 12:48:52Z"),
+  spaceUtc: localizeIsoText("at 2026-10-12 23:13:00 UTC."),
+  frac7: localizeIsoText("service started 2026-10-12T23:01:13.7792072Z"),
+  spaceFrac7: localizeIsoText("at 2026-10-12 23:13:00.1234567Z"),
+  serverClock: localizeIsoText("start time 2026-09-27 21:32:43 (server clock)"),
+  expSpaceZ: "until " + here("2026-10-11T12:48:52Z"),
+  expSpaceUtc: "at " + here("2026-10-12T23:13:00Z") + ".",
+  expFrac7: "service started " + here("2026-10-12T23:01:13.779Z"),
+  expSpaceFrac7: "at " + here("2026-10-12T23:13:00.123Z"),
+  body: localizeAlertDetail(alertBody, sample),
+  bodyNoSample: localizeAlertDetail(alertBody, null),
+  bodyOtherClock: localizeAlertDetail(alertBody, { ...sample, instant_utc: "2026-10-12T23:12:46Z" }),
+  stripUtc: noticeStrip("until 2026-10-11 12:48:52Z").textContent,
+  here: { inc: here("2026-10-12T23:13:00Z"), fail: here("2026-10-12T07:00:00Z"), end: here("2026-10-12T08:00:00Z"), samp: here("2026-10-12T23:12:45Z") },
+  bodyRaw: alertBody,
+};
 
 console.log(JSON.stringify(out));

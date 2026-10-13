@@ -24,7 +24,7 @@
  */
 
 import { el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, relTime, rollupTextId,
-         fmtInt, fmtMb, fmtPct, fmtBool, fmtText, bandClass, disclosure } from "../util.js";
+         fmtInt, fmtMb, fmtPct, fmtBool, fmtText, bandClass, disclosure, localizeIsoText } from "../util.js";
 import { gridTable } from "../panels.js";
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { relativeSpec } from "../time-range.js";
@@ -230,7 +230,7 @@ function sweepDocument(d) {
         { key: "server", label: "Server" },
         bandColumn("from", "From"),
         bandColumn("to", "To"),
-        { key: "reason", label: "Reason", wrap: true, display: (t) => t.reason || "—" },
+        { key: "reason", label: "Reason", wrap: true, localizeText: true, display: (t) => t.reason || "—" },
       ], transitions));
     }
     for (const [label, list] of [["New servers", changes.new_servers], ["Departed servers", changes.departed_servers]]) {
@@ -262,7 +262,7 @@ function sweepDocument(d) {
         { key: "server", label: "Server" },
         bandColumn("previous_band", "Previous", (v) => v.previous_band || "—"),
         bandColumn("band", "Band", (v) => v.band, (v) => v.band_changed),
-        { key: "reason", label: "Reason", wrap: true, display: (v) => v.reason || "—" },
+        { key: "reason", label: "Reason", wrap: true, localizeText: true, display: (v) => v.reason || "—" },
       ], verdicts)
     : emptyStrip("This sweep carries no per-server verdicts."));
 
@@ -297,7 +297,7 @@ function livenessBlock(d, lv) {
           + faults.map((f) => f.server + " (" + f.error + ")").join("; ") })
       : null,
     notes.length
-      ? el("ul", { class: "liveness-notes" }, notes.map((n) => el("li", { text: String(n) })))
+      ? el("ul", { class: "liveness-notes" }, notes.map((n) => el("li", { text: localizeIsoText(String(n)) })))
       : null,
   ]);
 }

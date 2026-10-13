@@ -125,6 +125,47 @@ public sealed class WebPartialWindowBehaviourTests
     }
 
     [Fact]
+    public void ASpaceSeparatedOrUtcMarkedInstant_PrintsLocal_AndAServerClockOneIsLeftAlone()
+    {
+        // #5644 W20 (H2): the alert text spells an instant "2026-10-11 12:48:52Z" and "... 23:13:00 UTC"; the old pattern needed a "T".
+        var h = Run().GetProperty("h2");
+        string G(string n) => h.GetProperty(n).GetString()!;
+        Assert.Equal(G("expSpaceZ"), G("spaceZ"));
+        Assert.Equal(G("expSpaceUtc"), G("spaceUtc"));
+        Assert.Equal(G("expFrac7"), G("frac7"));
+        Assert.Equal(G("expSpaceFrac7"), G("spaceFrac7"));
+        Assert.Equal(G("expSpaceZ"), G("stripUtc"));
+        Assert.Equal("start time 2026-09-27 21:32:43 (server clock)", G("serverClock"));
+    }
+
+    [Fact]
+    public void AnAlertBodyOnTheWeb_ShowsItsTimeLinesLocal_AndLeavesStatementsAndServerClockLinesAlone()
+    {
+        // #5644 W20 (H2): Triage and Alert History printed "Incident Since: 2026-10-12 23:13:00Z", "Failed At: ...Z" and a time-of-day-only "23:12:45 UTC".
+        var h = Run().GetProperty("h2");
+        string G(string n) => h.GetProperty(n).GetString()!;
+        var here = h.GetProperty("here");
+        string H(string n) => here.GetProperty(n).GetString()!;
+        var expected = string.Join("\n", new[]
+        {
+            "Blocking chain (x2)",
+            "  Incident Since: " + H("inc"),
+            "  Blocked Query: SELECT 1 WHERE d = '2026-01-01 00:00:00Z'",
+            "  Failed At: " + H("fail"),
+            "  Started: 2026-09-27 21:32:43 (server clock, UTC offset not collected)",
+            "  Window: " + H("fail") + " → " + H("end"),
+            "",
+            "Newest blocked process sample: " + H("samp") + ", 5m 20s old",
+        });
+        Assert.Equal(expected, G("body"));
+        // No newest_sample on the row, or one whose time of day is not the line's: the time-of-day-only line is left as stored.
+        Assert.Contains("Newest blocked process sample: 23:12:45 UTC, 5m 20s old", G("bodyNoSample"));
+        Assert.Contains("Newest blocked process sample: 23:12:45 UTC, 5m 20s old", G("bodyOtherClock"));
+        Assert.Contains("  Incident Since: " + H("inc"), G("bodyNoSample"));
+        Assert.Contains("Incident Since: 2026-10-12 23:13:00Z", G("bodyRaw"));
+    }
+
+    [Fact]
     public void ACappedPanelsHeading_DropsItsWindowLabel_AndAnyOtherKeepsIt()
     {
         var r = Run();

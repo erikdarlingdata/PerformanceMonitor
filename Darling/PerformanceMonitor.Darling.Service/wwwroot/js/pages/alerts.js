@@ -24,7 +24,7 @@
  */
 
 import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
-         ALERT_STATE_LABELS, alertDeliveryState, parseUtc } from "../util.js";
+         ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { copyText } from "../grid-tools.js";
 import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
@@ -221,7 +221,7 @@ function detailCell(a) {
   const hasDetail = a.detail_text != null && String(a.detail_text).trim().length > 0;
   if (!hasDetail && !a.send_error) return el("span", { class: "muted", text: "—" });
 
-  const summary = hasDetail ? a.detail_text : "Delivery error: " + a.send_error;
+  const summary = hasDetail ? localizeAlertDetail(a.detail_text, a.newest_sample) : "Delivery error: " + a.send_error;
   const placeholder = el("div", {});
   const node = disclosure(summary, placeholder, { max: 120 });
 
@@ -295,7 +295,10 @@ function detailBody(a, details) {
    * the fix script. They replace the parsed detail_text, which is the same headings and fields without the prose.
    * A row without them (not an Analysis alert, no advice, a failed fetch) keeps the detail_text rendering below. */
   const items = Array.isArray(details) && details.length > 0 ? details : null;
-  const fields = !items && hasDetail ? parseDetailFields(a.detail_text) : null;
+  /* #5644 W20: the stored text names UTC instants ("Incident Since: ...Z", the sample-age line's time of day); the page shows them
+   * in the grids' local format. The stored text, the copy and the CSV keep the stored form. */
+  const shownDetail = hasDetail ? localizeAlertDetail(a.detail_text, a.newest_sample) : null;
+  const fields = !items && hasDetail ? parseDetailFields(shownDetail) : null;
   const body = [];
   if (items) {
     for (const item of items) body.push(...detailItem(item));
@@ -304,11 +307,11 @@ function detailBody(a, details) {
      * engine persisted when the alert fired, never re-measured against this page's clock) - once, and only when the
      * carrier is set. The detail_text branches below already carry the line in the text and must not add it again. */
     const ageLine = sampleAgeLine(a.newest_sample);
-    if (ageLine !== null) body.push(el("div", { class: "detail-sample-age", text: ageLine }));
+    if (ageLine !== null) body.push(el("div", { class: "detail-sample-age", text: localizeAlertDetail(ageLine, a.newest_sample) }));
   } else if (fields) {
     body.push(el("div", { class: "detail-fields" }, fields.map(fieldRow)));
   } else if (hasDetail) {
-    body.push(el("div", { class: "detail-raw", text: a.detail_text }));
+    body.push(el("div", { class: "detail-raw", text: shownDetail }));
   }
   if (a.send_error) {
     body.push(el("div", { class: "detail-fields detail-error" }, [fieldRow(["Delivery error", a.send_error])]));
