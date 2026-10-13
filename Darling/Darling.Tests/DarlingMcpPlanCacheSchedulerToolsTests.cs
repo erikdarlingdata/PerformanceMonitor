@@ -384,9 +384,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
             Assert.Contains("HIGH - Worker thread exhaustion", toolSplit, StringComparison.Ordinal);
             Assert.Contains("Worker thread exhaustion - check max worker threads setting", toolSplit, StringComparison.Ordinal);
 
-            /* #5712 round 1 L1: the memory flag follows the memory value the read shows. One piece stored TRUE at
-               6,000,000 KB (below 10 % of 65,536,000), the other FALSE at 20,000,000 KB: the read shows the larger 20,000,000 KB, so
-               the flag is FALSE (an OR of the stored flags would say TRUE). */
+            /* #5712 review: the memory group comes from ONE row, the one with the LEAST available memory. One piece stored TRUE at
+               6,000,000 KB (below 10 % of 65,536,000), the other FALSE at 20,000,000 KB: the read shows the 6,000,000 KB row and the
+               flag is recomputed from that row's pair, TRUE. */
             var memHighTime = baseTime.AddMinutes(25);
             await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
                 9401L, memHighTime, ServerId, ServerName, 100, 4, 4, 1, 0L, 10, 1.00m, 1, 0, 0, 0L, 1m, false, false, false, false, 65536000L, 6000000L, true, 1, 1, 0, false);
@@ -395,9 +395,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
             var memHigh = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(
                 postgres, ServerId, memHighTime.AddMinutes(-1), memHighTime.AddMinutes(1), ct);
             Assert.NotNull(memHigh);
-            Assert.False(memHigh!.PhysicalMemoryPressureWarning);
+            Assert.True(memHigh!.PhysicalMemoryPressureWarning);
 
-            /* The other side: both pieces stored FALSE, the larger available value is 6,000,000 KB < 6,553,600 KB. */
+            /* Both pieces stored FALSE; the least available value, 5,000,000 KB, is below 6,553,600 KB: TRUE. */
             var memLowTime = baseTime.AddMinutes(26);
             await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
                 9411L, memLowTime, ServerId, ServerName, 100, 4, 4, 1, 0L, 10, 1.00m, 1, 0, 0, 0L, 1m, false, false, false, false, 65536000L, 5000000L, false, 1, 1, 0, false);
@@ -419,7 +419,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
             Assert.NotNull(half);
             Assert.Equal(0.13m, half!.AvgRunnableTasksCount);
 
-            /* Part 4: the divisor is the online schedulers, the configured 8 less the 4 offline: 6 / 4 = 1.50. */
+            /* The divisor is scheduler_count (it IS the online count, measured on a SQL Server 2019 VM): 6 runnable tasks over 8 is 0.75,
+               even with offline_cpu_count 4 stored (no offline subtraction). */
             var offlineTime = baseTime.AddMinutes(28);
             await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
                 9431L, offlineTime, ServerId, ServerName, 100, 8, 8, 4, 0L, 10, 1.00m, 1, 0, 0, 0L, 1m, false, false, false, false, 65536000L, 30000000L, false, 1, 1, 4, true);
@@ -428,7 +429,19 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
             var offline = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(
                 postgres, ServerId, offlineTime.AddMinutes(-1), offlineTime.AddMinutes(1), ct);
             Assert.NotNull(offline);
-            Assert.Equal(1.50m, offline!.AvgRunnableTasksCount);
+            Assert.Equal(0.75m, offline!.AvgRunnableTasksCount);
+
+            /* The measured affinity case: scheduler_count 1 with offline_cpu_count 3 (4 CPUs, AFFINITY CPU = 0). The old divisor
+               (scheduler_count less offline_cpu_count, floored at 0) was NULL here; the average is 5 / 1 = 5.00. */
+            var affinityTime = baseTime.AddMinutes(29);
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9441L, affinityTime, ServerId, ServerName, 100, 1, 4, 3, 0L, 10, 1.00m, 1, 0, 0, 0L, 1m, false, false, false, false, 65536000L, 30000000L, false, 1, 1, 3, true);
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9442L, affinityTime, ServerId, ServerName, 100, 1, 4, 2, 0L, 10, 1.00m, 1, 0, 0, 0L, 1m, false, false, false, false, 65536000L, 30000000L, false, 1, 1, 3, true);
+            var affinity = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(
+                postgres, ServerId, affinityTime.AddMinutes(-1), affinityTime.AddMinutes(1), ct);
+            Assert.NotNull(affinity);
+            Assert.Equal(5.00m, affinity!.AvgRunnableTasksCount);
 
             bodySucceeded = true;
         }

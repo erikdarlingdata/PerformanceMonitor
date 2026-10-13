@@ -126,9 +126,8 @@ ORDER BY 1";
     /// The CPU Scheduler latest-snapshot statement (#5710): the newest <c>collection_time</c> in the window is found
     /// first, then ALL of its rows are combined into one (<see cref="CpuSchedulerCollectionSql"/>), because a
     /// collection written before the collector fix can be split across several rows that each cover some of the
-    /// schedulers. Sums are added, the average is the summed total over the online scheduler count (<c>scheduler_count</c> less
-    /// <c>offline_cpu_count</c>), the single-row DMV
-    /// columns take their MAX. $1 server_id, $2/$3 the UTC window.
+    /// schedulers. Sums are added, the average is the summed total over <c>scheduler_count</c> (the online count), the
+    /// request and memory column groups each come from one stored row, the other single-row DMV columns take their MAX. $1 server_id, $2/$3 the UTC window.
     /// </summary>
     internal static string CpuSchedulerSnapshotSql => $@"
 WITH newest AS

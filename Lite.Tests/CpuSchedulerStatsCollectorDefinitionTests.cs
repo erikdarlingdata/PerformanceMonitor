@@ -122,6 +122,7 @@ FROM
         avg_runnable_tasks_count = CONVERT(decimal(38,2), AVG(CONVERT(decimal(38,2), dos.runnable_tasks_count)))
     FROM sys.dm_os_schedulers AS dos
     WHERE dos.status = N'VISIBLE ONLINE'
+    HAVING COUNT_BIG(*) > 0 /*no VISIBLE ONLINE scheduler writes no row (as before #5710), not one all-NULL row*/
 ) AS sched
 CROSS JOIN sys.dm_os_sys_info AS osi
 CROSS JOIN sys.dm_os_sys_memory AS osm
@@ -236,6 +237,14 @@ OPTION(RECOMPILE);";
         Assert.Contains("AVG(CONVERT(decimal(38,2), dos.runnable_tasks_count))", derived);
         Assert.Contains("FROM sys.dm_os_schedulers AS dos", derived);
         Assert.Contains("WHERE dos.status = N'VISIBLE ONLINE'", derived);
+
+        /* #5712 review: a scalar aggregate over zero rows is ONE all-NULL row, and ReadAsync's GetInt32(3) throws on it.
+           HAVING COUNT_BIG(*) > 0 (still no GROUP BY) makes an instance with no VISIBLE ONLINE scheduler write no row,
+           as before the derived table. */
+        Assert.Contains("HAVING COUNT_BIG(*) > 0", derived);
+        Assert.True(
+            derived.IndexOf("WHERE dos.status", StringComparison.Ordinal) < derived.IndexOf("HAVING COUNT_BIG(*) > 0", StringComparison.Ordinal),
+            "HAVING follows the VISIBLE ONLINE filter inside the derived table");
 
         /* Outside the derived table sys.dm_os_schedulers is read only for the offline-CPU count, and no column
            of a single-row piece is aggregated again. */

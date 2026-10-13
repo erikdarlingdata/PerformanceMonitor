@@ -97,7 +97,7 @@ public sealed partial class ViewerDataService
     /// <para>#5710: the newest <c>collection_time</c> is found first, then ALL of its rows are combined into one
     /// (<see cref="CpuSchedulerCollectionSql"/>): a collection written before the collector fix can be split across
     /// several rows that each cover some of the schedulers. Sums are added, the average is the summed total over
-    /// the online scheduler count (<c>scheduler_count</c> less <c>offline_cpu_count</c>), the single-row DMV columns take their MAX. This replaces the #3936 tiebreak: with every
+    /// <c>scheduler_count</c> (the online count), the request and memory column groups each come from one stored row, the other single-row DMV columns take their MAX. This replaces the #3936 tiebreak: with every
     /// same-instant row folded into one, no physical row order can change the answer.</para>
     /// </summary>
     public static readonly string CpuSchedulerSnapshotSql = $"""

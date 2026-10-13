@@ -174,6 +174,7 @@ FROM
         avg_runnable_tasks_count = CONVERT(decimal(38,2), AVG(CONVERT(decimal(38,2), dos.runnable_tasks_count)))
     FROM sys.dm_os_schedulers AS dos
     WHERE dos.status = N'VISIBLE ONLINE'
+    HAVING COUNT_BIG(*) > 0 /*no VISIBLE ONLINE scheduler writes no row (as before #5710), not one all-NULL row*/
 ) AS sched
 CROSS JOIN sys.dm_os_sys_info AS osi
 CROSS JOIN sys.dm_os_sys_memory AS osm

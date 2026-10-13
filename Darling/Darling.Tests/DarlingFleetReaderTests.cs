@@ -295,7 +295,9 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.DoesNotContain("N'", sql, StringComparison.Ordinal);         // no N'' literals
         Assert.DoesNotContain("now(", sql.ToLowerInvariant());              // no bare now()
         Assert.DoesNotContain("getdate", sql.ToLowerInvariant());           // no T-SQL GETDATE()
-        Assert.DoesNotContain("[", sql, StringComparison.Ordinal);          // no T-SQL bracket identifiers
+        /* No T-SQL bracket identifiers. The one allowed "[": the ")[1]" array subscript that picks the first element of
+           (ARRAY_AGG(col ORDER BY ...)) in the shared cpu_scheduler_stats combine (#5710), which PostgreSQL and DuckDB both run. */
+        Assert.DoesNotContain("[", sql.Replace(")[1]", ")", StringComparison.Ordinal), StringComparison.Ordinal);
     }
 }
 

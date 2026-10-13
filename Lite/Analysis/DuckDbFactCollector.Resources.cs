@@ -96,7 +96,6 @@ FROM newest";
     /// collector fix can be split across several rows that each cover some of the schedulers. This replaces the #3936
     /// <c>collection_id DESC</c> tiebreak; see Darling's twin (PgFactCollector.Resources.RunnableTaskStatsSql).
     /// </summary>
-
     private async Task CollectRunnableTaskFactsAsync(AnalysisContext context, List<Fact> facts)
     {
         try

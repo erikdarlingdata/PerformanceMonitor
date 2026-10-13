@@ -50,15 +50,17 @@ public sealed class CpuSchedulerCollectionSqlTests
         Assert.Contains("CAST(ROUND(CAST(SUM(total_runnable_tasks_count) AS DECIMAL(38,2)) /", sql, StringComparison.Ordinal);
         Assert.Contains(", 2) AS DECIMAL(38,2))", sql, StringComparison.Ordinal);
 
-        /* The divisor is the ONLINE scheduler count: the configured count less the stored offline count. */
-        Assert.Contains("GREATEST(MAX(scheduler_count) - COALESCE(MAX(offline_cpu_count), 0), 0)", sql, StringComparison.Ordinal);
+        /* The divisor is scheduler_count, which IS the online count (measured: AFFINITY CPU = 0 on 4 CPUs gave scheduler_count 1,
+           VISIBLE OFFLINE 3). Nothing is subtracted for offline_cpu_count: that gave NULL on any server with offline schedulers. */
+        Assert.Contains("/ NULLIF(MAX(scheduler_count), 0), 2) AS DECIMAL(38,2))", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GREATEST(", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE(MAX(offline_cpu_count)", sql, StringComparison.Ordinal);
 
         /* The workload-group, memory, request and node columns are single-row pieces: one deterministic value. */
         foreach (var column in new[]
         {
             "max_workers_count", "scheduler_count", "cpu_count", "total_active_request_count", "total_queued_request_count",
-            "total_blocked_task_count", "total_active_parallel_thread_count", "runnable_request_count", "total_request_count",
-            "runnable_percent", "total_physical_memory_kb", "available_physical_memory_kb", "system_memory_state_desc",
+            "total_blocked_task_count", "total_active_parallel_thread_count",
             "total_node_count", "nodes_online_count", "offline_cpu_count",
         })
         {
@@ -69,9 +71,28 @@ public sealed class CpuSchedulerCollectionSqlTests
         Assert.Contains("SUM(total_current_workers_count) >= MAX(max_workers_count) * 0.90", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(total_runnable_tasks_count) >= MAX(cpu_count)", sql, StringComparison.Ordinal);
 
-        /* #5712 L1: the memory flag rises as available memory FALLS, so OR-ing it would follow MIN(available) while the
-           read shows MAX(available). It is recomputed from the two shown values, the collector's own rule (below 10 %). */
-        Assert.Contains("ELSE MAX(available_physical_memory_kb) < MAX(total_physical_memory_kb) * 0.10", sql, StringComparison.Ordinal);
+        /* #5712 review: correlated columns come from ONE stored row. The request triple is one dm_exec_requests reading: the row
+           with the most requests, then the most runnable ones, then the newest collection_id. NULLS LAST is spelled out because
+           PostgreSQL and DuckDB sort NULLs differently on DESC. */
+        const string requestOrder = "ORDER BY total_request_count DESC NULLS LAST, runnable_request_count DESC NULLS LAST, collection_id DESC";
+        foreach (var column in new[] { "runnable_request_count", "total_request_count", "runnable_percent" })
+        {
+            Assert.Contains($"(ARRAY_AGG({column} {requestOrder}))[1] AS {column}", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain($"MAX({column})", sql, StringComparison.Ordinal);
+        }
+
+        /* The sys.dm_os_sys_memory group is one reading too: the row with the LEAST available memory. */
+        const string memoryOrder = "ORDER BY available_physical_memory_kb ASC NULLS LAST, total_physical_memory_kb DESC NULLS LAST, collection_id DESC";
+        foreach (var column in new[] { "total_physical_memory_kb", "available_physical_memory_kb", "system_memory_state_desc" })
+        {
+            Assert.Contains($"(ARRAY_AGG({column} {memoryOrder}))[1] AS {column}", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain($"MAX({column})", sql, StringComparison.Ordinal);
+        }
+
+        /* The memory flag is recomputed from that same row's pair, the collector's own rule (below 10 %). */
+        Assert.Contains(
+            $"ELSE (ARRAY_AGG(available_physical_memory_kb {memoryOrder}))[1] < (ARRAY_AGG(total_physical_memory_kb {memoryOrder}))[1] * 0.10",
+            sql, StringComparison.Ordinal);
         Assert.DoesNotContain("BOOL_OR(physical_memory_pressure_warning) AS", sql, StringComparison.Ordinal);
     }
 
