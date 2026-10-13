@@ -101,14 +101,19 @@ public sealed class DarlingMcpClientTimeoutTools
         var floor = DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified);
         var ceiling = DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified);
 
+        /* The collection log stamps a run when it starts; its rows carry the time the runner took a moment later. A range that ends
+           between the two must still count that run's rows, the allowance AttentionEvaluator.ReadSpan itself makes (RowSkewSeconds).
+           Only the run list stops at the range end; the rows get the skew past it, and ReadSpan cuts them at the newest run + skew. */
+        var rowCeiling = ceiling.AddSeconds(AttentionEvaluator.RowSkewSeconds);
+
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
 
-        async Task<List<T>> Query<T>(string sql, Func<NpgsqlDataReader, T> map)
+        async Task<List<T>> Query<T>(string sql, Func<NpgsqlDataReader, T> map, bool rows = true)
         {
             await using var command = new NpgsqlCommand(sql, connection);
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, floor);
-            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, ceiling);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, rows ? rowCeiling : ceiling);
 
             var rows = new List<T>();
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -120,7 +125,7 @@ public sealed class DarlingMcpClientTimeoutTools
             return rows;
         }
 
-        var runs = await Query(AttentionWindowSql.Runs("collection_log", bounded: true), r => r.GetDateTime(0));
+        var runs = await Query(AttentionWindowSql.Runs("collection_log", bounded: true), r => r.GetDateTime(0), rows: false);
         var counts = await Query(AttentionWindowSql.Counts("attention_events", bounded: true),
             r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)));
         var groups = await Query(AttentionWindowSql.SampleGroups("attention_events", bounded: true),

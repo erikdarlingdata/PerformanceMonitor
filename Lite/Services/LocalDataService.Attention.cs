@@ -61,23 +61,28 @@ public partial class LocalDataService
     {
         using var connection = await OpenConnectionAsync();
 
+        /* The collection log stamps a run when it starts; its rows carry the time the runner took a moment later. A range that ends
+           between the two must still count that run's rows, the allowance AttentionEvaluator.ReadSpan itself makes (RowSkewSeconds).
+           Only the run list stops at the range end; the rows get the skew past it, and ReadSpan cuts them at the newest run + skew. */
+        var rowCeiling = windowEnd.AddSeconds(AttentionEvaluator.RowSkewSeconds);
+
         var runs = await QueryAttentionAsync(connection, AttentionWindowSql.Runs("v_collection_log", bounded: true), serverId, windowStart, windowEnd,
             r => r.GetDateTime(0));
-        var counts = await QueryAttentionAsync(connection, AttentionWindowSql.Counts("v_attention_events", bounded: true), serverId, windowStart, windowEnd,
+        var counts = await QueryAttentionAsync(connection, AttentionWindowSql.Counts("v_attention_events", bounded: true), serverId, windowStart, rowCeiling,
             r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)));
-        var groups = await QueryAttentionAsync(connection, AttentionWindowSql.SampleGroups("v_attention_events", bounded: true), serverId, windowStart, windowEnd,
+        var groups = await QueryAttentionAsync(connection, AttentionWindowSql.SampleGroups("v_attention_events", bounded: true), serverId, windowStart, rowCeiling,
             r => new AttentionSampleGroup(
                 r.GetDateTime(0),
                 r.IsDBNull(1) ? null : r.GetString(1),
                 r.IsDBNull(2) ? null : r.GetString(2),
                 r.GetInt64(3)));
-        var statements = await QueryAttentionAsync(connection, AttentionWindowSql.TopStatements("v_attention_events", bounded: true), serverId, windowStart, windowEnd,
+        var statements = await QueryAttentionAsync(connection, AttentionWindowSql.TopStatements("v_attention_events", bounded: true), serverId, windowStart, rowCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1), r.IsDBNull(2) ? null : r.GetString(2)));
-        var databases = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "database_name", bounded: true), serverId, windowStart, windowEnd,
+        var databases = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "database_name", bounded: true), serverId, windowStart, rowCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
-        var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "client_app_name", bounded: true), serverId, windowStart, windowEnd,
+        var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "client_app_name", bounded: true), serverId, windowStart, rowCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
-        var samples = await QueryAttentionAsync(connection, AttentionWindowSql.Samples("v_attention_events", sampleLimit + 1), serverId, windowStart, windowEnd,
+        var samples = await QueryAttentionAsync(connection, AttentionWindowSql.Samples("v_attention_events", sampleLimit + 1), serverId, windowStart, rowCeiling,
             r => new ClientTimeoutSample(
                 r.IsDBNull(0) ? null : r.GetDateTime(0),
                 r.GetDateTime(1),

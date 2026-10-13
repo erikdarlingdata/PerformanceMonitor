@@ -110,7 +110,7 @@ public static class ClientTimeoutsRead
             }).ToList(),
             top_databases = window.TopDatabases.Select(t => new { database_name = t.Name, sampled_events = t.Samples }).ToList(),
             top_client_apps = window.TopApplications.Select(t => new { client_app_name = t.Name, sampled_events = t.Samples }).ToList(),
-            sampled_events_returned = samples.Count,
+            sampled_events_returned = Math.Min(samples.Count, limit),
             sampled_events_truncated = samples.Count > limit,
             sampled_events = samples.Take(limit).Select(s => new
             {
