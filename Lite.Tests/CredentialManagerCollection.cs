@@ -28,7 +28,7 @@ namespace Lite.Tests;
 /// <para>Running alone is stricter than the <c>app-alert-statics</c> collection two members came from, so the App
 /// statics those two write stay guarded. <see cref="CredentialManagerCollectionCensusTests"/> keeps new classes in.</para>
 /// </summary>
-[CollectionDefinition(Name, DisableParallelization = true)]
+[CollectionDefinition("credential-manager", DisableParallelization = true)]
 public sealed class CredentialManagerCollection
 {
     public const string Name = "credential-manager";
@@ -48,7 +48,7 @@ public sealed class CredentialManagerCollectionCensusTests
         @"new CredentialService\(|new CredentialStore\(|\.CredentialService\b|App\.(SaveWebhookUrl|GetWebhookUrl|GetSmtpPassword|SaveSmtpPassword)\(|RouteSecretAccess\.CredentialManager\(",
         RegexOptions.CultureInvariant);
 
-    private const string Membership = "[Collection(CredentialManagerCollection.Name)]";
+    private const string Membership = "[Collection(\"credential-manager\")]";
 
     /* The seven classes the census found when it was written; fewer means the scan stopped seeing them. */
     private const int MemberFloor = 7;

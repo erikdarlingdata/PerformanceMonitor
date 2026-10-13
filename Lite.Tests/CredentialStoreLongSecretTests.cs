@@ -10,7 +10,6 @@ using System;
 using CredentialManagement;
 using PerformanceMonitor.Common;
 using Xunit;
-using Lite.Tests;
 
 namespace PerformanceMonitorLite.Tests;
 
@@ -26,7 +25,7 @@ namespace PerformanceMonitorLite.Tests;
 /// written. The Lite store prefix is used on purpose (that is what <c>App.SaveWebhookUrl</c> writes under),
 /// but only with test-only keys.
 /// </summary>
-[Collection(CredentialManagerCollection.Name)]
+[Collection("credential-manager")]
 public class CredentialStoreLongSecretTests
 {
     /// <summary>The prefix Lite's CredentialService gives every target (see CredentialService).</summary>

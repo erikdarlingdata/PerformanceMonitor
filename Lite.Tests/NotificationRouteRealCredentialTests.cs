@@ -15,7 +15,6 @@ using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using Xunit;
-using Lite.Tests;
 
 namespace PerformanceMonitorLite.Tests;
 
@@ -34,7 +33,7 @@ namespace PerformanceMonitorLite.Tests;
 /// the Credential Manager while this one reads it; it also keeps the App statics it shares with the app-alert-statics classes
 /// away from them.
 /// </summary>
-[Collection(CredentialManagerCollection.Name)]
+[Collection("credential-manager")]
 public sealed class NotificationRouteRealCredentialTests : IDisposable
 {
     private const string OldTeams = "https://teams.old-secret.test/hook/aaa111";

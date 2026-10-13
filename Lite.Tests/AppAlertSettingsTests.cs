@@ -10,7 +10,6 @@ using PerformanceMonitorLite;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Services;
 using Xunit;
-using Lite.Tests;
 
 namespace PerformanceMonitorLite.Tests;
 
@@ -35,7 +34,7 @@ namespace PerformanceMonitorLite.Tests;
 /// #5785 moved it to the credential-manager collection, because GetSmtpPassword reads the real Credential Manager. That
 /// collection runs alone, after every parallel class has finished, so the App statics stay as guarded as they were.
 /// </summary>
-[Collection(CredentialManagerCollection.Name)]
+[Collection("credential-manager")]
 public class AppAlertSettingsTests
 {
     /// <summary>

@@ -32,7 +32,7 @@ namespace Lite.Tests;
 /// <para>The pair is synthetic and is the one the Darling viewer's collision tests use: two different hosts that
 /// hash to one id.</para>
 /// </summary>
-[Collection(CredentialManagerCollection.Name)]
+[Collection("credential-manager")]
 public sealed class ServerIdCollisionTests : IDisposable
 {
     private const string HolderHost = "sql9jocsv";
