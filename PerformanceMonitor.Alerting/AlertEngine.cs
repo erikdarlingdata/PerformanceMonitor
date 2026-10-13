@@ -367,6 +367,12 @@ public sealed class AlertEngine
     /// else; production passes <see cref="AlertReadFailureCounter.Shared"/>, and tests that want to
     /// observe the counting pass their own instance rather than touching that one.
     /// </param>
+    /// <param name="escalationSeedReader">
+    /// #5715 part B: the alert-history read that seeds the six <see cref="TierEscalation"/> instances across a restart
+    /// (<see cref="EscalationSeed.ReaderFor"/> over the host's <see cref="IAlertHistoryStore"/>). Called once per server key
+    /// and family per process, at the start of that server's sweep. A throw is logged and counted, seeds nothing and is
+    /// retried on the next sweep; null leaves the tier in memory only.
+    /// </param>
     public AlertEngine(
         IAlertEngineSettings settings,
         IAlertReadAdapter readAdapter,
@@ -378,7 +384,8 @@ public sealed class AlertEngine
         Func<AlertResolution, CancellationToken, Task>? resolutionCallback = null,
         ILogger? logger = null,
         Func<DateTime>? utcNow = null,
-        AlertReadFailureCounter? readFailures = null)
+        AlertReadFailureCounter? readFailures = null,
+        Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? escalationSeedReader = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _readAdapter = readAdapter ?? throw new ArgumentNullException(nameof(readAdapter));
@@ -391,7 +398,27 @@ public sealed class AlertEngine
         _logger = logger;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
         _readFailures = readFailures;
+        _escalationSeedReader = escalationSeedReader;
+        /* #5715 part B: the six opted-in families, each with the resolution title its history row is stored under. */
+        _escalationSeedFamilies = new (string Metric, string ResolutionTitle, bool CountMuted, TierEscalation Escalation)[]
+        {
+            (CpuPersistenceMetric, EscalationSeed.CpuResolvedTitle, true, _cpuEscalation),
+            (DeadlockWatermarkMetric, EscalationSeed.DeadlocksClearedTitle, true, _deadlockEscalation),
+            (PostgresAlertEvaluator.PoisonWaitMetric, EscalationSeed.PoisonWaitsClearedTitle, true, _poisonWaitEscalation),
+            (RunnableQueueEvaluator.MetricName, EscalationSeed.RunnableQueueClearedTitle, true, _runnableQueueEscalation),
+            /* A muted Client Timeouts fire is tracked on its own stamp and does not record the tier (see CheckAttentionAsync). */
+            (AttentionEvaluator.MetricName, EscalationSeed.ClientTimeoutsClearedTitle, false, _attentionEscalation),
+            (VolumeFreeSpaceWatermarkMetric, EscalationSeed.VolumeFreeSpaceResolvedTitle, true, _lowDiskEscalation),
+        };
     }
+
+    /// <summary>#5715 part B: the history reader that seeds <see cref="TierEscalation"/> across a restart; null leaves the tier in-memory only.</summary>
+    private readonly Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? _escalationSeedReader;
+
+    private readonly (string Metric, string ResolutionTitle, bool CountMuted, TierEscalation Escalation)[] _escalationSeedFamilies;
+
+    /// <summary>(server key, metric) pairs whose seed read has completed, so each is read once per process. A failed read is not added.</summary>
+    private readonly ConcurrentDictionary<(string Key, string Metric), bool> _escalationSeeded = new();
 
     /// <summary>#3013: the swallowed-read counter, or null when nothing is counting.</summary>
     private readonly AlertReadFailureCounter? _readFailures;
@@ -443,6 +470,7 @@ public sealed class AlertEngine
            looked at the store. */
         _readFailures?.RecordPass(key);
 
+        await EnsureEscalationSeededAsync(key, now, alertCooldown, ct);
         await EnsureWatermarksSeededAsync(key, ct);
 
         await CheckCpuAsync(snapshot, key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
@@ -574,6 +602,54 @@ public sealed class AlertEngine
         }
 
         _seededServerKeys[key] = true;
+    }
+
+    /// <summary>
+    /// #5715 part B: seeds the six <see cref="TierEscalation"/> instances from the alert history, once per server key
+    /// per process, at the start of that server's sweep and before any family evaluates. After a restart in the middle
+    /// of an incident the engine would otherwise not know a Warning was delivered, and the email and webhook cooldowns
+    /// (seeded from the same history) would hold the first Critical for the rest of the Warning's window.
+    /// <para>The window is the family's cooldown: older than that the bypass changes nothing, so nothing older is read.
+    /// A tier is restored only when the instance has no entry for the key yet, so a fire this process already made wins.</para>
+    /// <para>A failed read is an annotation, never a suppression: it is logged and counted, seeds nothing, and does not
+    /// stop the sweep; that family is read again on the next sweep. Only cancellation propagates.</para>
+    /// </summary>
+    private async Task EnsureEscalationSeededAsync(string key, DateTime now, TimeSpan alertCooldown, CancellationToken ct)
+    {
+        if (_escalationSeedReader is null || alertCooldown <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var sinceUtc = now - alertCooldown;
+        foreach (var (metric, resolutionTitle, countMuted, escalation) in _escalationSeedFamilies)
+        {
+            if (_escalationSeeded.ContainsKey((key, metric)))
+            {
+                continue;
+            }
+
+            var readClock = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                var tier = await _escalationSeedReader(new EscalationSeedQuery(key, metric, resolutionTitle, sinceUtc, countMuted), ct);
+                if (tier is { } seeded && escalation.Highest(key) is null)
+                {
+                    escalation.Restore(key, seeded);
+                }
+
+                _escalationSeeded[(key, metric)] = true;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("Could not read the {Metric} tier from alert history for {ServerKey} after {ElapsedMs} ms; a Warning-to-Critical escalation across a restart is not seeded this sweep: {Message}", metric, key, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "escalation tier seed", readClock.ElapsedMilliseconds);
+            }
+        }
     }
 
     /* ---------------- CPU (Lite AlertEngine.cs:62-114) ---------------- */
@@ -871,7 +947,7 @@ public sealed class AlertEngine
                    CpuClearSamples consecutive clears. Still gated on !suppressed, exactly as before. */
                 await NotifyResolutionAsync(new AlertResolution(
                     key, serverName, "High CPU",
-                    "CPU Resolved",                                                 /* :110 */
+                    EscalationSeed.CpuResolvedTitle,                                                 /* :110 */
                     $"{serverName}: {cpuMetricLabel} back to {eventValue:F0}%"), ct); /* :111 */
             }
         }
@@ -1865,7 +1941,7 @@ public sealed class AlertEngine
             {
                 await NotifyResolutionAsync(new AlertResolution(
                     key, serverName, "Deadlocks Detected",
-                    "Deadlocks Cleared",                                            /* :267 */
+                    EscalationSeed.DeadlocksClearedTitle,                                            /* :267 */
                     $"{serverName}: No deadlocks in the last hour"), ct);           /* :268 */
             }
         }
@@ -2011,7 +2087,7 @@ public sealed class AlertEngine
                 {
                     await NotifyResolutionAsync(new AlertResolution(
                         key, serverName, "Poison Wait",
-                        "Poison Waits Cleared",                                     /* :329 */
+                        EscalationSeed.PoisonWaitsClearedTitle,                                     /* :329 */
                         string.Create(CultureInfo.InvariantCulture,
                             $"{serverName}: Poison wait accumulated over the last {PoisonWaitEvaluator.WindowMinutes} minutes back below threshold")), ct); /* :330 */
                     readClock.Restart();
@@ -2084,7 +2160,7 @@ public sealed class AlertEngine
                     {
                         await NotifyResolutionAsync(new AlertResolution(
                             key, serverName, RunnableQueueEvaluator.MetricName,
-                            "Runnable Queue Cleared",
+                            EscalationSeed.RunnableQueueClearedTitle,
                             string.Create(CultureInfo.InvariantCulture,
                                 $"{serverName}: Runnable Queue alert resolved - no fresh scheduler data for {RunnableQueueEvaluator.StaleIncidentMinutes} minutes, so the queue could not be re-checked (the cpu_scheduler_stats collector may be disabled, slow or failing)")), ct);
                         readClock.Restart();
@@ -2196,7 +2272,7 @@ public sealed class AlertEngine
                 {
                     await NotifyResolutionAsync(new AlertResolution(
                         key, serverName, RunnableQueueEvaluator.MetricName,
-                        "Runnable Queue Cleared",
+                        EscalationSeed.RunnableQueueClearedTitle,
                         string.Create(CultureInfo.InvariantCulture,
                             $"{serverName}: Runnable tasks per scheduler averaged over the last {reading.SampleCount} collections are back below threshold")), ct);
                     readClock.Restart();
@@ -2264,7 +2340,7 @@ public sealed class AlertEngine
                     {
                         await NotifyResolutionAsync(new AlertResolution(
                             key, serverName, AttentionEvaluator.MetricName,
-                            "Client Timeouts Cleared",
+                            EscalationSeed.ClientTimeoutsClearedTitle,
                             string.Create(CultureInfo.InvariantCulture,
                                 $"{serverName}: Client Timeouts alert resolved - no fresh attention collector runs for {AttentionEvaluator.StaleIncidentMinutes} minutes, so the rate could not be re-checked (the attention collector may be disabled, slow or failing)")), ct);
                         readClock.Restart();
@@ -2368,7 +2444,7 @@ public sealed class AlertEngine
                 {
                     await NotifyResolutionAsync(new AlertResolution(
                         key, serverName, AttentionEvaluator.MetricName,
-                        "Client Timeouts Cleared",
+                        EscalationSeed.ClientTimeoutsClearedTitle,
                         string.Create(CultureInfo.InvariantCulture,
                             $"{serverName}: Client timeouts over the last {reading.CoveredMinutes:N0} minutes are back below threshold")), ct);
                     readClock.Restart();
@@ -2858,7 +2934,7 @@ public sealed class AlertEngine
                 {
                     await NotifyResolutionAsync(new AlertResolution(
                         key, serverName, "Volume Free Space",
-                        "Volume Free Space Resolved",                               /* :545 */
+                        EscalationSeed.VolumeFreeSpaceResolvedTitle,                               /* :545 */
                         $"{serverName}: All volumes back above threshold"), ct);    /* :546 */
                 }
             }

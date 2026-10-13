@@ -344,7 +344,9 @@ public partial class MainWindow : Window
                    does not apply here — but the SURFACE gap does: a swallowed read reached no health read
                    on this SKU either. Passed explicitly rather than defaulted inside the engine so a test
                    constructs its own and cannot pollute this one. */
-                readFailures: AlertReadFailureCounter.Shared);
+                readFailures: AlertReadFailureCounter.Shared,
+                /* #5715 part B: a Warning delivered before a restart still lets the Critical through at once. */
+                escalationSeedReader: PerformanceMonitor.Alerting.EscalationSeed.ReaderFor(_alertHistoryStore));
 
             /* Load mute rules from the local store. A failed read THROWS — the store reports a fault as a
                fault rather than as an empty rule set — and it is swallowed here for the reason Darling

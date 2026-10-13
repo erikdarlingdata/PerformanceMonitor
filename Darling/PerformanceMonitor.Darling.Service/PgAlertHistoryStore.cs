@@ -164,6 +164,67 @@ AND   notification_type IN ('webhook', 'email+webhook')", "WebhookAlert");
            exclusion stays one symbol and pinned. */
         ReadMaxAlertTimeAsync(serverId, metricName, dedupKey: null, DeliveredPageFilter, logScope: "AnalysisNotify");
 
+    /// <summary>
+    /// #5715 part B: the tier of the newest fire row inside the window, null when a resolution row is as new or newer.
+    /// See <see cref="IAlertHistoryStore.GetLastFiredTierAsync"/>. A failed read THROWS (no catch here): the engine
+    /// logs it and retries on the next sweep, and "could not read" must not look like "no history". alert_time is
+    /// microsecond-precision naive UTC; the window bound is sent the same way.
+    /// </summary>
+    public async Task<AlertSeverityLevel?> GetLastFiredTierAsync(
+        string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true)
+    {
+        /* Same identity scope as GetLastEmailSentUtcAsync (#3456). */
+        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
+        if (sid is null)
+        {
+            return null;
+        }
+
+        await using var connection = await _postgres.OpenConnectionAsync();
+
+        DateTime? fireAt = null;
+        string? contextJson = null;
+        using (var fireCommand = new NpgsqlCommand(@"
+SELECT alert_time, context_json
+FROM config_alert_log
+WHERE server_id = $1
+AND   metric_name = $2
+AND   alert_time >= $3"
+            + AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter
+            + (countMuted ? "" : AlertHistoryEscalationSeed.ExcludeMutedFilter)
+            + "\nORDER BY alert_time DESC\nLIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds })
+        {
+            fireCommand.Parameters.AddWithValue(sid.Value);
+            fireCommand.Parameters.AddWithValue(metricName);
+            fireCommand.Parameters.AddWithValue(DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified));
+            await using var reader = await fireCommand.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                fireAt = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
+                contextJson = reader.IsDBNull(1) ? null : reader.GetString(1);
+            }
+        }
+
+        if (fireAt is null)
+        {
+            return null;
+        }
+
+        using var resolutionCommand = new NpgsqlCommand(@"
+SELECT MAX(alert_time)
+FROM config_alert_log
+WHERE server_id = $1
+AND   metric_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+        resolutionCommand.Parameters.AddWithValue(sid.Value);
+        resolutionCommand.Parameters.AddWithValue(resolutionMetricName);
+        var resolved = await resolutionCommand.ExecuteScalarAsync();
+        DateTime? resolvedAt = resolved == null || resolved == DBNull.Value
+            ? null
+            : DateTime.SpecifyKind(Convert.ToDateTime(resolved, CultureInfo.InvariantCulture), DateTimeKind.Utc);
+
+        return AlertHistoryEscalationSeed.Resolve(fireAt, contextJson, resolvedAt);
+    }
+
     /// <summary>The #3712 seed exclusion, as SQL text. A literal rather than a parameter for the reason the
     /// email/webhook filters above are: <see cref="AlertDelivery.ChannelDigest"/> is a compile-time constant
     /// of this codebase, and spelling it through the constant is what keeps the writer's value and the

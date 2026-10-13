@@ -27,13 +27,17 @@ namespace PerformanceMonitor.Alerting;
 /// <para><b>Failed sends.</b> A fire whose every channel failed delivered nothing, so the fire site puts the tier
 /// back (<see cref="Restore"/>); the retry is still the escalation.</para>
 ///
-/// <para><b>Restart gap (round 2 of #5709, deliberate).</b> The tier lives in memory only. After a restart in the
-/// middle of an incident the engine does not know a Warning was delivered, so the first Critical is an ordinary first
-/// fire, while the email and webhook cooldowns are seeded from the alert history and may hold it for the rest of
-/// their window. The seed seam (<c>IAlertHistoryStore.GetLastEmailSentUtcAsync</c> and
-/// <c>GetLastWebhookSentUtcAsync</c>) returns a timestamp only, never a severity, lives in the delivery layer (the
-/// engine holds no history store), and every store implements it; carrying a tier through it would be a new
-/// persistence path in both apps, so the gap is accepted and the cooldown is the fallback.</para>
+/// <para><b>Across a restart (#5715 part B).</b> The tier lives in memory, so a restart in the middle of an incident
+/// would forget that a Warning was delivered, and the email and webhook cooldowns (seeded from the alert history) would
+/// hold the first Critical for the rest of the Warning's window. The engine therefore seeds each instance from the
+/// history: once per server key per process, at the start of that server's sweep, it asks
+/// <c>IAlertHistoryStore.GetLastFiredTierAsync</c> for the tier of the newest fire of each family's metric inside that
+/// family's cooldown, and <see cref="Restore"/>s it when the instance holds no entry for the key yet. The read returns
+/// null (nothing seeded) when no such fire exists, when a resolution row for the metric is as new as the fire or
+/// newer, and for a fire whose every channel failed (in process that tier is put back too). A muted fire counts, as
+/// it does in process. A failed read seeds nothing, is logged and counted as a read failure, and is retried on the next
+/// sweep; it never blocks a fire. Lite writes no resolution rows, so there a Warning whose incident cleared inside the
+/// window still seeds: the cost is a Critical delivered sooner than the cooldown would have, never a held one.</para>
 ///
 /// <para><b>Opt-in.</b> One instance per alert family, held by the engine; the fire site calls
 /// <see cref="IsEscalation"/> before its cooldown test, <see cref="Record"/> when it fires and <see cref="Close"/>

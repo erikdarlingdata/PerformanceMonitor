@@ -341,6 +341,74 @@ AND   metric_name = $2"
     }
 
     /// <summary>
+    /// #5715 part B: the tier of the newest fire row inside the window, null when a resolution row is as new or newer.
+    /// See <see cref="IAlertHistoryStore.GetLastFiredTierAsync"/>. A failed read THROWS (no catch here): the engine
+    /// logs it and retries on the next sweep, and "could not read" must not look like "no history".
+    /// </summary>
+    public async Task<AlertSeverityLevel?> GetLastFiredTierAsync(
+        string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true)
+    {
+        /* Same identity scope as GetLastEmailSentUtcAsync (#3456). */
+        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
+        if (sid is null) return null;
+
+        var duckDb = _duckDb;
+        if (duckDb == null)
+        {
+            var dbPath = App.DatabasePath;
+            if (string.IsNullOrEmpty(dbPath)) return null;
+            duckDb = new DuckDbInitializer(dbPath);
+        }
+
+        using var readLock = duckDb.AcquireReadLock();
+        using var connection = duckDb.CreateConnection();
+        await connection.OpenAsync();
+
+        /* v_config_alert_log = live UNION ALL archive (#4887), so a reset cannot hide a fire or a resolution. */
+        using var fireCommand = connection.CreateCommand();
+        fireCommand.CommandText = @"
+SELECT alert_time, context_json
+FROM v_config_alert_log
+WHERE server_id = $1
+AND   metric_name = $2
+AND   alert_time >= $3"
+            + AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter
+            + (countMuted ? "" : AlertHistoryEscalationSeed.ExcludeMutedFilter)
+            + "\nORDER BY alert_time DESC\nLIMIT 1";
+        fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
+        fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
+        fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sinceUtc });
+
+        DateTime? fireAt = null;
+        string? contextJson = null;
+        using (var reader = await fireCommand.ExecuteReaderAsync())
+        {
+            if (await reader.ReadAsync())
+            {
+                fireAt = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
+                contextJson = reader.IsDBNull(1) ? null : reader.GetString(1);
+            }
+        }
+
+        if (fireAt is null) return null;
+
+        using var resolutionCommand = connection.CreateCommand();
+        resolutionCommand.CommandText = @"
+SELECT MAX(alert_time)
+FROM v_config_alert_log
+WHERE server_id = $1
+AND   metric_name = $2";
+        resolutionCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
+        resolutionCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = resolutionMetricName });
+        var resolved = await resolutionCommand.ExecuteScalarAsync();
+        DateTime? resolvedAt = resolved == null || resolved == DBNull.Value
+            ? null
+            : DateTime.SpecifyKind(Convert.ToDateTime(resolved), DateTimeKind.Utc);
+
+        return AlertHistoryEscalationSeed.Resolve(fireAt, contextJson, resolvedAt);
+    }
+
+    /// <summary>
     /// #3916: the analysis #2054 hold's restart seed — MAX(alert_time) over rows that were a DELIVERED
     /// page (<c>alert_sent</c> true = email and/or webhook delivered), minus the #3712 digest exclusion
     /// (redundant by construction — a digest row is never Sent — and kept so the exclusion stays one

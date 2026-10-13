@@ -1,0 +1,51 @@
+// Copyright (c) 2026 Erik Darling, Darling Data LLC
+//
+// Licensed under the MIT License. See LICENSE file in the project root for full license information.
+
+using System;
+
+namespace PerformanceMonitor.Notifications;
+
+/// <summary>
+/// The shared half of <see cref="IAlertHistoryStore.GetLastFiredTierAsync"/> (#5715 part B): the failed-send
+/// predicate both stores spell in SQL, and the one place that turns "newest fire row" and "newest resolution row"
+/// into the tier the engine seeds, so the DuckDB and PostgreSQL stores cannot answer the tie question differently.
+/// </summary>
+public static class AlertHistoryEscalationSeed
+{
+    /// <summary>
+    /// SQL that keeps a row unless EVERY attempted channel failed: <c>alert_sent</c> false with a non-null
+    /// <c>send_error</c>, exactly the engine's <c>FailedSendBackoff.EveryChannelFailed</c> test. In process, such a fire
+    /// puts the tier back (<c>TierEscalation.Restore</c>), so the history must not seed it. A row with no send error
+    /// and no delivery (unconfigured, throttled, muted, folded) was not a failed send and stays: the engine recorded its
+    /// tier. A legacy <c>undelivered</c> row (a webhook that came back unsuccessful, with a null error) cannot be told
+    /// apart from those and is counted, which is the safe direction: it can only deliver a Critical sooner.
+    /// </summary>
+    public const string KeepUnlessEveryChannelFailedFilter = "\nAND   (alert_sent OR send_error IS NULL)";
+
+    /// <summary>SQL that drops muted rows, for a family whose engine fire site does not record a muted fire's tier.</summary>
+    public const string ExcludeMutedFilter = "\nAND   NOT muted";
+
+    /// <summary>
+    /// The tier to seed: the tier of the newest fire row (<paramref name="fireAtUtc"/>, read from its
+    /// <paramref name="contextJson"/> the way <c>AlertHistoryRowSeverity.FiredAt</c> does), or null when there is no
+    /// fire, the fire carries no tier, or a resolution row is as new as the fire or newer. At an exact tie the
+    /// resolution wins: the incident closed no later than the fire, and a seed that revived it would bypass a cooldown
+    /// for an incident that is over. Both values come back from the same column type, so equal stored instants compare
+    /// equal, microsecond for microsecond.
+    /// </summary>
+    public static AlertSeverityLevel? Resolve(DateTime? fireAtUtc, string? contextJson, DateTime? resolvedAtUtc)
+    {
+        if (fireAtUtc is not { } fired)
+        {
+            return null;
+        }
+
+        if (resolvedAtUtc is { } resolved && resolved >= fired)
+        {
+            return null;
+        }
+
+        return AlertContextSerializer.TryReadSeverity(contextJson);
+    }
+}
