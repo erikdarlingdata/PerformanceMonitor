@@ -82,6 +82,9 @@ public sealed class DarlingWorker : BackgroundService
        collection — the two loops share a cancellation token and the guarded server set only. */
     private static readonly TimeSpan s_commandPollInterval = TimeSpan.FromSeconds(5);
 
+    /// <summary>#5654: the external alert drain's cadence. A queued alert waits at most this long, plus its pass, for a send.</summary>
+    private static readonly TimeSpan s_externalAlertInterval = TimeSpan.FromSeconds(15);
+
     /* The store disk-pressure self-alert's poll cadence (fleet-level, Stage 4). Disk fills slowly, and the
        check is one volume free-space read (a few file-system calls, no directory walk) plus one narrow
        store_metrics lookup, so 5 minutes is ample and cheap —
@@ -3508,7 +3511,11 @@ LIMIT 1";
             },
             serviceInstance,
             _loggerFactory.CreateLogger<ExternalAlertDrain>());
-        var externalAlertReapDone = false;
+
+        /* #5654: the drain runs on its own 15-second loop, like the command loop, and is never awaited inside the fleet
+           loop, so collection, the custom alerts and the self alerts do not wait on a channel send or a store lock. The
+           loop honors the service pause and the master switch itself. Awaited with the command loop at shutdown. */
+        var externalAlertLoop = RunExternalAlertLoopAsync(externalAlertDrain, stoppingToken);
 
         /* #2022 phase 2: the Query Store backfill worker, on its own tick (see s_queryStoreBackfillInterval).
            Fills the two windows the live path discards by design — the 60-minute first-contact tail and
@@ -4013,33 +4020,6 @@ LIMIT 1";
                 await _selfAlerts.EvaluateNotificationChannelsAsync(stoppingToken);
             }
 
-            /* #5654: external alerts, every pass, beside the custom-alert work above. Expiry always runs, so rows that
-               waited out a pause or a disabled master switch still age out and the self-monitor can count them (they
-               expire as usual, not on resume); the claim and the sends run only while the drain's master switch reads on. The first pass
-               of a run also takes back what a stopped run left claimed: delivered if the history has its row, else
-               interrupted, never sent again. Failure-isolated so a throw never stops the fleet loop. */
-            try
-            {
-                var externalPass = await externalAlertDrain.RunPassAsync(
-                    reapFirst: !externalAlertReapDone, stoppingToken);
-                externalAlertReapDone = true;
-                if (externalPass.Claimed > 0 || externalPass.Expired > 0)
-                {
-                    _logger.LogInformation(
-                        "External alerts: claimed {Claimed} (delivered {Delivered}, muted {Muted}, no channel {NoChannel}, retry {Retried}, failed {Failed}, ignored {Ignored}, interrupted {Interrupted}), expired {Expired}",
-                        externalPass.Claimed, externalPass.Delivered, externalPass.Muted, externalPass.NoChannel,
-                        externalPass.Retried, externalPass.Failed, externalPass.Ignored, externalPass.Interrupted, externalPass.Expired);
-                }
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "External alert pass failed; it is tried again next pass");
-            }
-
             /* #3514: the web-dashboard TLS certificate expiry self-alert. The web host loads the certificate
                once at start and publishes its served expiry to WebTlsCertificateState; a headless service can
                run for months without a restart, so the worker re-evaluates that fixed expiry against the clock
@@ -4275,6 +4255,16 @@ LIMIT 1";
         try
         {
             await commandLoop;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
+        /* #5654: the external alert loop observes the same token; its pass in flight gives back the rows it had not reached. */
+        try
+        {
+            await externalAlertLoop;
         }
         catch (OperationCanceledException)
         {
@@ -6343,6 +6333,51 @@ LIMIT 1";
             try
             {
                 await Task.Delay(s_commandPollInterval, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// #5654: the external alert drain's loop, one pass every <see cref="s_externalAlertInterval"/> on its own task, beside
+    /// the command loop. While the service is paused a tick does nothing at all (no expiry, no reap, no claim, no send), the
+    /// same as every other alert family; rows that waited out a pause expire on the first pass after the resume. With the
+    /// master switch off a pass still expires and reaps but claims and sends nothing (the switch is read inside the drain).
+    /// A failed pass is logged and tried again on the next tick; only cancellation ends the loop.
+    /// </summary>
+    private async Task RunExternalAlertLoopAsync(ExternalAlertDrain drain, CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            if (ShouldRunCollection(_paused))
+            {
+                try
+                {
+                    var pass = await drain.RunPassAsync(stoppingToken);
+                    if (pass.Claimed > 0 || pass.Expired > 0)
+                    {
+                        _logger.LogInformation(
+                            "External alerts: claimed {Claimed} (delivered {Delivered}, muted {Muted}, no channel {NoChannel}, retry {Retried}, failed {Failed}, ignored {Ignored}, interrupted {Interrupted}), expired {Expired}",
+                            pass.Claimed, pass.Delivered, pass.Muted, pass.NoChannel,
+                            pass.Retried, pass.Failed, pass.Ignored, pass.Interrupted, pass.Expired);
+                    }
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "External alert pass failed; it is tried again next pass");
+                }
+            }
+
+            try
+            {
+                await Task.Delay(s_externalAlertInterval, stoppingToken);
             }
             catch (OperationCanceledException)
             {

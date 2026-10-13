@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -56,6 +57,18 @@ public enum ExternalAlertOutcome
 }
 
 /// <summary>
+/// A state write waited longer than <see cref="ExternalAlertStore.StateWriteLockTimeoutMilliseconds"/> for a lock another
+/// session holds (#5654). Nothing was written and nothing was sent, so the drain gives the row back to the queue for a
+/// later attempt rather than closing it.
+/// </summary>
+public sealed class ExternalAlertStateLockTimeoutException : Exception
+{
+    public ExternalAlertStateLockTimeoutException(string message, Exception inner) : base(message, inner)
+    {
+    }
+}
+
+/// <summary>
 /// The remembered firing state of one <c>(source, key, submitted server name)</c> subject, with the identity its fire was
 /// sent under: the server id (0 for a name that was not registered), the server key and the display name. A clear closes
 /// the incident under these, whatever the server registry says by then.
@@ -68,11 +81,12 @@ public sealed record ExternalAlertFiringState(
 /// <c>config.submit_external_alert</c>, records what became of each row, expires what nobody took in time, reaps what a
 /// dead run left claimed, and remembers which keys are firing so a clear pairs with its fire.
 ///
-/// <para><b>Delivery is at most once.</b> A row moves <c>pending</c> to <c>claimed</c> to one terminal status, and nothing
-/// moves a claimed row back except <see cref="ReleaseForRetryAsync"/>, which the drain calls only after a send that failed
-/// before anything left the process. A run that dies between the send and the mark leaves a claimed row;
-/// <see cref="ReapAsync"/> marks it <c>interrupted</c> and it is never claimed again, because a second send could page
-/// someone twice for one fire.</para>
+/// <para><b>Delivery is at most once.</b> A row moves <c>pending</c> to <c>claimed</c> to one terminal status. Only two
+/// calls move a claimed row back: <see cref="ReleaseForRetryAsync"/>, which the drain calls only when it knows nothing
+/// left the process (a state write that timed out on a lock, a PagerDuty resolve, which a repeat leaves unchanged), and
+/// <see cref="ReleaseUnattemptedAsync"/>, for rows a stopping pass never attempted. A run that dies between a send and the
+/// mark leaves a claimed row; the reap, which every pass runs, marks it <c>delivered</c> or <c>interrupted</c> once its
+/// claim is old enough, and it is never claimed again, because a second send could page someone twice for one fire.</para>
 ///
 /// <para><b>Order.</b> A claim takes at most one row per <c>(source, key)</c>, and only when no earlier row of that key is
 /// still pending or claimed, so a fire and the clear that follows it reach the drain in order. The claim runs under a
@@ -148,7 +162,7 @@ WHERE pending_id = $1
   AND status = 'claimed'";
 
     /// <summary>
-    /// Returns a claimed row to the queue after a send that failed before anything left the process. $1 pending_id,
+    /// Returns a claimed row to the queue after handling that sent nothing. $1 pending_id,
     /// $2 next attempt time, $3 reason. Counts the attempt.
     /// </summary>
     public const string ReleaseForRetrySql = @"
@@ -214,6 +228,37 @@ WITH reaped AS (
     RETURNING p.status
 )
 SELECT status, count(*)::int FROM reaped GROUP BY status";
+
+    /// <summary>
+    /// Keeps this run's claims young while a pass works through its batch (#5654). $1 the pending ids, $2 the service
+    /// instance. Returns the ids that are still claimed by this instance, so a row the reap took meanwhile is not sent.
+    /// </summary>
+    public const string RestampClaimsSql = @"
+UPDATE config.external_alert_pending
+SET claimed_at = now()
+WHERE pending_id = ANY($1)
+  AND status = 'claimed'
+  AND service_instance = $2
+RETURNING pending_id";
+
+    /// <summary>
+    /// Gives claimed rows that were never attempted back to the queue, with no attempt counted (#5654). $1 the pending ids,
+    /// $2 the service instance.
+    /// </summary>
+    public const string ReleaseUnattemptedSql = @"
+UPDATE config.external_alert_pending
+SET status = 'pending',
+    claimed_at = NULL,
+    service_instance = NULL
+WHERE pending_id = ANY($1)
+  AND status = 'claimed'
+  AND service_instance = $2";
+
+    /// <summary>How long a state write waits for a row lock before it gives up (<c>SET LOCAL lock_timeout</c>).</summary>
+    public const int StateWriteLockTimeoutMilliseconds = 2_000;
+
+    /// <summary>Runs first in a state write's transaction. The value is a constant, so nothing is concatenated from input.</summary>
+    public const string StateWriteLockTimeoutSql = "SET LOCAL lock_timeout = '2000ms'";
 
     /// <summary>Reads one subject's firing state. $1 source_id, $2 alert_key, $3 server_label (the normalized submitted name).</summary>
     public const string GetStateSql = @"
@@ -350,8 +395,9 @@ RETURNING fired_severity";
     }
 
     /// <summary>
-    /// Puts a claimed row back in the queue to be tried again at <paramref name="nextAttemptAtUtc"/>. Only for a send that
-    /// failed before anything left the process; expiry still ends the row if the retries run past its deadline.
+    /// Puts a claimed row back in the queue to be tried again at <paramref name="nextAttemptAtUtc"/>, and counts the attempt.
+    /// Only for a row whose handling is known to have sent nothing, or whose send a repeat leaves unchanged; expiry still ends
+    /// the row if the retries run past its deadline.
     /// </summary>
     public async Task<bool> ReleaseForRetryAsync(
         long pendingId, DateTime nextAttemptAtUtc, string? reason, CancellationToken cancellationToken = default)
@@ -364,6 +410,57 @@ RETURNING fired_severity";
         return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
 
+    /// <summary>
+    /// Sets <c>claimed_at</c> to now for the given rows this instance still holds, and returns the ids that are still claimed
+    /// by it. The drain calls it before each row's send, with that row and the rest of its batch, so a long pass keeps every
+    /// claim younger than the reap age. A row missing from the answer was taken by the reap and must not be sent.
+    /// </summary>
+    public async Task<IReadOnlySet<long>> RestampClaimsAsync(
+        string serviceInstance, IReadOnlyCollection<long> pendingIds, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(serviceInstance);
+        ArgumentNullException.ThrowIfNull(pendingIds);
+        var live = new HashSet<long>();
+        if (pendingIds.Count == 0)
+        {
+            return live;
+        }
+
+        await using var command = _dataSource.CreateCommand(RestampClaimsSql);
+        command.CommandTimeout = _commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<long[]> { TypedValue = pendingIds.ToArray() });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serviceInstance });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            live.Add(reader.GetInt64(0));
+        }
+
+        return live;
+    }
+
+    /// <summary>
+    /// Gives the claimed rows this instance never attempted back to <c>pending</c>, with no attempt counted and the next
+    /// attempt time untouched. For a pass that stops (the service is stopping, or the store failed) with rows still in its
+    /// batch. Returns how many went back. A row the reap already took, or another instance holds, is left alone.
+    /// </summary>
+    public async Task<int> ReleaseUnattemptedAsync(
+        string serviceInstance, IReadOnlyCollection<long> pendingIds, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(serviceInstance);
+        ArgumentNullException.ThrowIfNull(pendingIds);
+        if (pendingIds.Count == 0)
+        {
+            return 0;
+        }
+
+        await using var command = _dataSource.CreateCommand(ReleaseUnattemptedSql);
+        command.CommandTimeout = _commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<long[]> { TypedValue = pendingIds.ToArray() });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serviceInstance });
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     /// <summary>Marks every pending row past its deadline expired. Returns how many.</summary>
     public async Task<int> ExpireAsync(CancellationToken cancellationToken = default)
     {
@@ -373,9 +470,8 @@ RETURNING fired_severity";
     }
 
     /// <summary>
-    /// Marks every row that has been claimed for at least <paramref name="claimedFor"/> interrupted. The drain calls it when
-    /// the service starts, before its first claim, with the age after which a claim cannot belong to a live run, and again
-    /// on later passes. Returns how many. Those rows are not sent again.
+    /// Marks every row that has been claimed for at least <paramref name="claimedFor"/> interrupted. Returns how many. Those
+    /// rows are not sent again. The drain's own reap is <see cref="ReapWithHistoryAsync"/>.
     /// </summary>
     public async Task<int> ReapAsync(TimeSpan claimedFor, CancellationToken cancellationToken = default)
     {
@@ -454,16 +550,21 @@ RETURNING fired_severity";
         ArgumentException.ThrowIfNullOrEmpty(severity);
         ArgumentNullException.ThrowIfNull(serverKey);
         ArgumentNullException.ThrowIfNull(serverName);
-        await using var command = _dataSource.CreateCommand(RecordFireSql);
-        command.CommandTimeout = _commandTimeoutSeconds;
-        BindSubject(command, sourceId, alertKey, serverLabel);
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serverKey });
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serverName });
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = severity });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        await reader.ReadAsync(cancellationToken);
-        return (reader.GetBoolean(0), reader.IsDBNull(1) ? null : reader.GetString(1));
+        return await InStateWriteAsync(
+            async (connection, transaction) =>
+            {
+                await using var command = new NpgsqlCommand(RecordFireSql, connection, transaction);
+                command.CommandTimeout = _commandTimeoutSeconds;
+                BindSubject(command, sourceId, alertKey, serverLabel);
+                command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+                command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serverKey });
+                command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serverName });
+                command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = severity });
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                await reader.ReadAsync(cancellationToken);
+                return (reader.GetBoolean(0), reader.IsDBNull(1) ? null : reader.GetString(1));
+            },
+            cancellationToken);
     }
 
     /// <summary>
@@ -473,11 +574,46 @@ RETURNING fired_severity";
     public async Task<string?> RecordClearAsync(
         int sourceId, string alertKey, string serverLabel, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(RecordClearSql);
-        command.CommandTimeout = _commandTimeoutSeconds;
-        BindSubject(command, sourceId, alertKey, serverLabel);
-        var severity = await command.ExecuteScalarAsync(cancellationToken);
-        return severity is string text ? text : null;
+        return await InStateWriteAsync(
+            async (connection, transaction) =>
+            {
+                await using var command = new NpgsqlCommand(RecordClearSql, connection, transaction);
+                command.CommandTimeout = _commandTimeoutSeconds;
+                BindSubject(command, sourceId, alertKey, serverLabel);
+                var severity = await command.ExecuteScalarAsync(cancellationToken);
+                return severity is string text ? text : null;
+            },
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Runs one state write in a transaction that waits at most <see cref="StateWriteLockTimeoutMilliseconds"/> for a lock.
+    /// The state table's foreign key to the source registry takes a share lock on the source's row, and a session that holds
+    /// that row (a submit left open in a transaction) would otherwise stall every write until the command deadline. A wait
+    /// that runs out surfaces as <see cref="ExternalAlertStateLockTimeoutException"/>: nothing was written.
+    /// </summary>
+    private async Task<T> InStateWriteAsync<T>(
+        Func<NpgsqlConnection, NpgsqlTransaction, Task<T>> write, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            await using (var timeout = new NpgsqlCommand(StateWriteLockTimeoutSql, connection, transaction))
+            {
+                timeout.CommandTimeout = _commandTimeoutSeconds;
+                await timeout.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var result = await write(connection, transaction);
+            await transaction.CommitAsync(cancellationToken);
+            return result;
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+        {
+            throw new ExternalAlertStateLockTimeoutException(
+                "A state write waited more than " + StateWriteLockTimeoutMilliseconds + " ms for a lock and gave up.", ex);
+        }
     }
 
     private static void BindSubject(NpgsqlCommand command, int sourceId, string alertKey, string serverLabel)

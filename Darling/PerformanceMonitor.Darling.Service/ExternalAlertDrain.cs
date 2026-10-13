@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -31,10 +33,14 @@ public sealed record ExternalAlertDrainResult(
 /// cooldown, statement filter and history row), and a resolution row the way Darling's own clears write one.
 ///
 /// <para><b>Once only.</b> A row is claimed (<c>claimed</c>), handled exactly once, and then marked. The send happens
-/// before the mark, so a run that dies between them leaves a claimed row; the reap at the next start marks it
+/// before the mark, so a run that dies between them leaves a claimed row; the reap, which every pass runs, marks it
 /// <c>delivered</c> when the alert history holds the row the deliverer writes after a send (the row carries the pending id in
-/// its <c>context_json</c>), else <c>interrupted</c>. A claimed row is never sent a second time. The one return to
-/// <c>pending</c> is a send that every channel refused, which the deliverer reports and has not delivered anywhere.</para>
+/// its <c>context_json</c>), else <c>interrupted</c>, once its claim is older than <see cref="ReapClaimsOlderThan"/>. A pass
+/// restamps its claims before each row, so the age is never reached by a live pass. A claimed row is never sent a second
+/// time. A row goes back to <c>pending</c> only when nothing was sent for it: a state write that timed out on a lock, a
+/// PagerDuty resolve that failed (a repeat resolve leaves the incident as it is), and the rows of a stopping pass that were
+/// never attempted. A fire that every channel refused is marked <c>failed</c>, because the deliverer's answer cannot show
+/// that no request left the process (a timeout after the request was sent reads the same as a refused connection).</para>
 ///
 /// <para><b>Order.</b> The store's claim hands out at most one row per source and key per call, and none while an earlier
 /// row of the key is still pending or claimed, so a fire and its clear are handled in the order they were submitted. A fire
@@ -53,7 +59,8 @@ public sealed class ExternalAlertDrain
     /// <summary>The longest wait between two attempts of one row.</summary>
     public static readonly TimeSpan RetryDelayCap = TimeSpan.FromMinutes(5);
 
-    /// <summary>How old a claim must be for the start-of-run reap to take it. Far longer than any live pass holds one.</summary>
+    /// <summary>How old a claim must be for the reap to take it. A pass restamps its claims before each row, so a live run's
+    /// claims stay far younger than this.</summary>
     public static readonly TimeSpan ReapClaimsOlderThan = TimeSpan.FromMinutes(5);
 
     private const int MaxTitleLength = 200;
@@ -110,25 +117,23 @@ public sealed class ExternalAlertDrain
     public static string ResolvedMetricNameFor(string source, string key) => MetricNameFor(source, key) + " Resolved";
 
     /// <summary>
-    /// One 15-second pass: expire what nobody took in time, on the first pass of a run take back what a dead run left
-    /// claimed, then claim a batch and handle each row. Expiry always runs, so rows left while alerts were off or the
-    /// service was paused still age out and are counted; the claim and the sends run only while the master switch is on.
+    /// One pass, run on the drain's own loop every 15 seconds: expire what nobody took in time, reap what a stopped run left
+    /// claimed (every pass, so a row stranded in a live run is found too), then claim a batch and handle each row. Expiry and
+    /// the reap run while the master switch is off, so rows left while alerts were off still age out and are counted; the
+    /// claim and the sends run only while it is on. Before each row's send the pass restamps the claims of that row and of
+    /// those after it. A pass that stops with rows unattempted (the service is stopping, or the store failed) gives them back
+    /// to <c>pending</c> with no attempt counted.
     /// </summary>
-    public async Task<ExternalAlertDrainResult> RunPassAsync(bool reapFirst, CancellationToken cancellationToken)
+    public async Task<ExternalAlertDrainResult> RunPassAsync(CancellationToken cancellationToken)
     {
         var expired = await _store.ExpireAsync(cancellationToken);
 
-        var reapedDelivered = 0;
-        var reapedInterrupted = 0;
-        if (reapFirst)
+        var (reapedDelivered, reapedInterrupted) = await _store.ReapWithHistoryAsync(ReapClaimsOlderThan, cancellationToken);
+        if (reapedDelivered + reapedInterrupted > 0)
         {
-            (reapedDelivered, reapedInterrupted) = await _store.ReapWithHistoryAsync(ReapClaimsOlderThan, cancellationToken);
-            if (reapedDelivered + reapedInterrupted > 0)
-            {
-                _logger.LogWarning(
-                    "External alerts: {Delivered} claimed row(s) a stopped run left were found in the alert history and marked delivered; {Interrupted} had no history row and were marked interrupted. None is sent again.",
-                    reapedDelivered, reapedInterrupted);
-            }
+            _logger.LogWarning(
+                "External alerts: {Delivered} claimed row(s) a stopped run left were found in the alert history and marked delivered; {Interrupted} had no history row and were marked interrupted. None is sent again.",
+                reapedDelivered, reapedInterrupted);
         }
 
         if (!_alertsEnabled())
@@ -139,44 +144,97 @@ public sealed class ExternalAlertDrain
         var rows = await _store.ClaimAsync(_serviceInstance, ExternalAlertStore.DefaultClaimBatch, cancellationToken);
         int delivered = 0, muted = 0, noChannel = 0, retried = 0, failed = 0, ignored = 0, interrupted = 0;
 
-        foreach (var row in rows)
+        /* Rows before this index were attempted (or were taken by the reap). A pass that stops gives back the rest. */
+        var firstUnattempted = 0;
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            ExternalAlertOutcome? outcome;
-            try
+            for (var index = 0; index < rows.Count; index++)
             {
-                outcome = string.Equals(row.Kind, "clear", StringComparison.Ordinal)
-                    ? await HandleClearAsync(row, cancellationToken)
-                    : await HandleFireAsync(row, cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                /* Something threw outside the deliverer's own isolation (the state or the mark). Whether anything left the
-                   process is unknown, so the row is closed as interrupted and never sent again. */
-                _logger.LogError(ex, "External alert {PendingId} ({Source}/{Key}) could not be handled", row.PendingId, row.SourceName, row.AlertKey);
-                await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Interrupted, "the drain failed while handling it: " + ex.GetType().Name);
-                outcome = ExternalAlertOutcome.Interrupted;
-            }
+                var row = rows[index];
+                cancellationToken.ThrowIfCancellationRequested();
 
-            switch (outcome)
-            {
-                case null: retried++; break;
-                case ExternalAlertOutcome.Delivered: delivered++; break;
-                case ExternalAlertOutcome.Muted: muted++; break;
-                case ExternalAlertOutcome.NoChannel: noChannel++; break;
-                case ExternalAlertOutcome.Failed: failed++; break;
-                case ExternalAlertOutcome.Ignored: ignored++; break;
-                case ExternalAlertOutcome.Interrupted: interrupted++; break;
-                default: break;
+                var stillClaimed = await _store.RestampClaimsAsync(
+                    _serviceInstance, rows.Skip(index).Select(r => r.PendingId).ToArray(), cancellationToken);
+                firstUnattempted = index + 1;
+                if (!stillClaimed.Contains(row.PendingId))
+                {
+                    _logger.LogWarning("External alert {PendingId} was no longer claimed by this run before its send; it is left alone", row.PendingId);
+                    continue;
+                }
+
+                ExternalAlertOutcome? outcome;
+                try
+                {
+                    outcome = string.Equals(row.Kind, "clear", StringComparison.Ordinal)
+                        ? await HandleClearAsync(row, cancellationToken)
+                        : await HandleFireAsync(row, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (ExternalAlertStateLockTimeoutException ex)
+                {
+                    /* The state write comes before the send, so nothing went out: the row goes back for a later attempt. */
+                    _logger.LogWarning(ex, "External alert {PendingId} ({Source}/{Key}) waited on a lock held by another session", row.PendingId, row.SourceName, row.AlertKey);
+                    outcome = await RetryOrFailAsync(row, "a state write waited on a lock held by another session", cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    /* Something threw outside the deliverer's own isolation (the state or the mark). Whether anything left the
+                       process is unknown, so the row is closed as interrupted and never sent again. */
+                    _logger.LogError(ex, "External alert {PendingId} ({Source}/{Key}) could not be handled", row.PendingId, row.SourceName, row.AlertKey);
+                    await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Interrupted, "the drain failed while handling it: " + ex.GetType().Name);
+                    outcome = ExternalAlertOutcome.Interrupted;
+                }
+
+                switch (outcome)
+                {
+                    case null: retried++; break;
+                    case ExternalAlertOutcome.Delivered: delivered++; break;
+                    case ExternalAlertOutcome.Muted: muted++; break;
+                    case ExternalAlertOutcome.NoChannel: noChannel++; break;
+                    case ExternalAlertOutcome.Failed: failed++; break;
+                    case ExternalAlertOutcome.Ignored: ignored++; break;
+                    case ExternalAlertOutcome.Interrupted: interrupted++; break;
+                    default: break;
+                }
             }
+        }
+        catch (Exception)
+        {
+            await ReleaseUnattemptedAsync(rows, firstUnattempted);
+            throw;
         }
 
         return new ExternalAlertDrainResult(
             expired, reapedDelivered, reapedInterrupted, rows.Count, delivered, muted, noChannel, retried, failed, ignored, interrupted);
+    }
+
+    /// <summary>The longest the release of a stopping pass's rows may take. It runs with no cancellation token, because
+    /// the token is the reason the pass is stopping.</summary>
+    public static readonly TimeSpan ReleaseOnStopTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>Gives the rows from <paramref name="firstUnattempted"/> on back to the queue. A failure is logged and left
+    /// to the reap: it must not replace the exception that stopped the pass.</summary>
+    private async Task ReleaseUnattemptedAsync(IReadOnlyList<ExternalAlertPendingRow> rows, int firstUnattempted)
+    {
+        if (firstUnattempted >= rows.Count)
+        {
+            return;
+        }
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(ReleaseOnStopTimeout);
+            var ids = rows.Skip(firstUnattempted).Select(r => r.PendingId).ToArray();
+            var released = await _store.ReleaseUnattemptedAsync(_serviceInstance, ids, timeout.Token);
+            _logger.LogInformation("External alerts: {Released} claimed row(s) this pass had not reached went back to pending", released);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "External alerts: the rows this pass had not reached could not be given back; the reap takes them once their claim is old enough");
+        }
     }
 
     private async Task<ExternalAlertOutcome?> HandleFireAsync(ExternalAlertPendingRow row, CancellationToken cancellationToken)
@@ -231,7 +289,12 @@ public sealed class ExternalAlertDrain
 
         if (FailedSendBackoff.EveryChannelFailed(delivery))
         {
-            return await RetryOrFailAsync(row, "every channel failed; the alert history row has the error", cancellationToken);
+            /* The answer cannot show that no request left the process: a webhook that timed out, or answered with an error,
+               or an SMTP session that broke, may already have reached its destination. A repeat could post the alert twice,
+               so the row is closed. */
+            await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Failed,
+                Trim("every channel failed, and a request may have reached its destination, so it is not sent again; the alert history row has the error"));
+            return ExternalAlertOutcome.Failed;
         }
 
         if (delivery.Sent)
@@ -305,7 +368,8 @@ public sealed class ExternalAlertDrain
         return ExternalAlertOutcome.Delivered;
     }
 
-    /// <summary>A send every channel refused: wait 1, 2, 4 minutes and try again, then give up. Null means the row went back to the queue.</summary>
+    /// <summary>A row whose handling sent nothing (or whose send a repeat leaves unchanged): wait 1, 2, 4 minutes and try
+    /// again, then give up as failed. Null means the row went back to the queue.</summary>
     private async Task<ExternalAlertOutcome?> RetryOrFailAsync(ExternalAlertPendingRow row, string reason, CancellationToken cancellationToken)
     {
         var attempt = row.Attempts + 1;

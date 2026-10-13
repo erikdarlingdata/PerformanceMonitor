@@ -31,7 +31,7 @@ namespace Darling.Tests;
 /// <summary>
 /// The external alert drain against a real store with a fake deliverer that writes the history row the way the real one
 /// does, after its send (#5654): a fire is sent once and leaves one history row, a fire and its clear arrive in order, a muted
-/// fire is recorded as muted and sends nothing, a failed send retries and then fails, an unregistered server lands in bucket 0,
+/// fire is recorded as muted and sends nothing, a fire every channel refused is marked failed and not sent again, an unregistered server lands in bucket 0,
 /// a restart finds a claimed row delivered when the history has its row and interrupted when not (neither is sent again), and
 /// the PagerDuty resolve is asked for only on a clear of a firing key.
 /// </summary>
@@ -45,8 +45,8 @@ public sealed class ExternalAlertDrainLiveTests
         await WithDrainAsync(async rig =>
         {
             var id = await rig.SubmitAsync("fire", "disk", server: "SQL01", value: 91.5);
-            var pass = await rig.Drain.RunPassAsync(reapFirst: false, rig.Ct);
-            var again = await rig.Drain.RunPassAsync(reapFirst: false, rig.Ct);
+            var pass = await rig.Drain.RunPassAsync(rig.Ct);
+            var again = await rig.Drain.RunPassAsync(rig.Ct);
 
             Assert.Equal(1, pass.Delivered);
             Assert.Equal(0, again.Claimed);
@@ -68,10 +68,10 @@ public sealed class ExternalAlertDrainLiveTests
             var fire = await rig.SubmitAsync("fire", "cpu", server: "SQL01");
             var clear = await rig.SubmitAsync("clear", "cpu", server: "SQL01");
 
-            var first = await rig.Drain.RunPassAsync(false, rig.Ct);
+            var first = await rig.Drain.RunPassAsync(rig.Ct);
             Assert.Equal(1, first.Claimed);
             Assert.Equal("pending", await rig.StatusAsync(clear));
-            var second = await rig.Drain.RunPassAsync(false, rig.Ct);
+            var second = await rig.Drain.RunPassAsync(rig.Ct);
             Assert.Equal(1, second.Claimed);
 
             Assert.Equal("delivered", await rig.StatusAsync(fire));
@@ -173,7 +173,7 @@ public sealed class ExternalAlertDrainLiveTests
         await WithDrainAsync(async rig =>
         {
             var clear = await rig.SubmitAsync("clear", "never-fired");
-            await rig.Drain.RunPassAsync(false, rig.Ct);
+            await rig.Drain.RunPassAsync(rig.Ct);
             Assert.Equal("ignored", await rig.StatusAsync(clear));
             Assert.Empty(rig.PagerDutyResolves);
             Assert.Equal("0", await rig.ScalarAsync("SELECT count(*) FROM config.config_alert_log"));
@@ -187,7 +187,7 @@ public sealed class ExternalAlertDrainLiveTests
         {
             rig.Muted = true;
             var id = await rig.SubmitAsync("fire", "disk", server: "SQL01");
-            var pass = await rig.Drain.RunPassAsync(false, rig.Ct);
+            var pass = await rig.Drain.RunPassAsync(rig.Ct);
 
             Assert.Equal(1, pass.Muted);
             Assert.Equal("muted", await rig.StatusAsync(id));
@@ -197,33 +197,25 @@ public sealed class ExternalAlertDrainLiveTests
     }
 
     [Fact]
-    public async Task AFailedSend_RetriesOnABackoff_ThenIsMarkedFailed()
+    public async Task AFireEveryChannelFailed_IsMarkedFailedAtOnce_AndNotSentAgain()
     {
+        /* #5654: a webhook that timed out after its request was sent, or answered with an error, reads the same as a
+           refused connection, so a failed fire is never put back in the queue. */
         await WithDrainAsync(async rig =>
         {
             rig.Answer = AlertDelivery.FromLegacyStoredColumns(false, "failed", "boom");
             var id = await rig.SubmitAsync("fire", "disk");
-            var attempts = 0;
-            for (; attempts < ExternalAlertDrain.MaxSendAttempts; attempts++)
-            {
-                var pass = await rig.Drain.RunPassAsync(false, rig.Ct);
-                Assert.Equal(1, pass.Claimed);
-                if (attempts < ExternalAlertDrain.MaxSendAttempts - 1)
-                {
-                    Assert.Equal(1, pass.Retried);
-                    Assert.Equal("pending", await rig.StatusAsync(id));
-                    /* Not due yet: the next pass takes nothing until the wait is over. */
-                    Assert.Equal(0, (await rig.Drain.RunPassAsync(false, rig.Ct)).Claimed);
-                    await rig.ExecAsync($"UPDATE config.external_alert_pending SET next_attempt_at = now() - interval '1 second' WHERE pending_id = {id}");
-                }
-                else
-                {
-                    Assert.Equal(1, pass.Failed);
-                }
-            }
 
+            var pass = await rig.Drain.RunPassAsync(rig.Ct);
+            var again = await rig.Drain.RunPassAsync(rig.Ct);
+
+            Assert.Equal(1, pass.Claimed);
+            Assert.Equal(1, pass.Failed);
+            Assert.Equal(0, pass.Retried);
+            Assert.Equal(0, again.Claimed);
             Assert.Equal("failed", await rig.StatusAsync(id));
-            Assert.Equal(ExternalAlertDrain.MaxSendAttempts, rig.Sent.Count);
+            Assert.Equal("0", await rig.ScalarAsync($"SELECT attempts::text FROM config.external_alert_pending WHERE pending_id = {id}"));
+            Assert.Single(rig.Sent);
         });
     }
 
@@ -234,7 +226,7 @@ public sealed class ExternalAlertDrainLiveTests
         {
             await rig.SubmitAsync("fire", "a", server: "NOT-MONITORED");
             await rig.SubmitAsync("fire", "b", server: "sql01");
-            await rig.Drain.RunPassAsync(false, rig.Ct);
+            await rig.Drain.RunPassAsync(rig.Ct);
 
             Assert.Equal("0", await rig.ScalarAsync("SELECT server_id::text FROM config.config_alert_log WHERE metric_name = 'External:nagios:a'"));
             Assert.Equal("NOT-MONITORED", await rig.ScalarAsync("SELECT server_name FROM config.config_alert_log WHERE metric_name = 'External:nagios:a'"));
@@ -257,7 +249,7 @@ public sealed class ExternalAlertDrainLiveTests
                 "7", "SQL01", "External:nagios:logged", "1", "", 1, null,
                 AlertDelivery.FromLegacyStoredColumns(true, "webhook", null), false, "x", loggedContext));
 
-            var pass = await rig.Drain.RunPassAsync(reapFirst: true, rig.Ct);
+            var pass = await rig.Drain.RunPassAsync(rig.Ct);
 
             Assert.Equal(1, pass.ReapedDelivered);
             Assert.Equal(1, pass.ReapedInterrupted);
@@ -278,7 +270,7 @@ public sealed class ExternalAlertDrainLiveTests
             var id = await rig.SubmitAsync("fire", "disk");
             await rig.ExecAsync($"UPDATE config.external_alert_pending SET expires_at = now() - interval '1 minute' WHERE pending_id = {id}");
             rig.Enabled = false;
-            var pass = await rig.Drain.RunPassAsync(false, rig.Ct);
+            var pass = await rig.Drain.RunPassAsync(rig.Ct);
             Assert.Equal(1, pass.Expired);
             Assert.Equal(0, pass.Claimed);
             Assert.Equal("expired", await rig.StatusAsync(id));
