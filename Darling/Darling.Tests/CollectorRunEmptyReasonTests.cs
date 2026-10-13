@@ -136,6 +136,10 @@ public sealed class CollectorRunEmptyReasonTests
         Assert.Contains("status = 'SUCCESS'", DarlingCollectorRunFactsReader.LatestSuccessSql, StringComparison.Ordinal);
         Assert.Contains("status = 'SUCCESS'", DarlingCollectorRunFactsReader.RunsInWindowSql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $3", DarlingCollectorRunFactsReader.LatestSuccessSql, StringComparison.Ordinal);
+        /* #5633 review: an as_of read bounds the newest run at the anchor, the same text otherwise. */
+        Assert.Contains("collection_time <= $4", DarlingCollectorRunFactsReader.LatestSuccessAtOrBeforeSql, StringComparison.Ordinal);
+        Assert.Contains("status = 'SUCCESS'", DarlingCollectorRunFactsReader.LatestSuccessAtOrBeforeSql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $3", DarlingCollectorRunFactsReader.LatestSuccessAtOrBeforeSql, StringComparison.Ordinal);
     }
 
     [Theory]

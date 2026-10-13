@@ -220,7 +220,7 @@ public sealed class McpQueryTools
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats")
                     ?? EmptyProcedureStatsStatus(
-                        await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "procedure_stats", hours_back, windowEnd),
+                        await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "procedure_stats", hours_back, asOfUtc: windowEnd),
                         hours_back);
             }
 

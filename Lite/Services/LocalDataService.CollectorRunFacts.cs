@@ -27,6 +27,19 @@ AND   status = 'SUCCESS'
 ORDER BY collection_time DESC
 LIMIT $3";
 
+    /// <summary><see cref="CollectorLatestSuccessSql"/> for a historical read (#5633 review): only runs AT OR BEFORE <c>$4</c>, the read's
+    /// as_of, so an empty page answers with the collector's state as of the anchor, not as of now. Twin of
+    /// <c>DarlingCollectorRunFactsReader.LatestSuccessAtOrBeforeSql</c>.</summary>
+    public const string CollectorLatestSuccessAtOrBeforeSql = @"
+SELECT collection_time, rows_collected
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = $2
+AND   status = 'SUCCESS'
+AND   collection_time <= $4
+ORDER BY collection_time DESC
+LIMIT $3";
+
     /// <summary>
     /// The successful trace_flags runs that stored ZERO rows (#5633 item 19), the empty snapshots the trace-flag change diff needs: a run
     /// that finds no flag stores nothing, so without these the last flag being turned off never shows. Bounded like the change read: the
@@ -107,7 +120,8 @@ AND   collection_time <= $4";
     /// #5633 items 3 and 19: what <c>collection_log</c> says about one collector (the Darling twin is
     /// <c>DarlingCollectorRunFactsReader</c>; the words are shared in <see cref="CollectorRunFacts"/>). Pass
     /// <paramref name="hoursBack"/> (with <paramref name="asOfUtc"/>) to also count the runs inside the window; leave it
-    /// null for a read with no window question. Only SUCCESS rows count. Asked only on an empty path, and a failed read
+    /// null for a read with no window question. A non-null <paramref name="asOfUtc"/> also bounds the newest-run read at the anchor
+    /// (<see cref="CollectorLatestSuccessAtOrBeforeSql"/>), with or without a window. Only SUCCESS rows count. Asked only on an empty path, and a failed read
     /// propagates to the tool's own catch rather than becoming a quiet "no runs".
     /// </summary>
     public async Task<CollectorRunFacts> GetCollectorRunFactsAsync(int serverId, string collectorName, int? hoursBack = null, DateTime? asOfUtc = null)
@@ -120,10 +134,15 @@ AND   collection_time <= $4";
 
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = CollectorLatestSuccessSql;
+            command.CommandText = asOfUtc is null ? CollectorLatestSuccessSql : CollectorLatestSuccessAtOrBeforeSql;
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
             command.Parameters.Add(new DuckDBParameter { Value = collectorName });
             command.Parameters.Add(new DuckDBParameter { Value = CollectorRunFacts.RunsCap });
+            if (asOfUtc is { } ceiling)
+            {
+                command.Parameters.Add(new DuckDBParameter { Value = ceiling });
+            }
+
             using var reader = await command.ExecuteReaderAsync();
             while (await reader.ReadAsync())
             {

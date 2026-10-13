@@ -154,6 +154,39 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)";
         Assert.Contains("at least two snapshots", Field(changes, "message"), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task TraceFlagChanges_AsOfBeforeTheOnlyRun_AnswersAsOfThen_NotAsOfNow()
+    {
+        /* #5633 review: the empty reason came from the newest successful run EVER, so an as_of call before the collector had run said
+           "No trace flags are enabled" on the strength of a run that had not happened yet. */
+        await LogRunAsync("trace_flags", DateTime.UtcNow.AddMinutes(-20), 0);
+        var service = new LocalDataService(_duckDb);
+
+        var asOfThen = await McpConfigHistoryTools.GetTraceFlagChanges(service, _serverManager, ServerName, as_of: DateTime.UtcNow.AddHours(-3).ToString("o"));
+        var now = await McpConfigHistoryTools.GetTraceFlagChanges(service, _serverManager, ServerName);
+
+        Assert.Contains("at least two snapshots", Field(asOfThen, "message"), StringComparison.Ordinal);
+        Assert.Contains("No trace flags are enabled as of", Field(now, "message"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CollectorRunFacts_WithAnAnchor_IgnoreRunsAfterIt()
+    {
+        var anchor = DateTime.UtcNow.AddHours(-3);
+        await LogRunAsync("procedure_stats", anchor.AddMinutes(-30), 2);
+        await LogRunAsync("procedure_stats", anchor.AddMinutes(-10), 0);
+        await LogRunAsync("procedure_stats", DateTime.UtcNow.AddMinutes(-5), 9);
+        var service = new LocalDataService(_duckDb);
+
+        var anchored = await service.GetCollectorRunFactsAsync(_serverId, "procedure_stats", asOfUtc: anchor);
+        var live = await service.GetCollectorRunFactsAsync(_serverId, "procedure_stats");
+
+        Assert.Equal(2, anchored.SuccessfulRuns);
+        Assert.Equal(0, anchored.LastSuccessRows);
+        Assert.True(anchored.LastSuccessUtc < DateTime.UtcNow.AddHours(-2));
+        Assert.Equal(9, live.LastSuccessRows);
+    }
+
     [Theory]
     [InlineData("min server memory (MB)", 0, 16, true)]
     [InlineData("min server memory (MB)", 0, 0, true)]

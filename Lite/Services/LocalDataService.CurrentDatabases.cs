@@ -25,6 +25,13 @@ public partial class LocalDataService
     internal static bool IsDroppedDatabase(IReadOnlyList<string>? current, string? databaseName)
         => current is not null && databaseName is not null && !current.Contains(databaseName, StringComparer.Ordinal);
 
+    /// <summary>The shared backfill SQL names <c>database_states</c> (the hot table) after each FROM; these reads need the archive
+    /// union, so the name becomes <c>v_database_states</c> (#5633 item 4). The match is the name and the WHERE after it, not the
+    /// FROM, so this is no bare read: the text that runs always reads the view, which
+    /// <c>ArchivableTableBareReadSweepTests</c> would otherwise count as two bare reads here.</summary>
+    private static string ThroughArchiveView(string sharedSql)
+        => sharedSql.Replace("database_states WHERE", "v_database_states WHERE", StringComparison.Ordinal);
+
     /// <summary>
     /// #5633 item 4: the databases the server's newest <c>database_states</c> snapshot names, on the same SQL text as the
     /// Query Store backfill's gone-database check (<see cref="QueryStoreBackfillState.NewestSnapshotSql"/>), read from
@@ -39,8 +46,7 @@ public partial class LocalDataService
         {
             using var connection = await OpenConnectionAsync();
             using var command = connection.CreateCommand();
-            command.CommandText = (asOfUtc is null ? QueryStoreBackfillState.NewestSnapshotSql : QueryStoreBackfillState.NewestSnapshotAtOrBeforeSql)
-                .Replace("FROM database_states", "FROM v_database_states", StringComparison.Ordinal);
+            command.CommandText = ThroughArchiveView(asOfUtc is null ? QueryStoreBackfillState.NewestSnapshotSql : QueryStoreBackfillState.NewestSnapshotAtOrBeforeSql);
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = (asOfUtc ?? nowUtc ?? DateTime.UtcNow) - CurrentDatabasesHorizon });
             if (asOfUtc is { } ceiling)
@@ -118,8 +124,7 @@ public partial class LocalDataService
             var anchor = asOfUtc ?? nowUtc ?? DateTime.UtcNow;
             using var connection = await OpenConnectionAsync();
             using var command = connection.CreateCommand();
-            command.CommandText = (asOfUtc is null ? QueryStoreBackfillState.LastSeenPerDatabaseSql : QueryStoreBackfillState.LastSeenPerDatabaseAtOrBeforeSql)
-                .Replace("FROM database_states", "FROM v_database_states", StringComparison.Ordinal);
+            command.CommandText = ThroughArchiveView(asOfUtc is null ? QueryStoreBackfillState.LastSeenPerDatabaseSql : QueryStoreBackfillState.LastSeenPerDatabaseAtOrBeforeSql);
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DroppedDatabasesFloor(anchor, windowStartUtc) });
             if (asOfUtc is { } ceiling)

@@ -39,6 +39,20 @@ internal static class DarlingCollectorRunFactsReader
         LIMIT $3
         """;
 
+    /// <summary><see cref="LatestSuccessSql"/> for a historical read (#5633 review): only runs AT OR BEFORE $4 (naive UTC), the read's
+    /// anchor, so an empty page answers with the collector's state as of the anchor, not as of now. Twin of Lite's
+    /// <c>CollectorLatestSuccessAtOrBeforeSql</c>.</summary>
+    public const string LatestSuccessAtOrBeforeSql = """
+        SELECT collection_time, rows_collected
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collector_name = $2
+        AND   status = 'SUCCESS'
+        AND   collection_time <= $4
+        ORDER BY collection_time DESC
+        LIMIT $3
+        """;
+
     /// <summary>Successful runs of one collector inside a window. $1 server_id, $2 collector_name, $3/$4 window (naive UTC).</summary>
     public const string RunsInWindowSql = """
         SELECT COUNT(*)
@@ -102,7 +116,8 @@ internal static class DarlingCollectorRunFactsReader
     }
 
     /// <summary>The run facts for <paramref name="collectorName"/>. Pass a window to also count the runs inside it; pass
-    /// null for a read with no window question (the latest-snapshot trace-flag reads).</summary>
+    /// null for a read with no window question (the latest-snapshot trace-flag reads). A non-null <paramref name="windowEndUtc"/>
+    /// (the read's anchor) also bounds the newest-run read, with or without a start (<see cref="LatestSuccessAtOrBeforeSql"/>).</summary>
     public static async Task<CollectorRunFacts> ReadAsync(
         NpgsqlDataSource postgres,
         int serverId,
@@ -115,12 +130,17 @@ internal static class DarlingCollectorRunFactsReader
         DateTime? last = null;
         long? lastRows = null;
 
-        await using (var command = postgres.CreateCommand(LatestSuccessSql))
+        await using (var command = postgres.CreateCommand(windowEndUtc is null ? LatestSuccessSql : LatestSuccessAtOrBeforeSql))
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             DarlingMcpReadParameters.AddText(command, collectorName);
             DarlingMcpReadParameters.AddInt(command, CollectorRunFacts.RunsCap);
+            if (windowEndUtc is { } ceiling)
+            {
+                DarlingMcpReadParameters.AddTimestamp(command, ceiling);
+            }
+
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
