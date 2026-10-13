@@ -183,6 +183,42 @@ public class BlockingWaitDuckDbTests : IClassFixture<SharedDuckDbFixture>, IDisp
         Assert.Equal(2, await OverviewCountAsync());
     }
 
+    /* ── #5644 final review: the server tab badge and the daily summary count waits too ── */
+
+    private async Task<int> BadgeBlockingCountAsync() =>
+        (await new LocalDataService(_duckDb).GetAlertCountsAsync(ServerId, hoursBack: 2, fromDate: null, toDate: null)).blockingCount;
+
+    /* The day buckets are UTC days of the wait's longest report; a run across midnight is two buckets, so sum them. */
+    private async Task<long> DailySummaryBlockingEventsAsync()
+    {
+        var today = DateTime.UtcNow.Date;
+        var rows = await new LocalDataService(_duckDb).GetDailySummaryRangeAsync(ServerId, today.AddDays(-1), today.AddDays(2));
+        return rows.Sum(r => r.BlockingEvents);
+    }
+
+    [Fact]
+    public async Task TheServerTabBadgeAndTheDailySummary_CountWaitsNotReports()
+    {
+        /* Nine reports of one wait, then six of another: 15 report rows, 2 waits. */
+        await SeedWaitAsync(52, 51, Ago(30), reports: 9);
+        await SeedWaitAsync(53, 51, Ago(20), reports: 6);
+
+        Assert.Equal(2, CSharpWaitCount());
+        Assert.Equal(2, await BadgeBlockingCountAsync());
+        Assert.Equal(2, await DailySummaryBlockingEventsAsync());
+        Assert.Equal(2, await OverviewCountAsync());
+    }
+
+    [Fact]
+    public async Task TheServerTabBadgeAndTheDailySummary_CountWaitsOnTheDmvFallbackToo()
+    {
+        await SeedWaitAsync(52, 51, Ago(30), reports: 11, dmv: true);
+        await SeedWaitAsync(53, 51, Ago(20), reports: 6, dmv: true);
+
+        Assert.Equal(2, await BadgeBlockingCountAsync());
+        Assert.Equal(2, await DailySummaryBlockingEventsAsync());
+    }
+
     /* ── #5644 wave-1 review: sub-millisecond starts and NULL times ── */
 
     private sealed record Edge(int Blocked, int Blocker, DateTime? Time, long? Wait);

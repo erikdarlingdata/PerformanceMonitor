@@ -52,15 +52,24 @@ deadlocks AS (
     WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3
     GROUP BY 1
 ),
+" + BlockingWaits.WaitsCteSql(
+    BlockingWaits.SqlDialect.DuckDb, "bpr_waits",
+    @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3/*scope*/") + @" AS ev") + "," + BlockingWaits.WaitsCteSql(
+    BlockingWaits.SqlDialect.DuckDb, "dmv_waits",
+    @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms
+    FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3/*scope*/") + @",
 bpr AS (
+    /* #5644: counts WAITS, not report rows (BlockingWaits.WaitsCteSql, the definition the alert, the Overview tile
+       and the analysis fact share), bucketed on the day of the wait's longest report. */
     SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3/*scope*/") + @" AS ev
+    FROM bpr_waits
     GROUP BY 1
 ),
 dmv AS (
     SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
-    FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3/*scope*/
+    FROM dmv_waits
     GROUP BY 1
 ),
 cpu AS (

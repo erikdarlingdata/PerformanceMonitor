@@ -36,7 +36,7 @@ public sealed partial class ViewerDataService
     /// service's <c>DarlingHealthReader</c> (the <c>get_daily_health</c> MCP tool) — the two used to keep
     /// hand-copied literals with nothing enforcing the copy (#1661).
     /// </summary>
-    public const string DailySummaryRangeSql = DailySummarySql.RangeSql;
+    public static readonly string DailySummaryRangeSql = DailySummarySql.RangeSql;
 
     /// <summary>The tier-routed form. See <see cref="DailySummarySql.RangeSqlFor(RetentionTier)"/>.</summary>
     public static string DailySummaryRangeSqlFor(RetentionTier tier) => DailySummarySql.RangeSqlFor(tier);

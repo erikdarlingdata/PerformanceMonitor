@@ -341,7 +341,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
     /// viewer's Performance Calendar. This was a hand-copied literal described as "verbatim" with nothing
     /// enforcing it, so the calendar and this MCP tool could silently answer the same day differently (#1661).
     /// </summary>
-    public const string DailySummaryRangeSql = DailySummarySql.RangeSql;
+    public static readonly string DailySummaryRangeSql = DailySummarySql.RangeSql;
 
     /// <summary>The range read's rows plus the horizon they were judged against (#3541 A9).</summary>
     /// <param name="Rows">One row per day the spine holds, oldest first, each stamped with its <see cref="DailySummaryReadRow.DataState"/>.</param>

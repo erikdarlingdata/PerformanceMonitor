@@ -104,10 +104,12 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
             "INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, monitor_loop) VALUES ($1,$2,$3,$4,1)",
             _nextId--, day.AddHours(1), ServerId, ServerName);
 
-    private Task SeedBprAsync(DateTime day, long waitTimeMs) =>
+    /* #5644: the day's blocking count is WAITS, and reports with the same time and wait time are one wait, so a
+       caller that wants several distinct events gives each its own minute. */
+    private Task SeedBprAsync(DateTime day, long waitTimeMs, int minute = 0) =>
         ExecAsync(
             "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, wait_time_ms, event_time) VALUES ($1,$2,$3,$4,$5,$2)",
-            _nextId--, day.AddHours(1), ServerId, ServerName, waitTimeMs);
+            _nextId--, day.AddHours(1).AddMinutes(minute), ServerId, ServerName, waitTimeMs);
 
     private Task SeedMemoryAsync(DateTime day, int process, int system) =>
         ExecAsync(
@@ -176,7 +178,7 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
         // exactly (#3539 A3) — each under the 10 s wait bar so the count arm is what decides.
         await SeedCollectionRunAsync(Day(11));
         for (var i = 0; i < 120; i++)
-            await SeedBprAsync(Day(11), 6_000);
+            await SeedBprAsync(Day(11), 6_000, minute: i);
 
         // 07-12 Healthy: collected, quiet.
         await SeedCollectionRunAsync(Day(12));
