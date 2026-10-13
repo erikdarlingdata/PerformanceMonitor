@@ -6087,6 +6087,30 @@ public sealed class DarlingManagedPostgres
     internal const string AlertSourcesNetworkToken = "sources";
 
     /// <summary>
+    /// The network roles the managed pg_hba block writes a line for (#5654): <paramref name="roles"/> as configured, less
+    /// <see cref="AlertSourcesNetworkToken"/> unless <paramref name="groupExtras"/> was read and is empty (the group's members at
+    /// any depth are exactly the registered, marked source logins). Null means the members could not be read. Pure.
+    /// </summary>
+    internal static IReadOnlyList<string> AdmittedNetworkRoles(IReadOnlyList<string> roles, IReadOnlyList<string>? groupExtras)
+    {
+        if (groupExtras is { Count: 0 })
+        {
+            return roles;
+        }
+
+        var admitted = new List<string>();
+        foreach (var role in roles)
+        {
+            if (!string.Equals(role, AlertSourcesNetworkToken, StringComparison.Ordinal))
+            {
+                admitted.Add(role);
+            }
+        }
+
+        return admitted;
+    }
+
+    /// <summary>
     /// The managed pg_hba block for every admitted role (#2665) — one <c>hostssl</c> line each, in the
     /// order <see cref="DarlingNetwork.NormalizeNetworkRoles"/> settled on, so the text is identical however
     /// the field was written and the reconciler does not rewrite-and-reload on a reordering.
@@ -6190,6 +6214,37 @@ public sealed class DarlingManagedPostgres
         try
         {
             var exposed = plan.Mode == NetworkMode.Exposed;
+
+            /* #5654: the +darling_alert_sources line admits every member of the group at any depth, so it is written only
+               while those members are exactly the registered, marked source logins. Any other member (one the provisioning
+               step could not revoke, or one that could not be read) leaves the line out, and the rest of the block stays. */
+            if (exposed && plan.Roles!.Contains(AlertSourcesNetworkToken, StringComparer.Ordinal))
+            {
+                IReadOnlyList<string>? extras;
+                try
+                {
+                    await using var connection = new NpgsqlConnection(DarlingStoreConnection.WithApplicationName(
+                        DarlingStoreConnection.PinSessionTimeZoneUtc(ownerConnectionString), ServiceApplicationName));
+                    await connection.OpenAsync(cancellationToken);
+                    extras =await DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync(connection, cancellationToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning("Could not read the members of {Group} ({Message}), so the pg_hba line for alert sources is left out on this start.",
+                        DarlingManagedRoles.AlertSourceGroupRoleName, ex.Message);
+                    extras = null;
+                }
+
+                if (extras is { Count: > 0 })
+                {
+                    _logger.LogWarning(
+                        "The pg_hba line for alert sources is left out: {Group} also has these members, directly or through a source login, which are not registered alert source logins and could not be revoked: {Roles}. Revoke them as a superuser; the next start checks again.",
+                        DarlingManagedRoles.AlertSourceGroupRoleName, string.Join(", ", extras));
+                }
+
+                plan = plan with { Roles = AdmittedNetworkRoles(plan.Roles!, extras) };
+            }
+
             var desiredLine = exposed ? BuildNetworkPgHbaLines(plan.Roles!, plan.Cidr!) : null;
 
             var hbaPath = Path.Combine(_dataDirectory, "pg_hba.conf");

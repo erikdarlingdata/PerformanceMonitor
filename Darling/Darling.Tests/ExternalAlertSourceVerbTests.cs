@@ -196,6 +196,67 @@ public sealed class ExternalAlertSourceVerbTests
     {
         var note = string.Join("\n", DarlingCliCommands.BuildAlertSourceNetworkNote(new PostgresConfig { Managed = false }));
         Assert.Contains("hostssl <database> +darling_alert_sources <range> scram-sha-256", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("no other role", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("reject", note, StringComparison.Ordinal);
+    }
+
+    /* #5654: a member of the group that is not a source login (here the owner, which PostgreSQL 16 makes a member of the group
+       and of each login it creates) is named; a bring-your-own store gets a reject line for it, to go above the group line. */
+    [Fact]
+    public void TheNetworkNote_ForABringYourOwnStore_NamesEachExtraMember_WithARejectLine()
+    {
+        var note = string.Join("\n", DarlingCliCommands.BuildAlertSourceNetworkNote(new PostgresConfig { Managed = false }, ["store_owner", "Mixed Case"]));
+        Assert.Contains("'store_owner', 'Mixed Case'", note, StringComparison.Ordinal);
+        Assert.Contains("ABOVE", note, StringComparison.Ordinal);
+        Assert.Contains("  hostssl <database> store_owner <range> reject", note, StringComparison.Ordinal);
+        Assert.Contains("  hostssl <database> \"Mixed Case\" <range> reject", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheNetworkNote_ForTheManagedStore_SaysTheLineIsLeftOut_WhileAnExtraMemberRemains()
+    {
+        var postgres = new PostgresConfig { Managed = true, Network = new PostgresNetworkConfig { Listen = "192.0.2.10", AllowFrom = "192.0.2.0/24", Role = "viewer,sources" } };
+        var note = string.Join("\n", DarlingCliCommands.BuildAlertSourceNetworkNote(postgres, ["store_owner"]));
+        Assert.Contains("'store_owner'", note, StringComparison.Ordinal);
+        Assert.Contains("leaves out the +darling_alert_sources line", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("reject", note, StringComparison.Ordinal);
+        Assert.Single(DarlingCliCommands.BuildAlertSourceNetworkNote(postgres, []));
+    }
+
+    /* #5654: the managed pg_hba block writes the alert source line only when the group's members were read and are exactly the
+       source logins; the other roles' lines stay either way. */
+    [Fact]
+    public void TheManagedPgHbaBlock_LeavesOutTheSourcesLine_UnlessTheGroupHoldsOnlySourceLogins()
+    {
+        string[] roles = ["viewer", "sources"];
+        Assert.Equal(roles, DarlingManagedPostgres.AdmittedNetworkRoles(roles, []));
+        Assert.Equal(["viewer"], DarlingManagedPostgres.AdmittedNetworkRoles(roles, ["store_owner"]));
+        Assert.Equal(["viewer"], DarlingManagedPostgres.AdmittedNetworkRoles(roles, null));
+        Assert.Empty(DarlingManagedPostgres.AdmittedNetworkRoles(["sources"], ["store_owner"]));
+        Assert.DoesNotContain("+darling_alert_sources",
+            DarlingManagedPostgres.BuildNetworkPgHbaLines(DarlingManagedPostgres.AdmittedNetworkRoles(roles, ["store_owner"]), "10.0.0.0/24"), StringComparison.Ordinal);
+    }
+
+    /* #5654: when a database administrator still has to run the statements, add and rotate say nothing is applied yet, never
+       that the password changed or the login exists. */
+    [Theory]
+    [InlineData("--rotate-alert-source", "nothing is changed yet", "no longer works")]
+    [InlineData("--add-alert-source", "does not exist yet", "created (login")]
+    public void ThePendingResultText_SaysNothingIsAppliedYet(string verb, string expected, string absent)
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var exit = DarlingCliCommands.PrintAlertSourceResult(
+            verb,
+            new ExternalAlertSourceAdmin.Result(ExternalAlertSourceAdmin.Outcome.NeedsDbaSql, "darling_src_orders", "PwForTheTest0123456789abcdefgh",
+                "ALTER ROLE \"darling_src_orders\" PASSWORD 'SCRAM-SHA-256$x';", DbaReason: "permission denied to alter role"),
+            "orders", "Host=127.0.0.1;Port=5432;Database=darling;Username=darling;Password=ownerpw", output, error);
+
+        Assert.Equal(0, exit);
+        Assert.Contains(expected, output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(absent, output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("permission denied to alter role", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("nothing", output.ToString()[output.ToString().IndexOf("permission denied", StringComparison.Ordinal)..], StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

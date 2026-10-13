@@ -321,6 +321,30 @@ REVOKE ALL ON FUNCTION {config}.{InfoFunctionName}() FROM PUBLIC;";
     /// </summary>
     public static string BuildGrantSql(string configSchema, IReadOnlyList<string> roles)
     {
+        return BuildGrantSqlCore(configSchema, roles);
+    }
+
+    /// <summary>
+    /// Takes from PUBLIC the SELECT the extension's install script gives on its views, and EXECUTE on the functions behind them
+    /// (#5654), so a login that holds nothing else (an external alert source login) cannot read every role's statement
+    /// statistics. The readers are the SECURITY DEFINER functions above, run as their owner, so they are unaffected. A role
+    /// that may not revoke them (not the extension's owner) gets a warning from the server and changes nothing.
+    /// </summary>
+    public static string BuildRevokePublicSql(string extensionSchema, bool withInfoView)
+    {
+        var schema = "\"" + extensionSchema.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+        var sql = $@"
+REVOKE SELECT ON {schema}.pg_stat_statements FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION {schema}.pg_stat_statements(boolean) FROM PUBLIC;";
+        return withInfoView
+            ? sql + $@"
+REVOKE SELECT ON {schema}.pg_stat_statements_info FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION {schema}.pg_stat_statements_info() FROM PUBLIC;"
+            : sql;
+    }
+
+    private static string BuildGrantSqlCore(string configSchema, IReadOnlyList<string> roles)
+    {
         if (roles is null)
         {
             throw new ArgumentNullException(nameof(roles));
@@ -478,6 +502,11 @@ FROM
         await using (var grant = new NpgsqlCommand(BuildGrantSql(configSchema, readerRoles), connection) { CommandTimeout = SetupTimeoutSeconds })
         {
             await grant.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var revoke = new NpgsqlCommand(BuildRevokePublicSql(extensionSchema, withInfoView), connection) { CommandTimeout = SetupTimeoutSeconds })
+        {
+            await revoke.ExecuteNonQueryAsync(cancellationToken);
         }
 
         if (!loaded)

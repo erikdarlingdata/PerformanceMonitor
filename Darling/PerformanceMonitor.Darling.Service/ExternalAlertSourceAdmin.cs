@@ -56,7 +56,11 @@ internal static class ExternalAlertSourceAdmin
         /// <summary>Done, in full.</summary>
         Done,
 
-        /// <summary>The registry was changed but the owner cannot manage logins: <see cref="Result.DbaSql"/> holds what a database administrator runs.</summary>
+        /// <summary>
+        /// The owner cannot make, change or drop the login (it lacks CREATEROLE, or the server refused the step:
+        /// <see cref="Result.DbaReason"/> says why). Nothing of the login was changed; add and remove changed the registry, rotate
+        /// changed nothing. <see cref="Result.DbaSql"/> holds what a database administrator runs.
+        /// </summary>
         NeedsDbaSql,
 
         /// <summary>The name is not a valid source name.</summary>
@@ -86,7 +90,8 @@ internal static class ExternalAlertSourceAdmin
         string? DbaSql = null,
         long RemovedRows = 0,
         long RemovedUndelivered = 0,
-        bool LoginDropped = false);
+        bool LoginDropped = false,
+        string? DbaReason = null);
 
     /// <summary>One line of <c>--list-alert-sources</c>. No secret: the registry does not hold one.</summary>
     internal sealed record SourceRow(
@@ -145,27 +150,38 @@ internal static class ExternalAlertSourceAdmin
         var verifier = ScramSha256Verifier.Create(password);
         var canManageLogins = await CanManageLoginsAsync(owner, transaction, ct);
 
+        string? reason = null;
         if (canManageLogins)
         {
-            await ExecAsync(owner, transaction, $"CREATE ROLE {Quote(role)} {s_loginAttributes} PASSWORD '{verifier}'", ct);
-            await ExecAsync(owner, transaction, $"COMMENT ON ROLE {Quote(role)} IS '{DarlingManagedRoles.AlertSourceRoleMarker}'", ct);
+            /* The shared step also makes the login a member of darling_alert_sources (the group the pg_hba line for
+               postgres.network.role "sources" names), in this transaction, so the new source is admitted from the network as
+               soon as the verb returns wherever that line is written. A CREATEROLE owner that is not a superuser may still be
+               refused part of it (an attribute it may not set, a group another role made): then nothing of the login is kept,
+               the source is registered, and the verb returns the statements a database administrator runs, with the reason. */
+            await transaction.SaveAsync(LoginSavepoint, ct);
+            try
+            {
+                await ExecAsync(owner, transaction, $"CREATE ROLE {Quote(role)} {s_loginAttributes} PASSWORD '{verifier}'", ct);
+                await ExecAsync(owner, transaction, $"COMMENT ON ROLE {Quote(role)} IS '{DarlingManagedRoles.AlertSourceRoleMarker}'", ct);
+                await ExecAsync(owner, transaction, $"INSERT INTO {Schema}.external_alert_source (source_name, role_name) VALUES ($1, $2)", ct, name, role);
+                await ExecAsync(owner, transaction, DarlingManagedRoles.BuildExternalAlertSourceRolesSql(Schema), ct);
+                await transaction.CommitAsync(ct);
+                return new Result(Outcome.Done, role, password);
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
+            {
+                await transaction.RollbackAsync(LoginSavepoint, ct);
+                reason = ex.MessageText;
+            }
         }
 
         await ExecAsync(owner, transaction, $"INSERT INTO {Schema}.external_alert_source (source_name, role_name) VALUES ($1, $2)", ct, name, role);
-
-        if (!canManageLogins)
-        {
-            await transaction.CommitAsync(ct);
-            return new Result(Outcome.NeedsDbaSql, role, password, BuildAddSqlForDba(role, verifier, await DatabaseNameAsync(owner, ct), owner.PostgreSqlVersion.Major));
-        }
-
-        /* The shared step also makes the login a member of darling_alert_sources (the group the pg_hba line for
-           postgres.network.role "sources" names), in this transaction, so the new source is admitted from the network as
-           soon as the verb returns wherever that line is written. */
-        await ExecAsync(owner, transaction, DarlingManagedRoles.BuildExternalAlertSourceRolesSql(Schema), ct);
         await transaction.CommitAsync(ct);
-        return new Result(Outcome.Done, role, password);
+        return new Result(Outcome.NeedsDbaSql, role, password, BuildAddSqlForDba(role, verifier, await DatabaseNameAsync(owner, ct), owner.PostgreSqlVersion.Major),
+            DbaReason: reason);
     }
+
+    private const string LoginSavepoint = "alert_source_login";
 
     /// <summary>Gives a registered source a new password. The old password stops working at once.</summary>
     public static async Task<Result> RotateAsync(NpgsqlConnection owner, string name, CancellationToken ct)
@@ -200,7 +216,16 @@ internal static class ExternalAlertSourceAdmin
             return new Result(Outcome.NeedsDbaSql, registered, password, $"ALTER ROLE {Quote(registered)} PASSWORD '{verifier}';");
         }
 
-        await ExecAsync(owner, transaction, $"ALTER ROLE {Quote(registered)} PASSWORD '{verifier}'", ct);
+        try
+        {
+            await ExecAsync(owner, transaction, $"ALTER ROLE {Quote(registered)} PASSWORD '{verifier}'", ct);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
+        {
+            /* From PostgreSQL 16 a CREATEROLE owner changes only a login it holds ADMIN OPTION on (one it made itself). */
+            return new Result(Outcome.NeedsDbaSql, registered, password, $"ALTER ROLE {Quote(registered)} PASSWORD '{verifier}';", DbaReason: ex.MessageText);
+        }
+
         await transaction.CommitAsync(ct);
         return new Result(Outcome.Done, registered, password);
     }
@@ -240,24 +265,36 @@ internal static class ExternalAlertSourceAdmin
         await ExecAsync(owner, transaction, $"DELETE FROM {Schema}.external_alert_source WHERE source_id = $1", ct, sourceId);
 
         string? dbaSql = null;
+        string? reason = null;
         var dropped = false;
         if (marked && canManageLogins)
         {
             var quoted = Quote(registered);
-            await ExecAsync(owner, transaction, $"REVOKE ALL ON FUNCTION {Schema}.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) FROM {quoted}", ct);
-            await ExecAsync(owner, transaction, $"REVOKE ALL ON SCHEMA {Schema} FROM {quoted}", ct);
-            await ExecAsync(owner, transaction, $"REVOKE ALL ON DATABASE {Quote(await DatabaseNameAsync(owner, ct))} FROM {quoted}", ct);
-            await ExecAsync(owner, transaction, $"DROP ROLE {quoted}", ct);
-            dropped = true;
+            await transaction.SaveAsync(LoginSavepoint, ct);
+            try
+            {
+                await ExecAsync(owner, transaction, $"REVOKE ALL ON FUNCTION {Schema}.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) FROM {quoted}", ct);
+                await ExecAsync(owner, transaction, $"REVOKE ALL ON SCHEMA {Schema} FROM {quoted}", ct);
+                await ExecAsync(owner, transaction, $"REVOKE ALL ON DATABASE {Quote(await DatabaseNameAsync(owner, ct))} FROM {quoted}", ct);
+                await ExecAsync(owner, transaction, $"DROP ROLE {quoted}", ct);
+                dropped = true;
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
+            {
+                /* The registry row still goes (the function refuses the login at once); the login is left for a database administrator. */
+                await transaction.RollbackAsync(LoginSavepoint, ct);
+                reason = ex.MessageText;
+            }
         }
-        else if (marked)
+
+        if (marked && !dropped)
         {
             dbaSql = BuildRemoveSqlForDba(registered, await DatabaseNameAsync(owner, ct));
         }
 
         await transaction.CommitAsync(ct);
         return new Result(dbaSql is null ? Outcome.Done : Outcome.NeedsDbaSql, registered, DbaSql: dbaSql,
-            RemovedRows: rows, RemovedUndelivered: undelivered, LoginDropped: dropped);
+            RemovedRows: rows, RemovedUndelivered: undelivered, LoginDropped: dropped, DbaReason: reason);
     }
 
     /// <summary>Every registered source, oldest first. The last submit and the undelivered count come from the queue rows the store still keeps.</summary>

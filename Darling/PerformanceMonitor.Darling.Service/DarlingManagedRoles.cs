@@ -1670,6 +1670,8 @@ GRANT SELECT ON {config}.external_alert_source, {config}.external_alert_pending,
    TO {admin}, {viewer};
 GRANT SELECT ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
    TO {mcp};
+REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {admin}, {viewer}, {mcp};
+REVOKE EXECUTE ON FUNCTION {config}.config_bump_version(), {config}.config_service_bump() FROM PUBLIC;
 {BuildExternalAlertSourceRolesSql(config)}
 
 -- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
@@ -1883,11 +1885,20 @@ REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignat
     internal static string BuildExternalAlertSourceRolesSql(string config) => $@"
 DO $do$
 DECLARE
+   name_grantor boolean := (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user)
+                           OR current_setting('server_version_num')::int >= 160000;
    source_login record;
    membership record;
-   group_oid oid;
+   attribute text;
+   own_role text;
+   group_role record;
 BEGIN
-   REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {DarlingManagedPostgres.AdminRoleName}, {DarlingManagedPostgres.ViewerRoleName}, {DarlingManagedPostgres.McpRoleName};
+   FOR own_role IN
+      SELECT rolname FROM pg_catalog.pg_roles
+      WHERE rolname IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
+   LOOP
+      EXECUTE format('REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM %I', own_role);
+   END LOOP;
 
    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '{AlertSourceGroupRoleName}') THEN
       CREATE ROLE {AlertSourceGroupRoleName} NOLOGIN NOINHERIT;
@@ -1896,18 +1907,30 @@ BEGIN
       RAISE EXCEPTION 'The group role ""{AlertSourceGroupRoleName}"" already exists and was not created by Darling (missing the ''{AlertSourceGroupRoleMarker}'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated role.';
    END IF;
 
-   SELECT oid INTO group_oid FROM pg_catalog.pg_roles WHERE rolname = '{AlertSourceGroupRoleName}';
-   ALTER ROLE {AlertSourceGroupRoleName} NOLOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS NOINHERIT;
+   /* Only the attributes that are on are named: a role without SUPERUSER may not name SUPERUSER, REPLICATION or BYPASSRLS
+      in ALTER ROLE even to switch them off, so a CREATEROLE owner running the add verb sets only what it may. */
+   SELECT oid, rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls INTO group_role
+   FROM pg_catalog.pg_roles WHERE rolname = '{AlertSourceGroupRoleName}';
+   ALTER ROLE {AlertSourceGroupRoleName} NOLOGIN NOINHERIT;
+   FOREACH attribute IN ARRAY array_remove(ARRAY[
+         CASE WHEN group_role.rolsuper THEN 'SUPERUSER' END,
+         CASE WHEN group_role.rolcreaterole THEN 'CREATEROLE' END,
+         CASE WHEN group_role.rolcreatedb THEN 'CREATEDB' END,
+         CASE WHEN group_role.rolreplication THEN 'REPLICATION' END,
+         CASE WHEN group_role.rolbypassrls THEN 'BYPASSRLS' END], NULL)
+   LOOP
+      EXECUTE format('ALTER ROLE %I NO%s', '{AlertSourceGroupRoleName}', attribute);
+   END LOOP;
 
    FOR membership IN
       SELECT g.rolname AS granted, b.rolname AS grantor
       FROM pg_catalog.pg_auth_members AS a
       JOIN pg_catalog.pg_roles AS g ON g.oid = a.roleid
       LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
-      WHERE a.member = group_oid
+      WHERE a.member = group_role.oid
    LOOP
       EXECUTE format('REVOKE %I FROM %I', membership.granted, '{AlertSourceGroupRoleName}')
-         || CASE WHEN membership.grantor IS NULL THEN '' ELSE format(' GRANTED BY %I', membership.grantor) END
+         || CASE WHEN name_grantor AND membership.grantor IS NOT NULL THEN format(' GRANTED BY %I', membership.grantor) ELSE '' END
          || ' CASCADE';
    END LOOP;
 
@@ -1917,29 +1940,26 @@ BEGIN
    EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I, %I FROM %I', '{config}', '{PgSchemaGenerator.CollectSchema}', '{AlertSourceGroupRoleName}');
    REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {AlertSourceGroupRoleName};
 
+   /* Every grant of the group to a role that is not a registered, marked source login, and every grant of a source login to
+      any role, found by walking down from the group through the source logins (pg_hba's +group matches a member at any
+      depth). A grant this role may not revoke (PostgreSQL 16 records a non-superuser creator of the group, or of a login, as
+      its member, granted by the bootstrap superuser) is left and named in a WARNING; the pg_hba step and the verbs read the
+      same closure (AlertSourceGroupExtrasSql) and name it too. */
    FOR membership IN
-      SELECT m.rolname AS member_name, b.rolname AS grantor
-      FROM pg_catalog.pg_auth_members AS a
-      JOIN pg_catalog.pg_roles AS m ON m.oid = a.member
-      LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
-      WHERE a.roleid = group_oid
-        AND NOT EXISTS (
-           SELECT 1
-           FROM {config}.external_alert_source AS s
-           WHERE s.role_name = m.rolname
-             AND shobj_description(m.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}'
-             AND m.rolname NOT IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
-             AND m.rolname <> current_user
-             AND NOT m.rolsuper
-             AND m.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = current_database()))
+{AlertSourceGroupSweepSql(config, "group_role.oid")}
    LOOP
-      EXECUTE format('REVOKE %I FROM %I', '{AlertSourceGroupRoleName}', membership.member_name)
-         || CASE WHEN membership.grantor IS NULL THEN '' ELSE format(' GRANTED BY %I', membership.grantor) END
-         || ' CASCADE';
+      BEGIN
+         EXECUTE format('REVOKE %I FROM %I', membership.granted, membership.member_name)
+            || CASE WHEN name_grantor AND membership.grantor IS NOT NULL THEN format(' GRANTED BY %I', membership.grantor) ELSE '' END
+            || ' CASCADE';
+      EXCEPTION WHEN insufficient_privilege THEN
+         RAISE WARNING 'Role ""%"" is still a member of ""%"": revoking that needs a superuser, or ADMIN OPTION on it and the rights of the role that granted it.', membership.member_name, membership.granted;
+      END;
    END LOOP;
 
    FOR source_login IN
-      SELECT s.role_name, r.oid AS role_oid, (shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}') AS marked,
+      SELECT s.role_name, r.oid AS role_oid, r.rolsuper, r.rolcreaterole, r.rolcreatedb, r.rolreplication, r.rolbypassrls,
+             (shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}') AS marked,
              (r.rolname IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
               OR r.rolname = current_user
               OR r.rolsuper
@@ -1960,7 +1980,16 @@ BEGIN
          CONTINUE;
       END IF;
 
-      EXECUTE format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS NOINHERIT CONNECTION LIMIT {AlertSourceConnectionLimit}', source_login.role_name);
+      EXECUTE format('ALTER ROLE %I LOGIN NOINHERIT CONNECTION LIMIT {AlertSourceConnectionLimit}', source_login.role_name);
+      FOREACH attribute IN ARRAY array_remove(ARRAY[
+            CASE WHEN source_login.rolsuper THEN 'SUPERUSER' END,
+            CASE WHEN source_login.rolcreaterole THEN 'CREATEROLE' END,
+            CASE WHEN source_login.rolcreatedb THEN 'CREATEDB' END,
+            CASE WHEN source_login.rolreplication THEN 'REPLICATION' END,
+            CASE WHEN source_login.rolbypassrls THEN 'BYPASSRLS' END], NULL)
+      LOOP
+         EXECUTE format('ALTER ROLE %I NO%s', source_login.role_name, attribute);
+      END LOOP;
 
       FOR membership IN
          SELECT g.rolname AS granted, b.rolname AS grantor
@@ -1970,7 +1999,7 @@ BEGIN
          WHERE a.member = source_login.role_oid
       LOOP
          EXECUTE format('REVOKE %I FROM %I', membership.granted, source_login.role_name)
-            || CASE WHEN membership.grantor IS NULL THEN '' ELSE format(' GRANTED BY %I', membership.grantor) END
+            || CASE WHEN name_grantor AND membership.grantor IS NOT NULL THEN format(' GRANTED BY %I', membership.grantor) ELSE '' END
             || ' CASCADE';
       END LOOP;
 
@@ -1986,6 +2015,95 @@ BEGIN
       END IF;
    END LOOP;
 END $do$;";
+
+    /// <summary>
+    /// The query (#5654) the group sweep loops over: every grant to remove so that the members of
+    /// <see cref="AlertSourceGroupRoleName"/>, at any depth, are only the registered, marked source logins. A <c>WITH RECURSIVE</c>
+    /// walk starts at the group and goes on only through such a login. It returns each grant of the group to a role that is not
+    /// one, and each grant of one of those logins to any role (a source login has no members). One row per
+    /// <c>pg_auth_members</c> row: granted, member_name, grantor. <paramref name="groupOid"/> is a PL/pgSQL expression.
+    /// <c>tools/provision-roles.sql</c> carries the same query.
+    /// </summary>
+    internal static string AlertSourceGroupSweepSql(string config, string groupOid) => $@"      WITH RECURSIVE valid AS (
+         SELECT r.oid
+         FROM {config}.external_alert_source AS s
+         JOIN pg_catalog.pg_roles AS r ON r.rolname = s.role_name
+         WHERE shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}'
+           AND r.rolname NOT IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
+           AND r.rolname <> current_user
+           AND NOT r.rolsuper
+           AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = current_database())
+      ), walk (roleid, member) AS (
+         SELECT a.roleid, a.member FROM pg_catalog.pg_auth_members AS a WHERE a.roleid = {groupOid}
+         UNION
+         SELECT a.roleid, a.member
+         FROM pg_catalog.pg_auth_members AS a
+         JOIN walk AS w ON a.roleid = w.member
+         WHERE w.member IN (SELECT v.oid FROM valid AS v)
+      )
+      SELECT DISTINCT g.rolname AS granted, m.rolname AS member_name, b.rolname AS grantor
+      FROM walk AS w
+      JOIN pg_catalog.pg_auth_members AS a ON a.roleid = w.roleid AND a.member = w.member
+      JOIN pg_catalog.pg_roles AS g ON g.oid = a.roleid
+      JOIN pg_catalog.pg_roles AS m ON m.oid = a.member
+      LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
+      WHERE (w.roleid = {groupOid} AND w.member NOT IN (SELECT v.oid FROM valid AS v))
+         OR w.roleid IN (SELECT v.oid FROM valid AS v)";
+
+    /// <summary>
+    /// Every role that a pg_hba line naming <c>+darling_alert_sources</c> admits and that is not a registered, marked source
+    /// login (#5654): each member of the group at any depth (pg_hba follows membership through every role, whatever its INHERIT
+    /// and SET options), plus the group itself when it can log in. Read after the provisioning step, this is what that step
+    /// could not revoke, for example the PostgreSQL 16 grant of the group, or of a source login, to the non-superuser role that
+    /// created it. One row: a text array sorted by name, empty when the group does not exist. <paramref name="registryExists"/>
+    /// false (a store not yet upgraded) counts every member.
+    /// </summary>
+    internal static string AlertSourceGroupExtrasSql(string config, bool registryExists)
+    {
+        var isSource = registryExists
+            ? $@"EXISTS (SELECT 1 FROM {config}.external_alert_source AS s WHERE s.role_name = r.rolname)
+              AND shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}'
+              AND r.rolname NOT IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
+              AND NOT r.rolsuper
+              AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = current_database())"
+            : "false";
+        return $@"
+WITH RECURSIVE closure (oid) AS (
+   SELECT a.member
+   FROM pg_catalog.pg_auth_members AS a
+   JOIN pg_catalog.pg_roles AS g ON g.oid = a.roleid
+   WHERE g.rolname = '{AlertSourceGroupRoleName}'
+   UNION
+   SELECT a.member FROM pg_catalog.pg_auth_members AS a JOIN closure AS c ON a.roleid = c.oid
+)
+SELECT COALESCE(array_agg(x.rolname ORDER BY x.rolname COLLATE ""C""), ARRAY[]::text[])
+FROM (
+   SELECT r.rolname::text AS rolname
+   FROM closure AS c
+   JOIN pg_catalog.pg_roles AS r ON r.oid = c.oid
+   WHERE NOT ({isSource})
+   UNION
+   SELECT rolname::text FROM pg_catalog.pg_roles WHERE rolname = '{AlertSourceGroupRoleName}' AND rolcanlogin
+) AS x";
+    }
+
+    /// <summary>
+    /// Reads <see cref="AlertSourceGroupExtrasSql"/> on <paramref name="connection"/> (#5654): the roles besides the registered,
+    /// marked source logins that a <c>+darling_alert_sources</c> pg_hba line admits. The managed pg_hba step writes that line
+    /// only when this is empty, and the add and rotate verbs name each role it returns.
+    /// </summary>
+    internal static async Task<IReadOnlyList<string>> ReadAlertSourceGroupExtrasAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        bool registryExists;
+        await using (var probe = new NpgsqlCommand(
+            $"SELECT to_regclass('{PgSchemaGenerator.ConfigSchema}.external_alert_source') IS NOT NULL", connection))
+        {
+            registryExists = (bool)(await probe.ExecuteScalarAsync(ct))!;
+        }
+
+        await using var command = new NpgsqlCommand(AlertSourceGroupExtrasSql(PgSchemaGenerator.ConfigSchema, registryExists), connection);
+        return (string[])(await command.ExecuteScalarAsync(ct))!;
+    }
 
     /// <summary>
     /// The <c>SECURITY DEFINER</c> function (#3334) that lets the least-privilege viewer/mcp roles write the ONE

@@ -1001,10 +1001,12 @@ For a managed store:
 
 1. Make the store reachable from the network (`postgres.network.listen` and `allowFrom`, see [Remote viewer](#remote-viewer)).
 2. Add `sources` to `postgres.network.role`, keeping the roles it already lists, for example `"role": "viewer,sources"`.
-3. Restart the service. The managed pg_hba block gains `hostssl darling +darling_alert_sources <allowFrom> scram-sha-256`, which admits every source login, and no other role, from that range over TLS.
+3. Restart the service. The managed pg_hba block gains `hostssl darling +darling_alert_sources <allowFrom> scram-sha-256`, which admits, from that range over TLS, each role that is a member of `darling_alert_sources` directly or through another role. The service keeps those members to the registered source logins, and writes the line only while they are exactly that: if a member remains that it could not revoke, it leaves the line out (the block's other lines stay) and logs a warning naming the role.
 4. On the source machine, use the printed connection string with `Host` set to the address the store listens on. `--add-alert-source` and `--rotate-alert-source` say whether `sources` is listed now.
 
-A source added later is admitted as soon as `--add-alert-source` returns; there is nothing to restart. For a bring-your-own store, add the same line to your own `pg_hba.conf` (with your database name and range) and reload it.
+A source added later is admitted as soon as `--add-alert-source` returns; there is nothing to restart. For a bring-your-own store, add the same line to your own `pg_hba.conf` (with your database name and range) and reload it. On PostgreSQL 16 and later, a role that is not a superuser and creates the group or a source login (the store owner running `tools/provision-roles.sql` or the add verb, or an administrator running the printed statements) becomes a member of it and cannot revoke that itself; the verbs and the script name every such role, with a `hostssl <database> <role> <range> reject` line to put ABOVE the group line.
+
+A source login can read what every PostgreSQL login can: the system catalogs and statistics views, such as `pg_roles`, `pg_stat_activity` and function definitions in `pg_proc`. In the store it can call `config.submit_external_alert` and nothing else: no table, view or other function of Darling's, and not `pg_stat_statements` (the service and the script take that view from PUBLIC).
 
 ---
 

@@ -1194,6 +1194,23 @@ END;
 $fn$;
 REVOKE ALL ON FUNCTION config.submit_external_alert(text, text, text, text, text, text, double precision) FROM PUBLIC;
 REVOKE ALL ON FUNCTION config.submit_external_alert(text, text, text, text, text, text, double precision) FROM admin, viewer, mcp;
+-- The two trigger functions need no EXECUTE to fire, so PUBLIC (and with it a source login) gets none.
+REVOKE EXECUTE ON FUNCTION config.config_bump_version(), config.config_service_bump() FROM PUBLIC;
+-- pg_stat_statements gives PUBLIC its views and functions; Darling reads them through its own SECURITY DEFINER functions.
+DO $do$
+DECLARE
+   ext_schema text := (SELECT n.nspname FROM pg_catalog.pg_extension AS e JOIN pg_catalog.pg_namespace AS n ON n.oid = e.extnamespace
+                       WHERE e.extname = 'pg_stat_statements');
+BEGIN
+   IF ext_schema IS NOT NULL THEN
+      EXECUTE pg_catalog.format('REVOKE SELECT ON %I.pg_stat_statements FROM PUBLIC', ext_schema);
+      EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_stat_statements(boolean) FROM PUBLIC', ext_schema);
+      IF pg_catalog.to_regclass(pg_catalog.format('%I.pg_stat_statements_info', ext_schema)) IS NOT NULL THEN
+         EXECUTE pg_catalog.format('REVOKE SELECT ON %I.pg_stat_statements_info FROM PUBLIC', ext_schema);
+         EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_stat_statements_info() FROM PUBLIC', ext_schema);
+      END IF;
+   END IF;
+END $do$;
 
 DO $do$
 DECLARE
@@ -1211,11 +1228,31 @@ BEGIN
    END IF;
 
    SELECT oid INTO group_oid FROM pg_catalog.pg_roles WHERE rolname = 'darling_alert_sources';
+   -- NOLOGIN and NOINHERIT alone, then only the attributes that are on: a role without SUPERUSER may not name SUPERUSER,
+   -- REPLICATION or BYPASSRLS in ALTER ROLE even to switch them off, so naming them all would always fail for it.
    BEGIN
-      ALTER ROLE darling_alert_sources NOLOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS NOINHERIT;
+      ALTER ROLE darling_alert_sources NOLOGIN NOINHERIT;
    EXCEPTION WHEN insufficient_privilege THEN
-      RAISE WARNING 'Role "darling_alert_sources" could not be set to NOLOGIN NOINHERIT with every widening attribute off: this needs a superuser, or CREATEROLE and, from PostgreSQL 16, ADMIN OPTION on the role.';
+      RAISE WARNING 'Role "darling_alert_sources" could not be set to NOLOGIN NOINHERIT: this needs a superuser, or CREATEROLE and, from PostgreSQL 16, ADMIN OPTION on the role.';
    END;
+   FOREACH attribute IN ARRAY (
+         SELECT pg_catalog.array_remove(ARRAY[
+            CASE WHEN r.rolsuper THEN 'SUPERUSER' END,
+            CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END,
+            CASE WHEN r.rolcreatedb THEN 'CREATEDB' END,
+            CASE WHEN r.rolreplication THEN 'REPLICATION' END,
+            CASE WHEN r.rolbypassrls THEN 'BYPASSRLS' END], NULL)
+         FROM pg_catalog.pg_roles AS r WHERE r.oid = group_oid)
+   LOOP
+      BEGIN
+         EXECUTE pg_catalog.format('ALTER ROLE darling_alert_sources NO%s', attribute);
+      EXCEPTION WHEN insufficient_privilege THEN
+         RAISE WARNING 'Role "darling_alert_sources" still has the % attribute: switching it off needs a superuser, or, from PostgreSQL 16, an owner that holds % itself.', attribute, attribute;
+      END;
+   END LOOP;
+   IF (SELECT r.rolcanlogin FROM pg_catalog.pg_roles AS r WHERE r.oid = group_oid) THEN
+      RAISE WARNING 'Role "darling_alert_sources" can still log in, and a pg_hba line for +darling_alert_sources admits it. Have a superuser run: ALTER ROLE darling_alert_sources NOLOGIN;';
+   END IF;
 
    FOR membership IN
       SELECT g.rolname AS granted, b.rolname AS grantor
@@ -1254,29 +1291,45 @@ BEGIN
    GRANT SELECT ON config.external_alert_source, config.external_alert_pending, config.external_alert_state
       TO mcp;
 
+   -- Every grant of the group to a role that is not a registered, marked source login, and every grant of a source login to
+   -- any role, found by walking down from the group through the source logins: pg_hba's +darling_alert_sources matches a
+   -- member at any depth, whatever its INHERIT and SET options. A grant this role may not revoke (from PostgreSQL 16, a role
+   -- that is not a superuser is recorded as a member of each role it creates, granted by the bootstrap superuser) is named
+   -- in a WARNING here, and again at the end of this block with the pg_hba line that keeps it out.
    FOR membership IN
-      SELECT m.rolname AS member_name, b.rolname AS grantor
-      FROM pg_catalog.pg_auth_members AS a
+      WITH RECURSIVE valid AS (
+         SELECT r.oid
+         FROM config.external_alert_source AS s
+         JOIN pg_catalog.pg_roles AS r ON r.rolname = s.role_name
+         WHERE pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM 'darling-alert-source'
+           AND r.rolname NOT IN ('admin', 'viewer', 'mcp')
+           AND r.rolname <> current_user
+           AND NOT r.rolsuper
+           AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())
+      ), walk (roleid, member) AS (
+         SELECT a.roleid, a.member FROM pg_catalog.pg_auth_members AS a WHERE a.roleid = group_oid
+         UNION
+         SELECT a.roleid, a.member
+         FROM pg_catalog.pg_auth_members AS a
+         JOIN walk AS w ON a.roleid = w.member
+         WHERE w.member IN (SELECT v.oid FROM valid AS v)
+      )
+      SELECT DISTINCT g.rolname AS granted, m.rolname AS member_name, b.rolname AS grantor
+      FROM walk AS w
+      JOIN pg_catalog.pg_auth_members AS a ON a.roleid = w.roleid AND a.member = w.member
+      JOIN pg_catalog.pg_roles AS g ON g.oid = a.roleid
       JOIN pg_catalog.pg_roles AS m ON m.oid = a.member
       LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
-      WHERE a.roleid = group_oid
-        AND NOT EXISTS (
-           SELECT 1
-           FROM config.external_alert_source AS s
-           WHERE s.role_name = m.rolname
-             AND pg_catalog.shobj_description(m.oid, 'pg_authid') IS NOT DISTINCT FROM 'darling-alert-source'
-             AND m.rolname NOT IN ('admin', 'viewer', 'mcp')
-             AND m.rolname <> current_user
-             AND NOT m.rolsuper
-             AND m.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database()))
+      WHERE (w.roleid = group_oid AND w.member NOT IN (SELECT v.oid FROM valid AS v))
+         OR w.roleid IN (SELECT v.oid FROM valid AS v)
    LOOP
       BEGIN
-         EXECUTE pg_catalog.format('REVOKE darling_alert_sources FROM %I', membership.member_name)
+         EXECUTE pg_catalog.format('REVOKE %I FROM %I', membership.granted, membership.member_name)
             || CASE WHEN (as_superuser OR pg_catalog.current_setting('server_version_num')::int >= 160000) AND membership.grantor IS NOT NULL
                     THEN pg_catalog.format(' GRANTED BY %I', membership.grantor) ELSE '' END
             || ' CASCADE';
       EXCEPTION WHEN insufficient_privilege THEN
-         RAISE WARNING 'Login "%" is still a member of "darling_alert_sources": revoking that needs a superuser, or ADMIN OPTION on it.', membership.member_name;
+         RAISE WARNING 'Role "%" is still a member of "%": revoking that needs a superuser, or ADMIN OPTION on it and the rights of the role that granted it.', membership.member_name, membership.granted;
       END;
    END LOOP;
 
@@ -1355,6 +1408,31 @@ BEGIN
       EXCEPTION WHEN insufficient_privilege THEN
          RAISE WARNING 'Login "%" could not be made a member of "darling_alert_sources": this needs a superuser, or ADMIN OPTION on the group.', source_login.role_name;
       END;
+   END LOOP;
+
+   -- What a pg_hba line for +darling_alert_sources admits besides the source logins: every member of the group at any depth
+   -- (through any role) that is not a registered, marked source login, after the revokes above. The role running this script
+   -- is one of them when it is not a superuser and created the group or a source login on PostgreSQL 16 or later.
+   FOR membership IN
+      WITH RECURSIVE closure (oid) AS (
+         SELECT a.member FROM pg_catalog.pg_auth_members AS a WHERE a.roleid = group_oid
+         UNION
+         SELECT a.member FROM pg_catalog.pg_auth_members AS a JOIN closure AS c ON a.roleid = c.oid
+      )
+      SELECT r.rolname AS member_name
+      FROM closure AS c
+      JOIN pg_catalog.pg_roles AS r ON r.oid = c.oid
+      WHERE NOT (EXISTS (SELECT 1 FROM config.external_alert_source AS s WHERE s.role_name = r.rolname)
+                 AND pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM 'darling-alert-source'
+                 AND r.rolname NOT IN ('admin', 'viewer', 'mcp')
+                 AND NOT r.rolsuper
+                 AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database()))
+      ORDER BY r.rolname
+   LOOP
+      RAISE WARNING 'Role "%" is a member of "darling_alert_sources" (directly or through a source login)%, so a pg_hba line for +darling_alert_sources admits it too. Put this line ABOVE that one: hostssl % % <range> reject',
+         membership.member_name,
+         CASE WHEN membership.member_name = current_user THEN ', and it is the role running this script' ELSE '' END,
+         pg_catalog.quote_ident(pg_catalog.current_database()), pg_catalog.quote_ident(membership.member_name);
    END LOOP;
 END $do$;
 

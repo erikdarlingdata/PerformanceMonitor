@@ -5985,13 +5985,23 @@ public static class DarlingCliCommands
         var result = IsAddAlertSourceVerb(verb) ? await ExternalAlertSourceAdmin.AddAsync(connection, sourceName!, cancellationToken)
             : IsRotateAlertSourceVerb(verb) ? await ExternalAlertSourceAdmin.RotateAsync(connection, sourceName!, cancellationToken)
             : await ExternalAlertSourceAdmin.RemoveAsync(connection, sourceName!, cancellationToken);
-        return PrintAlertSourceResult(verb, result, sourceName!, storeConnectionString, output, error, postgres);
+
+        /* The roles besides the source logins that a +darling_alert_sources pg_hba line would admit (#5654): what the
+           provisioning step could not revoke, read after it ran. The add and rotate text name each one. */
+        IReadOnlyList<string>? groupExtras = null;
+        if (!IsRemoveAlertSourceVerb(verb)
+            && result.Outcome is ExternalAlertSourceAdmin.Outcome.Done or ExternalAlertSourceAdmin.Outcome.NeedsDbaSql)
+        {
+            groupExtras = await DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync(connection, cancellationToken);
+        }
+
+        return PrintAlertSourceResult(verb, result, sourceName!, storeConnectionString, output, error, postgres, groupExtras);
     }
 
     /// <summary>Prints what an add, rotate or remove did, and returns the exit code. The only place a password is written, and only inside the connection string.</summary>
     internal static int PrintAlertSourceResult(
         string verb, ExternalAlertSourceAdmin.Result result, string sourceName, string storeConnectionString, TextWriter output, TextWriter error,
-        PostgresConfig? postgres = null)
+        PostgresConfig? postgres = null, IReadOnlyList<string>? groupExtras = null)
     {
         switch (result.Outcome)
         {
@@ -6026,16 +6036,21 @@ public static class DarlingCliCommands
         }
         else
         {
+            var pending = result.Outcome == ExternalAlertSourceAdmin.Outcome.NeedsDbaSql;
             output.WriteLine(IsRotateAlertSourceVerb(verb)
-                ? $"Source '{sourceName}': new password set. The old password no longer works."
-                : $"Source '{sourceName}' created (login '{result.RoleName}').");
+                ? pending
+                    ? $"Source '{sourceName}': a new password was generated, and nothing is changed yet. It takes effect, and the old password stops working, only after a database administrator runs the statements below."
+                    : $"Source '{sourceName}': new password set. The old password no longer works."
+                : pending
+                    ? $"Source '{sourceName}' is registered, and its login '{result.RoleName}' does not exist yet. A database administrator creates it with the statements below; until then the connection string does not work."
+                    : $"Source '{sourceName}' created (login '{result.RoleName}').");
             output.WriteLine();
             output.WriteLine("Connection string (shown ONCE; Darling keeps no copy, so save it now. If it is lost, --rotate-alert-source makes a new one):");
             output.WriteLine();
             output.WriteLine("  " + ExternalAlertSourceAdmin.BuildSourceConnectionString(storeConnectionString, result.RoleName, result.Password!));
             output.WriteLine();
             output.WriteLine("The host above is the address this service uses for its store. A source on another machine uses the address it reaches the store at.");
-            foreach (var line in BuildAlertSourceNetworkNote(postgres))
+            foreach (var line in BuildAlertSourceNetworkNote(postgres, groupExtras))
             {
                 output.WriteLine(line);
             }
@@ -6046,7 +6061,12 @@ public static class DarlingCliCommands
         if (result.Outcome == ExternalAlertSourceAdmin.Outcome.NeedsDbaSql)
         {
             output.WriteLine();
-            output.WriteLine("This store's owner cannot make, change or drop logins (it lacks CREATEROLE). The registry is updated; have a database administrator run:");
+            output.WriteLine(result.DbaReason is null
+                ? "This store's owner cannot make, change or drop logins (it lacks CREATEROLE)."
+                : $"The store refused the login step for this store's owner: {result.DbaReason}");
+            output.WriteLine(IsRotateAlertSourceVerb(verb)
+                ? "Nothing is applied yet. Have a database administrator run:"
+                : "The registry is updated and nothing of the login is applied yet. Have a database administrator run:");
             output.WriteLine();
             output.WriteLine(result.DbaSql);
         }
@@ -6061,8 +6081,43 @@ public static class DarlingCliCommands
     /// in <c>postgres.network.role</c>, which writes <c>hostssl darling +darling_alert_sources &lt;allowFrom&gt; scram-sha-256</c>
     /// into the managed pg_hba block; the suggested value keeps every role the field admits today. A bring-your-own store's own
     /// pg_hba.conf decides, so the note names the line to add there. Pure.
+    /// <para><paramref name="groupExtras"/> are the roles besides the source logins that are members of the group at any depth
+    /// (<see cref="DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync"/>), which a <c>+</c> line admits too. Each is named:
+    /// on the managed store the pg_hba block leaves the alert source line out while any remain, and a bring-your-own store
+    /// gets a <c>reject</c> line for each, to go above the group line.</para>
     /// </summary>
-    internal static IReadOnlyList<string> BuildAlertSourceNetworkNote(PostgresConfig? postgres)
+    internal static IReadOnlyList<string> BuildAlertSourceNetworkNote(PostgresConfig? postgres, IReadOnlyList<string>? groupExtras = null)
+    {
+        var lines = BuildAlertSourceNetworkNoteCore(postgres);
+        if (groupExtras is not { Count: > 0 })
+        {
+            return lines;
+        }
+
+        var group = DarlingManagedRoles.AlertSourceGroupRoleName;
+        var named = string.Join(", ", groupExtras.Select(role => $"'{role}'"));
+        var all = new List<string>(lines)
+        {
+            $"These roles are members of {group} too, directly or through a source login, and could not be removed (PostgreSQL 16 makes a role that is not a superuser a member of each role it creates): {named}.",
+        };
+        if (postgres is { Managed: true })
+        {
+            all.Add($"While any of them remains, the managed pg_hba block leaves out the +{group} line, so no source connects from another machine. A superuser revokes the membership; each service start checks again.");
+        }
+        else
+        {
+            all.Add($"A +{group} line admits them too. Put these lines ABOVE it, so they cannot connect from that range:");
+            all.AddRange(groupExtras.Select(role => $"  hostssl <database> {QuotePgHbaRole(role)} <range> reject"));
+        }
+
+        return all;
+    }
+
+    /// <summary>A role name as a pg_hba user field: double-quoted when it is not plain lower-case letters, digits and underscores.</summary>
+    private static string QuotePgHbaRole(string role)
+        => role.All(c => c is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_') ? role : "\"" + role.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+
+    private static IReadOnlyList<string> BuildAlertSourceNetworkNoteCore(PostgresConfig? postgres)
     {
         const string token = "sources";
         if (postgres is null)
@@ -6074,7 +6129,7 @@ public static class DarlingCliCommands
         {
             return new[]
             {
-                "This store is your own PostgreSQL, so its pg_hba.conf decides who connects from another machine. This line admits every alert source login, and no other role, from one range over TLS:",
+                $"This store is your own PostgreSQL, so its pg_hba.conf decides who connects from another machine. This line admits, from one range over TLS, each role that is a member of {DarlingManagedRoles.AlertSourceGroupRoleName} directly or through another role; Darling keeps those members to the registered alert source logins and names any other it cannot remove:",
                 $"  hostssl <database> +{DarlingManagedRoles.AlertSourceGroupRoleName} <range> scram-sha-256",
             };
         }
