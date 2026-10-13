@@ -1,0 +1,83 @@
+<Window x:Class="PerformanceMonitorLite.Windows.NotificationRoutesWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Notification Routes"
+        Height="520" Width="1000"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResizeWithGrip"
+        Icon="/EDD.ico"
+        Background="{DynamicResource BackgroundBrush}">
+    <!-- #5750: scoped notification routes. Shape of ManageMuteRulesWindow (grid + Add/Edit/Toggle/Delete); every write goes
+         straight to the DuckDB store, which drops the route cache so the alert path picks the change up on its next read. -->
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Notification Routes" FontSize="18" FontWeight="Bold"
+                   Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <TextBlock Grid.Row="1" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundDimBrush}" Margin="0,0,0,12"
+                   Text="Send one server's or one tag's alerts to their own destinations. A route names the alerts it covers (an exact metric, a family, or every metric) and, optionally, one server or one tag with all the tags under it. A destination on a route replaces the app-wide one for that channel only; a channel left empty keeps using the app-wide setting. A route whose server or tag was removed matches nothing."/>
+
+        <Grid Grid.Row="2">
+            <DataGrid x:Name="RoutesGrid"
+                      AutoGenerateColumns="False"
+                      IsReadOnly="True"
+                      SelectionMode="Single"
+                      CanUserAddRows="False"
+                      CanUserDeleteRows="False"
+                      HeadersVisibility="Column"
+                      GridLinesVisibility="Horizontal"
+                      MouseDoubleClick="RoutesGrid_MouseDoubleClick">
+                <DataGrid.Columns>
+                    <DataGridTemplateColumn Header="Enabled" Width="60">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <CheckBox IsChecked="{Binding Enabled, UpdateSourceTrigger=PropertyChanged}"
+                                          HorizontalAlignment="Center" VerticalAlignment="Center"
+                                          Click="EnabledCheckBox_Click"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTextColumn Header="Route" Binding="{Binding RouteId}" Width="50"
+                                        SortDirection="Descending" ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="Matches" Binding="{Binding MetricMatch}" Width="150"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="Scope" Binding="{Binding ScopeDisplay}" Width="*"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="Teams" Binding="{Binding TeamsMarker}" Width="70"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="Slack" Binding="{Binding SlackMarker}" Width="70"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="Generic" Binding="{Binding GenericMarker}" Width="70"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="PagerDuty" Binding="{Binding PagerDutyMarker}" Width="80"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="Email" Binding="{Binding EmailMarker}" Width="70"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                    <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="200"
+                                        ElementStyle="{StaticResource DataGridCellText}"/>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="NoRoutesMessage"
+                       Text="No routes yet. Every alert goes to the app-wide destinations. Add a route to send one server's or one tag's alerts somewhere else."
+                       Foreground="{DynamicResource ForegroundDimBrush}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       TextWrapping="Wrap" TextAlignment="Center" MaxWidth="460"
+                       Visibility="Collapsed" IsHitTestVisible="False"/>
+        </Grid>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Left" Margin="0,12,0,0">
+            <Button Content="_Add Route..." Width="110" Height="28" Margin="0,0,8,0"
+                    Click="AddRoute_Click" Style="{StaticResource AccentButton}"/>
+            <Button Content="_Edit" Width="80" Height="28" Margin="0,0,8,0" Click="EditRoute_Click"/>
+            <Button Content="_Toggle" Width="80" Height="28" Margin="0,0,8,0" Click="ToggleRoute_Click"/>
+            <Button Content="_Delete" Width="80" Height="28" Margin="0,0,8,0" Click="DeleteRoute_Click"/>
+        </StackPanel>
+        <Button Grid.Row="3" Content="_Close" Width="80" Height="28" Margin="0,12,0,0"
+                HorizontalAlignment="Right" Click="Close_Click" IsCancel="True"/>
+    </Grid>
+</Window>
