@@ -434,13 +434,14 @@ public sealed class QueryStoreComposeStampTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal + 3, arity - 1);
+        Assert.Equal(ProbeOrdinal + 4, arity - 1);
         Assert.Equal("hasQueryStoreComposeStamp", method.GetParameters()[ProbeOrdinal].Name);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
@@ -451,6 +452,7 @@ public sealed class QueryStoreComposeStampTests
         behind[ProbeOrdinal + 1] = false;
         behind[ProbeOrdinal + 2] = false;
         behind[ProbeOrdinal + 3] = false;
+        behind[ProbeOrdinal + 4] = false;
         Assert.Equal(172, (int)method.Invoke(null, behind)!);
 
         /* Everything through V173's sentinel true and the newer one false maps to V173 itself. */
@@ -458,6 +460,7 @@ public sealed class QueryStoreComposeStampTests
         atThisRung[ProbeOrdinal + 1] = false;
         atThisRung[ProbeOrdinal + 2] = false;
         atThisRung[ProbeOrdinal + 3] = false;
+        atThisRung[ProbeOrdinal + 4] = false;
         Assert.Equal(QueryStoreComposeStamp.RungVersion, (int)method.Invoke(null, atThisRung)!);
 
         var arm = viewer.IndexOf("if (hasQueryStoreComposeStamp)", StringComparison.Ordinal);
