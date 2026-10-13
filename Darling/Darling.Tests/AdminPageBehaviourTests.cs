@@ -9,6 +9,7 @@
 using System;
 using System.Linq;
 using System.Text.Json;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -126,5 +127,29 @@ public sealed class AdminPageBehaviourTests
 
         Assert.Contains("slack, pagerduty", texts);
         Assert.Contains("ops@example.test", texts);
+    }
+
+    [Fact]
+    public void TheRoutesTab_ShowsWhereEachRouteApplies_AndAnOrphanOrUnreadableScopeNeverReadsAsOk()
+    {
+        var texts = Texts(Tab("tab:routes"));
+
+        // The fleet-wide route and the scoped ones: "All servers", the server's name, the tag's name, or the id a gone scope still names.
+        Assert.Contains(ViewerNotificationRouteScope.AllServersLabel, texts);
+        Assert.Contains("Alpha", texts);
+        Assert.Contains("East", texts);
+        Assert.Contains("(server id 99)", texts);
+        Assert.Contains("(tag id 6)", texts);
+        // An untrusted name is drawn as text, never parsed as markup: the grid shows the literal characters.
+        Assert.Contains("<img src=x onerror=alert(1)>", texts);
+
+        // The status words are the desktop viewer's, and the orphan and unreadable routes (which match nothing) are never OK.
+        Assert.Contains(ViewerNotificationRouteScope.OrphanedServerStatus, texts);
+        Assert.Contains(ViewerNotificationRouteScope.OrphanedTagStatus, texts);
+        Assert.Contains(ViewerNotificationRouteScope.TagDataUnreadableStatus, texts);
+        Assert.Contains(ViewerNotificationRouteScope.OkStatus, texts);
+        Assert.Equal(3, texts.Count(t => t == ViewerNotificationRouteScope.OkStatus));
+        // The wildcard route reports no family.
+        Assert.Contains("wildcard", texts);
     }
 }

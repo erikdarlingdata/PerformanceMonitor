@@ -546,7 +546,19 @@ try {
         smtp_recipients: ["ops@example.test"], enabled: true, modified_at_utc: "2026-01-01T00:00:00Z", webhook_url: "https://hooks.example.test/SECRET-HOOK",
         password: "SECRET-PW", routing_key: "SECRET-KEY", slack_url: "https://hooks.example.test/SECRET-SLACKURL", pagerduty_routing_key: "SECRET-PDKEY",
         slack_webhook_url: "https://hooks.example.test/SECRET-SLACK",
-      }],
+      },
+      /* #5750: the scope fields the read now carries. A server route, a tag route whose name is markup, an orphaned route that matches
+         nothing, an unreadable tag scope, and a disabled orphaned tag route. */
+      { route_id: 8, metric_match: "*", match_kind: "wildcard", family: null, configured_channels: ["teams"], smtp_recipients: [], enabled: true, modified_at_utc: "2026-01-01T00:00:00Z",
+        scope_server_id: 3, scope_server_name: "Alpha", scope_tag_id: null, scope_tag_name: null, expanded_server_count: 1, orphaned: false, scope_unreadable: false },
+      { route_id: 9, metric_match: "performance", match_kind: "family", family: "performance", configured_channels: ["slack"], smtp_recipients: [], enabled: true, modified_at_utc: "2026-01-01T00:00:00Z",
+        scope_server_id: null, scope_server_name: null, scope_tag_id: 4, scope_tag_name: "<img src=x onerror=alert(1)>", expanded_server_count: 2, orphaned: false, scope_unreadable: false },
+      { route_id: 10, metric_match: "agent-jobs", match_kind: "family", family: "agent-jobs", configured_channels: ["email"], smtp_recipients: [], enabled: true, modified_at_utc: "2026-01-01T00:00:00Z",
+        scope_server_id: 99, scope_server_name: null, scope_tag_id: null, scope_tag_name: null, expanded_server_count: null, orphaned: true, scope_unreadable: false },
+      { route_id: 11, metric_match: "reports", match_kind: "family", family: "reports", configured_channels: ["email"], smtp_recipients: [], enabled: true, modified_at_utc: "2026-01-01T00:00:00Z",
+        scope_server_id: null, scope_server_name: null, scope_tag_id: 5, scope_tag_name: "East", expanded_server_count: null, orphaned: false, scope_unreadable: true },
+      { route_id: 12, metric_match: "external", match_kind: "family", family: "external", configured_channels: ["generic"], smtp_recipients: [], enabled: false, modified_at_utc: "2026-01-01T00:00:00Z",
+        scope_server_id: null, scope_server_name: null, scope_tag_id: 6, scope_tag_name: null, expanded_server_count: null, orphaned: true, scope_unreadable: false }],
     },
     settings: {
       alerts_enabled: true, cooldown_minutes: 15,

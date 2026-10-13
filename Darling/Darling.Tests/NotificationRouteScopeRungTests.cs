@@ -332,7 +332,28 @@ INSERT INTO config.config_notification_routes (metric_match, slack_url) VALUES (
                 Assert.Equal(JsonValueKind.Null, fleet.GetProperty("expanded_server_count").ValueKind);
                 Assert.False(fleet.GetProperty("orphaned").GetBoolean());
                 Assert.DoesNotContain("hooks.example.invalid", json.RootElement.GetRawText(), StringComparison.Ordinal);
+
+                /* The wildcard route reads wildcard with no family (it used to read exact_metric / performance). */
+                Assert.Equal("wildcard", tagRow.GetProperty("match_kind").GetString());
+                Assert.Equal(JsonValueKind.Null, tagRow.GetProperty("family").ValueKind);
             }
+
+            /* set_notification_route_enabled returns the same projection, scope included (#5750 review): the tag route, as stored. */
+            var westRouteId = Convert.ToInt32(await ScalarAsync(connection, FormattableString.Invariant($"SELECT route_id FROM config.config_notification_routes WHERE scope_tag_id = {west}"), ct), CultureInfo.InvariantCulture);
+            using (var set = JsonDocument.Parse(await DarlingMcpAlertTools.SetNotificationRouteEnabled(dataSource, westRouteId, false)))
+            {
+                Assert.Equal("updated", set.RootElement.GetProperty("status").GetString());
+                var route = set.RootElement.GetProperty("route");
+                Assert.False(route.GetProperty("enabled").GetBoolean());
+                Assert.Equal(west, route.GetProperty("scope_tag_id").GetInt32());
+                Assert.Equal("West", route.GetProperty("scope_tag_name").GetString());
+                Assert.Equal(3, route.GetProperty("expanded_server_count").GetInt32());
+                Assert.False(route.GetProperty("orphaned").GetBoolean());
+                Assert.False(route.GetProperty("scope_unreadable").GetBoolean());
+                Assert.Equal("wildcard", route.GetProperty("match_kind").GetString());
+            }
+
+            await ExecAsync(connection, FormattableString.Invariant($"UPDATE config.config_notification_routes SET enabled = true WHERE route_id = {westRouteId}"), ct);
 
             /* A deleted tag and a deleted server leave the route rows, now orphaned. The cascade from the tag delete takes its subtree. */
             await ExecAsync(connection, FormattableString.Invariant($"DELETE FROM config.server_tags WHERE id = {west}"), ct);

@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -42,7 +43,7 @@ public sealed class AdminPageTests
 
     [Theory]
     [InlineData("SERVER_COLUMNS", new[] { "display_name", "server_name", "auth", "engine", "version", "status", "freshness", "monthly_cost", "read_only", "added", "last_collected" })]
-    [InlineData("ROUTE_COLUMNS", new[] { "route_id", "enabled", "metric_match", "match_kind", "family", "channels", "smtp_recipients", "modified_at_utc" })]
+    [InlineData("ROUTE_COLUMNS", new[] { "route_id", "enabled", "metric_match", "match_kind", "family", "applies_to", "status", "channels", "smtp_recipients", "modified_at_utc" })]
     [InlineData("SETTING_COLUMNS", new[] { "setting", "value" })]
     public void EachTab_DeclaresItsColumnKeys(string name, string[] keys)
     {
@@ -52,6 +53,24 @@ public sealed class AdminPageTests
         var block = page.Substring(start, page.IndexOf("];", start, StringComparison.Ordinal) - start);
         var found = System.Text.RegularExpressions.Regex.Matches(block, "key: \"([a-z_]+)\"").Select(m => m.Groups[1].Value).ToArray();
         Assert.Equal(keys, found);
+    }
+
+    [Fact]
+    public void TheRoutesTab_UsesTheDesktopViewersScopeAndStatusWords()
+    {
+        var page = Page();
+        foreach (var (name, word) in new[]
+        {
+            ("ROUTE_ALL_SERVERS", ViewerNotificationRouteScope.AllServersLabel),
+            ("ROUTE_STATUS_OK", ViewerNotificationRouteScope.OkStatus),
+            ("ROUTE_STATUS_DISABLED", ViewerNotificationRouteScope.DisabledStatus),
+            ("ROUTE_STATUS_ORPHANED_SERVER", ViewerNotificationRouteScope.OrphanedServerStatus),
+            ("ROUTE_STATUS_ORPHANED_TAG", ViewerNotificationRouteScope.OrphanedTagStatus),
+            ("ROUTE_STATUS_TAG_UNREADABLE", ViewerNotificationRouteScope.TagDataUnreadableStatus),
+        })
+        {
+            Assert.Contains("export const " + name + " = \"" + word + "\";", page, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

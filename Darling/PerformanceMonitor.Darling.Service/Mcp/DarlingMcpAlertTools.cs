@@ -647,25 +647,7 @@ public sealed class DarlingMcpAlertTools
                 enabled_route_count = routes.Count(r => r.Enabled),
                 /* Zero routes is the ordinary state and the caller must be able to tell it from a failed read: an
                    empty array here with route_count 0 IS the answer "every alert goes to every parent channel". */
-                routes = routes.Select(r => new
-                {
-                    route_id = r.RouteId,
-                    metric_match = r.MetricMatch,
-                    match_kind = r.Family is null ? "exact_metric" : "family",
-                    family = r.Family ?? AlertFamily.Of(r.MetricMatch),
-                    configured_channels = r.ConfiguredChannels,
-                    smtp_recipients = r.EmailRecipients,
-                    enabled = r.Enabled,
-                    modified_at_utc = r.ModifiedAtUtc,
-                    /* #5750: the scope, labelled, and what it covers now. Null ids = fleet-wide. Orphaned = the server or tag is gone: the row stays, matching nothing. */
-                    scope_server_id = r.ScopeServerId,
-                    scope_server_name = r.ScopeServerName,
-                    scope_tag_id = r.ScopeTagId,
-                    scope_tag_name = r.ScopeTagName,
-                    expanded_server_count = r.ExpandedServerCount,
-                    orphaned = r.Orphaned,
-                    scope_unreadable = r.ScopeUnreadable,
-                }),
+                routes = routes.Select(RoutePayload),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -761,16 +743,28 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
-    private static object RoutePayload(PgNotificationRouteStore.RouteSummary r) => new
+    /// <summary>The ONE Darling route projection (#5750): <c>get_notification_routes</c> lists it and
+    /// <c>set_notification_route_enabled</c> returns it, so the two cannot drift apart again. Field names mirror Lite's
+    /// payload (<c>McpAlertTools.RoutePayload</c>); <see cref="NotificationRouteKinds"/> spells <c>match_kind</c> and
+    /// <c>family</c> for both products, so a <c>*</c> route reads as <c>wildcard</c> with no family.</summary>
+    internal static object RoutePayload(PgNotificationRouteStore.RouteSummary r) => new
     {
         route_id = r.RouteId,
         metric_match = r.MetricMatch,
-        match_kind = r.Family is null ? "exact_metric" : "family",
-        family = r.Family ?? AlertFamily.Of(r.MetricMatch),
+        match_kind = NotificationRouteKinds.MatchKind(r.MetricMatch),
+        family = NotificationRouteKinds.FamilyOf(r.MetricMatch),
         configured_channels = r.ConfiguredChannels,
         smtp_recipients = r.EmailRecipients,
         enabled = r.Enabled,
         modified_at_utc = r.ModifiedAtUtc,
+        /* The scope, labelled, and what it covers now. Null ids = fleet-wide. Orphaned = the server or tag is gone: the row stays, matching nothing. */
+        scope_server_id = r.ScopeServerId,
+        scope_server_name = r.ScopeServerName,
+        scope_tag_id = r.ScopeTagId,
+        scope_tag_name = r.ScopeTagName,
+        expanded_server_count = r.ExpandedServerCount,
+        orphaned = r.Orphaned,
+        scope_unreadable = r.ScopeUnreadable,
     };
 
     [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed.")]

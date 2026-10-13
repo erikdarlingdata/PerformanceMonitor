@@ -75,6 +75,8 @@ export const ROUTE_COLUMNS = [
   { key: "metric_match", label: "Matches" },
   { key: "match_kind", label: "Kind" },
   { key: "family", label: "Family" },
+  { key: "applies_to", label: "Applies to" },
+  { key: "status", label: "Status" },
   { key: "channels", label: "Channels set", wrap: true },
   { key: "smtp_recipients", label: "Email to", wrap: true },
   { key: "modified_at_utc", label: "Modified", format: "time" },
@@ -229,6 +231,29 @@ export function settingSections(data) {
   }).filter((s) => s.rows.length);
 }
 
+/* #5750: the words the desktop viewer's routes window uses (ViewerNotificationRouteScope in the Viewer; a test pins these
+   against it). The Applies to cell names the scope: "All servers", the server's name, or the tag's name. */
+export const ROUTE_ALL_SERVERS = "All servers";
+export const ROUTE_STATUS_OK = "OK";
+export const ROUTE_STATUS_DISABLED = "Disabled";
+export const ROUTE_STATUS_ORPHANED_SERVER = "Orphaned: server removed";
+export const ROUTE_STATUS_ORPHANED_TAG = "Orphaned: tag deleted";
+export const ROUTE_STATUS_TAG_UNREADABLE = "Not active: tag data unreadable";
+
+/** Where a route applies, from get_notification_routes' scope fields. A scope whose server or tag is gone shows the id it still names. */
+export function routeScopeText(r) {
+  if (r.scope_server_id != null) return r.scope_server_name || `(server id ${r.scope_server_id})`;
+  if (r.scope_tag_id != null) return r.scope_tag_name || `(tag id ${r.scope_tag_id})`;
+  return ROUTE_ALL_SERVERS;
+}
+
+/** A route's status: a scope that cannot be read or no longer exists matches NOTHING, so it never reads as OK. */
+export function routeStatusText(r) {
+  if (r.scope_unreadable === true) return ROUTE_STATUS_TAG_UNREADABLE;
+  if (r.orphaned === true) return r.scope_server_id != null ? ROUTE_STATUS_ORPHANED_SERVER : ROUTE_STATUS_ORPHANED_TAG;
+  return r.enabled === false ? ROUTE_STATUS_DISABLED : ROUTE_STATUS_OK;
+}
+
 /** Route rows: only the columns above, with the channel names joined. A destination field is never copied. */
 export function routeRows(data) {
   const routes = data && Array.isArray(data.routes) ? data.routes : [];
@@ -238,6 +263,8 @@ export function routeRows(data) {
     metric_match: r.metric_match,
     match_kind: r.match_kind,
     family: r.family,
+    applies_to: routeScopeText(r),
+    status: routeStatusText(r),
     channels: Array.isArray(r.configured_channels) ? r.configured_channels.filter((c) => !isSecretKey(c)).join(", ") : null,
     smtp_recipients: Array.isArray(r.smtp_recipients) ? r.smtp_recipients.join(", ") : r.smtp_recipients ?? null,
     modified_at_utc: r.modified_at_utc,
