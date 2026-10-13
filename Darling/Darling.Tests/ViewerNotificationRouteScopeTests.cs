@@ -192,6 +192,15 @@ public sealed class ViewerNotificationRouteScopeTests
         Assert.Equal("Every metric (*)", ViewerNotificationRouteScope.WildcardChoiceLabel);
     }
 
+}
+
+/// <summary>
+/// The live half of #5750's viewer scope tests (split out so the pure facts above stay out of any collection): the round trip of
+/// both scope columns through the viewer's write and read paths, and orphan status on the service's own inputs.
+/// </summary>
+/* #1776 own-store: this class mints its own scratch database per fact, so it is not [Collection("live-postgres")]. */
+public sealed class ViewerNotificationRouteScopeLivePostgresTests
+{
     /* ---- live: the round trip and orphan status on the service's own inputs ----------------------------------- */
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -202,7 +211,6 @@ public sealed class ViewerNotificationRouteScopeTests
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    /* #1776 own-store: this fact mints its own scratch database, so it is not [Collection("live-postgres")]. */
     [Fact]
     public async Task Live_BothScopeColumns_RoundTripThroughTheViewer_AndOrphanStatusUsesTheServicesInputs()
     {
