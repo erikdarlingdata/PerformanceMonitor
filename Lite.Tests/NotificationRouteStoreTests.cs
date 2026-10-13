@@ -368,26 +368,32 @@ public sealed class NotificationRouteStoreTests : IDisposable
     [Fact]
     public async Task TheCache_ReloadsAfterAServerAdd_AndAServerSettingsEdit()
     {
-        var calls = 0;
-        NotificationRouteCache.Configure(() => { calls++; return Array.Empty<NotificationRoute>(); });
-        _ = NotificationRouteCache.Current;
-        _ = NotificationRouteCache.Current;
-        Assert.Equal(1, calls);
-
+        /* The loader names the server state it SAW in the route it returns, and the test asserts on that, never on how many
+           times the loader ran. The cache is a process-wide static that every ServerManager and tag writer invalidates, and
+           test classes outside this serialized collection write servers in parallel: a count of loads includes their
+           invalidations (CI saw "Expected: 3, Actual: 4"). A foreign invalidation only makes the next read load the same state again. */
+        const int BeforeAdd = 1, AfterAdd = 2, AfterEdit = 3;
         var configDir = Path.Combine(_tempDir, "cfg");
         Directory.CreateDirectory(configDir);
         var manager = new ServerManager(configDir);
         var server = new PerformanceMonitorLite.Models.ServerConnection { ServerName = "R3-SRV", DisplayName = "R3" };
+        NotificationRouteCache.Configure(() =>
+        {
+            var seen = manager.GetAllServers().FirstOrDefault(s => s.Id == server.Id);
+            var state = seen is null ? BeforeAdd : seen.DisplayName == "R3 edited" ? AfterEdit : AfterAdd;
+            return new[] { new NotificationRoute(state, "High CPU", "https://x.test/h", "", "", "", "", true) };
+        });
+        Assert.Equal(BeforeAdd, NotificationRouteCache.Current.Single().RouteId);
+
         manager.AddServer(server);
-        _ = NotificationRouteCache.Current;
-        Assert.Equal(2, calls);
+        Assert.Equal(AfterAdd, NotificationRouteCache.Current.Single().RouteId);
         Assert.Contains(
             RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server)),
             manager.GetKnownServerIds());
 
+        server.DisplayName = "R3 edited";
         manager.UpdateServerSettings(server);
-        _ = NotificationRouteCache.Current;
-        Assert.Equal(3, calls);
+        Assert.Equal(AfterEdit, NotificationRouteCache.Current.Single().RouteId);
 
         await Task.CompletedTask;
     }
