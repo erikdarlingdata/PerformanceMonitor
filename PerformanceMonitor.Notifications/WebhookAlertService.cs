@@ -2290,7 +2290,13 @@ public class WebhookAlertService
     /// </summary>
     private static AlertContext RedactForWebhook(AlertContext context)
     {
-        var redacted = new AlertContext { Incidents = context.Incidents, NewestSample = context.NewestSample };
+        var redacted = new AlertContext
+        {
+            Incidents = context.Incidents,
+            NewestSample = context.NewestSample,
+            /* #5641: transient and never serialized, but a copy that drops a member is the drift this census-pinned type guards against. */
+            EscalationBypassesCooldown = context.EscalationBypassesCooldown
+        };
         foreach (var detail in context.Details)
         {
             if (detail.IsCodeBlock)

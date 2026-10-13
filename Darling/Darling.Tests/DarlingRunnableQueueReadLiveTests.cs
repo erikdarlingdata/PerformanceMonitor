@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -49,26 +50,35 @@ public sealed class DarlingRunnableQueueReadLiveTests
     {
         var sql = DarlingAlertReadAdapter.RunnableQueueSql;
 
+        /* The fold is the shared CpuSchedulerCollectionSql, not a hand-written copy (#5641 review): a drift in either
+           place fails here. The text between the fragment and the outer select is the whole of this read's own SQL. */
+        var fold = CpuSchedulerCollectionSql.PerCollection(
+            "cpu_scheduler_stats",
+            "server_id = $1 AND collection_time >= $2 AND avg_runnable_tasks_count IS NOT NULL",
+            newestOnly: false);
+        Assert.Contains(fold, sql, StringComparison.Ordinal);
+        Assert.Contains(CpuSchedulerCollectionSql.CombinedColumns, sql, StringComparison.Ordinal);
+        var ownText = sql.Replace(fold, string.Empty, StringComparison.Ordinal);
+
         Assert.Contains("FROM cpu_scheduler_stats", sql, StringComparison.Ordinal);
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         /* A row whose average is NULL is not a row: out of the count, the sums and the maximum alike. */
         Assert.Contains("avg_runnable_tasks_count IS NOT NULL", sql, StringComparison.Ordinal);
         /* One row per collection_time (the collector can write several, #5710), newest first. */
-        Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, collection_time", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("collection_id", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT", sql, StringComparison.Ordinal);
-        /* A lone row keeps its own average; split rows sum the totals over the highest scheduler count, in numeric. */
+        /* A lone row keeps its own average; split rows sum the totals over the highest scheduler count, in numeric:
+           both live in the shared fold, and this read only casts the folded average. */
         Assert.Contains("WHEN COUNT(*) = 1", sql, StringComparison.Ordinal);
         Assert.Contains("THEN MAX(avg_runnable_tasks_count)", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(total_runnable_tasks_count)::numeric / NULLIF(MAX(scheduler_count), 0)", sql, StringComparison.Ordinal);
-        Assert.Contains(")::double precision AS per_scheduler", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(total_runnable_tasks_count)::bigint", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX(scheduler_count)::integer", sql, StringComparison.Ordinal);
-        /* The collector's per-scheduler numbers, never the node or offline-CPU columns (#5656). */
-        Assert.DoesNotContain("node", sql, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("offline", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("CAST(SUM(total_runnable_tasks_count) AS DECIMAL(38,2)) / NULLIF(MAX(scheduler_count), 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(avg_runnable_tasks_count AS double precision) AS per_scheduler", sql, StringComparison.Ordinal);
+        /* The collector's per-scheduler numbers, never the node or offline-CPU columns (#5656): this read's own text. */
+        Assert.DoesNotContain("node", ownText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("offline", ownText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("collection_id", ownText, StringComparison.Ordinal);
         /* A bare now() is timestamptz and would compare in the server's time zone; the floor is bound. */
         Assert.DoesNotContain("now(", sql.ToLowerInvariant(), StringComparison.Ordinal);
         Assert.DoesNotContain("FROM v_", sql, StringComparison.Ordinal);

@@ -653,7 +653,7 @@ CROSS JOIN LATERAL (SELECT date_trunc('day', now() AT TIME ZONE 'UTC') - interva
 
         /* V173 (#5582): the stamp-grain rollup and its triggers are above V170 too; RewindTableAsync dropped the triggers, the tables go here. */
         /* V177 (#5641): the Runnable Queue settings columns are above V170 too (the probe's newest sentinel). */
-        await ExecAsync(connection, "ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS runnable_queue_enabled, DROP COLUMN IF EXISTS runnable_queue_warning_per_scheduler, DROP COLUMN IF EXISTS runnable_queue_critical_per_scheduler", ct);
+        await RungRewindArtifacts.DropV177SentinelAsync(connection, ct);
         /* V176 (#5638): the procedure totals table is above V170 too. */
         await ExecAsync(connection, "DROP TABLE IF EXISTS collect.procedure_stats_totals", ct);
         /* V175 (#5631): the daily plan regression rows-per-call column is above V170 too. */

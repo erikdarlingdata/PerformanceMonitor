@@ -15,6 +15,7 @@ using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitorLite.Tests;
 using Xunit;
@@ -52,19 +53,31 @@ public sealed class RunnableQueueWindowReadTests : IClassFixture<SharedDuckDbFix
     {
         var sql = LocalDataService.RunnableQueueSamplesSql;
 
+        /* The fold is the shared CpuSchedulerCollectionSql, not a hand-written copy (#5641 review): a drift in either
+           place fails here. The text outside the fragment is the whole of this read's own SQL. */
+        var fold = CpuSchedulerCollectionSql.PerCollection(
+            "v_cpu_scheduler_stats",
+            "server_id = $1 AND collection_time >= $2 AND avg_runnable_tasks_count IS NOT NULL",
+            newestOnly: false);
+        Assert.Contains(fold, sql, StringComparison.Ordinal);
+        Assert.Contains(CpuSchedulerCollectionSql.CombinedColumns, sql, StringComparison.Ordinal);
+        var ownText = sql.Replace(fold, string.Empty, StringComparison.Ordinal);
+
         Assert.Contains("FROM v_cpu_scheduler_stats", sql, StringComparison.Ordinal);
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("avg_runnable_tasks_count IS NOT NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, collection_time", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("collection_id", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT", sql, StringComparison.Ordinal);
+        /* Lone row versus split fold lives in the shared fragment; this read only casts the folded average. */
         Assert.Contains("WHEN COUNT(*) = 1", sql, StringComparison.Ordinal);
         Assert.Contains("THEN MAX(avg_runnable_tasks_count)", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(SUM(total_runnable_tasks_count) AS DOUBLE) / NULLIF(MAX(scheduler_count), 0)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("node", sql, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("offline", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("CAST(SUM(total_runnable_tasks_count) AS DECIMAL(38,2)) / NULLIF(MAX(scheduler_count), 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(avg_runnable_tasks_count AS DOUBLE) AS per_scheduler", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("node", ownText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("offline", ownText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("collection_id", ownText, StringComparison.Ordinal);
         /* The floor is bound from the caller's clock; no engine-side now() to disagree with the evaluator. */
         Assert.DoesNotContain("now()", sql, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("current_timestamp", sql, StringComparison.OrdinalIgnoreCase);

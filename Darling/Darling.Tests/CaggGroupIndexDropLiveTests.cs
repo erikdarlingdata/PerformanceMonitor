@@ -318,6 +318,12 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < 177)
+        {
+            /* V177 (#5641) - the Runnable Queue settings columns are the probe's newest sentinel. The shared helper owns the removal. */
+            await RungRewindArtifacts.DropV177SentinelAsync(connection, ct);
+        }
+
         if (simulatedVersion < ProcedureStatsTotals.RungVersion)
         {
             /* V176 (#5638) - the per-collection procedure totals table is the probe's sentinel. */

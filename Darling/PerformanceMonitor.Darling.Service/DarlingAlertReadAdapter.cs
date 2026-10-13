@@ -819,35 +819,29 @@ ORDER BY accumulated_wait_ms DESC";
     ///
     /// <para>One row per <c>collection_time</c>, newest first. The collector can write several rows for one
     /// collection_time, each covering a subset of the schedulers while every row says the full
-    /// <c>scheduler_count</c> (#5710; old rows stay split), so rows are folded: a lone row uses its own
+    /// <c>scheduler_count</c> (#5710; old rows stay split), so rows are folded by the shared <see cref="CpuSchedulerCollectionSql"/> (one definition for every reader, #5641 review): a lone row uses its own
     /// <c>avg_runnable_tasks_count</c> (the collector's <c>AVG(runnable_tasks_count)</c> over <c>VISIBLE ONLINE</c>
     /// schedulers, runnable tasks per scheduler: the number the bars were measured on, never the node or offline-CPU
-    /// columns, #5656); several use <c>SUM(total_runnable_tasks_count) / MAX(scheduler_count)</c>. The sum is cast to
-    /// <c>numeric</c> first because both columns are integers and PostgreSQL would divide them as integers. A row whose
-    /// average is NULL is not a row. No ORDER BY tiebreaker: after the GROUP BY there is no tie.</para>
+    /// columns, #5656); several use <c>SUM(total_runnable_tasks_count) / MAX(scheduler_count)</c>. The shared fold
+    /// casts the sum to <c>numeric</c> first, so the division is never integer division. A row whose
+    /// average is NULL is not a row (the filter is on the stored rows, before the fold). No ORDER BY tiebreaker: after the GROUP BY there is no tie.</para>
     ///
     /// <para><b>Cost.</b> One server, a <c>collection_time</c> floor of the engine's 60-minute read
     /// (<c>RunnableQueueEvaluator.ReadLookbackMinutes</c>, which the cadence is derived from): about 60 collections at the
     /// 1-minute cadence, all in the newest chunk, the same predicate shape as the poison-wait read beside it.</para>
     /// </summary>
-    public const string RunnableQueueSql = @"
+    public static readonly string RunnableQueueSql = $"""
 SELECT
     collection_time,
-    (
-        CASE
-            WHEN COUNT(*) = 1
-            THEN MAX(avg_runnable_tasks_count)
-            ELSE SUM(total_runnable_tasks_count)::numeric / NULLIF(MAX(scheduler_count), 0)
-        END
-    )::double precision AS per_scheduler,
-    SUM(total_runnable_tasks_count)::bigint AS total_runnable_tasks_count,
-    MAX(scheduler_count)::integer AS scheduler_count
-FROM cpu_scheduler_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   avg_runnable_tasks_count IS NOT NULL
-GROUP BY collection_time
-ORDER BY collection_time DESC";
+    CAST(avg_runnable_tasks_count AS double precision) AS per_scheduler,
+    CAST(total_runnable_tasks_count AS bigint) AS total_runnable_tasks_count,
+    CAST(scheduler_count AS integer) AS scheduler_count
+FROM
+(
+    {CpuSchedulerCollectionSql.PerCollection("cpu_scheduler_stats", "server_id = $1 AND collection_time >= $2 AND avg_runnable_tasks_count IS NOT NULL", newestOnly: false)}
+) AS collections
+ORDER BY collection_time DESC
+""";
 
     public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(
         string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)

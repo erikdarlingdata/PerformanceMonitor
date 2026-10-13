@@ -108,6 +108,29 @@ public sealed class IncidentDeliveryFilterTests
     }
 
     /// <summary>
+    /// #5641 review: a tier escalation's cooldown bypass is about the firing, so both delivery copies keep it (the
+    /// filtered render and the roster press), and a context that is not an escalation stays unflagged.
+    /// </summary>
+    [Fact]
+    public void TheBypassFlagOfAnEscalation_SurvivesTheFilteredRenderAndTheRosterPress()
+    {
+        var context = TwoIncidents();
+        context.EscalationBypassesCooldown = true;
+
+        var filtered = IncidentDeliveryFilter.ForDelivery(context, null, new[] { Fresh }).Context;
+        var pressed = IncidentDeliveryFilter.ForDelivery(
+            context, null, deliverableDedupKeys: null, aggregateRoster: new AlertDetailItem { Heading = "roster" }).Context;
+
+        Assert.NotSame(context, filtered);
+        Assert.NotSame(context, pressed);
+        Assert.True(filtered!.EscalationBypassesCooldown);
+        Assert.True(pressed!.EscalationBypassesCooldown);
+
+        var unflagged = TwoIncidents();
+        Assert.False(IncidentDeliveryFilter.ForDelivery(unflagged, null, new[] { Fresh }).Context!.EscalationBypassesCooldown);
+    }
+
+    /// <summary>
     /// Delivery filters; persistence does not. The caller writes its <c>config_alert_log</c> row from the
     /// context it still holds AFTER the send, so a filter that mutated in place would silently strip the
     /// history row, the context JSON, the triage page, the Viewer's detail pane and

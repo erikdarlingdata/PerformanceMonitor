@@ -105,6 +105,36 @@ public class WebhookCooldownSeedTests : IDisposable
     }
 
     [Fact]
+    public async Task RunnableQueueEscalation_SplitPerEvent_EveryMessageStillBypassesTheWindow()
+    {
+        /* #5641 review: per-event delivery sends each message from a COPY of the alert's context
+           (PerEventNotification.NewContext). A copy that dropped the bypass flag made a split escalation wait out
+           the window it was meant to skip. Every message is attempted (the endpoint refuses it); the unflagged
+           control is throttled. */
+        var history = new FakeHistoryStore { LastWebhookSent = DateTime.UtcNow };
+        var svc = MakeService(history, EnabledTeamsSettings());
+
+        var source = ContextWith("fp-one");
+        source.Incidents!.Add(new AlertIncident("fp-two", new[] { "db.dbo.U" }));
+        source.SeverityOverride = AlertSeverityLevel.Critical;
+
+        foreach (var message in PerEventNotification.Split(source, 10))
+        {
+            var control = await svc.TrySendWebhookAlertsAsync("Runnable Queue", "Srv", "20", "16", "1", message.Context);
+            Assert.Equal(AlertChannelOutcome.Throttled, control.Outcome);
+        }
+
+        source.EscalationBypassesCooldown = true;
+        var messages = PerEventNotification.Split(source, 10);
+        Assert.Equal(2, messages.Count);
+        foreach (var message in messages)
+        {
+            var escalation = await svc.TrySendWebhookAlertsAsync("Runnable Queue", "Srv", "20", "16", "1", message.Context);
+            Assert.Equal(AlertChannelOutcome.Failed, escalation.Outcome);
+        }
+    }
+
+    [Fact]
     public async Task NullHistoryStore_NoSeed_AttemptsPost()
     {
         // The legacy/test path passes no history store: pre-#1145 in-memory-only cooldown, so a

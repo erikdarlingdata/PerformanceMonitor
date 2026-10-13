@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -21,7 +22,8 @@ public partial class LocalDataService
     /// <c>cpu_scheduler_stats</c> <c>collection_time</c> in the last <paramref name="lookbackMinutes"/> minutes,
     /// newest first. A collection with one row uses that row's <c>avg_runnable_tasks_count</c> exactly; a collection the
     /// collector split across several rows (each covering a subset of the schedulers while saying the full
-    /// <c>scheduler_count</c>, #5710) uses <c>SUM(total_runnable_tasks_count) / MAX(scheduler_count)</c>. The twin of
+    /// <c>scheduler_count</c>, #5710) uses <c>SUM(total_runnable_tasks_count) / MAX(scheduler_count)</c>, folded by the shared
+    /// <see cref="CpuSchedulerCollectionSql"/>. The twin of
     /// <c>DarlingAlertReadAdapter.RunnableQueueSql</c>, in DuckDB's dialect. See <see cref="RunnableQueueSamplesSql"/>.
     /// </summary>
     public async Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(int serverId, int lookbackMinutes)
@@ -57,29 +59,23 @@ public partial class LocalDataService
 
     /// <summary>
     /// <see cref="GetRunnableQueueSamplesAsync"/>'s text, exposed for the parity pins. One row per
-    /// <c>collection_time</c>, newest first (no tie is possible after the GROUP BY). A row whose
-    /// <c>avg_runnable_tasks_count</c> is NULL (no visible online scheduler) is not a row. $1 server_id, $2 the
-    /// naive-UTC floor. <c>per_scheduler</c> is the lone row's own average, or the summed total over the highest
-    /// scheduler count when the collection was split. The sum is cast to DOUBLE before the division: no integer
-    /// division, whatever the engine's <c>/</c> does.
+    /// <c>collection_time</c>, newest first (no tie is possible after the GROUP BY). The per-collection fold is NOT
+    /// written here: it is <see cref="CpuSchedulerCollectionSql.PerCollection"/> (#5710; one definition for every reader,
+    /// #5641 review), and this select takes <c>avg_runnable_tasks_count</c> from it as <c>per_scheduler</c>: the lone
+    /// row's own average, or the summed total over the highest scheduler count when the collection was split. A row whose
+    /// <c>avg_runnable_tasks_count</c> is NULL (no visible online scheduler) is not a row: the filter is on the stored
+    /// rows, before the fold. $1 server_id, $2 the naive-UTC floor.
     /// </summary>
-    public const string RunnableQueueSamplesSql = @"
+    public static readonly string RunnableQueueSamplesSql = $"""
 SELECT
     collection_time,
-    CAST
-    (
-        CASE
-            WHEN COUNT(*) = 1
-            THEN MAX(avg_runnable_tasks_count)
-            ELSE CAST(SUM(total_runnable_tasks_count) AS DOUBLE) / NULLIF(MAX(scheduler_count), 0)
-        END AS DOUBLE
-    ) AS per_scheduler,
-    CAST(SUM(total_runnable_tasks_count) AS BIGINT) AS total_runnable_tasks_count,
-    CAST(MAX(scheduler_count) AS INTEGER) AS scheduler_count
-FROM v_cpu_scheduler_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   avg_runnable_tasks_count IS NOT NULL
-GROUP BY collection_time
-ORDER BY collection_time DESC";
+    CAST(avg_runnable_tasks_count AS DOUBLE) AS per_scheduler,
+    CAST(total_runnable_tasks_count AS BIGINT) AS total_runnable_tasks_count,
+    CAST(scheduler_count AS INTEGER) AS scheduler_count
+FROM
+(
+    {CpuSchedulerCollectionSql.PerCollection("v_cpu_scheduler_stats", "server_id = $1 AND collection_time >= $2 AND avg_runnable_tasks_count IS NOT NULL", newestOnly: false)}
+) AS collections
+ORDER BY collection_time DESC
+""";
 }
