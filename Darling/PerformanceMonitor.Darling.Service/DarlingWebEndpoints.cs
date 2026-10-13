@@ -349,8 +349,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ToHttpResult(fleetRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, 0, context.RequestAborted);
             }
 
-            var hours = Math.Clamp(QueryInt(context, "hours_back", "hours", DefaultFleetHours), 1, 168);
-            var worstCount = Math.Max(0, QueryInt(context, "worst_count", null, DarlingFleetReader.DefaultWorstCount));
+            /* #5644 (review of W22): an out-of-range window or count is refused with the {"status":"invalid"} 400
+               the read loop answers, never clamped to a different window and answered 200 (REVIEW-TRAPS: counts
+               are refused, not clamped). The refusal names the spelling the caller sent (hours or hours_back).
+               The in-product callers send neither (apiGetFleet asks for the bare /api/fleet, the one-hour default). */
+            var hours = QueryInt(context, "hours_back", "hours", DefaultFleetHours);
+            var worstCount = QueryInt(context, "worst_count", null, DarlingFleetReader.DefaultWorstCount);
+            if (FleetParamRefusal(hours, worstCount, key => First(context, key)) is { } fleetRangeRefusal)
+            {
+                return ToHttpResult(fleetRangeRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, 0, context.RequestAborted);
+            }
+
             var now = DateTime.UtcNow;
             var result = await DarlingFleetReader.GetFleetOverviewAsync(
                 postgres, now.AddHours(-hours), now, now, worstCount,
@@ -6508,6 +6517,25 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
     }
 
+    /// <summary>
+    /// #5644: the refusal envelope for an out-of-range <c>/api/fleet</c> window (<paramref name="hours"/> outside 1..168) or a
+    /// negative <paramref name="worstCount"/>, else null. Same envelope and sentences as the MCP tool's
+    /// <see cref="McpHelpers.ValidateHoursBack(int)"/>, with the window parameter named as the caller sent it
+    /// (<see cref="NameWindowParameterTheCallerSent"/>). Pure over the lookup, so a test pins it without a server.
+    /// </summary>
+    internal static string? FleetParamRefusal(int hours, int worstCount, Func<string, string?> lookup)
+    {
+        var window = McpHelpers.ValidateHoursBack(hours);
+        if (window is not null)
+        {
+            return NameWindowParameterTheCallerSent(window, lookup);
+        }
+
+        return worstCount < 0
+            ? McpHelpers.Refusal("worst_count", $"Invalid worst_count value '{worstCount}'. Must be zero or a positive integer.")
+            : null;
+    }
+
     private static string? NonIntegerParamRefusal(HttpContext context) =>
         NonIntegerParamRefusal(key => First(context, key));
 
@@ -6517,7 +6545,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>
     /// A row-count knob (<c>?limit=</c> / <c>?top=</c>), clamped to [1, <see cref="MaxRowLimit"/>] at the
     /// dispatch layer so an authenticated/loopback caller can't request an unbounded result set from a reader
-    /// that binds the value straight into <c>LIMIT $N</c> (the /api/fleet window is clamped the same way).
+    /// that binds the value straight into <c>LIMIT $N</c> (the /api/fleet window is refused out of range instead, #5644).
     /// </summary>
     private static int Rows(HttpContext context, string key, int def) =>
         ClampRows(QueryInt(context, key, null, def));
