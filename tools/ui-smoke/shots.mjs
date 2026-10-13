@@ -29,9 +29,10 @@ const PIXEL_THRESHOLD = 0.1;
 const MAX_SHOT_TRIES = 8;
 /* How long to wait for every card to turn collection stale. The band opens 2 minutes after the seed anchor (the run log prints the wait it took). */
 const STALE_WAIT_MS = 4 * 60 * 1000;
-/* Screenshot-only: the status bar's database size changes width when it crosses a digit count (99 MB to 100 MB), and a mask hides the
-   glyphs but not the box, so every item to its right would move. A fixed width, wide enough for "Database: 1023 MB (stale)". */
-const SHOT_STYLE = "#statusbar .sb-store-size { display: inline-block; flex: none; box-sizing: border-box; width: 14em; overflow: hidden; white-space: nowrap; }";
+/* Screenshot-only: the status bar's database size is not the same on every run. Its text changes width when it crosses a digit count
+   (99 MB to 100 MB), a mask hides the glyphs but not the box, and in a CI run (38437783077) the item was not there at all, because the
+   size read had not finished. So the item and the separator before it are hidden: the bar is the same with or without it. */
+const SHOT_STYLE = "#statusbar .sb-store-size, #statusbar .sb-sep:has(+ .sb-store-size) { display: none !important; }";
 /* A timestamp farther than this from the seed anchor is not seed-relative (a build date, a plan's compile time): left alone. */
 const SHIFT_REACH_MS = 60 * 24 * 3600 * 1000;
 const TS = /(\d{4})-(\d{2})-(\d{2})([T ])(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?/g;

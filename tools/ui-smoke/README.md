@@ -74,8 +74,9 @@ How the page is kept the same on every run:
 - The service marks the two unreachable servers "collection stale" a couple of minutes after the seed anchor, and "offline"
   after 30. The shots wait until `/api/fleet` shows every card stale. They give up after 4 minutes with one message if the
   cards never got there, and with another if the cards are already past stale.
-- The database size in the status bar changes width when it gains a digit (99 MB to 100 MB). A mask hides the text. It does not hide
-  the box. For the shots, `shots.mjs` adds a style that gives the box a fixed width.
+- The database size in the status bar is not the same on every run. Its width changes when it gains a digit (99 MB to 100 MB).
+  In one run the item was missing, because the read of the size had not finished. A mask hides the text, not the box. For the
+  shots, `shots.mjs` adds a style that hides the item and the separator before it, so the bar is the same either way.
 - `report.json` is `{ pages, screenshotProblems }`. The page walk is written first, then rewritten with the screenshot
   problems, so a failure in the screenshot step cannot lose the walk.
 - Playwright's Chromium lives in the folder named by `PLAYWRIGHT_BROWSERS_PATH`. The workflow sets it and caches that folder.
