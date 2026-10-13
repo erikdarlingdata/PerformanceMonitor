@@ -104,6 +104,64 @@ public sealed class StoreHostSlowSizeLiveTests
             connection, cts.Token, reads: new DarlingStoreHostProfile.StoreFactsReads { SlowReadSeconds = 30, StoreSizeSql = SleepingSizeSql }));
     }
 
+    [Theory]
+    [InlineData("SELECT 1::bigint, 1::integer FROM timescaledb_information.no_such_view_5718", "42P01")]
+    [InlineData("SELECT 1::bigint, 1::integer FROM no_such_schema_5718.chunks", "42P01")]
+    public async Task AStoreWithoutTimescaleDb_ReadsZeroChunks_NotUnavailable_Live(string sql, string expectedSqlState)
+    {
+        var cs = ConnectionString();
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the #5718 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+
+        /* The statement raises what a database without TimescaleDB raises for the chunk catalog view
+           (an undefined relation, SQLSTATE 42P01): the honest answer is "no chunks", not "unknown". */
+        var ex = await Assert.ThrowsAsync<PostgresException>(async () =>
+        {
+            await using var probe = new NpgsqlCommand(sql, connection);
+            await probe.ExecuteScalarAsync(ct);
+        });
+        Assert.Equal(expectedSqlState, ex.SqlState);
+
+        var facts = await DarlingStoreHostProfile.GatherStoreFactsAsync(
+            connection, ct, reads: new DarlingStoreHostProfile.StoreFactsReads { StoreSizeSql = "SELECT 42::bigint", UncompressedChunkSizeSql = sql });
+
+        Assert.Equal(0L, facts.UncompressedChunkBytes);
+        Assert.Equal(0, facts.UncompressedChunkCount);
+        Assert.Null(facts.UncompressedUnavailableReason);
+        Assert.Equal(42L, facts.StoreSizeBytes);
+    }
+
+    [Theory]
+    [InlineData("DO $$ BEGIN RAISE EXCEPTION 'permission denied for view chunks' USING ERRCODE = '42501'; END $$", "42501")]
+    [InlineData("SELECT (1 / (SELECT 0))::bigint, 1::integer", "22012")]
+    public async Task ARefusedUncompressedChunkRead_IsUnknownWithItsSqlState_NotZeroChunks_Live(string sql, string expectedSqlState)
+    {
+        var cs = ConnectionString();
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the #5718 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+
+        var facts = await DarlingStoreHostProfile.GatherStoreFactsAsync(
+            connection, ct, reads: new DarlingStoreHostProfile.StoreFactsReads { StoreSizeSql = "SELECT 42::bigint", UncompressedChunkSizeSql = sql });
+
+        /* Zero would be a fabricated "nothing is uncompressed" (and uncompressed_chunk_percent_of_ram would follow
+           it to 0.0); a refusal is unknown, named by its SQLSTATE, and the rest of the profile still returns. */
+        Assert.Null(facts.UncompressedChunkBytes);
+        Assert.Null(facts.UncompressedChunkCount);
+        Assert.Equal($"this role cannot read it (SQLSTATE {expectedSqlState})", facts.UncompressedUnavailableReason);
+        Assert.Equal(42L, facts.StoreSizeBytes);
+        Assert.NotNull(facts.BufferHitRatioPercent);
+
+        /* The failed statement does not poison the connection: the reads that follow in GatherAsync depend on it. */
+        await using var after = new NpgsqlCommand("SELECT 1", connection);
+        Assert.Equal(1, await after.ExecuteScalarAsync(ct));
+    }
+
     [Fact]
     public async Task APolledRead_TakesTheStoredSweepSize_AndReportsItsAge_NeverReadingPgDatabaseSize_Live()
     {
@@ -238,11 +296,33 @@ public sealed class StoreHostSlowSizeTests
     }
 
     [Fact]
-    public void TheStoredSizeSql_IsTheRecordedSizeSqlWithTheTimeAdded()
+    public void TheStoredSizeSql_AndTheRecordedSizeSql_ShareOneTail_ThatIsDefinedOnce()
     {
-        Assert.Equal(
-            StoreSelfMetrics.LatestStoreSizeSql,
-            StoreSelfMetrics.LatestStoreSizeWithTimeSql.Replace("SELECT total_bytes, metric_time", "SELECT total_bytes", StringComparison.Ordinal));
+        /* Both statements are built from ONE private const tail (the predicate and ordering), so they cannot
+           drift apart; the select lists are the only difference (#5718 review). */
+        const string tailStart = "FROM collect.store_metrics";
+        var recorded = StoreSelfMetrics.LatestStoreSizeSql;
+        var withTime = StoreSelfMetrics.LatestStoreSizeWithTimeSql;
+
+        Assert.StartsWith("SELECT total_bytes", recorded, StringComparison.Ordinal);
+        Assert.StartsWith("SELECT total_bytes, metric_time", withTime, StringComparison.Ordinal);
+        Assert.Equal(recorded[recorded.IndexOf(tailStart, StringComparison.Ordinal)..], withTime[withTime.IndexOf(tailStart, StringComparison.Ordinal)..]);
+
+        var source = Source("Darling", "PerformanceMonitor.Darling.Storage", "StoreSelfMetrics.cs");
+        Assert.Single(Regex.Matches(source, @"AND\s+total_bytes IS NOT NULL\s+ORDER BY metric_time DESC\s+LIMIT 1"));
+    }
+
+    [Theory]
+    [InlineData("42P01", true)]
+    [InlineData("3F000", true)]
+    [InlineData("42883", true)]
+    [InlineData("42501", false)]
+    [InlineData("22012", false)]
+    [InlineData("57014", false)]
+    [InlineData("XX000", false)]
+    public void OnlyAnUndefinedRelationSchemaOrFunction_MeansTimescaleDbIsAbsent(string sqlState, bool absent)
+    {
+        Assert.Equal(absent, DarlingStoreHostProfile.IsTimescaleAbsent(new PostgresException("x", "ERROR", "ERROR", sqlState)));
     }
 
     [Fact]
@@ -270,5 +350,74 @@ public sealed class StoreHostSlowSizeTests
         Assert.Contains("store.size_age_seconds", js, StringComparison.Ordinal);
         Assert.Contains("store.size_unavailable_reason", js, StringComparison.Ordinal);
         Assert.Contains("store.uncompressed_unavailable_reason", js, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheWebCard_DerivesTheAgeFromSizeAsOfAtRenderTime_NotFromTheCachedServerAge()
+    {
+        var js = Source("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "sweeps.js");
+
+        /* The card cell asks storeSizeText for the age as of NOW, so a poll tick that replays the cached payload
+           still shows a true age; size_age_seconds is only the fallback inside storeSizeAgeSeconds. */
+        Assert.Contains("cellText(storeSizeText(store, Date.now()))", js, StringComparison.Ordinal);
+        Assert.Contains("parseUtc(store.size_as_of)", js, StringComparison.Ordinal);
+        Assert.DoesNotContain("fmtMs(store.size_age_seconds", js, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheWebCardAge_KeepsMovingWhenTheCachedPayloadIsReplayed_Node()
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        psi.ArgumentList.Add(Path.Combine(RepoRoot(), "Darling", "Darling.Tests", "store-host-size-age-harness.mjs"));
+        psi.ArgumentList.Add(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
+
+        System.Diagnostics.Process proc;
+        try
+        {
+            proc = System.Diagnostics.Process.Start(psi)!;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
+            throw;
+        }
+
+        using (proc)
+        {
+            var error = proc.StandardError.ReadToEndAsync();
+            var output = proc.StandardOutput.ReadToEnd().Trim();
+            if (!proc.WaitForExit(30000))
+            {
+                proc.Kill(entireProcessTree: true);
+                Assert.Fail("the store host size-age harness did not finish in 30 s");
+            }
+
+            Assert.True(proc.ExitCode == 0, "the store host size-age harness failed: " + await error);
+            using var doc = JsonDocument.Parse(output);
+            var r = doc.RootElement;
+
+            /* One payload, three render times: the age follows the clock, which is what a replayed poll tick needs. */
+            Assert.Equal("3.0 GB (hourly sweep, 10.0 min old)", r.GetProperty("atFetch").GetString());
+            Assert.Equal("3.0 GB (hourly sweep, 11.0 min old)", r.GetProperty("onePollLater").GetString());
+            Assert.Equal("3.0 GB (hourly sweep, 1.2 h old)", r.GetProperty("anHourLater").GetString());
+            Assert.Equal("3.0 GB (hourly sweep, 0 ms old)", r.GetProperty("clockBehind").GetString());
+            Assert.Equal("3.0 GB (hourly sweep, 10.0 min old)", r.GetProperty("noAsOfUsesServerAge").GetString());
+            Assert.Equal("3.0 GB", r.GetProperty("noAge").GetString());
+            Assert.Equal("unavailable (timed out after 10 s)", r.GetProperty("unavailable").GetString());
+        }
+    }
+
+    [Fact]
+    public void TheSupportBundle_StaysOnTheStoredSize_AndCarriesItsAgeAndReasons()
+    {
+        var bundle = Source("Darling", "PerformanceMonitor.Darling.Service", "DiagnosticsBundleRunner.cs");
+        Assert.Contains("DarlingMcpStoreHostTools.GetStoreHost(postgres, config.Postgres", bundle, StringComparison.Ordinal);
+
+        /* The bundle's host section is the tool's whole payload, which is what carries these. */
+        var tool = Source("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpStoreHostTools.cs");
+        foreach (var member in new[] { "size_as_of =", "size_age_seconds =", "size_unavailable_reason =", "uncompressed_unavailable_reason =" })
+        {
+            Assert.Contains(member, tool, StringComparison.Ordinal);
+        }
     }
 }

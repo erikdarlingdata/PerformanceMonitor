@@ -73,8 +73,10 @@ public sealed class DarlingMcpStoreHostTools
         + "size_as_of is when the sweep recorded it and size_age_seconds how old it is as of this response. Before "
         + "the first sweep, or when the stored figure cannot be read, size_bytes, size_as_of and size_age_seconds "
         + "are null and size_unavailable_reason says why. The uncompressed_chunk_* figures are read live on every "
-        + "call; if that read times out they are null and uncompressed_unavailable_reason says why, and the rest "
-        + "of the profile still returns (a slow fact fails alone). --check-settings reads the size live. This "
+        + "call; if that read times out or the role is refused it (any error but TimescaleDB being absent) they are "
+        + "null, uncompressed_chunk_percent_of_ram is null with them, and uncompressed_unavailable_reason says why "
+        + "(the SQLSTATE for a refusal); a store without TimescaleDB reports 0 chunks. The rest of the profile still "
+        + "returns (a slow fact fails alone). --check-settings reads the size live. This "
         + "tool never writes a setting or a conf file.")]
     public static async Task<string> GetStoreHost(
         NpgsqlDataSource postgres, PostgresConfig? postgresConfig, StoreHostProfileCache cache,
@@ -109,9 +111,10 @@ public sealed class DarlingMcpStoreHostTools
                 async token =>
                 {
                     await using var connection = await postgres.OpenConnectionAsync(token);
-                    /* #5718: the polled reads (this tool, and the web page that calls it every few minutes) take the
-                       store size from the hourly sweep's stored figure and report its age, rather than paying
-                       pg_database_size on every poll. --check-settings keeps the live read. */
+                    /* #5718: this tool (and the web card, which calls it on each first paint, hashchange and span
+                       change) takes the store size from the hourly sweep's stored figure and reports its age,
+                       rather than paying the live whole-store size walk on every call, which measured 5.8 s mean /
+                       30.7 s max on a slow store and failed at the 10 s bound. --check-settings keeps the live read. */
                     return await DarlingStoreHostProfile.GatherAsync(
                         postgresConfig, connection, token, useStoredStoreSize: true);
                 },

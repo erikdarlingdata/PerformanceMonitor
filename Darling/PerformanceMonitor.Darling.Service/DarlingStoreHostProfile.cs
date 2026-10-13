@@ -118,7 +118,8 @@ internal readonly record struct HostDataVolumeProfile(
 /// size, lifetime buffer hit, lifetime temp bytes, and the #4211 uncompressed-chunks-vs-RAM figure.
 /// #5718: the two slow facts (size and uncompressed chunks) fail ALONE. <see cref="StoreSizeBytes"/> null
 /// means unavailable and <see cref="StoreSizeUnavailableReason"/> says why; <see cref="UncompressedChunkBytes"/>
-/// and <see cref="UncompressedChunkCount"/> null mean unavailable (a read that timed out), and
+/// and <see cref="UncompressedChunkCount"/> null mean unavailable (a read that timed out, or one the role was
+/// refused for any reason but TimescaleDB being absent; a store without TimescaleDB reads 0 and 0), and
 /// <see cref="UncompressedUnavailableReason"/> says why. <see cref="StoreSizeAsOfUtc"/> is the sweep's
 /// <c>metric_time</c> (naive UTC) when the size came from the stored hourly figure, null when it was read live.</summary>
 internal readonly record struct HostStoreFacts(
@@ -606,6 +607,17 @@ WHERE NOT is_compressed";
         && (exception is PostgresException { SqlState: PostgresErrorCodes.QueryCanceled }
             || DarlingAlertReadAdapter.IsCommandTimeout(exception));
 
+    /// <summary>
+    /// True when <paramref name="exception"/> says TimescaleDB is not installed on this database: the
+    /// <c>timescaledb_information</c> view, its schema or a function it needs is undefined (SQLSTATE
+    /// <c>42P01</c>, <c>3F000</c>, <c>42883</c>). Every other SQLSTATE is a refusal or a fault, not an absence
+    /// (#5718 review).
+    /// </summary>
+    internal static bool IsTimescaleAbsent(PostgresException exception) =>
+        exception.SqlState is PostgresErrorCodes.UndefinedTable
+            or PostgresErrorCodes.InvalidSchemaName
+            or PostgresErrorCodes.UndefinedFunction;
+
     /// <summary>The wording a timed-out fact carries; the tool error's sentence is built from the same
     /// words so the profile and the envelope cannot disagree about what happened (#5718).</summary>
     internal static string DescribeReadTimeout(int seconds) => $"timed out after {seconds} s";
@@ -743,13 +755,22 @@ WHERE NOT is_compressed";
             uncompressedCount = null;
             uncompressedReason = DescribeReadTimeout(reads.SlowReadSeconds);
         }
-        catch (PostgresException)
+        catch (PostgresException pg) when (IsTimescaleAbsent(pg))
         {
             /* timescaledb_information.chunks does not exist on this connection's database -- no TimescaleDB
                extension here (plain PostgreSQL BYO, or preloaded-but-not-CREATE-EXTENSION'd, same shape the
                JobExecutionLoggingSql remarks describe for a different GUC). Zero/zero is the honest answer. */
             uncompressedBytes = 0;
             uncompressedCount = 0;
+        }
+        catch (PostgresException pg)
+        {
+            /* #5718 review: any OTHER refusal (a revoked grant, a broken view) is not "no chunks" -- zero would
+               be a fabricated answer, and uncompressed_chunk_percent_of_ram would follow it to 0.0 (#3707).
+               Unknown, with the SQLSTATE, the same shape as the timeout arm. */
+            uncompressedBytes = null;
+            uncompressedCount = null;
+            uncompressedReason = $"this role cannot read it (SQLSTATE {pg.SqlState})";
         }
 
         return new HostStoreFacts(
