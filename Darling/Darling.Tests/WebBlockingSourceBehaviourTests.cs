@@ -141,10 +141,13 @@ public sealed class WebBlockingSourceBehaviourTests
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(tabs, "line\\(\"Blocked process report trend\", \"get_blocking_trend\"").Count);
         Assert.Contains("const BLOCKING_REPORT_SERIES = [{ key: \"count\", label: \"Reports\" }];", tabs);
         Assert.DoesNotContain("No blocking events in this window — an empty trend", tabs);
-        Assert.Contains("label: \"Reports\"", templates);
+        /* The starter dashboard panel has no collector tag to follow, so it words itself for both sources. */
+        Assert.Contains("title: \"Blocking trend (reports or snapshot rows)\"", templates);
+        Assert.Contains("label: \"Reports or snapshot rows\"", templates);
+        Assert.DoesNotContain("title: \"Blocked process report trend\"", templates);
         /* The axis caption says it too: both tab charts and the starter dashboard panel carry unit "reports". */
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(tabs, "unit: \"reports\",").Count);
-        Assert.Contains("unit: \"reports\",", templates);
+        Assert.Contains("unit: \"reports or snapshot rows\",", templates);
     }
 
     /// <summary>#5644 W16 review: only a true negative (status "empty") takes the page's one sentence. A not_collected or unavailable

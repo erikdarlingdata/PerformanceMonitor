@@ -85,7 +85,7 @@ public sealed class ChartIntegerTicksPinTests
     public void TheStarterDashboardAndComposedCountCharts_AskForWholeNumberTicks()
     {
         var templates = Js("view-templates.js");
-        Assert.Matches(@"series: \[\{ key: ""count"", label: ""Reports"" \}\],\n\s+format: ""int"",", templates);
+        Assert.Matches(@"series: \[\{ key: ""count"", label: ""Reports or snapshot rows"" \}\],\n\s+format: ""int"",", templates);
         Assert.Contains("...READ_FIELDS.get_deadlock_trend.line,", templates, StringComparison.Ordinal);
         Assert.Matches(@"get_deadlock_trend: \{[\s\S]*?line: \{[^}]*?format: ""int"",[^}]*?label: ""Deadlocks""", Js("read-fields.js"));
 

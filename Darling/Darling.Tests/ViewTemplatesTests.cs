@@ -306,7 +306,11 @@ public sealed class ViewTemplatesTests
         /* The two reads whose EMPTY ARRAY means "it did not happen" say exactly that, rather than inheriting a
            sentence about collection. Absence and non-occurrence are the distinction this whole codebase keeps
            closing, and a starter dashboard is the worst place to blur it. */
-        Assert.Contains("an empty trend here means none happened, not that nothing was collected", js, StringComparison.Ordinal);
+        /* The blocking trend counts blocked process REPORTS (or DMV snapshot rows), so its sentence says "captured" (#5644 W16);
+           the deadlock trend panel spreads READ_FIELDS and keeps "happened". */
+        Assert.Contains("an empty trend here means none were captured, not that nothing was collected", js, StringComparison.Ordinal);
+        Assert.Contains("an empty trend here means none happened, not that nothing was collected",
+            ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js")), StringComparison.Ordinal);
 
         /* And the two reads that CANNOT be honest on day one are deliberately absent, not merely unused: the
            analysis pass writes nothing for 24 hours, and a target with Query Store off has nothing ever. */
