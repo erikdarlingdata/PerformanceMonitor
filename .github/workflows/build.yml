@@ -651,6 +651,8 @@ jobs:
               # DmvResourceDatabaseSentinelTests reads install/56). A PR that edits only an install script fires `installer`
               # and `sql-validation`, neither of which runs Lite.Tests, so the nightly would be the first to catch drift.
               - 'install/**/!(*.md)'
+              # #5669: the Lite path gate the shard legs and lite-scope read; see that file's header.
+              - '.github/lite-paths-filter.yml'
               # #2489, changed by Erik's 2026-09-24 ruling that docs-only changes skip CI:
               # README.md and Lite/README.md used to sit here so LiteRuntimePrerequisiteDocsTests
               # (which reads these two READMEs against the built runtimeconfig and this file's
@@ -2551,12 +2553,15 @@ jobs:
 
   # #5669: the Lite scope of a pull request, decided once from the files it changes, so the four Lite shards are not
   # started (a Windows runner each, about two minutes of checkout and filtering) when the diff touches nothing the
-  # Lite suite depends on. The answer is ci-select.py's `lite-mode`, which reads the lite-tests job's own filter copies
-  # below, so it is the answer each leg's "Decide how much of the Lite suite runs" step would reach. It decides only
-  # `none`: the `reads` mode runs shard 0 alone, and a matrix leg cannot be skipped by its index in a job-level `if`.
+  # Lite suite depends on. Two engines evaluate ONE pattern file, .github/lite-paths-filter.yml, over the pull
+  # request's files: dorny/paths-filter (picomatch), the very step each shard leg runs, and ci-select.py's `lite-mode`
+  # (the Python matcher). `none` needs BOTH to say nothing matched. If they disagree (a pattern one engine matches and
+  # the other does not), or either gives no answer, `mode` is `unknown`, the shards run as before, and a disagreement
+  # is reported as a warning naming both answers. It decides only `none`: the `reads` mode runs shard 0 alone, and a
+  # matrix leg cannot be skipped by its index in a job-level `if`.
   # It never blocks and never fails the run: any problem (no file list, a failed API call, a failed step) leaves
-  # `mode` empty, and the shards then decide for themselves, exactly as before. Pull requests only; a push, a
-  # merge-queue run and a release have no skip. Lite tests (result) reads `mode` to tell this planned skip from an
+  # `mode` unknown or empty, and the shards then decide for themselves, exactly as before. Pull requests only; a push,
+  # a merge-queue run and a release have no skip. Lite tests (result) reads `mode` to tell this planned skip from an
   # unplanned one.
   lite-scope:
     name: Lite scope
@@ -2573,6 +2578,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The dorny answer: the same step, version and file the shard legs run, over the same pull request files. Its
+      # failure is not this job's failure (the scope step below reads an empty answer as unknown).
+      - name: Detect changed paths (dorny/paths-filter)
+        id: filter
+        continue-on-error: true
+        uses: dorny/paths-filter@v4
+        with:
+          filters: .github/lite-paths-filter.yml
+
       - name: Decide the Lite scope from the changed files
         id: scope
         shell: bash
@@ -2580,17 +2594,45 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          DORNY_LITE: ${{ steps.filter.outputs.lite_shard }}
+          DORNY_CORE: ${{ steps.filter.outputs.core_shard }}
+          DORNY_ROOT: ${{ steps.filter.outputs.root_shard }}
+          DORNY_READS: ${{ steps.filter.outputs.darling_reads_shard }}
+          DORNY_LINKED: ${{ steps.filter.outputs.lite_linked_shard }}
         run: |
           set -uo pipefail
 
-          # The same file list dorny/paths-filter reads on a pull request: the pull request files API.
-          mode=unknown
+          # Answer one: ci-select.py over the pull request files API list, the same list dorny reads on a pull request.
+          pyans=unknown
           if gh api --paginate "repos/${GH_REPO}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[].filename' > changed.txt; then
-            mode=$(python .github/scripts/ci-select.py lite-mode --event pull_request --files-from changed.txt | sed -n 's/^mode=//p')
+            pyans=$(python .github/scripts/ci-select.py lite-mode --event pull_request --files-from changed.txt | sed -n 's/^mode=//p')
           fi
-          [ -n "${mode}" ] || mode=unknown
+          [ -n "${pyans}" ] || pyans=unknown
+
+          # Answer two: dorny/paths-filter over the one pattern file. `none` when every filter answered false, `matched`
+          # when any answered true, `unknown` when any answer is missing (a failed step leaves them empty).
+          dorny=none
+          for answer in "${DORNY_LITE}" "${DORNY_CORE}" "${DORNY_ROOT}" "${DORNY_READS}" "${DORNY_LINKED}"; do
+            if [ "${answer}" = "true" ]; then
+              dorny=matched
+            elif [ "${answer}" != "false" ] && [ "${dorny}" != "matched" ]; then
+              dorny=unknown
+            fi
+          done
+
+          # Both engines must agree to skip. Anything else runs the shards, as before this job existed.
+          mode=unknown
+          if [ "${pyans}" = "none" ] && [ "${dorny}" = "none" ]; then
+            mode=none
+          elif [ "${pyans}" != "unknown" ] && [ "${dorny}" != "unknown" ]; then
+            if [ "${pyans}" = "none" ] || [ "${dorny}" = "none" ]; then
+              echo "::warning title=Lite scope engines disagree::ci-select.py lite-mode says '${pyans}' and dorny/paths-filter says '${dorny}' for the same files, so the Lite shards run. A pattern in .github/lite-paths-filter.yml is matched by one engine and not the other."
+            else
+              mode=${pyans}
+            fi
+          fi
           echo "mode=${mode}" >> "$GITHUB_OUTPUT"
-          echo "::notice title=Lite scope::mode=${mode}$([ "${mode}" = "none" ] && echo ', so the Lite shards are not started')"
+          echo "::notice title=Lite scope::mode=${mode} (ci-select.py: ${pyans}, dorny/paths-filter: ${dorny})$([ "${mode}" = "none" ] && echo ', so the Lite shards are not started')"
           exit 0
 
   # The Lite suite on pull requests and pushes: four shards cut over CLASS NAMES (#3887), balanced
@@ -2634,8 +2676,9 @@ jobs:
   #
   # Each shard pays its own checkout/setup/restore/build (~2½ minutes measured on a warm NuGet
   # cache) — the price of taking ~10 minutes off the PR wall. They run in parallel with the build
-  # job, off its critical path. The filter predicates below are BYTE-FOR-BYTE copies of
-  # the build job's lite/core/root (renamed *_shard so the census can find each set unambiguously);
+  # job, off its critical path. The filter predicates live in ONE file, .github/lite-paths-filter.yml (#5669),
+  # which this job's step, the lite-scope job's dorny step and ci-select.py all read. They are BYTE-FOR-BYTE
+  # copies of the build job's lite/core/root (renamed *_shard so the census can find each set unambiguously);
   # CrossAppGuardCiGateTests pins the copies equal, so they cannot drift apart silently.
   lite-tests:
     name: Lite tests
@@ -2683,64 +2726,10 @@ jobs:
         uses: dorny/paths-filter@v4
         with:
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
-          filters: |
-            # COPIES of the build job's root/core/lite predicates, generated from them and pinned
-            # byte-equal by CrossAppGuardCiGateTests.TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs
-            # (the build job's `lite` set is carried here as lite_shard plus darling_reads_shard).
-            # The REASONING for every entry lives at the build job's own filter block and is not
-            # duplicated here — duplicated prose is prose that rots out of step. What matters is that
-            # the sets stay identical: the shards must run the Lite suite in exactly the cases the
-            # build job's step used to, or the split loses coverage silently. That includes the
-            # entries that look foreign to Lite (the two READMEs, the three Darling trees) — Lite.Tests
-            # reads those files in its cross-app and docs guards, so an edit there has to reach this
-            # suite. A hand-typed copy of this block dropped two of them and was caught by the pin
-            # above before CI ever ran (#3887).
-            root_shard:
-              - 'PerformanceMonitor.sln'
-              - 'Directory.Build.props'
-              - 'global.json'
-              - 'nuget.config'
-              - 'NuGet.config'
-              - '.github/workflows/build.yml'
-            core_shard:
-              - 'PerformanceMonitor.Alerting/**/!(*.md)'
-              - 'PerformanceMonitor.Analysis/**/!(*.md)'
-              - 'PerformanceMonitor.Collectors/**/!(*.md)'
-              - 'PerformanceMonitor.Common/**/!(*.md)'
-              - 'PerformanceMonitor.Notifications/**/!(*.md)'
-              - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
-              - 'PerformanceMonitor.Ui/**/!(*.md)'
-            lite_shard:
-              - 'Lite/**/!(*.md)'
-              - 'Lite.Tests/**/!(*.md)'
-              # #5616: the Lite shard script and its packer are test inputs (Lite.Tests CrossAppGuardCiGateTests parses the script), so an edit to either has to reach the Lite suite.
-              - '.github/scripts/run-lite-shard.ps1'
-              - '.github/scripts/lite-shard-pack.py'
-              # #5656: Lite.Tests pins read install/ scripts as source (CpuSchedulerStatsCollectorDefinitionTests reads install/17,
-              # DmvResourceDatabaseSentinelTests reads install/56). A PR that edits only an install script fires `installer`
-              # and `sql-validation`, neither of which runs Lite.Tests, so the nightly would be the first to catch drift.
-              - 'install/**/!(*.md)'
-            # The rest of the build job's `lite` set: the three Darling trees Lite.Tests reads as source.
-            # A diff that reaches ONLY these (no lite_shard, core_shard or root_shard entry) runs just the
-            # Lite.Tests classes tagged [Trait("Reads", "Darling")], in one shard; see the scope step below.
-            # lite_shard followed by darling_reads_shard is the build job's `lite` set, entry for entry.
-            darling_reads_shard:
-              - 'Darling/PerformanceMonitor.Darling.Viewer/**/!(*.md)'
-              - 'Darling/Darling.Tests/**/!(*.md)'
-              - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
-            # Darling.Tests files that Lite.Tests.csproj COMPILES into its own assembly. An edit to one
-            # changes code that dozens of Lite.Tests classes run, not just text they read, so it takes the
-            # whole suite. Not part of the build job's `lite` set (those entries are covered there by the
-            # Darling.Tests tree); DarlingReadsTraitGuardTests pins this list to the project's linked compiles.
-            lite_linked_shard:
-              - 'Darling/Darling.Tests/CSharpSourceWalker.cs'
-              - 'Darling/Darling.Tests/McpInProcessHost.cs'
-              - 'Darling/Darling.Tests/McpArgumentTypeRows.cs'
-              - 'Darling/Darling.Tests/StatementScrubCanary.cs'
-              - 'Darling/Darling.Tests/GuardStageScanner.cs'
-              - 'Darling/Darling.Tests/StaTestThread.cs'
-              - 'Darling/Darling.Tests/TimingTestScanner.cs'
-              - 'Darling/Darling.Tests/WpfExitSwitchTests.cs'
+          # ONE file, .github/lite-paths-filter.yml, read here, by the lite-scope job and by ci-select.py (#5669). It holds the
+          # root_shard / core_shard / lite_shard / darling_reads_shard / lite_linked_shard sets; the header there says how they relate
+          # to the build job's own root / core / lite sets and which tests pin them.
+          filters: .github/lite-paths-filter.yml
       # How much of the Lite suite THIS leg runs, decided from the filter answers alone (no build needed):
       #   full  - a Lite, Lite.Tests, core or root path changed, or a Darling.Tests file that Lite.Tests
       #           compiles into itself, or the event is not a pull request (a push

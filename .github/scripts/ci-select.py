@@ -17,7 +17,8 @@ These readers use the same code:
   lands only while the replay finds 0 misses. A Guard-tagged test runs it on every pull request.
 
 The path patterns are NOT copied here. They are read from the filter blocks in .github/workflows/build.yml and
-from .github/darling-paths-filter.yml, the same text dorny/paths-filter evaluates, so the replay and the
+from .github/darling-paths-filter.yml and .github/lite-paths-filter.yml, the same text dorny/paths-filter
+evaluates, so the replay and the
 workflow cannot disagree about which area a file belongs to. What lives here is the decision logic that
 used to be spread over `if:` expressions and a bash if-chain.
 
@@ -38,6 +39,7 @@ import xml.etree.ElementTree as ET
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 WORKFLOW = os.path.join(ROOT, ".github", "workflows", "build.yml")
 DARLING_FILTER = os.path.join(ROOT, ".github", "darling-paths-filter.yml")
+LITE_FILTER = os.path.join(ROOT, ".github", "lite-paths-filter.yml")
 CORPUS = os.path.join(ROOT, ".github", "ci-history", "failures.jsonl")
 ACCEPTED = os.path.join(ROOT, ".github", "ci-history", "replay-accepted.txt")
 
@@ -155,10 +157,14 @@ def load_file_filters(path: str = DARLING_FILTER) -> dict[str, list[str]]:
 class Rules:
     """The pattern sets, loaded once."""
 
-    def __init__(self, workflow: str = WORKFLOW, darling_filter: str = DARLING_FILTER) -> None:
+    def __init__(self, workflow: str = WORKFLOW, darling_filter: str = DARLING_FILTER, lite_filter: str = LITE_FILTER) -> None:
         wf = load_workflow_filters(workflow)
         self.build = wf["build"]
-        self.lite_shards = wf["lite-tests"]
+        # The Lite shard sets live in their own file (#5669), the one the shard legs and the lite-scope job give
+        # dorny/paths-filter, so both engines read the same text. A missing or empty file raises: no silent none.
+        self.lite_shards = load_file_filters(lite_filter)
+        if not self.lite_shards:
+            raise SystemExit(f"{lite_filter} holds no filters")
         self.tree = wf["darling-tree-guards"]
         self.guard = wf["guard-tests"]
         self.gate = load_file_filters(darling_filter)
@@ -434,7 +440,7 @@ SLOW_TRAIT = "Cost=Slow"
 _BUILD_INPUT_NAMES = {"directory.build.props", "directory.build.targets", "directory.packages.props", "global.json",
                       "nuget.config", "packages.lock.json"}
 _BUILD_INPUT_PATHS = {".github/workflows/build.yml", ".github/scripts/ci-select.py", ".github/darling-paths-filter.yml",
-                      ".github/scripts/run-darling-pg-shard.ps1", ".github/scripts/run-lite-shard.ps1",
+                      ".github/lite-paths-filter.yml", ".github/scripts/run-darling-pg-shard.ps1", ".github/scripts/run-lite-shard.ps1",
                       ".github/scripts/darling-shard-pack.py", ".github/scripts/darling-shard-weights.json",
                       ".github/scripts/lite-shard-pack.py"}
 _BUILD_INPUT_SUFFIXES = (".csproj", ".props", ".targets", ".sln", ".slnx")
@@ -1229,8 +1235,8 @@ def main(argv: list[str]) -> int:
         print(f"run={'true' if run else 'false'}")
         return 0
     if args.cmd == "lite-mode":
-        # The same answer the Lite shard legs reach from their own path filters (decide() reads the lite-tests job's
-        # filter copies), made once before the shards start so a diff the Lite suite does not depend on (mode=none)
+        # The same answer the Lite shard legs reach from their own path filters (decide() reads
+        # .github/lite-paths-filter.yml), made once before the shards start so a diff the Lite suite does not depend on (mode=none)
         # does not take four Windows runners. Anything but a clean answer prints unknown, and the shards then run
         # their own scope step as before.
         try:
