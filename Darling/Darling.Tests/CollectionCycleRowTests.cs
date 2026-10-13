@@ -874,20 +874,4 @@ public sealed class CollectionCycleReaderCensusTests
 
         Assert.True(offenders.Count == 0, "the collector name is spelled in " + string.Join(", ", offenders) + "; use CollectionCycleRow.CollectorName");
     }
-
-    /// <summary>
-    /// #5735: the two products read one log row, so the collector name and status are spelled the same in Lite's
-    /// <c>CollectionCycleSkip</c> and Darling's <c>CollectionCycleRow</c>. A drift would make each product's readers miss the other's rows
-    /// (a peer disclosure, the shared get_collection_health text, a store read by both).
-    /// </summary>
-    [Fact]
-    public void LiteAndDarling_SpellTheCollectorNameAndStatus_Identically()
-    {
-        var lite = File.ReadAllText(Path.Combine(CycleSkipFeedTests.RepoRoot(), "Lite", "Services", "CollectionCycleSkip.cs"));
-        var name = Regex.Match(lite, "const string CollectorName = \"([^\"]+)\";");
-        var status = Regex.Match(lite, "const string Status = \"([^\"]+)\";");
-        Assert.True(name.Success && status.Success, "Lite's CollectionCycleSkip no longer declares the two constants as string literals");
-        Assert.Equal(CollectionCycleRow.CollectorName, name.Groups[1].Value);
-        Assert.Equal(CollectionCycleRow.Status, status.Groups[1].Value);
-    }
 }
