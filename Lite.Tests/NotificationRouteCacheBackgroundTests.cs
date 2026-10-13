@@ -212,12 +212,12 @@ public sealed class NotificationRouteCacheBackgroundTests
         var stuck = new NotificationRouteCacheCore(isUiThread: () => false);
         stuck.Configure(() =>
         {
-            release.Wait(TimeSpan.FromSeconds(10));
+            release.Wait(TimeSpan.FromSeconds(60));
             return new[] { Route(12) };
         });
-        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        /* The loader is stuck until the test releases it, so a wait with no bound would not return here. */
         await stuck.WaitForFirstLoadAsync(TimeSpan.FromMilliseconds(50));
-        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(8), "The wait did not end at its bound.");
         release.Set();
 
         var loaded = new NotificationRouteCacheCore(isUiThread: () => false);

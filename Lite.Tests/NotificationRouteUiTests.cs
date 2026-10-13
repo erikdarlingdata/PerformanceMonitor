@@ -29,6 +29,7 @@ namespace PerformanceMonitorLite.Tests;
 /// round-trip test writes through the store, which invalidates the static route cache.
 /// </summary>
 [Collection("app-alert-statics")]
+[Trait("Reads", "Darling")]
 public sealed class NotificationRouteUiTests : IDisposable
 {
     private const string TeamsUrl = "https://teams.r5-secret.test/hook/abc123";
