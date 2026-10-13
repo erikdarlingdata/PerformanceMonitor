@@ -104,37 +104,98 @@
       "name": "ui-sql-blocking",
       "hash": "#/server/ui-sql/blocking",
       "server": "ui-sql",
-      "expect": {}
+      "expect": {
+        "panels": [
+          {
+            "title": "Blocking",
+            "state": "data",
+            "minRows": 2
+          },
+          {
+            "title": "Lock Waits",
+            "state": "data"
+          },
+          {
+            "title": "Blocked Process Reports",
+            "state": "empty"
+          }
+        ]
+      }
     },
     {
       "name": "ui-sql-config",
       "hash": "#/server/ui-sql/config",
       "server": "ui-sql",
-      "expect": {}
+      "expect": {
+        "panels": [
+          {
+            "title": "Server Properties",
+            "state": "data"
+          },
+          {
+            "title": "Trace Flags",
+            "state": "empty"
+          }
+        ]
+      }
     },
     {
       "name": "ui-sql-changes",
       "hash": "#/server/ui-sql/changes",
       "server": "ui-sql",
-      "expect": {}
+      "expect": {
+        "panels": [
+          {
+            "title": "Trace Flag Changes",
+            "state": "empty"
+          }
+        ]
+      }
     },
     {
       "name": "ui-sql-activity",
       "hash": "#/server/ui-sql/activity",
       "server": "ui-sql",
-      "expect": {}
+      "expect": {
+        "panels": [
+          {
+            "title": "Sessions",
+            "state": "empty"
+          }
+        ]
+      }
     },
     {
       "name": "ui-sql-events",
       "hash": "#/server/ui-sql/events",
       "server": "ui-sql",
-      "expect": {}
+      "expect": {
+        "panels": [
+          {
+            "title": "Severe Errors",
+            "state": "empty"
+          }
+        ]
+      }
     },
     {
       "name": "ui-sql-health",
       "hash": "#/server/ui-sql/health",
       "server": "ui-sql",
-      "expect": {}
+      "expect": {
+        "panels": [
+          {
+            "title": "Collectors",
+            "state": "data",
+            "minRows": 5
+          },
+          {
+            "title": "Collection Log",
+            "state": "data",
+            "minRows": 5
+          }
+        ]
+      }
     },
     {
       "name": "ui-pg-overview",
@@ -146,49 +207,124 @@
       "name": "ui-pg-activity",
       "hash": "#/server/ui-pg/activity",
       "server": "ui-pg",
-      "expect": {}
+      "expect": {
+        "panels": [
+          {
+            "title": "Top Query Shapes",
+            "state": "data",
+            "minRows": 6
+          },
+          {
+            "title": "By Database",
+            "state": "data",
+            "minRows": 2
+          },
+          {
+            "title": "Database Activity",
+            "state": "data"
+          },
+          {
+            "title": "Deadlocks",
+            "state": "empty"
+          }
+        ]
+      }
     },
     {
       "name": "ui-pg-vacuum",
       "hash": "#/server/ui-pg/vacuum",
       "server": "ui-pg",
-      "expect": {}
+      "expect": {
+        "panels": [
+          {
+            "title": "Autovacuum Backlog",
+            "state": "empty"
+          }
+        ]
+      }
     },
     {
       "name": "ui-pg-waits",
       "hash": "#/server/ui-pg/waits",
       "server": "ui-pg",
-      "expect": {}
+      "expect": {
+        "panels": [
+          {
+            "title": "Wait Events",
+            "state": "data",
+            "minRows": 3
+          },
+          {
+            "title": "Wait Trend",
+            "state": "empty"
+          }
+        ]
+      }
     },
     {
       "name": "ui-pg-io",
       "hash": "#/server/ui-pg/io",
       "server": "ui-pg",
-      "expect": {}
+      "expect": {
+        "panels": [
+          {
+            "title": "I/O Summary",
+            "state": "empty"
+          }
+        ]
+      }
     },
     {
       "name": "ui-pg-replication",
       "hash": "#/server/ui-pg/replication",
       "server": "ui-pg",
-      "expect": {}
+      "expect": {
+        "panels": [
+          {
+            "title": "Slots",
+            "state": "empty"
+          }
+        ]
+      }
     },
     {
       "name": "ui-pg-storage",
       "hash": "#/server/ui-pg/storage",
       "server": "ui-pg",
-      "expect": {}
+      "expect": {
+        "panels": [
+          {
+            "title": "By Table",
+            "state": "empty"
+          }
+        ]
+      }
     },
     {
       "name": "ui-pg-config",
       "hash": "#/server/ui-pg/config",
       "server": "ui-pg",
-      "expect": {}
+      "expect": {
+        "panels": [
+          {
+            "title": "Settings",
+            "state": "empty"
+          }
+        ]
+      }
     },
     {
       "name": "alerts",
       "hash": "#/alerts",
       "nav": "alerts",
-      "expect": {}
+      "expect": {
+        "grids": [
+          {
+            "index": 0,
+            "minRows": 1
+          }
+        ]
+      }
     },
     {
       "name": "alert-rules",

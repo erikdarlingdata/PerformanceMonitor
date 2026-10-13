@@ -68,7 +68,10 @@ async function settle(page) {
   await page.waitForFunction(
     () => {
       const main = document.querySelector("#main");
-      return !!main && main.children.length > 0 && !main.querySelector(".strip.loading");
+      /* A panel that answered "not collected" and asked to be hidden (Instance CPU on a PostgreSQL server that is not Aurora,
+         panels.js hideWhenNotCollected) keeps its loading strip inside a hidden card: not a panel still loading. */
+      const loading = [...(main ? main.querySelectorAll(".strip.loading") : [])].filter((e) => !e.closest("[hidden]"));
+      return !!main && main.children.length > 0 && loading.length === 0;
     },
     null,
     { timeout: SETTLE_MS }
@@ -78,7 +81,7 @@ async function settle(page) {
   let last = "";
   for (let i = 0; i < 40; i++) {
     const now = JSON.stringify(await page.evaluate(readPanels));
-    const loading = await page.evaluate(() => !!document.querySelector("#main .strip.loading"));
+    const loading = await page.evaluate(() => [...document.querySelectorAll("#main .strip.loading")].some((e) => !e.closest("[hidden]")));
     if (!loading && now === last) return;
     last = now;
     await page.waitForTimeout(250);
