@@ -285,7 +285,13 @@ The service reports the set once per start with a count, a total and that comman
 
 **The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints the post-start checklist; work it about 10–15 minutes later against the store, and hold the upgrade unverified until every line passes.
 
-Before you run an older build against the store, disable or delete every scoped notification route in the Notification Routes window. A route can be limited to one server or one tag ([#5750](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5750)), and the store keeps that limit in two new columns. A build from before that change does not read them. It treats each scoped route as if it covered all servers, so a route meant for one server sends the alerts of every server.
+##### Rolling back to an older build
+
+A rollback restores the install files, not the store ([#5773](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5773)). The store keeps every migration the newer build applied, and the older build runs against it: migrations are additive, so it starts and collects. When it starts, the service logs one warning that names the migrations it does not know, for example: *"The store is at V183; this build knows up to V180, so V181-V183 are unknown to it."*
+
+An older build ignores what those migrations added, so it can read some newer data differently. The list below names each migration that changes what an older build reads, and what to do before you roll back past it. A migration not listed here has no known effect on what an older build reads.
+
+- **V181**: an older build reads a notification route scoped to a server or a tag ([#5750](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5750)) as fleet-wide. A route meant for one server then sends the alerts of every server. A scoped route for every metric (`*`) matches nothing, so its alerts go to the default destinations. Disable or delete every scoped route in the Notification Routes window before you roll back to a build older than V181.
 
 #### Upgrading from a build that predates the script
 
