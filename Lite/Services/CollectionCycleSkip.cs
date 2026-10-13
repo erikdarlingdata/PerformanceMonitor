@@ -29,8 +29,11 @@ internal sealed record CycleSkipReport(int SlotsSkipped, int CycleMs, string Slo
 /// </summary>
 internal static class CollectionCycleSkip
 {
-    /// <summary>The <c>collection_log.collector_name</c> of a skipped-slots row. It is not a collector: every reader of
-    /// the log leaves it out of any collector list, rate, streak and "last success".</summary>
+    /// <summary>The <c>collection_log.collector_name</c> of a skipped-slots row. It is not a collector: every reader that
+    /// summarises the log leaves it out of any collector list, rate, streak and "last success". The two reads that
+    /// return the log as rows (the Collection Log grid and <c>get_collection_log</c>, and their fleet forms) show
+    /// the row on purpose, filterable by <c>status = SKIPPED</c>; <c>get_collection_log</c> counts it in
+    /// <c>skipped_cycle_rows</c> and not in <c>run_count</c> (#5731).</summary>
     internal const string CollectorName = "collection_cycle";
 
     /// <summary>The <c>collection_log.status</c> of a skipped-slots row.</summary>

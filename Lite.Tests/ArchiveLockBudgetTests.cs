@@ -448,4 +448,99 @@ SELECT TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'Blocking
         Assert.InRange(dueIn, TimeSpan.FromMinutes(4), TimeSpan.FromMinutes(5));
         Assert.True(stamp > oldStamp, "the stamp moved off the old one, to the retry stamp");
     }
+
+    /* ---- the reset's recovery is not deferred (#5731 review round 1) ---- */
+
+    /* Rows and distinct keys across every archive parquet file of one table, the count a v_<table> read would see. */
+    private (long Rows, long Distinct) ArchivedRows(string table, string keyColumn)
+    {
+        var glob = Path.Combine(_archiveDir, "*_" + table + ".parquet").Replace("\\", "/");
+        if (Directory.GetFiles(_archiveDir, "*_" + table + ".parquet").Length == 0)
+        {
+            return (0, 0);
+        }
+
+        using var connection = new DuckDBConnection("DataSource=:memory:");
+        connection.Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"SELECT count(*), count(DISTINCT {keyColumn}) FROM read_parquet('{glob}')";
+        using var reader = cmd.ExecuteReader();
+        Assert.True(reader.Read());
+        return (Convert.ToInt64(reader.GetValue(0)), Convert.ToInt64(reader.GetValue(1)));
+    }
+
+    /* A pass killed between the promote and the DELETE: the journal is on disk, the file holds the rows, the table still holds them too. */
+    private async Task KillAPassAfterThePromoteAsync(DuckDbInitializer initializer)
+    {
+        var killed = new ArchiveService(initializer, _archiveDir)
+        {
+            AfterPromoteForTests = table =>
+            {
+                if (table == "collection_log")
+                {
+                    throw new ArchiveService.SimulatedKillException();
+                }
+            }
+        };
+        await Assert.ThrowsAsync<ArchiveService.SimulatedKillException>(() => killed.ArchiveOldDataAsync(hotDataDays: 7));
+        Assert.True(File.Exists(Path.Combine(_archiveDir, "collection_log.archive-pending")), "the kill left no journal");
+        Assert.Equal((50, 50), ArchivedRows("collection_log", "log_id"));
+    }
+
+    [Fact]
+    public async Task TheResetsRecovery_WaitsBehindAHeldRead_SoNoRowIsArchivedTwice()
+    {
+        var initializer = await SeedAsync();
+        await KillAPassAfterThePromoteAsync(initializer);
+
+        var service = new ArchiveService(initializer, _archiveDir) { WriteLockBudget = Budget };
+        Task reset;
+        using (new HeldRead(initializer))
+        {
+            reset = Task.Run(() => service.ArchiveAllAndResetAsync());
+
+            /* Four budgets: a recovery on the budget has given up by now and left the journal behind. */
+            await Task.Delay(Budget * 4, TestContext.Current.CancellationToken);
+            Assert.False(reset.IsCompleted, "the reset finished while a read still held the lock");
+            Assert.True(File.Exists(Path.Combine(_archiveDir, "collection_log.archive-pending")), "the journal was resolved without the lock");
+        }
+
+        Assert.True(await Task.WhenAny(reset, Task.Delay(HangGuard, TestContext.Current.CancellationToken)) == reset,
+            "the reset never finished after the read was released");
+        await reset;
+
+        /* Each row exactly once across the archive files: the recovery deleted the promoted rows, so the reset did not export them again. */
+        Assert.Equal((50, 50), ArchivedRows("collection_log", "log_id"));
+        Assert.Equal((20, 20), ArchivedRows("config_alert_log", "alert_time"));
+        Assert.Equal(0, await CountAsync("collection_log"));
+        Assert.Equal(50, await CountAsync("v_collection_log"));
+        Assert.False(File.Exists(Path.Combine(_archiveDir, "collection_log.archive-pending")));
+    }
+
+    [Fact]
+    public async Task TheReset_WithAJournalItCouldNotFinish_IsAbandoned_AndExportsNothing()
+    {
+        var initializer = await SeedAsync();
+        await KillAPassAfterThePromoteAsync(initializer);
+
+        /* A read-only journal: the recovery deletes the promoted rows and then cannot delete the journal, the
+           generic-failure shape that leaves one behind even with the lock free. */
+        var journal = Path.Combine(_archiveDir, "collection_log.archive-pending");
+        File.SetAttributes(journal, FileAttributes.ReadOnly);
+        try
+        {
+            var filesBefore = ArchiveFiles();
+            var service = new ArchiveService(initializer, _archiveDir);
+            await service.ArchiveAllAndResetAsync();
+
+            Assert.True(File.Exists(journal));
+            Assert.True(service.ResetRetryNotBeforeUtc > DateTime.UtcNow, "the abandoned reset did not back off");
+            Assert.Equal((50, 50), ArchivedRows("collection_log", "log_id"));
+            Assert.Equal(filesBefore, ArchiveFiles());
+        }
+        finally
+        {
+            File.SetAttributes(journal, FileAttributes.Normal);
+        }
+    }
 }

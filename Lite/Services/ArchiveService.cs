@@ -117,8 +117,12 @@ public class ArchiveService
        so an unbounded wait behind one slow read held every collector off for as long as the read ran. Same number
        as the #5371 CHECKPOINT and every other background store write (LocalDataService.WriteLockBudget); a test
        sets a shorter one. Covers the per-table promote plus DELETE, the recovery of an interrupted export, the
-       compaction swap per group and the swap-journal replay. The size-triggered reset keeps its unbounded wait on
-       purpose: it must finish the job it started. */
+       compaction swap per group and the swap-journal replay. The size-triggered reset's three locks (the
+       unfinished-reset-export cleanup, the export of every table, and the promote/preserve/reset section) stay
+       unbounded on purpose: the reset must finish the job it started. The interrupted-work recovery INSIDE the reset is
+       unbounded too (RecoverInterruptedArchiveWorkAsync(unbounded: true)), because a journal it left behind
+       would have its rows exported a second time by the reset. Only the post-reset compaction stays on this
+       budget: a deferred compaction is idempotent and the next hourly pass merges the group. */
     internal TimeSpan WriteLockBudget { get; set; } = LocalDataService.WriteLockBudget;
 
     /* Replaces the minute-resolution file-name prefix, so a test can put two runs in different "minutes"
@@ -149,6 +153,11 @@ public class ArchiveService
        removed when the swap is complete. Found at the start of a later run, it means the previous run did
        not finish, and the run finishes or undoes that swap before merging anything. */
     private const string SwapJournalSuffix = ".swap";
+
+    /* The month (6 digits) or day (8 digits) and the table a swap journal's file name carries. One definition for the
+       deferred replay and the post-replay unresolved check, which must agree on the group they protect from the merge
+       (#5731); compiled once per process. */
+    private static readonly Regex s_swapJournalName = new(@"^(\d{8}|\d{6})_(.+)" + Regex.Escape(SwapJournalSuffix) + "$", RegexOptions.Compiled);
 
     /* One per table, written once a periodic export's .tmp is complete and before it is promoted, removed after the
        rows it archived are deleted (#4720). It holds the cutoff (UTC, round-trip format) and the final file name.
@@ -488,9 +497,10 @@ public class ArchiveService
        reorganizes the file, so readers must not be mid-query when that happens. Returns the rows deleted.
        The export itself calls the Core form below, with its promote under the same lock (#4824); this one is for
        a caller with no promote to keep it with, the recovery of an interrupted export. */
-    private async Task<int> DeleteArchivedRowsAsync(string table, string timeColumn, DateTime cutoff)
+    private async Task<int> DeleteArchivedRowsAsync(string table, string timeColumn, DateTime cutoff, bool unbounded = false)
     {
-        using (_duckDb.AcquireWriteLock(WriteLockBudget))
+        /* unbounded: the reset's recovery waits as long as the reset's own locks do (#5731). */
+        using (_duckDb.AcquireWriteLock(unbounded ? null : WriteLockBudget))
         {
             return await DeleteArchivedRowsCoreAsync(table, timeColumn, cutoff);
         }
@@ -599,17 +609,22 @@ public class ArchiveService
     /// anything. Called once at the start of every entry point that does, after the unfinished-reset-export
     /// cleanup (#4720).
     /// </summary>
-    private async Task RecoverInterruptedArchiveWorkAsync()
+    /// <param name="unbounded">
+    /// True for <c>ArchiveAllAndResetAsync</c> (#5731): the reset is the store's own exclusive section, and a journal
+    /// the recovery left behind would have the reset export its rows a second time. False for the scheduled pass,
+    /// which waits <see cref="WriteLockBudget"/> and re-checks the journal before it exports the table.
+    /// </param>
+    private async Task RecoverInterruptedArchiveWorkAsync(bool unbounded = false)
     {
         if (!Directory.Exists(_archivePath))
         {
             return;
         }
 
-        await RecoverPendingArchivesAsync();
+        await RecoverPendingArchivesAsync(unbounded);
 
         /* After the swap journals are replayed: a journal the replay could not finish still names temps it needs. */
-        ReplayCompactionSwapJournals();
+        ReplayCompactionSwapJournals(unbounded);
         RemoveStaleTempFiles();
     }
 
@@ -680,7 +695,7 @@ public class ArchiveService
     /// rows is harmless). If it does not, the promote never happened and the rows are still only in the table.
     /// Either way the journal goes, so the export below neither repeats an archived table nor loses one.
     /// </summary>
-    private async Task RecoverPendingArchivesAsync()
+    private async Task RecoverPendingArchivesAsync(bool unbounded)
     {
         foreach (var journalPath in Directory.GetFiles(_archivePath, "*" + PendingArchiveSuffix).Order(StringComparer.Ordinal))
         {
@@ -700,7 +715,7 @@ public class ArchiveService
                 var (cutoff, fileName) = pending.Value;
                 if (File.Exists(Path.Combine(_archivePath, fileName)))
                 {
-                    var deleted = await DeleteArchivedRowsAsync(table, timeColumn, cutoff);
+                    var deleted = await DeleteArchivedRowsAsync(table, timeColumn, cutoff, unbounded);
                     File.Delete(journalPath);
                     _logger?.LogInformation(
                         "Recovered the interrupted archive of {Table}: {File} was already written, so {Count} row(s) older than {Cutoff:o} were deleted from the table",
@@ -817,7 +832,7 @@ COPY (
     /// any journal to resolve, the resolving and the archive-view rebuild that follows it run under one write
     /// lock; with none, no lock is taken (#4720).
     /// </summary>
-    private (HashSet<string> AlreadyFolded, HashSet<(string Month, string Table)> UnresolvedGroups, bool LockTimedOut) ReplayCompactionSwapJournals()
+    private (HashSet<string> AlreadyFolded, HashSet<(string Month, string Table)> UnresolvedGroups, bool LockTimedOut) ReplayCompactionSwapJournals(bool unbounded = false)
     {
         /* Finish or undo any swap a previous run left behind (a crash, a kill, or a file it could not delete)
            before grouping, so this run starts from a consistent set of files. Inputs that an earlier swap
@@ -840,7 +855,7 @@ COPY (
         IDisposable acquired;
         try
         {
-            acquired = _duckDb.AcquireWriteLock(WriteLockBudget);
+            acquired = _duckDb.AcquireWriteLock(unbounded ? null : WriteLockBudget);
         }
         catch (StoreLockTimeoutException ex)
         {
@@ -848,7 +863,7 @@ COPY (
                as a journal that could not be finished does, and the next pass replays them. */
             foreach (var journalPath in journalPaths)
             {
-                var m = Regex.Match(Path.GetFileName(journalPath), @"^(\d{8}|\d{6})_(.+)" + Regex.Escape(SwapJournalSuffix) + "$");
+                var m = s_swapJournalName.Match(Path.GetFileName(journalPath));
                 if (m.Success)
                 {
                     unresolvedGroups.Add((m.Groups[1].Value, m.Groups[2].Value));
@@ -888,7 +903,7 @@ COPY (
             if (File.Exists(journalPath))
             {
                 /* The group's period is a month (6 digits) or, for a table merged per day, a day (8 digits). */
-                var m = Regex.Match(journalName, @"^(\d{8}|\d{6})_(.+)" + Regex.Escape(SwapJournalSuffix) + "$");
+                var m = s_swapJournalName.Match(journalName);
                 if (m.Success)
                 {
                     unresolvedGroups.Add((m.Groups[1].Value, m.Groups[2].Value));
@@ -1790,7 +1805,7 @@ COPY (
         try
         {
             await RemoveUnfinishedResetExportsAndRefreshViewsAsync();
-            await RecoverInterruptedArchiveWorkAsync();
+            await RecoverInterruptedArchiveWorkAsync(unbounded: true);
 
             /* The reset exports every table and checkpoints; the same once-per-pass volume check (#5377). */
             _duckDb.WarnIfDataVolumeLow(LastCompactionLargestNeedBytes);
@@ -1816,6 +1831,18 @@ COPY (
                     try
                     {
                         BeforeTableExportForTests?.Invoke(table);
+
+                        /* #5731: a journal that survives the (unbounded) recovery above is one it could not finish: an
+                           earlier export's promoted file already holds this table's rows. Exporting the table again
+                           would put them in a second archive file, and every v_<table> read would count them twice;
+                           skipping the table and resetting anyway would drop them. So this attempt is abandoned like
+                           a failed export: every row stays in the database and the retry backoff applies. */
+                        if (File.Exists(PendingArchivePath(table)))
+                        {
+                            exportsSucceeded = false;
+                            _logger?.LogWarning("Skipping {Table}: the journal of an earlier interrupted export is still there and could not be finished; the database is not reset", table);
+                            break;
+                        }
 
                         /* Check row count */
                         using var countCmd = connection.CreateCommand();

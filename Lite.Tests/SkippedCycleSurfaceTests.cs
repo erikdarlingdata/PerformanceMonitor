@@ -71,6 +71,26 @@ public sealed class SkippedCycleSurfaceTests : IClassFixture<SharedDuckDbFixture
         Assert.Contains("slowest step collectors, 412.3 s", line, StringComparison.Ordinal);
     }
 
+    /* arg_max skips a NULL argument: four separate calls would hand back the OLDER cycle's step, step time and note
+       when the newest row left them NULL, and the "last" fields would describe two different cycles (#5731). */
+    [Fact]
+    public async Task TheNewestRow_WithNullSlowestStepAndNote_ReturnsNull_NotAnOlderRowsValues()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        await SeedAsync(ServerA, "collection_cycle", AsOf.AddHours(-1), "SKIPPED", slots: 3, step: null, stepMs: null, totalMs: 480_000, message: null);
+        await SeedCycleAsync(ServerA, AsOf.AddHours(-5), slots: 2, step: "archival", stepMs: 90_000, totalMs: 130_000, message: "older late cycle");
+
+        var summary = await service.GetSkippedCycleSummaryAsync(ServerA, AsOf);
+
+        Assert.Equal(2, summary.Count);
+        Assert.Equal(AsOf.AddHours(-1), summary.LastAtUtc);
+        Assert.Equal(480_000, summary.LastDurationMs);
+        Assert.Null(summary.LastSlowestStep);
+        Assert.Null(summary.LastSlowestStepMs);
+        Assert.Null(summary.LastMessage);
+    }
+
     [Fact]
     public async Task TheWindow_IsTwentyFourHours_InclusiveAtBothEnds()
     {

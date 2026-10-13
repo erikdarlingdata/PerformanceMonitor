@@ -1091,7 +1091,12 @@ public sealed class McpHealthTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
-                run_count = rows.Count,
+                /* #5731: a collector RUN is a row a collector wrote. The log page also shows the collection loop's own
+                   collection_cycle/SKIPPED rows (CollectionCycleSkip: a late cycle's skipped slots; filterable with
+                   status = SKIPPED), which are not runs, so they are counted in skipped_cycle_rows and not here.
+                   Every returned-time span field below describes the PAGE, cycle rows included. */
+                run_count = rows.Count(r => r.CollectorName != CollectionCycleSkip.CollectorName),
+                skipped_cycle_rows = rows.Count(r => r.CollectorName == CollectionCycleSkip.CollectorName),
                 truncated,
                 /*
                     #3287, field-identical to Darling's twin: the span this PAGE covers, beside the span
@@ -1228,7 +1233,9 @@ public sealed class McpHealthTools
             {
                 scope = "fleet",
                 hours_back = hours,
-                run_count = rows.Count,
+                /* #5731: collector runs only; the collection_cycle/SKIPPED rows the page also shows are counted apart. The returned-time span fields describe the page, cycle rows included. */
+                run_count = rows.Count(r => r.CollectorName != CollectionCycleSkip.CollectorName),
+                skipped_cycle_rows = rows.Count(r => r.CollectorName == CollectionCycleSkip.CollectorName),
                 truncated,
                 /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
                 oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Min(r => r.CollectionTime)),

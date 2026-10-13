@@ -387,7 +387,37 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
         return _seedConn;
     }
 
-    private async Task SeedLogAsync(string collector, DateTime collectionTimeUtc, double durationMs = 100)
+    /// <summary>
+    /// #5731: the log page shows the collection loop's own <c>collection_cycle</c>/<c>SKIPPED</c> row (that is what the
+    /// grid and this tool are for) and does not count it as a collector run. Two collector rows and one cycle row:
+    /// <c>run_count</c> 2, <c>skipped_cycle_rows</c> 1, the cycle row still in <c>runs</c>, and the returned-time span
+    /// describing the page, cycle row included. Both forms, one server and the fleet.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ACycleRowIsShownOnThePage_ButNotCountedAsARun(bool fleet)
+    {
+        var service = new LocalDataService(_duckDb);
+
+        var oldest = DateTime.UtcNow.AddMinutes(-30);
+        await SeedLogAsync(CollectionCycleSkip.CollectorName, oldest, 70_000, status: CollectionCycleSkip.Status);
+        await SeedLogAsync("wait_stats", DateTime.UtcNow.AddMinutes(-20));
+        await SeedLogAsync("query_store", DateTime.UtcNow.AddMinutes(-10));
+
+        var json = await McpHealthTools.GetCollectionLog(service, _serverManager, fleet ? "*" : ServerName, 24, 200);
+        var root = JsonDocument.Parse(json).RootElement;
+
+        Assert.Equal(2, root.GetProperty("run_count").GetInt32());
+        Assert.Equal(1, root.GetProperty("skipped_cycle_rows").GetInt32());
+        Assert.Equal(3, root.GetProperty("runs").GetArrayLength());
+        Assert.Contains(root.GetProperty("runs").EnumerateArray(),
+            r => r.GetProperty("collector").GetString() == CollectionCycleSkip.CollectorName
+              && r.GetProperty("status").GetString() == CollectionCycleSkip.Status);
+        Assert.Equal(oldest.ToString("o")[..19], root.GetProperty("oldest_returned_collection_time").GetString()![..19]);
+    }
+
+    private async Task SeedLogAsync(string collector, DateTime collectionTimeUtc, double durationMs = 100, string status = "SUCCESS")
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -403,7 +433,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         cmd.Parameters.Add(new DuckDBParameter { Value = collector });
         cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified) });
         cmd.Parameters.Add(new DuckDBParameter { Value = durationMs });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "SUCCESS" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = status });
         cmd.Parameters.Add(new DuckDBParameter { Value = DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = 10 });
         /* The 80/20 split the duration pin asserts, kept PROPORTIONAL so a row seeded with a different total
