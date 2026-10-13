@@ -62,7 +62,7 @@ At each report:
 1. Stop the agent.
 2. Check that the shared checkout is clean.
 3. Read the PR's core product diff against the checklist below. Lane PRs arrive as drafts, which can't be merged
-   from the UI, so none merges before this step finishes.
+   from the UI, but a lane can open one ready instead, so read the diff before anything can merge.
 4. A security PR, or an irreversible data rewrite, gets a review round before it leaves draft.
 5. Mark it ready (`gh pr ready <n>`) and arm auto-merge only after that. Auto-merge waits for CI.
 
@@ -142,8 +142,8 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
    - `listen_addresses = '127.0.0.1'`
    - `timescaledb.max_background_workers` and `max_worker_processes`, as CI's `darling-pg` job sets them.
    - `timezone = 'UTC'` and `log_timezone = 'UTC'`. initdb takes the machine's time zone, but CI's runners run
-     in UTC, and a rig must match CI: time-sensitive live tests fail on a rig in another time zone. A rig in
-     UTC does not excuse a failure: CI still decides whose it is.
+     in UTC, and a rig must match CI: time-sensitive live tests have failed on a rig in another time zone. A rig
+     in UTC does not excuse a failure: CI still decides whose it is.
    - Change `postgresql.conf` before you start the server. A restart during a running suite breaks that run's
      results, and so does a re-run on the database that run left behind.
 4. Check the port is free. Start the server in the background, because `pg_ctl -w start` hangs a tool call, and
