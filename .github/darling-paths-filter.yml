@@ -61,6 +61,9 @@ darling:
   # job and leave a stale count literal to surface as an unrelated red on the next Darling pull request.
   - '.github/workflows/darling-ui-smoke.yml'
   - 'tools/ui-smoke/**/!(*.md)'
+  # #5745: the WPF smoke workflow copies the same cluster step again (viewer walk on a seeded store), so it is parsed by
+  # CiClusterWorkerSizingTests too.
+  - '.github/workflows/wpf-smoke.yml'
 
 # Lite/** is deliberately ABSENT, though build.yml's own `darling` filter carries it. That entry
 # exists because Darling.Tests reads Lite source in its cross-app parity guards, and those guards run

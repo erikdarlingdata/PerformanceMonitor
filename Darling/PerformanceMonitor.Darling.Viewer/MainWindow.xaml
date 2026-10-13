@@ -1028,7 +1028,7 @@
                                         <Grid>
                                             <StackPanel Margin="16">
                                                 <DockPanel Margin="0,0,0,4">
-                                                    <TextBlock Text="{Binding DisplayName}" FontSize="16" FontWeight="SemiBold"
+                                                    <TextBlock Text="{Binding DisplayName}" AutomationProperties.AutomationId="OverviewServerCardName" FontSize="16" FontWeight="SemiBold"
                                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                                     <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}"
                                                              ToolTip="{Binding StatusTooltip}"

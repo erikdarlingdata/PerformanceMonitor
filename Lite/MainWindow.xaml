@@ -423,7 +423,7 @@
                                                 Margin="6"
                                                 Width="260" MinHeight="160"
                                                 Cursor="Hand"
-                                                AutomationProperties.AutomationId="OverviewServerCard" AutomationProperties.Name="{Binding DisplayName}"
+                                                AutomationProperties.Name="{Binding DisplayName}"
                                                 MouseLeftButtonDown="OverviewCard_MouseLeftButtonDown">
                                             <Grid>
                                                 <StackPanel Margin="16">
@@ -453,7 +453,7 @@
                                                                      ToolTip="{Binding StatusTooltip}"
                                                                      VerticalAlignment="Center"/>
                                                         </StackPanel>
-                                                        <TextBlock Text="{Binding DisplayName}" FontSize="16" FontWeight="SemiBold"
+                                                        <TextBlock Text="{Binding DisplayName}" AutomationProperties.AutomationId="OverviewServerCardName" FontSize="16" FontWeight="SemiBold"
                                                                    TextTrimming="CharacterEllipsis"
                                                                    Foreground="{DynamicResource ForegroundBrush}"/>
                                                     </DockPanel>
