@@ -1086,7 +1086,7 @@ public partial class RemoteCollectorService
     /// NULL and no rows were collected. A failed write is the writer's own logged failure, and nothing here throws but a
     /// stop: a cycle that is already late must not be stopped by the record of it.
     /// </summary>
-    /// <param name="cycleStampUtc">The late cycle's logical start (its grid slot).</param>
+    /// <param name="cycleStampUtc">The late cycle's own start: the stamp the wait returned, when the loop noticed the gap. The row is stamped there, not at the previous cycle, so a gap of any length stays inside the 24-hour surfaces for 24 hours after it ends. The message carries the gap's other end.</param>
     internal async Task LogSkippedCycleAsync(DateTime cycleStampUtc, CycleSkipReport report, CancellationToken cancellationToken)
     {
         try

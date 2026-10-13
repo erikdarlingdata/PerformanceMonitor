@@ -14,7 +14,7 @@ internal readonly record struct CycleStep(string Name, long ElapsedMs);
 /// </summary>
 /// <param name="SlotsSkipped">Whole collection intervals that passed with no cycle: the row's <c>fanout_item_count</c>.</param>
 /// <param name="CycleMs">The late cycle's total length: the row's <c>duration_ms</c>.</param>
-/// <param name="SlowestStep">The slowest step, or <c>wait</c> when the wait overran: the row's <c>slowest_item</c>.</param>
+/// <param name="SlowestStep">The slowest step, or <c>wait</c> when the wait was the longer: the row's <c>slowest_item</c>.</param>
 /// <param name="SlowestStepMs">The slowest step's length: the row's <c>slowest_item_ms</c>.</param>
 /// <param name="Message">The Warning line and the row's <c>error_message</c>.</param>
 internal sealed record CycleSkipReport(int SlotsSkipped, int CycleMs, string SlowestStep, int SlowestStepMs, string Message);
@@ -62,13 +62,17 @@ internal static class CollectionCycleSkip
     }
 
     /// <summary>
-    /// The report for a cycle that skipped <paramref name="slotsSkipped"/> slots, or null for none.
-    /// A cycle that itself ran a whole interval or more is the cause, and the line lists its slowest steps. A shorter
-    /// cycle means the wait overran (the computer slept or hibernated, or the clock stepped forward), and the line says
-    /// so with the wait's length.
+    /// The report for a cycle that skipped <paramref name="slotsSkipped"/> slots, or null for none. Each part of the
+    /// gap is attributed on its own. The cycle is a cause when it ran a whole interval or more, and the line lists its
+    /// slowest steps. The wait is a cause when it ran past its slot by a whole interval or more (the wait's length minus
+    /// the time left in the interval after the cycle): the computer slept or hibernated, or the clock stepped forward,
+    /// and the line says so with the wait's length. When both hold the line prints both, and says the slots passed
+    /// across the two. With neither (the stamps alone show a gap) the line is the wait's. The slot count is always the
+    /// whole gap. When the two stamps are given the line ends by naming the gap from one to the other.
     /// </summary>
     internal static CycleSkipReport? Build(
-        int slotsSkipped, TimeSpan cycleElapsed, TimeSpan waitElapsed, IReadOnlyList<CycleStep> steps, TimeSpan interval)
+        int slotsSkipped, TimeSpan cycleElapsed, TimeSpan waitElapsed, IReadOnlyList<CycleStep> steps, TimeSpan interval,
+        DateTime? previousCycleStart = null, DateTime? nextCycleStart = null)
     {
         if (slotsSkipped <= 0)
         {
@@ -76,24 +80,48 @@ internal static class CollectionCycleSkip
         }
 
         var cycleMs = ClampMs(cycleElapsed.TotalMilliseconds);
+        var waitMs = ClampMs(waitElapsed.TotalMilliseconds);
+        var intervalText = Format((long)interval.TotalMilliseconds);
 
-        if (cycleElapsed >= interval)
+        var timeLeftAfterCycle = interval > cycleElapsed ? interval - cycleElapsed : TimeSpan.Zero;
+        var cycleCaused = cycleElapsed >= interval;
+        var waitCaused = waitElapsed - timeLeftAfterCycle >= interval;
+
+        var slowest = steps.Where(s => s.ElapsedMs > 0).OrderByDescending(s => s.ElapsedMs).Take(3).ToList();
+        var listed = slowest.Count == 0
+            ? "none timed"
+            : string.Join(", ", slowest.Select(s => s.Name.Replace('_', ' ') + " " + Format(s.ElapsedMs)));
+        var top = slowest.Count == 0 ? new CycleStep("collectors", 0) : slowest[0];
+        var gap = GapSentence(previousCycleStart, nextCycleStart);
+
+        if (cycleCaused && waitCaused)
         {
-            var slowest = steps.Where(s => s.ElapsedMs > 0).OrderByDescending(s => s.ElapsedMs).Take(3).ToList();
-            var listed = slowest.Count == 0
-                ? "none timed"
-                : string.Join(", ", slowest.Select(s => s.Name.Replace('_', ' ') + " " + Format(s.ElapsedMs)));
+            var both = string.Create(CultureInfo.InvariantCulture,
+                $"Collection cycle took {Format(cycleMs)} and the wait overran, so {slotsSkipped} collection slot(s) were skipped across the two. Slowest steps: {listed}. The wait lasted {Format(waitMs)} against a {intervalText} interval; the computer may have slept or hibernated, or the clock stepped forward.{gap}");
+            return waitMs > top.ElapsedMs
+                ? new CycleSkipReport(slotsSkipped, cycleMs, WaitStepName, waitMs, both)
+                : new CycleSkipReport(slotsSkipped, cycleMs, top.Name, ClampMs(top.ElapsedMs), both);
+        }
+
+        if (cycleCaused)
+        {
             var message = string.Create(CultureInfo.InvariantCulture,
-                $"Collection cycle took {Format(cycleMs)}, so {slotsSkipped} collection slot(s) were skipped. Slowest steps: {listed}.");
-            var top = slowest.Count == 0 ? new CycleStep("collectors", 0) : slowest[0];
+                $"Collection cycle took {Format(cycleMs)}, so {slotsSkipped} collection slot(s) were skipped. Slowest steps: {listed}.{gap}");
             return new CycleSkipReport(slotsSkipped, cycleMs, top.Name, ClampMs(top.ElapsedMs), message);
         }
 
-        var waitMs = ClampMs(waitElapsed.TotalMilliseconds);
         var overran = string.Create(CultureInfo.InvariantCulture,
-            $"Collection wait overran: it lasted {Format(waitMs)} against a {Format((long)interval.TotalMilliseconds)} interval, so {slotsSkipped} collection slot(s) were skipped. The cycle itself took {Format(cycleMs)}; the computer may have slept or hibernated, or the clock stepped forward.");
+            $"Collection wait overran: it lasted {Format(waitMs)} against a {intervalText} interval, so {slotsSkipped} collection slot(s) were skipped. The cycle itself took {Format(cycleMs)}; the computer may have slept or hibernated, or the clock stepped forward.{gap}");
         return new CycleSkipReport(slotsSkipped, cycleMs, WaitStepName, waitMs, overran);
     }
+
+    /// <summary>" The gap ran from X UTC to Y UTC.", or nothing when either stamp is missing. No equals sign: the baseline
+    /// marker read keys on one.</summary>
+    private static string GapSentence(DateTime? from, DateTime? to)
+        => from.HasValue && to.HasValue
+            ? string.Create(CultureInfo.InvariantCulture,
+                $" The gap ran from {from.Value:yyyy-MM-dd HH:mm:ss} UTC to {to.Value:yyyy-MM-dd HH:mm:ss} UTC.")
+            : "";
 
     /// <summary>Milliseconds below one second, one decimal below ten seconds, whole seconds from ten seconds up.</summary>
     internal static string Format(long ms)

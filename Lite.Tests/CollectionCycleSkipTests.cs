@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -21,6 +22,9 @@ namespace PerformanceMonitorLite.Tests;
 /// (<see cref="CollectionBackgroundService.WaitForNextCycleAsync"/>) over a fake clock and a fake delay, the way
 /// <see cref="CollectionCycleResumeTests"/> drives it.
 /// </summary>
+/* Collection app-logger-statics: AFailedRowWrite_... reads AppLogger's process-wide buffer, which the other classes in the
+   collection also drain. */
+[Collection("app-logger-statics")]
 public sealed class CollectionCycleSkipTests : IDisposable
 {
     private static readonly DateTime T0 = new(2026, 10, 12, 10, 0, 0, DateTimeKind.Utc);
@@ -166,6 +170,46 @@ public sealed class CollectionCycleSkipTests : IDisposable
     }
 
     [Fact]
+    public void ALongCycleFollowedByAnOverrunWait_PrintsBothCauses_AndDoesNotBlameTheCycleAlone()
+    {
+        /* A 65 s cycle (4 s over the interval), then the computer slept: the wait lasted 2 h. The slot count is the whole gap. */
+        var report = CollectionCycleSkip.Build(124, TimeSpan.FromSeconds(65), TimeSpan.FromHours(2), Steps(), Interval);
+
+        Assert.NotNull(report);
+        Assert.Equal(
+            "Collection cycle took 65s and the wait overran, so 124 collection slot(s) were skipped across the two. "
+            + "Slowest steps: archival 240s, collectors 61s, retention 9s. "
+            + "The wait lasted 7200s against a 60s interval; the computer may have slept or hibernated, or the clock stepped forward.",
+            report!.Message);
+        Assert.Equal(124, report.SlotsSkipped);
+        Assert.Equal(65_000, report.CycleMs);
+        /* The row's slowest item is whichever is longer: here the wait. */
+        Assert.Equal("wait", report.SlowestStep);
+        Assert.Equal(7_200_000, report.SlowestStepMs);
+        Assert.DoesNotContain("so 124 collection slot(s) were skipped. ", report.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ALongCycleWhoseWaitRanOnlyItsShortSlack_IsTheCyclesCauseAlone()
+    {
+        /* A 130 s cycle then a wait that only used up its own slack (0 s left after the cycle): no overrun, so one cause. */
+        var report = CollectionCycleSkip.Build(2, TimeSpan.FromSeconds(130), TimeSpan.FromSeconds(30), Steps(), Interval);
+
+        Assert.StartsWith("Collection cycle took 130s, so 2 collection slot(s) were skipped.", report!.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("overran", report.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheGapSentence_NamesBothEndsOfTheGap_WhenTheStampsAreGiven()
+    {
+        var late = T0 + TimeSpan.FromHours(25);
+        var report = CollectionCycleSkip.Build(1499, TimeSpan.FromSeconds(5), TimeSpan.FromHours(25), Steps(), Interval, T0, late);
+
+        Assert.EndsWith(" The gap ran from 2026-10-12 10:00:00 UTC to 2026-10-13 11:00:00 UTC.", report!.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("=", report.Message);
+    }
+
+    [Fact]
     public void NoSkippedSlots_IsNoReport()
     {
         Assert.Null(CollectionCycleSkip.Build(0, TimeSpan.FromSeconds(300), TimeSpan.Zero, Steps(), Interval));
@@ -270,7 +314,8 @@ public sealed class CollectionCycleSkipTests : IDisposable
         await f.Loop.ReportSkippedSlotsAsync(previous, next, TimeSpan.FromSeconds(312), TimeSpan.FromSeconds(48), Steps(),
             CancellationToken.None);
 
-        var expected = CollectionCycleSkip.Build(5, TimeSpan.FromSeconds(312), TimeSpan.FromSeconds(48), Steps(), Interval)!;
+        var expected = CollectionCycleSkip.Build(5, TimeSpan.FromSeconds(312), TimeSpan.FromSeconds(48), Steps(), Interval, previous, next)!;
+        Assert.Contains("2026-10-12 10:00:00 UTC to 2026-10-12 10:06:00 UTC", expected.Message, StringComparison.Ordinal);
         var warning = Assert.Single(f.Log);
         Assert.Equal(LogLevel.Warning, warning.Level);
         Assert.Equal(expected.Message, warning.Message);
@@ -281,9 +326,10 @@ public sealed class CollectionCycleSkipTests : IDisposable
         foreach (var server in new[] { f.Enabled1, f.Enabled2 })
         {
             var row = rows[RemoteCollectorService.GetServerId(server)];
-            Assert.Equal("collection_cycle", row.Collector);
+            Assert.Equal(CollectionCycleSkip.CollectorName, row.Collector);
             Assert.Equal("SKIPPED", row.Status);
-            Assert.Equal(previous, row.Time);
+            /* The late cycle's own start (the stamp the wait returned), not the previous cycle's: the message names that end. */
+            Assert.Equal(next, row.Time);
             Assert.Equal(312_000, row.DurationMs);
             Assert.Equal(5, row.Items);
             Assert.Equal("archival", row.SlowestItem);
@@ -294,6 +340,28 @@ public sealed class CollectionCycleSkipTests : IDisposable
             Assert.Null(row.DuckMs);
             Assert.Equal(server.DisplayName, row.ServerName);
         }
+    }
+
+    [Fact]
+    public async Task ATwentyFiveHourGapThatEndedAMinuteAgo_ShowsInTheMcpBlockAndTheCollectionHealthLine()
+    {
+        /* The row is stamped at the late cycle's own start, so a gap longer than the 24-hour window is still inside it for
+           24 hours after it ends. Stamped at the previous cycle (25 hours back) it would read count_24h 0 from the start. */
+        var f = await OpenAsync();
+        var lateStamp = DateTime.UtcNow.AddMinutes(-1);
+        var previous = lateStamp.AddHours(-25);
+
+        await f.Loop.ReportSkippedSlotsAsync(previous, lateStamp, TimeSpan.FromSeconds(5), TimeSpan.FromHours(25), Steps(),
+            CancellationToken.None);
+
+        var summary = await new LocalDataService(f.DuckDb)
+            .GetSkippedCycleSummaryAsync(RemoteCollectorService.GetServerId(f.Enabled1), cancellationToken: TestContext.Current.CancellationToken);
+        var block = System.Text.Json.JsonSerializer.SerializeToElement(McpHealthTools.SkippedCyclesBlock(summary));
+
+        Assert.Equal(1, block.GetProperty("count_24h").GetInt64());
+        Assert.Equal(1, summary.Count);
+        Assert.StartsWith("Skipped cycles in 24 h: 1 late cycle(s), 1,499 slot(s) skipped.", summary.SummaryLine(), StringComparison.Ordinal);
+        Assert.Contains("The gap ran from", summary.LastMessage, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -328,13 +396,59 @@ public sealed class CollectionCycleSkipTests : IDisposable
     public async Task AFailedRowWrite_IsLoggedAndNeverLeavesTheLoop()
     {
         var f = await OpenAsync(dropLogTable: true);
+        AppLogger.DrainBufferedLines();
 
         var ex = await Record.ExceptionAsync(() => f.Loop.ReportSkippedSlotsAsync(T0, T0 + TimeSpan.FromMinutes(6),
             TimeSpan.FromSeconds(312), TimeSpan.Zero, Steps(), CancellationToken.None));
 
         Assert.Null(ex);
+        /* The loop's Warning is written before the row, on every skip; it is not the failure. The write failure goes to
+           AppLogger from RemoteCollectorService.WriteCollectionLogRowAsync, once per enabled server, read here from
+           AppLogger's own buffer (the seam its other pins use). */
         Assert.Single(f.Log);
+        var failures = AppLogger.DrainBufferedLines()
+            .Where(l => l.Contains("[ERROR]", StringComparison.Ordinal)
+                        && l.Contains("[Collector]", StringComparison.Ordinal)
+                        && l.Contains("COLLECTION LOGGING FAILED", StringComparison.Ordinal))
+            .ToList();
+        Assert.Equal(2, failures.Count);
     }
+
+    // ── the collector name has one home ──────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void NoFileUnderLite_CopiesTheCollectorNameAsASingleQuotedSqlLiteral()
+    {
+        /* The nine reader predicates interpolate CollectionCycleSkip.CollectorName; a rename must move writer and readers
+           together. The census has no exceptions: doc comments write the name in <c> tags, never in single quotes. */
+        var literal = "'" + CollectionCycleSkip.CollectorName + "'";
+        var lite = Path.GetFullPath(Path.Combine(RepoRootFromThisFile(), "Lite"));
+        var offenders = Directory.EnumerateFiles(lite, "*", SearchOption.AllDirectories)
+            .Where(f => !f.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+                        && !f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+                        && !string.Equals(Path.GetFileName(f), "CollectionCycleSkip.cs", StringComparison.Ordinal)
+                        && (f.EndsWith(".cs", StringComparison.Ordinal) || f.EndsWith(".xaml", StringComparison.Ordinal)
+                            || f.EndsWith(".sql", StringComparison.Ordinal)))
+            .Where(f => File.ReadAllText(f).Contains(literal, StringComparison.Ordinal))
+            .Select(f => Path.GetRelativePath(lite, f))
+            .ToList();
+
+        Assert.Empty(offenders);
+    }
+
+    [Fact]
+    public void TheNinePredicates_InterpolateTheCollectorName()
+    {
+        var services = Path.Combine(RepoRootFromThisFile(), "Lite", "Services");
+        var count = Directory.EnumerateFiles(services, "LocalDataService.*.cs")
+            .Sum(f => System.Text.RegularExpressions.Regex.Matches(File.ReadAllText(f),
+                @"collector_name <> '\{CollectionCycleSkip\.CollectorName\}'").Count);
+
+        Assert.Equal(9, count);
+    }
+
+    private static string RepoRootFromThisFile([CallerFilePath] string thisFile = "")
+        => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, ".."));
 
     // ── the loop is wired to it ──────────────────────────────────────────────────────────────────────────
 

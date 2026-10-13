@@ -336,14 +336,14 @@ public class CollectionBackgroundService : BackgroundService
     {
         var report = CollectionCycleSkip.Build(
             CollectionCycleSkip.CountSkippedSlots(previousCycleStart, nextCycleStart, CollectionInterval),
-            cycleElapsed, waitElapsed, steps, CollectionInterval);
+            cycleElapsed, waitElapsed, steps, CollectionInterval, previousCycleStart, nextCycleStart);
         if (report == null)
         {
             return;
         }
 
         _logger?.LogWarning("{Message}", report.Message);
-        await _collectorService.LogSkippedCycleAsync(previousCycleStart, report, cancellationToken);
+        await _collectorService.LogSkippedCycleAsync(nextCycleStart, report, cancellationToken);
     }
 
     /// <summary>
