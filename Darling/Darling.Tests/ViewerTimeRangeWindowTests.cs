@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
 using Xunit;
@@ -197,5 +198,87 @@ public sealed class ViewerTimeRangeWindowTests
 
         Assert.NotNull(TimeRangeNotes.DataStartNote(resolved!, Now.AddHours(-3)));
         Assert.Null(TimeRangeNotes.DataStartNote(resolved!, Now.AddDays(-3)));
+    }
+
+    /* ---- the duration trends' tier clock (#5725) ---- */
+
+    /// <summary>The regression: a live "past 95 hours" window starts exactly on the raw boundary (96 h less the 1 h margin). The viewer
+    /// hands the tier decision the window's own end, so the window routes Raw however long the read takes to start; the old second
+    /// <c>DateTime.UtcNow</c> read a few milliseconds LATER flipped the same window to the hourly tier.</summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(7)]
+    [InlineData(250)]
+    public void ALive95HourWindow_RoutesRawEveryTime_WhenTheTierIsDecidedAtTheWindowEnd(int millisecondsLater)
+    {
+        var now = new DateTime(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
+        var (start, end, live) = ViewerTimeRangeWindow.Window(TimeRangeSpec.Relative(TimeSpan.FromHours(95)), now, TimeZoneInfo.Utc);
+        Assert.True(live);
+        Assert.Equal(TimeSpan.FromHours(95), end - start);
+        Assert.Equal(TimescaleSupport.RawRetentionSpan - DurationTrendRouting.RawTierMargin, end - start);
+
+        var tierNow = ViewerTimeRangeWindow.TierNowUtc(live, end);
+
+        Assert.Equal(end, tierNow);
+        Assert.True(DurationTrendRouting.ShouldUseRawTier(start, tierNow!.Value));
+        Assert.Equal(RetentionTier.Raw, DurationTrendRouting.ResolveTier(start, tierNow.Value, hourlyAvailable: true, default));
+
+        /* The old behaviour, for contrast (the revert check): a clock read after the window was computed flips the same window. */
+        if (millisecondsLater > 0)
+        {
+            var late = end.AddMilliseconds(millisecondsLater);
+            Assert.False(DurationTrendRouting.ShouldUseRawTier(start, late));
+            Assert.Equal(RetentionTier.Hourly, DurationTrendRouting.ResolveTier(start, late, hourlyAvailable: true, default));
+        }
+    }
+
+    [Fact]
+    public void AFixedRange_KeepsTheWallClock_AndNeverUsesItsPastEndAsTheClock()
+    {
+        var now = new DateTime(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
+        var (_, end, live) = ViewerTimeRangeWindow.Window(TimeRangeSpec.FixedRange(now.AddDays(-10), now.AddDays(-9)), now, TimeZoneInfo.Utc);
+
+        Assert.False(live);
+        Assert.Null(ViewerTimeRangeWindow.TierNowUtc(live, end));
+    }
+
+    [Fact]
+    public void TheSharedTierClock_IsOneDefinition_TheMcpToolsAndTheViewerBothUse()
+    {
+        var wall = new DateTime(2026, 10, 12, 12, 0, 3, DateTimeKind.Utc);
+        var end = new DateTime(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.Equal(end, DurationTrendRouting.TierClock(true, end, () => wall));
+        Assert.Equal(wall, DurationTrendRouting.TierClock(false, end, () => wall));
+        Assert.Equal(end, PerformanceMonitor.Darling.Service.Mcp.DarlingMcpTrendTools.TierClock(null, end, () => wall));
+        Assert.Equal(wall, PerformanceMonitor.Darling.Service.Mcp.DarlingMcpTrendTools.TierClock("2026-09-12T12:00:00Z", end, () => wall));
+
+        var tools = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTrendTools.cs").Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains("DurationTrendRouting.TierClock(string.IsNullOrWhiteSpace(asOf), windowEndUtc, wallClock)", tools, StringComparison.Ordinal);
+        Assert.DoesNotContain("wallClock?.Invoke()", tools, StringComparison.Ordinal);
+    }
+
+    /// <summary>Source pin: the Performance Trends load reads its window with the tier clock and hands it to both duration trends; the
+    /// clock is the window's end only for a live range (<see cref="ViewerTimeRangeWindow.TierNowUtc"/> returns null for a fixed one).</summary>
+    [Fact]
+    public void ThePerformanceTrendsLoad_PassesTheTierClock_ToBothDurationTrends()
+    {
+        static string Read(string file) => RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", file).Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        var trends = Read("ViewerServerTab.QueryTrends.cs");
+        Assert.Contains("GetQueryDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc)", trends, StringComparison.Ordinal);
+        Assert.Contains("GetProcedureDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc)", trends, StringComparison.Ordinal);
+        Assert.Contains("LoadPerformanceTrendsAsync(DateTime startUtc, DateTime endUtc, DateTime? tierNowUtc)", trends, StringComparison.Ordinal);
+
+        var queries = Read("ViewerServerTab.Queries.cs");
+        Assert.Contains("var (startUtc, endUtc, tierNowUtc) = GetWindowUtcWithTierClock();", queries, StringComparison.Ordinal);
+        Assert.Contains("await LoadPerformanceTrendsAsync(startUtc, endUtc, tierNowUtc);", queries, StringComparison.Ordinal);
+
+        var range = Read("ViewerServerTab.TimeRange.cs");
+        Assert.Contains("return (startUtc, endUtc, ViewerTimeRangeWindow.TierNowUtc(isLive, endUtc));", range, StringComparison.Ordinal);
+
+        var window = Read("ViewerTimeRangeWindow.cs");
+        Assert.Contains("isLive ? DurationTrendRouting.TierClock(windowEndIsNow: true, endUtc) : null;", window, StringComparison.Ordinal);
     }
 }
