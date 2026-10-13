@@ -110,8 +110,8 @@ SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AN
     /// carry too (#3976) — an ordered per-chunk descent that stops at the newest chunk with a row, which a
     /// plan built to prove a MAX over the whole retained history cannot do regardless of any WHERE clause.</para>
     /// </summary>
-    public const string ServerSummaryLastCollectionSql = @"
-SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY collection_time DESC LIMIT 1";
+    public const string ServerSummaryLastCollectionSql = $@"
+SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {CollectionCycleRow.NotCycleRowSql} ORDER BY collection_time DESC LIMIT 1";
 
     /// <summary>The span the blocking and deadlock counts cover, ending at the read's clock — Lite's window.
     /// Published by the tool so "recent" has a number.</summary>

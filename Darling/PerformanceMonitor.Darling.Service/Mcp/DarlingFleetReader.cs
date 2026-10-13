@@ -559,7 +559,7 @@ WHERE id = 1";
     /// read positively reported is the only miss that can become Offline: a server absent from the result
     /// altogether (disabled between <see cref="FleetServersSql"/> and this read) keeps the no-claim reading,
     /// which is the lesson of the rotating false-Offlines this read's null fallback was written for.</para></summary>
-    public const string FleetLastCollectionSql = @"
+    public const string FleetLastCollectionSql = $@"
 SELECT
     s.server_id,
     latest.collection_time AS last_collection_time,
@@ -571,6 +571,7 @@ LEFT JOIN LATERAL
     FROM v_collection_log
     WHERE server_id = s.server_id
     AND   collection_time >= $1
+    AND   {CollectionCycleRow.NotCycleRowSql}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest ON TRUE
@@ -582,7 +583,7 @@ AND   s.server_id <> 0";
     /// none for), $2 the window start. The shape of the Viewer's <c>ServerFreshnessSql</c> (a per-server LATERAL ...
     /// ORDER BY collection_time DESC LIMIT 1, an index descent on (server_id, collection_time)), bounded ABOVE by the window
     /// start because everything newer is already known to be empty, which also lets TimescaleDB leave the newest chunks out.</summary>
-    public const string FleetOlderCollectionSql = @"
+    public const string FleetOlderCollectionSql = $@"
 SELECT
     s.server_id,
     latest.collection_time
@@ -593,6 +594,7 @@ CROSS JOIN LATERAL
     FROM v_collection_log
     WHERE server_id = s.server_id
     AND   collection_time < $2
+    AND   {CollectionCycleRow.NotCycleRowSql}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest
@@ -741,6 +743,7 @@ SELECT
 FROM v_collection_log
 WHERE collection_time >= $1
 AND   server_id <> 0
+AND   {CollectionCycleRow.NotCycleRowSql}
 GROUP BY server_id, collector_name";
 
     /* ─────────── #3893 arm 2: the same read, composed from the hourly aggregate + a raw head slice ───────────

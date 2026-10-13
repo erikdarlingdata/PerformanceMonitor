@@ -6,7 +6,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <see cref="CollectorName"/> and <c>status</c> is <see cref="Status"/>. It carries a real <c>server_id</c>, so
 /// the data_retention sentinel trick (server_id 0, left out of every per-server read) does not hide it. Every read of
 /// the log that counts runs, rates, streaks, "last collected" or "any row" leaves it out through
-/// <see cref="NotCycleRow"/>; the reads that name one collector, or <c>status = 'SUCCESS'</c>, never see it; the raw
+/// <see cref="NotCycleRowSql"/>; the reads that name one collector, or <c>status = 'SUCCESS'</c>, never see it; the raw
 /// log reads show it on purpose. <c>CollectionCycleReaderCensusTests</c> holds the line for every later reader, and
 /// no file but this one may spell the collector name as a literal.
 /// </summary>
@@ -21,7 +21,4 @@ public static class CollectionCycleRow
     /// <summary>The predicate that leaves skipped-slots rows out of a read of <c>collection_log</c> or
     /// <c>v_collection_log</c>: <c>collector_name &lt;&gt; 'collection_cycle'</c>. A row's collector_name is NOT NULL.</summary>
     public const string NotCycleRowSql = "collector_name <> '" + CollectorName + "'";
-
-    /// <summary>The same predicate on a qualified column, for a read that aliases the log (<c>l.collector_name</c>).</summary>
-    public static string NotCycleRow(string alias) => alias + ".collector_name <> '" + CollectorName + "'";
 }

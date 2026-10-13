@@ -5657,6 +5657,8 @@ public sealed class DarlingSelfAlertTests
     /// be static any more. Nothing else on it is exercised by these fixtures: they assert the raw signals a
     /// read returns from seeded rows, so the deliverer, the history store and the mute seam are inert.
     /// </summary>
+    internal static DarlingSelfAlertEvaluator LiveReadEvaluatorForTests() => LiveReadEvaluator();
+
     private static DarlingSelfAlertEvaluator LiveReadEvaluator()
     {
         var h = new Harness();
@@ -5748,6 +5750,67 @@ public sealed class DarlingSelfAlertTests
             /* Fresh connection + body-aware masking (#1794): this class showed the "Connection is not
                open" signature on a reused local store, and cleanup on the body's connection is exactly
                how that masks the real failure and strands the seeded rows. */
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteLiveRowsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #5735: a server whose only RECENT rows are <c>collection_cycle</c> skipped-slots rows still raises Collection
+    /// Stopped. The signals read counts <c>SKIPPED</c> as a healthy no-op, so a skip row counted as a run would be the
+    /// newest "success", reset the staleness clock and stand in for a collection that never happened: the late-collection
+    /// record would mask the outage it records. The old success is 45 minutes old and a skip row lands every minute.
+    /// </summary>
+    [Fact]
+    public async Task LiveStoreReads_SkipRowsAreNotRunsAndNeverMaskCollectionStopped()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live self-alert store reads.");
+
+        var ct = Ct;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteLiveRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var utcNow = LiveClock.Now();
+            long logId = 9_500_000;
+            await InsertLogAsync(connection, ct, logId++, "wait_stats", utcNow.AddMinutes(-45), "SUCCESS");
+            for (var i = 0; i < 12; i++)
+            {
+                await InsertLogAsync(connection, ct, logId++, CollectionCycleRow.CollectorName, utcNow.AddMinutes(-1 - i / 4.0), CollectionCycleRow.Status);
+            }
+
+            var (lastSuccess, recentRuns, recentSuccess) = await LiveReadEvaluator().ReadCollectionSignalsAsync(
+                postgres, LiveServerId, DarlingSelfAlertEvaluator.ConsecutiveFailureThreshold, ct);
+
+            /* The last success is the 45-minute-old collector run, not a skip row; the skip rows are not runs. */
+            Assert.NotNull(lastSuccess);
+            Assert.True(lastSuccess <= utcNow.AddMinutes(-44), $"last success was {lastSuccess:o}");
+            Assert.Equal(1, recentRuns);
+            Assert.Equal(1, recentSuccess);
+
+            var hDown = new Harness { Now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc) };
+            var evaluator = hDown.Build();
+            await evaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: false, ct);
+            Assert.DoesNotContain(hDown.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+
+            hDown.Now = hDown.Now.AddMinutes(31);
+            await evaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: false, ct);
+            var stopped = Assert.Single(hDown.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+            Assert.StartsWith("No successful collection in 76 minutes", stopped.CurrentValue, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 await DeleteLiveRowsAsync(cleanup, cleanupCt);

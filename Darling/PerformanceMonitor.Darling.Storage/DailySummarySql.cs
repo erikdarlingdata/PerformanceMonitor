@@ -38,7 +38,7 @@ public static class DailySummarySql
     /// per-stored-name aggregation this read always ran; <c>wait_per_type</c> merges its groups, so the trim runs
     /// once per group rather than once per row.
     /// </summary>
-    public const string RangeSql = """
+    public const string RangeSql = $"""
         WITH wait_per_spelling AS (
             SELECT date_trunc('day', collection_time) AS d, wait_type, SUM(delta_wait_time_ms) AS ms
             FROM v_wait_stats
@@ -122,6 +122,7 @@ public static class DailySummarySql
                    COUNT(*) FILTER (WHERE status = 'ERROR') AS errs
             FROM v_collection_log
             WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+            AND   {CollectionCycleRow.NotCycleRowSql}
             GROUP BY 1
         ),
         mem AS (
