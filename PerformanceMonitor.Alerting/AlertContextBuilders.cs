@@ -704,14 +704,11 @@ public static class AlertContextBuilders
     }
 
     /// <summary>
-    /// The Runnable Queue card's top-request items (#5641): the heaviest requests in the newest query snapshot,
-    /// ranked by CPU time (then elapsed time) because the alert is about CPU queueing. Takes the rows an
-    /// unfiltered, threshold-zero <c>GetLongRunningQueriesAsync</c> read returned, which is exactly the surface the
-    /// High CPU card's maintenance probe reads; shows at most <see cref="RunnableQueueRequestDisplayCap"/> and
-    /// states the omission as a final item rather than cutting silently. Fields are the Long-Running Query
-    /// card's session fields, so a reader sees the same facts under both alerts. Returns an empty list when the
-    /// snapshot holds no request. <paramref name="readHitCap"/> says the read returned a full page, so the count of
-    /// omitted requests is a floor and the trailer reads "at least N more request(s)".
+    /// The Client Timeouts card's detail items (#5640): the reading (rate, exact count, minutes covered, and the estimate line only
+    /// when the mute proportion changed the count), then the top statements, databases and client applications. Those three lists
+    /// cover the samples inside the finding's covered span (round 2 of #5714, L6); when the span kept no samples they are the
+    /// lookback's, the headings say "in the last N minutes", and the database and application lines carry the label "Recent ..." so
+    /// the mute dialogs pre-fill nothing from an hour-old list.
     /// </summary>
     public static IReadOnlyList<AlertDetailItem> BuildClientTimeoutItems(
         AttentionEvaluator.Finding finding, AttentionWindow window)
@@ -733,13 +730,15 @@ public static class AlertContextBuilders
 
         /* 2. The top statements (the statement filter judges each sample text before it is cut), the sampled events a statement
            appears in, not the count of timeouts. */
+        var lookback = window.TopsFromLookback;
+        var lookbackNote = string.Create(CultureInfo.InvariantCulture, $" in the last {AttentionEvaluator.ReadLookbackMinutes} minutes");
         var rank = 0;
         foreach (var statement in window.TopStatements.Take(AttentionTopListCap))
         {
             rank++;
             var item = new AlertDetailItem
             {
-                Heading = string.Create(CultureInfo.InvariantCulture, $"Top statement {rank}: {statement.Samples:N0} sampled event{(statement.Samples == 1 ? "" : "s")}"),
+                Heading = string.Create(CultureInfo.InvariantCulture, $"Top statement {rank}: {statement.Samples:N0} sampled event{(statement.Samples == 1 ? "" : "s")}{(lookback ? lookbackNote : "")}"),
                 Fields = new() { ("Fingerprint", statement.Name) },
             };
             if (!string.IsNullOrEmpty(statement.SampleText))
@@ -751,9 +750,12 @@ public static class AlertContextBuilders
         }
 
         /* 3. Databases and client applications, the top first. The FIRST "Database" and "Client Application" lines are what the
-           mute dialogs pre-fill (AlertMuteContext.PopulateFromDetailText), so those two labels are used for the top entry only. */
-        AddTopList(items, "Top databases (sampled events)", "Database", window.TopDatabases);
-        AddTopList(items, "Top client applications (sampled events)", "Client Application", window.TopApplications);
+           mute dialogs pre-fill (AlertMuteContext.PopulateFromDetailText), so those two labels are used for the top entry only,
+           and only for a list that covers the span: a lookback list wears "Recent ..." labels, which the pre-fill ignores. */
+        AddTopList(items, lookback ? $"Top databases (sampled events{lookbackNote})" : "Top databases (sampled events)",
+            lookback ? "Recent Database" : "Database", window.TopDatabases);
+        AddTopList(items, lookback ? $"Top client applications (sampled events{lookbackNote})" : "Top client applications (sampled events)",
+            lookback ? "Recent Client Application" : "Client Application", window.TopApplications);
         return items;
     }
 
@@ -777,6 +779,16 @@ public static class AlertContextBuilders
         items.Add(item);
     }
 
+    /// <summary>
+    /// The Runnable Queue card's top-request items (#5641): the heaviest requests in the newest query snapshot,
+    /// ranked by CPU time (then elapsed time) because the alert is about CPU queueing. Takes the rows an
+    /// unfiltered, threshold-zero <c>GetLongRunningQueriesAsync</c> read returned, which is exactly the surface the
+    /// High CPU card's maintenance probe reads; shows at most <see cref="RunnableQueueRequestDisplayCap"/> and
+    /// states the omission as a final item rather than cutting silently. Fields are the Long-Running Query
+    /// card's session fields, so a reader sees the same facts under both alerts. Returns an empty list when the
+    /// snapshot holds no request. <paramref name="readHitCap"/> says the read returned a full page, so the count of
+    /// omitted requests is a floor and the trailer reads "at least N more request(s)".
+    /// </summary>
     public static IReadOnlyList<AlertDetailItem> BuildRunnableQueueRequestItems(IReadOnlyList<LongRunningQueryInfo> sessions, bool readHitCap = false)
     {
         if (sessions.Count == 0) return Array.Empty<AlertDetailItem>();
