@@ -31,6 +31,12 @@ namespace Lite.Tests;
 /// <c>live-postgres</c> collection, reads a <c>DARLING_TEST_</c> variable, or refers to a helper that does,
 /// because the guard job has no PostgreSQL and every tagged class runs there. The exemption list is the one place
 /// a class that is guard-style and cannot be tagged is named; its size is pinned and may only shrink.</para>
+///
+/// <para><b>Rule R4 (#5776).</b> A class that reaches a whole catalog (the MCP tool catalog, every type of a product
+/// assembly, or every collector definition) names no symbol a change touches, so a lane's selection by changed
+/// symbol cannot find it, and a new tool or collector is exactly what turns it red. It carries
+/// <c>[Trait("Stage", "Census")]</c>, which the guard job runs beside Stage=Guard, or is exempt with its R3
+/// reason. R3 holds over Census as it does over Guard.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class GuardStageCensusTests
@@ -106,6 +112,100 @@ public sealed class GuardStageCensusTests
         Assert.Contains(problems, p => p.StartsWith("STALE", StringComparison.Ordinal) && p.Contains("NoSuchPinTests", StringComparison.Ordinal));
         Assert.Contains(problems, p => p.StartsWith("REASON", StringComparison.Ordinal) && p.Contains("PlainTests", StringComparison.Ordinal));
         Assert.Equal(5, problems.Count);
+    }
+
+    [Fact]
+    public void TheCatalogDetector_SeesTheToolCatalogAProductAssemblyAndTheCollectorSet()
+    {
+        /* Rule R4 (#5776): each planted reach is flagged. */
+        Assert.True(GuardStageScanner.ReachesACatalogInText(
+            "var types = typeof(DarlingMcpTools).Assembly.GetTypes().Where(t => t.GetCustomAttribute<McpServerToolTypeAttribute>() is not null);"));
+        Assert.True(GuardStageScanner.ReachesACatalogInText(
+            "foreach (var type in assembly.GetTypes()) { }"));
+        Assert.True(GuardStageScanner.ReachesACatalogInText(
+            "var types = typeof(PgIndexBloatCollector).Assembly\n            .GetExportedTypes();"));
+        Assert.True(GuardStageScanner.ReachesACatalogInText(
+            "services.AddMcpServer().WithToolsFromAssembly(typeof(DarlingMcpTools).Assembly);"));
+        Assert.True(GuardStageScanner.ReachesACatalogInText(
+            "var sqlServer = CollectorCatalog.All.Where(c => c.Name.Length > 0).ToList();"));
+        Assert.True(GuardStageScanner.ReachesACatalogInText(
+            "Assert.Contains(PerformanceMonitor.Collectors.CollectorCatalog . All, c => c.Name == name);"));
+
+        /* And these are not: the test assembly's own types, one named collector, a near-miss member, prose and literals. */
+        Assert.False(GuardStageScanner.ReachesACatalogInText(
+            "var mine = typeof(SomeCensusTests).Assembly.GetTypes();"));
+        Assert.False(GuardStageScanner.ReachesACatalogInText(
+            "var mine = typeof(Darling.Tests.SomeCensusTests).Assembly.GetExportedTypes();"));
+        Assert.False(GuardStageScanner.ReachesACatalogInText(
+            "var mine = Assembly.GetExecutingAssembly().GetTypes();"));
+        Assert.False(GuardStageScanner.ReachesACatalogInText(
+            "var one = CollectorCatalog.Find(\"wait_stats\"); var ok = CollectorCatalog.AllowsSomething;"));
+        Assert.False(GuardStageScanner.ReachesACatalogInText(
+            "var attr = method.GetCustomAttribute<McpServerToolAttribute>();"));
+        Assert.False(GuardStageScanner.ReachesACatalogInText(
+            "// every [McpServerToolType] class, CollectorCatalog.All and assembly.GetTypes()\nvar a = \"McpServerToolTypeAttribute CollectorCatalog.All\";"));
+    }
+
+    [Fact]
+    public void TheCensus_FlagsAnUntaggedCatalogClassAndACensusTaggedStoreClass()
+    {
+        const string text = "namespace Synthetic;\n\n"
+          + "[Trait(\"Stage\", \"Census\")]\npublic sealed class CatalogSweepTests\n{\n    [Fact]\n    public void A() { var all = CollectorCatalog.All; }\n}\n\n"
+          + "public sealed class ToolListTests\n{\n    [Fact]\n    public void B() { var t = typeof(DarlingMcpTools).Assembly.GetTypes(); }\n}\n\n"
+          + "public sealed class PlainReadTests\n{\n    [Fact]\n    public void C() { var one = CollectorCatalog.Find(\"x\"); }\n}\n";
+
+        var rows = GuardStageScanner.ScanText(text).ToDictionary(r => r.Name);
+
+        Assert.True(rows["CatalogSweepTests"].ReachesACatalog);
+        Assert.True(rows["CatalogSweepTests"].TaggedCensus);
+        Assert.False(rows["CatalogSweepTests"].Tagged);
+        Assert.True(rows["CatalogSweepTests"].Satisfied);
+        Assert.True(rows["ToolListTests"].ReachesACatalog);
+        Assert.False(rows["ToolListTests"].AlwaysRun);
+        Assert.False(rows["PlainReadTests"].Candidate);
+
+        var withStore = rows.Values.Append(new GuardStageScanner.Row(
+            "LiveCatalogTests", "e.cs", true, false, true, false, false, false, ReachesACatalog: true, TaggedCensus: true)).ToList();
+        var problems = GuardStageScanner.Problems(withStore, new Dictionary<string, string>());
+
+        Assert.Contains(problems, p => p.StartsWith("MISSING", StringComparison.Ordinal) && p.Contains("ToolListTests", StringComparison.Ordinal)
+            && p.Contains("Stage=Census", StringComparison.Ordinal));
+        Assert.Contains(problems, p => p.StartsWith("STORE", StringComparison.Ordinal) && p.Contains("LiveCatalogTests", StringComparison.Ordinal)
+            && p.Contains("Stage=Census", StringComparison.Ordinal));
+        Assert.Equal(2, problems.Count);
+    }
+
+    [Fact]
+    public void EveryCatalogWideClass_CarriesAnAlwaysRunTrait_OrIsExempt()
+    {
+        var rows = GuardStageScanner.Scan(TestsRoot(), ProjectFile());
+        var catalog = rows.Where(r => r.ReachesACatalog).ToList();
+
+        /* Rule R4 (#5776): the classes a symbol selection cannot find. Each is tagged or exempt; the full census below
+           holds the same rule, and this case names it alone so a red run says which rule broke. */
+        var untagged = catalog
+            .Where(r => !r.AlwaysRun && !s_exempt.ContainsKey(r.Name))
+            .Select(r => $"{r.File}: {r.Name}")
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+        Assert.True(
+            untagged.Count == 0,
+            $"These Lite.Tests classes reach a whole catalog (the MCP tools, a product assembly's types or every collector) "
+          + $"and carry no always-run trait. Add {GuardStageScanner.CensusTraitText} directly above each (build.yml's guard-tests "
+          + "job runs it beside Stage=Guard), or, when it needs a store, list it in GuardStageCensusTests.s_exempt with the reason:\n  "
+          + string.Join("\n  ", untagged));
+
+        Assert.True(
+            catalog.Count >= 35,
+            $"only {catalog.Count} Lite.Tests classes were found reaching a whole catalog; the R4 scan has stopped seeing them");
+
+        /* No name rule finds these: #5714 turned them red with a new tool or collector. */
+        foreach (var name in new[] { "XeTimeFilterSweepTests" })
+        {
+            var row = catalog.SingleOrDefault(r => r.Name == name);
+            Assert.True(row is not null, $"{name} is no longer read as reaching a whole catalog");
+            Assert.True(row!.AlwaysRun, $"{name} is not tagged to always run");
+        }
     }
 
     [Fact]

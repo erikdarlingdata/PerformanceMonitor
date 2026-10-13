@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// param is optional (a fleet-wide read must work with no arguments), and the advertised tools/list schema is
 /// Gemini-clean.
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class DarlingMcpAgToolsSurfaceTests
 {
     private static readonly string[] AgToolSurface =

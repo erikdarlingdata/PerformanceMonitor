@@ -36,6 +36,7 @@ namespace Darling.Tests;
 /// column list, and the Gemini-clean advertised schema.
 /// </summary>
 [Trait("Reads", "Lite")]
+[Trait("Stage", "Census")]
 public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
 {
     private static readonly string[] ConfigToolSurface =

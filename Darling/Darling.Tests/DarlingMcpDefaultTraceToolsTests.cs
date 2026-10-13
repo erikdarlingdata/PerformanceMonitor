@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// <see cref="DefaultTraceEventSignificance"/>, and the viewer's <see cref="SystemEventSignificance"/>
 /// delegates to that SAME shared gate (asserted equal, so the two can never drift).
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class DarlingMcpDefaultTraceToolsSurfaceAndSqlTests
 {
     private static MethodInfo[] ToolMethods() => typeof(DarlingMcpDefaultTraceTools)

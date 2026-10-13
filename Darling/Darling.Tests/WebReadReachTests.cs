@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// <see cref="McpHelpers.MaxHoursBack"/>, that the validator of each such read takes its ceiling from the table, and
 /// that the <c>ValidateWindow</c> overload refuses (never clamps) beyond the ceiling it is handed.
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class WebReadReachTests
 {
     private static string[] WindowedReads() =>

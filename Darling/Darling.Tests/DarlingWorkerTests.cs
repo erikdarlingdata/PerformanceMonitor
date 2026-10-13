@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// and every scheduled default — a new definition that isn't wired into the worker fails here,
 /// not silently in production.
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class DarlingWorkerTests
 {
     [Fact]

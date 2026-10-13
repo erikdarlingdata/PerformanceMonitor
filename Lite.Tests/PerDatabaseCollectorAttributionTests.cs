@@ -31,6 +31,7 @@ namespace Lite.Tests;
 /// target because a few SQL Server definitions only go per-database on Azure SQL DB, so a single target
 /// would silently skip them. Any target for which the answer is true triggers the requirement.</para>
 /// </summary>
+[Trait("Stage", "Census")]
 public class PerDatabaseCollectorAttributionTests
 {
     private static readonly CollectorTargetInfo[] s_targets =

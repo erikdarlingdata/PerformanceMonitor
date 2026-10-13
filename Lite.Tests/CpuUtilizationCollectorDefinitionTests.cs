@@ -29,6 +29,7 @@ namespace Lite.Tests;
 /// autumn fall-back hour landing under a UTC watermark, the upgrade day neither dropping nor duplicating
 /// under the local one, and the Azure arm unchanged in either frame.
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class CpuUtilizationCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

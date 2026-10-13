@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// tables are deliberately NOT collector tables, the viewer's connect-time gate, the read's wiring, and the
 /// derived note.
 /// </summary>
+[Trait("Stage", "Census")]
 public class StoreLogSelfMonitoringStoreTests
 {
     internal const int RungVersion = 111;

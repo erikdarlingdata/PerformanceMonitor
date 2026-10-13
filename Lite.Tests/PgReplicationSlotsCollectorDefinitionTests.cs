@@ -20,6 +20,7 @@ namespace Lite.Tests;
 /// measure that does not depend on a column which is NULL by default, and the version gating that keeps
 /// the table shape constant across a mixed-version fleet.
 /// </summary>
+[Trait("Stage", "Census")]
 public class PgReplicationSlotsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// <see cref="CheckpointsTimedRungTests"/> (V140) when this rung landed, and hands them on to
 /// <c>IndexObjectStatsServerTimeIndexRungTests</c> (V142, #4196) when that one did.</para>
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class CollectionCaveatsRungTests
 {
     private const int RungVersion = 141;

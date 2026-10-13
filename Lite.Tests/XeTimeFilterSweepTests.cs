@@ -27,6 +27,7 @@ namespace Lite.Tests;
 /// <para>The sweep builds every SQL Server collector's statements for each target shape, with and without
 /// plan capture, so a filter assembled from fragments is caught as well as one written out whole.</para>
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class XeTimeFilterSweepTests
 {
     /* WHERE/AND/OR, then a .value() call on the event's own timestamp attribute, then a comparison. Covers

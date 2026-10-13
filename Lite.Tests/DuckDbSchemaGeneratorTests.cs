@@ -25,6 +25,7 @@ namespace PerformanceMonitorLite.Tests;
 /// flows into Lite and no hand-edit can silently diverge. (Storage-equivalence to the former
 /// hand-written tables is proven separately by <see cref="DuckDbSchemaEquivalenceTests"/>.)
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class DuckDbSchemaGeneratorTests
 {
     [Fact]

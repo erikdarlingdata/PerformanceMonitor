@@ -67,6 +67,7 @@ namespace Darling.Tests;
 /// rollup refreshes over it, as a ledger above the rollup, which fails safe; retention never deletes inside a window the
 /// route takes (its window starts inside raw's retention).</para>
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class QueryStatsWriterCensusPins
 {
     private const string RunnerFile = "PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs";

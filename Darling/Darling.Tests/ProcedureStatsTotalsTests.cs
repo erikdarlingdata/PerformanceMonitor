@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// runner's call site, the retention registration, and the MCP duration trends' tier clock. The live behavior is in
 /// <see cref="ProcedureStatsTotalsWriterLiveTests"/>.
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class ProcedureStatsTotalsTests
 {
     private static string Normalize(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);

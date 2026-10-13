@@ -44,6 +44,13 @@ internal static class GuardStageScanner
     /// <summary>The attribute a guard class carries, as it is written in source.</summary>
     internal const string GuardTraitText = "[Trait(\"Stage\", \"Guard\")]";
 
+    /// <summary>
+    /// The attribute a catalog-wide class carries (rule R4, #5776). The guard job runs it beside Stage=Guard, so it
+    /// is always run too; it is a trait of its own only because the R4 set took well over two minutes in the nightly
+    /// test map (545 s of Darling.Tests), so the set stays separable from the fast source pins.
+    /// </summary>
+    internal const string CensusTraitText = "[Trait(\"Stage\", \"Census\")]";
+
     /// <summary>The attribute a class that reads a Lite file carries, as it is written in source (#5459 cut 3a).</summary>
     internal const string LiteTraitText = "[Trait(\"Reads\", \"Lite\")]";
 
@@ -67,6 +74,22 @@ internal static class GuardStageScanner
     private static readonly Regex s_repoRootExpression = new(
         @"^(?:\w+\.)*\w*(?:RepoRoot|FindRoot|ResolveRoot)\w*\(\s*\)$|^(?:RepoFile\.)?Root$", RegexOptions.CultureInvariant);
 
+    /* R4 (#5776): a reach over a whole catalog. The MCP tool catalog is read by filtering types on the tool-type
+       attribute or by registering every tool in an assembly; the collector set is CollectorCatalog.All. */
+    private static readonly Regex s_catalogReach = new(
+        @"\b(?:McpServerToolTypeAttribute|WithToolsFromAssembly)\b|\bCollectorCatalog\s*\.\s*All\b",
+        RegexOptions.CultureInvariant);
+
+    /* R4: every type of an assembly. The receiver is captured so a test assembly's own type list (typeof(SomeTests)
+       .Assembly, or GetExecutingAssembly()) is not taken for a product assembly. */
+    private static readonly Regex s_assemblyTypes = new(
+        @"(?<receiver>(?:typeof\s*\(\s*[\w.]+\s*\)|GetExecutingAssembly\s*\(\s*\)|[\w.]+)(?:\s*\.\s*Assembly)?)\s*\.\s*(?:GetTypes|GetExportedTypes)\s*\(\s*\)",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex s_testAssemblyReceiver = new(
+        @"^typeof\s*\(\s*(?:[\w.]+\.)?\w+Tests\s*\)\s*\.\s*Assembly$|GetExecutingAssembly",
+        RegexOptions.CultureInvariant);
+
     private static readonly Regex s_testAttribute = new(@"\[(?:Fact|Theory)\b", RegexOptions.CultureInvariant);
 
     private static readonly Regex s_testVariable = new(@"^DARLING_TEST_\w+$", RegexOptions.CultureInvariant);
@@ -82,13 +105,21 @@ internal static class GuardStageScanner
         bool ReadsTestVariable,
         bool UsesStoreHelper,
         bool ReadsLite = false,
-        bool TaggedLite = false)
+        bool TaggedLite = false,
+        bool ReachesACatalog = false,
+        bool TaggedCensus = false)
     {
+        /// <summary>Whether the class carries either always-run trait, Stage=Guard or Stage=Census: the guard job runs both.</summary>
+        internal bool AlwaysRun => Tagged || TaggedCensus;
+
+        /// <summary>Whether the class carries the trait its rules ask for: Stage=Guard for R1 or R2, either for R4 alone.</summary>
+        internal bool Satisfied => GuardStyleByName || EnumeratesRepoRoot ? Tagged : AlwaysRun;
+
         /// <summary>Whether the class is guard-style by name (R1).</summary>
         internal bool GuardStyleByName => GuardStyleName.IsMatch(Name);
 
         /// <summary>Whether the class is a guard candidate by either rule (R1 or R2).</summary>
-        internal bool Candidate => IsTest && (GuardStyleByName || EnumeratesRepoRoot);
+        internal bool Candidate => IsTest && (GuardStyleByName || EnumeratesRepoRoot || ReachesACatalog);
 
         /// <summary>Whether tagging the class would break rule R3: the guard job has no store.</summary>
         internal bool NeedsAStore => LiveCollection || ReadsTestVariable || UsesStoreHelper;
@@ -114,7 +145,9 @@ internal static class GuardStageScanner
         bool ReadsTestVariable,
         string OwnCode,
         bool ReadsLite,
-        bool TaggedLite);
+        bool TaggedLite,
+        bool ReachesACatalog,
+        bool TaggedCensus);
 
     /// <summary>
     /// Every test class under <paramref name="testsRoot"/>, one row per class name. When <paramref name="projectFile"/>
@@ -176,7 +209,9 @@ internal static class GuardStageScanner
                 ReadsTestVariable: group.Any(d => d.ReadsTestVariable),
                 UsesStoreHelper: usesHelper,
                 ReadsLite: group.Any(d => d.ReadsLite),
-                TaggedLite: group.Any(d => d.TaggedLite)));
+                TaggedLite: group.Any(d => d.TaggedLite),
+                ReachesACatalog: group.Any(d => d.ReachesACatalog),
+                TaggedCensus: group.Any(d => d.TaggedCensus)));
         }
 
         return rows;
@@ -184,23 +219,27 @@ internal static class GuardStageScanner
 
     /// <summary>
     /// What is wrong with the suite's tagging, one line per fault; empty when it is right. Rules R1 and R2: a
-    /// guard candidate carries the trait or is exempt. Rule R3: a tagged class needs no store. And an exemption
-    /// must still be one: it names a candidate that is untagged, with a reason.
+    /// guard candidate carries Stage=Guard or is exempt. Rule R4 (#5776): a catalog-wide class carries Stage=Census
+    /// (or Stage=Guard) or is exempt. Rule R3: a class with either trait needs no store. And an exemption must still
+    /// be one: it names a candidate that is untagged, with a reason.
     /// </summary>
     internal static List<string> Problems(IReadOnlyList<Row> rows, IReadOnlyDictionary<string, string> exempt)
     {
         var problems = new List<string>();
         var byName = rows.ToDictionary(r => r.Name, StringComparer.Ordinal);
 
-        foreach (var r in rows.Where(r => r.Candidate && !r.Tagged && !exempt.ContainsKey(r.Name)).OrderBy(r => r.Name, StringComparer.Ordinal))
+        foreach (var r in rows.Where(r => r.Candidate && !r.Satisfied && !exempt.ContainsKey(r.Name)).OrderBy(r => r.Name, StringComparer.Ordinal))
         {
-            var why = r.GuardStyleByName ? "guard-style name" : "enumerates the repo root recursively";
-            problems.Add($"MISSING {r.File}: {r.Name} ({why}; store: {(r.NeedsAStore ? r.StoreReasons : "none")})");
+            var why = r.GuardStyleByName ? "guard-style name"
+                : r.EnumeratesRepoRoot ? "enumerates the repo root recursively"
+                : "reaches a whole catalog: the MCP tools, a product assembly's types or every collector (R4)";
+            var trait = r.GuardStyleByName || r.EnumeratesRepoRoot ? "Stage=Guard" : "Stage=Census";
+            problems.Add($"MISSING {r.File}: {r.Name} ({why}; needs {trait}; store: {(r.NeedsAStore ? r.StoreReasons : "none")})");
         }
 
-        foreach (var r in rows.Where(r => r.Tagged && r.NeedsAStore).OrderBy(r => r.Name, StringComparer.Ordinal))
+        foreach (var r in rows.Where(r => r.AlwaysRun && r.NeedsAStore).OrderBy(r => r.Name, StringComparer.Ordinal))
         {
-            problems.Add($"STORE {r.File}: {r.Name} is tagged Stage=Guard but {r.StoreReasons}; the guard job has no PostgreSQL");
+            problems.Add($"STORE {r.File}: {r.Name} is tagged {(r.Tagged ? "Stage=Guard" : "Stage=Census")} but {r.StoreReasons}; the guard job has no PostgreSQL");
         }
 
         foreach (var (name, reason) in exempt)
@@ -213,7 +252,7 @@ internal static class GuardStageScanner
             {
                 problems.Add($"STALE {name}: is exempt but is not a guard candidate (renamed, deleted or no longer matches); drop the entry");
             }
-            else if (row.Tagged)
+            else if (row.Satisfied)
             {
                 problems.Add($"STALE {name}: is exempt but now carries the trait; drop the entry");
             }
@@ -281,9 +320,41 @@ internal static class GuardStageScanner
                 readsVariable,
                 ownCode,
                 fileReadsLite,
-                attributes.Any(a => Squash(a).Contains(Squash(LiteTraitText), StringComparison.Ordinal)));
+                attributes.Any(a => Squash(a).Contains(Squash(LiteTraitText), StringComparison.Ordinal)),
+                ReachesACatalog(ownCode),
+                attributes.Any(a => Squash(a).Contains(Squash(CensusTraitText), StringComparison.Ordinal)));
         }
     }
+
+    /// <summary>
+    /// Rule R4 (#5776): whether a class's code (comments and strings already blanked) reaches a whole catalog: the
+    /// MCP tool catalog (types filtered on <c>McpServerToolTypeAttribute</c>, or <c>WithToolsFromAssembly</c>), every
+    /// type of a product assembly (<c>GetTypes()</c> or <c>GetExportedTypes()</c>, unless the receiver is a test
+    /// class's own assembly), or every collector definition (<c>CollectorCatalog.All</c>). Such a class names no
+    /// symbol a change touches, so a lane's symbol selection cannot find it; a new tool or collector is what breaks
+    /// it. It therefore runs in the always-run stage.
+    /// </summary>
+    internal static bool ReachesACatalog(string code)
+    {
+        if (s_catalogReach.IsMatch(code))
+        {
+            return true;
+        }
+
+        foreach (Match m in s_assemblyTypes.Matches(code))
+        {
+            if (!s_testAssemblyReceiver.IsMatch(m.Groups["receiver"].Value.Trim()))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The R4 question over one source text, comments and strings blanked first, for the detector tests.</summary>
+    internal static bool ReachesACatalogInText(string text) =>
+        ReachesACatalog(CSharpSourceWalker.StripCommentsAndStrings(text));
 
     /// <summary>
     /// Whether a source file reads a file under <c>Lite/</c> or <c>Lite.Tests/</c>: a string literal (not a comment)
@@ -410,7 +481,7 @@ internal static class GuardStageScanner
         return decls
             .Select(d => new Row(
                 d.Name, d.File, true, d.Tagged, d.LiveCollection, d.EnumeratesRepoRoot, d.ReadsTestVariable, false,
-                d.ReadsLite, d.TaggedLite))
+                d.ReadsLite, d.TaggedLite, d.ReachesACatalog, d.TaggedCensus))
             .ToList();
     }
 
@@ -498,10 +569,12 @@ internal static class GuardStageScanner
         return result;
     }
 
+    /* Stage=Census too (#5776): the guard job runs both traits, so rule R3 holds over both. */
     private static bool HasGuardTrait(IEnumerable<Attribute> attributes) =>
         attributes.OfType<ITraitAttribute>().Any(a => a.GetTraits().Any(
             t => string.Equals(t.Key, "Stage", StringComparison.OrdinalIgnoreCase)
-              && string.Equals(t.Value, "Guard", StringComparison.OrdinalIgnoreCase)));
+              && (string.Equals(t.Value, "Guard", StringComparison.OrdinalIgnoreCase)
+                  || string.Equals(t.Value, "Census", StringComparison.OrdinalIgnoreCase))));
 
     /// <summary>
     /// Where the source scan and xunit disagree, and rule R3 over the reflected set (M1 of #5471's review). Both
@@ -523,22 +596,22 @@ internal static class GuardStageScanner
                 problems.Add($"UNSCANNED {r.Name}: xunit runs it in the guard job but the source scan found no test class of that name "
                   + "(a linked file the csproj does not list, or tests inherited from a base class)");
             }
-            else if (!row.Tagged)
+            else if (!row.AlwaysRun)
             {
-                problems.Add($"UNTAGGED {row.File}: {r.Name} is selected by -trait Stage=Guard through a trait the source scan does not read "
+                problems.Add($"UNTAGGED {row.File}: {r.Name} is selected by -trait Stage=Guard or Stage=Census through a trait the source scan does not read "
                   + "(a method-level trait, a combined attribute list, a constant, a base class); write it as the one attribute line above the class");
             }
 
-            if (r.LiveCollection || (row is not null && row.NeedsAStore && !row.Tagged))
+            if (r.LiveCollection || (row is not null && row.NeedsAStore && !row.AlwaysRun))
             {
-                problems.Add($"STORE {r.Name} is selected by -trait Stage=Guard but needs a store ("
+                problems.Add($"STORE {r.Name} is selected by -trait Stage=Guard or Stage=Census but needs a store ("
                   + (r.LiveCollection ? "live-postgres collection" : row!.StoreReasons) + "); the guard job has no PostgreSQL");
             }
         }
 
-        foreach (var row in rows.Where(r => r.Tagged && !reflectedNames.Contains(r.Name)).OrderBy(r => r.Name, StringComparer.Ordinal))
+        foreach (var row in rows.Where(r => r.AlwaysRun && !reflectedNames.Contains(r.Name)).OrderBy(r => r.Name, StringComparer.Ordinal))
         {
-            problems.Add($"PHANTOM {row.File}: {row.Name} reads as tagged in source but xunit does not select it for -trait Stage=Guard "
+            problems.Add($"PHANTOM {row.File}: {row.Name} reads as tagged in source but xunit does not select it for -trait Stage=Guard or Stage=Census "
               + "(not public, abstract, or no test method)");
         }
 

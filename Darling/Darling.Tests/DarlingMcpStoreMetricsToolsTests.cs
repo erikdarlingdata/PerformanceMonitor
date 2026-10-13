@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// null (never zero or infinity) when the denominator is missing, and negative deltas preserved because
 /// retention drops and compression passes genuinely shrink the store.
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class DarlingMcpStoreMetricsToolsTests
 {
     private static MethodInfo[] ToolMethods() => typeof(DarlingMcpStoreMetricsTools)

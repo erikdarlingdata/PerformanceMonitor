@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /* The banner's time text reads the process-wide display mode, which these tests set (restored in Dispose); one shared
    collection serializes it with every other class that flips the viewer's time statics. */
 [Collection("viewer-time-statics")]
+[Trait("Stage", "Census")]
 public sealed class ViewerPlanCorrectionsDataStartTests : IDisposable
 {
     private readonly TimeDisplayMode _savedMode = ViewerTimeHelper.CurrentDisplayMode;

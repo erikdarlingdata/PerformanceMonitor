@@ -23,6 +23,7 @@ namespace Lite.Tests;
 /// SESSION_MISSING, never zero rows and SUCCESS; the counter read and the execution_count gate come before the cast), the
 /// counter-delta and restart arithmetic, the count row (only for a delta above zero) and the samples, the shared statement fingerprint and truncation, and the state it stages.
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class AttentionCollectorDefinitionTests
 {
     private static readonly DateTime Now = new(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);

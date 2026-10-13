@@ -469,18 +469,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path TestResults | Out-Null
 
           foreach ($suite in $suites) {
-              $lines = @(dotnet run --project $suite.Project -c Release --no-build -- -list classes/json -trait Stage=Guard)
+              # #5776: Stage=Census rides along. Those classes reach a whole catalog (every MCP tool, a product assembly's
+              # types, every collector), so no changed symbol names them; xunit ORs the two -trait filters.
+              $lines = @(dotnet run --project $suite.Project -c Release --no-build -- -list classes/json -trait Stage=Guard -trait Stage=Census)
               if ($LASTEXITCODE -ne 0) { throw "$($suite.Name): the class listing failed with exit code $LASTEXITCODE" }
               # Only the runner's one-line JSON array is parsed; a CLI notice can share stdout.
               $json = @($lines | Where-Object { $_ -match '^\s*\[' })
               if ($json.Count -ne 1) { throw "$($suite.Name): expected one JSON array line from the class listing, got $($json.Count): $($lines -join ' | ')" }
               $classes = @($json[0] | ConvertFrom-Json)
               if ($classes.Count -eq 0) { throw "$($suite.Name): no class carries Stage=Guard, so this job would run nothing" }
-              Write-Host "$($suite.Name): $($classes.Count) Stage=Guard classes"
+              Write-Host "$($suite.Name): $($classes.Count) Stage=Guard and Stage=Census classes"
 
               # -failSkips: this job has no PostgreSQL, so a tagged test that needs a store would SKIP, and a skip
               # exits 0. Failing skips turns that into a red job (#5471 review M1). Both suites skip none today.
-              dotnet run --project $suite.Project -c Release --no-build -- -trait Stage=Guard -failSkips -xml "TestResults/guard-$($suite.Key)-a${{ github.run_attempt }}.xml"
+              dotnet run --project $suite.Project -c Release --no-build -- -trait Stage=Guard -trait Stage=Census -failSkips -xml "TestResults/guard-$($suite.Key)-a${{ github.run_attempt }}.xml"
               if ($LASTEXITCODE -ne 0) {
                   Write-Host "::error title=Guard tests failed::$($suite.Name) failed its Stage=Guard classes (exit $LASTEXITCODE). The shards were skipped on this pull request."
                   $failed += $suite.Name

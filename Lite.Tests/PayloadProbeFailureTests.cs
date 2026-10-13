@@ -41,6 +41,7 @@ namespace PerformanceMonitorLite.Tests;
 /// identical shared methods, so editing one app's copy alone fails a build.
 /// </para>
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class PayloadProbeFailureTests
 {
     /* ── the back-compat guarantee: a payload-only reader behaves exactly as before ── */

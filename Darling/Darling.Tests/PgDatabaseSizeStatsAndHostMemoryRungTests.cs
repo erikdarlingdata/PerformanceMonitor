@@ -45,6 +45,7 @@ namespace Darling.Tests;
 /// the probe, the catalog/dispatch/schedule wiring, the "nothing reads them yet" exit criterion, and the live
 /// round trip.</para>
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
 {
     private const int RungVersion = 136;

@@ -21,6 +21,7 @@ namespace Lite.Tests;
 /// call, so an edit that widens where it is evaluated turns the monitor into the contention it reports.
 /// That regression would not fail any other test — it would collect perfectly correct data and hurt.
 /// </summary>
+[Trait("Stage", "Census")]
 public class PgBlockingCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

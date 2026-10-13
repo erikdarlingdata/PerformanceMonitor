@@ -39,6 +39,7 @@ namespace Lite.Tests;
 /// collector already exists to prevent.
 /// </para>
 /// </summary>
+[Trait("Stage", "Census")]
 public class PgStatementStatsFlavorTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

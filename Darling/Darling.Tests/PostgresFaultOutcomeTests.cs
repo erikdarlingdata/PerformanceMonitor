@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// PERSISTENT, operator-actionable condition must not log ERROR every cycle forever — and that the ones
 /// which genuinely are errors still do.
 /// </summary>
+[Trait("Stage", "Census")]
 public class PostgresFaultOutcomeTests
 {
     /// <summary>

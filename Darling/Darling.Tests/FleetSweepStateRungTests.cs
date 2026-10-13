@@ -40,6 +40,7 @@ namespace Darling.Tests;
 /// <c>FleetSweepStoreLivePostgresTests</c>, split out per the LivePostgresCollectionHygieneTests
 /// shape so these pure pins never pay for a store connection.</para>
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class FleetSweepStateRungTests
 {
     private const int RungVersion = 123;

@@ -50,6 +50,7 @@ namespace Darling.Tests;
 /// feature, and executes with their own hands. Rendering advice and executing it are different acts,
 /// and only the second one is what "cannot write" is about.</para>
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class PlanForceNoWritePathTests
 {
     /// <summary>The statements that change a monitored server's behaviour. Nothing else in the

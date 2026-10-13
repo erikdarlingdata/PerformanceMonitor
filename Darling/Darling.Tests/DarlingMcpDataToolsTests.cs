@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// assert each read round-trips its data-bearing envelope and an empty store returns the #1224 miss.
 /// </summary>
 [Trait("Reads", "Lite")]
+[Trait("Stage", "Census")]
 public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
 {
     /* ---------------- ungated: tool-surface pin ---------------- */

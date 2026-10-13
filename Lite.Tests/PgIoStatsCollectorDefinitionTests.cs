@@ -20,6 +20,7 @@ namespace Lite.Tests;
 /// one that matters most — that NULL is preserved rather than coalesced, because on Aurora the entire write
 /// side is NULL and a zero there would be a measurement nobody took.
 /// </summary>
+[Trait("Stage", "Census")]
 public class PgIoStatsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

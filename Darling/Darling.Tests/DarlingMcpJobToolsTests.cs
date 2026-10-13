@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// the single server_name param, the latest-snapshot read SQL pin (v_running_jobs), the duration formatting,
 /// and the Gemini-clean advertised schema.
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class DarlingMcpJobToolsSurfaceAndSqlTests
 {
     private static MethodInfo[] ToolMethods() => typeof(DarlingMcpJobTools)

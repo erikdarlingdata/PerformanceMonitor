@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// Configuration, Trace Flags, the two config-change grids, Memory Pressure Events and the database-state editor showed an
 /// empty grid, chart or "0 databases" with no message.</para>
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class ViewerAzureSqlDatabaseGapCoverageTests
 {
     private const string ServerName = "EngineGapServer";

@@ -64,6 +64,10 @@ public sealed class GuardStageWorkflowTests
         Assert.Contains("-c Release --no-build -- -list classes/json -trait Stage=Guard", job, StringComparison.Ordinal);
         Assert.Contains("-c Release --no-build -- -trait Stage=Guard", job, StringComparison.Ordinal);
         Assert.Contains("no class carries Stage=Guard", job, StringComparison.Ordinal);
+        /* #5776: the catalog-wide classes (rule R4 of GuardStageScanner) carry Stage=Census, and both the listing and the
+           run take them beside Stage=Guard, or they would run on the shards alone. */
+        Assert.Contains("-c Release --no-build -- -list classes/json -trait Stage=Guard -trait Stage=Census)", job, StringComparison.Ordinal);
+        Assert.Contains("-c Release --no-build -- -trait Stage=Guard -trait Stage=Census -failSkips", job, StringComparison.Ordinal);
         Assert.Contains("if ($failed.Count -gt 0) { throw", job, StringComparison.Ordinal);
 
         /* Release builds of both projects, once, after a locked-mode restore of both, in bash with errexit. */

@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// server_name param each, the latest-snapshot read SQL pins (v_index_object_stats / v_database_size_stats),
 /// and the Gemini-clean advertised schema.
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
 {
     private static readonly string[] ObjectStatsToolSurface =

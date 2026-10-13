@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// service writes for an MCP client (<c>hints.captures</c>, <c>hours_back</c>, <c>denied_since_last_success</c>, collector
 /// measurement counts, the engine-gate sentence) into words for the web page. Node is skipped when it is not installed.
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class WebPlainTextTests
 {
     private static string[] Run(string[] inputs, out string notCollectedLine) => RunDoc(inputs, out notCollectedLine).Out;

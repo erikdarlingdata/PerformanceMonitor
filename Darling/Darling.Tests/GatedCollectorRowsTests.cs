@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// write no log row and so used to be missing from the web PG Overview. The pure helper, its wiring through the real
 /// tool, the roll-up identity (the new rows feed nothing) and the page.
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class GatedCollectorRowsTests
 {
     private sealed class FakeCollector : ICollectorSchemaInfo

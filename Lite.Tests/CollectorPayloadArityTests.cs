@@ -29,6 +29,7 @@ namespace Lite.Tests;
 /// <para>A build-time check turns that into a compile-cycle failure. The columns and the writes are two
 /// halves of one statement about the table; nothing but a test holds them together.</para>
 /// </summary>
+[Trait("Stage", "Census")]
 public class CollectorPayloadArityTests
 {
     /// <summary>Counts writes and accepts anything, so a collector's own value types never matter here.</summary>

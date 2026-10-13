@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// loopback-comment scrub. The live compile-and-run round-trip is exercised against a real store elsewhere; this
 /// pins the pure, no-DB contract.
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class DarlingComposeTests
 {
     /* ─────────────────────────── catalog pins (drift-proofing) ─────────────────────────── */

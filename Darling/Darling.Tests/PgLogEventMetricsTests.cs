@@ -458,6 +458,7 @@ public sealed class PgLogEventMetricsParserTests
 /// one-rung-behind half: a store carrying this and not V131 maps to 130, which is the honest answer for it
 /// and what makes the upgrade banner correct in both directions.
 /// </summary>
+[Trait("Stage", "Census")]
 public sealed class PgLogEventMetricsRungTests
 {
     private const int RungVersion = 130;
