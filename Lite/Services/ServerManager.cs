@@ -105,6 +105,18 @@ public class ServerManager
     public CredentialResolver CredentialResolver => new(_credentialService, ProfileLookup);
 
     /// <summary>
+    /// The hash ids (the ids the alert path and server_tag_map use) of every configured server, enabled or not. What the
+    /// notification-route store treats as "this server exists" when it expands a route's scope (#5750).
+    /// </summary>
+    public IReadOnlyCollection<int> GetKnownServerIds()
+    {
+        lock (_serversLock)
+        {
+            return _servers.Select(s => RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s))).ToHashSet();
+        }
+    }
+
+    /// <summary>
     /// Gets all servers sorted by favorite status and last connected time.
     /// </summary>
     public List<ServerConnection> GetAllServers()
@@ -296,6 +308,7 @@ public class ServerManager
 
             _servers.Add(server);
             SaveServers();
+            NotificationRouteCache.Invalidate();
         }
 
         // Save credentials based on authentication type
@@ -357,6 +370,7 @@ public class ServerManager
             var index = _servers.IndexOf(existing);
             _servers[index] = server;
             SaveServers();
+            NotificationRouteCache.Invalidate();
         }
 
         // Update credentials based on authentication type
@@ -426,6 +440,7 @@ public class ServerManager
             var index = _servers.IndexOf(existing);
             _servers[index] = server;
             SaveServers();
+            NotificationRouteCache.Invalidate();
         }
     }
 
@@ -442,6 +457,7 @@ public class ServerManager
             {
                 _servers.Remove(server);
                 SaveServers();
+                NotificationRouteCache.Invalidate();
             }
         }
 
@@ -911,7 +927,10 @@ public class ServerManager
             }
 
             if (imported > 0)
+            {
                 SaveServers();
+                NotificationRouteCache.Invalidate();
+            }
         }
 
         _logger?.LogInformation("Imported {Imported} servers, skipped {Skipped} duplicates, {Collided} collided", imported, skipped, collided);

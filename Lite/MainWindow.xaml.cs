@@ -114,6 +114,8 @@ public partial class MainWindow : Window
     private readonly AlertStateService _alertStateService = new();
     private readonly IAlertSettings _alertSettings = new AppAlertSettings();
     private readonly MuteRuleService _muteRuleService;
+    /// <summary>#5750: the scoped notification-route store, for the Settings window (its writes invalidate the route cache).</summary>
+    internal DuckDbNotificationRouteStore NotificationRouteStore { get; private set; } = null!;
     private EmailAlertService _emailAlertService;
 
     /// <summary>The webhook service the email service fans out to, held so the status timer can read each
@@ -149,6 +151,11 @@ public partial class MainWindow : Window
             new DuckDbMuteRuleStore(_databaseInitializer),
             new AppLoggerAdapter<MuteRuleService>());
         _serverManager = new ServerManager(App.SharedConfigDirectory, logger: new AppLoggerAdapter<ServerManager>());
+        /* #5750: the scoped notification routes. The cache reloads lazily after any route, tag or server edit invalidates it
+           (see NotificationRouteCache); Task.Run keeps the reload off the UI thread's synchronization context. */
+        NotificationRouteStore = new DuckDbNotificationRouteStore(_databaseInitializer, _serverManager.GetKnownServerIds);
+        var routeStore = NotificationRouteStore;
+        NotificationRouteCache.Configure(() => Task.Run(() => routeStore.ListAsync()).GetAwaiter().GetResult());
         /* The edition comes from _engineEditions, the same as the alert sweep's: the live status when it has read
            one, else the edition seeded from the store in MainWindow_Loaded. */
         PerformanceMonitorLite.Analysis.AnalysisService.SeparatelyMonitoredDatabasesProvider = serverId =>

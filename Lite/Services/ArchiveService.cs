@@ -186,6 +186,8 @@ public class ArchiveService
                                           max+1 in C#, safe because every row is restored.
          server_tags / server_tag_map   : user choice (#4887), PK id / (server_id, tag_id), one row per tag and
                                           per tagging; bounded by what the user created.
+         notification_routes            : user choice (#5750), PK route_id; the destinations are in Credential Manager,
+                                          keyed by route id, so restoring the rows verbatim keeps them wired.
        The restore is BY NAME: ALTER-added columns (watermark_time, v31) sit last on old stores while the fresh
        schema may order them differently, and a positional restore would swap values or fail. */
     internal static readonly string[] PreservedConfigTables =
@@ -199,7 +201,8 @@ public class ArchiveService
         "collector_state",
         "analysis_muted",
         "server_tags",
-        "server_tag_map"
+        "server_tag_map",
+        "notification_routes"
     ];
 
     /* Tables eligible for archival with their time column. Catalog-driven: every collector table
