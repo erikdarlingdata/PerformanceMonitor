@@ -31,7 +31,7 @@ public sealed class DarlingTlsKeyFileScriptTests
 {
     private static readonly string[] s_sharedFunctions =
     {
-        "Get-DarlingConfiguredPathsUnder", "Invoke-DarlingTlsKeyFileHardening",
+        "Get-DarlingConfiguredPathsUnder", "Get-DarlingTlsKeyFileVerbCommand", "Invoke-DarlingTlsKeyFileHardening",
     };
 
     private static string Script(string scriptName) =>
@@ -65,7 +65,7 @@ public sealed class DarlingTlsKeyFileScriptTests
             Assert.DoesNotContain(gone, script, StringComparison.Ordinal);
         }
 
-        Assert.Contains("--harden-files --tls-key-files-only", ExtractFunction(script, "Invoke-DarlingTlsKeyFileHardening", scriptName), StringComparison.Ordinal);
+        Assert.Contains("--harden-files --tls-key-files-only --config $configPath", ExtractFunction(script, "Invoke-DarlingTlsKeyFileHardening", scriptName), StringComparison.Ordinal);
     }
 
     /// <summary>The verb runs after the last tree lock (the lock resets any extra write grant on a file it walks) and before
@@ -77,16 +77,16 @@ public sealed class DarlingTlsKeyFileScriptTests
         var upgrade = Script("upgrade-darling.ps1");
 
         var installLock = install.LastIndexOf("\nInvoke-InstallTreeLock $serviceAccount\n", StringComparison.Ordinal);
-        var installCall = install.IndexOf("\n$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening $serviceExe\n", StringComparison.Ordinal);
+        var installCall = install.IndexOf("\n$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening $serviceExe $configPath\n", StringComparison.Ordinal);
         var installStart = install.IndexOf("\nStart-Service -Name $serviceName\n", StringComparison.Ordinal);
         Assert.True(installLock > 0 && installCall > installLock && installCall < installStart, $"install order: lock {installLock}, call {installCall}, start {installStart}");
-        Assert.Matches(@"\$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening \$serviceExe\nif \(\$tlsKeyWarning\) \{ Write-Host ""WARNING: \$tlsKeyWarning"" -ForegroundColor Yellow \}\n", install);
+        Assert.Matches(@"\$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening \$serviceExe \$configPath\nif \(\$tlsKeyWarning\) \{ Write-Host ""WARNING: \$tlsKeyWarning"" -ForegroundColor Yellow \}\n", install);
 
         var upgradeLock = upgrade.LastIndexOf("\nInvoke-UpgradeTreeLock 'after the copy'\n", StringComparison.Ordinal);
-        var upgradeCall = upgrade.IndexOf("\n$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening (Join-Path $InstallRoot $serviceExeName)\n", StringComparison.Ordinal);
+        var upgradeCall = upgrade.IndexOf("\n$tlsKeyWarning = Get-UpgradeTlsKeyFileWarning (Join-Path $InstallRoot $serviceExeName) $configPath\n", StringComparison.Ordinal);
         var upgradeStart = upgrade.IndexOf("\nStart-Service -Name $serviceName\n", StringComparison.Ordinal);
         Assert.True(upgradeLock > 0 && upgradeCall > upgradeLock && upgradeCall < upgradeStart, $"upgrade order: lock {upgradeLock}, call {upgradeCall}, start {upgradeStart}");
-        Assert.Matches(@"Invoke-DarlingTlsKeyFileHardening \(Join-Path \$InstallRoot \$serviceExeName\)\nif \(\$tlsKeyWarning\) \{ Warn \$tlsKeyWarning \}\n", upgrade);
+        Assert.Matches(@"Get-UpgradeTlsKeyFileWarning \(Join-Path \$InstallRoot \$serviceExeName\) \$configPath\nif \(\$tlsKeyWarning\) \{ Warn \$tlsKeyWarning \}\n", upgrade);
 
         var body = ExtractFunction(install, "Invoke-DarlingTlsKeyFileHardening", "install-darling.ps1");
         Assert.DoesNotContain("Fail ", body, StringComparison.Ordinal);
@@ -114,12 +114,31 @@ public sealed class DarlingTlsKeyFileScriptTests
         Assert.DoesNotContain("$tlsKeyNames", upgrade, StringComparison.Ordinal);
     }
 
-    /// <summary>The call, with a stub in place of the exe: the arguments reach it, its lines are echoed, a nonzero exit and an
-    /// exe that is not there each give a warning that names the verb, and a zero exit gives none. Nothing throws.</summary>
+    /// <summary>The config path the scripts pass is the darling.json of the install folder, the file the service itself reads.</summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "$configPath = Join-Path $root 'darling.json'\n")]
+    [InlineData("upgrade-darling.ps1", "$configName = 'darling.json'\n")]
+    public void TheScripts_PassTheInstallFoldersDarlingJson_ToTheVerb(string scriptName, string definition)
+    {
+        var script = Script(scriptName);
+
+        Assert.Contains(definition, script, StringComparison.Ordinal);
+        if (scriptName == "upgrade-darling.ps1")
+        {
+            Assert.Contains("\n$configPath = Join-Path $InstallRoot $configName\n", script, StringComparison.Ordinal);
+        }
+
+        Assert.Matches(@"Get-DarlingTlsKeyFileVerbCommand \$exe \$configPath", script);
+    }
+
+    /// <summary>The call, with a stub in place of the exe: the arguments reach it with the config path the caller names, the
+    /// stub's lines are echoed, a nonzero exit and an exe that is not there each give a warning that names the verb and the same
+    /// path, and a zero exit gives none. A DARLING_CONFIG in the calling process changes nothing about the path the stub gets.
+    /// Nothing throws.</summary>
     [Theory]
     [InlineData("install-darling.ps1")]
     [InlineData("upgrade-darling.ps1")]
-    public void TheVerbCall_WarnsWithTheCommandOnANonzeroExit_AndNeverThrows(string scriptName)
+    public void TheVerbCall_PassesTheConfigPath_WarnsWithTheCommandOnANonzeroExit_AndNeverThrows(string scriptName)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -128,32 +147,181 @@ public sealed class DarlingTlsKeyFileScriptTests
         }
 
         var probe = new StringBuilder();
-        probe.AppendLine(ExtractFunction(Script(scriptName), "Invoke-DarlingTlsKeyFileHardening", scriptName));
+        AppendVerbFunctions(probe, scriptName);
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
             $dir = Join-Path $env:TEMP ('pm5700-stub-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $env:DARLING_CONFIG = Join-Path $dir 'exported-viewer-config.json'
             try {
+                $cfg = Join-Path $dir 'install root\darling.json'
                 $bad = Join-Path $dir 'bad.cmd'
                 Set-Content -LiteralPath $bad -Value @('@echo off', 'echo stub-line args=%*', 'exit /b 3') -Encoding ASCII
                 $good = Join-Path $dir 'good.cmd'
                 Set-Content -LiteralPath $good -Value @('@echo off', 'echo stub-line args=%*', 'exit /b 0') -Encoding ASCII
-                $w = Invoke-DarlingTlsKeyFileHardening $bad
+                'cfg=' + $cfg
+                'env=' + $env:DARLING_CONFIG
+                $w = Invoke-DarlingTlsKeyFileHardening $bad $cfg
                 'nonzero=' + $w
-                $w = Invoke-DarlingTlsKeyFileHardening $good
+                $w = Invoke-DarlingTlsKeyFileHardening $good $cfg
                 'zero=' + $(if ($null -eq $w) { 'null' } else { $w })
-                $w = Invoke-DarlingTlsKeyFileHardening (Join-Path $dir 'missing.exe')
+                $w = Invoke-DarlingTlsKeyFileHardening (Join-Path $dir 'missing.exe') $cfg
                 'missing=' + $(if ($null -eq $w) { 'null' } else { $w })
             }
             finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
             """);
 
-        var all = string.Join("\n", RunWindowsPowerShell(probe.ToString()));
+        var lines = RunWindowsPowerShell(probe.ToString());
+        var all = string.Join("\n", lines);
+        var cfg = lines.Single(l => l.StartsWith("cfg=", StringComparison.Ordinal))["cfg=".Length..];
+        var envConfig = lines.Single(l => l.StartsWith("env=", StringComparison.Ordinal))["env=".Length..];
+        Assert.NotEqual(cfg, envConfig);
 
-        Assert.Equal(2, Regex.Matches(all, "stub-line args=--harden-files --tls-key-files-only").Count);
-        Assert.Matches(@"nonzero=The service could not check the TLS key files darling\.json names \(exit code 3\).*--harden-files --tls-key-files-only", all);
+        var stubLines = lines.Where(l => l.StartsWith("stub-line args=", StringComparison.Ordinal)).ToList();
+        Assert.Equal(2, stubLines.Count);
+        foreach (var stub in stubLines)
+        {
+            Assert.Equal($"stub-line args=--harden-files --tls-key-files-only --config \"{cfg}\"", stub);
+            Assert.DoesNotContain(envConfig, stub, StringComparison.Ordinal);
+        }
+
+        Assert.Matches(@"nonzero=The service could not check the TLS key files darling\.json names \(exit code 3\).*--harden-files --tls-key-files-only --config ""[^""]*install root\\darling\.json""", all);
         Assert.Contains("zero=null", all, StringComparison.Ordinal);
-        Assert.Matches(@"missing=The service could not check the TLS key files darling\.json names \(.+\).*--harden-files --tls-key-files-only", all);
+        Assert.Matches(@"missing=The service could not check the TLS key files darling\.json names \(.+\).*--harden-files --tls-key-files-only --config ""[^""]*install root\\darling\.json""", all);
+    }
+
+    /// <summary>A line of the verb's output that reports a key file it refused, left unchanged, left readable or found open to
+    /// other accounts is written as a warning even when the exit code is 0; the other lines are plain output and no warning.</summary>
+    [Theory]
+    [InlineData("install-darling.ps1")]
+    [InlineData("upgrade-darling.ps1")]
+    public void TheVerbCall_WritesProblemLinesAsWarnings_EvenOnExitCodeZero(string scriptName)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Windows PowerShell and .cmd stubs are Windows'.");
+            return;
+        }
+
+        var probe = new StringBuilder();
+        AppendVerbFunctions(probe, scriptName);
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $dir = Join-Path $env:TEMP ('pm5700-lines-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            try {
+                $stub = Join-Path $dir 'lines.cmd'
+                Set-Content -LiteralPath $stub -Encoding ASCII -Value @(
+                    '@echo off',
+                    'echo.  SECURED  C:\root\web.pfx (web)',
+                    'echo.  REFUSED  C:\root\a.pfx (web): it has more than one name',
+                    'echo.  NOT CHANGED (outside the install folder)  D:\k\b.key (mcp): note',
+                    'echo.  STILL READABLE  C:\root\c.pfx (web)',
+                    'echo.  OTHER ACCESS  C:\root\d.pfx (web): others',
+                    'echo.  UNTRUSTED OWNER  C:\root\e.pfx (web): owner',
+                    'echo.  MISSING  C:\root\f.pfx (web): not found',
+                    'echo.No TLS key files are named in darling.json.',
+                    'exit /b 0')
+                & { Invoke-DarlingTlsKeyFileHardening $stub (Join-Path $dir 'darling.json') } 3>&1 6>&1 | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.WarningRecord]) { 'W|' + $_.Message }
+                    elseif ($_ -is [System.Management.Automation.InformationRecord]) { 'H|' + $_.MessageData }
+                    elseif ($null -ne $_) { 'R|' + $_ }
+                }
+            }
+            finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+            """);
+
+        var lines = RunWindowsPowerShell(probe.ToString());
+        var all = string.Join("\n", lines);
+
+        foreach (var problem in new[] { "REFUSED  C:\\root\\a.pfx", "NOT CHANGED (outside the install folder)  D:\\k\\b.key", "STILL READABLE  C:\\root\\c.pfx", "OTHER ACCESS  C:\\root\\d.pfx", "UNTRUSTED OWNER  C:\\root\\e.pfx" })
+        {
+            Assert.True(lines.Contains("W|  " + problem, StringComparer.Ordinal) || lines.Any(l => l.StartsWith("W|  " + problem, StringComparison.Ordinal)), $"no warning for '{problem}':\n{all}");
+        }
+
+        Assert.Equal(5, lines.Count(l => l.StartsWith("W|", StringComparison.Ordinal)));
+        Assert.Contains("H|  SECURED  C:\\root\\web.pfx (web)", lines);
+        Assert.Contains("H|  MISSING  C:\\root\\f.pfx (web): not found", lines);
+        Assert.Contains("H|No TLS key files are named in darling.json.", lines);
+        Assert.DoesNotContain(lines, l => l.StartsWith("R|", StringComparison.Ordinal));
+    }
+
+    /// <summary>The upgrade runs the verb only over a tree it has locked. When a lock reported open paths, when the lock was skipped
+    /// because the service's account could not be read, and under -AcceptWritableExtraction, the stub is not called and the result is
+    /// a warning that names the verb and the command to run once the tree is locked; after a clean lock the stub is called. The
+    /// real Invoke-UpgradeTreeLock runs with its own helpers replaced by stand-ins, so the state the step reads is the one the lock
+    /// sets.</summary>
+    [Fact]
+    public void TheUpgrade_DoesNotRunTheVerb_OverATreeThatIsOpenOrNotLocked_OrUnderAcceptWritableExtraction()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Windows PowerShell and .cmd stubs are Windows'.");
+            return;
+        }
+
+        var script = Script("upgrade-darling.ps1");
+        var probe = new StringBuilder();
+        AppendVerbFunctions(probe, "upgrade-darling.ps1");
+        probe.AppendLine(ExtractFunction(script, "Get-UpgradeTlsKeyFileWarning", "upgrade-darling.ps1"));
+        probe.AppendLine(ExtractFunction(script, "Invoke-UpgradeTreeLock", "upgrade-darling.ps1"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            function Warn([string]$m) { }
+            function Good([string]$m) { }
+            function Get-DarlingExtraServiceWriteDirectories($r, $c) { @() }
+            $script:lockOpen = @()
+            function Lock-DarlingInstallTree($r, $a, $e) { return $script:lockOpen }
+            $serviceName = 'PerformanceMonitor Darling'
+            $InstallRoot = 'C:\pm5700-no-such-root'
+            $configPath = Join-Path $InstallRoot 'darling.json'
+            $dir = Join-Path $env:TEMP ('pm5700-gate-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            try {
+                $calls = Join-Path $dir 'calls.txt'
+                $stub = Join-Path $dir 'stub.cmd'
+                Set-Content -LiteralPath $stub -Encoding ASCII -Value @('@echo off', 'echo called>>"%~dp0calls.txt"', 'exit /b 0')
+                function Run-Case([string]$label, [string]$account, [string[]]$open, [bool]$accept, [int]$locks = 1) {
+                    if (Test-Path -LiteralPath $calls) { Remove-Item -LiteralPath $calls }
+                    $script:installTreeLockProblem = $null
+                    $script:logonAccount = $account
+                    $script:lockOpen = $open
+                    $script:AcceptWritableExtraction = [System.Management.Automation.SwitchParameter]$accept
+                    for ($i = 0; $i -lt $locks; $i++) {
+                        Invoke-UpgradeTreeLock 'after the copy'
+                        if ($i -eq 0 -and $locks -gt 1) { $script:lockOpen = @() }
+                    }
+                    $w = Get-UpgradeTlsKeyFileWarning $stub $configPath
+                    $label + '.called=' + (Test-Path -LiteralPath $calls)
+                    $label + '.warning=' + $(if ($null -eq $w) { 'null' } else { $w })
+                }
+                Run-Case 'clean' 'NT AUTHORITY\SYSTEM' @() $false
+                Run-Case 'open' 'NT AUTHORITY\SYSTEM' @('C:\x\a.dll') $false
+                Run-Case 'skipped' '' @() $false
+                Run-Case 'accept' 'NT AUTHORITY\SYSTEM' @() $true
+                Run-Case 'openThenClean' 'NT AUTHORITY\SYSTEM' @('C:\x\a.dll') $false 2
+            }
+            finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+            """);
+
+        var lines = RunWindowsPowerShell(probe.ToString());
+        var all = string.Join("\n", lines);
+
+        Assert.Contains("clean.called=True", lines);
+        Assert.Contains("clean.warning=null", lines);
+        foreach (var blocked in new[] { "open", "skipped", "accept", "openThenClean" })
+        {
+            Assert.Contains($"{blocked}.called=False", lines);
+            Assert.Matches($@"{blocked}\.warning=The TLS key files darling\.json names were not checked.*--harden-files --tls-key-files-only --config ""C:\\pm5700-no-such-root\\darling\.json""", all);
+        }
+    }
+
+    private static void AppendVerbFunctions(StringBuilder probe, string scriptName)
+    {
+        foreach (var name in new[] { "Get-DarlingTlsKeyFileVerbCommand", "Invoke-DarlingTlsKeyFileHardening" })
+        {
+            probe.AppendLine(ExtractFunction(Script(scriptName), name, scriptName));
+        }
     }
 
     // A scratch folder whose DACL grants Users read, inherited by everything made under it (the install root's shape),

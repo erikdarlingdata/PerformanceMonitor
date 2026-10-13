@@ -898,24 +898,51 @@ function Get-DarlingConfiguredPathsUnder([string]$folder) {
     return [pscustomobject]@{ Lines = $found; Incomplete = $incomplete }
 }
 
-# Runs the service exe's own TLS key file verb (#5700): `<exe> --harden-files --tls-key-files-only`. The exe is the one place that
-# reads darling.json for the key files it names (a pfxPath or keyPath under the web and mcp tls blocks) and sets their permissions;
-# this script reads no key path and sets no key permission itself. The verb prints one line per file, which this echoes. It exits 0
-# when it ran, whatever it reported per file, and nonzero only when it could not run. Returns $null when it ran, otherwise the
-# sentence to warn with, which carries the verb to run by hand. It never throws, so an install or upgrade is never failed over it.
-# Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
-function Invoke-DarlingTlsKeyFileHardening([string]$exe) {
+# The command that runs the service exe's own TLS key file verb by hand (#5700), with the darling.json it is to check. Kept
+# byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingTlsKeyFileVerbCommand([string]$exe, [string]$configPath) {
+    return "& `"$exe`" --harden-files --tls-key-files-only --config `"$configPath`""
+}
+
+# Runs the service exe's own TLS key file verb (#5700): `<exe> --harden-files --tls-key-files-only --config <configPath>`. The exe is
+# the one place that reads darling.json for the key files it names (a pfxPath or keyPath under the web and mcp tls blocks) and sets
+# their permissions; this script reads no key path and sets no key permission itself. $configPath is the darling.json in the
+# install folder, the one the service itself reads, so a DARLING_CONFIG in this session cannot point the verb at another file. The
+# verb prints one line per file, which this echoes; a line that reports a key file it refused, left unchanged, left readable or
+# found open to other accounts (REFUSED, NOT CHANGED, STILL READABLE, OTHER ACCESS, UNTRUSTED OWNER) is written as a warning even
+# when the exit code is 0. The exit code is 0 when it ran, whatever it reported per file, and nonzero only when it could not run.
+# Returns $null when it ran, otherwise the sentence to warn with, which carries the verb to run by hand. It never throws, so an
+# install or upgrade is never failed over it. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Invoke-DarlingTlsKeyFileHardening([string]$exe, [string]$configPath) {
     $priorErrorAction = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $reason = $null
     try {
-        & $exe --harden-files --tls-key-files-only 2>&1 | ForEach-Object { Write-Host "$_" }
+        & $exe --harden-files --tls-key-files-only --config $configPath 2>&1 | ForEach-Object {
+            $line = "$_"
+            if ($line -match '^  (REFUSED|NOT CHANGED|STILL READABLE|OTHER ACCESS|UNTRUSTED OWNER)') { Write-Warning $line }
+            else { Write-Host $line }
+        }
         if ($LASTEXITCODE -ne 0) { $reason = "exit code $LASTEXITCODE" }
     }
     catch { $reason = $_.Exception.Message }
     finally { $ErrorActionPreference = $priorErrorAction }
     if ($null -eq $reason) { return $null }
-    return "The service could not check the TLS key files darling.json names ($reason), so their permissions were not changed. Run from an elevated prompt: & `"$exe`" --harden-files --tls-key-files-only"
+    return "The service could not check the TLS key files darling.json names ($reason), so their permissions were not changed. Run from an elevated prompt: $(Get-DarlingTlsKeyFileVerbCommand $exe $configPath)"
+}
+
+# The upgrade's TLS key file step (#5700). The verb runs the installed exe elevated, so it runs only over a tree the upgrade has
+# locked: not when a lock reported paths ordinary users can still change, not when the lock was skipped, and not under
+# -AcceptWritableExtraction (the tree may already hold a swapped binary). Otherwise it returns the warning, which names the verb and
+# the command to run once the tree is locked. Returns $null when the verb ran, like Invoke-DarlingTlsKeyFileHardening.
+function Get-UpgradeTlsKeyFileWarning([string]$exe, [string]$configPath) {
+    $why = $null
+    if ($AcceptWritableExtraction) { $why = 'this upgrade was started with -AcceptWritableExtraction, so the install folder may already hold a changed binary' }
+    elseif ($installTreeLockProblem) { $why = $installTreeLockProblem }
+    if ($why) {
+        return "The TLS key files darling.json names were not checked and their permissions were not changed, because the verb runs the installed exe elevated and $why. Once the install folder is locked, run from an elevated prompt: $(Get-DarlingTlsKeyFileVerbCommand $exe $configPath)"
+    }
+    return Invoke-DarlingTlsKeyFileHardening $exe $configPath
 }
 
 # Gives a rollback backup folder a DACL of its own (#5700): inheritance off, SYSTEM and Administrators with full control that the
@@ -3385,8 +3412,12 @@ $logonAccount = Get-DarlingServiceLogonName $serviceName
 if ($logonAccount -eq 'LocalSystem') { $logonAccount = 'NT AUTHORITY\SYSTEM' }
 elseif ($logonAccount) { $logonAccount = $logonAccount -replace '^\.\\', "$env:COMPUTERNAME\" }
 
+# Set by Invoke-UpgradeTreeLock the first time a lock is skipped or leaves paths open; the TLS key file step reads it.
+$installTreeLockProblem = $null
+
 function Invoke-UpgradeTreeLock([string]$when) {
     if (-not $logonAccount) {
+        if (-not $script:installTreeLockProblem) { $script:installTreeLockProblem = "the install folder was not locked (the account '$serviceName' logs on as could not be read)" }
         Warn "Could not read which account '$serviceName' logs on as (sc.exe qc `"$serviceName`"), so the install folder was NOT locked $when rather than locked around a guess that could strip that account's access. Fix the lookup and re-run, or run install-darling.ps1."
         return
     }
@@ -3401,6 +3432,7 @@ function Invoke-UpgradeTreeLock([string]$when) {
         Good "Install folder locked ${when}: only SYSTEM and Administrators can change what runs from $InstallRoot; $logonAccount can write only its runtime folders."
         return
     }
+    if (-not $script:installTreeLockProblem) { $script:installTreeLockProblem = "ordinary users can still change $($open.Count) path(s) in the install folder" }
     Warn ("Ordinary users can still change {0} path(s) in the install folder, and the service runs from there as {1}, so anyone who can replace a binary can run code as that account. First: {2}. Fix from an elevated prompt with: icacls `"{3}`" /inheritance:d, then icacls `"{3}`" /remove:g *S-1-5-11 *S-1-5-32-545 *S-1-1-0 *S-1-5-4, then icacls `"{3}`" /grant `"*S-1-5-32-545:(OI)(CI)RX`" /grant:r `"{1}:(OI)(CI)RX`", then run this script again (it makes Administrators the owner of each path itself, and lists a file with more than one name). A path marked as a hard link (a file with more than one name): delete this name if it is not part of the install, or extract the file again if it is, and do not run icacls on it. Any other path listed as owned by an account, or below the folder, needs its own fix; these two commands are only for paths not marked as a hard link: icacls `"<path>`" /setowner *S-1-5-32-544 /L, then icacls `"<path>`" /reset /C. Remove any junction or link it names." -f $open.Count, $logonAccount, (($open | Select-Object -First 5) -join ', '), $InstallRoot)
 }
 
@@ -3723,7 +3755,7 @@ else {
 # the last tree lock above so the lock cannot undo it and before the service starts. A key file in the install folder is limited
 # to SYSTEM and Administrators with Read for the service account; a key file outside the install folder is reported and left as
 # it is. A verb that could not run is a warning with the command to run by hand, and the service still starts.
-$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening (Join-Path $InstallRoot $serviceExeName)
+$tlsKeyWarning = Get-UpgradeTlsKeyFileWarning (Join-Path $InstallRoot $serviceExeName) $configPath
 if ($tlsKeyWarning) { Warn $tlsKeyWarning }
 
 # ============================ the store folder ============================

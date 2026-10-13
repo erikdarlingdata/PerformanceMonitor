@@ -2133,6 +2133,78 @@ function Get-CimInstance {
         }
     }
 
+    /// <summary>
+    /// #5700: a TLS key file the exe's verb has already secured (a protected DACL of SYSTEM and Administrators in full plus Read for
+    /// the service account, owned by Administrators) is left exactly as it is by the tree lock that runs on its folder afterwards.
+    /// The key is made with icacls to the same shape, in a folder that inherits Users read the way an install folder does, and the
+    /// real lock function runs over the folder with that service account. The key's access descriptor is the same text before and
+    /// after, it is still protected from inheritance, no Users entry has appeared on it, and (with an elevated token, which sets the owner) the lock does not list it as open.
+    /// Both scripts' copies of the lock.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1")]
+    [InlineData("upgrade-darling.ps1")]
+    public void TheInstallTreeLock_LeavesAKeyFileTheVerbAlreadySecured_AsItWas(string scriptName)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        AppendServiceWrittenList(probe, script);
+        probe.AppendLine(ExtractFunction(script, "Lock-DarlingInstallTree"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path $env:TEMP ('pm5700-lock-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $sidType = [System.Security.Principal.SecurityIdentifier]
+            function Get-KeyDescriptor([string]$p) {
+                $acl = Get-Acl -LiteralPath $p
+                return $acl.GetSecurityDescriptorSddlForm('Access') + ' protected=' + $acl.AreAccessRulesProtected
+            }
+            try {
+                New-Item -ItemType Directory -Path $root -Force | Out-Null
+                $root = Get-DarlingCanonicalPath $root
+                $users = '*S-1-5-32-545'
+                & icacls.exe $root /grant "${users}:(OI)(CI)RX" /Q | Out-Null
+                $key = Join-Path $root 'web.pfx'
+                Set-Content -LiteralPath $key -Value 'not a real key'
+                & icacls.exe $key /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' '*S-1-5-19:(R)' /Q | Out-Null
+                # The owner change needs an elevated token (CI's runner is one); a filtered token leaves the owner as it was.
+                $ErrorActionPreference = 'Continue'
+                & icacls.exe $key /setowner '*S-1-5-32-544' /Q 2>&1 | Out-Null
+                $ErrorActionPreference = 'Stop'
+                $before = Get-KeyDescriptor $key
+                'setup.keyIsProtected=' + ($before -match 'protected=True')
+                'setup.keyHasNoUsersEntry=' + (-not ($before -match 'BU'))
+                'elevated=' + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+                $open = @(Lock-DarlingInstallTree $root 'NT AUTHORITY\LOCAL SERVICE')
+                $after = Get-KeyDescriptor $key
+                'keyDescriptorSame=' + ($before -eq $after)
+                'keyStillProtected=' + ($after -match 'protected=True')
+                'keyHasNoUsersEntry=' + (-not ($after -match 'BU'))
+                'keyListedOpen=' + @($open | Where-Object { $_ -like '*web.pfx*' }).Count
+                'before=' + $before
+                'after=' + $after
+            }
+            finally {
+                if (Test-Path -LiteralPath $root) {
+                    & icacls.exe $root /reset /T /C /Q 2>&1 | Out-Null
+                    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        AssertProbeSetupTook(answers);
+        AssertAnswer(answers, "keyDescriptorSame=True");
+        AssertAnswer(answers, "keyStillProtected=True");
+        AssertAnswer(answers, "keyHasNoUsersEntry=True");
+        if (answers.Contains("elevated=True"))
+        {
+            // With an Administrators owner (set only by an elevated token) the key matches no write or owner check of the lock.
+            AssertAnswer(answers, "keyListedOpen=0");
+        }
+    }
+
     /// <summary>Runs a probe in the shell a theory case names, skipping the case when PowerShell 7 is not installed.</summary>
     private static List<string> RunProbeInShell(string shell, string probe)
     {
