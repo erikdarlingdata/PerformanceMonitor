@@ -527,7 +527,7 @@ public sealed class AlertEngineTests
         Source = source
     };
 
-    private static DeadlockAlertRow DeadlockRow(string database = "StackOverflow") => new()
+    internal static DeadlockAlertRow DeadlockRow(string database = "StackOverflow") => new()
     {
         VictimProcessId = "process1",
         VictimSqlText = "UPDATE Users SET Reputation = 1",

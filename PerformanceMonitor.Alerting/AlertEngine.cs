@@ -135,8 +135,16 @@ public sealed class AlertEngine
        with no evaluation for RunnableQueueEvaluator.StaleIncidentMinutes is resolved, with the reason stated. */
     private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueEvaluation = new();
     /* #5641: the highest tier delivered for the open Runnable Queue incident, so a Warning that worsens to Critical
-       is delivered at once instead of waiting out the cooldown. Runnable Queue and Client Timeouts (#5640) opt in. */
+       is delivered at once instead of waiting out the cooldown. Runnable Queue, Client Timeouts (#5640) and the four
+       older two-tier alerts (#5715, below) opt in. */
     private readonly TierEscalation _runnableQueueEscalation = new();
+
+    /* #5715: the same Warning-to-Critical escalation for the four older two-tier alerts, one instance each, keyed like the
+       alert's own cooldown dictionary (per server; per volume for Volume Free Space). */
+    private readonly TierEscalation _cpuEscalation = new();
+    private readonly TierEscalation _deadlockEscalation = new();
+    private readonly TierEscalation _poisonWaitEscalation = new();
+    private readonly TierEscalation _lowDiskEscalation = new();
 
     /* #5640: the Client Timeouts alert's per-server state, shaped like Runnable Queue's (cooldown stamp, newest run fired on,
        active flag, last evaluation for the stale resolve, and the escalation tier). */
@@ -845,8 +853,15 @@ public sealed class AlertEngine
             {
                 await FireCpuAsync(key, serverName, serverId, now, alertCooldown, suppressed, eventValue, cpuMetricLabel, readingUtc, ct);
             }
-            else if (!suppressed)
+            else
             {
+                /* #5715: the incident is over whether or not anyone is told, so the next one starts from nothing delivered. */
+                _cpuEscalation.Close(key);
+                if (suppressed)
+                {
+                    continue;
+                }
+
                 /* The FALLING EDGE comes from the gate rather than from a single sample dropping under the
                    bar, which is the other half of #3282: the pre-gate code resolved on the first clear sample,
                    so a 93%-for-two-minutes excursion produced a fire and a resolve 147 seconds apart and an
@@ -977,11 +992,20 @@ public sealed class AlertEngine
         string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed,
         double alertCpuValue, string cpuMetricLabel, DateTime? readingUtc, CancellationToken ct)
     {
-        if (!suppressed && CooldownElapsed(_lastCpuAlert, key, now, alertCooldown)) /* :72 */
+        /* #5715: the tier is graded BEFORE the gate (GradeCpuFire is pure) and that one value is the fire's tier, so the
+           escalation test and the card cannot disagree. A Warning incident now graded Critical is delivered past the
+           cooldown; the stamp below restarts it, and the context's flag lets the email and webhook cooldowns through. */
+        var cpuGrade = GradeCpuFire(alertCpuValue);
+        var escalation = _cpuEscalation.IsEscalation(key, cpuGrade);
+
+        if (!suppressed && (escalation || CooldownElapsed(_lastCpuAlert, key, now, alertCooldown))) /* :72 */
         {
             var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "High CPU" }; /* :74 */
             bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
             _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
+            /* Recorded before the send (a muted fire's history row must not be late), put back below when every channel failed. */
+            var priorTier = _cpuEscalation.Highest(key);
+            _cpuEscalation.Record(key, cpuGrade);
 
             /* #3495: name the active backup on the card. Everything the annotation needs was knowable
                at fire time from the same active-session surface the operator ended up reading by hand
@@ -1055,8 +1079,8 @@ public sealed class AlertEngine
                byte-identical, so every channel renders what it rendered before plus the tier. Set on
                BOTH the context and the outcome for the reason the deadlock and Poison Wait sites give:
                Lite's deliverer persists only the context, Darling's folds the outcome in. */
-            var cpuGrade = GradeCpuFire(alertCpuValue);
-            var cpuContext = AlertSampleAge.Stamp(new AlertContext { SeverityOverride = cpuGrade }, CpuReadingSource, readingUtc, now);
+            var cpuContext = AlertSampleAge.Stamp(
+                new AlertContext { SeverityOverride = cpuGrade, EscalationBypassesCooldown = escalation }, CpuReadingSource, readingUtc, now);
             /* #5642: the context holds no Details, so the typed field alone would not reach a text channel; the
                hand-built text carries the age line (AlertDetailText.SampleAgeLine, appended once), and the
                channel renderers print the typed field only when the prose does not already carry it. */
@@ -1070,6 +1094,12 @@ public sealed class AlertEngine
                 Muted: isMuted, Severity: cpuGrade,
                 ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {_settings.CpuThresholdPercent}%)"), ct);
             AfterFire("High CPU", _lastCpuAlert, key, now, alertCooldown, delivery);
+
+            /* A fire nobody received has not delivered this tier: the retry is still the escalation (#5709 round 2). */
+            if (EveryChannelFailed(delivery))
+            {
+                _cpuEscalation.Restore(key, priorTier);
+            }
         }
     }
 
@@ -1729,7 +1759,13 @@ public sealed class AlertEngine
 
         /* Edge-trigger the rolling 1-hour count (#1091) — :213-227. */
         int deadlockWatermark = _lastAlertedDeadlockCount.TryGetValue(key, out var ladc) ? ladc : 0; /* :216 */
-        bool deadlockCooldownElapsed = CooldownElapsed(_lastDeadlockAlert, key, now, alertCooldown); /* :217 */
+        /* #5715: graded BEFORE the gate (GradeDeadlockFire is pure) and that one value is the fire's tier, so the
+           escalation test and the card cannot disagree. A Warning incident now graded Critical is a fire past the
+           cooldown. The gate's own new-event test stays: a Critical rate is a higher count than the Warning's, so
+           the watermark the Warning fire left is below it. */
+        var deadlockTier = GradeDeadlockFire(effectiveDeadlockCount, _settings.DeadlockRateThresholds);
+        var deadlockEscalation = _settings.DeadlockEnabled && _deadlockEscalation.IsEscalation(key, deadlockTier);
+        bool deadlockCooldownElapsed = deadlockEscalation || CooldownElapsed(_lastDeadlockAlert, key, now, alertCooldown); /* :217 */
         var deadlockDecision = _settings.DeadlockEnabled
             ? RollingCountAlertGate.Evaluate(effectiveDeadlockCount, _settings.DeadlockCountThreshold, deadlockWatermark, deadlockCooldownElapsed, suppressed)
             : new RollingCountAlertGate.Decision(false, false, 0);                  /* :218-220 */
@@ -1741,6 +1777,11 @@ public sealed class AlertEngine
 
         bool wasDeadlockActive = _activeDeadlockAlert.TryGetValue(key, out var wasDeadlock) && wasDeadlock; /* :229 */
         _activeDeadlockAlert[key] = deadlockDecision.Active;                        /* :230 */
+        if (!deadlockDecision.Active)
+        {
+            /* #5715: the window emptied (or the alert was switched off): the incident is over, announced or not. */
+            _deadlockEscalation.Close(key);
+        }
 
         /* #2216: observe every sweep — see the blocking twin above for why this cannot sit inside Fire. */
         var deadlockOccurrences = default(OccurrenceTotals);
@@ -1757,6 +1798,8 @@ public sealed class AlertEngine
             var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Deadlocks Detected" }; /* :234 */
             bool isMuted = _isAlertMuted(muteCtx);                                  /* :235 */
             _lastDeadlockAlert[key] = now;                                          /* :236 */
+            var priorDeadlockTier = _deadlockEscalation.Highest(key);
+            _deadlockEscalation.Record(key, deadlockTier);
 
             /* :249-250 — context from this sweep's fetch. */
             var deadlockContext = AlertContextBuilders.BuildDeadlockContext(
@@ -1778,7 +1821,8 @@ public sealed class AlertEngine
                outcome's severity into the context; Darling's does — setting both makes the two SKUs agree
                by construction, the Poison Wait precedent). */
             deadlockContext ??= new AlertContext();
-            deadlockContext.SeverityOverride = GradeDeadlockFire(effectiveDeadlockCount, _settings.DeadlockRateThresholds);
+            deadlockContext.SeverityOverride = deadlockTier;
+            deadlockContext.EscalationBypassesCooldown = deadlockEscalation;
             AlertSampleAge.Stamp(deadlockContext, "deadlock", AlertSampleAge.Newest(deadlockRows!.Select(r => r.NewestSampleUtc)), now);
             var detailText = AlertContextBuilders.ContextToDetailText(deadlockContext);
 
@@ -1799,6 +1843,8 @@ public sealed class AlertEngine
                and the retry sweep fires again at the same count. */
             if (EveryChannelFailed(delivery))
             {
+                /* #5715: the tier goes back with the watermark, so the retry is still the escalation. */
+                _deadlockEscalation.Restore(key, priorDeadlockTier);
                 var unannouncedWatermark = Math.Min(deadlockWatermark, effectiveDeadlockCount);
                 _lastAlertedDeadlockCount[key] = unannouncedWatermark;
                 await _stateStore.SaveEdgeTriggerWatermarkAsync(key, DeadlockWatermarkMetric, unannouncedWatermark);
@@ -1880,9 +1926,14 @@ public sealed class AlertEngine
                 bool hasFreshCollection = !_lastPoisonWaitCollectionTime.TryGetValue(key, out var lastCollectionTime)
                     || newestCollectionTime > lastCollectionTime;
 
-                if (!suppressed && hasFreshCollection && CooldownElapsed(_lastPoisonWaitAlert, key, now, alertCooldown)) /* :283 */
+                /* #5715: the worst finding's tier (findings[0], worst-first from the evaluator) is read before the gate and is
+                   the fire's tier. A Warning incident now graded Critical is delivered past the cooldown; the fresh-collection
+                   guard still applies, so the escalation rests on a reading newer than the one the Warning went out on. */
+                var worst = findings[0];                                            /* :285 — worst-first from the evaluator */
+                var escalation = _poisonWaitEscalation.IsEscalation(key, worst.Severity);
+
+                if (!suppressed && hasFreshCollection && (escalation || CooldownElapsed(_lastPoisonWaitAlert, key, now, alertCooldown))) /* :283 */
                 {
-                    var worst = findings[0];                                        /* :285 — worst-first from the evaluator */
                     var allWaitNames = string.Join(", ", findings.ConvertAll(f => f.CurrentValueClause)); /* :286 */
 
                     /* :288-293 — mute keys on the worst (highest severity, then most accumulated wait)
@@ -1891,6 +1942,8 @@ public sealed class AlertEngine
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastPoisonWaitAlert[key] = now;                                /* :294 */
                     _lastPoisonWaitCollectionTime[key] = newestCollectionTime;
+                    var priorTier = _poisonWaitEscalation.Highest(key);
+                    _poisonWaitEscalation.Record(key, worst.Severity);
 
                     /* One detail item per firing type, no incidents — the shape IncidentDeliveryFilter
                        documents for this metric (metric-level cooldown fallback). The severity rides on the
@@ -1901,7 +1954,7 @@ public sealed class AlertEngine
                     /* #4223: the worst-graded wait type as structured data, the same value the mute
                        context above already keys on — an alert-notebook reader can branch on it without
                        parsing the detail heading or the prose. */
-                    var poisonContext = new AlertContext { SeverityOverride = worst.Severity, WaitType = worst.WaitType };
+                    var poisonContext = new AlertContext { SeverityOverride = worst.Severity, WaitType = worst.WaitType, EscalationBypassesCooldown = escalation };
                     AlertSampleAge.Stamp(poisonContext, "wait stats", newestCollectionTime, now);
                     foreach (var finding in findings)
                     {
@@ -1942,6 +1995,7 @@ public sealed class AlertEngine
                     if (EveryChannelFailed(delivery))
                     {
                         _lastPoisonWaitCollectionTime.TryRemove(key, out _);
+                        _poisonWaitEscalation.Restore(key, priorTier);
                     }
                     readClock.Restart();
                 }
@@ -1950,6 +2004,7 @@ public sealed class AlertEngine
                 && _activePoisonWaitAlert.TryGetValue(key, out var wasPoisonWait) && wasPoisonWait) /* :323 */
             {
                 _activePoisonWaitAlert[key] = false;                                /* :325 */
+                _poisonWaitEscalation.Close(key);                                   /* #5715 */
                 if (!suppressed)                                                    /* :326 */
                 {
                     await NotifyResolutionAsync(new AlertResolution(
@@ -2731,21 +2786,39 @@ public sealed class AlertEngine
                 double? lastLowDiskPercent =
                     _lastAlertedLowDiskPercent.TryGetValue(key, out var lowDiskPct) ? lowDiskPct : (double?)null; /* :491-492 */
                 /* :493-497 — #754 follow-up: notify only on a fresh or worsening breach. */
+                /* #5715: the tier is decided BEFORE the gate (the worst volume's, the same call that grades the fire below)
+                   and is the fire's tier. A Warning incident now critically low is an escalation, and reaching Critical is
+                   new information even when the free space did not drop by the worsening step, so an escalation passes the
+                   worsening check and the cooldown. The alert is one per server (its cooldown and last-alerted level are
+                   keyed by server and its tier comes from the worst volume), so the escalation is keyed the same way. */
+                var lowDiskTier = LowDiskAlertGate.IsCriticallyLow(
+                    worst.FreePercent, worst.FreeGb, _settings.DiskCriticalFreePercent, _settings.DiskCriticalFreeGb)
+                    ? AlertSeverityLevel.Critical
+                    : AlertSeverityLevel.Warning;
+                var escalation = _lowDiskEscalation.IsEscalation(key, lowDiskTier);
+
                 if (!suppressed
-                    && LowDiskAlertGate.ShouldAlert(worst.FreePercent, lastLowDiskPercent)
-                    && CooldownElapsed(_lastLowDiskAlert, key, now, alertCooldown))
+                    && (escalation
+                        || (LowDiskAlertGate.ShouldAlert(worst.FreePercent, lastLowDiskPercent)
+                            && CooldownElapsed(_lastLowDiskAlert, key, now, alertCooldown))))
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Volume Free Space" }; /* :499 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :500 */
                     _lastLowDiskAlert[key] = now;                                   /* :501 */
                     _lastAlertedLowDiskPercent[key] = worst.FreePercent;            /* :502 */
+                    var priorTier = _lowDiskEscalation.Highest(key);
+                    _lowDiskEscalation.Record(key, lowDiskTier);
 
                     var lowDiskContext = AlertContextBuilders.BuildVolumeFreeSpaceContext(fingerprintServer, breached, lowDiskOccurrences.Decorate); /* :515 */
                     /* :516-522 — #1136: grade WARNING normally, CRITICAL when critically low. */
-                    if (lowDiskContext is not null && LowDiskAlertGate.IsCriticallyLow(
-                        worst.FreePercent, worst.FreeGb, _settings.DiskCriticalFreePercent, _settings.DiskCriticalFreeGb))
+                    if (lowDiskContext is not null)
                     {
-                        lowDiskContext.SeverityOverride = AlertSeverityLevel.Critical;
+                        if (lowDiskTier == AlertSeverityLevel.Critical)
+                        {
+                            lowDiskContext.SeverityOverride = AlertSeverityLevel.Critical;
+                        }
+
+                        lowDiskContext.EscalationBypassesCooldown = escalation;
                     }
                     lowDiskContext = AlertSampleAge.Stamp(lowDiskContext, "volume", AlertSampleAge.Newest(breached.Select(v => v.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(lowDiskContext); /* :523 */
@@ -2768,6 +2841,7 @@ public sealed class AlertEngine
                     if (EveryChannelFailed(delivery))
                     {
                         RestoreAlertedLevel(_lastAlertedLowDiskPercent, key, lastLowDiskPercent);
+                        _lowDiskEscalation.Restore(key, priorTier);
                     }
                     readClock.Restart();
                 }
@@ -2775,6 +2849,7 @@ public sealed class AlertEngine
             else if (_activeLowDiskAlert.TryGetValue(key, out var wasLowDisk) && wasLowDisk) /* :538 */
             {
                 _activeLowDiskAlert[key] = false;
+                _lowDiskEscalation.Close(key);                                      /* #5715 */
                 await ClearOccurrencesAsync(key, VolumeFreeSpaceWatermarkMetric);                                   /* :540 */
                 readClock.Restart();
                 _lastAlertedLowDiskPercent.TryRemove(key, out _);                   /* :541 */
