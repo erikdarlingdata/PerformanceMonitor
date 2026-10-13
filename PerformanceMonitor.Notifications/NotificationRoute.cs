@@ -42,6 +42,13 @@ namespace PerformanceMonitor.Notifications;
 /// Only a redirect: a recipient list is not an SMTP configuration, so email is delivered only where the
 /// parent's host/from/credentials are set.</param>
 /// <param name="Enabled">A disabled route is skipped at resolution exactly as if it did not exist.</param>
+/// <remarks>
+/// <para><b>Scope (#5750).</b> A route may be limited to one server (<see cref="ScopeServerId"/>) or to a tag and
+/// its whole subtree (<see cref="ScopeTagId"/>); never both. The scope is two init members rather than
+/// positional parameters so every existing construction keeps compiling. The product's loader expands the scope to
+/// <see cref="ExpandedServerIds"/> (with <see cref="NotificationRouteScopeExpander"/>) and the router only reads
+/// that set.</para>
+/// </remarks>
 public sealed record NotificationRoute(
     int RouteId,
     string MetricMatch,
@@ -62,6 +69,73 @@ public sealed record NotificationRoute(
     /// <summary>Whether <paramref name="channel"/> is off on this route (see <see cref="OffChannels"/>).</summary>
     public bool IsOffFor(string channel) =>
         OffChannels is not null && OffChannels.Contains(channel, StringComparer.Ordinal);
+
+    /// <summary>The metric match that means "every metric" (#5750). Legal only on a scoped route: a fleet-wide
+    /// route with this match never matches anything (storage refuses to save one, and
+    /// <see cref="NotificationRouter"/> ignores one that slipped through).</summary>
+    public const string WildcardMatch = "*";
+
+    /// <summary>The stored server scope (#5750): the product's server id this route is limited to, or null.
+    /// At most one of <see cref="ScopeServerId"/> and <see cref="ScopeTagId"/> is set; both null is a fleet-wide
+    /// route, which is what every route was before scopes existed. Lite's id is the hash its alert path and
+    /// <c>server_tag_map</c> use; Darling's is the registry <c>server_id</c>.</summary>
+    public int? ScopeServerId { get; init; }
+
+    /// <summary>The stored tag scope (#5750): a tag id, covering the servers mapped to that tag or to ANY
+    /// descendant tag, or null. See <see cref="ScopeServerId"/>.</summary>
+    public int? ScopeTagId { get; init; }
+
+    /// <summary>Loader-set, not stored (#5750): the server ids this route applies to, produced by
+    /// <see cref="NotificationRouteScopeExpander"/> from <see cref="ScopeServerId"/> / <see cref="ScopeTagId"/>.
+    /// Null means "no scope applied": right for a fleet-wide route, and — fail closed — a route that has a
+    /// scope but was never expanded matches nothing (see <see cref="CanMatch"/>).</summary>
+    public IReadOnlySet<int>? ExpandedServerIds { get; init; }
+
+    /// <summary>Loader-set, not stored (#5750): how many ancestors the scope tag has. The tag tier's tie rule
+    /// prefers the deeper tag. Zero for every route that is not tag-scoped.</summary>
+    public int ScopeTagDepth { get; init; }
+
+    /// <summary>Loader-set, not stored (#5750): the scope's server or tag no longer exists (or the scope is
+    /// malformed). An orphaned route matches nothing; it must never widen to fleet-wide, so there is no
+    /// cascade and no set-null behind it.</summary>
+    public bool Orphaned { get; init; }
+
+    /// <summary>Whether this route carries a stored scope (#5750).</summary>
+    public bool IsScoped => ScopeServerId.HasValue || ScopeTagId.HasValue;
+
+    /// <summary>The scope tier this route sits in (#5750): server-scoped, tag-scoped, or fleet-wide. A route with
+    /// both scopes set is malformed and reports the server tier but never matches (<see cref="CanMatch"/>).</summary>
+    public RouteScopeTier ScopeTier =>
+        ScopeServerId.HasValue ? RouteScopeTier.Server : ScopeTagId.HasValue ? RouteScopeTier.Tag : RouteScopeTier.Fleet;
+
+    /// <summary>Whether <see cref="MetricMatch"/> is the all-metrics wildcard (#5750).</summary>
+    public bool IsWildcard => string.Equals(MetricMatch?.Trim(), WildcardMatch, StringComparison.Ordinal);
+
+    /// <summary>Whether this route can match any firing at all (#5750): enabled, not orphaned, a well-formed
+    /// scope that has been expanded, and not a fleet-wide wildcard. What the "does any route configure a channel"
+    /// questions ask, so a route that can never match does not turn a channel on.</summary>
+    public bool CanMatch =>
+        Enabled && !Orphaned
+        && !(ScopeServerId.HasValue && ScopeTagId.HasValue)
+        && (IsScoped ? ExpandedServerIds is not null : !IsWildcard);
+
+    /// <summary>Whether this route's scope admits a firing on <paramref name="serverId"/> (#5750). A fleet-wide
+    /// route admits every firing, including one with no server id; a scoped route admits only a known server id
+    /// in its expanded set; an orphaned or malformed route admits nothing. Says nothing about the metric.</summary>
+    public bool AppliesTo(int? serverId)
+    {
+        if (Orphaned || (ScopeServerId.HasValue && ScopeTagId.HasValue))
+        {
+            return false;
+        }
+
+        if (!IsScoped)
+        {
+            return true;
+        }
+
+        return serverId.HasValue && ExpandedServerIds is not null && ExpandedServerIds.Contains(serverId.Value);
+    }
 
     /// <summary>The family this route matches, or null when <see cref="MetricMatch"/> is an exact metric name.</summary>
     public string? Family => AlertFamily.NormalizeFamily(MetricMatch);
@@ -98,14 +172,14 @@ public sealed record NotificationRoute(
     /// <summary>Whether this route names <paramref name="metricName"/> ITSELF — case-insensitively and
     /// trimmed, the same latitude a mute rule's metric name gets. The most specific match there is.</summary>
     public bool MatchesName(string metricName) =>
-        !IsFamilyRoute && !string.IsNullOrWhiteSpace(MetricMatch)
+        !IsFamilyRoute && !IsWildcard && !string.IsNullOrWhiteSpace(MetricMatch)
         && string.Equals(MetricMatch.Trim(), metricName, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Whether this route names the FIRING a recovery pairs with (<see cref="AlertFamily.Canonical"/>)
     /// — "Server Unreachable" catching "Server Restored". One notch less specific than
     /// <see cref="MatchesName"/>: a route that spells the recovery's own name outranks it.</summary>
     public bool MatchesFiring(string metricName) =>
-        !IsFamilyRoute && !string.IsNullOrWhiteSpace(MetricMatch)
+        !IsFamilyRoute && !IsWildcard && !string.IsNullOrWhiteSpace(MetricMatch)
         && !MatchesName(metricName)
         && string.Equals(MetricMatch.Trim(), AlertFamily.Canonical(metricName), StringComparison.OrdinalIgnoreCase);
 

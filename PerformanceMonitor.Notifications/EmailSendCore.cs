@@ -204,7 +204,7 @@ public sealed class EmailSendCore
                    and a recipient list without them is not a configuration. #4751: `smtpConfigured` above only
                    asks that SOME enabled route names recipients, so the fall-through to the parent's list can now
                    be blank — a firing no route covers, with no default list, has nobody to send to. */
-                emailRoute = NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings);
+                emailRoute = NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings, NotificationRouter.ParseServerId(serverId));
                 var recipients = emailRoute.Email.Destination ?? _settings.SmtpRecipients;
 
                 if (string.IsNullOrWhiteSpace(recipients))

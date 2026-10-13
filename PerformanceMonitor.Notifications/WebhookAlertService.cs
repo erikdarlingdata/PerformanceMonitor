@@ -234,7 +234,7 @@ public class WebhookAlertService
                comes from this one snapshot. With an adapter that does not override SnapshotForDelivery (Lite)
                it is the live settings. */
             var delivery = _settings.SnapshotForDelivery();
-            var route = NotificationRouter.Resolve(metricName, delivery.NotificationRoutes, delivery);
+            var route = NotificationRouter.Resolve(metricName, delivery.NotificationRoutes, delivery, NotificationRouter.ParseServerId(serverId));
 
             /* #5469: the PagerDuty auto-resolve behaviour reaches the cooldown only when PagerDuty will
                actually be sent this alert: the flag on AND a destination for this metric. The flag is read
@@ -2735,7 +2735,7 @@ public class WebhookAlertService
                 return AlertChannelOutcome.NotAttempted;
             }
 
-            var route = NotificationRouter.Resolve(firingMetric, delivery.NotificationRoutes, delivery);
+            var route = NotificationRouter.Resolve(firingMetric, delivery.NotificationRoutes, delivery, NotificationRouter.ParseServerId(serverId));
             if (route.PagerDuty.Destination is not { } pagerDutyKey)
             {
                 return AlertChannelOutcome.NotAttempted;

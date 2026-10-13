@@ -30,6 +30,26 @@ public enum RouteSource
 
     /// <summary>A route whose <c>metric_match</c> is the alert's exact metric name (or its paired firing).</summary>
     Exact,
+
+    /// <summary>A scoped route whose <c>metric_match</c> is <c>*</c> (#5750): every metric for its server or tag.
+    /// The lowest metric level; added last so the existing names keep their meaning.</summary>
+    Wildcard,
+}
+
+/// <summary>
+/// How narrowly a route is scoped (#5750). Lower is more specific, and resolution tries the tiers in this order:
+/// a server-scoped route beats a tag-scoped one, which beats a fleet-wide one, whatever their metric levels.
+/// </summary>
+public enum RouteScopeTier
+{
+    /// <summary>The route names one server.</summary>
+    Server = 0,
+
+    /// <summary>The route names a tag and its subtree.</summary>
+    Tag = 1,
+
+    /// <summary>No scope: the route applies to every server (and to a firing with no server).</summary>
+    Fleet = 2,
 }
 
 /// <summary>One channel's resolved destination for one firing: the URL / routing key / recipient list the
@@ -38,8 +58,11 @@ public enum RouteSource
 /// getters: Teams, Slack, Generic, PagerDuty, Email.</param>
 /// <param name="Destination">The resolved destination, or null when nothing supplies one.</param>
 /// <param name="RouteId">The route that supplied it, or null for the parent default / none.</param>
-/// <param name="Source">Which level answered.</param>
-public readonly record struct RoutedDestination(string Channel, string? Destination, int? RouteId, RouteSource Source)
+/// <param name="Source">Which metric level answered.</param>
+/// <param name="Tier">The scope tier of the route that supplied it (#5750), or null for the parent default / none.
+/// Optional so a four-argument construction keeps compiling.</param>
+public readonly record struct RoutedDestination(
+    string Channel, string? Destination, int? RouteId, RouteSource Source, RouteScopeTier? Tier = null)
 {
     /// <summary>Whether the channel is delivered at all for this firing.</summary>
     public bool IsDelivered => !string.IsNullOrWhiteSpace(Destination);
@@ -60,6 +83,10 @@ public sealed record NotificationRouteDecision(
     RoutedDestination PagerDuty,
     RoutedDestination Email)
 {
+    /// <summary>The scope tier of the winning route (#5750) - the one <see cref="RouteId"/> names - or null when no
+    /// route matched. Not part of the persisted <see cref="ToDto"/> projection.</summary>
+    public RouteScopeTier? RouteTier { get; init; }
+
     /// <summary>The five channels in fan-out order.</summary>
     public IEnumerable<RoutedDestination> All
     {
@@ -122,14 +149,17 @@ public sealed record NotificationRouteDecision(
 /// which is what lets the email path and the webhook fan-out each resolve after their OWN cooldown (design
 /// point 2) and still agree on where the firing lands.
 ///
-/// <para><b>Resolution order, per channel:</b> an enabled route matching the metric EXACTLY (its delivered
-/// name first, then the firing a recovery pairs with), then an enabled route matching its FAMILY, then the
-/// parent row's default — and within each level the first route by <c>route_id</c> whose column for that
-/// channel is non-empty.
-/// "Per channel" is the load-bearing phrase: an exact route that sets only Slack takes Slack and lets Teams
-/// fall to the family route, which lets Teams fall to the parent. A route with nothing for a channel is
-/// transparent for that channel, so a partially-filled route never blanks a destination the operator did
-/// not mention.</para>
+/// <para><b>Resolution order, per channel (#5750 adds the scope tiers):</b> routes are tried by SCOPE TIER first -
+/// server-scoped, then tag-scoped, then fleet-wide - and inside a tier by METRIC LEVEL: a route matching the metric
+/// EXACTLY (its delivered name first, then the firing a recovery pairs with), then its FAMILY, then <c>*</c>.
+/// Inside the tag tier at one metric level the DEEPER tag (more ancestors) wins, then the lowest <c>route_id</c>;
+/// elsewhere the lowest <c>route_id</c> wins. After every route comes the parent row's default. A scoped route
+/// matches only when the firing's server id is in its expanded set, so a firing with no server id can only be
+/// answered by a fleet-wide route. An orphaned route matches nothing, and a fleet-wide <c>*</c> is never matched
+/// (storage refuses to save one). "Per channel" is the load-bearing phrase: an exact route that sets only Slack
+/// takes Slack and lets Teams fall to the next candidate, and so on down to the parent. A route with nothing for a
+/// channel is transparent for that channel, so a partially-filled route never blanks a destination the operator did
+/// not mention, and one firing on one channel never goes to two destinations.</para>
 ///
 /// <para><b>Zero routes ⇒ today's fan-out, byte for byte.</b> With no routes every channel answers
 /// <see cref="RouteSource.Default"/> from the same <see cref="IAlertSettings"/> members the fan-out read
@@ -148,12 +178,16 @@ public static class NotificationRouter
 
     /// <summary>
     /// Resolves the destinations for one firing. <paramref name="routes"/> may be null or empty (the shared
-    /// default — every SKU without a routes table), in which case the answer is the parent defaults.
+    /// default - every SKU without a routes table), in which case the answer is the parent defaults.
+    /// <paramref name="serverId"/> (#5750) is the product's server id for the firing - Lite's hash id, Darling's
+    /// registry id - or null for a firing with no server (a fleet-level preview): only fleet-wide routes can match
+    /// then. Optional so a caller with no server keeps compiling.
     /// </summary>
     public static NotificationRouteDecision Resolve(
         string metricName,
         IReadOnlyList<NotificationRoute>? routes,
-        IAlertSettings defaults)
+        IAlertSettings defaults,
+        int? serverId = null)
     {
         if (metricName is null)
         {
@@ -167,113 +201,122 @@ public static class NotificationRouter
 
         var family = AlertFamily.Of(metricName);
 
-        /* The two candidate lists, each ordered by route id so "first matching enabled route wins" is a
-           statement about the table and not about the order a reader happened to return rows in. Disabled
-           routes are dropped here, once, so no level below can see one. */
-        var byName = new List<NotificationRoute>();
-        var byFiring = new List<NotificationRoute>();
-        var byFamily = new List<NotificationRoute>();
+        /* One candidate list, ordered (scope tier, metric level, deeper tag first, route id) so "first matching
+           route wins, per channel" is a statement about the ordering and not about the order a reader happened to
+           return rows in. Disabled, orphaned, wrong-server and fleet-wide-`*` routes are dropped here, once, so no
+           level below can see one. The metric level is also the RouteSource the destination reports: the exact
+           level spans the delivered name then the firing a recovery pairs with (so "Server Restored" lands where
+           "Server Unreachable" did unless the operator named the recovery), and both report RouteSource.Exact. */
+        var candidates = new List<(NotificationRoute Route, RouteScopeTier Tier, int Level, RouteSource Source)>();
         if (routes is not null)
         {
-            foreach (var route in routes.Where(r => r is not null && r.Enabled).OrderBy(r => r.RouteId))
+            foreach (var route in routes)
             {
+                if (route is null || !route.CanMatch || !route.AppliesTo(serverId))
+                {
+                    continue;
+                }
+
                 if (route.MatchesName(metricName))
                 {
-                    byName.Add(route);
+                    candidates.Add((route, route.ScopeTier, 0, RouteSource.Exact));
                 }
                 else if (route.MatchesFiring(metricName))
                 {
-                    byFiring.Add(route);
+                    candidates.Add((route, route.ScopeTier, 1, RouteSource.Exact));
                 }
                 else if (route.MatchesFamily(metricName))
                 {
-                    byFamily.Add(route);
+                    candidates.Add((route, route.ScopeTier, 2, RouteSource.Family));
+                }
+                else if (route.IsWildcard)
+                {
+                    candidates.Add((route, route.ScopeTier, 3, RouteSource.Wildcard));
                 }
             }
         }
 
-        /* The exact level, most specific first: a route spelling the delivered name itself, then one spelling
-           the firing a recovery pairs with — so "Server Restored" lands where "Server Unreachable" did unless
-           the operator named the recovery, in which case they meant it. Both report RouteSource.Exact. */
-        var exact = byName.Concat(byFiring).ToList();
+        var ordered = candidates
+            .OrderBy(c => (int)c.Tier)
+            .ThenBy(c => c.Level)
+            .ThenByDescending(c => c.Tier == RouteScopeTier.Tag ? c.Route.ScopeTagDepth : 0)
+            .ThenBy(c => c.Route.RouteId)
+            .ToList();
 
         /* The winning route for the ledger's headline: the most specific one that matched at all, whether
            or not it ended up supplying every channel. Per-channel provenance sits on each destination. */
-        int? routeId = exact.Count > 0 ? exact[0].RouteId : byFamily.Count > 0 ? byFamily[0].RouteId : null;
+        int? routeId = ordered.Count > 0 ? ordered[0].Route.RouteId : null;
+        RouteScopeTier? routeTier = ordered.Count > 0 ? ordered[0].Tier : null;
 
         var teams = ResolveChannel(
-            TeamsChannel, exact, byFamily, r => r.TeamsUrl,
+            TeamsChannel, ordered, r => r.TeamsUrl,
             defaults.TeamsWebhookEnabled ? defaults.TeamsWebhookUrl : null);
         var slack = ResolveChannel(
-            SlackChannel, exact, byFamily, r => r.SlackUrl,
+            SlackChannel, ordered, r => r.SlackUrl,
             defaults.SlackWebhookEnabled ? defaults.SlackWebhookUrl : null);
         var generic = ResolveChannel(
-            GenericChannel, exact, byFamily, r => r.GenericUrl,
+            GenericChannel, ordered, r => r.GenericUrl,
             defaults.GenericWebhookEnabled ? defaults.GenericWebhookUrl : null);
         var pagerDuty = ResolveChannel(
-            PagerDutyChannel, exact, byFamily, r => r.PagerDutyRoutingKey,
+            PagerDutyChannel, ordered, r => r.PagerDutyRoutingKey,
             defaults.PagerDutyEnabled ? defaults.PagerDutyRoutingKey : null);
         /* #4751: SmtpEnabled no longer implies a non-blank default recipient list, so the default arm can be
            blank here; ResolveChannel's last arm turns a blank default into a null destination, and the email
            path reads null (or blank) as "no recipients for this firing". */
         var email = ResolveChannel(
-            EmailChannel, exact, byFamily, r => r.SmtpRecipients,
+            EmailChannel, ordered, r => r.SmtpRecipients,
             defaults.SmtpEnabled ? defaults.SmtpRecipients : null);
 
-        return new NotificationRouteDecision(metricName, family, routeId, teams, slack, generic, pagerDuty, email);
+        return new NotificationRouteDecision(metricName, family, routeId, teams, slack, generic, pagerDuty, email)
+        {
+            RouteTier = routeTier,
+        };
     }
+
+    /// <summary>Parses the string server id the send paths carry (Lite: the hash id; Darling: the registry id) into
+    /// the int the router matches scopes against (#5750). Null for a blank or non-numeric id - a self-alert or a
+    /// fleet-level firing - so only fleet-wide routes apply.</summary>
+    public static int? ParseServerId(string? serverId) =>
+        int.TryParse(serverId, System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var id)
+            ? id
+            : null;
 
     /// <summary>Whether any enabled route could make the webhook fan-out attempt something the parent's
     /// configuration alone would not — the routes half of <c>WebhookAlertService.AnyWebhookConfigured</c>.
     /// Configuration only; never resolves a metric.</summary>
     public static bool AnyRouteConfiguresAWebhook(IReadOnlyList<NotificationRoute>? routes) =>
-        routes is not null && routes.Any(r => r is not null && r.Enabled && r.HasAnyWebhookDestination);
+        routes is not null && routes.Any(r => r is not null && r.CanMatch && r.HasAnyWebhookDestination);
 
     /// <summary>Whether any enabled route names a destination for ONE webhook channel (#4750) — the
     /// per-channel counterpart of <see cref="AnyRouteConfiguresAWebhook"/>, for "does this channel still have
     /// somewhere to send". Configuration only; never resolves a metric.</summary>
     public static bool AnyRouteConfiguresWebhookChannel(IReadOnlyList<NotificationRoute>? routes, string channel) =>
-        routes is not null && routes.Any(r => r is not null && r.Enabled && r.HasWebhookDestinationFor(channel));
+        routes is not null && routes.Any(r => r is not null && r.CanMatch && r.HasWebhookDestinationFor(channel));
 
     /// <summary>Whether any enabled route names email recipients (#4751) — the email path's counterpart of
     /// <see cref="AnyRouteConfiguresAWebhook"/>: with a blank default recipient list, a route's recipients are
     /// what make email worth attempting at all. Configuration only; never resolves a metric.</summary>
     public static bool AnyRouteConfiguresEmail(IReadOnlyList<NotificationRoute>? routes) =>
-        routes is not null && routes.Any(r => r is not null && r.Enabled && r.HasEmailDestination);
+        routes is not null && routes.Any(r => r is not null && r.CanMatch && r.HasEmailDestination);
 
     private static RoutedDestination ResolveChannel(
         string channel,
-        List<NotificationRoute> exact,
-        List<NotificationRoute> byFamily,
+        List<(NotificationRoute Route, RouteScopeTier Tier, int Level, RouteSource Source)> ordered,
         Func<NotificationRoute, string> column,
         string? parentDefault)
     {
-        foreach (var route in exact)
+        foreach (var (route, tier, _, source) in ordered)
         {
             /* #5366: a destination the route set but that could not be read is off, not inherited. */
             if (route.IsOffFor(channel))
             {
-                return new RoutedDestination(channel, null, route.RouteId, RouteSource.None);
+                return new RoutedDestination(channel, null, route.RouteId, RouteSource.None, tier);
             }
 
             var value = column(route);
             if (!string.IsNullOrWhiteSpace(value))
             {
-                return new RoutedDestination(channel, value.Trim(), route.RouteId, RouteSource.Exact);
-            }
-        }
-
-        foreach (var route in byFamily)
-        {
-            if (route.IsOffFor(channel))
-            {
-                return new RoutedDestination(channel, null, route.RouteId, RouteSource.None);
-            }
-
-            var value = column(route);
-            if (!string.IsNullOrWhiteSpace(value))
-            {
-                return new RoutedDestination(channel, value.Trim(), route.RouteId, RouteSource.Family);
+                return new RoutedDestination(channel, value.Trim(), route.RouteId, source, tier);
             }
         }
 
