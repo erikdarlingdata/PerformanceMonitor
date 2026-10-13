@@ -16,7 +16,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <summary>
 /// #5735: one server's skipped-slot rows (<see cref="CollectionCycleRow"/>) over the trailing
 /// <see cref="SkippedCycleReader.Window"/>. <see cref="Count"/> 0 means none: every other field is then null (and
-/// <see cref="SlotsSkipped"/> 0). The twin of Lite's <c>SkippedCycleSummary</c> (#5643). On Darling a slot is one
+/// <see cref="SlotsSkipped"/> 0). The twin of Lite's <c>SkippedCycleSummary</c> (#5643, PR #5730). On Darling a slot is one
 /// scheduled run of one collector, summed across the server's collectors; on Lite it is a whole cycle.
 /// </summary>
 public sealed class SkippedCycleSummary
@@ -39,17 +39,16 @@ public sealed class SkippedCycleSummary
     /// <summary>The newest row's own message.</summary>
     public string? LastMessage { get; init; }
 
-    /// <summary>The newest row's cause length (<c>duration_ms</c>) in milliseconds.</summary>
-    public long? LastDurationMs { get; init; }
-
     /// <summary>No rows in the window.</summary>
     public static SkippedCycleSummary None { get; } = new();
 }
 
 /// <summary>
 /// #5735: the read behind the MCP <c>skipped_cycles</c> block, the web panel and the Viewer's Collection Health line.
-/// One statement, one index seek: <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>
-/// serves the equality on the collector and the range on the time. It is never memoised: the block shows what the
+/// One statement, one bounded range scan: <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>
+/// serves the equality on the collector and the range on the time, and the two <c>OVER ()</c> aggregates read every
+/// matching row in the window (the writer coalesces them to one per server per five minutes, so at most a few hundred
+/// in 24 hours) before the <c>LIMIT 1</c>; it is not a single seek. It is never memoised: the block shows what the
 /// loop just did, and the one-minute collector-health memo would show a row a minute late.
 /// </summary>
 public static class SkippedCycleReader
@@ -69,8 +68,7 @@ SELECT
     collection_time,
     slowest_item,
     slowest_item_ms,
-    error_message,
-    duration_ms
+    error_message
 FROM v_collection_log
 WHERE server_id = $1
 AND   collector_name = $2
@@ -82,9 +80,13 @@ LIMIT 1";
 
     /// <summary>
     /// This server's skipped-slot rows in the <see cref="Window"/> ending at <paramref name="asOfUtc"/> (default now).
+    /// The deadline comes from the caller: the MCP tool passes <c>McpCommandDeadlines.ReadSeconds</c> like every other read
+    /// in <c>get_collection_health</c>, the Viewer its interactive budget. The default is the named storage band, never a
+    /// bare literal.
     /// </summary>
     public static async Task<SkippedCycleSummary> GetSkippedCycleSummaryAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime? asOfUtc = null, int commandTimeoutSeconds = 30, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime? asOfUtc = null,
+        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
         var end = asOfUtc ?? DateTime.UtcNow;
@@ -111,8 +113,7 @@ LIMIT 1";
             LastAtUtc = DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc),
             LastSlowestStep = reader.IsDBNull(3) ? null : reader.GetString(3),
             LastSlowestStepMs = reader.IsDBNull(4) ? null : reader.GetInt32(4),
-            LastMessage = reader.IsDBNull(5) ? null : reader.GetString(5),
-            LastDurationMs = reader.IsDBNull(6) ? null : Convert.ToInt64(reader.GetValue(6))
+            LastMessage = reader.IsDBNull(5) ? null : reader.GetString(5)
         };
     }
 }

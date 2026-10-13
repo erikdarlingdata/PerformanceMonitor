@@ -4598,12 +4598,15 @@ FROM config.config_collector_schedules";
     /// <summary>Whether ANY enabled server has EVER recorded a collector run — the fleet-wide
     /// <see cref="HasAnyCollectionLogSql"/>, used the same way: to tell a genuinely quiet fleet-wide window
     /// from a fleet that has never once collected (every server newly added, or the service never started).
+    /// #5735: the skipped-slots row is not a collector run, so the predicate leaves it out; <c>NotCycleRowSql</c> starts with
+    /// the column name, so the <c>cl.</c> in front qualifies it. The walk stops at the first collector row, which a fleet
+    /// that has ever collected has, so the added filter does not lengthen it in practice.
     /// </summary>
     public const string HasAnyCollectionLogFleetSql = $"""
         SELECT 1
         FROM v_collection_log cl
         JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
-        WHERE {CollectionCycleRow.NotCycleRowSql}
+        WHERE cl.{CollectionCycleRow.NotCycleRowSql}
         LIMIT 1
         """;
 

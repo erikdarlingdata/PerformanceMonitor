@@ -1605,6 +1605,14 @@ public sealed class DarlingMcpDataTools
         GetCollectionHealthCoreAsync(postgres, server_name, full_detail, uncutText: false, logger, cancellationToken);
 
     /// <summary>
+    /// <see cref="GetCollectionHealth"/> with the skipped-slot read passed in, so a test can fail it without a store fault.
+    /// Not a tool: same parameters and output otherwise.
+    /// </summary>
+    internal static Task<string> GetCollectionHealthWithSkippedCycleRead(
+        NpgsqlDataSource postgres, string? server_name, Func<Task<SkippedCycleSummary>> skippedCycleRead, CancellationToken cancellationToken) =>
+        GetCollectionHealthCoreAsync(postgres, server_name, full_detail: false, uncutText: false, logger: null, cancellationToken, skippedCycleRead);
+
+    /// <summary>
     /// The diagnostics bundle's read: the default shape with <c>last_error</c> and <c>output_finding</c> whole. The bundle
     /// aliases the text first and cuts it afterwards, so a name that straddles the tool's own cut is never left as a prefix.
     /// Not a tool: the MCP surface, its parameters and its output are the ones <see cref="GetCollectionHealth"/> has.
@@ -1618,7 +1626,8 @@ public sealed class DarlingMcpDataTools
         bool full_detail,
         bool uncutText,
         Microsoft.Extensions.Logging.ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<Task<SkippedCycleSummary>>? skippedCycleRead = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -1931,9 +1940,15 @@ public sealed class DarlingMcpDataTools
 
             /* #5735: the collection loop's skipped slots over the last 24 h, read fresh and OUTSIDE the one-minute
                collector-health memo above (the rows are not collectors, so the collector half never carries them, and a
-               row just written must not show a minute late). One index seek on the watermark index. */
-            var skippedCycles = await SkippedCycleReader.GetSkippedCycleSummaryAsync(
-                postgres, resolved.ServerId, cancellationToken: cancellationToken);
+               row just written must not show a minute late). One bounded range scan on the watermark index, at the same
+               read deadline as every other read in this tool. The block is the one supplementary figure in the payload
+               (the collector rows, the sweep verdict and the caveats are the answer), so a failed read degrades the block
+               to status "unavailable" with its figures null, rather than removing the whole payload from the tool an
+               operator reaches for when collection looks wrong. Cancellation still propagates. */
+            var skippedCycles = await ReadSkippedCyclesOrNullAsync(
+                skippedCycleRead ?? (() => SkippedCycleReader.GetSkippedCycleSummaryAsync(
+                    postgres, resolved.ServerId, commandTimeoutSeconds: McpCommandDeadlines.ReadSeconds, cancellationToken: cancellationToken)),
+                logger);
 
             /* #3691: wraps the whole payload rather than sitting in it as a property — McpHelpers.JsonOptions
                WRITES nulls, so a property would ship analysis_caveats: null on every clean answer — and it reads
@@ -2052,8 +2067,8 @@ public sealed class DarlingMcpDataTools
                     finding = alertReadFinding,
                     note = AlertReadFailureCounter.WindowNote
                 },
-                /* #5735: always present; zero is a real answer (count_24h 0, slots 0, the rest null), so a missing
-                   field never reads as "none". On this SKU a slot is one scheduled run of one collector. */
+                /* #5735: always present; zero is a real answer (status ok, count_24h 0, slots 0, the rest null), so a missing
+                   field never reads as "none". A failed read is status unavailable with every figure null. On this SKU a slot is one scheduled run of one collector. */
                 skipped_cycles = SkippedCyclesBlock(skippedCycles),
                 sweep_pressure = new
                 {
@@ -2120,19 +2135,51 @@ public sealed class DarlingMcpDataTools
         }
     }
 
+    /// <summary>The <c>status</c> word of a <c>skipped_cycles</c> block that was read.</summary>
+    internal const string SkippedCyclesRead = "ok";
+
+    /// <summary>
+    /// The <c>status</c> word of a <c>skipped_cycles</c> block whose read failed: this server may have skipped slots and the
+    /// read could not say. Every figure on that block is then null, which is not the zero a real empty window reports.
+    /// </summary>
+    internal const string SkippedCyclesUnavailable = "unavailable";
+
+    /// <summary>
+    /// #5735: runs the skipped-slot read and returns null when it fails, so the caller can degrade the block instead of
+    /// losing the payload. Cancellation propagates (the caller asked to stop); every other failure is logged once and
+    /// swallowed, the way <see cref="DarlingCollectionCaveatReader"/> treats its own optional read.
+    /// </summary>
+    internal static async Task<SkippedCycleSummary?> ReadSkippedCyclesOrNullAsync(
+        Func<Task<SkippedCycleSummary>> read, Microsoft.Extensions.Logging.ILogger? logger)
+    {
+        ArgumentNullException.ThrowIfNull(read);
+        try
+        {
+            return await read();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "get_collection_health: the skipped-slot read failed, so the skipped_cycles block reports status {Status}.",
+                SkippedCyclesUnavailable);
+            return null;
+        }
+    }
+
     /// <summary>
     /// #5735: the <c>skipped_cycles</c> block of <c>get_collection_health</c>. A server whose loop stepped over
     /// collection slots writes one <c>collection_cycle</c>/<c>SKIPPED</c> row (coalesced to one per five minutes). Zero is a
-    /// real answer (count_24h 0, slots_skipped_24h 0, the rest null); the block is always present.
+    /// real answer (status ok, count_24h 0, slots_skipped_24h 0, the rest null); the block is always present. A read that
+    /// failed is <paramref name="s"/> null: status unavailable and every figure null, never a zero.
     /// </summary>
-    internal static object SkippedCyclesBlock(SkippedCycleSummary s) => new
+    internal static object SkippedCyclesBlock(SkippedCycleSummary? s) => new
     {
-        count_24h = s.Count,
-        slots_skipped_24h = s.SlotsSkipped,
-        last_at = s.LastAtUtc?.ToString("o"),
-        last_slowest_step = s.LastSlowestStep,
-        last_slowest_step_ms = s.LastSlowestStepMs,
-        last_message = s.LastMessage
+        status = s is null ? SkippedCyclesUnavailable : SkippedCyclesRead,
+        count_24h = s?.Count,
+        slots_skipped_24h = s?.SlotsSkipped,
+        last_at = s?.LastAtUtc?.ToString("o"),
+        last_slowest_step = s?.LastSlowestStep,
+        last_slowest_step_ms = s?.LastSlowestStepMs,
+        last_message = s?.LastMessage
     };
 
     /// <summary>

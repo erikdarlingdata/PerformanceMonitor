@@ -7,15 +7,16 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// #5735: what Darling says about the collection slots one server's loop stepped over. The same text is the
-/// <c>error_message</c> of the server's <c>collection_cycle</c> row in <c>collection_log</c> (Lite's twin is #5643's
+/// <c>error_message</c> of the server's <c>collection_cycle</c> row in <c>collection_log</c> (Lite's twin, for #5643 in PR #5730, is
 /// <c>CollectionCycleSkip</c>, worded alike).
 /// </summary>
 /// <param name="SlotsSkipped">Slots lost, summed across the server's collectors: the row's <c>fanout_item_count</c>.</param>
-/// <param name="DurationMs">The cause's length: the row's <c>duration_ms</c>.</param>
+/// <param name="DurationMs">The cause's length: the row's <c>duration_ms</c>. Null when no cause's length was measured (no cause at
+/// all, or only a lost daily run, which has no length): the column then stays NULL, not a measured 0 ms.</param>
 /// <param name="SlowestItem">The cause's name (a collector, <c>gate_wait</c>, <c>launch_guard_hold</c>): the row's <c>slowest_item</c>.</param>
 /// <param name="SlowestItemMs">The named cause's length: the row's <c>slowest_item_ms</c>.</param>
 /// <param name="Message">The row's <c>error_message</c>.</param>
-internal sealed record CycleSkipReport(int SlotsSkipped, int DurationMs, string SlowestItem, int SlowestItemMs, string Message);
+internal sealed record CycleSkipReport(int SlotsSkipped, int? DurationMs, string SlowestItem, int SlowestItemMs, string Message);
 
 /// <summary>What was pending for one server when the row was written: the slots by collector and by kind, and the earliest
 /// slot lost.</summary>
@@ -204,7 +205,7 @@ internal static class DarlingCycleSkip
 
         /* Candidates: (label, length of the cause, name for slowest_item, slowest_item_ms). The largest length is the cause
            the row carries; the sentence lists every one. */
-        var candidates = new List<(string Sentence, long Length, string Name, long NameMs)>();
+        var candidates = new List<(string Sentence, long? Length, string Name, long NameMs)>();
         if (causes.PrevBodyMs >= CauseFloorMs)
         {
             var slowestName = causes.PrevBodySlowestName ?? UnmeasuredName;
@@ -234,19 +235,22 @@ internal static class DarlingCycleSkip
             var lost = string.Join(", ", snapshot.DailyLostSlots.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).Select(k => k.Replace('_', ' ')));
             candidates.Add((
                 string.Create(CultureInfo.InvariantCulture, $"{dailySlots} run-time collector slot(s) lost their day ({lost})"),
-                0, snapshot.DailyLostSlots.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).First(), 0));
+                null, snapshot.DailyLostSlots.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).First(), 0));
         }
 
         string cause;
         string item;
         long itemMs;
-        long durationMs;
+        long? durationMs;
         if (candidates.Count == 0)
         {
             cause = "no single cause was measured (the body and the wait for a fleet slot were both short)";
             item = UnmeasuredName;
             itemMs = 0;
-            durationMs = 0;
+            /* slowest_item_ms has no choice: the writer stores the slot count only with all three of the fanout columns, so
+               it carries 0. duration_ms is bound on its own and is nullable, so "no cause was measured" ends as NULL and
+               never reads as a measured 0 ms. */
+            durationMs = null;
         }
         else
         {
@@ -263,7 +267,7 @@ internal static class DarlingCycleSkip
             $"Collection fell behind on this server: {total} slot(s) skipped across {perCollector.Count} collector(s) (top: {string.Join(", ", top)}). Cause: {cause}.{gap}");
 
         return new CycleSkipReport(
-            (int)Math.Min(int.MaxValue, total), ClampMs(durationMs), item, ClampMs(itemMs), message);
+            (int)Math.Min(int.MaxValue, total), durationMs is { } d ? ClampMs(d) : null, item, ClampMs(itemMs), message);
     }
 
     /// <summary>Milliseconds below one second, one decimal below ten seconds, whole seconds from ten seconds up (Lite's

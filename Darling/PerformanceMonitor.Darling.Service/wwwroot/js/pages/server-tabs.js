@@ -3152,8 +3152,10 @@ const SWEEP_STATS = [
 
 /* #5735: the `skipped_cycles` block of get_collection_health. A slot is one scheduled run of one collector the loop stepped
    over, summed across the server's collectors. Zero is real (count 0, the other tiles dashes); the message tile is dropped
-   when there is none rather than showing a dash. */
+   when there is none rather than showing a dash. The Read tile says "ok", or "unavailable" when the read failed (every figure is
+   then a dash, which is not the zero a real empty window reports). */
 const SKIPPED_CYCLES_STATS = [
+  { key: "skipped_cycles.status", label: "Read", format: "text", small: true },
   { key: "skipped_cycles.count_24h", label: "Late cycles", format: "int" },
   { key: "skipped_cycles.slots_skipped_24h", label: "Slots skipped", format: "int" },
   { key: "skipped_cycles.last_at", label: "Last", format: "reltime", small: true },

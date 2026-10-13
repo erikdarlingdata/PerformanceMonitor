@@ -261,7 +261,7 @@ ON CONFLICT (server_id) DO UPDATE SET
     /// same insert every collector row uses. The row is not a collector run: <c>collector_name</c> is
     /// <see cref="CollectionCycleRow.CollectorName"/>, <c>status</c> is <see cref="CollectionCycleRow.Status"/>,
     /// <c>fanout_item_count</c> carries the slots skipped, <c>slowest_item</c>/<c>slowest_item_ms</c> the cause,
-    /// <c>duration_ms</c> the cause's length, and both timing splits are NULL with no rows collected. Stamped
+    /// <c>duration_ms</c> the cause's length (NULL when none was measured), and both timing splits are NULL with no rows collected. Stamped
     /// <paramref name="stampUtc"/> (when the late run noticed the gap), not the clock at insert, so the caller names
     /// the moment. Failure-isolated like the other observability writes; returns whether the row landed so the caller
     /// keeps its pending counts when it did not.
@@ -287,7 +287,7 @@ ON CONFLICT (server_id) DO UPDATE SET
         DateTime stampUtc,
         string status,
         int rowsCollected,
-        int durationMs,
+        int? durationMs,
         int? sqlMs,
         int? storageMs,
         string? errorMessage,
@@ -316,7 +316,7 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.AddWithValue(collectorName);
             /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
             command.Parameters.AddWithValue(DateTime.SpecifyKind(stampUtc, DateTimeKind.Unspecified));
-            command.Parameters.AddWithValue(durationMs);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = durationMs.HasValue ? durationMs.Value : (object)DBNull.Value });
             command.Parameters.AddWithValue(status);
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)message ?? DBNull.Value });
             command.Parameters.AddWithValue(rowsCollected);

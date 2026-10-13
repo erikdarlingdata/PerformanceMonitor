@@ -192,6 +192,32 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,$9,$10,$11)", connection);
         Assert.Equal("mine", summary.LastSlowestStep);
     });
 
+    /// <summary>#5735: a skipped-slot read that fails does not remove the payload. The collector rows, the sweep verdict and the
+    /// caveats come back whole, and the block says it could not be read, with every figure null (not the zero a real empty
+    /// window reports). Cancellation is not swallowed.</summary>
+    [Fact]
+    public Task Mcp_FailedSkippedCycleRead_DegradesTheBlock_AndKeepsThePayload() => RunAsync(async (connection, postgres, ct) =>
+    {
+        await InsertAsync(connection, ServerId, "wait_stats", "SUCCESS", DateTime.UtcNow.AddMinutes(-2), 5, null, null, null, 100, ct);
+
+        using (var degraded = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionHealthWithSkippedCycleRead(
+            postgres, ServerName, () => throw new InvalidOperationException("the skipped-slot read failed"), ct)))
+        {
+            var root = degraded.RootElement;
+            Assert.Equal("wait_stats", root.GetProperty("collectors").EnumerateArray().Single().GetProperty("collector").GetString());
+            Assert.True(root.TryGetProperty("sweep_pressure", out _), "the sweep verdict survives");
+            var block = root.GetProperty("skipped_cycles");
+            Assert.Equal("unavailable", block.GetProperty("status").GetString());
+            foreach (var name in new[] { "count_24h", "slots_skipped_24h", "last_at", "last_slowest_step", "last_slowest_step_ms", "last_message" })
+            {
+                Assert.Equal(JsonValueKind.Null, block.GetProperty(name).ValueKind);
+            }
+        }
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DarlingMcpDataTools.GetCollectionHealthWithSkippedCycleRead(
+            postgres, ServerName, () => throw new OperationCanceledException(), ct));
+    });
+
     /// <summary>The MCP block: always present, 0 is real. The server has one collector row, so the tool answers with data.</summary>
     [Fact]
     public Task Mcp_Block_ZeroIsReal_AndFieldsCarryTheNewestRow() => RunAsync(async (connection, postgres, ct) =>
@@ -201,6 +227,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,$9,$10,$11)", connection);
         using (var none = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionHealth(postgres, ServerName, cancellationToken: ct)))
         {
             var block = none.RootElement.GetProperty("skipped_cycles");
+            Assert.Equal("ok", block.GetProperty("status").GetString());
             Assert.Equal(0, block.GetProperty("count_24h").GetInt64());
             Assert.Equal(0, block.GetProperty("slots_skipped_24h").GetInt64());
             foreach (var name in new[] { "last_at", "last_slowest_step", "last_slowest_step_ms", "last_message" })
@@ -234,16 +261,67 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,$9,$10,$11)", connection);
 public sealed class SkippedCycleSurfaceShapeTests
 {
     private static readonly string[] BlockFields =
-        ["count_24h", "slots_skipped_24h", "last_at", "last_slowest_step", "last_slowest_step_ms", "last_message"];
+        ["status", "count_24h", "slots_skipped_24h", "last_at", "last_slowest_step", "last_slowest_step_ms", "last_message"];
 
     [Fact]
-    public void TheBlock_HasTheSixFields_AndNullsWhenThereIsNoRow()
+    public void TheBlock_HasTheStatusAndSixFigures_AndNullsWhenThereIsNoRow()
     {
         using var doc = JsonDocument.Parse(JsonSerializer.Serialize(
             DarlingMcpDataTools.SkippedCyclesBlock(SkippedCycleSummary.None), McpHelpers.JsonOptions));
         Assert.Equal(BlockFields, doc.RootElement.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal("ok", doc.RootElement.GetProperty("status").GetString());
         Assert.Equal(0, doc.RootElement.GetProperty("count_24h").GetInt64());
         Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("last_message").ValueKind);
+    }
+
+    /// <summary>#5735: the block of a read that failed. Same fields, status "unavailable", every figure null: a count of 0
+    /// would read as the all-clear on the one block whose job is to say the loop fell behind.</summary>
+    [Fact]
+    public void TheDegradedBlock_SaysUnavailable_WithEveryFigureNull_NeverAZero()
+    {
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(DarlingMcpDataTools.SkippedCyclesBlock(null), McpHelpers.JsonOptions));
+        Assert.Equal(BlockFields, doc.RootElement.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+        foreach (var p in doc.RootElement.EnumerateObject().Where(p => p.Name != "status"))
+        {
+            Assert.Equal(JsonValueKind.Null, p.Value.ValueKind);
+        }
+    }
+
+    [Fact]
+    public async Task AFailedRead_IsNull_ASuccessfulOneIsPassedThrough_CancellationPropagates()
+    {
+        Assert.Null(await DarlingMcpDataTools.ReadSkippedCyclesOrNullAsync(() => throw new TimeoutException("deadline"), logger: null));
+        Assert.Null(await DarlingMcpDataTools.ReadSkippedCyclesOrNullAsync(() => Task.FromException<SkippedCycleSummary>(new InvalidOperationException()), logger: null));
+        Assert.Same(SkippedCycleSummary.None, await DarlingMcpDataTools.ReadSkippedCyclesOrNullAsync(() => Task.FromResult(SkippedCycleSummary.None), logger: null));
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            DarlingMcpDataTools.ReadSkippedCyclesOrNullAsync(() => throw new OperationCanceledException(), logger: null));
+        await Assert.ThrowsAsync<TaskCanceledException>(() =>
+            DarlingMcpDataTools.ReadSkippedCyclesOrNullAsync(() => Task.FromCanceled<SkippedCycleSummary>(new CancellationToken(true)), logger: null));
+    }
+
+    /// <summary>#5735: the read takes its deadline from the caller. The tool passes the one every sibling read in the payload
+    /// uses, the Viewer its interactive budget, and the reader's own default is the named storage band, never a bare 30.</summary>
+    [Fact]
+    public void TheReadDeadline_ComesFromTheCaller_NotABareLiteral()
+    {
+        var tools = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
+        Assert.Contains("postgres, resolved.ServerId, commandTimeoutSeconds: McpCommandDeadlines.ReadSeconds, cancellationToken: cancellationToken)", tools, StringComparison.Ordinal);
+
+        var reader = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "SkippedCycleSummary.cs");
+        Assert.Contains("int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds,", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("commandTimeoutSeconds = 30", reader, StringComparison.Ordinal);
+
+        var viewer = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.SkippedCycles.cs");
+        Assert.Contains("commandTimeoutSeconds: ViewerCommandDeadlines.CurrentInteractiveReadSeconds", viewer, StringComparison.Ordinal);
+    }
+
+    /// <summary>The summary carries only what a surface prints: the read selects six columns, and nothing parks a seventh.</summary>
+    [Fact]
+    public void TheSummary_HasNoUnreadDurationField()
+    {
+        Assert.Null(typeof(SkippedCycleSummary).GetProperty("LastDurationMs"));
+        Assert.DoesNotContain("duration_ms", SkippedCycleReader.SummarySql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -251,6 +329,7 @@ public sealed class SkippedCycleSurfaceShapeTests
     {
         var tools = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
         Assert.Contains("skipped_cycles = SkippedCyclesBlock(skippedCycles),", tools, StringComparison.Ordinal);
+        Assert.Contains("await ReadSkippedCyclesOrNullAsync(", tools, StringComparison.Ordinal);
         var read = tools.IndexOf("SkippedCycleReader.GetSkippedCycleSummaryAsync(", StringComparison.Ordinal);
         var memo = tools.IndexOf("DarlingDataReader.GetCollectionHealthMemoizedAsync(", StringComparison.Ordinal);
         Assert.True(memo >= 0 && read > memo, "the skipped-slot read is its own statement after the memoised collector read");

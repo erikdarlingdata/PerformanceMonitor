@@ -92,6 +92,22 @@ public sealed class CycleSkipAccumulatorTests
         Assert.Equal(DarlingCycleSkip.UnmeasuredName, report.SlowestItem);
         Assert.Equal(0, report.SlowestItemMs);
         Assert.Contains("no single cause was measured", report.Message, StringComparison.Ordinal);
+
+        /* #5735: slowest_item_ms must carry 0 (the writer stores the count only with all three fanout columns), but
+           duration_ms is bound on its own, so "nothing was measured" is NULL, not a measured 0 ms. */
+        Assert.Null(report.DurationMs);
+    }
+
+    /// <summary>A lost daily run is a cause with no length: it names the collector, and the row's duration stays NULL.</summary>
+    [Fact]
+    public void ALostDailyRunAlone_HasNoMeasuredDuration()
+    {
+        var tally = new CycleSkipAccumulator();
+        tally.AddDailyLost("index_object_stats", 1, T0.AddMinutes(-6));
+        var report = DarlingCycleSkip.Build(tally.TryTake(T0, DarlingCycleSkip.RowMinInterval)!, new CycleSkipCauses(0, null, 0, 0), T0)!;
+        Assert.Equal("index_object_stats", report.SlowestItem);
+        Assert.Equal(0, report.SlowestItemMs);
+        Assert.Null(report.DurationMs);
     }
 
     /// <summary>The 5-minute floor holds: after a row, counts keep adding but no snapshot is offered before 5 minutes, and the
@@ -295,6 +311,42 @@ public sealed class CollectionCycleRowLiveTests
             };
             var unexpected = values.Where(p => !expected.Contains(p.Key) && p.Value is not null).Select(p => p.Key).ToList();
             Assert.True(unexpected.Count == 0, "columns that should be NULL: " + string.Join(", ", unexpected));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, CleanAsync);
+        }
+    }
+
+    /// <summary>#5735: a report with no measured duration lands <c>duration_ms</c> as NULL, while the slowest-item triple stays whole.</summary>
+    [Fact]
+    public async Task ARowWithNoMeasuredDuration_StoresNull_NotZero()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live cycle-skip tests.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await using var postgres = NpgsqlDataSource.Create(cs!);
+            var report = new CycleSkipReport(3, null, DarlingCycleSkip.UnmeasuredName, 0, "Collection fell behind on this server: 3 slot(s).");
+            Assert.True(await DarlingObservability.LogCycleSkipAsync(postgres, Runtime(WriterServerId, "cycle-writer"), MinutesAgo(2), report, null, ct));
+
+            using var command = new NpgsqlCommand("SELECT duration_ms, fanout_item_count, slowest_item, slowest_item_ms FROM collection_log WHERE server_id = $1", connection);
+            command.Parameters.AddWithValue(WriterServerId);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.True(reader.IsDBNull(0), "duration_ms is NULL when nothing was measured");
+            Assert.Equal(3, reader.GetInt32(1));
+            Assert.Equal(DarlingCycleSkip.UnmeasuredName, reader.GetString(2));
+            Assert.Equal(0, reader.GetInt32(3));
 
             bodySucceeded = true;
         }
@@ -552,6 +604,10 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
 /// #5735: every read of <c>collection_log</c> in Darling's code either leaves the skipped-slots row out, names its collector
 /// or <c>status = 'SUCCESS'</c> (which the row never has), or is on the safe list below with its reason. And no file but
 /// <c>CollectionCycleRow.cs</c> spells the collector's name as a literal.
+/// <para>The safe list is per READ (the file plus the statement constant or the method that holds the SQL), never per file: a
+/// per-file entry's reason covers only the reads it was written for, and a listed file would then hide a later read the reason
+/// says nothing about. Each predicate is judged inside its own subquery, so a statement with three subqueries cannot borrow
+/// the exclusion from the one next to it.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class CollectionCycleReaderCensusTests
@@ -562,20 +618,34 @@ public sealed class CollectionCycleReaderCensusTests
         "PerformanceMonitor.Darling.Analysis",
     ];
 
-    /// <summary>File name to the reason every unfiltered read in it is safe. A new unfiltered read in a file NOT listed fails
-    /// the census; a listed file's reason must still hold for the new read.</summary>
+    /// <summary>"File.cs::Name" (the statement constant, or the method for SQL written inline) to the reason THAT read is safe
+    /// unfiltered. A new unfiltered read, in a listed file or not, fails the census until it is listed with its own reason; an
+    /// entry that names no read fails <see cref="TheSafeList_NamesReadsThatExist"/>.</summary>
     private static readonly Dictionary<string, string> SafeList = new(StringComparer.Ordinal)
     {
-        ["DarlingDataReader.cs"] = "get_collection_log and its fleet twin are the raw log by design",
-        ["DarlingObservability.cs"] = "the writers, and the sentinel-server retention reads",
-        ["DarlingStoreUpgrade.cs"] = "a plain post-upgrade row count that proves the cluster answers; any row will do",
-        ["PgMigrations.cs"] = "one-time, frozen DDL and data rewrites, never a reader",
-        ["TimescaleSupport.cs"] = "the collection_health_hourly aggregate definition: it groups by collector_name, so the extra group is harmless, and a changed definition would force a drop and rebuild; the readers filter instead (CollectionHealthRollupSupport)",
-        ["ViewerDataService.CollectionHealth.cs"] = "the raw log grid by design (RecentCollectionLogSql); the other reads join the already-filtered per-collector aggregate or name a collector",
-        ["DarlingSelfAlertEvaluator.cs"] = "MissingCaptureSessionsSql names its two collectors",
+        ["DarlingDataReader.cs::CollectionLogBody"] = "get_collection_log is the raw log by design; its optional collector filter is the caller's, not an exclusion",
+        ["DarlingDataReader.cs::CollectionLogFleetBody"] = "get_collection_log's fleet twin: the raw log by design, its optional collector filter the caller's",
+        ["DarlingStoreUpgrade.cs::VerifySentinelReadAsync"] = "a plain post-upgrade row count that proves the cluster answers; any row will do",
+        ["PgMigrations.cs::V5Sql"] = "one-time, frozen DDL and data rewrite, never a reader",
+        ["PgMigrations.cs::V80Sql"] = "one-time, frozen DDL and data rewrite, never a reader",
+        ["PgMigrations.cs::V108Sql"] = "one-time, frozen DDL and data rewrite, never a reader",
+        ["PgMigrations.cs::V109Sql"] = "one-time, frozen DDL and data rewrite, never a reader",
+        ["PgMigrations.cs::V110Sql"] = "one-time, frozen DDL and data rewrite, never a reader",
+        ["TimescaleSupport.cs::CreateCollectionHealthHourlySql"] = "the collection_health_hourly aggregate definition: it groups by collector_name, so the extra group is harmless, and a changed definition would force a drop and rebuild; the readers filter instead (CollectionHealthRollupSupport)",
+        ["ViewerDataService.CollectionHealth.cs::RecentCollectionLogSql"] = "the Viewer's raw collection-log grid, by design",
     };
 
     private static readonly Regex ReadStart = new(@"\bFROM\s+(?:collect\.)?(?:v_)?collection_log\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>A statement constant: <c>const string X</c> or <c>static readonly string X</c>.</summary>
+    private static readonly Regex ConstDecl = new(
+        @"^[ \t]*(?:\w+[ \t]+)*(?:const|static[ \t]+readonly)[ \t]+string[ \t]+(\w+)[ \t]*=",
+        RegexOptions.Multiline | RegexOptions.Compiled);
+
+    /// <summary>A method declaration (modifiers, a return type that may be a tuple, the name, the parameter list).</summary>
+    private static readonly Regex MethodDecl = new(
+        @"^[ \t]*(?:(?:public|private|internal|protected|static|async|sealed|override)[ \t]+)+(?:[^=;(){}\r\n]|\([^()\r\n]*\))*?\b(\w+)[ \t]*(?:<[^>\r\n]*>)?[ \t]*\(",
+        RegexOptions.Multiline | RegexOptions.Compiled);
 
     private static IEnumerable<string> SourceFiles()
     {
@@ -605,45 +675,153 @@ public sealed class CollectionCycleReaderCensusTests
     private static string WithoutComments(string text) =>
         Regex.Replace(text, @"/\*.*?\*/|//[^\r\n]*", string.Empty, RegexOptions.Singleline | RegexOptions.CultureInvariant);
 
-    [Fact]
-    public void EveryCollectionLogRead_ExcludesTheCycleRow_NamesACollector_OrIsOnTheSafeList()
+    /// <summary>The statement a read starts: from the FROM to the end of its string literal (a closing quote, a semicolon, or
+    /// 1,500 chars), cut at the parenthesis that closes the subquery the FROM sits in, so the predicate is judged in its own
+    /// scope.</summary>
+    internal static string StatementOf(string text, int fromIndex)
     {
-        var violations = new List<string>();
-        var read = 0;
+        var tail = text.Substring(fromIndex, Math.Min(1500, text.Length - fromIndex));
+        var end = tail.IndexOf("\"\"\"", StringComparison.Ordinal);
+        var close = tail.IndexOf("\";", StringComparison.Ordinal);
+        if (close >= 0 && (end < 0 || close < end))
+        {
+            end = close;
+        }
+
+        var statement = end > 0 ? tail[..end] : tail;
+        var depth = 0;
+        for (var i = 0; i < statement.Length; i++)
+        {
+            if (statement[i] == '(')
+            {
+                depth++;
+            }
+            else if (statement[i] == ')' && --depth < 0)
+            {
+                return statement[..i];
+            }
+        }
+
+        return statement;
+    }
+
+    /// <summary>The statement constant, else the method, that holds the SQL at <paramref name="index"/>: whichever is declared
+    /// nearest above it.</summary>
+    internal static string OwnerOf(string text, int index)
+    {
+        var before = text[..index];
+        var owner = (Index: -1, Name: "?");
+        foreach (var regex in new[] { ConstDecl, MethodDecl })
+        {
+            foreach (Match m in regex.Matches(before))
+            {
+                if (m.Index > owner.Index)
+                {
+                    owner = (m.Index, m.Groups[1].Value);
+                }
+            }
+        }
+
+        return owner.Name;
+    }
+
+    private static bool Excludes(string statement) =>
+        statement.Contains("NotCycleRowSql", StringComparison.Ordinal)
+        || Regex.IsMatch(statement, @"collector_name\s*(=|IN\b|<>\s*ALL|LIKE\b)", RegexOptions.IgnoreCase)
+        || Regex.IsMatch(statement, @"\bstatus\s*=\s*'(SUCCESS|PERMISSIONS|SESSION_MISSING)'", RegexOptions.IgnoreCase)
+        || Regex.IsMatch(statement, @"server_id\s*=\s*\$?\{?\w*FleetServerId", RegexOptions.IgnoreCase);
+
+    /// <summary>Every read: where it is, which safe-list key it answers to, its statement, and whether it excludes on its own.</summary>
+    private static List<(string Key, int Line, string Statement)> Reads()
+    {
+        var reads = new List<(string, int, string)>();
         foreach (var file in SourceFiles())
         {
             var name = Path.GetFileName(file);
             var text = WithoutComments(File.ReadAllText(file));
             foreach (Match m in ReadStart.Matches(text))
             {
-                read++;
-
-                /* The statement: from the FROM to the end of its string literal (a closing quote, a semicolon, or 900 chars). */
-                var tail = text.Substring(m.Index, Math.Min(900, text.Length - m.Index));
-                var end = tail.IndexOf("\"\"\"", StringComparison.Ordinal);
-                var close = tail.IndexOf("\";", StringComparison.Ordinal);
-                if (close >= 0 && (end < 0 || close < end))
-                {
-                    end = close;
-                }
-
-                var statement = end > 0 ? tail[..end] : tail;
-                var safe = statement.Contains("NotCycleRowSql", StringComparison.Ordinal)
-                    || Regex.IsMatch(statement, @"collector_name\s*(=|IN\b|<>\s*ALL|LIKE\b)", RegexOptions.IgnoreCase)
-                    || Regex.IsMatch(statement, @"\bstatus\s*=\s*'(SUCCESS|PERMISSIONS|SESSION_MISSING)'", RegexOptions.IgnoreCase)
-                    || Regex.IsMatch(statement, @"server_id\s*=\s*\$?\{?\w*FleetServerId", RegexOptions.IgnoreCase)
-                    || SafeList.ContainsKey(name);
-                if (!safe)
-                {
-                    var line = text[..m.Index].Count(c => c == '\n') + 1;
-                    violations.Add($"{name}:{line}");
-                }
+                var line = text[..m.Index].Count(c => c == '\n') + 1;
+                reads.Add(($"{name}::{OwnerOf(text, m.Index)}", line, StatementOf(text, m.Index)));
             }
         }
 
-        Assert.True(read > 20, $"the census saw only {read} collection_log reads; the pattern or the roots drifted");
+        return reads;
+    }
+
+    [Fact]
+    public void EveryCollectionLogRead_ExcludesTheCycleRow_NamesACollector_OrIsOnTheSafeList()
+    {
+        var reads = Reads();
+        var violations = reads
+            .Where(r => !SafeList.ContainsKey(r.Key) && !Excludes(r.Statement))
+            .Select(r => $"{r.Key} (line {r.Line})")
+            .ToList();
+
+        Assert.True(reads.Count > 20, $"the census saw only {reads.Count} collection_log reads; the pattern or the roots drifted");
         Assert.True(violations.Count == 0,
-            "collection_log reads with no collection_cycle exclusion, collector name or safe-list reason (#5735): " + string.Join(", ", violations));
+            "collection_log reads with no collection_cycle exclusion, collector name or per-read safe-list reason (#5735): " + string.Join(", ", violations));
+    }
+
+    /// <summary>The raw-log readers are listed because their collector filter is optional, which is not an exclusion; the
+    /// census must not also let a silent relaxation of it hide behind the heuristic.</summary>
+    [Fact]
+    public void TheSafeList_NamesReadsThatExist()
+    {
+        var keys = Reads().Select(r => r.Key).ToHashSet(StringComparer.Ordinal);
+        Assert.All(SafeList.Keys, k => Assert.Contains(k, keys));
+    }
+
+    /// <summary>A listed read needs a listed reason: a blank one defeats the point of listing.</summary>
+    [Fact]
+    public void EverySafeListEntry_CarriesAReason() =>
+        Assert.All(SafeList, kv => Assert.False(string.IsNullOrWhiteSpace(kv.Value), kv.Key));
+
+    /// <summary>The selection-by-scope rule itself: a statement with three subqueries is judged one subquery at a time, so the
+    /// exclusion in the second cannot excuse the first. Without the cut, deleting the predicate from the FIRST read of
+    /// <c>ReadCollectionSignalsCoreAsync</c> (the <c>last_success</c> subquery) would still find it in the next 900 characters.</summary>
+    [Fact]
+    public void AReadIsJudgedInItsOwnSubquery_NotByItsNeighbours()
+    {
+        const string text = "(SELECT MAX(t) FROM collection_log WHERE server_id = $1 AND status IN ('A', 'B')) AS a, "
+            + "(SELECT COUNT(*) FROM (SELECT x FROM collection_log WHERE server_id = $1 AND {CollectionCycleRow.NotCycleRowSql} LIMIT 5) r) AS b\";";
+        var first = text.IndexOf("FROM collection_log", StringComparison.Ordinal);
+        var second = text.IndexOf("FROM collection_log", first + 1, StringComparison.Ordinal);
+        Assert.False(Excludes(StatementOf(text, first)));
+        Assert.True(Excludes(StatementOf(text, second)));
+    }
+
+    /// <summary>
+    /// The alert pass's collection signals (<c>ReadCollectionSignalsCoreAsync</c>): all three subqueries carry the cycle-row
+    /// predicate. The first is the <c>last_success</c> one, and it matters most: the skipped-slots row has status
+    /// <c>SKIPPED</c>, which that subquery counts as a collection having happened, so without the predicate the record of an
+    /// outage would reset the clock on the outage it records. The behaviour is pinned by live tests that need a store; this is
+    /// the pin that needs none.
+    /// </summary>
+    [Fact]
+    public void TheCollectionSignalsRead_CarriesTheCyclePredicate_InAllThreeSubqueries()
+    {
+        var file = Path.Combine(CycleSkipFeedTests.RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs");
+        var text = WithoutComments(File.ReadAllText(file));
+        var start = text.IndexOf("ReadCollectionSignalsCoreAsync(\r\n", StringComparison.Ordinal);
+        if (start < 0)
+        {
+            start = text.IndexOf("ReadCollectionSignalsCoreAsync(\n", StringComparison.Ordinal);
+        }
+
+        Assert.True(start >= 0, "ReadCollectionSignalsCoreAsync moved");
+        var method = text[start..];
+        var sqlStart = method.IndexOf("SELECT", StringComparison.Ordinal);
+        var sqlEnd = method.IndexOf("\", connection)", StringComparison.Ordinal);
+        Assert.True(sqlStart >= 0 && sqlEnd > sqlStart);
+        var sql = method[sqlStart..sqlEnd];
+
+        var reads = ReadStart.Matches(sql);
+        Assert.Equal(3, reads.Count);
+        foreach (Match m in reads)
+        {
+            Assert.Contains("NotCycleRowSql", StatementOf(sql, m.Index), StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -665,12 +843,5 @@ public sealed class CollectionCycleReaderCensusTests
         }
 
         Assert.True(offenders.Count == 0, "the collector name is spelled in " + string.Join(", ", offenders) + "; use CollectionCycleRow.CollectorName");
-    }
-
-    [Fact]
-    public void TheSafeList_NamesFilesThatExist()
-    {
-        var names = SourceFiles().Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal);
-        Assert.All(SafeList.Keys, k => Assert.Contains(k, names));
     }
 }

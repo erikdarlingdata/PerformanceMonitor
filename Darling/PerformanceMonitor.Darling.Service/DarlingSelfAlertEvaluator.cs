@@ -5781,7 +5781,7 @@ CROSS JOIN LATERAL (
     SELECT l.collection_time
     FROM collect.collection_log l
     WHERE l.server_id = c.server_id
-    AND   {CollectionCycleRow.NotCycleRowSql}
+    AND   l.{CollectionCycleRow.NotCycleRowSql}
     ORDER BY l.collection_time DESC
     LIMIT 1) n
 WHERE c.is_enabled";

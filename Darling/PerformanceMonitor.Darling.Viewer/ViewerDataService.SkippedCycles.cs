@@ -19,7 +19,7 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// #5735: this server's skipped-slot rows in the trailing 24 hours, from the Storage read the MCP
     /// <c>skipped_cycles</c> block and the web panel share (<see cref="SkippedCycleReader"/>). Read on every refresh: it
-    /// is one index seek and is never memoised, so a row the loop just wrote shows at once.
+    /// is one bounded range scan on the watermark index and is never memoised, so a row the loop just wrote shows at once.
     /// </summary>
     public Task<SkippedCycleSummary> GetSkippedCycleSummaryAsync(int serverId, CancellationToken cancellationToken = default) =>
         SkippedCycleReader.GetSkippedCycleSummaryAsync(
@@ -28,7 +28,7 @@ public sealed partial class ViewerDataService
 
 /// <summary>
 /// #5735: the one line the Collection Health tab prints about skipped slots; Lite's <c>SkippedCycleSummary.SummaryLine</c> twin
-/// (#5643). The all-clear when there is none, else the rows, the slots and the newest row's time and cause. On Darling a slot is
+/// (#5643, PR #5730). The all-clear when there is none, else the rows, the slots and the newest row's time and cause. On Darling a slot is
 /// one scheduled run of one collector, so the line says "slot(s)" and not cycles; a row is one late stretch (at most one is
 /// written per server per five minutes).
 /// </summary>

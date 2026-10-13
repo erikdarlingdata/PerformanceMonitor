@@ -2,7 +2,7 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// #5735: the one spelling of the <c>collection_log</c> row that records the collection slots a server's loop stepped
-/// over (Lite's twin is <c>CollectionCycleSkip</c>, #5643). The row is not a collector run: <c>collector_name</c> is
+/// over (Lite's twin is <c>CollectionCycleSkip</c>, #5643, PR #5730). The row is not a collector run: <c>collector_name</c> is
 /// <see cref="CollectorName"/> and <c>status</c> is <see cref="Status"/>. It carries a real <c>server_id</c>, so
 /// the data_retention sentinel trick (server_id 0, left out of every per-server read) does not hide it. Every read of
 /// the log that counts runs, rates, streaks, "last collected" or "any row" leaves it out through
