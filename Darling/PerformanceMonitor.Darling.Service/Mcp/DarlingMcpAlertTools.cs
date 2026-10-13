@@ -606,7 +606,7 @@ public sealed class DarlingMcpAlertTools
         "stays, is orphaned = true, and matches nothing. Resolution order per channel: scope first (a route for the " +
         "alert's server, then one for a tag it is under, the deeper tag first, then a fleet-wide route), and inside a " +
         "scope an enabled route matching the metric EXACTLY, then its FAMILY, then * (scoped routes only), then the parent; " +
-        "within a level the lowest route_id with a non-empty column wins.A recovery routes as its firing (Server Restored as Server " +
+        "within a level the lowest route_id with a non-empty column wins. A recovery routes as its firing (Server Restored as Server " +
         "Unreachable), so a channel that saw the fire sees the clear. Routing sits AFTER the cooldown: it changes " +
         "where a post lands, never whether it is sent. Destination values (webhook URLs, the PagerDuty routing key) " +
         "are bearer secrets and are NOT reported — configured_channels lists which channels each route sets by " +
@@ -757,7 +757,7 @@ public sealed class DarlingMcpAlertTools
         smtp_recipients = r.EmailRecipients,
         enabled = r.Enabled,
         modified_at_utc = r.ModifiedAtUtc,
-        /* The scope, labelled, and what it covers now. Null ids = fleet-wide. Orphaned = the server or tag is gone: the row stays, matching nothing. */
+        /* The scope, labelled, and what it covers now. Null ids = fleet-wide. expanded_server_count is null for a fleet-wide route and for a scoped route whose scope could not be read (scope_unreadable tells the two apart). Orphaned = the server or tag is gone: the row stays, matching nothing. */
         scope_server_id = r.ScopeServerId,
         scope_server_name = r.ScopeServerName,
         scope_tag_id = r.ScopeTagId,

@@ -61,7 +61,7 @@ public sealed class PgNotificationRouteStore
         /// <summary>The scope tag's name, or null when the route is not tag-scoped or the tag no longer exists (#5750).</summary>
         public string? ScopeTagName { get; init; }
 
-        /// <summary>How many servers the scope covers right now: the one server, or the tag's whole subtree; null for a fleet-wide route (#5750).</summary>
+        /// <summary>How many servers the scope covers right now: the one server, or the tag's whole subtree; null for a fleet-wide route and for a scoped route whose scope could not be read (scope_unreadable tells the two apart) (#5750).</summary>
         public int? ExpandedServerCount { get; init; }
 
         /// <summary>True when the scoped server or tag no longer exists: the route stays as written and matches nothing (#5750).</summary>
