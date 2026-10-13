@@ -49,6 +49,8 @@ public sealed class MuteRuleExternalSourceSurfaceTests
     [InlineData("n1234567890123456789012345678901", false)]
     [InlineData("n123456789012345678901234567890", true)]
     [InlineData("", false)]
+    [InlineData("nagios\n", false)]
+    [InlineData("nagios\r\n", false)]
     public void TheSourceNameCheckIsTheRegistrysShape(string name, bool valid) =>
         Assert.Equal(valid, MuteRule.IsValidExternalSource(name));
 
@@ -70,6 +72,8 @@ public sealed class MuteRuleExternalSourceSurfaceTests
     [InlineData("n")]
     [InlineData("no spaces")]
     [InlineData("1abc")]
+    [InlineData("nagios\n")]
+    [InlineData("na\ngios")]
     public async Task CreateOverMcp_RefusesAnInvalidSource_AndWritesNothing(string source)
     {
         var store = new FakeMuteRuleStore();
@@ -128,6 +132,21 @@ public sealed class MuteRuleExternalSourceSurfaceTests
 
     private static FakeMuteRuleStore Seeded(string? source) =>
         new FakeMuteRuleStore().Seed(new MuteRule { Id = "r1", ServerName = "SQL01", Reason = "x", ExternalSource = source });
+
+    /// <summary>#5654: a trailing line feed is refused on the web body's create and on the shared update parser (MCP and web
+    /// PATCH), not trimmed into a valid name.</summary>
+    [Fact]
+    public async Task ATrailingLineFeed_IsRefused_OnTheWebCreate_AndOnUpdate()
+    {
+        var store = Seeded(null);
+
+        var created = await DarlingMcpAlertTools.CreateMuteRuleCore(store, "{\"external_source\":\"nagios\\n\"}");
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(created));
+
+        var updated = await DarlingMcpAlertTools.UpdateMuteRuleCore(store, "r1", "{\"external_source\":\"nagios\\n\"}");
+        Assert.NotEqual("updated", DarlingMcpTestData.StatusOf(updated));
+        Assert.Null(store.Row("r1")!.ExternalSource);
+    }
 
     [Fact]
     public async Task Update_SetsTheSource_AndAnAbsentKeyLeavesIt()

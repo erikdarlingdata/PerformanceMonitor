@@ -93,6 +93,7 @@ public sealed class ExternalAlertSourceVerbTests
     [InlineData(new[] { "1orders" }, "not a valid source name")]
     [InlineData(new[] { "or-ders" }, "not a valid source name")]
     [InlineData(new[] { "abcdefghijklmnopqrstuvwxyz0123456" }, "not a valid source name")]
+    [InlineData(new[] { "orders\n" }, "not a valid source name")]
     public void TheNameVerbs_RefuseABadCommandLine(string[] rest, string expected)
     {
         Assert.False(DarlingCliCommands.TryParseAlertSourceArgs("--add-alert-source", rest, true, out _, out _, out var error));
@@ -119,6 +120,148 @@ public sealed class ExternalAlertSourceVerbTests
         var longest = "a" + new string('b', 30);
         Assert.True(ExternalAlertSourceAdmin.IsValidName(longest));
         Assert.True(ExternalAlertSourceAdmin.RoleNameFor(longest).Length <= 63);
+    }
+
+    /// <summary>#5654: the name check runs to the string's true end, so a trailing line feed (which a <c>$</c>-anchored .NET
+    /// pattern lets through) is refused, and the verbs and the mute rule surfaces share one rule.</summary>
+    [Theory]
+    [InlineData("orders\n")]
+    [InlineData("orders\r\n")]
+    [InlineData("orders\0")]
+    public void TheNameRule_RefusesATrailingLineFeed(string name)
+    {
+        Assert.False(ExternalAlertSourceAdmin.IsValidName(name));
+        Assert.True(ExternalAlertSourceAdmin.IsValidName(name.TrimEnd('\n', '\r', '\0')));
+    }
+
+    private static PostgresConfig ManagedWithRole(string role) => new()
+    {
+        Managed = true,
+        Port = 5641,
+        DataDirectory = Path.Combine(Path.GetTempPath(), "darling-store-test", "data"),
+        Network = new PostgresNetworkConfig { Listen = "192.0.2.10", AllowFrom = "192.0.2.0/24", Role = role },
+    };
+
+    /// <summary>#5654: a source on another machine gets the remote viewer's string shape: the viewer's host, VerifyFull and the
+    /// store's own certificate, from the same builder, with the source's login.</summary>
+    [Fact]
+    public void TheRemoteSourceString_VerifiesTheServer_InTheViewersForm()
+    {
+        var postgres = ManagedWithRole("viewer,sources");
+        var remote = DarlingCliCommands.BuildRemoteAlertSourceConnectionString(postgres, "darling_src_orders", "SourcePassword123");
+        Assert.NotNull(remote);
+
+        var builder = new NpgsqlConnectionStringBuilder(remote!.ConnectionString);
+        Assert.Equal(SslMode.VerifyFull, builder.SslMode);
+        Assert.Equal(remote.CertificatePath, builder.RootCertificate);
+        Assert.EndsWith("server.crt", remote.CertificatePath, StringComparison.Ordinal);
+        Assert.Equal("192.0.2.10", builder.Host);
+        Assert.Equal("darling_src_orders", builder.Username);
+        Assert.Equal("SourcePassword123", builder.Password);
+
+        var viewer = DarlingCliCommands.BuildViewerConnectionString(
+            DarlingCliCommands.ResolveViewerHost(postgres.Network!.Listen), postgres.Port, "viewer", "ViewerPassword123", remote.CertificatePath);
+        Assert.Equal(
+            viewer.Replace("Username=viewer;Password=ViewerPassword123", string.Empty, StringComparison.Ordinal),
+            remote.ConnectionString.Replace("Username=darling_src_orders;Password=SourcePassword123", string.Empty, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("viewer")]
+    [InlineData("admin,viewer")]
+    public void TheRemoteSourceString_IsPrintedOnlyWhenSourcesAreAdmitted(string role)
+    {
+        Assert.Null(DarlingCliCommands.BuildRemoteAlertSourceConnectionString(ManagedWithRole(role), "darling_src_orders", "pw"));
+        Assert.Null(DarlingCliCommands.BuildRemoteAlertSourceConnectionString(new PostgresConfig { Managed = false }, "darling_src_orders", "pw"));
+        Assert.Null(DarlingCliCommands.BuildRemoteAlertSourceConnectionString(null, "darling_src_orders", "pw"));
+    }
+
+    [Fact]
+    public void TheResultText_WhenSourcesAreAdmitted_PrintsTheLocalAndTheVerifyingString()
+    {
+        var output = new StringWriter();
+        var exit = DarlingCliCommands.PrintAlertSourceResult(
+            "--add-alert-source",
+            new ExternalAlertSourceAdmin.Result(ExternalAlertSourceAdmin.Outcome.Done, "darling_src_orders", "PwForTheTest0123456789abcdefgh"),
+            "orders", "Host=127.0.0.1;Port=5641;Database=darling;Username=darling;Password=ownerpw", output, new StringWriter(),
+            ManagedWithRole("viewer,sources"));
+
+        Assert.Equal(0, exit);
+        var text = output.ToString();
+        Assert.Equal(2, Regex.Matches(text, "PwForTheTest0123456789abcdefgh").Count);
+        Assert.Single(Regex.Matches(text, "SSL Mode=VerifyFull;Root Certificate="));
+        Assert.Contains("Copy " + Path.Combine(Path.GetTempPath(), "darling-store-test", "server.crt"), text, StringComparison.Ordinal);
+        Assert.DoesNotContain("ownerpw", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5654: rotate and remove say how many open sessions of the login were ended, or print the statement a database
+    /// administrator runs when the owner may not end them.</summary>
+    [Fact]
+    public void TheResultText_SaysWhichSessionsWereEnded_OrPrintsTheStatementForADba()
+    {
+        var ended = new StringWriter();
+        DarlingCliCommands.PrintAlertSourceResult("--rotate-alert-source",
+            new ExternalAlertSourceAdmin.Result(ExternalAlertSourceAdmin.Outcome.Done, "darling_src_orders", "Pw0123456789", SessionsEnded: 3),
+            "orders", "Host=127.0.0.1", ended, new StringWriter());
+        Assert.Contains("Ended 3 open session(s) of login 'darling_src_orders'", ended.ToString(), StringComparison.Ordinal);
+        Assert.Contains("no longer works for a new connection", ended.ToString(), StringComparison.Ordinal);
+
+        var refused = new StringWriter();
+        DarlingCliCommands.PrintAlertSourceResult("--remove-alert-source",
+            new ExternalAlertSourceAdmin.Result(ExternalAlertSourceAdmin.Outcome.Done, "darling_src_orders", LoginDropped: true,
+                EndSessionsSqlForDba: ExternalAlertSourceAdmin.BuildEndSessionsSqlForDba("darling_src_orders")),
+            "orders", "Host=127.0.0.1", refused, new StringWriter());
+        Assert.Contains("may not end the open sessions", refused.ToString(), StringComparison.Ordinal);
+        Assert.Contains(
+            "SELECT pg_catalog.pg_terminate_backend(a.pid) FROM pg_catalog.pg_stat_activity AS a WHERE a.usename = 'darling_src_orders';",
+            refused.ToString(), StringComparison.Ordinal);
+        Assert.Contains(ExternalAlertSourceAdmin.BuildEndSessionsSqlForDba("darling_src_orders"),
+            ExternalAlertSourceAdmin.BuildRemoveSqlForDba("darling_src_orders", "darling"), StringComparison.Ordinal);
+    }
+
+    /// <summary>#5654: when the owner cannot turn utility statement tracking off, the text says the statistics may hold the
+    /// verifier and prints the reset statement for a database administrator.</summary>
+    [Fact]
+    public void TheResultText_PrintsTheStatisticsReset_WhenTrackingCouldNotBeTurnedOff()
+    {
+        var output = new StringWriter();
+        DarlingCliCommands.PrintAlertSourceResult("--add-alert-source",
+            new ExternalAlertSourceAdmin.Result(ExternalAlertSourceAdmin.Outcome.Done, "darling_src_orders", "Pw0123456789",
+                StatementStatisticsResetSql: "SELECT pg_stat_statements_reset();"),
+            "orders", "Host=127.0.0.1", output, new StringWriter());
+        Assert.Contains("may hold", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("SELECT pg_stat_statements_reset();", output.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5654: every statement the verbs run as the store owner names its catalog functions through <c>pg_catalog.</c>, and every
+    /// verb transaction begins with <c>SET LOCAL search_path = pg_catalog, pg_temp</c>, so the shared provisioning step the add
+    /// verb runs inside it resolves the same way.
+    /// </summary>
+    [Fact]
+    public void TheVerbsOwnerSql_NamesCatalogFunctionsThroughPgCatalog_AndPinsTheTransactionSearchPath()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "PerformanceMonitor.sln")))
+        {
+            dir = dir.Parent;
+        }
+
+        var source = File.ReadAllText(Path.Combine(dir!.FullName, "Darling", "PerformanceMonitor.Darling.Service", "ExternalAlertSourceAdmin.cs"));
+        var code = string.Join("\n", source.Split('\n').Where(l => !l.TrimStart().StartsWith("///", StringComparison.Ordinal)
+            && !l.TrimStart().StartsWith("/*", StringComparison.Ordinal) && !l.TrimStart().StartsWith("*", StringComparison.Ordinal)));
+
+        var unqualified = Regex.Matches(code,
+                @"(?<![\w.])(count|max|min|shobj_description|current_database|current_setting|to_regclass|format|lower|pg_terminate_backend|has_\w+_privilege)\s*\(")
+            .Select(m => m.Value).ToArray();
+        Assert.Empty(unqualified);
+        Assert.Matches(new Regex(@"\bFROM pg_catalog\.pg_roles\b"), code);
+        Assert.DoesNotMatch(new Regex(@"\bFROM (pg_roles|pg_stat_activity|pg_authid)\b"), code);
+
+        /* One raw BeginTransactionAsync, inside the helper that pins the search path; every verb calls the helper. */
+        Assert.Single(Regex.Matches(code, @"\.BeginTransactionAsync\("));
+        Assert.Contains("\"SET LOCAL search_path = pg_catalog, pg_temp\"", code, StringComparison.Ordinal);
+        Assert.Equal(3, Regex.Matches(code, @"await BeginOwnerTransactionAsync\(owner, ct\)").Count);
     }
 
     [Fact]

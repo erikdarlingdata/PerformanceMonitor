@@ -1082,7 +1082,7 @@ public sealed class DarlingMcpAlertTools
             /* #5654: a source name the registry could never hold would key a rule that mutes nothing. Blank folds
                to omitted here, like every other optional dimension of this tool. */
             var externalSource = Trimmed(external_source);
-            if (externalSource != null && !MuteRule.IsValidExternalSource(externalSource))
+            if (externalSource != null && (HasControlCharacter(external_source) || !MuteRule.IsValidExternalSource(externalSource)))
             {
                 return Outcome("invalid", MuteRule.InvalidExternalSourceMessage(externalSource));
             }
@@ -1623,7 +1623,7 @@ public sealed class DarlingMcpAlertTools
                 var trimmed = s.Trim();
                 if (trimmed.Length == 0)
                     error = "'external_source' is blank. Pass null to clear the field, or a source name to set it.";
-                else if (!MuteRule.IsValidExternalSource(trimmed))
+                else if (HasControlCharacter(s) || !MuteRule.IsValidExternalSource(trimmed))
                     error = MuteRule.InvalidExternalSourceMessage(trimmed);
                 else
                     changes.Add(new MuteRuleFieldChange("external_source", r => r.ExternalSource = trimmed));
@@ -1825,6 +1825,10 @@ public sealed class DarlingMcpAlertTools
     internal const string DeliveryCooldownColumn = "email_cooldown_minutes";
 
     private static string? Trimmed(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    /* #5654: a source name keeps the spaces-are-trimmed rule of every text field, but a line feed or other control character
+       anywhere in it is refused rather than trimmed away, the same answer the verbs give a name with a trailing line feed. */
+    private static bool HasControlCharacter(string? value) => value is not null && value.Any(char.IsControl);
 
     /// <summary>A small {status, message} envelope for a non-data write outcome (invalid / not_found / unavailable)
     /// — the same shape <see cref="DarlingMcpCustomViewTools"/> uses, so an MCP client can branch on the outcome

@@ -78,6 +78,25 @@ public sealed class ExternalAlertSourceVerbLiveTests
         return await ScalarAsync<long>(connection, $"SELECT config.submit_external_alert('fire', '{key}', 'warning', 'Disk almost full', '93 percent used', 'web01', 93.5)", ct);
     }
 
+    /// <summary>pg_terminate_backend signals the backend and returns; the backend exits a moment later, so this waits up to ten seconds for it.</summary>
+    private static async Task AssertSessionsGoneAsync(NpgsqlConnection owner, string predicate, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        long left;
+        while ((left = await ScalarAsync<long>(owner, $"SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity WHERE {predicate}", ct)) > 0
+            && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(100, ct);
+        }
+
+        Assert.Equal(0L, left);
+    }
+
+    /// <summary>The statements pg_stat_statements recorded that carry this run's login name and a SCRAM verifier, so a failure shows them.</summary>
+    private static async Task<string> RecordedVerifierStatementsAsync(NpgsqlConnection owner, CancellationToken ct) =>
+        await ScalarAsync<string>(owner,
+            $"SELECT COALESCE(pg_catalog.string_agg(pg_catalog.left(query, 300), ' | '), '') FROM pg_stat_statements WHERE query LIKE '%{RoleName}%' AND query LIKE '%SCRAM-SHA-256$%'", ct);
+
     private static async Task<string?> VerifierOfAsync(NpgsqlConnection owner, CancellationToken ct)
     {
         try
@@ -171,6 +190,16 @@ END $do$", ["admin", "viewer", "mcp", GroupName], cleanupCt));
                 return (exit, output.ToString(), error.ToString());
             }
 
+            /* #5654: with pg_stat_statements loaded and utility tracking on for the session, the verbs turn tracking off for their
+               own transaction, so no statement the view records carries the login's verifier. */
+            var statementsTracked = await ScalarAsync<bool>(owner,
+                "SELECT pg_catalog.current_setting('shared_preload_libraries') LIKE '%pg_stat_statements%'", ct);
+            if (statementsTracked)
+            {
+                await ExecAsync(owner, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
+                await ExecAsync(owner, "SET pg_stat_statements.track_utility = on", ct);
+            }
+
             /* Nothing yet. */
             var empty = await RunAsync("--list-alert-sources", null);
             Assert.Equal(0, empty.Exit);
@@ -221,6 +250,11 @@ END $do$", ["admin", "viewer", "mcp", GroupName], cleanupCt));
                 Assert.Equal(0, await ScalarAsync<long>(owner, $"SELECT count(*) FROM pg_stat_statements WHERE query LIKE '%{firstPassword}%'", ct));
             }
 
+            if (statementsTracked)
+            {
+                Assert.Equal(string.Empty, await RecordedVerifierStatementsAsync(owner, ct));
+            }
+
             /* A second add of the same name is refused, and prints no string. */
             var again = await RunAsync("--add-alert-source", SourceName);
             Assert.Equal(1, again.Exit);
@@ -252,9 +286,22 @@ END $do$", ["admin", "viewer", "mcp", GroupName], cleanupCt));
                 passwordsChecked = true;
             }
 
+            /* #5654: a session the login opened before rotate is ended by it. */
+            await using var heldBeforeRotate = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(firstString) { Pooling = false }.ConnectionString);
+            await heldBeforeRotate.OpenAsync(ct);
+            Assert.Equal(1, await ScalarAsync<int>(heldBeforeRotate, "SELECT 1", ct));
+
             /* Rotate: a new password, a new verifier, the old password refused. */
             var rotate = await RunAsync("--rotate-alert-source", SourceName);
             Assert.Equal(0, rotate.Exit);
+            Assert.Contains($"Ended 1 open session(s) of login '{RoleName}'", rotate.Output, StringComparison.Ordinal);
+            await AssertSessionsGoneAsync(owner, $"usename = '{RoleName}'", ct);
+            await Assert.ThrowsAnyAsync<Exception>(() => ScalarAsync<int>(heldBeforeRotate, "SELECT 1", ct));
+
+            if (statementsTracked)
+            {
+                Assert.Equal(string.Empty, await RecordedVerifierStatementsAsync(owner, ct));
+            }
             var secondString = ConnectionStringFrom(rotate.Output);
             var secondPassword = new NpgsqlConnectionStringBuilder(secondString).Password!;
             Assert.NotEqual(firstPassword, secondPassword);
@@ -280,10 +327,16 @@ END $do$", ["admin", "viewer", "mcp", GroupName], cleanupCt));
             Assert.Equal(1, missing.Exit);
             Assert.Contains("No source named", missing.Error);
 
-            /* Remove: the login, the row and the queued alerts go; the count is printed. */
+            /* Remove: the login, the row and the queued alerts go; the count is printed. A session the login holds is ended. */
+            var loginOid = await ScalarAsync<uint>(owner, $"SELECT oid FROM pg_roles WHERE rolname = '{RoleName}'", ct);
+            await using var heldBeforeRemove = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(secondString) { Pooling = false }.ConnectionString);
+            await heldBeforeRemove.OpenAsync(ct);
             var remove = await RunAsync("--remove-alert-source", SourceName);
             Assert.Equal(0, remove.Exit);
             Assert.Contains("dropped", remove.Output);
+            Assert.Contains($"Ended 1 open session(s) of login '{RoleName}'", remove.Output, StringComparison.Ordinal);
+            await AssertSessionsGoneAsync(owner, $"usesysid = {loginOid}", ct);
+            await Assert.ThrowsAnyAsync<Exception>(() => ScalarAsync<int>(heldBeforeRemove, "SELECT 1", ct));
             Assert.Contains("2 queued alert row(s), 2 of them not yet delivered", remove.Output);
             Assert.False(await ScalarAsync<bool>(owner, $"SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RoleName}')", ct));
             Assert.Empty(await GroupMembersAsync(owner, ct));

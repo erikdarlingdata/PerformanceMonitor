@@ -1426,9 +1426,7 @@ public static class DarlingCliCommands
            Every credential and the cert live in the same directory (ParentOf(dataDirectory)), so the cert
            path is role-independent. */
         var dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(postgres);
-        var certificatePath = Path.Combine(
-            Path.GetDirectoryName(DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory))!,
-            DarlingManagedPostgres.ServerCertFileName);
+        var certificatePath = ManagedStoreCertificatePath(dataDirectory);
 
         var handoffs = new List<ViewerHandoff>(roles.Count);
         foreach (var role in roles)
@@ -2216,6 +2214,15 @@ public static class DarlingCliCommands
         string host, int port, string role, string password, string rootCertificatePath) =>
         $"Host={host};Port={port};Username={role};Password={password};Database=darling;" +
         $"Search Path=collect,config,public;SSL Mode=VerifyFull;Root Certificate={rootCertificatePath}";
+
+    /// <summary>
+    /// The managed store's TLS certificate (the PEM a remote client names in <c>Root Certificate</c>), beside the role credentials
+    /// in the parent of the data directory. The viewer handoff and the alert source verbs (#5654) both name this file.
+    /// </summary>
+    internal static string ManagedStoreCertificatePath(string dataDirectory) =>
+        Path.Combine(
+            Path.GetDirectoryName(DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory))!,
+            DarlingManagedPostgres.ServerCertFileName);
 
     /* ================================================================================================
        --configure-network: the interactive opt-in exposure wizard (#1561).
@@ -6033,6 +6040,7 @@ public static class DarlingCliCommands
                 ? $"  Login '{result.RoleName}' dropped."
                 : $"  Login '{result.RoleName}' was not dropped: it is missing, or it was not made by --add-alert-source, or the statements below drop it.");
             output.WriteLine($"  Removed with it: {result.RemovedRows} queued alert row(s), {result.RemovedUndelivered} of them not yet delivered. Alerts it already sent stay in the alert history.");
+            WriteEndedSessions(result, output);
         }
         else
         {
@@ -6040,16 +6048,34 @@ public static class DarlingCliCommands
             output.WriteLine(IsRotateAlertSourceVerb(verb)
                 ? pending
                     ? $"Source '{sourceName}': a new password was generated, and nothing is changed yet. It takes effect, and the old password stops working, only after a database administrator runs the statements below."
-                    : $"Source '{sourceName}': new password set. The old password no longer works."
+                    : $"Source '{sourceName}': new password set. The old password no longer works for a new connection."
                 : pending
                     ? $"Source '{sourceName}' is registered, and its login '{result.RoleName}' does not exist yet. A database administrator creates it with the statements below; until then the connection string does not work."
                     : $"Source '{sourceName}' created (login '{result.RoleName}').");
+            WriteEndedSessions(result, output);
             output.WriteLine();
             output.WriteLine("Connection string (shown ONCE; Darling keeps no copy, so save it now. If it is lost, --rotate-alert-source makes a new one):");
             output.WriteLine();
             output.WriteLine("  " + ExternalAlertSourceAdmin.BuildSourceConnectionString(storeConnectionString, result.RoleName, result.Password!));
             output.WriteLine();
-            output.WriteLine("The host above is the address this service uses for its store. A source on another machine uses the address it reaches the store at.");
+
+            /* #5654: a source on another machine gets the remote viewer's string shape (VerifyFull against the store's own
+               certificate), never the local string with only the host changed. */
+            var remote = BuildRemoteAlertSourceConnectionString(postgres, result.RoleName, result.Password!);
+            if (remote is null)
+            {
+                output.WriteLine("The host above is the address this service uses for its store. A source on another machine uses the address it reaches the store at.");
+            }
+            else
+            {
+                output.WriteLine("The string above is for a source on this machine. A source on another machine uses this one (also shown ONCE):");
+                output.WriteLine();
+                output.WriteLine("  " + remote.ConnectionString);
+                output.WriteLine();
+                output.WriteLine($"It verifies the store's certificate (SSL Mode=VerifyFull). Copy {remote.CertificatePath} to the source machine and point");
+                output.WriteLine("\"Root Certificate\" at the copy. Host must be a name or address the certificate carries.");
+            }
+
             foreach (var line in BuildAlertSourceNetworkNote(postgres, groupExtras))
             {
                 output.WriteLine(line);
@@ -6071,8 +6097,59 @@ public static class DarlingCliCommands
             output.WriteLine(result.DbaSql);
         }
 
+        if (result.StatementStatisticsResetSql is not null)
+        {
+            output.WriteLine();
+            output.WriteLine("This store's owner cannot turn utility statement tracking off, and it is on, so the store's statement statistics may hold");
+            output.WriteLine("the login's password verifier (the statement that set it). Have a database administrator clear them:");
+            output.WriteLine();
+            output.WriteLine(result.StatementStatisticsResetSql);
+        }
+
         output.WriteLine();
         return CollectorToggleExitCode.Success;
+    }
+
+    /// <summary>The sessions line of rotate and remove (#5654): how many open sessions of the login were ended, or the statement a database administrator runs when the owner may not end them.</summary>
+    private static void WriteEndedSessions(ExternalAlertSourceAdmin.Result result, TextWriter output)
+    {
+        if (result.SessionsEnded is { } ended)
+        {
+            output.WriteLine($"  Ended {ended} open session(s) of login '{result.RoleName}'.");
+        }
+        else if (result.EndSessionsSqlForDba is { } sql)
+        {
+            output.WriteLine($"  This store's owner may not end the open sessions of login '{result.RoleName}', so any it holds stay connected. Have a database administrator run:");
+            output.WriteLine("  " + sql);
+        }
+    }
+
+    /// <summary>A source's connection string for another machine, and the certificate file it names.</summary>
+    internal sealed record RemoteAlertSourceString(string ConnectionString, string CertificatePath);
+
+    /// <summary>
+    /// The connection string for a source on another machine (#5654), built exactly as the remote viewer's is
+    /// (<see cref="BuildViewerConnectionString"/>: the host <see cref="ResolveViewerHost"/> picks, SSL Mode=VerifyFull and the store's
+    /// own certificate as the root), with the source's login and password. Only for a managed store whose
+    /// <c>postgres.network.role</c> lists <c>sources</c>; null otherwise. Pure: nothing is written or kept.
+    /// </summary>
+    internal static RemoteAlertSourceString? BuildRemoteAlertSourceConnectionString(PostgresConfig? postgres, string roleName, string password)
+    {
+        if (postgres is null || !postgres.Managed)
+        {
+            return null;
+        }
+
+        var roles = DarlingNetwork.NormalizeNetworkRoles(postgres.Network?.Role);
+        if (roles is null || !roles.Contains(DarlingManagedPostgres.AlertSourcesNetworkToken, StringComparer.Ordinal))
+        {
+            return null;
+        }
+
+        var certificatePath = ManagedStoreCertificatePath(DarlingManagedPostgres.ResolveDataDirectory(postgres));
+        return new RemoteAlertSourceString(
+            BuildViewerConnectionString(ResolveViewerHost(postgres.Network?.Listen), postgres.Port, roleName, password, certificatePath),
+            certificatePath);
     }
 
     /// <summary>
