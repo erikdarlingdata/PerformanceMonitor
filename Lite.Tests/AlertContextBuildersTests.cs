@@ -155,18 +155,44 @@ public class AlertContextBuildersTests
     }
 
     [Fact]
-    public void BuildLongRunningQueryContext_NullQueryHashAndNoText_EmitsNoIncident()
+    public void BuildLongRunningQueryContext_NullQueryHash_EmitsNoIncident()
     {
-        /* #5711: a NULL hash is "the engine did not say", the same as an all-zero one, so the incident is keyed by the
-           statement text instead (QueryHashIdentityParityTests pins that arm); a row with neither stays out of the
-           incident list. This test used to pass text and expect no incident for a NULL hash alone. */
         var context = AlertContextBuilders.BuildLongRunningQueryContext(Server, new List<LongRunningQueryInfo>
         {
-            Lrq(71, 90, db: "StackOverflow", query: "", hash: null)
+            Lrq(71, 90, db: "StackOverflow", query: "SELECT 1", hash: null)
         });
 
         Assert.NotNull(context);
         Assert.Single(context!.Details);
+        Assert.Null(context.Incidents);
+    }
+
+    [Fact]
+    public void BuildLongRunningQueryContext_ZeroQueryHash_EmitsNoIncident()
+    {
+        /* #5711: an all-zero hash is "the engine did not say", the same as NULL, so it emits no incident either. */
+        var context = AlertContextBuilders.BuildLongRunningQueryContext(Server, new List<LongRunningQueryInfo>
+        {
+            Lrq(71, 90, db: "StackOverflow", query: "BACKUP DATABASE [StackOverflow] TO DISK = N'nul'", hash: "0x0000000000000000")
+        });
+
+        Assert.NotNull(context);
+        Assert.Single(context!.Details);
+        Assert.Null(context.Incidents);
+    }
+
+    [Fact]
+    public void BuildLongRunningQueryContext_ZeroQueryHashes_OfDifferentStatements_EmitNoIncident_AndAreNotPooled()
+    {
+        /* #5711: before the fix both rows keyed on the same zero hash and folded into ONE incident. */
+        var context = AlertContextBuilders.BuildLongRunningQueryContext(Server, new List<LongRunningQueryInfo>
+        {
+            Lrq(71, 90, db: "StackOverflow", query: "BACKUP DATABASE [StackOverflow] TO DISK = N'nul'", hash: "0x0000000000000000"),
+            Lrq(72, 80, db: "StackOverflow", query: "DBCC CHECKDB (N'StackOverflow')", hash: "0x0000000000000000")
+        });
+
+        Assert.NotNull(context);
+        Assert.Equal(2, context!.Details.Count);
         Assert.Null(context.Incidents);
     }
 

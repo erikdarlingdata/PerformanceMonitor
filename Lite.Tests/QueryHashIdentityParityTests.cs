@@ -191,31 +191,33 @@ public class QueryHashIdentityParityTests
         new() { SessionId = 1, DatabaseName = db, QueryText = text, QueryHash = hash, ElapsedSeconds = 900 };
 
     [Fact]
-    public void Alert_ZeroHashQueries_OfDifferentStatements_GetDifferentIncidents()
+    public void Alert_ZeroHashQueries_OfDifferentStatements_EmitNoIncident_AndAreNotPooled()
     {
         var incidents = AlertContextBuilders.LongRunningQueryIncidents("srv",
             [Query(Zero, "BACKUP DATABASE [tenant_shared] TO DISK = N'nul'"), Query(Zero, "DBCC CHECKDB (N'tenant_shared')"), Query("0", StatementA)]);
 
-        Assert.Equal(3, incidents.Count);
-        Assert.Equal(3, incidents.Select(i => i.DedupKey).Distinct().Count());
-    }
-
-    [Fact]
-    public void Alert_ZeroHashQueries_OfOneStatement_FoldIntoOneIncident()
-    {
-        var a = AlertContextBuilders.LongRunningQueryIncidents("srv", [Query(Zero, StatementA)]);
-        var b = AlertContextBuilders.LongRunningQueryIncidents("srv", [Query(null, "  " + StatementA.ToUpperInvariant())]);
-
-        Assert.Equal(a.Single().DedupKey, b.Single().DedupKey);
+        Assert.Empty(incidents);
     }
 
     [Theory]
     [InlineData(null, "")]
+    [InlineData(null, "SELECT 1")]
+    [InlineData("", "SELECT 1")]
     [InlineData(Zero, "")]
     [InlineData("0", "   ")]
     [InlineData(Zero, Marker)]
-    public void Alert_AQueryWithNeitherAHashNorText_HasNoIncident(string? hash, string text) =>
+    [InlineData(Zero, "SELECT 1")]
+    public void Alert_AQueryWithAnUnknownHash_HasNoIncident_WhateverItsText(string? hash, string text) =>
         Assert.Empty(AlertContextBuilders.LongRunningQueryIncidents("srv", [Query(hash, text)]));
+
+    [Fact]
+    public void Alert_AnUnknownHashRow_DoesNotHideAKnownHashRow()
+    {
+        var incidents = AlertContextBuilders.LongRunningQueryIncidents("srv",
+            [Query(Zero, StatementA), Query(RealHash, StatementB)]);
+
+        Assert.Single(incidents);
+    }
 
     [Fact]
     public void Alert_ARealHash_KeysExactlyAsBefore_WhateverTheText()
