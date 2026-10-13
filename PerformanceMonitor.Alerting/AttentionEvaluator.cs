@@ -190,6 +190,35 @@ public static class AttentionEvaluator
             }
         }
 
+        return Take(window, runs, oldestTaken);
+    }
+
+    /// <summary>
+    /// The read surface's reading (get_client_timeouts, #5640): the SAME freshness and span rules as <see cref="Read"/>, but the span
+    /// takes EVERY successful run in the window (from the oldest run in it to the newest) instead of stopping at
+    /// <see cref="WindowMinutes"/>, so the rate is the exact count over the whole range asked for. Null when the evaluator would say
+    /// "not observed" (no fresh run, or fewer than two runs). The first run in the window is the BASE, not a taken run: its count row
+    /// covers the time before the window.
+    /// </summary>
+    public static AttentionReading? ReadSpan(AttentionWindow? window, DateTime now)
+    {
+        if (window is null || window.RunTimes.Count == 0)
+        {
+            return null;
+        }
+
+        var runs = window.RunTimes.Distinct().OrderByDescending(t => t).ToList();
+        if (runs[0] < now.AddMinutes(-RunnableQueueEvaluator.FallbackWindowOfTimes(runs)) || runs.Count < 2)
+        {
+            return null;
+        }
+
+        return Take(window, runs, runs.Count - 2);
+    }
+
+    private static AttentionReading Take(AttentionWindow window, List<DateTime> runs, int oldestTaken)
+    {
+        var newest = runs[0];
         var baseRun = runs[oldestTaken + 1];
         var covered = Math.Max(1d, (newest - baseRun).TotalMinutes);
 

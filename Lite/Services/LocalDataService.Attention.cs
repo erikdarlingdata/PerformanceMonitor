@@ -50,6 +50,67 @@ public partial class LocalDataService
         return new AttentionWindow(runs, counts, groups, statements, databases, applications);
     }
 
+    /// <summary>
+    /// The <c>get_client_timeouts</c> read (#5640): the same six shared statements as <see cref="GetAttentionWindowAsync"/> with the
+    /// ceiling on (<c>$3</c> = <paramref name="windowEnd"/>, naive UTC, so an as_of read does not count what came after it), plus the
+    /// newest <paramref name="sampleLimit"/> sampled events (one more is fetched, as the truncation signal). Dumb by contract:
+    /// <see cref="ClientTimeoutsRead"/> judges.
+    /// </summary>
+    public async Task<(AttentionWindow Window, List<ClientTimeoutSample> Samples)> GetAttentionRangeAsync(
+        int serverId, DateTime windowStart, DateTime windowEnd, int sampleLimit)
+    {
+        using var connection = await OpenConnectionAsync();
+
+        var runs = await QueryAttentionAsync(connection, AttentionWindowSql.Runs("v_collection_log", bounded: true), serverId, windowStart, windowEnd,
+            r => r.GetDateTime(0));
+        var counts = await QueryAttentionAsync(connection, AttentionWindowSql.Counts("v_attention_events", bounded: true), serverId, windowStart, windowEnd,
+            r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)));
+        var groups = await QueryAttentionAsync(connection, AttentionWindowSql.SampleGroups("v_attention_events", bounded: true), serverId, windowStart, windowEnd,
+            r => new AttentionSampleGroup(
+                r.GetDateTime(0),
+                r.IsDBNull(1) ? null : r.GetString(1),
+                r.IsDBNull(2) ? null : r.GetString(2),
+                r.GetInt64(3)));
+        var statements = await QueryAttentionAsync(connection, AttentionWindowSql.TopStatements("v_attention_events", bounded: true), serverId, windowStart, windowEnd,
+            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1), r.IsDBNull(2) ? null : r.GetString(2)));
+        var databases = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "database_name", bounded: true), serverId, windowStart, windowEnd,
+            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
+        var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "client_app_name", bounded: true), serverId, windowStart, windowEnd,
+            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
+        var samples = await QueryAttentionAsync(connection, AttentionWindowSql.Samples("v_attention_events", sampleLimit + 1), serverId, windowStart, windowEnd,
+            r => new ClientTimeoutSample(
+                r.IsDBNull(0) ? null : r.GetDateTime(0),
+                r.GetDateTime(1),
+                r.IsDBNull(2) ? null : r.GetString(2),
+                r.IsDBNull(3) ? null : r.GetString(3),
+                r.IsDBNull(4) ? null : r.GetString(4),
+                r.IsDBNull(5) ? null : Convert.ToInt32(r.GetValue(5), System.Globalization.CultureInfo.InvariantCulture),
+                r.IsDBNull(6) ? null : Convert.ToInt64(r.GetValue(6), System.Globalization.CultureInfo.InvariantCulture),
+                r.IsDBNull(7) ? null : r.GetString(7),
+                r.IsDBNull(8) ? null : r.GetString(8)));
+
+        return (new AttentionWindow(runs, counts, groups, statements, databases, applications), samples);
+    }
+
+    private static async Task<List<T>> QueryAttentionAsync<T>(
+        PerformanceMonitorLite.Database.LockedConnection connection, string sql, int serverId, DateTime floor, DateTime ceiling, Func<DbDataReader, T> map)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = floor });
+        command.Parameters.Add(new DuckDBParameter { Value = ceiling });
+
+        var rows = new List<T>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            rows.Add(map(reader));
+        }
+
+        return rows;
+    }
+
     private static async Task<List<T>> QueryAttentionAsync<T>(
         PerformanceMonitorLite.Database.LockedConnection connection, string sql, int serverId, DateTime floor, Func<DbDataReader, T> map)
     {
