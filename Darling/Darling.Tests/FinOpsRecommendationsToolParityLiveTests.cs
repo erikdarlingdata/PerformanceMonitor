@@ -116,7 +116,7 @@ public sealed class FinOpsRecommendationsToolParityLiveTests
     }
 
     private static Task<string> ToolAsync(NpgsqlDataSource postgres, string server, CancellationToken ct) =>
-        DarlingMcpFinOpsRecommendationsTools.GetFinOpsRecommendations(postgres, server, ct);
+        DarlingMcpFinOpsRecommendationsTools.GetFinOpsRecommendations(postgres, server, cancellationToken: ct);
 
     [Fact]
     public async Task Tool_EqualsTheComposer_ForEachServer()

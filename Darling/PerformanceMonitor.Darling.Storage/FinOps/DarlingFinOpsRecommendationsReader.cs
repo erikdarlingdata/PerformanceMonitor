@@ -14,6 +14,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -325,7 +326,7 @@ ORDER BY database_name";
     /// <param name="onCheckFailed">Optional. Invoked once per failed check with that check's label and the exception.
     /// It is not invoked for the VM check's inner CPU fallback, which degrades to the 24-hour window and still emits.</param>
     public static async Task<List<FinOpsRecommendation>> GetRecommendationsAsync(NpgsqlDataSource dataSource, int serverId, decimal monthlyCost, int commandTimeoutSeconds, Action<string, Exception>? onCheckFailed = null,
-        IReadOnlyCollection<string>? secondaryDatabases = null, CancellationToken cancellationToken = default)
+        IReadOnlyCollection<string>? secondaryDatabases = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var recommendations = new List<FinOpsRecommendation>();
         var memoryCutoff = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified);
@@ -333,7 +334,7 @@ ORDER BY database_name";
         /* #5633 item 4: the databases the server has now (its newest database_states snapshot; null when unknown, which skips
            nothing). A database dropped since its rows were collected is left out of the database-named rules below; the index
            read (compression) applies the same set at its own read. */
-        var currentDatabases = await CurrentDatabaseScope.ReadAsync(dataSource, serverId, cancellationToken: cancellationToken);
+        var currentDatabases = await CurrentDatabaseScope.ReadAsync(dataSource, serverId, logger: logger, cancellationToken: cancellationToken);
 
         // 1. Enterprise feature / license audit (collected server_properties + database_config.is_encrypted).
         try
@@ -436,7 +437,7 @@ ORDER BY database_name";
         //    has native Index Analysis, so the sp_IndexCleanup-existence prompt is obsolete).
         try
         {
-            var indexes = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+            var indexes = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, serverId, commandTimeoutSeconds, logger, cancellationToken);
             var rec = FinOpsRecommendationFigures.Compression(
                 indexes.Where(i => !AgReplicaScope.IsSkipped(secondaryDatabases, i.DatabaseName)));
             if (rec != null)

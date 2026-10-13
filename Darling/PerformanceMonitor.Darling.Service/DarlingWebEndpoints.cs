@@ -5658,7 +5658,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ? DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(pg, Server(c), Hours(c, 24), databases, Rows(c, "limit", 50), full_text: QueryBool(c, "full_text", true), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted)
                 : DatabaseNamesRefusal(c),
             ["get_query_store_clutter"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(pg, Server(c), Hours(c, 24), Rows(c, "limit", DarlingMcpQueryStoreClutterTools.DefaultLimit), QueryBool(c, "include_fleet_median", false), AsOf(c), databases, c.RequestAborted)
+                ? DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(pg, Server(c), Hours(c, 24), Rows(c, "limit", DarlingMcpQueryStoreClutterTools.DefaultLimit), QueryBool(c, "include_fleet_median", false), AsOf(c), databases, logger, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
             /* #4198: query_text already had a 2000-character cap before this tool had a full_text opt-in at
                all, so the viewer keeps that exact number through the previewLength overload -- QueryBool
@@ -5682,7 +5682,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_top_procedures_by_cpu"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpDataTools.GetTopProceduresRanked(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", order_by: Str(c, "order_by"), cancellationToken: c.RequestAborted)
+                ? DarlingMcpDataTools.GetTopProceduresRanked(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", order_by: Str(c, "order_by"), cancellationToken: c.RequestAborted, logger: logger)
                 : DatabaseNamesRefusal(c),
             ["get_top_queries_by_cpu"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpDataTools.GetTopQueriesRanked(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), group_by: "query_hash", as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", order_by: Str(c, "order_by"), cancellationToken: c.RequestAborted)
@@ -5932,7 +5932,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_system_health"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSystemHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
             ["get_finops_inventory"] = (c, pg, an) => DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(pg, First(c, "view") ?? "", QueryInt(c, "limit", null, DarlingMcpFinOpsInventoryTools.DefaultLimit), QueryBool(c, "include_removed", false), c.RequestAborted),
-            ["get_finops_recommendations"] = (c, pg, an) => DarlingMcpFinOpsRecommendationsTools.GetFinOpsRecommendations(pg, Server(c), c.RequestAborted),
+            ["get_finops_recommendations"] = (c, pg, an) => DarlingMcpFinOpsRecommendationsTools.GetFinOpsRecommendations(pg, Server(c), logger, c.RequestAborted),
             // FinOps web parity (#4843), set A ends.
             // Each set belongs to one series of changes. Append to your own set only,
             // so the two series never edit the same lines of this read list.
@@ -5942,7 +5942,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             //
             //
             // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
-            ["get_finops"] = (c, pg, an) => DarlingMcpFinOpsTools.GetFinOps(pg, First(c, "view") ?? "", Server(c), Hours(c, 24), QueryInt(c, "limit", null, 10), Str(c, "database_name"), QueryBool(c, "full_text", false), Str(c, "object_name"), c.RequestAborted),
+            ["get_finops"] = (c, pg, an) => DarlingMcpFinOpsTools.GetFinOps(pg, First(c, "view") ?? "", Server(c), Hours(c, 24), QueryInt(c, "limit", null, 10), Str(c, "database_name"), QueryBool(c, "full_text", false), Str(c, "object_name"), logger, c.RequestAborted),
             // FinOps web parity (#4843), set B ends.
         };
 

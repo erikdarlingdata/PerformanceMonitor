@@ -77,7 +77,7 @@ public sealed class DroppedDatabaseScopeLiveTests
         Assert.NotNull(Find(baseline, "idle database"));
         Assert.Contains("SalesA.", Find(baseline, "uncompressed object")!.Detail, StringComparison.Ordinal);
         Assert.Contains("OrdersA", Find(baseline, "low IO latency")!.Detail, StringComparison.Ordinal);
-        var baselineInputs = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, GoldenServerId, TimeoutSeconds, ct);
+        var baselineInputs = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, GoldenServerId, TimeoutSeconds, cancellationToken: ct);
         Assert.Contains(baselineInputs, i => i.DatabaseName == "SalesA");
 
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -96,9 +96,9 @@ public sealed class DroppedDatabaseScopeLiveTests
         Assert.DoesNotContain(rows, r => r.Detail.Contains("ArchiveA", StringComparison.Ordinal) || r.Detail.Contains("SalesA", StringComparison.Ordinal));
         Assert.Contains("OrdersA", Find(rows, "low IO latency")!.Detail, StringComparison.Ordinal);
 
-        var inputs = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, GoldenServerId, TimeoutSeconds, ct);
+        var inputs = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, GoldenServerId, TimeoutSeconds, cancellationToken: ct);
         Assert.DoesNotContain(inputs, i => i.DatabaseName == "SalesA");
-        var analysis = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(dataSource, GoldenServerId, TimeoutSeconds, ct);
+        var analysis = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(dataSource, GoldenServerId, TimeoutSeconds, cancellationToken: ct);
         Assert.DoesNotContain(analysis.Result.DatabaseRollups, r => r.DatabaseName == "SalesA");
     }
 

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 
@@ -351,14 +352,14 @@ LIMIT 1";
     }
 
     /// <summary>Reads the latest per-index snapshot for the server and maps each row to the analyzer input contract.</summary>
-    public static async Task<List<IndexCleanupIndexInput>> GetIndexCleanupInputsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    public static async Task<List<IndexCleanupIndexInput>> GetIndexCleanupInputsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
-        var rows = await ReadIndexObjectStatsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+        var rows = await ReadIndexObjectStatsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken, logger: logger);
         return rows.ConvertAll(MapToIndexInput);
     }
 
     /// <summary>Runs <see cref="IndexObjectStatsLatestSql"/> and returns its rows with their snapshot stamps.</summary>
-    private static async Task<List<IndexObjectStatsDto>> ReadIndexObjectStatsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken, ICollection<string>? omittedDatabases = null)
+    private static async Task<List<IndexObjectStatsDto>> ReadIndexObjectStatsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken, ICollection<string>? omittedDatabases = null, ILogger? logger = null)
     {
         var inputs = new List<IndexObjectStatsDto>();
 
@@ -376,7 +377,7 @@ LIMIT 1";
            index snapshot in the store, and listed in the analysis, the compression recommendation and the rollups as if it
            were current. Its rows are left out here, at the one read every consumer shares. Unknown (no snapshot) keeps all. */
         return await CurrentDatabaseScope.OmitDroppedAsync(
-            dataSource, inputs, r => serverId, r => r.DatabaseName, DatabaseFilter.All, r => r.CollectionTime, omittedDatabases: omittedDatabases, cancellationToken: cancellationToken);
+            dataSource, inputs, r => serverId, r => r.DatabaseName, DatabaseFilter.All, r => r.CollectionTime, omittedDatabases: omittedDatabases, logger: logger, cancellationToken: cancellationToken);
     }
 
     /// <summary>
@@ -412,9 +413,9 @@ LIMIT 1";
     /// The full index-cleanup analysis for one server: reads the latest collected snapshot, derives the
     /// server-fact options, and runs the pure analyzer off the calling thread (the dedupe is string-comparison-heavy).
     /// </summary>
-    public static async Task<IndexCleanupAnalysisResult> GetIndexAnalysisAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    public static async Task<IndexCleanupAnalysisResult> GetIndexAnalysisAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
-        var inputs = await GetIndexCleanupInputsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+        var inputs = await GetIndexCleanupInputsAsync(dataSource, serverId, commandTimeoutSeconds, logger, cancellationToken);
         var options = await GetIndexCleanupOptionsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken: cancellationToken);
         return await Task.Run(() => IndexCleanupAnalyzer.Analyze(inputs, options), cancellationToken);
     }
@@ -427,10 +428,10 @@ LIMIT 1";
     /// snapshot, so a dropped-and-recreated (or restored-as-new) database can leave two ids sharing one name, and each
     /// must carry its own time. Each id's newest cycle carries exactly one, so the map has no collisions.
     /// </summary>
-    public static async Task<IndexAnalysisWithSnapshotTimes> GetIndexAnalysisWithSnapshotTimesAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    public static async Task<IndexAnalysisWithSnapshotTimes> GetIndexAnalysisWithSnapshotTimesAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var omitted = new HashSet<string>(StringComparer.Ordinal);
-        var rows = await ReadIndexObjectStatsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken, omitted);
+        var rows = await ReadIndexObjectStatsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken, omitted, logger);
         var options = await GetIndexCleanupOptionsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken: cancellationToken);
         var times = new Dictionary<int, DateTime>();
         foreach (var row in rows)
