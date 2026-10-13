@@ -59,7 +59,9 @@ public sealed class ServerTagMcpRoleLiveTests
             .Select(line => line.Trim())
             .Where(line => line.StartsWith("GRANT ", StringComparison.Ordinal)
                 && line.EndsWith(" TO mcp;", StringComparison.Ordinal)
-                && (line.Contains("config.server_tags ", StringComparison.Ordinal) || line.Contains("config.server_tag_map ", StringComparison.Ordinal)))
+                && (line.Contains("config.server_tags ", StringComparison.Ordinal)
+                    || line.Contains("config.server_tag_map ", StringComparison.Ordinal)
+                    || line.Contains("config.config_service ", StringComparison.Ordinal)))
             .Select(line => line[..^" TO mcp;".Length] + " TO " + RoleName + ";")
             .ToList();
 
@@ -68,9 +70,13 @@ public sealed class ServerTagMcpRoleLiveTests
         {
             await ExecAsync(owner, $"GRANT USAGE ON SCHEMA config TO {RoleName}; GRANT SELECT ON ALL TABLES IN SCHEMA config TO {RoleName};", ct);
 
-            /* Exactly the two tag-table write grants come out of the product's SQL; a renamed or dropped line
-               would otherwise leave this test granting nothing and still passing. */
-            Assert.Equal(2, tagGrants.Count);
+            /* Exactly the two tag-table write grants plus the two-column config_service grant come out of the product's
+               SQL; a renamed or dropped line would otherwise leave this test granting nothing and still passing. The
+               config_service grant is what the V181 reload-beacon triggers (trg_bump_server_tags / trg_bump_server_tag_map,
+               #5750) need: config_bump_version() is SECURITY INVOKER and UPDATEs config_service.config_version as the
+               writing role, so a role with only the tag-table grants gets 42501 on config_service. The real mcp role
+               holds it already; this scratch role has to be given it the same way. */
+            Assert.Equal(3, tagGrants.Count);
 
             var asMcp = new NpgsqlConnectionStringBuilder(ownerString) { Username = RoleName, Password = RolePassword }.ConnectionString;
             await using var source = NpgsqlDataSource.Create(asMcp);

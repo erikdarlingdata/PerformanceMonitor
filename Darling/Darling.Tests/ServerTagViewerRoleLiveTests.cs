@@ -58,9 +58,13 @@ public sealed class ServerTagViewerRoleLiveTests
             .Select(line => line.Trim())
             .Where(line => line.StartsWith("GRANT ", StringComparison.Ordinal)
                 && line.EndsWith(" TO " + "viewer" + ";", StringComparison.Ordinal)
-                && (line.Contains("config.server_tags ", StringComparison.Ordinal) || line.Contains("config.server_tag_map ", StringComparison.Ordinal)))
+                && (line.Contains("config.server_tags ", StringComparison.Ordinal)
+                    || line.Contains("config.server_tag_map ", StringComparison.Ordinal)
+                    || line.Contains("config.config_service ", StringComparison.Ordinal)))
             .ToList();
-        Assert.Equal(2, tagGrants.Count);
+        /* The two tag-table writes plus the two-column config_service grant: V181's reload-beacon triggers (#5750) run
+           config_bump_version() as the writing role (SECURITY INVOKER), which UPDATEs config_service.config_version. */
+        Assert.Equal(3, tagGrants.Count);
         tagGrants = tagGrants
             .Select(line => line[..^(" TO " + "viewer" + ";").Length] + " TO " + RoleName + ";")
             .ToList();
