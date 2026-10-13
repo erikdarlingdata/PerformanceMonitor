@@ -95,18 +95,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpTrendTools
 {
     /// <summary>
-    /// The wall clock the duration-trend tools hand to the tier decision (#5638), captured ONCE per call. With no
-    /// <paramref name="asOf"/> the window ends at the instant <see cref="McpHelpers.ValidateWindow(int, string, int, out DateTime)"/>
-    /// took, so that instant IS the wall clock and the tier is decided against the very instant the window was computed. Without
-    /// it, <c>ResolveDurationTrendRoute</c> defaulted its clock to a second <c>DateTime.UtcNow</c> read a few milliseconds LATER, and
-    /// a window whose start sits exactly on the raw boundary (<see cref="TimescaleSupport.RawRetentionSpan"/> less
-    /// <see cref="DarlingTrendReader.RawTierMargin"/>, 95 h) fell just past it and flipped to the hourly tier on a read that should
-    /// always be raw. With an <paramref name="asOf"/> the window's end is an anchor in the past and is NEVER the clock:
-    /// <see cref="DarlingTrendReader.ShouldUseRawTier"/> (#2353) measures against the wall clock because retention drops by age,
-    /// so the clock is one <paramref name="wallClock"/> reading (the real clock unless a test passes one).
+    /// The clock the duration-trend tools hand to the tier decision (#5638), captured ONCE per call: with no
+    /// <paramref name="asOf"/> the window ends now, so the window's end IS the clock; with one it is a wall-clock reading, never the
+    /// anchor. The rule lives in <see cref="DurationTrendRouting.TierClock"/> (#5725), shared with the viewer.
     /// </summary>
     internal static DateTime TierClock(string? asOf, DateTime windowEndUtc, Func<DateTime>? wallClock = null) =>
-        string.IsNullOrWhiteSpace(asOf) ? windowEndUtc : (wallClock?.Invoke() ?? DateTime.UtcNow);
+        DurationTrendRouting.TierClock(string.IsNullOrWhiteSpace(asOf), windowEndUtc, wallClock);
 
     [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage over time in time buckets: total server, target, buffer pool and plan cache memory, with granted memory from the memory-grant series joined per bucket. total_granted_mb is null where that series has no snapshot (granted_note says why); use get_memory_grants for grant detail." + BaselineDiscontinuities.DescriptionSentence)]
     public static Task<string> GetMemoryTrend(
