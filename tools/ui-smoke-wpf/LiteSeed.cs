@@ -54,6 +54,20 @@ internal static class LiteSeed
 
             using var conn = duck.CreateConnection();
             await conn.OpenAsync();
+
+            /* The Top Queries grid (LocalDataService.TopQueriesByCpuSql) keeps only rows whose last_execution_time is inside
+               the window and whose group has a positive delta; the analysis scenarios do not set last_execution_time (they
+               never needed it), so a row with none gets its collection time. */
+            foreach (var fix in new[]
+            {
+                "UPDATE query_stats SET last_execution_time = collection_time WHERE last_execution_time IS NULL",
+                "UPDATE query_stats SET delta_execution_count = 1 WHERE delta_execution_count IS NULL",
+            })
+            {
+                using var upd = conn.CreateCommand();
+                upd.CommandText = fix;
+                await upd.ExecuteNonQueryAsync();
+            }
             foreach (var table in new[] { "wait_stats", "query_stats" })
             {
                 using var chk = conn.CreateCommand();
