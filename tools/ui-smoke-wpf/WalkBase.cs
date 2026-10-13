@@ -76,7 +76,7 @@ public abstract class WalkBase : IAsyncLifetime
     protected void Walk()
     {
         var main = Step("main window", () =>
-            Retry.WhileNull(() => _app!.GetMainWindow(_automation!), s_wait, TimeSpan.FromSeconds(1)).Result
+            Retry.WhileNull(() => _app!.GetMainWindow(_automation!), s_wait, TimeSpan.FromSeconds(1), ignoreException: true).Result
             ?? throw new Xunit.Sdk.XunitException("no main window within " + s_wait));
         Shot("00-main-window");
 
@@ -137,7 +137,7 @@ public abstract class WalkBase : IAsyncLifetime
 
     private static T WaitFor<T>(Func<T?> find, string what) where T : class
     {
-        var r = Retry.WhileNull(find, s_wait, TimeSpan.FromMilliseconds(500));
+        var r = Retry.WhileNull(find, s_wait, TimeSpan.FromMilliseconds(500), ignoreException: true);
         return r.Result ?? throw new Xunit.Sdk.XunitException("timed out after " + s_wait + " waiting for " + what);
     }
 
@@ -158,7 +158,7 @@ public abstract class WalkBase : IAsyncLifetime
             var host = root.FindFirstDescendant(cf => cf.ByAutomationId(automationId));
             count = host?.FindAllDescendants(cf => cf.ByControlType(rowType)).Length ?? 0;
             return count > 0;
-        }, s_wait, TimeSpan.FromSeconds(1));
+        }, s_wait, TimeSpan.FromSeconds(1), ignoreException: true);
         Assert.True(r.Result, $"{automationId} showed 0 {rowType} rows after {s_wait}");
         Console.WriteLine($"{automationId}: {count} {rowType} rows");
         return count;
