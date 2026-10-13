@@ -153,9 +153,10 @@ public sealed class McpPageContractTests
 
     private static readonly Regex ParameterLimit = new(@"\bLIMIT \$\d+\s*$", RegexOptions.Compiled);
 
-    /// <summary>The page-contract keys a tool body emits: its count, its bounds, its ordering.</summary>
+    /// <summary>The page-contract keys a tool body emits: its count, its bounds, its ordering, and (#5711) the
+    /// <c>query_identity</c> key the long-query tool tells a client to group by.</summary>
     private static readonly Regex ContractKeys = new(
-        @"\b(\w+_returned|oldest_returned_\w+|newest_returned_\w+)\s*=|\border = ""([a-z_]+)""",
+        @"\b(\w+_returned|oldest_returned_\w+|newest_returned_\w+|query_identity)\s*=|\border = ""([a-z_]+)""",
         RegexOptions.Compiled);
 
     /* ───────────────────────── Darling, reflected ───────────────────────── */
@@ -266,6 +267,32 @@ public sealed class McpPageContractTests
                 $"{darlingName} ↔ {liteName}: Darling emits [{string.Join(", ", darlingKeys.Order())}], "
                 + $"Lite emits [{string.Join(", ", liteKeys.Order())}] — same tool name, different page contract");
         }
+    }
+
+    /// <summary>
+    /// #5711 review: a long-query row with no hash and no statement text (every <c>attention</c>: the collector stores
+    /// NULL statement text for it) has no identity. Both SKUs must say so as JSON null, not one as null and the other as
+    /// "": an "" is a group key a client would pool every cancel and timeout under. The grid's display string stays ""
+    /// (Lite's <c>QueryIdentity</c>); the MCP path reads the null-preserving <c>McpQueryIdentity</c>. The executed halves are Lite's
+    /// <c>McpPageContractTests.GetLongQueryCompletions_ANoTextZeroHashRow_EmitsNull...</c> and the Postgres-backed live test.
+    /// </summary>
+    [Fact]
+    public void LongQueryTool_StatesANoIdentityRowAsNull_OnBothSkus_NotAsAnEmptyString()
+    {
+        var darling = Strip(ToolBody(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpLongQueryTools.cs"), "get_long_query_completions"));
+        var lite = Strip(ToolBody(ReadRepoFileLf("Lite", "Mcp", "McpLongQueryTools.cs"), "get_long_query_completions"));
+
+        Assert.Contains("query_identity = r.QueryIdentity", darling, StringComparison.Ordinal);
+        Assert.Contains("query_identity = r.McpQueryIdentity", lite, StringComparison.Ordinal);
+        foreach (var (label, body) in new[] { ("Darling", darling), ("Lite", lite) })
+        {
+            Assert.DoesNotContain("?? \"\"", body, StringComparison.Ordinal);
+            Assert.Contains("query_hash = ", body, StringComparison.Ordinal);
+        }
+
+        /* The Lite MCP property must not fall back to "": the grid's own QueryIdentity does, and sharing it was the defect. */
+        var data = Strip(ReadRepoFileLf("Lite", "Services", "LocalDataService.LongQueries.cs"));
+        Assert.Matches(@"string\? McpQueryIdentity => QueryHashIdentity\.Identity\(QueryHash, StatementText\);", data);
     }
 
     /* ───────────────────────── #3653 A16: the unknowable row, one spelling ───────────────────────── */
@@ -1492,6 +1519,19 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             JsonAssert.Contains("\"truncated\": true", slowest);
             JsonAssert.Contains("\"order\": \"duration_ms_desc\"", slowest);
             JsonAssert.Contains("\"truncated\": false", await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, 24, 4));
+
+            /* #5711 review: an attention row stores no statement text and the trace's hash 0, so it has no identity; the wire says
+               null for both fields, never "". Ranked last (no duration), so the page above is unchanged. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO long_query_completions (long_query_completion_id, collection_time, server_id, server_name, event_time, event_type, database_name, query_hash, statement_text)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                CollectionIdGenerator.Next(), now, ServerId, ServerName, now, "attention", Db, "0", DBNull.Value);
+            using (var attentionPage = System.Text.Json.JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, 24, 10)))
+            {
+                var attention = attentionPage.RootElement.GetProperty("completions").EnumerateArray().Single(c => c.GetProperty("event_type").GetString() == "attention");
+                Assert.Equal(System.Text.Json.JsonValueKind.Null, attention.GetProperty("query_hash").ValueKind);
+                Assert.Equal(System.Text.Json.JsonValueKind.Null, attention.GetProperty("query_identity").ValueKind);
+            }
 
             /* Plan corrections: 3 re-captures. */
             for (var i = 0; i < 3; i++)

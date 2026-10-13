@@ -9,10 +9,12 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -172,13 +174,24 @@ public sealed partial class ViewerDataService
     /// </para>
     /// </summary>
     public async Task<List<ViewerJobHistoryRow>> GetJobHistoryAsync(
-        DateTime sinceUtc, int? serverId = null, int limit = 2000, DateTime? untilUtc = null, CancellationToken cancellationToken = default)
+        DateTime sinceUtc, int? serverId = null, int limit = 2000, DateTime? untilUtc = null, int? runStatus = null, string? category = null,
+        CancellationToken cancellationToken = default)
     {
         /* #5562 R6: a finished range's end goes into the read (the shared reader's UntilUtc), so the SQL bounds the runs before the
            per-server top-N and the row cap count them. A window that ended in the past on a busy fleet keeps every run inside it, not
            the newest N of everything since the start. The reader's end is inclusive; the picker's end is exclusive (a run at the next
-           day's start is not in "yesterday"), so it is taken one microsecond (the store's precision) earlier. */
-        var filter = untilUtc is { } until ? new JobHistoryFilter(UntilUtc: until.AddTicks(-TimeSpan.TicksPerMicrosecond)) : null;
+           day's start is not in "yesterday"), so it is taken one microsecond (the store's precision) earlier.
+           #5703: the tab's Status and Category go into the read the same way. The row cap keeps the newest N runs of the whole fleet,
+           and one busy server (a job every minute) fills it with its latest runs, so a filter applied to the rows afterwards never
+           saw an older failure on a quieter server: the All Servers grid lost runs the single-server grid showed. The reader's
+           filters run inside the per-server top-N, so the cap counts only matching runs. They do not touch the job stats (the long-running
+           flag and the last success come from the job's successful outcomes, whatever status the grid is filtered to). */
+        var filter = untilUtc is null && runStatus is null && string.IsNullOrWhiteSpace(category)
+            ? null
+            : new JobHistoryFilter(
+                RunStatus: runStatus,
+                Category: string.IsNullOrWhiteSpace(category) ? null : category,
+                UntilUtc: untilUtc is { } until ? until.AddTicks(-TimeSpan.TicksPerMicrosecond) : null);
         var dtos = await DarlingJobHistoryReader.GetAsync(
             _dataSource, sinceUtc, serverId, limit, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, filter, cancellationToken);
 
@@ -194,6 +207,44 @@ public sealed partial class ViewerDataService
 
         return rows;
     }
+
+    /// <summary>
+    /// The Job History tab's Server choices that do not depend on the runs it read (#5703): every managed server the job history
+    /// collector runs on (the sidebar's set, <see cref="GetManagedServersAsync"/>, narrowed by <see cref="JobHistoryCollector.CollectsOn"/>:
+    /// not a disabled server, a PostgreSQL target or an Azure SQL Database, none of which can have job history; Amazon RDS and Azure SQL
+    /// Managed Instance run SQL Agent and stay), by the name the grid's Server column speaks. A server with runs in the window is still
+    /// offered, from the rows. The runs alone would leave a quiet server out of the drop-down whenever a busier server's newest runs fill
+    /// the row cap.
+    /// </summary>
+    public async Task<List<JobHistoryFilterChoices.ServerChoice>> GetJobHistoryServerChoicesAsync(CancellationToken cancellationToken = default)
+    {
+        var servers = await GetManagedServersAsync(cancellationToken);
+        return ServerChoicesOf(servers);
+    }
+
+    /// <summary>Maps the managed servers to Server choices: those the job history collector runs on, by display name.</summary>
+    internal static List<JobHistoryFilterChoices.ServerChoice> ServerChoicesOf(IEnumerable<DarlingServer> servers) =>
+        servers
+            .Where(s => JobHistoryCollector.CollectsOn(s.IsEnabled, s.EngineKind, s.EngineEdition))
+            .Select(s => new JobHistoryFilterChoices.ServerChoice(s.ServerId, string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName))
+            .ToList();
+
+    /// <summary>
+    /// The Job History tab's Category choices (#5703): every category with a run in the window, from a read of its own that the row cap
+    /// and the tab's Status and Category filters do not touch (<see cref="DarlingJobHistoryReader.GetCategoriesAsync"/>). At All
+    /// Servers the grid's read holds only the newest runs of the whole fleet, so a quieter server's categories would be missing from
+    /// the drop-down until a Status filter surfaced them.
+    /// </summary>
+    /// <param name="sinceUtc">The window's start: the one the grid's read takes.</param>
+    /// <param name="untilUtc">The window's end for a range that ended in the past, else null.</param>
+    /// <param name="serverId">The server picked in the tab's Server drop-down, or null at All Servers: the read is that server's, so a
+    /// category only another server has is not offered (picking it would give an empty grid).</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    public Task<List<string>> GetJobHistoryCategoriesAsync(
+        DateTime sinceUtc, DateTime? untilUtc = null, int? serverId = null, CancellationToken cancellationToken = default) =>
+        DarlingJobHistoryReader.GetCategoriesAsync(
+            _dataSource, sinceUtc, untilUtc is { } until ? until.AddTicks(-TimeSpan.TicksPerMicrosecond) : null,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, serverId, cancellationToken);
 
     /// <summary>
     /// The exact window, after the server-local to UTC conversion: keeps the runs at or after

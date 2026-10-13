@@ -325,6 +325,13 @@ public sealed class CaggGroupIndexDropLiveTests
             await dropClientTimeouts.ExecuteNonQueryAsync(ct);
         }
 
+        if (simulatedVersion < ProcedureStatsTotals.RungVersion)
+        {
+            /* V176 (#5638) - the per-collection procedure totals table is the probe's sentinel. */
+            await using var dropTotals = new NpgsqlCommand("DROP TABLE IF EXISTS collect.procedure_stats_totals", connection);
+            await dropTotals.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < 175)
         {
             /* V175 (#5631) - the rows-per-call column of the daily plan regression totals is the probe's sentinel. */

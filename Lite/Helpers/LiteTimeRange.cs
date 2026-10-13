@@ -87,6 +87,24 @@ internal static class LiteTimeRange
         return BoundsOf(range, nowUtc);
     }
 
+    /// <summary>The Job History tab's choices key for the picked window (<see cref="PerformanceMonitor.Common.JobHistoryChoicesKey"/>):
+    /// a relative preset (and the 24-hour fallback a picker with no range gets) slides its start with now, so it is keyed by its
+    /// length, taken from the spec because the span of the resolved instants differs by a few milliseconds between two resolves.
+    /// A calendar period (Today, Month to Date) or a "since X" window has a fixed start and is keyed by it, and by its end only when
+    /// that has passed.</summary>
+    internal static PerformanceMonitor.Common.JobHistoryChoicesKey ChoicesKeyOf(
+        TimeRangePicker picker, DateTime startUtc, DateTime? endUtc, DateTime nowUtc, int? serverId) =>
+        ChoicesKeyOf(picker.Resolve(), startUtc, endUtc, nowUtc, serverId);
+
+    /// <inheritdoc cref="ChoicesKeyOf(TimeRangePicker, DateTime, DateTime?, DateTime, int?)"/>
+    internal static PerformanceMonitor.Common.JobHistoryChoicesKey ChoicesKeyOf(
+        ResolvedTimeRange? range, DateTime startUtc, DateTime? endUtc, DateTime nowUtc, int? serverId)
+    {
+        return range is null || range.Spec.Kind == TimeRangeKind.Relative
+            ? new PerformanceMonitor.Common.JobHistoryChoicesKey(null, range?.Spec.Span ?? TimeSpan.FromHours(24), null, serverId)
+            : PerformanceMonitor.Common.JobHistoryChoicesKey.For(false, startUtc, endUtc ?? nowUtc, endUtc is null, serverId);
+    }
+
     /// <summary><see cref="BoundsOf(TimeRangePicker, int, DateTime)"/> for a range already resolved.</summary>
     internal static (DateTime startUtc, DateTime? endUtc) BoundsOf(ResolvedTimeRange range, DateTime nowUtc)
     {

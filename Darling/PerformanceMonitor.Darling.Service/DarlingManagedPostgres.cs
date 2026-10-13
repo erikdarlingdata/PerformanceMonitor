@@ -1392,6 +1392,20 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
+    /// #5716: the lowest and highest raw readings (bytes, inclusive) that <see cref="QuantizeRam"/> maps to the SAME
+    /// quantized size as <paramref name="totalPhysicalMemoryBytes"/> — "no hardware change" as the v8 fingerprint
+    /// defines it. It is half a GB either side of the quantized value, because that is the rounding
+    /// <see cref="QuantizeRam"/> does; the rule lives here and nowhere else. The lowest end is 1 byte at the very
+    /// bottom, where the quantized size is 0.
+    /// </summary>
+    internal static (long LowestBytes, long HighestBytes) QuantizedRamBucket(long totalPhysicalMemoryBytes)
+    {
+        const long halfGb = 1024L * 1024L * 1024L / 2;
+        var quantized = QuantizeRam(totalPhysicalMemoryBytes);
+        return (Math.Max(quantized - halfGb, 1), quantized + halfGb - 1);
+    }
+
+    /// <summary>
     /// True when the MOST RECENT fingerprint in the conf matches the current hardware — the test that
     /// decides whether <see cref="BuildHardwareSizingConfAppend"/> needs to run (#2845).
     ///

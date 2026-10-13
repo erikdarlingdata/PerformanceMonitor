@@ -345,6 +345,148 @@ public sealed class DarlingStoreHostProfileTests
         Assert.Equal(1024, DarlingStoreHostProfile.ApplyWalDriftTolerance("max_wal_size", 1024, 4096, 16 * Gb));
     }
 
+    /// <summary>The verdict a live check reaches for shared_buffers: the target BuildDerivedTargets gives
+    /// (derived from the QUANTIZED reading), through the #5716 tolerance, into ClassifyVerdict.</summary>
+    private static (HostSettingVerdict Verdict, long Derived) SharedBuffersVerdict(long rawRamBytes, long inForceMb)
+    {
+        var quantizedTarget = DarlingManagedPostgres.DeriveMemorySettings(
+            DarlingManagedPostgres.QuantizeRam(rawRamBytes)).SharedBuffersMb;
+        var derived = DarlingStoreHostProfile.ApplySharedBuffersRawReadingTolerance(
+            "shared_buffers", quantizedTarget, inForceMb, rawRamBytes);
+        var attribution = new PerformanceMonitor.Darling.Service.ConfSettingAttribution(
+            PerformanceMonitor.Darling.Service.ConfSettingOrigin.ManagedBlock, "postgresql.conf", 90, $"{inForceMb}MB");
+        return (DarlingStoreHostProfile.ClassifyVerdict(attribution, inForceMb, derived).Verdict, derived);
+    }
+
+    /// <summary>#5716: a 4 GB host whose OS reports 4092 MB. v5 wrote the RAW derivation (1023 MB); the
+    /// quantized target is 1024 MB. Precondition asserts the plant really splits the two derivations.</summary>
+    [Fact]
+    public void SharedBuffersVerdict_RawReadingGave1023_QuantizedGives1024_1023InForceMatches()
+    {
+        const long raw = 4092L * 1024 * 1024;
+        Assert.Equal(1023, DarlingManagedPostgres.DeriveMemorySettings(raw).SharedBuffersMb);
+        Assert.Equal(1024, DarlingManagedPostgres.DeriveMemorySettings(DarlingManagedPostgres.QuantizeRam(raw)).SharedBuffersMb);
+
+        var (verdict, derived) = SharedBuffersVerdict(raw, 1023);
+
+        Assert.Equal(HostSettingVerdict.Matches, verdict);
+        Assert.Equal(1023, derived); /* the reported derived figure is the one the verdict matched */
+    }
+
+    [Fact]
+    public void SharedBuffersVerdict_SameHost_1024InForceMatches()
+    {
+        var (verdict, derived) = SharedBuffersVerdict(4092L * 1024 * 1024, 1024);
+
+        Assert.Equal(HostSettingVerdict.Matches, verdict);
+        Assert.Equal(1024, derived);
+    }
+
+    /// <summary>#5716 review: the raw reading drifts with no resize (balloon guests, <c>QuantizeRam</c>'s notes). A
+    /// host whose v5 block wrote 1023 MB from 4092 MB and now reads 4088 MB (derivation 1022) is the SAME host:
+    /// both readings quantize to 4 GB, so 1023 still reads Matches. With the band reverted to exact equality
+    /// against today's raw derivation this fails (1023 != 1022).</summary>
+    [Fact]
+    public void SharedBuffersVerdict_RawReadingDriftedWithNoResize_1023InForceStillMatches()
+    {
+        const long wrote = 4092L * 1024 * 1024;
+        const long now = 4088L * 1024 * 1024;
+        Assert.Equal(1023, DarlingManagedPostgres.DeriveMemorySettings(wrote).SharedBuffersMb);
+        Assert.Equal(1022, DarlingManagedPostgres.DeriveMemorySettings(now).SharedBuffersMb);
+        Assert.Equal(DarlingManagedPostgres.QuantizeRam(wrote), DarlingManagedPostgres.QuantizeRam(now));
+
+        var (verdict, derived) = SharedBuffersVerdict(now, 1023);
+
+        Assert.Equal(HostSettingVerdict.Matches, verdict);
+        Assert.Equal(1023, derived);
+    }
+
+    /// <summary>#5716 review: a 3 GB host (768 MB written) resized to 4 GB is a real change and reads stale.</summary>
+    [Fact]
+    public void SharedBuffersVerdict_FourGbHostWith768FromAThreeGbHost_IsStale()
+    {
+        Assert.Equal(768, DarlingManagedPostgres.DeriveMemorySettings(3L * 1024 * 1024 * 1024).SharedBuffersMb);
+
+        var (verdict, derived) = SharedBuffersVerdict(4L * 1024 * 1024 * 1024, 768);
+
+        Assert.Equal(HostSettingVerdict.StaleAfterHardwareChange, verdict);
+        Assert.Equal(1024, derived);
+    }
+
+    /// <summary>#5716 review: the 4 GB bucket is 3.5 GB through 4.5 GB minus a byte. The reading at each end
+    /// reads Matches against its own derivation; the band is the bucket's, so one byte past either end moves to
+    /// the neighbouring bucket and the figure for the far end no longer fits.</summary>
+    [Fact]
+    public void SharedBuffersVerdict_BucketEdges_AreInsideTheBandAndOneBytePastIsNot()
+    {
+        const long gb = 1024L * 1024 * 1024;
+        var (lowest, highest) = DarlingManagedPostgres.QuantizedRamBucket(4 * gb);
+        Assert.Equal(4 * gb - gb / 2, lowest);
+        Assert.Equal(4 * gb + gb / 2 - 1, highest);
+        Assert.Equal(4 * gb, DarlingManagedPostgres.QuantizeRam(lowest));
+        Assert.Equal(4 * gb, DarlingManagedPostgres.QuantizeRam(highest));
+        Assert.Equal(3 * gb, DarlingManagedPostgres.QuantizeRam(lowest - 1));
+        Assert.Equal(5 * gb, DarlingManagedPostgres.QuantizeRam(highest + 1));
+
+        var lowestMb = DarlingManagedPostgres.DeriveMemorySettings(lowest).SharedBuffersMb;
+        var highestMb = DarlingManagedPostgres.DeriveMemorySettings(highest).SharedBuffersMb;
+        Assert.Equal(896, lowestMb);
+        Assert.Equal(1024, highestMb);
+
+        /* Reading at the bucket's lowest end: its own derivation (896) is in force. */
+        Assert.Equal((HostSettingVerdict.Matches, 896L), SharedBuffersVerdict(lowest, lowestMb));
+        /* Reading at the bucket's highest end: the capped 1024 is in force. */
+        Assert.Equal((HostSettingVerdict.Matches, 1024L), SharedBuffersVerdict(highest, highestMb));
+
+        /* One MB under the lowest derivation (what a 3.5 GB - 1 byte reading would have written) is stale. */
+        Assert.Equal(HostSettingVerdict.StaleAfterHardwareChange, SharedBuffersVerdict(lowest, lowestMb - 1).Verdict);
+        /* One byte under the bucket is a 3 GB host: its band tops out at 895 MB, so 896 is stale there. */
+        Assert.Equal(HostSettingVerdict.StaleAfterHardwareChange, SharedBuffersVerdict(lowest - 1, 896).Verdict);
+        /* One byte over is a 5 GB host; the cap makes the band 1024 only, so 1023 is stale. */
+        Assert.Equal(HostSettingVerdict.StaleAfterHardwareChange, SharedBuffersVerdict(highest + 1, 1023).Verdict);
+    }
+
+    /// <summary>#5716: a 2 GB host moved to 4 GB keeps v5's 512 MB, below the 4 GB bucket's band.</summary>
+    [Fact]
+    public void SharedBuffersVerdict_FourGbHostWith512FromATwoGbHost_IsStale()
+    {
+        var (verdict, derived) = SharedBuffersVerdict(4092L * 1024 * 1024, 512);
+
+        Assert.Equal(HostSettingVerdict.StaleAfterHardwareChange, verdict);
+        Assert.Equal(1024, derived);
+    }
+
+    /// <summary>#5716: the tolerance is shared_buffers-only and needs a readable current value, so every other
+    /// setting's target is untouched.</summary>
+    [Fact]
+    public void SharedBuffersTolerance_LeavesEveryOtherSettingAndAnUnreadableValueAlone()
+    {
+        const long raw = 4092L * 1024 * 1024;
+        Assert.Equal(1024, DarlingStoreHostProfile.ApplySharedBuffersRawReadingTolerance("shared_buffers", 1024, null, raw));
+        Assert.Equal(3072, DarlingStoreHostProfile.ApplySharedBuffersRawReadingTolerance("effective_cache_size", 3072, 1023, raw));
+        Assert.Equal(1024, DarlingStoreHostProfile.ApplySharedBuffersRawReadingTolerance("work_mem", 1024, 1023, raw));
+    }
+
+    /// <summary>#5716: both verdict producers must route their derived target through the tolerance before
+    /// ClassifyVerdict. <c>GatherSettingProfilesAsync</c> builds the startup profile (via
+    /// <c>GatherStartupProfileAsync</c>, which the worker logs a warning from per stale row) and feeds
+    /// <c>--check-settings</c>' first table and <c>get_store_host</c>; <c>ComputeAndStoreManagedConfVerdictsAsync</c>
+    /// writes the stored <c>collect.managed_conf_verdicts</c> rows the viewer and MCP roles read. No self-alert
+    /// consumes a stale verdict.</summary>
+    [Theory]
+    [InlineData("GatherSettingProfilesAsync")]
+    [InlineData("ComputeAndStoreManagedConfVerdictsAsync")]
+    public void SharedBuffersTolerance_IsAppliedBeforeClassifyVerdictByBothVerdictProducers(string member)
+    {
+        var body = CSharpSourceWalker.StripCommentsAndStrings(
+            StartupCommandTimeoutTests.SerialLoopMemberBody("DarlingStoreHostProfile.cs", member));
+
+        var tolerance = body.IndexOf("ApplySharedBuffersRawReadingTolerance(", StringComparison.Ordinal);
+        var classify = body.IndexOf("ClassifyVerdict(", StringComparison.Ordinal);
+        Assert.True(tolerance >= 0, member + " must call ApplySharedBuffersRawReadingTolerance");
+        Assert.True(tolerance < classify, member + " must apply the tolerance before ClassifyVerdict");
+    }
+
     [Fact]
     public void ClassifyVerdict_OperatorOverrideIsAlwaysOperatorOverride()
     {
