@@ -201,8 +201,9 @@ WHERE status = 'pending'
   AND expires_at <= now()";
 
     /// <summary>
-    /// Marks every row a dead run left claimed interrupted, and never sends it. $1 the age a claim must have reached, as an
-    /// interval, so a live service's fresh claim is left alone.
+    /// Marks every row a dead run left claimed interrupted, and never sends it. $1 the instant a claim must predate (UTC now
+    /// minus the age, bound as <c>timestamptz</c> by <c>UtcAgo</c>, #5654: the store clock-discipline census
+    /// takes no bare clock beside a <c>claimed_at</c> name), so a live service's fresh claim is left alone.
     /// </summary>
     public const string ReapSql = @"
 UPDATE config.external_alert_pending
@@ -210,10 +211,10 @@ SET status = 'interrupted',
     completed_at = now(),
     reason = 'the run that claimed it ended before reporting a result; not sent again'
 WHERE status = 'claimed'
-  AND claimed_at < now() - $1";
+  AND claimed_at < $1";
 
     /// <summary>
-    /// The reap with the delivered-if-logged refinement (#5654). $1 the age a claim must have reached, as an interval.
+    /// The reap with the delivered-if-logged refinement (#5654). $1 the instant a claim must predate, as <see cref="ReapSql"/>.
     /// A claimed row that old becomes <c>delivered</c> when a history row written after the claim carries its pending id
     /// in <c>context_json</c> and is not a send that failed on every channel (the drain writes that row after the send, so its existence is the proof the send
     /// happened), else <c>interrupted</c>. Either way it is never claimed again and never sent again. The history scan is
@@ -239,7 +240,7 @@ WITH reaped AS (
                      THEN 'the run that claimed it ended before marking it; its history row shows it was sent'
                      ELSE 'the run that claimed it ended before reporting a result; not sent again' END
     WHERE p.status = 'claimed'
-      AND p.claimed_at < now() - $1
+      AND p.claimed_at < $1
     RETURNING p.status
 )
 SELECT status, count(*)::int FROM reaped GROUP BY status";
@@ -324,7 +325,7 @@ RETURNING fired_severity";
     /// <summary>
     /// The rows the drain gave up on inside a window (#5654), by source and terminal status: <c>expired</c> (past its deadline
     /// still pending), <c>interrupted</c> (a stopped run left it claimed) and <c>failed</c> (every send failed, no retry
-    /// left). $1 the window, as an interval, counted back from now on <c>completed_at</c>. Read by the self-monitor alert
+    /// left). $1 the start of the window, UTC now minus the window, bound as <c>timestamptz</c> and compared with <c>completed_at</c>. Read by the self-monitor alert
     /// "External Alerts Undelivered"; <c>delivered</c>, <c>muted</c>, <c>no_channel</c> and <c>ignored</c> are outcomes a
     /// source or an operator chose, so they are not counted.
     /// </summary>
@@ -333,11 +334,20 @@ SELECT s.source_name, p.status, count(*)::int
 FROM config.external_alert_pending p
 JOIN config.external_alert_source s ON s.source_id = p.source_id
 WHERE p.status IN ('expired', 'interrupted', 'failed')
-  AND p.completed_at >= now() - $1
+  AND p.completed_at >= $1
 GROUP BY s.source_name, p.status
 ORDER BY s.source_name, p.status";
 
     private const int MaxReasonLength = 500;
+
+    /// <summary>
+    /// UTC now minus <paramref name="age"/>, <c>Kind=Utc</c> so Npgsql binds it as <c>timestamptz</c> (#5654). The queue's
+    /// time columns are <c>timestamptz</c>, so a Utc bound is the right frame; the store clock-discipline census takes the
+    /// bound from the service clock rather than a bare <c>now()</c> next to a column name that other tables hold as
+    /// naive UTC. The DB stamps <c>claimed_at</c> and <c>completed_at</c> itself, so the two clocks differ by their skew,
+    /// seconds against windows of a minute or more.
+    /// </summary>
+    private static DateTime UtcAgo(TimeSpan age) => DateTime.SpecifyKind(DateTime.UtcNow - age, DateTimeKind.Utc);
 
     private readonly NpgsqlDataSource _dataSource;
     private readonly int _commandTimeoutSeconds;
@@ -505,8 +515,9 @@ ORDER BY s.source_name, p.status";
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(window, TimeSpan.Zero);
         await using var command = _dataSource.CreateCommand(CountUndeliveredSql);
         command.CommandTimeout = _commandTimeoutSeconds;
-        command.Parameters.Add(new NpgsqlParameter<TimeSpan> { TypedValue = window });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = UtcAgo(window) });
         var counts = new List<ExternalAlertUndeliveredCount>();
+        /* the window start is UTC now minus the window, bound as timestamptz (the columns are timestamptz) */
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -533,7 +544,7 @@ ORDER BY s.source_name, p.status";
         ArgumentOutOfRangeException.ThrowIfLessThan(claimedFor, TimeSpan.Zero);
         await using var command = _dataSource.CreateCommand(ReapSql);
         command.CommandTimeout = _commandTimeoutSeconds;
-        command.Parameters.Add(new NpgsqlParameter<TimeSpan> { TypedValue = claimedFor });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = UtcAgo(claimedFor) });
         return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -548,7 +559,7 @@ ORDER BY s.source_name, p.status";
         ArgumentOutOfRangeException.ThrowIfLessThan(claimedFor, TimeSpan.Zero);
         await using var command = _dataSource.CreateCommand(ReapWithHistorySql);
         command.CommandTimeout = _commandTimeoutSeconds;
-        command.Parameters.Add(new NpgsqlParameter<TimeSpan> { TypedValue = claimedFor });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = UtcAgo(claimedFor) });
 
         var delivered = 0;
         var interrupted = 0;
