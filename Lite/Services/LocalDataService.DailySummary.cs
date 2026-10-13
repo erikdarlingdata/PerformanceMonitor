@@ -85,6 +85,7 @@ coll AS (
            COUNT(*) FILTER (WHERE status = 'ERROR') AS errs
     FROM v_collection_log
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   collector_name <> 'collection_cycle'
     GROUP BY 1
 ),
 mem AS (

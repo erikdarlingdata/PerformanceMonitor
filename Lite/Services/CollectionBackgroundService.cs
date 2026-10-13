@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
@@ -187,6 +188,17 @@ public class CollectionBackgroundService : BackgroundService
            a cycle's work takes, so a collector's due check compares exact grid times. */
         var cycleStart = DateTime.UtcNow;
 
+        /* #5643: each step of a cycle is timed, so a cycle that runs past its interval can say which step took the
+           time. The previous cycle's stamp is what the next stamp is compared with to count skipped slots. */
+        var steps = new List<CycleStep>();
+        var cycleWatch = new Stopwatch();
+        var stepWatch = new Stopwatch();
+        void Lap(string name)
+        {
+            steps.Add(new CycleStep(name, stepWatch.ElapsedMilliseconds));
+            stepWatch.Restart();
+        }
+
         /* #5642: the pileup check runs on its own cadence beside the collection loop, not behind it. It keeps the
            loop's two gates (a paused service and a down local database) and ends with the stopping token. */
         var pileupLoop = RunPileupCadenceAsync(
@@ -199,10 +211,17 @@ public class CollectionBackgroundService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            var previousCycleStart = cycleStart;
+            steps.Clear();
+            cycleWatch.Reset();
+
             /* While Lite's local database is down after a fatal error, the whole cycle skips, housekeeping included:
                every step would fail against the invalidated database. The reopen does not need a cycle to run. */
             if (!IsPaused && !_collectorService.LocalDatabaseIsDown())
             {
+                cycleWatch.Restart();
+                stepWatch.Restart();
+
                 /* Check all server connections before collecting */
                 if (_serverManager != null)
                 {
@@ -215,6 +234,7 @@ public class CollectionBackgroundService : BackgroundService
                             "Connection check faulted AFTER being abandoned — this is the wedge's own exception (#2148)"),
                         cancellationToken: stoppingToken);
                     LogStepOutcome(check, "Connection check", ConnectionCheckDeadline);
+                    Lap("connection_check");
                 }
 
                 try
@@ -236,19 +256,26 @@ public class CollectionBackgroundService : BackgroundService
                     IsCollecting = false;
                 }
 
+                Lap("collectors");
+
                 /* Periodic archival (time-based or size-based) */
                 await RunArchivalIfDueAsync();
+                Lap("archival");
 
                 await RunQueryStoreBackfillIfDueAsync(stoppingToken);
+                Lap("query_store_backfill");
 
                 /* Periodic retention cleanup */
                 await RunRetentionIfDueAsync();
+                Lap("retention");
 
                 /* Periodic analysis-findings retention (rolling 30-day purge) */
                 await RunFindingsCleanupIfDueAsync();
+                Lap("findings_cleanup");
 
                 /* Periodic dismissed-archive-alert sidecar retention (rolling 180-day purge) */
                 await RunDismissedAlertsCleanupIfDueAsync();
+                Lap("dismissed_alerts_cleanup");
 
                 /* #3467: the same-statement-pileup finding is evaluated on a cadence, NOT on the analysis
                    interval, which is the whole point (the measured incident's evidence sat in the store 21
@@ -258,6 +285,7 @@ public class CollectionBackgroundService : BackgroundService
 
                 /* Periodic scheduled analysis + high-severity finding notifications */
                 await RunAnalysisIfDueAsync(stoppingToken);
+                Lap("analysis");
 
                 /* Log process memory at the end of each cycle. Lets bug reporters
                    self-report memory without Task Manager, gives us a continuous
@@ -265,12 +293,18 @@ public class CollectionBackgroundService : BackgroundService
                    that would otherwise need external sampling to detect. Three
                    property reads — negligible overhead at 1-minute cadence. */
                 LogProcessMemory();
+                cycleWatch.Stop();
             }
 
             try
             {
+                var waitStartedUtc = DateTime.UtcNow;
                 cycleStart = await WaitForNextCycleAsync(cycleStart, CollectionInterval, () => DateTime.UtcNow,
                     (wait, token) => Task.Delay(wait, token), stoppingToken);
+
+                /* #5643: the wait skips a missed grid slot and does not replay it; this is where that stops being silent. */
+                await ReportSkippedSlotsAsync(previousCycleStart, cycleStart, cycleWatch.Elapsed,
+                    DateTime.UtcNow - waitStartedUtc, steps, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -289,6 +323,27 @@ public class CollectionBackgroundService : BackgroundService
         }
 
         _logger?.LogInformation("Collection background service stopped");
+    }
+
+    /// <summary>
+    /// #5643: after the wait returns the next cycle's stamp, says so when slots were skipped: one Warning line and one
+    /// <c>collection_log</c> row per enabled server (<see cref="RemoteCollectorService.LogSkippedCycleAsync"/>). A cycle on
+    /// time, a stamp a hair off the grid and #4732's backward clock step skip nothing and say nothing. Nothing here throws
+    /// but a stop: a failed record is logged and the loop carries on.
+    /// </summary>
+    internal async Task ReportSkippedSlotsAsync(DateTime previousCycleStart, DateTime nextCycleStart, TimeSpan cycleElapsed,
+        TimeSpan waitElapsed, IReadOnlyList<CycleStep> steps, CancellationToken cancellationToken)
+    {
+        var report = CollectionCycleSkip.Build(
+            CollectionCycleSkip.CountSkippedSlots(previousCycleStart, nextCycleStart, CollectionInterval),
+            cycleElapsed, waitElapsed, steps, CollectionInterval);
+        if (report == null)
+        {
+            return;
+        }
+
+        _logger?.LogWarning("{Message}", report.Message);
+        await _collectorService.LogSkippedCycleAsync(previousCycleStart, report, cancellationToken);
     }
 
     /// <summary>

@@ -155,14 +155,16 @@ WHERE server_id = $1 AND deadlock_time >= $2";
         }
 
         /* Last collection time from collection_log — hot table first (#3895). A miss on both leaves the CPU
-           stamp above in place, exactly as the single view read did. */
+           stamp above in place, exactly as the single view read did. #5643: the loop's skipped-slots row is not a
+           collection, so it cannot make a stalled server read fresh. */
         foreach (var relation in NewestFirstRelations("collection_log"))
         {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SELECT MAX(collection_time)
 FROM " + relation + @"
-WHERE server_id = $1";
+WHERE server_id = $1
+AND   collector_name <> 'collection_cycle'";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             var result = await cmd.ExecuteScalarAsync();
             if (result != null && result != DBNull.Value)

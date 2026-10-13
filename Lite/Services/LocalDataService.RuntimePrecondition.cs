@@ -99,11 +99,13 @@ SELECT (
            SELECT MAX(collection_time)
            FROM collection_log
            WHERE server_id = $1
+           AND   collector_name <> 'collection_cycle'
        ) AS server_last_collected,
        (
            SELECT MIN(collection_time)
            FROM collection_log
            WHERE server_id = $1
+           AND   collector_name <> 'collection_cycle'
        ) AS server_first_collected";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

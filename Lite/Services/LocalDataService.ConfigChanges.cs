@@ -167,7 +167,7 @@ public partial class LocalDataService
         command.CommandText = $@"
 SELECT 1
 WHERE EXISTS (SELECT 1 FROM {view} WHERE server_id = $1 AND capture_time < $2)
-AND   EXISTS (SELECT 1 FROM v_collection_log WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)";
+AND   EXISTS (SELECT 1 FROM v_collection_log WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 AND collector_name <> 'collection_cycle')";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });

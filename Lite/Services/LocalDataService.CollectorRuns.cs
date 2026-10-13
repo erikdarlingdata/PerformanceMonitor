@@ -190,6 +190,7 @@ SELECT collector_name,
        MAX(collection_time) AS last_collected
 FROM v_collection_log
 WHERE server_id = $1
+AND   collector_name <> 'collection_cycle'
 GROUP BY collector_name";
 
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
