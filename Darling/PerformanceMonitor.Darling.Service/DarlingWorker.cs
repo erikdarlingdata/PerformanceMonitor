@@ -112,6 +112,11 @@ public sealed class DarlingWorker : BackgroundService
        so matching its #3304 neighbour costs nothing. */
     private static readonly TimeSpan s_staleMuteCheckInterval = TimeSpan.FromMinutes(5);
 
+    /* #5654: how often the external-alert delivery check reads the count of rows the drain gave up on. The count looks back
+       DarlingSelfAlertEvaluator.ExternalAlertsWindow (an hour), so a slower tick only delays the alert and its clear by
+       minutes; the read is one grouped count over a table the retention job keeps short. */
+    private static readonly TimeSpan s_externalAlertsCheckInterval = TimeSpan.FromMinutes(5);
+
     /// <summary>#3514: how often the sweep re-evaluates the web-dashboard TLS certificate's expiry. Hourly is
     /// ample for a day-granularity fact (the evaluator's own daily refire gates the actual firing); the check
     /// itself is a field read and a date compare.</summary>
@@ -960,6 +965,10 @@ public sealed class DarlingWorker : BackgroundService
     /* MinValue = the first sweep after startup evaluates the stale-mute check (#3306), then every
        s_staleMuteCheckInterval. Fleet-level (mute rules are a store-wide concept), so a single field. */
     private DateTime _nextStaleMuteCheckUtc = DateTime.MinValue;
+
+    /* MinValue = the first sweep after startup runs the external-alert delivery check (#5654), then every
+       s_externalAlertsCheckInterval. Fleet-level, so a single field. */
+    private DateTime _nextExternalAlertsCheckUtc = DateTime.MinValue;
 
     /* #3514: next due time for the web-dashboard TLS certificate expiry self-alert. Fleet-level (the web
        certificate is a store-wide concept), so a single field like the stale-mute cadence above. */
@@ -3494,8 +3503,9 @@ LIMIT 1";
            check and history store as the custom alerts above, so an external alert obeys every route and mute rule and
            lands in the same history. A registered server name maps to its id under the servers lock; an unregistered
            name stays a label in the server_id 0 bucket. */
+        var externalAlertStore = new ExternalAlertStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
         var externalAlertDrain = new ExternalAlertDrain(
-            new ExternalAlertStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds),
+            externalAlertStore,
             alertsEnabled: () => alertSettings.AlertsEnabled,
             (outcome, token) => deliverer.DeliverAndReportAsync(outcome, token),
             (metric, serverName, serverKey, detail, token) => deliverer.TryResolvePagerDutyAsync(metric, serverName, serverKey, detail, token),
@@ -4006,6 +4016,17 @@ LIMIT 1";
             {
                 _nextStaleMuteCheckUtc = DateTime.UtcNow.Add(s_staleMuteCheckInterval);
                 await _selfAlerts.EvaluateStaleMuteRulesAsync(muteRuleService.GetRules(), stoppingToken);
+            }
+
+            /* #5654: external alerts the drain gave up on (expired, interrupted or failed every send). A source that queues
+               an alert believes it was delivered, and nothing else reports that it was not. The count is one store read per
+               tick; a failed read holds the standing alert rather than resolving it. Fleet-level, own slow cadence; the
+               Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
+            /* #4732: the stamp below is written as now + s_externalAlertsCheckInterval, so that is the span. */
+            if (_selfAlerts is not null && StampIsDue(_nextExternalAlertsCheckUtc, s_externalAlertsCheckInterval, DateTime.UtcNow))
+            {
+                _nextExternalAlertsCheckUtc = DateTime.UtcNow.Add(s_externalAlertsCheckInterval);
+                await EvaluateExternalAlertsAsync(externalAlertStore, stoppingToken);
             }
 
             /* #4750: a webhook channel that has failed three times in a row. A channel can fail for weeks while
@@ -9587,6 +9608,32 @@ LIMIT $3";
         {
             await _selfAlerts!.EvaluateCustomRuleHealthAsync(report, cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// #5654: reads the count of external alert rows the drain gave up on in the last
+    /// <see cref="DarlingSelfAlertEvaluator.ExternalAlertsWindow"/> and hands it to
+    /// <see cref="DarlingSelfAlertEvaluator.EvaluateExternalAlertsAsync"/>. A failed read is counted on #3013's swallowed-read
+    /// counter and sends no report, so the standing alert is held, never resolved on uncertainty.
+    /// </summary>
+    private async Task EvaluateExternalAlertsAsync(ExternalAlertStore store, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<ExternalAlertUndeliveredCount> counts;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            counts = await store.CountUndeliveredAsync(DarlingSelfAlertEvaluator.ExternalAlertsWindow, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "External alert self-alert: could not count undelivered rows after {ElapsedMs} ms - the standing alert is held this tick: {Message}",
+                readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(null, "external alert self-alert (undelivered count)", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        await _selfAlerts!.EvaluateExternalAlertsAsync(new DarlingSelfAlertEvaluator.ExternalAlertsReport(counts), cancellationToken);
     }
 
     /// <summary>

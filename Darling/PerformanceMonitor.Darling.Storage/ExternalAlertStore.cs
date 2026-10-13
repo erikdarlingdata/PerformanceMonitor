@@ -34,6 +34,9 @@ public sealed record ExternalAlertPendingRow(
     DateTime ExpiresAtUtc,
     int Attempts);
 
+/// <summary>How many rows of one source ended in one give-up status (<c>expired</c>, <c>interrupted</c> or <c>failed</c>) inside a window (#5654).</summary>
+public sealed record ExternalAlertUndeliveredCount(string SourceName, string Status, int Count);
+
 /// <summary>What a claimed row became. Each maps to one terminal <c>status</c> value of the pending table.</summary>
 public enum ExternalAlertOutcome
 {
@@ -318,6 +321,22 @@ WHERE source_id = $1 AND alert_key = $2 AND server_label = $3
   AND firing
 RETURNING fired_severity";
 
+    /// <summary>
+    /// The rows the drain gave up on inside a window (#5654), by source and terminal status: <c>expired</c> (past its deadline
+    /// still pending), <c>interrupted</c> (a stopped run left it claimed) and <c>failed</c> (every send failed, no retry
+    /// left). $1 the window, as an interval, counted back from now on <c>completed_at</c>. Read by the self-monitor alert
+    /// "External Alerts Undelivered"; <c>delivered</c>, <c>muted</c>, <c>no_channel</c> and <c>ignored</c> are outcomes a
+    /// source or an operator chose, so they are not counted.
+    /// </summary>
+    public const string CountUndeliveredSql = @"
+SELECT s.source_name, p.status, count(*)::int
+FROM config.external_alert_pending p
+JOIN config.external_alert_source s ON s.source_id = p.source_id
+WHERE p.status IN ('expired', 'interrupted', 'failed')
+  AND p.completed_at >= now() - $1
+GROUP BY s.source_name, p.status
+ORDER BY s.source_name, p.status";
+
     private const int MaxReasonLength = 500;
 
     private readonly NpgsqlDataSource _dataSource;
@@ -474,6 +493,27 @@ RETURNING fired_severity";
         command.Parameters.Add(new NpgsqlParameter<long[]> { TypedValue = pendingIds.ToArray() });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serviceInstance });
         return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// How many rows the drain gave up on in the last <paramref name="window"/>, per source and status
+    /// (<see cref="CountUndeliveredSql"/>). Empty when there are none. Read only.
+    /// </summary>
+    public async Task<IReadOnlyList<ExternalAlertUndeliveredCount>> CountUndeliveredAsync(
+        TimeSpan window, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(window, TimeSpan.Zero);
+        await using var command = _dataSource.CreateCommand(CountUndeliveredSql);
+        command.CommandTimeout = _commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<TimeSpan> { TypedValue = window });
+        var counts = new List<ExternalAlertUndeliveredCount>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            counts.Add(new ExternalAlertUndeliveredCount(reader.GetString(0), reader.GetString(1), reader.GetInt32(2)));
+        }
+
+        return counts;
     }
 
     /// <summary>Marks every pending row past its deadline expired. Returns how many.</summary>

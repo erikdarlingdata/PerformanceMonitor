@@ -546,7 +546,7 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.PolicyJobFailingMetric,
             /* #3783: the store's TOAST slack and checkpointer pressure, both fired through the constant. */
             DarlingSelfAlertEvaluator.ToastSlackMetric, DarlingSelfAlertEvaluator.CheckpointerPressureMetric,
-            /* #5654: the external-alert delivery health check's alert; the check itself is a later part. */
+            /* #5654: the external-alert delivery health check's alert. */
             DarlingSelfAlertEvaluator.ExternalAlertsUndeliveredMetric,
         };
 
