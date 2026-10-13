@@ -38,6 +38,28 @@ public class MuteRule
     /// still mutes an external alert when its other dimensions (server, metric, patterns) match. Lite never sets it.</summary>
     public string? ExternalSource { get; set; }
 
+    /// <summary>Whether <paramref name="name"/> is a well-formed external source name (#5654):
+    /// <c>^[a-z][a-z0-9_]{1,30}$</c>, the shape the source registry's own check constraint holds every source name
+    /// to. The one check the MCP create/update tools and the web mute routes run on a rule's source, so none of
+    /// them can store a name the registry could never hold (a rule on such a name would mute nothing while
+    /// reading as if it muted something). Upper case is refused, not folded: a stored name is lower case, and
+    /// the refusal says so.</summary>
+    public static bool IsValidExternalSource(string? name)
+    {
+        if (name is null || name.Length < 2 || name.Length > 31) return false;
+        if (name[0] < 'a' || name[0] > 'z') return false;
+        for (var i = 1; i < name.Length; i++)
+        {
+            var c = name[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) return false;
+        }
+        return true;
+    }
+
+    /// <summary>The refusal text for a source name <see cref="IsValidExternalSource"/> rejects.</summary>
+    public static string InvalidExternalSourceMessage(string? name) =>
+        $"external_source '{name}' is not a valid source name. A source name is 2 to 31 characters, lower case: a letter, then letters, digits or underscores (e.g. 'nagios').";
+
     public string? MetricName { get; set; }
     public string? DatabasePattern { get; set; }
     public string? QueryTextPattern { get; set; }
