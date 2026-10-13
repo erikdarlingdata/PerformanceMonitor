@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -341,11 +342,20 @@ public static class DarlingFileSecurity
     /// The TLS key-file ACL (<see cref="HardenedKeyFileSecurity"/>) applied the way
     /// <see cref="HardenWithoutFollowingLinks"/> applies one: through a handle to exactly the checked file, refused when
     /// the leaf or a folder on its path up to <paramref name="anchorDirectory"/> is a junction or symbolic link, when the
-    /// handle's final path is not the path asked for, or when the file has more than one name (#5700).
+    /// handle's final path is not the path asked for, or when the file has more than one name (#5700). Before the key is
+    /// opened, every folder from the volume root down to its parent, the anchor included, is opened without following a
+    /// link and held until the ACL is set (<see cref="PinFolderChain"/>): one that is a junction or symbolic link refuses
+    /// the change, and none of them can be renamed, deleted or replaced while the change runs.
     /// </summary>
     /// <returns>Null once the ACL is applied; otherwise why it was not, and nothing was changed.</returns>
     public static string? HardenKeyFileWithoutFollowingLinks(string path, string anchorDirectory, KeyFileKind kind) =>
         ApplyWithoutFollowingLinks(path, anchorDirectory, HardenedKeyFileSecurity, kind);
+
+    /// <summary><see cref="HardenKeyFileWithoutFollowingLinks(string, string, KeyFileKind)"/> that calls
+    /// <paramref name="whilePinned"/> once every folder on the path and the key are held open and checked, just before the
+    /// ACL is applied, so a test can try to rename a held folder at the moment it matters.</summary>
+    internal static string? HardenKeyFileWithoutFollowingLinks(string path, string anchorDirectory, KeyFileKind kind, Action whilePinned) =>
+        ApplyWithoutFollowingLinks(path, anchorDirectory, HardenedKeyFileSecurity, kind, whilePinned);
 
     /// <summary>What a file darling.json names as a TLS secret has to be, checked on its first bytes before its ACL is
     /// changed (#5700): a DER PKCS#12 bundle, a PEM private key, or a short text file holding a password.</summary>
@@ -474,7 +484,8 @@ public static class DarlingFileSecurity
         }
     }
 
-    private static string? ApplyWithoutFollowingLinks(string path, string anchorDirectory, Func<NativeObjectSecurity> buildSecurity, KeyFileKind? keyKind = null)
+    private static string? ApplyWithoutFollowingLinks(
+        string path, string anchorDirectory, Func<NativeObjectSecurity> buildSecurity, KeyFileKind? keyKind = null, Action? whilePinned = null)
     {
         var anchor = Path.TrimEndingDirectorySeparator(Path.GetFullPath(anchorDirectory));
         var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
@@ -483,6 +494,71 @@ public static class DarlingFileSecurity
             throw new ArgumentException($"{full} is not below {anchor}.", nameof(path));
         }
 
+        /* A key file is changed only with its whole folder chain held (#5700): the install folder is where a config lives
+           that ordinary users may be able to rename, and a name resolved after the check is not the name checked. */
+        var pinned = new List<Microsoft.Win32.SafeHandles.SafeFileHandle>();
+        try
+        {
+            if (keyKind is not null && PinFolderChain(Path.GetDirectoryName(full)!, pinned) is { } folderRefusal)
+            {
+                return folderRefusal;
+            }
+
+            return ApplyToOpenedFile(full, anchor, buildSecurity, keyKind, whilePinned);
+        }
+        finally
+        {
+            foreach (var held in pinned)
+            {
+                held.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Opens every folder from the volume root down to <paramref name="folder"/> without following a link, adds each
+    /// handle to <paramref name="held"/> (the caller closes them after the change), and returns why the chain cannot be
+    /// trusted: the first folder that is a junction or symbolic link. Null when none is, and then none of the folders can be
+    /// renamed, deleted or turned into a link until the handles are closed: each is opened for traverse, which counts as
+    /// read access in a share check (the same open a process's current directory holds), with a share mode that does not
+    /// include delete, so the open that a rename or a delete needs is a sharing violation. The folders are opened from the
+    /// root down, each by a name that resolves through folders already held, so none can have been swapped after its check.
+    /// An open for attributes only would not do this: such an open takes no part in a share check.
+    /// </summary>
+    private static string? PinFolderChain(string folder, List<Microsoft.Win32.SafeHandles.SafeFileHandle> held)
+    {
+        var chain = new List<string>();
+        for (var current = folder; current is not null; current = Path.GetDirectoryName(current))
+        {
+            chain.Add(current);
+        }
+
+        chain.Reverse();
+        foreach (var directory in chain)
+        {
+            Microsoft.Win32.SafeHandles.SafeFileHandle handle;
+            try
+            {
+                handle = OpenForSecurity(directory, followLink: false, access: FileTraverse | FileReadAttributes);
+            }
+            catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == ErrorAccessDenied)
+            {
+                handle = OpenForSecurity(directory, followLink: false, access: FileReadData | FileReadAttributes);
+            }
+
+            held.Add(handle);
+            if ((File.GetAttributes(handle) & FileAttributes.ReparsePoint) != 0)
+            {
+                return $"{directory} is a junction or symbolic link";
+            }
+        }
+
+        return null;
+    }
+
+    private static string? ApplyToOpenedFile(
+        string full, string anchor, Func<NativeObjectSecurity> buildSecurity, KeyFileKind? keyKind, Action? whilePinned)
+    {
         string anchorFinal;
         using (var anchorHandle = OpenForSecurity(anchor, followLink: true, access: FileReadAttributes))
         {
@@ -523,7 +599,7 @@ public static class DarlingFileSecurity
 
         if (information.NumberOfLinks > 1)
         {
-            return $"{full} is a hard link: the file has {information.NumberOfLinks.ToString(System.Globalization.CultureInfo.InvariantCulture)} names, and its ACL is the same under every one of them";
+            return HardLinkRefusal(full, information.NumberOfLinks);
         }
 
         /* Joined rather than concatenated: a volume root keeps its separator (C:\), and its final path can come back
@@ -541,6 +617,7 @@ public static class DarlingFileSecurity
             return $"{full} {contentRefusal}";
         }
 
+        whilePinned?.Invoke();
         var security = buildSecurity();
         var descriptor = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
         var dacl = new byte[descriptor.DiscretionaryAcl!.BinaryLength];
@@ -583,6 +660,7 @@ public static class DarlingFileSecurity
 
     private const int ErrorAccessDenied = 5;
     private const uint FileReadData = 0x00000001;
+    private const uint FileTraverse = 0x00000020;
     private const uint WriteOwner = 0x00080000;
     private const uint GenericRead = 0x80000000;
     private const uint ReadControl = 0x00020000;
@@ -633,6 +711,97 @@ public static class DarlingFileSecurity
             : path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..]
             : path;
     }
+
+    /// <summary>The refusal for a file with more than one name: how many, the other names (as many as can be listed), and
+    /// the command that lists them, because the ACL belongs to the file and is the same under every name.</summary>
+    internal static string HardLinkRefusal(string full, uint names)
+    {
+        const int Listed = 8;
+        var others = OtherNamesOf(full);
+        var text = $"{full} is a hard link: the file has {names.ToString(System.Globalization.CultureInfo.InvariantCulture)} names, and its ACL is the same under every one of them";
+        if (others.Count > 0)
+        {
+            text += $". Its other name(s): {string.Join("; ", others.Take(Listed))}" + (others.Count > Listed ? $"; and {others.Count - Listed} more" : string.Empty);
+        }
+
+        return text + $". To list every name, run: fsutil hardlink list \"{full}\"";
+    }
+
+    /// <summary>The other names of the file at <paramref name="full"/> on its volume (<c>FindFirstFileNameW</c> /
+    /// <c>FindNextFileNameW</c>), as full paths; empty when they cannot be listed.</summary>
+    internal static IReadOnlyList<string> OtherNamesOf(string full)
+    {
+        var names = new List<string>();
+        var volume = Path.GetPathRoot(full) ?? string.Empty;
+        var own = full[volume.Length..];
+        var buffer = new char[1024];
+        var length = (uint)buffer.Length;
+        var search = FindFirstFileNameW(full, 0, ref length, buffer);
+        if (search == InvalidHandle && System.Runtime.InteropServices.Marshal.GetLastPInvokeError() == ErrorMoreData)
+        {
+            buffer = new char[length];
+            length = (uint)buffer.Length;
+            search = FindFirstFileNameW(full, 0, ref length, buffer);
+        }
+
+        if (search == InvalidHandle)
+        {
+            return names;
+        }
+
+        try
+        {
+            while (true)
+            {
+                /* The count includes the terminating null; each name is volume-relative and starts with a backslash. */
+                var name = new string(buffer, 0, (int)Math.Max(length, 1u) - 1).TrimStart('\\');
+                if (!string.Equals(name, own, StringComparison.OrdinalIgnoreCase))
+                {
+                    names.Add(Path.Join(volume, name));
+                }
+
+                length = (uint)buffer.Length;
+                if (FindNextFileNameW(search, ref length, buffer))
+                {
+                    continue;
+                }
+
+                if (System.Runtime.InteropServices.Marshal.GetLastPInvokeError() != ErrorMoreData)
+                {
+                    break;
+                }
+
+                buffer = new char[length];
+                length = (uint)buffer.Length;
+                if (!FindNextFileNameW(search, ref length, buffer))
+                {
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            _ = FindClose(search);
+        }
+
+        return names;
+    }
+
+    private const int ErrorMoreData = 234;
+    private static readonly IntPtr InvalidHandle = new(-1);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindFirstFileNameW(
+        string lpFileName, uint dwFlags, ref uint stringLength, [System.Runtime.InteropServices.Out] char[] linkName);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool FindNextFileNameW(
+        IntPtr hFindStream, ref uint stringLength, [System.Runtime.InteropServices.Out] char[] linkName);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool FindClose(IntPtr hFindFile);
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
     private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(

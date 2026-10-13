@@ -223,7 +223,7 @@ if (args.Length > 0 && DarlingCliCommands.IsConfigureFirewallVerb(args[0]))
    taking ownership needs a privilege a virtual service account is not granted — so it logs the remedy and carries
    on. This is the actor with the authority. Verifies every target after the attempt and exits non-zero if
    anything is still readable, so it is usable in a provisioning script. Windows-only: ACLs.
-   Optional second arg = an explicit config path. */
+   Optional: --config <path> (or the path as the one bare argument) = an explicit config path. */
 if (args.Length > 0 && DarlingCliCommands.IsHardenFilesVerb(args[0]))
 {
     if (!OperatingSystem.IsWindows())
@@ -234,8 +234,12 @@ if (args.Length > 0 && DarlingCliCommands.IsHardenFilesVerb(args[0]))
 
     /* #5700: --tls-key-files-only runs just the TLS key-file step, for the install and upgrade scripts (not in the
        help text). The other argument, if any, is the config path. */
-    var tlsKeyFilesOnly = args.Skip(1).Any(DarlingCliCommands.IsTlsKeyFilesOnlyFlag);
-    var configPath = args.Skip(1).FirstOrDefault(arg => !DarlingCliCommands.IsTlsKeyFilesOnlyFlag(arg));
+    if (!DarlingCliCommands.TryParseHardenFilesArgs(args.Skip(1).ToArray(), out var configPath, out var tlsKeyFilesOnly, out var hardenFilesUsage))
+    {
+        Console.Error.WriteLine(hardenFilesUsage);
+        return 1;
+    }
+
     return tlsKeyFilesOnly
         ? DarlingCliCommands.HardenTlsKeyFilesOnly(configPath, Console.Out, Console.Error)
         : DarlingCliCommands.HardenFiles(configPath, Console.Out, Console.Error);

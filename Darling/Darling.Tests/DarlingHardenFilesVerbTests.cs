@@ -98,13 +98,13 @@ public class DarlingHardenFilesVerbTests
         var source = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
 
-        var at = source.IndexOf("public static int HardenFiles(", StringComparison.Ordinal);
+        var at = source.IndexOf("private static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
         Assert.True(at >= 0, "HardenFiles is gone (#2352)");
 
         /* The same window as the two pins below: #4004's review added the log-hash key's targets to the list, which
            moved the verify pass past the old 6,000, and its round 2 the junction refusal (DarlingHardenFilesJunctionTests),
            which moved it past 8,000, and #5700 the TLS key files (past 10,000). */
-        var body = source[at..Math.Min(source.Length, at + 13000)];
+        var body = source[at..Math.Min(source.Length, at + 17000)];
 
         /* It re-reads rather than trusting the call. */
         Assert.Contains("DarlingFileSecurity.IsReadableByOrdinaryUsers(", body, StringComparison.Ordinal);
@@ -143,10 +143,10 @@ public class DarlingHardenFilesVerbTests
         var source = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
 
-        var at = source.IndexOf("public static int HardenFiles(", StringComparison.Ordinal);
+        var at = source.IndexOf("private static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
         Assert.True(at >= 0, "HardenFiles is gone (#2352)");
 
-        var body = source[at..Math.Min(source.Length, at + 13000)];
+        var body = source[at..Math.Min(source.Length, at + 17000)];
 
         /* It asks the SCM, and hardens for what it gets back. */
         Assert.Contains("RegisteredServiceAccount(ServiceName)", body, StringComparison.Ordinal);
@@ -173,9 +173,9 @@ public class DarlingHardenFilesVerbTests
         var source = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
 
-        var at = source.IndexOf("public static int HardenFiles(", StringComparison.Ordinal);
+        var at = source.IndexOf("private static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
         /* 11,000: the viewer and mcp credentials joined the target list, which moved the verify pass past 10,000. */
-        var body = source[at..Math.Min(source.Length, at + 14000)];
+        var body = source[at..Math.Min(source.Length, at + 18000)];
 
         Assert.Contains("GrantsHardenedAccount(", body, StringComparison.Ordinal);
         Assert.Contains("LOCKED OUT", body, StringComparison.Ordinal);

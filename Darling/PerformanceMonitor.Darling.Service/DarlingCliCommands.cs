@@ -128,6 +128,64 @@ public static class DarlingCliCommands
     public static bool IsTlsKeyFilesOnlyFlag(string arg) =>
         string.Equals(arg, "--tls-key-files-only", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// The arguments after <c>--harden-files</c>: <c>[--tls-key-files-only] [--config &lt;path to darling.json&gt;]</c>. The
+    /// config path may also be given as the one bare argument (the verb's long-standing form), but not both. Returns false
+    /// with a ready-to-print <paramref name="errorMessage"/> on anything else.
+    /// </summary>
+    public static bool TryParseHardenFilesArgs(string[] rest, out string? configPath, out bool tlsKeyFilesOnly, out string? errorMessage)
+    {
+        configPath = null;
+        tlsKeyFilesOnly = false;
+        errorMessage = null;
+        const string Usage = "Usage: --harden-files [--config <path to darling.json>]";
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (IsTlsKeyFilesOnlyFlag(arg))
+            {
+                tlsKeyFilesOnly = true;
+                continue;
+            }
+
+            if (string.Equals(arg, "--config", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-') || configPath is not null)
+                {
+                    errorMessage = (configPath is not null ? "--config was given twice, or with a path argument too." : "--config needs a path.") + Environment.NewLine + Usage;
+                    return false;
+                }
+
+                configPath = rest[++i];
+                continue;
+            }
+
+            if (arg.StartsWith('-') || configPath is not null)
+            {
+                errorMessage = $"Unknown or unexpected argument for --harden-files: {arg}" + Environment.NewLine + Usage;
+                return false;
+            }
+
+            configPath = arg;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The first lines <c>--harden-files</c> prints (#5700): the config file it checks, and, when no path was passed and
+    /// <c>DARLING_CONFIG</c> is set, that the path came from that variable. The service does not read the variable, so an
+    /// administrator whose session has it set can be checking a different file from the service's.
+    /// </summary>
+    internal static void WriteConfigSource(TextWriter output, string? passedPath, string resolvedConfig, Func<string, string?> environment)
+    {
+        output.WriteLine($"Config file: {resolvedConfig}");
+        if (string.IsNullOrWhiteSpace(passedPath) && !string.IsNullOrWhiteSpace(environment("DARLING_CONFIG")))
+        {
+            output.WriteLine("  (taken from the DARLING_CONFIG environment variable, because no --config was passed. Pass --config <path> to check another file.)");
+        }
+    }
+
     /// <summary>The verb <see cref="EnableMcpAsync"/> handles — enable the MCP endpoint in the store (+ firewall).</summary>
     public static bool IsEnableMcpVerb(string arg) =>
         string.Equals(arg, "--enable-mcp", StringComparison.OrdinalIgnoreCase);
@@ -4172,12 +4230,13 @@ public static class DarlingCliCommands
     /// <paramref name="problems"/>.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    internal static TlsKeyFileResult HardenTlsKeyFiles(DarlingConfig config, string installRoot, TextWriter output, TextWriter problems)
+    internal static TlsKeyFileResult HardenTlsKeyFiles(DarlingConfig config, string installRoot, TextWriter output, TextWriter problems, string? configFile = null)
     {
         var examined = 0;
         var exposed = 0;
         var refused = 0;
         var missing = 0;
+        var notKeyFiles = configFile is null ? new List<NotKeyTarget>() : NotKeyTargets(config, configFile);
         foreach (var entry in TlsKeyFilesNamed(config))
         {
             var (keyFile, _, kind) = entry;
@@ -4185,6 +4244,16 @@ public static class DarlingCliCommands
             if (TlsKeyPathProblem(keyFile) is { } problem)
             {
                 problems.WriteLine($"  SKIPPED  {keyFile} ({what}): {problem}");
+                continue;
+            }
+
+            /* A colon after the drive letter's names an alternate data stream: a handle to one answers for its host file,
+               so the ACL would land on a file the setting does not name. */
+            if (keyFile.IndexOf(':', 2) >= 0)
+            {
+                problems.WriteLine($"  REFUSED  {keyFile} ({what}): names an alternate data stream, not a file, so nothing was changed. Name the key file itself in darling.json and re-run.");
+                examined++;
+                refused++;
                 continue;
             }
 
@@ -4196,6 +4265,14 @@ public static class DarlingCliCommands
             catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
             {
                 problems.WriteLine($"  SKIPPED  {keyFile} ({what}): not a valid path ({OneLine(ex.Message)}).");
+                continue;
+            }
+
+            if (notKeyFiles.FirstOrDefault(target => target.Names(full)) is { Path: not null } notKey)
+            {
+                problems.WriteLine($"  REFUSED  {full} ({what}): it is {notKey.What}, which has its own access rule and is not a key file, so nothing was changed. Name the key file in darling.json and re-run.");
+                examined++;
+                refused++;
                 continue;
             }
 
@@ -4246,9 +4323,12 @@ public static class DarlingCliCommands
                     /* A file that is not what its setting says is refused by what it holds, not by a link on its path. */
                     var byContent = refusal.Contains(DarlingFileSecurity.NotAKeyFileReason, StringComparison.Ordinal)
                         || refusal.Contains(DarlingFileSecurity.NotAPasswordFileReason, StringComparison.Ordinal);
+                    var hardLink = refusal.Contains(" is a hard link: ", StringComparison.Ordinal);
                     problems.WriteLine(byContent
                         ? $"  REFUSED  {full} ({what}): {OneLine(refusal)}, so nothing was changed. Name the right file in darling.json and re-run."
-                        : $"  REFUSED  {full} ({what}): {OneLine(refusal)}, so nothing was changed through it. Remove it and re-run.");
+                        : hardLink
+                            ? $"  REFUSED  {full} ({what}): {OneLine(refusal)}. Nothing was changed. Remove the other name(s) and re-run."
+                            : $"  REFUSED  {full} ({what}): {OneLine(refusal)}, so nothing was changed through it. Remove it and re-run.");
                     refused++;
                     continue;
                 }
@@ -4273,6 +4353,43 @@ public static class DarlingCliCommands
         }
 
         return new TlsKeyFileResult(examined, exposed, refused, missing);
+    }
+
+    /// <summary>A file or folder <see cref="HardenFiles"/> hardens under a rule of its own, which a TLS key setting must not
+    /// be pointed at: <see cref="Names"/> is true for the path itself and, for a folder, for anything below it.</summary>
+    internal readonly record struct NotKeyTarget(string Path, bool IsFolder, string What)
+    {
+        internal bool Names(string full) =>
+            string.Equals(System.IO.Path.TrimEndingDirectorySeparator(Path), System.IO.Path.TrimEndingDirectorySeparator(full), StringComparison.OrdinalIgnoreCase)
+            || (IsFolder && IsBelow(Path, full));
+    }
+
+    /// <summary>
+    /// What a TLS key setting may not name (#5700): the config file the verb loaded, its backups, the store's folder,
+    /// credentials and TLS key, the log-hash key and the folder it lives in. These are the targets <see cref="HardenFiles"/>
+    /// hardens under their own rules, so a setting that named one would give it the key ACL instead.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static List<NotKeyTarget> NotKeyTargets(DarlingConfig config, string configFile)
+    {
+        string dataDirectory;
+        string? keyDirectory;
+        try
+        {
+            dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
+            keyDirectory = DarlingLogHashKeyFile.DirectoryFor(config, configFile);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or NotSupportedException or IOException)
+        {
+            dataDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "PerformanceMonitorDarling", "pg");
+            keyDirectory = null;
+        }
+
+        return HardenTargets(configFile, dataDirectory, keyDirectory)
+            .Where(target => !target.IsDirectory || target.What == "the log-hash key directory")
+            .Select(target => new NotKeyTarget(Path.GetFullPath(target.Path), target.IsDirectory, target.What))
+            .ToList();
     }
 
     /// <summary>
@@ -4320,7 +4437,8 @@ public static class DarlingCliCommands
         HardenTlsKeyFilesOnly(configPath, output, error, IsElevated(), DarlingFileSecurity.RegisteredServiceAccount(ServiceName));
 
     [SupportedOSPlatform("windows")]
-    internal static int HardenTlsKeyFilesOnly(string? configPath, TextWriter output, TextWriter error, bool elevated, SecurityIdentifier? serviceAccount)
+    internal static int HardenTlsKeyFilesOnly(
+        string? configPath, TextWriter output, TextWriter error, bool elevated, SecurityIdentifier? serviceAccount, Func<string, string?>? environment = null)
     {
         if (!elevated)
         {
@@ -4328,11 +4446,13 @@ public static class DarlingCliCommands
             return 2;
         }
 
-        var resolvedConfig = DarlingConfig.ResolveConfigPath(configPath);
+        environment ??= Environment.GetEnvironmentVariable;
+        var resolvedConfig = DarlingConfig.ResolveConfigPath(configPath, environment);
+        WriteConfigSource(output, configPath, resolvedConfig, environment);
         DarlingConfig config;
         try
         {
-            config = DarlingConfig.Load(configPath);
+            config = DarlingConfig.Load(resolvedConfig);
         }
         catch (Exception ex)
         {
@@ -4354,59 +4474,19 @@ public static class DarlingCliCommands
         }
 
         var installRoot = Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory;
-        HardenTlsKeyFiles(config, installRoot, output, output);
+        HardenTlsKeyFiles(config, installRoot, output, output, resolvedConfig);
         return 0;
     }
 
     /// <summary>
-    /// Re-applies the secret-file ACLs, elevated (#2352).
-    ///
-    /// <para><b>Why this exists as a verb.</b> The service already computes the correct DACL
-    /// (<see cref="DarlingFileSecurity.HardenFile"/>) and already detects when the real one is wrong
-    /// (<see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/>). What it lacks is authority: re-ACLing a
-    /// file it does not own needs WRITE_DAC, and taking ownership needs a privilege a virtual service account is
-    /// not granted, so it can only log the remedy and continue. Until now the only thing that ever APPLIED the
-    /// rule to an existing install was <c>install-darling.ps1</c>, which leaves anyone who registered the exe by
-    /// hand — the README's own <c>sc create</c> path — typing three <c>icacls</c> lines out of a log message.</para>
-    ///
-    /// <para><b>It verifies rather than claims.</b> Every target is re-read after the attempt and reported as
-    /// SECURED or STILL READABLE, and the exit code is 1 if anything is still exposed. "We tried" is not the
-    /// same statement as "the secret is not readable" — a distinction <see cref="ConfirmExportedSecretIsProtected"/>'s own
-    /// contract already makes, and the reason a permissions call that silently did nothing was able to hide.</para>
-    ///
-    /// <para>Idempotent, so it is safe on a healthy box and can simply live in a runbook. Missing targets are
-    /// skipped quietly: a BYO-Postgres install has no managed credential files, and their absence is not a
-    /// fault.</para>
+    /// The files and folders <see cref="HardenFiles"/> hardens that are not TLS key files (#5700 keeps them apart from the
+    /// key files darling.json names): the live config, its backups, the store's folder and credentials, the store's own TLS
+    /// key and the log-hash key. Built from the loaded config's data and key folders, or the documented default store
+    /// location when the config did not load.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    public static int HardenFiles(string? configPath, TextWriter output, TextWriter error)
+    private static List<HardenTarget> HardenTargets(string resolvedConfig, string dataDirectory, string? keyDirectory)
     {
-        var resolvedConfig = DarlingConfig.ResolveConfigPath(configPath);
-
-        /* The managed store's directory is derived from config when it loads, but this verb has to work when
-           darling.json is exactly what is unreadable — that is the failure it exists to repair. So a config that
-           will not load is a warning, not a stop: the config file itself is still hardened, and the store
-           targets fall back to the documented default location. */
-        string? dataDirectory = null;
-        string? keyDirectory = null;
-        DarlingConfig? loadedConfig = null;
-        try
-        {
-            var config = DarlingConfig.Load(configPath);
-            loadedConfig = config;
-            dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
-            keyDirectory = DarlingLogHashKeyFile.DirectoryFor(config, resolvedConfig);
-        }
-        catch (Exception ex)
-        {
-            output.WriteLine($"NOTE: could not load {resolvedConfig} ({ex.Message}).");
-            output.WriteLine("      Continuing with the documented default store location — hardening darling.json");
-            output.WriteLine("      is very often what makes it loadable again.");
-            dataDirectory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "PerformanceMonitorDarling", "pg");
-        }
-
         var storeRoot = Path.GetDirectoryName(Path.GetFullPath(dataDirectory));
         var targets = new List<HardenTarget>
         {
@@ -4457,6 +4537,63 @@ public static class DarlingCliCommands
             targets.Add(new(keyDirectory, AllowInteractive: false, IsDirectory: true, "the log-hash key directory"));
             targets.Add(new(Path.Combine(keyDirectory, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
         }
+
+        return targets;
+    }
+
+    /// <summary>
+    /// Re-applies the secret-file ACLs, elevated (#2352).
+    ///
+    /// <para><b>Why this exists as a verb.</b> The service already computes the correct DACL
+    /// (<see cref="DarlingFileSecurity.HardenFile"/>) and already detects when the real one is wrong
+    /// (<see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/>). What it lacks is authority: re-ACLing a
+    /// file it does not own needs WRITE_DAC, and taking ownership needs a privilege a virtual service account is
+    /// not granted, so it can only log the remedy and continue. Until now the only thing that ever APPLIED the
+    /// rule to an existing install was <c>install-darling.ps1</c>, which leaves anyone who registered the exe by
+    /// hand — the README's own <c>sc create</c> path — typing three <c>icacls</c> lines out of a log message.</para>
+    ///
+    /// <para><b>It verifies rather than claims.</b> Every target is re-read after the attempt and reported as
+    /// SECURED or STILL READABLE, and the exit code is 1 if anything is still exposed. "We tried" is not the
+    /// same statement as "the secret is not readable" — a distinction <see cref="ConfirmExportedSecretIsProtected"/>'s own
+    /// contract already makes, and the reason a permissions call that silently did nothing was able to hide.</para>
+    ///
+    /// <para>Idempotent, so it is safe on a healthy box and can simply live in a runbook. Missing targets are
+    /// skipped quietly: a BYO-Postgres install has no managed credential files, and their absence is not a
+    /// fault.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static int HardenFiles(string? configPath, TextWriter output, TextWriter error, Func<string, string?>? environment = null)
+    {
+        environment ??= Environment.GetEnvironmentVariable;
+        var resolvedConfig = DarlingConfig.ResolveConfigPath(configPath, environment);
+        WriteConfigSource(output, configPath, resolvedConfig, environment);
+
+        /* The managed store's directory is derived from config when it loads, but this verb has to work when
+           darling.json is exactly what is unreadable — that is the failure it exists to repair. So a config that
+           will not load is a warning, not a stop: the config file itself is still hardened, and the store
+           targets fall back to the documented default location. */
+        string? dataDirectory = null;
+        string? keyDirectory = null;
+        DarlingConfig? loadedConfig = null;
+        try
+        {
+            var config = DarlingConfig.Load(resolvedConfig);
+            loadedConfig = config;
+            dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
+            keyDirectory = DarlingLogHashKeyFile.DirectoryFor(config, resolvedConfig);
+        }
+        catch (Exception ex)
+        {
+            output.WriteLine($"NOTE: could not load {resolvedConfig} ({ex.Message}).");
+            output.WriteLine("      Continuing with the documented default store location — hardening darling.json");
+            output.WriteLine("      is very often what makes it loadable again.");
+            dataDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "PerformanceMonitorDarling", "pg");
+        }
+
+        var targets = HardenTargets(resolvedConfig, dataDirectory, keyDirectory);
+        var configDirectory = Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory;
 
         /* #2371: harden for the account the SERVICE runs as, not for whoever is running THIS. The verb is
            documented to be run elevated and exists because the service cannot re-ACL a file it does not own,
@@ -4567,7 +4704,7 @@ public static class DarlingCliCommands
         }
         else
         {
-            var tls = HardenTlsKeyFiles(loadedConfig, configDirectory, output, error);
+            var tls = HardenTlsKeyFiles(loadedConfig, configDirectory, output, error, resolvedConfig);
             tlsExamined = tls.Examined;
             touched += tls.Examined;
             exposed += tls.Exposed;

@@ -89,7 +89,24 @@ public class DarlingTlsKeyFileHardenTests
         var output = new StringWriter();
         var error = new StringWriter();
         var exit = DarlingCliCommands.HardenTlsKeyFilesOnly(config, output, error, elevated, noAccount ? null : account ?? ServiceSid);
-        return (exit, output.ToString(), error.ToString());
+        return (exit, WithoutConfigHeader(output.ToString()), error.ToString());
+    }
+
+    /// <summary>The report without the lines the verb opens with (the config file it checked, and where that path came
+    /// from), which the tests of those lines read directly.</summary>
+    private static string WithoutConfigHeader(string output)
+    {
+        var lines = output.ReplaceLineEndings("\n").Split('\n').ToList();
+        if (lines.Count > 0 && lines[0].StartsWith("Config file: ", StringComparison.Ordinal))
+        {
+            lines.RemoveAt(0);
+            if (lines.Count > 0 && lines[0].StartsWith("  (taken from the DARLING_CONFIG", StringComparison.Ordinal))
+            {
+                lines.RemoveAt(0);
+            }
+        }
+
+        return string.Join(Environment.NewLine, lines);
     }
 
     private static bool WindowsOnly()
@@ -220,6 +237,11 @@ public class DarlingTlsKeyFileHardenTests
             Assert.Contains("hard link", output, StringComparison.Ordinal);
             Assert.Equal(victimBefore, Snapshot(victim));
             Assert.Equal(victimBefore, Snapshot(pfx));
+
+            /* The report names the other name, and gives the command that lists every name, so an administrator can find it. */
+            Assert.Contains(@"\elsewhere\someones.pfx", output, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains($"fsutil hardlink list \"{pfx}\"", output, StringComparison.Ordinal);
+            Assert.Contains("Remove the other name(s) and re-run.", output, StringComparison.Ordinal);
         }
         finally
         {
@@ -854,6 +876,456 @@ public class DarlingTlsKeyFileHardenTests
             Assert.Empty(DarlingCliCommands.TlsKeyFilesNamed(DarlingConfig.Load(WriteConfig(install, "{\"pfxPassword\":\"env:EXAMPLE_PASSWORD\"}"))));
             Assert.Empty(DarlingCliCommands.TlsKeyFilesNamed(DarlingConfig.Load(WriteConfig(install, "{\"pfxPassword\":\"literal\"}"))));
             Assert.Empty(DarlingCliCommands.TlsKeyFilesNamed(DarlingConfig.Load(WriteConfig(install, "{\"pfxPassword\":\"FILE:C:\\\\x.txt\"}"))));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static string SnapshotFolder(string path) =>
+        Convert.ToHexString(new DirectoryInfo(path).GetAccessControl().GetSecurityDescriptorBinaryForm());
+
+    /// <summary>The install folder is itself a junction: the key behind it is not changed, and the report says which path
+    /// is the link. A junction there is what lets a folder that ordinary users can rename send the change elsewhere.</summary>
+    [Fact]
+    public void AnInstallFolderThatIsAJunction_IsRefused_AndTheKeyBehindItKeepsItsAcl()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-rootlink-");
+        try
+        {
+            var real = MakeFolder(Path.Combine(scratch.FullName, "real"));
+            var pfx = MakeKey(real, "web.pfx");
+            var before = Snapshot(pfx);
+            var root = Path.Combine(scratch.FullName, "root");
+            MakeJunction(root, real);
+            Assert.SkipWhen(!File.Exists(Path.Combine(root, "web.pfx")), "A junction could not be made here.");
+            var viaLink = Path.Combine(root, "web.pfx");
+            var config = WriteConfig(root, "{\"pfxPath\":" + Json(viaLink) + "}");
+
+            var (exit, output, _) = Run(config);
+
+            Assert.Equal(0, exit);
+            Assert.StartsWith($"  REFUSED  {viaLink} (the TLS key file, web.network.tls.pfxPath): {root} is a junction or symbolic link", output, StringComparison.Ordinal);
+            Assert.Equal(before, Snapshot(pfx));
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(pfx));
+
+            Assert.NotNull(DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks(viaLink, root, DarlingFileSecurity.KeyFileKind.Pfx));
+            Assert.Equal(before, Snapshot(pfx));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>A junction above the install folder is refused too, though the check for links below the install folder
+    /// does not look that far up.</summary>
+    [Fact]
+    public void AJunctionAboveTheInstallFolder_IsRefused_AndTheKeyBehindItKeepsItsAcl()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-parentlink-");
+        try
+        {
+            var real = MakeFolder(Path.Combine(scratch.FullName, "real"));
+            var realInstall = MakeFolder(Path.Combine(real, "install"));
+            var pfx = MakeKey(realInstall, "web.pfx");
+            var before = Snapshot(pfx);
+            var link = Path.Combine(scratch.FullName, "link");
+            MakeJunction(link, real);
+            Assert.SkipWhen(!Directory.Exists(Path.Combine(link, "install")), "A junction could not be made here.");
+            var install = Path.Combine(link, "install");
+            var viaLink = Path.Combine(install, "web.pfx");
+            var config = WriteConfig(install, "{\"pfxPath\":" + Json(viaLink) + "}");
+
+            var (exit, output, _) = Run(config);
+
+            Assert.Equal(0, exit);
+            Assert.StartsWith($"  REFUSED  {viaLink} (the TLS key file, web.network.tls.pfxPath): {link} is a junction or symbolic link", output, StringComparison.Ordinal);
+            Assert.Equal(before, Snapshot(pfx));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>The key's own name being a junction is refused by the check on the handle (the check the verb makes on the
+    /// path first is not the only one): a junction needs no privilege to make, so this runs wherever the tests do.</summary>
+    [Fact]
+    public void AKeyThatIsAJunction_IsRefusedOnTheHandle_AndWhatItPointsAtKeepsItsAcl()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-leaflink-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var target = MakeFolder(Path.Combine(scratch.FullName, "target"));
+            var before = SnapshotFolder(target);
+            var leaf = Path.Combine(install, "web.pfx");
+            MakeJunction(leaf, target);
+            Assert.SkipWhen(!Directory.Exists(leaf), "A junction could not be made here.");
+
+            var refusal = DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks(leaf, install, DarlingFileSecurity.KeyFileKind.Pfx);
+
+            Assert.Equal($"{leaf} is a junction or symbolic link", refusal);
+            Assert.Equal(before, SnapshotFolder(target));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>A key that is a symbolic link to a file is refused on the handle, and the file it points at is not changed.
+    /// A file symbolic link needs a privilege (an elevated process, or developer mode), so this is skipped without one.</summary>
+    [Fact]
+    public void AKeyThatIsAFileSymbolicLink_IsRefusedOnTheHandle_AndTheFileItPointsAtKeepsItsAcl()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-symlink-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var elsewhere = MakeFolder(Path.Combine(scratch.FullName, "elsewhere"));
+            var victim = MakeKey(elsewhere, "someones.pfx");
+            var before = Snapshot(victim);
+            var leaf = Path.Combine(install, "web.pfx");
+            try
+            {
+                File.CreateSymbolicLink(leaf, victim);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Assert.Skip("A file symbolic link needs an elevated process or developer mode: " + ex.Message);
+                return;
+            }
+
+            var refusal = DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks(leaf, install, DarlingFileSecurity.KeyFileKind.Pfx);
+
+            Assert.Equal($"{leaf} is a junction or symbolic link", refusal);
+            Assert.Equal(before, Snapshot(victim));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>
+    /// While the key's ACL is applied, the key and every folder from the volume root down to its folder are held open: none
+    /// can be renamed (a share check refuses the delete access a rename needs). Once the call returns they are released.
+    /// </summary>
+    [Fact]
+    public void EveryFolderOnTheKeysPath_IsHeldAgainstARename_WhileTheAclIsApplied()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-pinned-");
+        try
+        {
+            var outer = MakeFolder(Path.Combine(scratch.FullName, "outer"));
+            var install = MakeFolder(Path.Combine(outer, "install"));
+            var certs = MakeFolder(Path.Combine(install, "certs"));
+            var pfx = MakeKey(certs, "web.pfx");
+            var attempts = new System.Collections.Generic.List<string>();
+
+            void TryRename(string from, string label)
+            {
+                var to = from + "-renamed";
+                try
+                {
+                    if (Directory.Exists(from))
+                    {
+                        Directory.Move(from, to);
+                        Directory.Move(to, from);
+                    }
+                    else
+                    {
+                        File.Move(from, to);
+                        File.Move(to, from);
+                    }
+
+                    attempts.Add($"{label}: renamed");
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    attempts.Add($"{label}: held");
+                }
+            }
+
+            var refusal = DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks(
+                pfx, install, DarlingFileSecurity.KeyFileKind.Pfx,
+                () =>
+                {
+                    TryRename(pfx, "the key");
+                    TryRename(certs, "the key's folder");
+                    TryRename(install, "the install folder");
+                    TryRename(outer, "the folder above the install folder");
+                    TryRename(scratch.FullName, "the scratch folder");
+                });
+
+            Assert.Null(refusal);
+            Assert.Equal(
+                new[] { "the key: held", "the key's folder: held", "the install folder: held", "the folder above the install folder: held", "the scratch folder: held" },
+                attempts);
+
+            /* Nothing is held once the call returns. */
+            Directory.Move(outer, outer + "-after");
+            Directory.Move(outer + "-after", outer);
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>The config file the verb loaded is not a key file, though its text can look like one: it is refused as a key,
+    /// and so is a backup of it. Neither gets the key ACL, which would take the operator's read of the config away.</summary>
+    [Fact]
+    public void TheConfigFileAndItsBackups_AreRefusedAsKeys_AndKeepTheirAcl()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-notkey-config-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var configPath = Path.Combine(install, "darling.json");
+            var backup = MakeKey(install, "darling.json.bak-20260101", System.Text.Encoding.ASCII.GetBytes(PemKeyText));
+            File.WriteAllText(configPath,
+                "{\"postgres\":{\"managed\":false,\"connectionString\":\"Host=127.0.0.1;Username=darling;ApplicationName=-----BEGIN PRIVATE KEY-----\"},"
+                + "\"web\":{\"network\":{\"tls\":{\"keyPath\":" + Json(configPath) + "}}},"
+                + "\"mcp\":{\"network\":{\"tls\":{\"keyPath\":" + Json(backup) + "}}}}");
+            Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(configPath));
+            var configBefore = Snapshot(configPath);
+            var backupBefore = Snapshot(backup);
+
+            var (exit, output, _) = Run(configPath);
+
+            Assert.Equal(0, exit);
+            Assert.Contains($"  REFUSED  {configPath} (the TLS key file, web.network.tls.keyPath): it is the live config", output, StringComparison.Ordinal);
+            Assert.Contains($"  REFUSED  {backup} (the TLS key file, mcp.network.tls.keyPath): it is a config backup", output, StringComparison.Ordinal);
+            Assert.Equal(configBefore, Snapshot(configPath));
+            Assert.Equal(backupBefore, Snapshot(backup));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>A store credential file, named as a key, is refused with its own access rule left as it is.</summary>
+    [Fact]
+    public void AStoreCredentialFile_IsRefusedAsAKey_AndKeepsItsAcl()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-notkey-store-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var store = MakeFolder(Path.Combine(install, "store"));
+            var credential = MakeKey(store, "pg-credential.dpapi", System.Text.Encoding.ASCII.GetBytes(PemKeyText));
+            var before = Snapshot(credential);
+            var config = Path.Combine(install, "darling.json");
+            File.WriteAllText(config,
+                "{\"postgres\":{\"managed\":false,\"connectionString\":\"Host=127.0.0.1;Username=darling\",\"dataDirectory\":" + Json(Path.Combine(store, "pg")) + "},"
+                + "\"web\":{\"network\":{\"tls\":{\"keyPath\":" + Json(credential) + "}}}}");
+
+            var (exit, output, _) = Run(config);
+
+            Assert.Equal(0, exit);
+            Assert.Contains($"  REFUSED  {credential} (the TLS key file, web.network.tls.keyPath): it is the store credential", output, StringComparison.Ordinal);
+            Assert.Equal(before, Snapshot(credential));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>A path with a data stream name ends in a colon part: a handle to the stream answers for its file, so the path
+    /// is refused and the file keeps its ACL even though the stream holds a bundle.</summary>
+    [Fact]
+    public void APathWithADataStreamName_IsRefused_AndTheFileKeepsItsAcl()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-stream-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var host = MakeKey(install, "web.txt", System.Text.Encoding.ASCII.GetBytes("host"));
+            var stream = host + ":key";
+            File.WriteAllBytes(stream, DerBundle());
+            var before = Snapshot(host);
+            var config = WriteConfig(install, "{\"pfxPath\":" + Json(stream) + "}");
+
+            var (exit, output, _) = Run(config);
+
+            Assert.Equal(0, exit);
+            Assert.StartsWith($"  REFUSED  {stream} (the TLS key file, web.network.tls.pfxPath): names an alternate data stream", output, StringComparison.Ordinal);
+            Assert.Equal(before, Snapshot(host));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    [Theory]
+    [InlineData(new string[0], null, false, true)]
+    [InlineData(new[] { "--tls-key-files-only" }, null, true, true)]
+    [InlineData(new[] { "--config", @"C:\x\darling.json" }, @"C:\x\darling.json", false, true)]
+    [InlineData(new[] { "--tls-key-files-only", "--config", @"C:\x\darling.json" }, @"C:\x\darling.json", true, true)]
+    [InlineData(new[] { "--CONFIG", @"C:\x\darling.json", "--TLS-KEY-FILES-ONLY" }, @"C:\x\darling.json", true, true)]
+    [InlineData(new[] { @"C:\x\darling.json" }, @"C:\x\darling.json", false, true)]
+    [InlineData(new[] { "--config" }, null, false, false)]
+    [InlineData(new[] { "--config", "--tls-key-files-only" }, null, true, false)]
+    [InlineData(new[] { "--config", @"C:\a.json", @"C:\b.json" }, @"C:\a.json", false, false)]
+    [InlineData(new[] { @"C:\a.json", "--config", @"C:\b.json" }, @"C:\a.json", false, false)]
+    [InlineData(new[] { "--bogus" }, null, false, false)]
+    public void TheHardenFilesArguments_TakeTheConfigAsDashDashConfigOrOneBarePath(string[] rest, string? expectedPath, bool expectedTlsOnly, bool valid)
+    {
+        var parsed = DarlingCliCommands.TryParseHardenFilesArgs(rest, out var configPath, out var tlsKeyFilesOnly, out var message);
+
+        Assert.Equal(valid, parsed);
+        if (valid)
+        {
+            Assert.Equal(expectedPath, configPath);
+            Assert.Equal(expectedTlsOnly, tlsKeyFilesOnly);
+            Assert.Null(message);
+        }
+        else
+        {
+            Assert.Contains("Usage: --harden-files [--config <path to darling.json>]", message, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The verb's first output line names the config file it checked; nothing else is said about where it came from
+    /// when a path was passed, even with the environment variable set.</summary>
+    [Fact]
+    public void TheTlsKeyFilesOnlyStep_StartsByNamingTheConfigFileItChecked()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-firstline-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var config = WriteConfig(install, "{}");
+            var other = Path.Combine(scratch.FullName, "exported.json");
+
+            var output = new StringWriter();
+            var exit = DarlingCliCommands.HardenTlsKeyFilesOnly(config, output, new StringWriter(), true, ServiceSid, name => name == "DARLING_CONFIG" ? other : null);
+
+            var lines = output.ToString().ReplaceLineEndings("\n").Split('\n');
+            Assert.Equal(0, exit);
+            Assert.Equal($"Config file: {config}", lines[0]);
+            Assert.Equal("No TLS key files are named in darling.json.", lines[1]);
+            Assert.DoesNotContain("DARLING_CONFIG", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>When no path was passed and DARLING_CONFIG is set, the second line says the config came from that variable
+    /// (the service does not read it), and the verb really checks that file.</summary>
+    [Fact]
+    public void WhenTheConfigPathComesFromDarlingConfig_TheSecondLineSaysSo()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-envline-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var pfx = MakeKey(install, "web.pfx");
+            var config = WriteConfig(install, "{\"pfxPath\":" + Json(pfx) + "}");
+
+            var output = new StringWriter();
+            var exit = DarlingCliCommands.HardenTlsKeyFilesOnly(null, output, new StringWriter(), true, ServiceSid, name => name == "DARLING_CONFIG" ? config : null);
+
+            var lines = output.ToString().ReplaceLineEndings("\n").Split('\n');
+            Assert.Equal(0, exit);
+            Assert.Equal($"Config file: {config}", lines[0]);
+            Assert.StartsWith("  (taken from the DARLING_CONFIG environment variable, because no --config was passed.", lines[1], StringComparison.Ordinal);
+            Assert.Equal($"  SECURED  {pfx} (the TLS key file, web.network.tls.pfxPath)", lines[2]);
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>The full verb opens the same way.</summary>
+    [Fact]
+    public void TheFullVerb_StartsByNamingTheConfigFileItChecked_AndWhereThePathCameFrom()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        Assert.SkipWhen(DarlingFileSecurity.RegisteredServiceAccount("PerformanceMonitor Darling") is not null,
+            "The Darling service is registered on this machine.");
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-fullline-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var config = WriteStoreLessConfig(install, scratch.FullName, "{}");
+
+            var passed = new StringWriter();
+            DarlingCliCommands.HardenFiles(config, passed, new StringWriter(), name => name == "DARLING_CONFIG" ? "C:\\elsewhere.json" : null);
+            var passedLines = passed.ToString().ReplaceLineEndings("\n").Split('\n');
+            Assert.Equal($"Config file: {config}", passedLines[0]);
+            Assert.DoesNotContain("DARLING_CONFIG", passed.ToString(), StringComparison.Ordinal);
+
+            var fromVariable = new StringWriter();
+            DarlingCliCommands.HardenFiles(null, fromVariable, new StringWriter(), name => name == "DARLING_CONFIG" ? config : null);
+            var variableLines = fromVariable.ToString().ReplaceLineEndings("\n").Split('\n');
+            Assert.Equal($"Config file: {config}", variableLines[0]);
+            Assert.StartsWith("  (taken from the DARLING_CONFIG environment variable, because no --config was passed.", variableLines[1], StringComparison.Ordinal);
         }
         finally
         {

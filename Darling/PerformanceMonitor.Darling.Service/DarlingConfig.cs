@@ -373,14 +373,19 @@ public sealed class DarlingConfig
 
     private HeartbeatConfig _heartbeat = new();
 
-    public static string ResolveConfigPath(string? explicitPath = null)
+    public static string ResolveConfigPath(string? explicitPath = null) =>
+        ResolveConfigPath(explicitPath, Environment.GetEnvironmentVariable);
+
+    /// <summary><see cref="ResolveConfigPath(string?)"/> reading the environment through <paramref name="environment"/>, so a
+    /// test can supply <c>DARLING_CONFIG</c> without setting it for the whole process.</summary>
+    internal static string ResolveConfigPath(string? explicitPath, Func<string, string?> environment)
     {
         if (!string.IsNullOrWhiteSpace(explicitPath))
         {
             return explicitPath;
         }
 
-        var fromEnvironment = Environment.GetEnvironmentVariable("DARLING_CONFIG");
+        var fromEnvironment = environment("DARLING_CONFIG");
         if (!string.IsNullOrWhiteSpace(fromEnvironment))
         {
             return fromEnvironment;
