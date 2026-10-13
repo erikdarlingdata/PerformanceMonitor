@@ -30,6 +30,14 @@ public class MuteRule
     /// field existed, so a stored rule keeps exactly the effect it had. Lite never sets it.</summary>
     public int? ServerId { get; set; }
 
+    /// <summary>The name of the ONE external alert source this rule covers (#5654), or null for a rule that is
+    /// not limited to a source. A source is a service that raises alerts through Darling's channels with
+    /// its own login; its name is the lower-case registry name, and it is compared ignoring case. A rule that
+    /// carries one matches only an alert from that source, so it never mutes a built-in alert and never mutes
+    /// another source. Null keeps the matching every rule had before this field existed: a rule without a source
+    /// still mutes an external alert when its other dimensions (server, metric, patterns) match. Lite never sets it.</summary>
+    public string? ExternalSource { get; set; }
+
     public string? MetricName { get; set; }
     public string? DatabasePattern { get; set; }
     public string? QueryTextPattern { get; set; }
@@ -53,6 +61,7 @@ public class MuteRule
         Reason = Reason,
         ServerName = ServerName,
         ServerId = ServerId,
+        ExternalSource = ExternalSource,
         MetricName = MetricName,
         DatabasePattern = DatabasePattern,
         QueryTextPattern = QueryTextPattern,
@@ -78,6 +87,7 @@ public class MuteRule
     {
         var parts = new List<string>();
         if (MetricName != null) parts.Add(MetricName);
+        if (ExternalSource != null) parts.Add($"from {ExternalSource}");
         if (ServerId.HasValue)
             parts.Add(ServerName != null ? $"on {ServerName} (#{ServerId.Value})" : $"on server #{ServerId.Value}");
         else if (ServerName != null)
@@ -145,6 +155,13 @@ public class MuteRule
             !string.Equals(ServerName, context.ServerName, StringComparison.OrdinalIgnoreCase))
             return false;
 
+        /* A source rule is decided on the source ALONE for this dimension: a context with no source (every
+           built-in alert, and Lite's) never matches it. A rule without a source skips the test, so it keeps
+           muting an external alert on its other dimensions. */
+        if (ExternalSource != null &&
+            !string.Equals(ExternalSource, context.ExternalSource, StringComparison.OrdinalIgnoreCase))
+            return false;
+
         if (MetricName != null && !NamesMetric(context.MetricName))
             return false;
 
@@ -181,11 +198,29 @@ public class AlertMuteContext
     /// id-keyed rule.</summary>
     public int? ServerId { get; set; }
 
+    /// <summary>The external alert source the alert came from (#5654), or null for an alert that did not come
+    /// from one. A rule with a <see cref="MuteRule.ExternalSource"/> matches only a context carrying that
+    /// source; a null here never matches it. Lite never sets it.</summary>
+    public string? ExternalSource { get; set; }
+
     public string MetricName { get; set; } = "";
     public string? DatabaseName { get; set; }
     public string? QueryText { get; set; }
     public string? WaitType { get; set; }
     public string? JobName { get; set; }
+
+    /// <summary>The source name inside an external alert's metric name (<c>External:&lt;source&gt;:&lt;key&gt;</c>,
+    /// #5654), or null for any other metric name. For a surface that holds the stored metric name and not the
+    /// drain's own record of the source (the viewer's alert rows). A source name holds no colon, so the first
+    /// colon after the prefix ends it.</summary>
+    public static string? ExternalSourceOf(string? metricName)
+    {
+        if (metricName is null || !metricName.StartsWith(AlertFamily.ExternalMetricPrefix, StringComparison.Ordinal))
+            return null;
+        var rest = metricName.AsSpan(AlertFamily.ExternalMetricPrefix.Length);
+        var colon = rest.IndexOf(':');
+        return colon > 0 ? rest[..colon].ToString() : null;
+    }
 
     /// <summary>The longest query-text pattern a mute dialog pre-fills from an alert.</summary>
     public const int SeedQueryTextMax = 200;
