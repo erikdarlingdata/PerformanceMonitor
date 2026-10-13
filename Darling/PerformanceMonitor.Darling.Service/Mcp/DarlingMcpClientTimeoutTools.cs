@@ -34,12 +34,12 @@ public sealed class DarlingMcpClientTimeoutTools
 {
     private const string Collector = "attention";
 
-    [McpServerTool(Name = "get_client_timeouts"), Description("Gets client timeouts (a client cancelled or timed out a query) for one server over a time range: the EXACT count and rate per minute from the session's event_counter, plus the top statements (fingerprint and one sample text), databases and client applications, and the newest sampled events. count and rate_per_minute are exact; the statements, databases, applications and sampled_events come from sampled ring-buffer events, which are a subset, never the total (samples_note says so). status empty = the collector ran across the range and counted none; unavailable = no recent successful collector run, so no count is claimed; not_collected = a PostgreSQL target has no such collector; precondition = the capture session is missing or denied.")]
+    [McpServerTool(Name = "get_client_timeouts"), Description("Gets client timeouts (queries a client cancelled or timed out) for one server over a time range: the exact count and rate per minute, plus sampled top statements, databases, client apps and recent events. Samples are a subset, never the total. empty = collector ran, none counted; unavailable = no recent collector run; not_collected = PostgreSQL target; precondition = capture session missing.")]
     public static async Task<string> GetClientTimeouts(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 1.")] int hours_back = 1,
-        [Description("Maximum sampled events to return, newest first. Default 20. Bounds sampled_events only; the count and the top lists are never cut.")] int limit = 20,
+        [Description("Sampled events to return, newest first. Default 20. Never cuts the count or top lists.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)

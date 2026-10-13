@@ -163,7 +163,8 @@ public sealed class McpToolsListBudgetTests
     // unmute_analysis_finding, the undo of the analysis mute, adds 793 bytes to the registered tool set (a 466-character
     // description plus its schema and wrapper): 94,429 + 793 = 95,222, the total the test measures on this tree. It is served only when mcp_allow_writes is on, so a default
     // install's tools/list does not grow by it.
-    private const int TotalCeilingBytes = 95_222;
+    /* #5640 Lane E2: get_client_timeouts (a 359-byte head, four parameters): the measured total went to 96,170 bytes. */
+    private const int TotalCeilingBytes = 96_170;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
