@@ -6,8 +6,8 @@
 -- Rules, so the assertions in pages.json can be exact:
 --   * Every time is relative to the store's own clock: now() AT TIME ZONE 'UTC', cut to the minute. Nothing is dated.
 --   * Every count is fixed: the same rows on every run, whatever the minute.
---   * The target is the one SQL Server the config registers ("ui-sql", an address nothing listens on, so the service
---     never collects and never overwrites what is seeded here).
+--   * The targets are the two servers the config registers: "ui-sql" (SQL Server) and "ui-pg" (PostgreSQL), both at an
+--     address nothing listens on, so the service never collects and never overwrites what is seeded here.
 --   * To cover another table, add one more section below, in the same shape, and name what it feeds. Keep the
 --     collection_id / log_id ranges apart (the ranges are listed in each section) so rows never collide.
 --
@@ -15,6 +15,10 @@
 --   cpu_utilization_stats 360 | memory_stats 360 | wait_stats 4 types x 360 | file_io_stats 2 files x 360
 --   query_stats 12 queries (3 databases x 4) x 36 collections (every 10 minutes) | server_properties 1
 --   database_size_stats 3 databases x 2 files, newest minute | collection_log 5 collectors x 72 (every 5 minutes), all success
+--   blocked_process_reports 2 | deadlocks 1 | analysis_findings 2 | config_alert_log 1
+-- Seeded (PostgreSQL target "ui-pg"):
+--   pg_database_stats 2 databases x 360 | pg_wait_stats 3 events x 360 | pg_statement_stats 6 queries x 36 (every 10 minutes)
+--   pg_statement_text 6 | collection_log 3 collectors x 72
 
 \set ON_ERROR_STOP on
 BEGIN;
@@ -129,6 +133,106 @@ SELECT 8000000 + 1000 * cl.n + k.k, :sid, :'sname', cl.name,
 FROM generate_series(0, 71) AS k(k)
 CROSS JOIN (VALUES (1, 'wait_stats', 4), (2, 'cpu_utilization_stats', 1), (3, 'memory_stats', 1), (4, 'file_io_stats', 2), (5, 'query_stats', 12))
     AS cl(n, name, rows_collected);
+
+-- blocked_process_reports: Blocking tab. Two reports, 1 and 2 hours back. blocked_report_id 9000001 and 9000002.
+INSERT INTO collect.blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid,
+    wait_time_ms, wait_resource, lock_mode, blocked_status, blocked_client_app, blocked_host_name, blocked_login_name, blocked_sql_text,
+    blocking_status, blocking_client_app, blocking_host_name, blocking_login_name, blocking_sql_text, contentious_object)
+SELECT 9000000 + r.n, mm.t - make_interval(hours => r.n), :sid, :'sname', mm.t - make_interval(hours => r.n), 'SalesDb', 60 + r.n, 80 + r.n,
+       15000 * r.n, 'KEY: 5:72057594038452224 (8194443284a0)', 'U', 'suspended', 'SalesApp', 'APP01', 'sales_app',
+       'UPDATE dbo.Orders SET Status = @Status WHERE OrderId = @OrderId;',
+       'sleeping', 'SalesApp', 'APP02', 'sales_batch', 'UPDATE dbo.Orders SET Total = Total * 1.01 WHERE CustomerId = @CustomerId;', 'dbo.Orders'
+FROM (SELECT t FROM ui_minutes WHERE m = 0) mm
+CROSS JOIN (VALUES (1), (2)) AS r(n);
+
+-- deadlocks: Blocking tab. One deadlock 3 hours back. deadlock_id 9100001.
+INSERT INTO collect.deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id, victim_sql_text, database_name)
+SELECT 9100001, t - interval '3 hours', :sid, :'sname', t - interval '3 hours', 'process1a2b3c',
+       'UPDATE dbo.Orders SET Status = @Status WHERE OrderId = @OrderId;', 'SalesDb'
+FROM ui_minutes WHERE m = 0;
+
+-- analysis_findings: Overview. Two findings from the newest minute. finding_id 9200001 and 9200002.
+INSERT INTO collect.analysis_findings (finding_id, analysis_time, server_id, server_name, database_name, time_range_start, time_range_end, severity, confidence,
+    category, story_path, story_path_hash, story_text, root_fact_key, root_fact_value, fact_count)
+SELECT 9200000 + f.n, t, :sid, :'sname', NULL, t - interval '6 hours', t, f.severity, 0.9,
+       f.category, f.story_path, md5(f.story_path), f.story_text, f.root_key, f.root_value, 2
+FROM (SELECT t FROM ui_minutes WHERE m = 0) mm
+CROSS JOIN (VALUES
+    (1, 0.8, 'waits', 'CXPACKET > PAGEIOLATCH_SH', 'Parallelism waits lead the wait profile, with page I/O latch waits behind them.', 'CXPACKET', 9000.0),
+    (2, 0.5, 'queries', 'query_stats > SalesDb', 'A reporting query in SalesDb takes the largest share of CPU.', 'query_cpu_share', 0.4))
+    AS f(n, severity, category, story_path, story_text, root_key, root_value);
+
+-- config_alert_log: Alert History. One alert, an hour back, sent.
+INSERT INTO config.config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, dismissed, muted, detail_text)
+SELECT t - interval '1 hour', :sid, :'sname', 'cpu', 96, 90, TRUE, 'email', FALSE, FALSE, 'CPU stayed above 90 percent for 5 minutes.'
+FROM ui_minutes WHERE m = 0;
+
+-- ---------------------------------------------------------------------------------------------------------------
+-- ui-pg: the PostgreSQL target. Its storage name is the config host. Ids ride 20000000 and up, clear of ui-sql's.
+-- ---------------------------------------------------------------------------------------------------------------
+SELECT server_id AS pgid, host AS pgname
+FROM config.config_monitored_servers
+WHERE name = 'ui-pg'
+\gset
+
+INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, engine_kind, postgres_major_version, created_date, modified_date)
+VALUES (:pgid, :'pgname', 'ui-pg', TRUE, 'postgres', 16,
+        (now() AT TIME ZONE 'UTC') - interval '7 days', now() AT TIME ZONE 'UTC')
+ON CONFLICT (server_id) DO UPDATE SET
+    server_name = EXCLUDED.server_name, display_name = EXCLUDED.display_name, is_enabled = TRUE,
+    engine_kind = 'postgres', postgres_major_version = 16, modified_date = EXCLUDED.modified_date;
+
+-- pg_database_stats: Activity (database) panels. Cumulative pg_stat_database counters, two databases.
+-- collection_id 20000000 + 1000 * db + m.
+INSERT INTO collect.pg_database_stats (collection_id, collection_time, server_id, server_name, database_name, xact_commit, xact_rollback,
+    blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset, numbackends)
+SELECT 20000000 + 1000 * d.n + m.m, m.t, :pgid, :'pgname', d.db,
+       (360 - m.m) * d.commits, (360 - m.m) * d.rollbacks, (360 - m.m) * d.reads, (360 - m.m) * d.hits,
+       (360 - m.m) / 30, (360 - m.m) * 4096, (360 - m.m) / 120,
+       m.t - interval '30 days', d.backends + (m.m % 3)
+FROM ui_minutes m
+CROSS JOIN (VALUES (1, 'appdb', 900, 4, 120, 9000, 12), (2, 'analytics', 150, 1, 800, 3000, 3)) AS d(n, db, commits, rollbacks, reads, hits, backends);
+
+-- pg_wait_stats: Waits tab. Three wait events with the per-interval deltas the read sums. collection_id 21000000 + 1000 * event + m.
+INSERT INTO collect.pg_wait_stats (collection_id, collection_time, server_id, server_name, wait_type_id, wait_event_id, wait_type, wait_event,
+    waits, wait_time_us, delta_waits, delta_wait_time_us, sample_interval_seconds)
+SELECT 21000000 + 1000 * w.n + m.m, m.t, :pgid, :'pgname', w.n, w.n * 10, w.wait_type, w.wait_event,
+       (360 - m.m) * w.waits, (360 - m.m) * w.us, w.waits, w.us, 60
+FROM ui_minutes m
+CROSS JOIN (VALUES (1, 'IO', 'DataFileRead', 50, 400000), (2, 'Lock', 'transactionid', 8, 900000), (3, 'LWLock', 'WALWrite', 30, 120000))
+    AS w(n, wait_type, wait_event, waits, us);
+
+-- pg_statement_text + pg_statement_stats: Activity tab "Top Query Shapes". Six statements over two databases, 36
+-- collections each (every 10 minutes); the read groups on (queryid, database_id), so the grid has exactly 6 rows.
+-- collection_id 22000000 + 1000 * query + c.
+INSERT INTO collect.pg_statement_text (server_id, queryid, query_text, first_seen, last_seen)
+SELECT :pgid, q.n, q.query_text, (now() AT TIME ZONE 'UTC') - interval '2 days', now() AT TIME ZONE 'UTC'
+FROM (VALUES
+    (1, 'SELECT id, total FROM orders WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 100'),
+    (2, 'UPDATE orders SET status = $1 WHERE id = $2'),
+    (3, 'SELECT customer_id, sum(total) FROM orders GROUP BY customer_id'),
+    (4, 'INSERT INTO order_lines (order_id, product_id, qty) VALUES ($1, $2, $3)'),
+    (5, 'SELECT date_trunc($1, created_at), count(*) FROM events GROUP BY 1'),
+    (6, 'REFRESH MATERIALIZED VIEW daily_sales')) AS q(n, query_text);
+
+INSERT INTO collect.pg_statement_stats (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel, calls,
+    total_exec_time_ms, min_exec_time_ms, max_exec_time_ms, mean_exec_time_ms, rows_returned, shared_blks_hit, shared_blks_read, shared_blks_dirtied,
+    shared_blks_written, temp_blks_read, temp_blks_written, wal_records, wal_fpi, wal_bytes,
+    delta_calls, delta_total_exec_time_ms, delta_rows, sample_interval_seconds)
+SELECT 22000000 + 1000 * q.n + c.c, c.t, :pgid, :'pgname', q.n, CASE WHEN q.n <= 4 THEN 16384 ELSE 16385 END, 10, TRUE,
+       (36 - c.c) * q.calls, (36 - c.c) * q.calls * q.ms, q.ms / 4, q.ms * 5, q.ms, (36 - c.c) * q.calls * 3,
+       (36 - c.c) * q.calls * 40, (36 - c.c) * q.calls, (36 - c.c) * q.calls / 20, (36 - c.c) * q.calls / 40, 0, (36 - c.c) * q.calls / 100,
+       (36 - c.c) * q.calls / 10, (36 - c.c) * q.calls / 500, (36 - c.c) * q.calls * 64,
+       q.calls, q.calls * q.ms, q.calls * 3, 600
+FROM (SELECT cc AS c, date_trunc('minute', now() AT TIME ZONE 'UTC') - make_interval(mins => cc * 10) AS t FROM generate_series(0, 35) AS cc) c
+CROSS JOIN (VALUES (1, 800, 3), (2, 1200, 2), (3, 40, 250), (4, 1500, 1), (5, 90, 120), (6, 2, 4000)) AS q(n, calls, ms);
+
+-- collection_log (ui-pg): 3 collectors, every 5 minutes, all success. log_id 23000000 + 1000 * collector + k.
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT 23000000 + 1000 * cl.n + k.k, :pgid, :'pgname', cl.name,
+       date_trunc('minute', now() AT TIME ZONE 'UTC') - make_interval(mins => k.k * 5), 90 + k.k, 'SUCCESS', cl.rows_collected
+FROM generate_series(0, 71) AS k(k)
+CROSS JOIN (VALUES (1, 'pg_database_stats', 2), (2, 'pg_wait_stats', 3), (3, 'pg_statement_stats', 6)) AS cl(n, name, rows_collected);
 
 COMMIT;
 

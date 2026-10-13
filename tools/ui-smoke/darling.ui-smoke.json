@@ -2,15 +2,16 @@
   // Config template for the web UI smoke check (#5701). run-ui-smoke.ps1 fills the two __TOKENS__ and writes the
   // result to its own scratch folder; the service reads it through DARLING_CONFIG.
   //
-  // The service refuses a config with no servers ("servers must contain at least one entry"), so one SQL Server is
-  // registered at an address nothing listens on. The connect fails at once, the service retries quietly, and nothing
+  // The service refuses a config with no servers ("servers must contain at least one entry"), so one SQL Server and one
+  // PostgreSQL are registered at addresses nothing listens on (127.0.0.1 port 1). The connect fails at once, the service retries quietly, and nothing
   // is ever collected over the rows seed.sql writes. Alerts and analysis stay off, so a failed connect sends nothing.
   // A loopback web host with no "network" block needs no sign-in.
   "postgres": {
     "connectionString": "Host=127.0.0.1;Port=__PG_PORT__;Username=darling;Database=darling"
   },
   "servers": [
-    { "name": "ui-sql", "host": "127.0.0.1,1", "auth": "integrated" }
+    { "name": "ui-sql", "host": "127.0.0.1,1", "auth": "integrated" },
+    { "name": "ui-pg", "engine": "postgres", "host": "127.0.0.1", "port": 1, "auth": "sql", "username": "ui-smoke", "password": "unused" }
   ],
   "alerts": { "enabled": false },
   "analysis": { "enabled": false },
