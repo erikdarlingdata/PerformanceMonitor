@@ -21,9 +21,6 @@ on:
   # The nightly runs it as a reusable workflow (nightly.yml, outside publish's needs).
   workflow_call:
   workflow_dispatch:
-  # TEMPORARY (lane B proof): removed in the last commit of this branch.
-  push:
-    branches: ['fix/5701-ui-smoke']
 
 permissions:
   contents: read
