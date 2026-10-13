@@ -291,6 +291,26 @@ public sealed class McpWritePolicyTests
         Assert.Equal(allowWrites, !instructions.Contains("in the catalog", StringComparison.Ordinal));
     }
 
+    /// <summary>#5789 correction: no sentence of the rendered instructions points a client at a tool this server
+    /// does not serve. Every backticked name that is a Lite tool must be in the served set, writes off and on.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RenderedInstructions_NameOnlyServedTools(bool allowWrites)
+    {
+        var all = RegisteredTools();
+        var catalog = McpWritePolicy.ToolNames(all);
+        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites));
+        var text = McpInstructions.Build(catalog, served);
+
+        var named = System.Text.RegularExpressions.Regex.Matches(text, "`([a-z][a-z0-9_]*)`")
+            .Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        var unserved = named.Where(n => catalog.Contains(n) && !served.Contains(n)).OrderBy(n => n, StringComparer.Ordinal).ToList();
+
+        Assert.True(named.Count(catalog.Contains) > 3, "the scan found almost no tool names; the backtick pattern no longer matches the text");
+        Assert.True(unserved.Count == 0, "the instructions name tools this configuration does not serve: " + string.Join(", ", unserved));
+    }
+
     private static JsonElement ResultOf(string body)
     {
         var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));

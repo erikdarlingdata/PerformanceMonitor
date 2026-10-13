@@ -134,8 +134,8 @@ public sealed class DarlingMcpInstructionsBudgetTests
 
         var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
         Assert.Contains(
-            $"This server exposes {served.Count} of its {catalog.Count} tools: `mcp.allowServerAdmin` is off, so `add_servers`, " +
-            $"`edit_server` and `remove_server` are not served. {shared} are the same names Lite exposes. The remaining " +
+            $"This server exposes {served.Count} of its {catalog.Count} tools: `mcp.allowServerAdmin` is off, so the " +
+            $"{catalog.Count - served.Count} tools that add, edit and remove monitored servers are not served. {shared} are the same names Lite exposes. The remaining " +
             $"{served.Count - shared} are unique to Darling: thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, " +
             "custom-alert-rule, alert-tuning and server-tag tools, and central-store-only reads",
             text, StringComparison.Ordinal);
@@ -155,6 +155,25 @@ public sealed class DarlingMcpInstructionsBudgetTests
         Assert.StartsWith($"This server exposes {catalog.Count} tools. ", census, StringComparison.Ordinal);
         Assert.Contains(census, DarlingMcpInstructions.Text, StringComparison.Ordinal);
         Assert.Equal(DarlingMcpInstructions.Text, DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served));
+    }
+
+    /// <summary>#5789 correction: no sentence of the rendered instructions points a client at a tool this server
+    /// does not serve. Every backticked name that is a Darling tool must be in the served set, for each switch state.</summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void RenderedInstructions_NameOnlyServedTools(bool writes, bool serverAdmin)
+    {
+        var catalog = Catalog();
+        var served = Served(new DarlingMcpWritePolicy.Effective(writes, serverAdmin));
+        var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
+
+        var named = Regex.Matches(text, "`([a-z][a-z0-9_]*)`").Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+        var unserved = named.Where(n => catalog.Contains(n) && !served.Contains(n)).OrderBy(n => n, StringComparer.Ordinal).ToList();
+
+        Assert.True(named.Count(catalog.Contains) > 10, "the scan found almost no tool names; the backtick pattern no longer matches the text");
+        Assert.True(unserved.Count == 0, "the instructions name tools this configuration does not serve: " + string.Join(", ", unserved));
     }
 
     /// <summary><see cref="DarlingMcpInstructions.LiteToolNames"/> is exactly the set of tool names Lite registers,

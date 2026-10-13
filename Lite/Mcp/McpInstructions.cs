@@ -42,8 +42,24 @@ internal static class McpInstructions
         else
             census = $"{count} tools ({total} in the catalog; the other {total - count} are not served in this configuration)";
 
-        return Head + "\n\n" + census + Tail;
+        /* #5789 correction: two sentences name write tools by name (the preamble's list and the Workflow line's
+           last step). With the writes off those tools are not served, so the names are dropped rather than
+           pointing a client at tools tools/list lacks. */
+        var head = served.Any(McpWritePolicy.IsWrite) ? Head : Head.Replace(PreambleWriteToolList, "", StringComparison.Ordinal);
+        var tail = served.Contains(MuteTool) ? Tail : Tail.Replace(WorkflowMuteStep, "", StringComparison.Ordinal);
+        return head + "\n\n" + census + tail;
     }
+
+    private const string MuteTool = "mute_analysis_finding";
+
+    /// <summary>The preamble's list of the write tools by name; <see cref="Build"/> drops it when none is served.
+    /// <c>RenderedInstructions_NameOnlyServedTools</c> fails if this stops matching the text.</summary>
+    private const string PreambleWriteToolList =
+        " (`mute_analysis_finding`, `unmute_analysis_finding`, `set_notification_route_enabled`, `delete_notification_route`)";
+
+    /// <summary>The Workflow line's last step, which names a write tool; <see cref="Build"/> drops it when that
+    /// tool is not served.</summary>
+    private const string WorkflowMuteStep = " -> `mute_analysis_finding` to silence an accepted pattern";
 
     private const string Head = """
         You are connected to a SQL Server performance monitoring tool via Performance Monitor Lite.

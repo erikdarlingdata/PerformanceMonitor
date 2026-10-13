@@ -52,17 +52,26 @@ internal static class DarlingMcpInstructions
     /// </summary>
     internal static string Build(
         DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served)
-        => Compose(peers, ToolCensus(catalog, served));
+        => Compose(peers, ToolCensus(catalog, served), served.Contains(MuteTool));
 
-    private static string Compose(DarlingPeerDirectory.Snapshot peers, string census)
+    private static string Compose(DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true)
     {
         var section = DarlingPeerDirectory.InstructionsSection(peers);
-        if (section.Length == 0 && ReferenceEquals(census, CatalogCensus))
+        if (section.Length == 0 && ReferenceEquals(census, CatalogCensus) && muteServed)
             return Text;
 
+        /* #5789 correction: the Workflow line names the mute write as its last step. With the writes off that tool
+           is not served, so the step is dropped rather than pointing a client at a tool tools/list lacks. */
+        var tail = muteServed ? BodyTail : BodyTail.Replace(WorkflowMuteStep, "", StringComparison.Ordinal);
         var preamble = section.Length == 0 ? Preamble : Preamble + "\n\n" + section;
-        return preamble + "\n\n" + BodyHead + "\n\n" + census + "\n\n" + BodyTail;
+        return preamble + "\n\n" + BodyHead + "\n\n" + census + "\n\n" + tail;
     }
+
+    private const string MuteTool = "mute_analysis_finding";
+
+    /// <summary>The Workflow line's last step, which names a write tool; <see cref="Compose"/> drops it when that
+    /// tool is not served. <c>RenderedInstructions_NameOnlyServedTools</c> fails if this stops matching the line.</summary>
+    private const string WorkflowMuteStep = " -> `mute_analysis_finding` to silence an accepted pattern";
 
     /// <summary>
     /// The census paragraph for a server that serves <paramref name="served"/> out of <paramref name="catalog"/>.
@@ -89,7 +98,7 @@ internal static class DarlingMcpInstructions
                       $"`{DarlingMcpWritePolicy.ServerAdminSetting}` {adminCount} more).";
         else if (!adminServed)
             opening = $"This server exposes {count} of its {total} tools: `{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so " +
-                      "`add_servers`, `edit_server` and `remove_server` are not served.";
+                      $"the {total - count} tools that add, edit and remove monitored servers are not served.";
         else
             opening = $"This server exposes {count} of its {total} tools; the other {total - count} are not served in this configuration.";
 
