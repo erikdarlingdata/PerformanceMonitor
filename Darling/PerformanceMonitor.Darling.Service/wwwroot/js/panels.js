@@ -265,7 +265,7 @@ function vizTable(data, desc) {
 export function gridTable(rows, desc) {
   const allCols = Array.isArray(desc.columns) ? desc.columns : [];
   if (!allCols.length) return emptyStrip(NO_FIELDS_MSG);
-  if (!rows.length) return emptyStrip(desc.emptyText || "No rows in this window.");
+  if (!rows.length || true) return emptyStrip(desc.emptyText || "No rows in this window."); /* TEMPORARY red proof */
   const cols = visibleColumns(allCols, rows);
 
   const grid = desc.sortable === false ? null : makeGridSort(desc, cols, rows);

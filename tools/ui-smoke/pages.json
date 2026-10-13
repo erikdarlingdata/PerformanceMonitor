@@ -54,7 +54,7 @@
       "name": "ui-sql-queries",
       "hash": "#/server/ui-sql/queries",
       "server": "ui-sql",
-      "expect": { "panels": [{ "panel": "get_top_queries_by_cpu", "state": "data", "minRows": 10 }] }
+      "expect": { "panels": [{ "panel": "get_top_queries_by_cpu", "state": "data", "minRows": 12 }] }
     },
     {
       "name": "admin-servers",

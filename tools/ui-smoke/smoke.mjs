@@ -100,7 +100,7 @@ async function checkPage(browser, spec) {
   page.on("requestfailed", (r) => note("request failed: " + r.url().replace(baseUrl, "") + " " + (r.failure()?.errorText || "")));
   page.on("response", (r) => {
     const url = new URL(r.url());
-    if (url.pathname.startsWith("/api/") && r.status() >= 400) note("api " + r.status() + ": " + url.pathname);
+    if (r.status() >= 400) note((url.pathname.startsWith("/api/") ? "api " : "asset ") + r.status() + ": " + url.pathname);
   });
 
   let panels = [];
