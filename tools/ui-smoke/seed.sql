@@ -15,7 +15,8 @@
 --   cpu_utilization_stats 360 | memory_stats 360 | wait_stats 4 types x 360 | file_io_stats 2 files x 360
 --   query_stats 12 queries (3 databases x 4) x 36 collections (every 10 minutes) | server_properties 1
 --   database_size_stats 3 databases x 2 files, newest minute | collection_log 5 collectors x 72 (every 5 minutes), all success
---   blocked_process_reports 2 | deadlocks 1 | analysis_findings 2 | config_alert_log 1
+--   blocked_process_reports 2 | deadlocks 1 | analysis_findings 2 | config_alert_log 1 (metric 'High CPU', the name #/triage resolves)
+--   ag_replica_states 2 (one group, SalesAG: UISQL01 primary, UISQL02 secondary) | ag_database_replica_states 4 (2 databases x 2 replicas), newest minute
 -- Seeded (PostgreSQL target "ui-pg"):
 --   pg_database_stats 2 databases x 360 | pg_wait_stats 3 events x 360 | pg_statement_stats 6 queries x 36 (every 10 minutes)
 --   pg_statement_text 6 | collection_log 3 collectors x 72
@@ -164,8 +165,36 @@ CROSS JOIN (VALUES
 
 -- config_alert_log: Alert History. One alert, an hour back, sent.
 INSERT INTO config.config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, dismissed, muted, detail_text)
-SELECT t - interval '1 hour', :sid, :'sname', 'cpu', 96, 90, TRUE, 'email', FALSE, FALSE, 'CPU stayed above 90 percent for 5 minutes.'
+SELECT t - interval '1 hour', :sid, :'sname', 'High CPU', 96, 90, TRUE, 'email', FALSE, FALSE, 'CPU stayed above 90 percent for 5 minutes.'
 FROM ui_minutes WHERE m = 0;
+
+-- Availability Group: the #/ag page (its nav entry shows only when the store has AG rows) and get_ag_health. One group,
+-- "SalesAG", seen by ui-sql: two replicas (UISQL01 primary and local, UISQL02 secondary) and two databases on each, from
+-- the newest minute. DarlingAgStatesReader reads the newest snapshot per server inside its staleness horizon, so a single
+-- snapshot is the whole story. collection_id 9300001 and up (replicas), 9310001 and up (databases).
+INSERT INTO collect.ag_replica_states (collection_id, collection_time, server_id, server_name, ag_name, replica_server_name, role_desc,
+    operational_state_desc, connected_state_desc, recovery_health_desc, synchronization_health_desc, availability_mode_desc,
+    failover_mode_desc, endpoint_url, is_local, group_id)
+SELECT 9300000 + r.n, mm.t, :sid, :'sname', 'SalesAG', r.replica, r.role, 'ONLINE', 'CONNECTED', 'ONLINE', 'HEALTHY',
+       'SYNCHRONOUS_COMMIT', 'AUTOMATIC', 'TCP://' || lower(r.replica) || '.example.test:5022', r.is_local,
+       '5f3c1a52-0a5e-4d0e-9b53-6f6f5b0c0001'
+FROM (SELECT t FROM ui_minutes WHERE m = 0) mm
+CROSS JOIN (VALUES (1, 'UISQL01', 'PRIMARY', TRUE), (2, 'UISQL02', 'SECONDARY', FALSE)) AS r(n, replica, role, is_local);
+
+INSERT INTO collect.ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name, database_name, replica_server_name,
+    is_local, synchronization_state_desc, last_hardened_lsn, last_commit_lsn, log_send_queue_size, redo_queue_size, log_send_rate, redo_rate,
+    is_suspended, suspend_reason_desc, availability_mode_desc, secondary_lag_seconds, last_commit_time, last_hardened_time, last_redone_time,
+    last_received_time, est_redo_completion_time_min, est_send_drain_time_min, group_id)
+SELECT 9310000 + 10 * d.n + r.n, mm.t, :sid, :'sname', 'SalesAG', d.db, r.replica, r.is_local,
+       CASE WHEN r.is_local THEN 'SYNCHRONIZED' ELSE 'SYNCHRONIZING' END,
+       '00000042:000000a8:0001', '00000042:000000a8:0001',
+       CASE WHEN r.is_local THEN 0 ELSE 128 END, CASE WHEN r.is_local THEN 0 ELSE 256 END,
+       CASE WHEN r.is_local THEN 0 ELSE 2048 END, CASE WHEN r.is_local THEN 0 ELSE 4096 END,
+       FALSE, NULL, 'SYNCHRONOUS_COMMIT', CASE WHEN r.is_local THEN 0 ELSE 2 END,
+       mm.t, mm.t, mm.t, mm.t, 0, 0, '5f3c1a52-0a5e-4d0e-9b53-6f6f5b0c0001'
+FROM (SELECT t FROM ui_minutes WHERE m = 0) mm
+CROSS JOIN (VALUES (1, 'SalesDb'), (2, 'OrdersDb')) AS d(n, db)
+CROSS JOIN (VALUES (1, 'UISQL01', TRUE), (2, 'UISQL02', FALSE)) AS r(n, replica, is_local);
 
 -- ---------------------------------------------------------------------------------------------------------------
 -- ui-pg: the PostgreSQL target. Its storage name is the config host. Ids ride 20000000 and up, clear of ui-sql's.

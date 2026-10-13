@@ -12,6 +12,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -111,6 +112,19 @@ VALUES (101, 'ui-sql', '127.0.0.1,1', 'integrated', TRUE, now() AT TIME ZONE 'UT
         Assert.Equal(1, await CountAsync("collect.deadlocks", sql));
         Assert.Equal(2, await CountAsync("collect.analysis_findings", sql));
         Assert.Equal(1, await CountAsync("config.config_alert_log", sql));
+        Assert.Equal(2, await CountAsync("collect.ag_replica_states", sql));
+        Assert.Equal(4, await CountAsync("collect.ag_database_replica_states", sql));
+        /* #/triage names the alert by its metric: the seeded row carries the name the High CPU notebook template is keyed on. */
+        Assert.Equal(1, await CountAsync("config.config_alert_log", sql + " AND metric_name = 'High CPU'"));
+
+        /* The #/ag page reads through DarlingAgReader: one group, two replicas, and a database grid of four rows (each
+           database once per replica). pages.json asserts exactly that grid, so the seed and the reader must agree. */
+        Assert.Equal(1, await DarlingAgReader.GetAvailabilityGroupCountAsync(source, null, ct));
+        var ag = await DarlingAgReader.GetAgHealthAsync(source, null, DateTime.UtcNow, responseByteBudget: null, cancellationToken: ct);
+        var group = Assert.Single(ag.AvailabilityGroups);
+        Assert.Equal("SalesAG", group.AgName);
+        Assert.Equal(2, group.Replicas.Count);
+        Assert.Equal(4, group.Databases.Count);
 
         Assert.Equal(2 * 360, await CountAsync("collect.pg_database_stats", pg));
         Assert.Equal(3 * 360, await CountAsync("collect.pg_wait_stats", pg));

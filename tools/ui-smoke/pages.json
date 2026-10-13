@@ -379,6 +379,29 @@
       "hash": "#/job-history",
       "nav": "job-history",
       "expect": {}
+    },
+    {
+      "name": "ag",
+      "hash": "#/ag",
+      "nav": "ag",
+      "heading": "Availability Groups",
+      "expect": {
+        "grids": [
+          { "index": 0, "exactRows": 4 }
+        ]
+      }
+    },
+    {
+      "name": "triage",
+      "hash": "#/triage?server=ui-sql&metric=High%20CPU",
+      "heading": "Triage",
+      "expect": {
+        "panels": [
+          { "panel": "get_top_queries_by_cpu", "state": "data", "minRows": 10 },
+          { "panel": "get_top_procedures_by_cpu", "state": "empty" },
+          { "panel": "get_cpu_scheduler_pressure", "state": "empty" }
+        ]
+      }
     }
   ]
 }
