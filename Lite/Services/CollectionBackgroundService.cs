@@ -722,7 +722,12 @@ public class CollectionBackgroundService : BackgroundService
         {
             /* The views must be rebuilt after a delete (see CleanupOldArchivesAndRefreshViewsAsync). */
             if (_duckDb != null)
-                await _retentionService.CleanupOldArchivesAndRefreshViewsAsync(_duckDb, RetentionService.ArchiveRetentionMonths);
+            {
+                /* #5731: null means the write lock stayed busy for the whole budget and nothing ran. Leave the stamp
+                   alone so the next housekeeping tick retries instead of waiting out the interval. */
+                if (await _retentionService.CleanupOldArchivesAndRefreshViewsAsync(_duckDb, RetentionService.ArchiveRetentionMonths) == null)
+                    return;
+            }
             else
                 _retentionService.CleanupOldArchives(retentionMonths: RetentionService.ArchiveRetentionMonths);
             _lastRetentionTime = DateTime.UtcNow;

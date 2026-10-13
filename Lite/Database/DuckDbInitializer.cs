@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -323,8 +324,17 @@ public partial class DuckDbInitializer : IDisposable
         {
             s_dbLock.EnterWriteLock();
         }
-        return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true));
+        return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true), WriteHoldWarnAfter);
     }
+
+    /// <summary>
+    /// #5731 hold watchdog: a WRITE hold that lasts longer than this logs one warning naming the holder when it
+    /// is released. A waiting writer makes every new reader (every collector's log append) wait, and a writer's
+    /// hold keeps them out, so a long write hold is the number the housekeeping budgets are tuned against. The
+    /// same five seconds as <c>LocalDataService.WriteLockBudget</c>, the longest a writer will wait for the
+    /// lock. An instance value rather than a static so a test can lower it on its own initializer.
+    /// </summary>
+    internal TimeSpan WriteHoldWarnAfter { get; set; } = TimeSpan.FromSeconds(5);
 
     private sealed class NoOpDisposable : IDisposable
     {
@@ -366,19 +376,40 @@ public partial class DuckDbInitializer : IDisposable
         private readonly ReaderWriterLockSlim _lock;
         private readonly bool _write;
         private readonly long _holdId;
+        private readonly long _acquiredAt = Stopwatch.GetTimestamp();
+        private readonly TimeSpan _warnAfter;
         private bool _disposed;
 
-        public LockReleaser(ReaderWriterLockSlim rwLock, bool write, long holdId)
+        public LockReleaser(ReaderWriterLockSlim rwLock, bool write, long holdId, TimeSpan warnAfter = default)
         {
             _lock = rwLock;
             _write = write;
             _holdId = holdId;
+            _warnAfter = warnAfter;
         }
 
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
+            /* #5731: write holds only, so a read pays one timestamp and nothing else. Logged before the release so
+               the registry still names the holder, and guarded because Dispose must never throw past the unlock. */
+            if (_write && _warnAfter > TimeSpan.Zero)
+            {
+                try
+                {
+                    var held = Stopwatch.GetElapsedTime(_acquiredAt);
+                    if (held > _warnAfter)
+                    {
+                        AppLogger.Warn("DuckDb", string.Create(CultureInfo.InvariantCulture,
+                            $"{StoreLockHolders.HolderName(_holdId)} held the local database write lock for {held.TotalSeconds:0.#} s (warns past {_warnAfter.TotalSeconds:0.#} s); collectors were held off for that long (#5731)"));
+                    }
+                }
+                catch (Exception)
+                {
+                    /* The warning is measurement only. */
+                }
+            }
             StoreLockHolders.Unregister(_holdId);
             if (_write) _lock.ExitWriteLock();
             else _lock.ExitReadLock();
