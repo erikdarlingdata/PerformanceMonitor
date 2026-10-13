@@ -14,6 +14,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using Xunit;
+using Lite.Tests;
 
 namespace PerformanceMonitorLite.Tests;
 
@@ -27,6 +28,7 @@ namespace PerformanceMonitorLite.Tests;
 /// and a temp config dir; each test cleans up. Pure resolution tests use an in-memory IProfileLookup
 /// stub so they don't depend on Credential Manager for the profile non-secret fields.
 /// </summary>
+[Collection(CredentialManagerCollection.Name)]
 public class CredentialProfileTests
 {
     private static SqlConnectionStringBuilder Parse(string connStr) => new(connStr);

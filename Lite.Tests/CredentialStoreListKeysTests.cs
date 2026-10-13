@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using PerformanceMonitor.Common;
 using Xunit;
+using Lite.Tests;
 
 namespace PerformanceMonitorLite.Tests;
 
@@ -18,6 +19,7 @@ namespace PerformanceMonitorLite.Tests;
 /// fresh GUID so nothing of the user's is read or touched, and cleaned up in a finally. Skips when this session cannot write a
 /// credential (a service account or a locked-down runner), because then there is nothing to enumerate.
 /// </summary>
+[Collection(CredentialManagerCollection.Name)]
 public sealed class CredentialStoreListKeysTests
 {
     [Fact]

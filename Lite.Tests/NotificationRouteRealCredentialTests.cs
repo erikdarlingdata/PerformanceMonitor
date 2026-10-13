@@ -15,6 +15,7 @@ using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using Xunit;
+using Lite.Tests;
 
 namespace PerformanceMonitorLite.Tests;
 
@@ -28,8 +29,12 @@ namespace PerformanceMonitorLite.Tests;
 /// <see cref="RouteSecretAccess.Over"/>, so the user's real <c>PerformanceMonitorLite_NotificationRoute_*</c> credentials are
 /// never read, and the store's start-up orphan sweep (which deletes keys no row owns) cannot reach them. Each test deletes
 /// what it wrote in <see cref="Dispose"/>.
+///
+/// In the credential-manager collection (#5785), which runs alone after the parallel classes, so no other test writes
+/// the Credential Manager while this one reads it; it also keeps the App statics it shares with the app-alert-statics classes
+/// away from them.
 /// </summary>
-[Collection("app-alert-statics")]
+[Collection(CredentialManagerCollection.Name)]
 public sealed class NotificationRouteRealCredentialTests : IDisposable
 {
     private const string OldTeams = "https://teams.old-secret.test/hook/aaa111";

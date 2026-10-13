@@ -13,6 +13,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using Xunit;
+using Lite.Tests;
 
 namespace PerformanceMonitorLite.Tests;
 
@@ -22,6 +23,7 @@ namespace PerformanceMonitorLite.Tests;
 /// ServerConnection.BuildConnectionString / ApplyAuthentication. Real Azure auth (token
 /// acquisition against a tenant) is a maintainer E2E step and is NOT exercised here.
 /// </summary>
+[Collection(CredentialManagerCollection.Name)]
 public class AzureAuthConnectionStringTests
 {
     private static SqlConnectionStringBuilder Parse(string connStr) => new(connStr);

@@ -10,6 +10,7 @@ using PerformanceMonitorLite;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Services;
 using Xunit;
+using Lite.Tests;
 
 namespace PerformanceMonitorLite.Tests;
 
@@ -31,8 +32,10 @@ namespace PerformanceMonitorLite.Tests;
 /// drives App.LoadAlertSettings, which writes the four webhook statics this one asserts on, and xUnit runs
 /// separate classes in parallel. #1965 widened that collection (and renamed it from "app-webhook-statics")
 /// to cover the App.Alert* statics too, after the same parallelism flaked the MCP alert-settings tests.
+/// #5785 moved it to the credential-manager collection, because GetSmtpPassword reads the real Credential Manager. That
+/// collection runs alone, after every parallel class has finished, so the App statics stay as guarded as they were.
 /// </summary>
-[Collection("app-alert-statics")]
+[Collection(CredentialManagerCollection.Name)]
 public class AppAlertSettingsTests
 {
     /// <summary>
