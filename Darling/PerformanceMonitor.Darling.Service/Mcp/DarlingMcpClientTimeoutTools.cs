@@ -91,9 +91,12 @@ public sealed class DarlingMcpClientTimeoutTools
     }
 
     /// <summary>
-    /// The seven reads on ONE connection: the six shared statements with the ceiling on ($3 = the window end), then the newest
-    /// <paramref name="sampleLimit"/> + 1 sampled events. $1 server_id, $2/$3 naive UTC (unspecified kind, so Npgsql binds
-    /// <c>timestamp</c> and never converts through the session's time zone).
+    /// The seven reads on ONE connection, in two steps. Step one reads the runs, the counts and the sample groups with the ceiling on
+    /// ($3 = the window end plus the row skew) and the evaluator cuts them to the span. Step two reads the top lists and the newest
+    /// <paramref name="sampleLimit"/> + 1 sampled events over exactly that span (<see cref="ClientTimeoutsRead.DetailSpan"/>: $2 = the
+    /// exclusive span boundary, $3 = the newest run plus the skew), so they never hold the base run's samples from before the span or
+    /// anything past the newest run (#5640). $1 server_id, $2/$3 naive UTC (unspecified kind, so Npgsql binds <c>timestamp</c> and never
+    /// converts through the session's time zone). Every command carries the MCP read deadline (#2874).
     /// </summary>
     internal static async Task<(AttentionWindow Window, List<ClientTimeoutSample> Samples)> ReadRangeAsync(
         NpgsqlDataSource postgres, int serverId, DateTime windowStart, DateTime windowEnd, int sampleLimit, CancellationToken cancellationToken)
@@ -108,12 +111,13 @@ public sealed class DarlingMcpClientTimeoutTools
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
 
-        async Task<List<T>> Query<T>(string sql, Func<NpgsqlDataReader, T> map, bool skewed = true)
+        async Task<List<T>> Query<T>(string sql, DateTime lower, DateTime upper, Func<NpgsqlDataReader, T> map)
         {
             await using var command = new NpgsqlCommand(sql, connection);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, floor);
-            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, skewed ? rowCeiling : ceiling);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, lower);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, upper);
 
             var rows = new List<T>();
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -125,22 +129,33 @@ public sealed class DarlingMcpClientTimeoutTools
             return rows;
         }
 
-        var runs = await Query(AttentionWindowSql.Runs("collection_log", bounded: true), r => r.GetDateTime(0), skewed: false);
-        var counts = await Query(AttentionWindowSql.Counts("attention_events", bounded: true),
+        var runs = await Query(AttentionWindowSql.Runs("collection_log", bounded: true), floor, ceiling, r => r.GetDateTime(0));
+        var counts = await Query(AttentionWindowSql.Counts("attention_events", bounded: true), floor, rowCeiling,
             r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)));
-        var groups = await Query(AttentionWindowSql.SampleGroups("attention_events", bounded: true),
+        var groups = await Query(AttentionWindowSql.SampleGroups("attention_events", bounded: true), floor, rowCeiling,
             r => new AttentionSampleGroup(
                 r.GetDateTime(0),
                 r.IsDBNull(1) ? null : r.GetString(1),
                 r.IsDBNull(2) ? null : r.GetString(2),
                 r.GetInt64(3)));
-        var statements = await Query(AttentionWindowSql.TopStatements("attention_events", bounded: true),
+
+        /* No span (fewer than two runs) is "not observed": the answer never shows the detail, so it is not read. */
+        var span = ClientTimeoutsRead.DetailSpan(runs);
+        if (span is null)
+        {
+            return (new AttentionWindow(runs, counts, groups, [], [], []), []);
+        }
+
+        var spanFloor = DateTime.SpecifyKind(span.Value.Floor, DateTimeKind.Unspecified);
+        var spanCeiling = DateTime.SpecifyKind(span.Value.Ceiling, DateTimeKind.Unspecified);
+
+        var statements = await Query(AttentionWindowSql.TopStatements("attention_events", bounded: true), spanFloor, spanCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1), r.IsDBNull(2) ? null : r.GetString(2)));
-        var databases = await Query(AttentionWindowSql.TopBy("attention_events", "database_name", bounded: true),
+        var databases = await Query(AttentionWindowSql.TopBy("attention_events", "database_name", bounded: true), spanFloor, spanCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
-        var applications = await Query(AttentionWindowSql.TopBy("attention_events", "client_app_name", bounded: true),
+        var applications = await Query(AttentionWindowSql.TopBy("attention_events", "client_app_name", bounded: true), spanFloor, spanCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
-        var samples = await Query(AttentionWindowSql.Samples("attention_events", sampleLimit + 1),
+        var samples = await Query(AttentionWindowSql.Samples("attention_events", sampleLimit + 1), spanFloor, spanCeiling,
             r => new ClientTimeoutSample(
                 r.IsDBNull(0) ? null : r.GetDateTime(0),
                 r.GetDateTime(1),

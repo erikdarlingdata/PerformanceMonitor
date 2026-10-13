@@ -41,8 +41,14 @@ public static class AttentionWindowSql
     public const int TopCount = 5;
 
     /// <summary>The read-surface ceiling (#5640, get_client_timeouts): <c>$3</c> = the naive-UTC end of the window, so an <c>as_of</c> read
-    /// does not count what happened after it. The alert's own reads pass <c>bounded: false</c> and keep the text they always had.</summary>
+    /// does not count what happened after it. The alert's own reads pass <c>bounded: false</c> and have no ceiling.</summary>
     public static string Ceiling(bool bounded) => bounded ? "\nAND   collection_time <= $3" : "";
+
+    /// <summary>The floor of the top lists. The alert's reads (<c>bounded: false</c>) keep <c>collection_time &gt;= $2</c>, the lookback floor. The
+    /// read surface (<c>bounded: true</c>) binds the SPAN boundary into <c>$2</c> and reads <c>collection_time &gt; $2</c>, with <c>$3</c> the
+    /// inclusive row ceiling: the very cut <c>AttentionEvaluator.ReadSpan</c> makes of the counts and the sample
+    /// groups (#5640), so a top list or a sampled event can never come from outside the rows the count came from.</summary>
+    public static string SpanFloor(bool bounded) => bounded ? "collection_time > $2" : "collection_time >= $2";
 
     /// <summary>Successful run times, newest first. Column 0 = collection_time. DISTINCT: an Azure SQL Database server logs one run per monitored database.</summary>
     public static string Runs(string logRelation, bool bounded = false) => $"""
@@ -83,21 +89,22 @@ GROUP BY collection_time, database_name, client_app_name
 ORDER BY collection_time DESC, database_name, client_app_name
 """;
 
-    /// <summary>The top <see cref="TopCount"/> statement fingerprints by sampled events, each with the newest non-NULL sample
-    /// text. Columns: fingerprint, samples (bigint), sample_text. Rows without a fingerprint (the statement filter withheld the
+    /// <summary>The top <see cref="TopCount"/> statement fingerprints by sampled events (count ties break by name in binary order,
+    /// <c>COLLATE "C"</c>, which PostgreSQL honors and DuckDB's default already is, so both stores list the same fifth entry), each with the newest non-NULL sample
+    /// text (ties on collection_time and event_time break on the unique id, so the pick is stable). Columns: fingerprint, samples (bigint), sample_text. Rows without a fingerprint (the statement filter withheld the
     /// text) are not a statement.</summary>
     public static string TopStatements(string eventsRelation, bool bounded = false) => $"""
 SELECT
     statement_fingerprint,
     CAST(COUNT(*) AS BIGINT) AS samples,
-    (array_agg(statement_text ORDER BY collection_time DESC) FILTER (WHERE statement_text IS NOT NULL))[1] AS sample_text
+    (array_agg(statement_text ORDER BY collection_time DESC, event_time DESC NULLS LAST, attention_event_id DESC) FILTER (WHERE statement_text IS NOT NULL))[1] AS sample_text
 FROM {eventsRelation}
 WHERE server_id = $1
-AND   collection_time >= $2{Ceiling(bounded)}
+AND   {SpanFloor(bounded)}{Ceiling(bounded)}
 AND   event_kind = '{KindSample}'
 AND   statement_fingerprint IS NOT NULL
 GROUP BY statement_fingerprint
-ORDER BY COUNT(*) DESC, statement_fingerprint
+ORDER BY COUNT(*) DESC, statement_fingerprint COLLATE "C"
 LIMIT {TopCount}
 """;
 
@@ -109,18 +116,18 @@ SELECT
     CAST(COUNT(*) AS BIGINT) AS samples
 FROM {eventsRelation}
 WHERE server_id = $1
-AND   collection_time >= $2{Ceiling(bounded)}
+AND   {SpanFloor(bounded)}{Ceiling(bounded)}
 AND   event_kind = '{KindSample}'
 AND   {column} IS NOT NULL
 GROUP BY {column}
-ORDER BY COUNT(*) DESC, {column}
+ORDER BY COUNT(*) DESC, {column} COLLATE "C"
 LIMIT {TopCount}
 """;
 
     /// <summary>
     /// The newest kept ring-buffer events, for the read surface only (get_client_timeouts): one row per <c>sample</c>, newest first.
     /// Columns: event_time, collection_time, database_name, client_app_name, client_hostname, session_id, interrupt_duration_us,
-    /// statement_fingerprint, statement_text. Always bounded ($3). <paramref name="limit"/> is a validated integer, never caller text.
+    /// statement_fingerprint, statement_text. Always bounded: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive row ceiling (see <see cref="SpanFloor"/>). Newest first, ties broken by the table's unique id so a page edge is stable. <paramref name="limit"/> is a validated integer, never caller text.
     /// </summary>
     public static string Samples(string eventsRelation, int limit) => $"""
 SELECT
@@ -135,10 +142,10 @@ SELECT
     statement_text
 FROM {eventsRelation}
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 AND   event_kind = '{KindSample}'
-ORDER BY collection_time DESC, event_time DESC NULLS LAST
+ORDER BY collection_time DESC, event_time DESC NULLS LAST, attention_event_id DESC
 LIMIT {limit}
 """;
 }

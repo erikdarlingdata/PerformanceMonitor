@@ -68,6 +68,26 @@ public static class ClientTimeoutsRead
         return (reading.TotalCount > 0 ? ClientTimeoutsKind.Data : ClientTimeoutsKind.Quiet, reading);
     }
 
+    /// <summary>
+    /// The exclusive floor and inclusive ceiling the top lists and the sampled events are read with (#5640): the SAME cut
+    /// <see cref="AttentionEvaluator.ReadSpan"/> makes of the counts and the sample groups (<see cref="AttentionEvaluator.RowSpan"/>), so
+    /// <c>top_*</c> and <c>sampled_events</c> cover exactly the rows <c>sampled_events_in_range</c> counts, never the base run's samples from
+    /// before the span or anything past the newest run's skew. Null when there is no span (fewer than two runs); the answer is then
+    /// <see cref="ClientTimeoutsKind.NotObserved"/> and the detail reads are skipped. The boundary is rounded DOWN to a microsecond:
+    /// both stores keep microseconds, so <c>collection_time &gt; floor</c> then agrees with the evaluator's tick comparison for every stored row.
+    /// </summary>
+    public static (DateTime Floor, DateTime Ceiling)? DetailSpan(IEnumerable<DateTime> runTimes)
+    {
+        var span = AttentionEvaluator.RowSpan(runTimes);
+        if (span is null)
+        {
+            return null;
+        }
+
+        var (boundary, ceiling) = span.Value;
+        return (new DateTime(boundary.Ticks - (boundary.Ticks % 10), boundary.Kind), ceiling);
+    }
+
     /// <summary>The <c>unavailable</c> sentence: the collector has no recent successful run in the window.</summary>
     public static string UnavailableMessage(string serverName, AttentionWindow window, DateTime windowEnd, int hoursBack)
     {

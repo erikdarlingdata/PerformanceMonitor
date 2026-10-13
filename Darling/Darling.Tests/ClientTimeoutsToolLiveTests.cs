@@ -42,8 +42,10 @@ public sealed class ClientTimeoutsToolLiveTests
     private const int CutId = -5640105;
     private const int AsOfEdgeId = -5640106;
     private const int OneRunId = -5640107;
+    private const int LeakId = -5640108;
+    private const int TieId = -5640109;
 
-    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId };
+    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId };
 
     private static string Name(int id) => "ct-live" + (-id).ToString(CultureInfo.InvariantCulture);
 
@@ -247,6 +249,100 @@ public sealed class ClientTimeoutsToolLiveTests
             var json = await DarlingMcpClientTimeoutTools.GetClientTimeouts(
                 postgres, Name(AsOfEdgeId), 1, as_of: asOf.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture), cancellationToken: ct);
             AssertAgrees(json, expected);
+        });
+    }
+
+    [Fact]
+    public async Task AnAsOf_DoesNotLetTheRowAllowanceLeakIntoTheTopListsOrTheSampledEvents()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            var now = Now();
+            await RegisterAsync(connection, LeakId, "sqlserver", ct);
+
+            /* The as_of row allowance (as_of + 30 s) and the range start are wider than the span ReadSpan counts (the midpoint after the BASE
+               run to the newest run + 30 s). The top lists and the samples are read over exactly the span (#5640, round 2). */
+            var newest = new DateTime((now.AddMinutes(-5).Ticks / TimeSpan.TicksPerSecond) * TimeSpan.TicksPerSecond, DateTimeKind.Unspecified);
+            var runs = await SeedRunsAsync(connection, LeakId, newest, 5, TimeSpan.FromMinutes(1), ct);
+            foreach (var run in runs)
+            {
+                await RowAsync(connection, LeakId, run.AddSeconds(3), "count", 4, null, null, null, null, ct);
+            }
+
+            await RowAsync(connection, LeakId, runs[4].AddSeconds(3), "sample", 0, "basedb", "BaseApp", "fp-base", "SELECT base", ct);
+            await RowAsync(connection, LeakId, runs[3].AddSeconds(3), "sample", 0, "spandb", "SpanApp", "fp-span", "SELECT span", ct);
+            await RowAsync(connection, LeakId, newest.AddSeconds(30.5), "sample", 0, "latedb", "LateApp", "fp-late", "SELECT late", ct);
+
+            var asOf = newest.AddSeconds(1);
+            var (window, samples) = await DarlingMcpClientTimeoutTools.ReadRangeAsync(postgres, LeakId, asOf.AddHours(-1), asOf, 20, ct);
+            var (kind, reading) = ClientTimeoutsRead.Classify(window, asOf);
+
+            Assert.Equal(ClientTimeoutsKind.Data, kind);
+            Assert.Equal(1, reading!.SampleTotal);
+            Assert.Equal(new[] { "SpanApp" }, window.TopApplications.Select(t => t.Name).ToArray());
+            Assert.Equal(new[] { "spandb" }, window.TopDatabases.Select(t => t.Name).ToArray());
+            Assert.Equal(new[] { "fp-span" }, window.TopStatements.Select(t => t.Name).ToArray());
+            Assert.Equal(new[] { "SELECT span" }, samples.Select(x => x.StatementText).ToArray());
+
+            /* And through the tool: no list sums past sampled_events_in_range. */
+            var json = await DarlingMcpClientTimeoutTools.GetClientTimeouts(
+                postgres, Name(LeakId), 1, as_of: asOf.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture), cancellationToken: ct);
+            using var doc = JsonDocument.Parse(json);
+            var body = doc.RootElement.GetProperty("client_timeouts");
+            Assert.Equal(1, body.GetProperty("sampled_events_in_range").GetInt64());
+            Assert.Equal(1, body.GetProperty("top_client_apps").GetArrayLength());
+            Assert.Equal(1, body.GetProperty("sampled_events").GetArrayLength());
+        });
+    }
+
+    [Fact]
+    public async Task Ties_AreOrderedTheSameWayInBothStores_BinaryNamesAndNewestIdFirst()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            var now = Now();
+            await RegisterAsync(connection, TieId, "sqlserver", ct);
+
+            /* Count ties break by name in binary order whatever the store collation ("App_b" < "app_a" in binary, the reverse under most
+               locales; the Lite twin pins the same list over DuckDB), the sampled events break ties on the unique id, and the sample text
+               of a fingerprint is the highest id's among same-instant samples (#5640, round 2). */
+            var newest = new DateTime((now.AddMinutes(-1).Ticks / TimeSpan.TicksPerSecond) * TimeSpan.TicksPerSecond, DateTimeKind.Unspecified);
+            var runs = await SeedRunsAsync(connection, TieId, newest, 3, TimeSpan.FromMinutes(1), ct);
+            foreach (var run in runs)
+            {
+                await RowAsync(connection, TieId, run.AddSeconds(3), "count", 5, null, null, null, null, ct);
+            }
+
+            var at = newest.AddSeconds(3);
+            var written = new List<string>();
+            async Task Sample(string? db, string? app, string? fingerprint, string text)
+            {
+                await RowAsync(connection, TieId, at, "sample", 0, db, app, fingerprint, text, ct);
+                written.Add(text);
+            }
+
+            foreach (var app in new[] { "a1", "a2", "a3", "a4" })
+            {
+                await Sample("db1", app, null, app + "-x");
+                await Sample("db1", app, null, app + "-y");
+            }
+
+            await Sample("db1", "app_a", null, "app_a-x");
+            await Sample("db1", "App_b", null, "App_b-x");
+            await Sample(null, null, "fp-pick", "pick1");
+            await Sample(null, null, "fp-pick", "pick2");
+            await Sample(null, null, "fp-pick", "pick3");
+
+            var (window, samples) = await DarlingMcpClientTimeoutTools.ReadRangeAsync(postgres, TieId, newest.AddHours(-1), newest, 20, ct);
+
+            Assert.Equal(new[] { "a1", "a2", "a3", "a4", "App_b" }, window.TopApplications.Select(t => t.Name).ToArray());
+            Assert.Equal("pick3", window.TopStatements.Single().SampleText);
+
+            var expected = Enumerable.Reverse(written).ToArray();
+            Assert.Equal(expected, samples.Select(x => x.StatementText).ToArray());
+
+            var (_, page) = await DarlingMcpClientTimeoutTools.ReadRangeAsync(postgres, TieId, newest.AddHours(-1), newest, 4, ct);
+            Assert.Equal(expected.Take(5).ToArray(), page.Select(x => x.StatementText).ToArray());
         });
     }
 

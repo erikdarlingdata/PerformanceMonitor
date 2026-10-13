@@ -53,7 +53,9 @@ public partial class LocalDataService
     /// <summary>
     /// The <c>get_client_timeouts</c> read (#5640): the same six shared statements as <see cref="GetAttentionWindowAsync"/> with the
     /// ceiling on (<c>$3</c> = <paramref name="windowEnd"/>, naive UTC, so an as_of read does not count what came after it), plus the
-    /// newest <paramref name="sampleLimit"/> sampled events (one more is fetched, as the truncation signal). Dumb by contract:
+    /// newest <paramref name="sampleLimit"/> sampled events (one more is fetched, as the truncation signal). The runs, counts and sample
+    /// groups are read first; the top lists and the sampled events then cover exactly the span the evaluator counts
+    /// (<see cref="ClientTimeoutsRead.DetailSpan"/>), so they never hold rows outside it. Dumb by contract:
     /// <see cref="ClientTimeoutsRead"/> judges.
     /// </summary>
     public async Task<(AttentionWindow Window, List<ClientTimeoutSample> Samples)> GetAttentionRangeAsync(
@@ -76,13 +78,23 @@ public partial class LocalDataService
                 r.IsDBNull(1) ? null : r.GetString(1),
                 r.IsDBNull(2) ? null : r.GetString(2),
                 r.GetInt64(3)));
-        var statements = await QueryAttentionAsync(connection, AttentionWindowSql.TopStatements("v_attention_events", bounded: true), serverId, windowStart, rowCeiling,
+        /* The top lists and the sampled events cover exactly the rows ReadSpan counts (#5640): the span boundary (exclusive) to the
+           newest run plus the skew, never the base run's samples from before the span. No span (fewer than two runs) is "not
+           observed", whose answer never shows the detail, so it is not read. */
+        var span = ClientTimeoutsRead.DetailSpan(runs);
+        if (span is null)
+        {
+            return (new AttentionWindow(runs, counts, groups, [], [], []), []);
+        }
+
+        var (spanFloor, spanCeiling) = span.Value;
+        var statements = await QueryAttentionAsync(connection, AttentionWindowSql.TopStatements("v_attention_events", bounded: true), serverId, spanFloor, spanCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1), r.IsDBNull(2) ? null : r.GetString(2)));
-        var databases = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "database_name", bounded: true), serverId, windowStart, rowCeiling,
+        var databases = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "database_name", bounded: true), serverId, spanFloor, spanCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
-        var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "client_app_name", bounded: true), serverId, windowStart, rowCeiling,
+        var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "client_app_name", bounded: true), serverId, spanFloor, spanCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
-        var samples = await QueryAttentionAsync(connection, AttentionWindowSql.Samples("v_attention_events", sampleLimit + 1), serverId, windowStart, rowCeiling,
+        var samples = await QueryAttentionAsync(connection, AttentionWindowSql.Samples("v_attention_events", sampleLimit + 1), serverId, spanFloor, spanCeiling,
             r => new ClientTimeoutSample(
                 r.IsDBNull(0) ? null : r.GetDateTime(0),
                 r.GetDateTime(1),

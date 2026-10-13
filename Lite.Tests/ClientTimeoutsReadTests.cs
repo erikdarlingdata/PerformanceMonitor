@@ -179,6 +179,93 @@ public sealed class ClientTimeoutsReadTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(7, reading!.TotalCount);
     }
 
+    [Fact]
+    public async Task AnAsOf_DoesNotLetTheRowAllowanceLeakIntoTheTopListsOrTheSampledEvents()
+    {
+        /* The as_of row allowance (windowEnd + 30 s) and the lower bound (windowStart) are wider than the span ReadSpan counts, which runs
+           from the midpoint after the BASE run to the newest run + 30 s. The top lists and the samples are read over exactly the span, so
+           the base run's samples and the rows between the newest run's skew and the allowance stay out (#5640, round 2). */
+        var server = StormServer + 20;
+        var newest = DateTime.UtcNow.AddMinutes(-5);
+        newest = new DateTime(newest.Ticks - (newest.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        for (var i = 0; i < 5; i++)
+        {
+            await LogAsync(1000 + i, server, newest.AddMinutes(-i));
+            await RowAsync(1010 + i, server, newest.AddMinutes(-i).AddSeconds(3), "count", 4, null, null, null, null);
+        }
+
+        /* The oldest run (newest - 4 min) is the base: its sample sits before the span. */
+        await RowAsync(1020, server, newest.AddMinutes(-4).AddSeconds(3), "sample", 0, "basedb", "BaseApp", "fp-base", "SELECT base");
+        await RowAsync(1021, server, newest.AddMinutes(-3).AddSeconds(3), "sample", 0, "spandb", "SpanApp", "fp-span", "SELECT span");
+        /* Past the newest run + 30 s, inside the as_of allowance (as_of + 30 s). */
+        await RowAsync(1022, server, newest.AddSeconds(30.5), "sample", 0, "latedb", "LateApp", "fp-late", "SELECT late");
+
+        var asOf = newest.AddSeconds(1);
+        var (window, samples) = await new LocalDataService(_duckDb).GetAttentionRangeAsync(server, asOf.AddHours(-1), asOf, 20);
+        var (kind, reading) = ClientTimeoutsRead.Classify(window, asOf);
+
+        Assert.Equal(ClientTimeoutsKind.Data, kind);
+        Assert.Equal(1, reading!.SampleTotal);
+        Assert.Equal(new[] { "SpanApp" }, window.TopApplications.Select(t => t.Name).ToArray());
+        Assert.Equal(new[] { "spandb" }, window.TopDatabases.Select(t => t.Name).ToArray());
+        Assert.Equal(new[] { "fp-span" }, window.TopStatements.Select(t => t.Name).ToArray());
+        Assert.Equal(new[] { "SELECT span" }, samples.Select(x => x.StatementText).ToArray());
+
+        /* The invariant the answer states: no top list sums past the in-range sample count. */
+        Assert.True(window.TopApplications.Sum(t => t.Samples) <= reading.SampleTotal);
+        Assert.True(samples.Count <= reading.SampleTotal);
+    }
+
+    [Fact]
+    public async Task Ties_AreOrderedTheSameWayInBothStores_BinaryNamesAndNewestIdFirst()
+    {
+        /* Count ties break by name in binary order (PostgreSQL's store collation and DuckDB's binary default must not pick different fifth
+           entries: "App_b" < "app_a" in binary, the reverse under most locales), the sampled events break ties on the unique id, and the
+           sample text of a fingerprint is the highest id's among same-instant samples (#5640, round 2). The Darling twin runs the same
+           shared text over PostgreSQL. */
+        var server = StormServer + 21;
+        var newest = DateTime.UtcNow.AddMinutes(-1);
+        newest = new DateTime(newest.Ticks - (newest.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        for (var i = 0; i < 3; i++)
+        {
+            await LogAsync(1100 + i, server, newest.AddMinutes(-i));
+            await RowAsync(1110 + i, server, newest.AddMinutes(-i).AddSeconds(3), "count", 5, null, null, null, null);
+        }
+
+        var at = newest.AddSeconds(3);
+        long id = 1200;
+        foreach (var app in new[] { "a1", "a2", "a3", "a4" })
+        {
+            await RowAsync(id, server, at, "sample", 0, "db1", app, null, "t" + id);
+            id++;
+            await RowAsync(id, server, at, "sample", 0, "db1", app, null, "t" + id);
+            id++;
+        }
+
+        await RowAsync(id, server, at, "sample", 0, "db1", "app_a", null, "t" + id);
+        id++;
+        await RowAsync(id, server, at, "sample", 0, "db1", "App_b", null, "t" + id);
+        id++;
+        var firstFingerprintId = id;
+        foreach (var n in new[] { 1, 2, 3 })
+        {
+            await RowAsync(id, server, at, "sample", 0, null, null, "fp-pick", "pick" + n);
+            id++;
+        }
+
+        var (window, samples) = await new LocalDataService(_duckDb).GetAttentionRangeAsync(server, newest.AddHours(-1), newest, 20);
+
+        Assert.Equal(new[] { "a1", "a2", "a3", "a4", "App_b" }, window.TopApplications.Select(t => t.Name).ToArray());
+        Assert.Equal("pick3", window.TopStatements.Single().SampleText);
+
+        var expected = Enumerable.Range(1200, (int)(id - 1200)).Reverse()
+            .Select(n => n >= firstFingerprintId ? "pick" + (n - firstFingerprintId + 1) : "t" + n).ToArray();
+        Assert.Equal(expected, samples.Select(x => x.StatementText).ToArray());
+
+        var (_, page) = await new LocalDataService(_duckDb).GetAttentionRangeAsync(server, newest.AddHours(-1), newest, 4);
+        Assert.Equal(expected.Take(5).ToArray(), page.Select(x => x.StatementText).ToArray());
+    }
+
     private async Task LogAsync(long logId, int serverId, DateTime time)
     {
         using var connection = _duckDb.CreateConnection();

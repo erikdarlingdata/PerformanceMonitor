@@ -216,19 +216,38 @@ public static class AttentionEvaluator
         return Take(window, runs, runs.Count - 2);
     }
 
+    /// <summary>
+    /// Which rows belong to the span of <paramref name="runTimes"/> (the successful runs of one range, any order, duplicates allowed):
+    /// the rows with <c>collection_time &gt; Boundary</c> and <c>collection_time &lt;= Ceiling</c>, the rule <see cref="Take"/> cuts the
+    /// counts and the sample groups with. Null when fewer than two runs exist (no base run, so no span). The read surface (#5640,
+    /// get_client_timeouts) binds these two times into the top lists and the sampled events, so they cover exactly the rows
+    /// <see cref="ReadSpan"/> counts and never the base run's own samples from before the span or anything past the newest run.
+    /// </summary>
+    public static (DateTime Boundary, DateTime Ceiling)? RowSpan(IEnumerable<DateTime> runTimes)
+    {
+        var runs = runTimes.Distinct().OrderByDescending(t => t).ToList();
+        if (runs.Count < 2)
+        {
+            return null;
+        }
+
+        return RowSpanOf(runs[^1], runs[^2], runs[0]);
+    }
+
+    private static (DateTime Boundary, DateTime Ceiling) RowSpanOf(DateTime baseRun, DateTime oldestTaken, DateTime newest) =>
+        /* A row belongs to the span when it sits after the midpoint between the base run and the oldest taken run. The
+           collection log stamps a run when it starts and the rows carry the time the runner took a moment later, so the
+           two clocks differ by seconds; the midpoint keeps the base run's own row out and the oldest taken run's row in
+           for any cadence. The ceiling is the newest run plus the same skew. */
+        (baseRun + ((oldestTaken - baseRun) / 2), newest.AddSeconds(RowSkewSeconds));
+
     private static AttentionReading Take(AttentionWindow window, List<DateTime> runs, int oldestTaken)
     {
         var newest = runs[0];
         var baseRun = runs[oldestTaken + 1];
         var covered = Math.Max(1d, (newest - baseRun).TotalMinutes);
 
-        /* A row belongs to the span when it sits after the midpoint between the base run and the oldest taken run. The
-           collection log stamps a run when it starts and the rows carry the time the runner took a moment later, so the
-           two clocks differ by seconds; the midpoint keeps the base run's own row out and the oldest taken run's row in
-           for any cadence. */
-        var boundary = baseRun + ((runs[oldestTaken] - baseRun) / 2);
-
-        var ceiling = newest.AddSeconds(RowSkewSeconds);
+        var (boundary, ceiling) = RowSpanOf(baseRun, runs[oldestTaken], newest);
 
         var total = window.Counts.Where(c => c.CollectionTime > boundary && c.CollectionTime <= ceiling).Sum(c => c.Count);
         var groups = window.SampleGroups
