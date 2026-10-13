@@ -107,7 +107,10 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
             dte.integer_data,
             dte.severity,
             dte.error_number,
-            dte.text_data
+            dte.text_data,
+            dte.filename,
+            dte.event_class,
+            dte.event_sequence
         FROM default_trace_events AS dte, svr
         WHERE dte.server_id = $1
         AND   dte.event_time - make_interval(mins => svr.offset_minutes) >= $2

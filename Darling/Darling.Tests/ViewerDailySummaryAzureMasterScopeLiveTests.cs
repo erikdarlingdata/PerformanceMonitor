@@ -63,9 +63,11 @@ public sealed class ViewerDailySummaryAzureMasterScopeLiveTests
             /* Day 1: three GP reports waiting 600 s and one of the master's own waiting 2 s; day 2: only GP's, so
                the scoped day falls back to the DMV snapshots. Deadlocks: an own-database row, a graph wholly in
                GP, a mixed graph and a NULL-database graph wholly in GP. */
-            for (var i = 0; i < 3; i++) await BprAsync(connection, MasterId, Day1, 600_000, "GP", ct);
-            await BprAsync(connection, MasterId, Day1, 2_000, "master", ct);
-            for (var i = 0; i < 2; i++) await BprAsync(connection, MasterId, Day2, 400_000, "GP", ct);
+            /* #5644: the daily summary counts blocking WAITS (one per blocked session, blocker and derived start), so
+               each intended event gets its own minute and is its own wait. */
+            for (var i = 0; i < 3; i++) await BprAsync(connection, MasterId, Day1, 600_000, "GP", ct, minute: i);
+            await BprAsync(connection, MasterId, Day1, 2_000, "master", ct, minute: 3);
+            for (var i = 0; i < 2; i++) await BprAsync(connection, MasterId, Day2, 400_000, "GP", ct, minute: i);
             await DmvAsync(connection, MasterId, Day2, 7_000, ct);
             await DmvAsync(connection, MasterId, Day2, 3_000, ct);
             await DeadAsync(connection, MasterId, Day1, 0, "Other", Graph("Other"), ct);
@@ -172,10 +174,10 @@ public sealed class ViewerDailySummaryAzureMasterScopeLiveTests
         }
     }
 
-    private static Task BprAsync(NpgsqlConnection connection, int id, DateTime day, int waitMs, string db, CancellationToken ct) =>
+    private static Task BprAsync(NpgsqlConnection connection, int id, DateTime day, int waitMs, string db, CancellationToken ct, int minute = 0) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name) VALUES ($1, $2, $3, 's', $2, $4, 60, 70, 'suspended', $5)",
-            CollectionIdGenerator.Next(), day.AddHours(12), id, waitMs, db);
+            CollectionIdGenerator.Next(), day.AddHours(12).AddMinutes(minute), id, waitMs, db);
 
     private static Task DmvAsync(NpgsqlConnection connection, int id, DateTime day, int waitMs, CancellationToken ct) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
