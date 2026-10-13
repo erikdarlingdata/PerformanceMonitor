@@ -2285,7 +2285,12 @@ public sealed class AlertEngine
                         NumericThresholdValue: finding.BarCrossed,
                         Muted: finding.Muted, Severity: finding.Severity,
                         ShortMessage: finding.Summary), ct);
-                    AfterFire(AttentionEvaluator.MetricName, stamps, key, now, alertCooldown, delivery);
+                    /* Final round of #5714 (L1): a Muted fire has no channel to back off, so it neither resets nor advances the
+                       unmuted path's failed-send streak (same family and key). Its own stamp was set above. */
+                    if (!finding.Muted)
+                    {
+                        AfterFire(AttentionEvaluator.MetricName, stamps, key, now, alertCooldown, delivery);
+                    }
 
                     /* A fire nobody received forgets the run marker and puts the tier back, so the retry counts as fresh and
                        is still the escalation (Runnable Queue's reasoning, rounds 1 and 2 of #5709). */

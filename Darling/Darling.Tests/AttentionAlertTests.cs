@@ -296,6 +296,22 @@ public sealed class AttentionAlertTests
     }
 
     [Fact]
+    public void TopListFloor_APastTheCeilingSampleIsNotASpanSample_AndTheCeilingIsNewestPlusSkew()
+    {
+        /* Final round of #5714 (L2): the rows a not-yet-logged run committed sit past newest + RowSkewSeconds, where Take never counts. */
+        var runs = Runs(T0.AddSeconds(-5), 8);
+        var lookbackFloor = T0.AddMinutes(-60);
+        var late = new[] { Sample(runs[0].AddSeconds(AttentionEvaluator.RowSkewSeconds + 1),"db1", "etl", 4) };
+
+        Assert.Equal(runs[0].AddSeconds(AttentionEvaluator.RowSkewSeconds), AttentionEvaluator.TopListCeiling(runs));
+        Assert.True(AttentionEvaluator.TopListFloor(runs, late, lookbackFloor).FromLookback);
+
+        /* A row exactly at the ceiling is inside (Take's <=). */
+        var edge = new[] { new AttentionSampleGroup(AttentionEvaluator.TopListCeiling(runs), "db1", "etl", 4) };
+        Assert.False(AttentionEvaluator.TopListFloor(runs, edge, lookbackFloor).FromLookback);
+    }
+
+    [Fact]
     public void TopListFloor_NoSamplesAndNoSpan_FallBackToTheLookback()
     {
         var lookbackFloor = T0.AddMinutes(-60);
@@ -457,6 +473,56 @@ public sealed class AttentionAlertTests
         Assert.Equal(AlertSeverityLevel.Critical, fires[2].Severity);
         Assert.False(fires[2].Muted);
         Assert.True(fires[2].Context!.EscalationBypassesCooldown);
+    }
+
+    /// <summary>One channel configured; email failed, nothing else went out.</summary>
+    private static AlertDelivery EmailFailed() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.Failed, SendError: "SMTP: 535 authentication failed",
+            WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    /// <summary>A muted fire attempts no channel.</summary>
+    private static AlertDelivery MutedNothingAttempted() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: true, trayChannelPresent: false);
+
+    [Fact]
+    public async Task Engine_AMutedFire_LeavesTheUnmutedFailedSendBackoffAlone()
+    {
+        /* Final round of #5714 (L1). Muted and unmuted fires share a family and key, so the muted one's AfterFire used to drop
+           the unmuted path's streak: fail, fail, a muted fire, fail was a one-minute retry again instead of the third failure's four. */
+        var h = Armed();
+        h.IsMuted = ctx => ctx.ClientAppName == "backup";
+        h.Deliverer.Report = o => o.Muted ? MutedNothingAttempted() : EmailFailed();
+        var engine = h.Build();
+        var start = h.Now;
+
+        async Task SweepAtAsync(int seconds, string app)
+        {
+            h.Now = start.AddSeconds(seconds);
+            h.Adapter.Attention = SampledWindow(h.Now, app == "backup" ? 360 : 210, app);
+            await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        }
+
+        int Unmuted() => Fires(h).Count(f => !f.Muted);
+
+        await SweepAtAsync(0, "web");          /* failure 1: retry in 1 minute */
+        await SweepAtAsync(61, "web");         /* failure 2: retry in 2 minutes, at 181 s */
+        Assert.Equal(2, Unmuted());
+        await SweepAtAsync(62, "backup");      /* the muted fire */
+        Assert.Single(Fires(h), f => f.Muted);
+        await SweepAtAsync(183, "web");        /* failure 3: retry in 4 minutes, at 423 s */
+        Assert.Equal(3, Unmuted());
+
+        await SweepAtAsync(244, "web");        /* a streak reset would retry here, a minute after failure 3 */
+        Assert.Equal(3, Unmuted());
+        await SweepAtAsync(420, "web");
+        Assert.Equal(3, Unmuted());
+        await SweepAtAsync(424, "web");
+        Assert.Equal(4, Unmuted());
     }
 
     [Fact]

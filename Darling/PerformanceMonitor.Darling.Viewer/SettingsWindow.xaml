@@ -377,8 +377,8 @@
                               ToolTip="The Runnable Queue alert averages runnable tasks per scheduler over the collections in the last 5 minutes when there are at least 3, otherwise over the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates). It fires WARNING at the first bar and CRITICAL at the second; a Warning that worsens to Critical is delivered at once."/>
                     <TextBox x:Name="AlertRunnableQueueWarningBox" Width="45" Text="8" Margin="6,0,0,0" VerticalAlignment="Center"
                              ToolTip="Warning bar: average runnable tasks per scheduler (the last 5 minutes' collections when there are at least 3, otherwise the newest 3 inside 10 minutes). At least 1. Default 8."/>
-                    <TextBlock Text="Critical at" VerticalAlignment="Center" Margin="8,0,0,0"
-                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock Text="Critical at" VerticalAlignment="Center" Margin="6,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertRunnableQueueCriticalBox" Width="45" Text="16" Margin="6,0,0,0" VerticalAlignment="Center"
                              ToolTip="Critical bar: average runnable tasks per scheduler (same window as the Warning bar). Never below the Warning bar. Default 16."/>
                 </StackPanel>
@@ -391,8 +391,8 @@
                               ToolTip="The Client Timeouts alert counts client timeouts and cancels per minute (the sqlserver.attention event: a client cancelled a query or its timeout expired) over the attention collector's last runs (about 3 minutes). It fires WARNING at the first bar and CRITICAL at the second; a Warning that worsens to Critical is delivered at once. Off by default because no measured normal rate exists yet."/>
                     <TextBox x:Name="AlertClientTimeoutsWarningBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
                              ToolTip="Warning bar: client timeouts and cancels (attentions) per minute over the covered span. At least 1. Default 10."/>
-                    <TextBlock Text="Critical at" VerticalAlignment="Center" Margin="8,0,0,0"
-                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock Text="Critical at" VerticalAlignment="Center" Margin="6,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertClientTimeoutsCriticalBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"
                              ToolTip="Critical bar: client timeouts and cancels (attentions) per minute (same span as the Warning bar). Never below the Warning bar. Default 60."/>
                 </StackPanel>

@@ -225,13 +225,28 @@ public static class AttentionEvaluator
     public static (DateTime Floor, bool FromLookback) TopListFloor(
         IReadOnlyList<DateTime> runTimes, IReadOnlyList<AttentionSampleGroup> sampleGroups, DateTime lookbackFloor)
     {
-        if (SpanBoundary(runTimes) is { } boundary && sampleGroups.Any(g => g.CollectionTime > boundary))
+        /* Final round of #5714 (L2): "the span kept samples" is asked with Take's own cut, > boundary AND <= newest + RowSkewSeconds,
+           so a row a collector run committed past the newest logged run (its SUCCESS log row not yet written) neither lists on the
+           card nor turns a sample-less span into a plain "Database" / "Client Application" list the count never saw. */
+        var ceiling = TopListCeiling(runTimes);
+        if (SpanBoundary(runTimes) is { } boundary
+            && sampleGroups.Any(g => g.CollectionTime > boundary && g.CollectionTime <= ceiling))
         {
             return (boundary, false);
         }
 
         return (lookbackFloor, true);
     }
+
+    /// <summary>
+    /// The row ceiling of the alert read's three top lists (final round of #5714, L2): the newest successful run plus
+    /// <see cref="RowSkewSeconds"/>, the very ceiling <see cref="Take"/> cuts the count and the sample groups at (and
+    /// <see cref="RowSpan"/> hands the MCP read). Both the span lists and the lookback fallback stop here, so the card never lists a
+    /// row the judged count could not have held. With no run at all the window is "not observed" and never reaches a card, so
+    /// there is nothing to cut at: <see cref="DateTime.MaxValue"/>.
+    /// </summary>
+    public static DateTime TopListCeiling(IReadOnlyList<DateTime> runTimes) =>
+        runTimes.Count == 0 ? DateTime.MaxValue : runTimes.Max().AddSeconds(RowSkewSeconds);
 
     private static DateTime Boundary(List<DateTime> runs, int oldestTaken)
     {

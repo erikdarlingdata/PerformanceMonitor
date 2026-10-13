@@ -1457,7 +1457,7 @@ SELECT
             return 178;
         }
         /* V177 (#5641): the Runnable Queue alert's settings columns on the alert settings row. Column-existence sentinel, newest-first.
-           The V178 arm (#5684) now sits above it as the top rung; this one is the rung a store at 177 maps to rather than falling
+           The V178 arm (#5684) and the V179 arm (#5640) now sit above it, V179 as the top rung; this one is the rung a store at 177 maps to rather than falling
            through to 176. (V176, #5638, sits just below this arm.) Named only in the probe line, not this prose, per the V71 finding. */
         if (hasRunnableQueueSettings)
         {

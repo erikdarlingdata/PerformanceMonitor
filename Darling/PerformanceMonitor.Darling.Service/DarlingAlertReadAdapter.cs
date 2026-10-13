@@ -926,14 +926,36 @@ ORDER BY collection_time DESC
         /* Round 2 of #5714 (L6): the card's top lists cover the samples inside the covered span, not the whole lookback (the span is
            a few minutes; the lookback an hour). A span that kept no samples falls back to the lookback and says so. */
         var (topFloor, topsFromLookback) = AttentionEvaluator.TopListFloor(runs, groups, floor);
-        var statements = await QueryAttentionAsync(connection, AttentionWindowSql.TopStatements("attention_events"), serverId, topFloor,
+        /* Final round of #5714 (L2): the lists are bounded like the count is, > floor AND <= newest + RowSkewSeconds (the MCP read's cut). */
+        var topCeiling = AttentionEvaluator.TopListCeiling(runs);
+        var statements = await QueryAttentionAsync(connection, AttentionWindowSql.TopStatements("attention_events", bounded: true), serverId, topFloor, topCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1), r.IsDBNull(2) ? null : r.GetString(2)), cancellationToken);
-        var databases = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "database_name"), serverId, topFloor,
+        var databases = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "database_name", bounded: true), serverId, topFloor, topCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
-        var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "client_app_name"), serverId, topFloor,
+        var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "client_app_name", bounded: true), serverId, topFloor, topCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
 
         return new AttentionWindow(runs, counts, groups, statements, databases, applications, topsFromLookback);
+    }
+
+    /// <summary>The bounded twin (final round of #5714, L2): <c>$2</c> the exclusive floor, <c>$3</c> the inclusive ceiling, both typed as
+    /// naive timestamps like the MCP read binds them.</summary>
+    private static async Task<List<T>> QueryAttentionAsync<T>(
+        NpgsqlConnection connection, string sql, int serverId, DateTime floor, DateTime ceiling, Func<NpgsqlDataReader, T> map, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, DateTime.SpecifyKind(floor, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, DateTime.SpecifyKind(ceiling, DateTimeKind.Unspecified));
+
+        var rows = new List<T>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(map(reader));
+        }
+
+        return rows;
     }
 
     private static async Task<List<T>> QueryAttentionAsync<T>(

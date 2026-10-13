@@ -94,6 +94,19 @@ public sealed class ClientTimeoutAlertDetailTests
         Assert.Contains(items, i => i.Heading == "Top databases (sampled events)");
         Assert.Contains(items, i => i.Heading == "Top client applications (sampled events)");
         Assert.DoesNotContain(items, i => i.Heading.Contains("in the last", StringComparison.Ordinal));
+
+        /* Final round of #5714 (L3): the positive half of the L6 rule. A span list is plain-headed, so the prefill takes its top entries
+           (the lookback fallback below takes neither). */
+        var context = new AlertContext();
+        foreach (var item in items)
+        {
+            context.Details.Add(item);
+        }
+
+        var mute = new AlertMuteContext { ServerName = "sql01", MetricName = AttentionEvaluator.MetricName };
+        mute.PopulateFromDetailText(AlertContextBuilders.ContextToDetailText(context), AttentionEvaluator.MetricName);
+        Assert.Equal("sales", mute.DatabaseName);
+        Assert.Equal("etl-job", mute.ClientAppName);
     }
 
     [Fact]

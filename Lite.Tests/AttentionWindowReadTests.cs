@@ -120,6 +120,56 @@ public sealed class AttentionWindowReadTests : IClassFixture<SharedDuckDbFixture
     }
 
     [Fact]
+    public async Task ARowPastTheNewestRunPlusSkew_IsInNeitherTheCountNorTheCardsLists()
+    {
+        /* Final round of #5714 (L2): the next collector run has committed its rows but not yet its SUCCESS log row, so they sit past
+           the newest logged run + RowSkewSeconds. The judged count (Take) never sees them; the card's lists must not either. */
+        var now = DateTime.UtcNow;
+        long id = 400;
+        var server = ServerId + 300;
+        for (var i = 0; i < 6; i++)
+        {
+            await LogAsync(id++, server, now.AddSeconds(-30).AddMinutes(-i), "SUCCESS");
+        }
+
+        await RowAsync(id++, server, now.AddSeconds(-28), "count", 7, null, null, null, null);
+        await RowAsync(id++, server, now.AddSeconds(-28), "sample", 0, "dbIn", "appIn", "fp-in", "SELECT in");
+        await RowAsync(id++, server, now.AddSeconds(60), "count", 100, null, null, null, null);
+        await RowAsync(id++, server, now.AddSeconds(60), "sample", 0, "dbLate", "appLate", "fp-late", "SELECT late");
+        await RowAsync(id++, server, now.AddSeconds(60), "sample", 0, "dbLate", "appLate", "fp-late", "SELECT late");
+
+        var window = await new LocalDataService(_duckDb).GetAttentionWindowAsync(server, Lookback);
+
+        Assert.False(window.TopsFromLookback);
+        Assert.Equal(new[] { "fp-in" }, window.TopStatements.Select(t => t.Name).ToArray());
+        Assert.Equal(new[] { "dbIn" }, window.TopDatabases.Select(t => t.Name).ToArray());
+        Assert.Equal(new[] { "appIn" }, window.TopApplications.Select(t => t.Name).ToArray());
+        Assert.Equal(7, AttentionEvaluator.Read(window, now)!.TotalCount);
+    }
+
+    [Fact]
+    public async Task ASpanWhoseOnlySamplesArePastTheCeiling_StillFallsBackToTheLookbackLists_WithoutThem()
+    {
+        var now = DateTime.UtcNow;
+        long id = 500;
+        var server = ServerId + 400;
+        for (var i = 0; i < 6; i++)
+        {
+            await LogAsync(id++, server, now.AddSeconds(-30).AddMinutes(-i), "SUCCESS");
+        }
+
+        await RowAsync(id++, server, now.AddMinutes(-4).AddSeconds(-28), "sample", 0, "dbOld", "appOld", "fp-old", "SELECT old");
+        await RowAsync(id++, server, now.AddSeconds(60), "sample", 0, "dbLate", "appLate", "fp-late", "SELECT late");
+
+        var window = await new LocalDataService(_duckDb).GetAttentionWindowAsync(server, Lookback);
+
+        Assert.True(window.TopsFromLookback);
+        Assert.Equal(new[] { "fp-old" }, window.TopStatements.Select(t => t.Name).ToArray());
+        Assert.Equal(new[] { "dbOld" }, window.TopDatabases.Select(t => t.Name).ToArray());
+        Assert.Equal(new[] { "appOld" }, window.TopApplications.Select(t => t.Name).ToArray());
+    }
+
+    [Fact]
     public async Task AQuietServer_HasRuns_ButNoCountOrSampleRows()
     {
         var now = DateTime.UtcNow;

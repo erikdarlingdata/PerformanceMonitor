@@ -166,6 +166,34 @@ public sealed class SettingsRowParityTests
     }
 
     [Fact]
+    public void TheCriticalAtText_OfTheRunnableQueueAndClientTimeoutsRows_HasTheSameBrushAndGapInBothWindows()
+    {
+        /* Final round of #5714 (UI item 4). The viewer copies Lite's front end; its "Critical at" text took the muted brush and a gap
+           of 8 from the Runnable Queue row, where Lite's rows use the foreground brush and 6. The viewer's other threshold rows
+           have no single brush-and-gap rule to match (their labels use 2, 4 and 24), so the viewer takes Lite's. */
+        string RowText(string xaml, string checkBox)
+        {
+            var row = xaml.Substring(xaml.IndexOf("x:Name=\"" + checkBox + "\"", StringComparison.Ordinal));
+            row = row.Substring(0, row.IndexOf("</StackPanel>", StringComparison.Ordinal));
+            var at = row.IndexOf("<TextBlock Text=\"Critical at\"", StringComparison.Ordinal);
+            Assert.True(at >= 0, $"{checkBox}: no Critical at text");
+            return row.Substring(at, row.IndexOf("/>", at, StringComparison.Ordinal) - at);
+        }
+
+        foreach (var checkBox in new[] { "AlertRunnableQueueCheckBox", "AlertClientTimeoutsCheckBox" })
+        {
+            var lite = RowText(RepoFile.ReadRepoFile(Lite), checkBox);
+            var viewer = RowText(RepoFile.ReadRepoFile(Viewer), checkBox);
+
+            Assert.Contains("Margin=\"6,0,0,0\"", lite, StringComparison.Ordinal);
+            Assert.Contains("{DynamicResource ForegroundBrush}", lite, StringComparison.Ordinal);
+            Assert.Contains("Margin=\"6,0,0,0\"", viewer, StringComparison.Ordinal);
+            Assert.Contains("{DynamicResource ForegroundBrush}", viewer, StringComparison.Ordinal);
+            Assert.DoesNotContain("ForegroundMutedBrush", viewer, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void TheViewersClientTimeoutsCheckBox_IsVerticallyCentred_LikeItsNeighbours()
     {
         var xaml = RepoFile.ReadRepoFile(Viewer);

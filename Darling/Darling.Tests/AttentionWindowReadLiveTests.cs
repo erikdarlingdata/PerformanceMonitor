@@ -148,6 +148,60 @@ public sealed class AttentionWindowReadLiveTests
     }
 
     [Fact]
+    public async Task ARowPastTheNewestRunPlusSkew_IsInNeitherTheCountNorTheCardsLists()
+    {
+        /* Final round of #5714 (L2): the next collector run has committed its rows but not yet its SUCCESS log row, so they sit past
+           the newest logged run + RowSkewSeconds. The judged count (Take) never sees them; the card's lists must not either. */
+        await RunAsync(async (adapter, connection, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            long id = 400;
+            for (var i = 0; i < 6; i++)
+            {
+                await LogAsync(connection, id++, ServerId, now.AddSeconds(-30).AddMinutes(-i), "SUCCESS", ct);
+            }
+
+            await RowAsync(connection, id++, ServerId, now.AddSeconds(-28), "count", 7, null, null, null, null, ct);
+            await RowAsync(connection, id++, ServerId, now.AddSeconds(-28), "sample", 0, "dbIn", "appIn", "fp-in", "SELECT in", ct);
+            await RowAsync(connection, id++, ServerId, now.AddSeconds(60), "count", 100, null, null, null, null, ct);
+            await RowAsync(connection, id++, ServerId, now.AddSeconds(60), "sample", 0, "dbLate", "appLate", "fp-late", "SELECT late", ct);
+            await RowAsync(connection, id++, ServerId, now.AddSeconds(60), "sample", 0, "dbLate", "appLate", "fp-late", "SELECT late", ct);
+
+            var window = await adapter.GetAttentionWindowAsync(ServerId.ToString(CultureInfo.InvariantCulture), Lookback, ct);
+
+            Assert.False(window.TopsFromLookback);
+            Assert.Equal(new[] { "fp-in" }, window.TopStatements.Select(t => t.Name).ToArray());
+            Assert.Equal(new[] { "dbIn" }, window.TopDatabases.Select(t => t.Name).ToArray());
+            Assert.Equal(new[] { "appIn" }, window.TopApplications.Select(t => t.Name).ToArray());
+            Assert.Equal(7, AttentionEvaluator.Read(window, now)!.TotalCount);
+        });
+    }
+
+    [Fact]
+    public async Task ASpanWhoseOnlySamplesArePastTheCeiling_StillFallsBackToTheLookbackLists_WithoutThem()
+    {
+        await RunAsync(async (adapter, connection, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            long id = 500;
+            for (var i = 0; i < 6; i++)
+            {
+                await LogAsync(connection, id++, OtherServerId, now.AddSeconds(-30).AddMinutes(-i), "SUCCESS", ct);
+            }
+
+            await RowAsync(connection, id++, OtherServerId, now.AddMinutes(-4).AddSeconds(-28), "sample", 0, "dbOld", "appOld", "fp-old", "SELECT old", ct);
+            await RowAsync(connection, id++, OtherServerId, now.AddSeconds(60), "sample", 0, "dbLate", "appLate", "fp-late", "SELECT late", ct);
+
+            var window = await adapter.GetAttentionWindowAsync(OtherServerId.ToString(CultureInfo.InvariantCulture), Lookback, ct);
+
+            Assert.True(window.TopsFromLookback);
+            Assert.Equal(new[] { "fp-old" }, window.TopStatements.Select(t => t.Name).ToArray());
+            Assert.Equal(new[] { "dbOld" }, window.TopDatabases.Select(t => t.Name).ToArray());
+            Assert.Equal(new[] { "appOld" }, window.TopApplications.Select(t => t.Name).ToArray());
+        });
+    }
+
+    [Fact]
     public async Task AQuietServer_HasRuns_ButNoCountOrSampleRows()
     {
         await RunAsync(async (adapter, connection, ct) =>

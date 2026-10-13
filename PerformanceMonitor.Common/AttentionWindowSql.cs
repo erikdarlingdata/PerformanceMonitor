@@ -41,11 +41,11 @@ public static class AttentionWindowSql
     public const int TopCount = 5;
 
     /// <summary>The read-surface ceiling (#5640, get_client_timeouts): <c>$3</c> = the naive-UTC end of the window, so an <c>as_of</c> read
-    /// does not count what happened after it. The alert's own reads pass <c>bounded: false</c> and have no ceiling.</summary>
+    /// does not count what happened after it. The alert's counts and sample groups pass <c>bounded: false</c> and have no ceiling; its top lists pass <c>true</c> since the final round of #5714 (L2).</summary>
     public static string Ceiling(bool bounded) => bounded ? "\nAND   collection_time <= $3" : "";
 
-    /// <summary>The floor of the top lists. The alert's reads (<c>bounded: false</c>) keep <c>collection_time &gt;= $2</c>, the lookback floor. The
-    /// read surface (<c>bounded: true</c>) binds the SPAN boundary into <c>$2</c> and reads <c>collection_time &gt; $2</c>, with <c>$3</c> the
+    /// <summary>The floor of the top lists. The alert's counts and sample groups (<c>bounded: false</c>) keep <c>collection_time &gt;= $2</c>, the lookback floor. The
+    /// read surface and, since the final round of #5714 (L2), the alert's top lists (<c>bounded: true</c>) binds the SPAN boundary into <c>$2</c> and reads <c>collection_time &gt; $2</c>, with <c>$3</c> the
     /// inclusive row ceiling: the very cut <c>AttentionEvaluator.ReadSpan</c> makes of the counts and the sample
     /// groups (#5640), so a top list or a sampled event can never come from outside the rows the count came from.</summary>
     public static string SpanFloor(bool bounded) => bounded ? "collection_time > $2" : "collection_time >= $2";
