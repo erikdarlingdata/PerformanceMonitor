@@ -21,7 +21,7 @@
  */
 
 import { el, mount, apiGet, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, localTime, fmtNum,
-         alertDeliveryState } from "../util.js";
+         alertDeliveryState, localizeAlertDetail } from "../util.js";
 import { VIZ } from "../panels.js";
 import { suggestViz, deriveVizConfig } from "../derive.js";
 import { renderNotebookDoc } from "./views.js";
@@ -61,7 +61,7 @@ function alertFields(a) {
     ])
   ));
   if (a.detail_text) {
-    return [box, el("pre", { class: "code", text: a.detail_text })];
+    return [box, el("pre", { class: "code", text: localizeAlertDetail(a.detail_text, a.newest_sample) })];
   }
   return [box];
 }

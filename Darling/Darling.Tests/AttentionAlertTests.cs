@@ -490,6 +490,52 @@ public sealed class AttentionAlertTests
         muted: true, trayChannelPresent: false);
 
     [Fact]
+    public async Task Engine_AnEscalationWhoseEveryChannelFailed_BacksOffLikeAnyFailedSend_AndADeliveredSendEndsTheStreak()
+    {
+        /* #5715 part A: the escalation skipped the cooldown stamp a failed send back-dates (#4752), so a Critical went out at
+           every sweep while every channel was down. While the family and key have an open streak it waits for the stamp. */
+        var h = Armed();
+        var engine = h.Build();
+        var start = h.Now;
+
+        async Task<int> SweepAtAsync(int seconds, long count)
+        {
+            h.Now = start.AddSeconds(seconds);
+            h.Adapter.Attention = StormWindow(h.Now, count);
+            var before = Fires(h).Count;
+            await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+            return Fires(h).Count - before;
+        }
+
+        Assert.Equal(1, await SweepAtAsync(0, 90));
+
+        h.Deliverer.Report = _ => EmailFailed();
+        Assert.Equal(1, await SweepAtAsync(60, 900));            /* failure 1: retry in 1 minute */
+        Assert.True(Fires(h)[^1].Context!.EscalationBypassesCooldown);
+        Assert.Equal(0, await SweepAtAsync(90, 900));
+        Assert.Equal(0, await SweepAtAsync(119, 900));
+
+        Assert.Equal(1, await SweepAtAsync(120, 900));           /* failure 2: retry in 2 minutes */
+        Assert.True(Fires(h)[^1].Context!.EscalationBypassesCooldown);
+        Assert.Equal(0, await SweepAtAsync(180, 900));
+        Assert.Equal(0, await SweepAtAsync(239, 900));
+
+        h.Deliverer.Report = null;
+        Assert.Equal(1, await SweepAtAsync(240, 900));           /* delivered: the streak ends */
+        Assert.True(Fires(h)[^1].Context!.EscalationBypassesCooldown);
+        Assert.Equal(0, await SweepAtAsync(270, 900));
+
+        /* A later incident's escalation goes at once again, inside the cooldown. */
+        h.Now = start.AddSeconds(300);
+        h.Adapter.Attention = Window(Runs(h.Now.AddSeconds(-5), 8));
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        var later = 240 + (h.Settings.CooldownMinutes * 60) + 60;
+        Assert.Equal(1, await SweepAtAsync(later, 90));
+        Assert.Equal(1, await SweepAtAsync(later + 60, 900));
+        Assert.True(Fires(h)[^1].Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
     public async Task Engine_AMutedFire_LeavesTheUnmutedFailedSendBackoffAlone()
     {
         /* Final round of #5714 (L1). Muted and unmuted fires share a family and key, so the muted one's AfterFire used to drop

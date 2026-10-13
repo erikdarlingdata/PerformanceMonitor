@@ -127,7 +127,8 @@ internal static class DarlingDefaultTraceReader
             dte.error_number,
             dte.severity,
             dte.duration_us,
-            dte.integer_data
+            dte.integer_data,
+            dte.event_sequence
         FROM default_trace_events AS dte, svr
         WHERE dte.server_id = $1
         AND   dte.event_time - make_interval(mins => svr.offset_minutes) >= $2 - interval '1 hour'
@@ -172,6 +173,7 @@ internal static class DarlingDefaultTraceReader
         DbDataReader reader, ServerClock clock, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
     {
         var rows = new List<DefaultTraceEventRow>();
+        var seen = new HashSet<(DefaultTraceEventRow Row, long? EventSequence)>();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -181,7 +183,7 @@ internal static class DarlingDefaultTraceReader
                 continue;
             }
 
-            rows.Add(new DefaultTraceEventRow(
+            var row = new DefaultTraceEventRow(
                 eventTimeUtc,
                 reader.IsDBNull(1) ? null : reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetInt32(2),
@@ -196,10 +198,24 @@ internal static class DarlingDefaultTraceReader
                 reader.IsDBNull(11) ? null : reader.GetInt32(11),
                 reader.IsDBNull(12) ? null : reader.GetInt32(12),
                 reader.IsDBNull(13) ? null : reader.GetInt64(13),
-                reader.IsDBNull(14) ? null : reader.GetInt64(14)));
+                reader.IsDBNull(14) ? null : reader.GetInt64(14));
+
+            /* #5644 W6: a stored COPY of one event repeats the row and its event_sequence, so the first of each in
+               reader order is kept. Two real events with identical columns (the same DBCC or audit event from one spid
+               in one 3.33 ms tick) carry different event_sequence values, so both stay. A row stored before the
+               column existed has a NULL sequence and keeps the column-only key. The viewer and Lite key the same
+               way. */
+            if (seen.Add((row, reader.IsDBNull(15) ? (long?)null : reader.GetInt64(15))))
+            {
+                rows.Add(row);
+            }
         }
 
         /* OrderByDescending is a stable sort (List.Sort is not), so ties keep the reader's order. */
+        /* #5644 W6: the store holds rows that are the same event twice (an older build kept both the Begin and the
+           Commit of every DDL, and re-stored an event whose datetime StartTime did not round-trip through the
+           watermark parameter). The loop above dropped the copies, keeping the first of each in reader order, so they stop
+           filling the page limit. */
         return rows.OrderByDescending(static r => r.EventTimeUtc).ToList();
     }
 }

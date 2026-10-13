@@ -464,6 +464,124 @@ public sealed class DarlingWebEndpointsTests
     public void ParseInt_DefaultsOnMissOrGarbage(string? raw, int expected) =>
         Assert.Equal(expected, DarlingWebEndpoints.ParseInt(raw, 10));
 
+    /// <summary>
+    /// #5644 W22: a present, non-integer integer knob is refused (the 400 envelope), not read as the default, so
+    /// <c>?hours=abc</c> and <c>?hours=1.5</c> no longer answer 200 for a different window than the one asked for.
+    /// Absent and empty knobs still take the default; a whole number (even out of range) is the tool's to judge.
+    /// </summary>
+    [Theory]
+    [InlineData("hours", "abc")]
+    [InlineData("hours", "1.5")]
+    [InlineData("hours", "1e2")]
+    [InlineData("hours_back", "24h")]
+    [InlineData("limit", "ten")]
+    [InlineData("top", "5.0")]
+    [InlineData("days_back", "x")]
+    [InlineData("bucket_minutes", "five")]
+    [InlineData("worst_count", "-")]
+    public void NonIntegerParamRefusal_RefusesAPresentNonInteger(string key, string raw)
+    {
+        var refusal = DarlingWebEndpoints.NonIntegerParamRefusal(k => k == key ? raw : null);
+
+        Assert.NotNull(refusal);
+        Assert.True(McpHelpers.IsRefusalEnvelope(refusal));
+        var envelope = JsonNode.Parse(refusal)!;
+        Assert.Equal("invalid", (string?)envelope["status"]);
+        Assert.Equal(key, (string?)envelope["hints"]!["parameter"]);
+        Assert.Equal($"Invalid {key} value '{raw}'. Must be a whole number.", (string?)envelope["message"]);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("24")]
+    [InlineData("-5")]      // readable: the tool owns the range refusal ("Must be a positive integer")
+    [InlineData("500")]
+    [InlineData("+7")]
+    public void NonIntegerParamRefusal_LeavesAbsentEmptyAndWholeNumbersToTheTool(string? raw)
+    {
+        foreach (var key in DarlingWebEndpoints.IntegerQueryKeys)
+        {
+            Assert.Null(DarlingWebEndpoints.NonIntegerParamRefusal(k => k == key ? raw : null));
+        }
+    }
+
+    /* #5644 W22: the tools refuse an out-of-range window as hours_back; a web caller that sent hours is told about hours. */
+    private static string HoursBackRefusal(int value) =>
+        McpHelpers.ValidateHoursBack(value)!;
+
+    [Theory]
+    [InlineData(-5)]
+    [InlineData(500)]
+    public void WindowRefusal_NamesTheHoursParameterTheWebCallerSent(int value)
+    {
+        var refusal = HoursBackRefusal(value);
+        Assert.Contains("hours_back", refusal);
+
+        var named = DarlingWebEndpoints.NameWindowParameterTheCallerSent(refusal, k => k == "hours" ? value.ToString() : null);
+
+        var doc = System.Text.Json.JsonDocument.Parse(named).RootElement;
+        Assert.Equal("invalid", doc.GetProperty("status").GetString());
+        Assert.Equal("hours", doc.GetProperty("hints").GetProperty("parameter").GetString());
+        var message = doc.GetProperty("message").GetString()!;
+        Assert.DoesNotContain("hours_back", message);
+        Assert.Contains($"hours value '{value}'", message);
+    }
+
+    [Fact]
+    public void WindowRefusal_ForAnMcpStyleRequest_OrAnotherParameter_IsLeftAlone()
+    {
+        var refusal = HoursBackRefusal(-5);
+
+        /* The caller sent hours_back (alone or beside hours): the tool's own wording is right. */
+        Assert.Equal(refusal, DarlingWebEndpoints.NameWindowParameterTheCallerSent(refusal, k => k == "hours_back" ? "-5" : null));
+        Assert.Equal(refusal, DarlingWebEndpoints.NameWindowParameterTheCallerSent(refusal, k => k is "hours" or "hours_back" ? "-5" : null));
+        /* No window parameter sent, and a result that is data rather than a refusal. */
+        Assert.Equal(refusal, DarlingWebEndpoints.NameWindowParameterTheCallerSent(refusal, _ => null));
+        const string Data = "{\"status\":\"ok\",\"hints\":{\"parameter\":\"hours_back\"}}";
+        Assert.Equal(Data, DarlingWebEndpoints.NameWindowParameterTheCallerSent(Data, k => k == "hours" ? "1" : null));
+        /* A refusal for a different parameter keeps its wording, even when it mentions hours_back. */
+        var other = McpHelpers.Refusal("baseline_hours_back", "baseline_hours_back must be greater than hours_back.");
+        Assert.Equal(other, DarlingWebEndpoints.NameWindowParameterTheCallerSent(other, k => k == "hours" ? "4" : null));
+    }
+
+    [Fact]
+    public void NonIntegerParamRefusal_ThroughTheQueryString_ReadsTheFirstNonEmptyValue()
+    {
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+        context.Request.QueryString = new Microsoft.AspNetCore.Http.QueryString("?server_name=SQL1&hours=abc");
+        Assert.NotNull(DarlingWebEndpoints.NonIntegerParamRefusal(k => DarlingWebEndpoints.First(context, k)));
+
+        context.Request.QueryString = new Microsoft.AspNetCore.Http.QueryString("?hours=&hours=12");
+        Assert.Null(DarlingWebEndpoints.NonIntegerParamRefusal(k => DarlingWebEndpoints.First(context, k)));
+    }
+
+    /// <summary>
+    /// #5644 W22 source pin: the /api/read dispatch loop and /api/fleet both call the check BEFORE any tool or reader
+    /// runs, and every key the dispatch reads through QueryInt/Rows/Hours is in the list.
+    /// </summary>
+    [Fact]
+    public void NonIntegerParamRefusal_RunsBeforeEveryReadAndCoversEveryIntegerKnob()
+    {
+        var source = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs");
+
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(source, @"NonIntegerParamRefusal\(context\) is \{ \}").Count);
+        Assert.True(source.IndexOf("NonIntegerParamRefusal(context) is { } nonIntegerRefusal", StringComparison.Ordinal)
+            < source.IndexOf("result = await handler(context, postgres, analysis);", StringComparison.Ordinal));
+
+        var keys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+            source, @"(?:QueryInt\((?:c|context), ""|Rows\(c, "")([a-z_]+)"""))
+        {
+            keys.Add(m.Groups[1].Value);
+        }
+
+        keys.Add("hours");
+        keys.Add("hours_back");
+        Assert.NotEmpty(keys);
+        Assert.All(keys, k => Assert.Contains(k, DarlingWebEndpoints.IntegerQueryKeys));
+    }
+
     [Theory]
     [InlineData("true", false, true)]
     [InlineData("false", true, false)]
@@ -757,6 +875,71 @@ public sealed class DarlingWebEndpointsTests
             "#4316: the web host's DarlingAnalysisService construction has moved or been renamed; update this pin's search text.");
 
         Assert.Contains("logger: logger", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5644 (review of W22): /api/fleet refuses an out-of-range window or a negative worst_count with the
+    /// {"status":"invalid"} envelope, naming the spelling the caller sent, and still answers the in-range requests
+    /// (the bare route, hours=24, the edges 1 and 168, worst_count=0) with no refusal. It used to clamp
+    /// (hours=500 answered 200 over 168 hours, worst_count=-3 over zero).
+    /// </summary>
+    [Theory]
+    [InlineData("hours", 500, "hours")]
+    [InlineData("hours", 0, "hours")]
+    [InlineData("hours", -5, "hours")]
+    [InlineData("hours", 169, "hours")]
+    [InlineData("hours_back", 500, "hours_back")]
+    [InlineData("hours_back", 0, "hours_back")]
+    public void FleetParamRefusal_RefusesAnOutOfRangeWindow_NamingTheParameterSent(string key, int value, string expectedParameter)
+    {
+        var refusal = DarlingWebEndpoints.FleetParamRefusal(value, 3, k => k == key ? value.ToString() : null);
+
+        Assert.NotNull(refusal);
+        Assert.True(McpHelpers.IsRefusalEnvelope(refusal));
+        var envelope = JsonNode.Parse(refusal)!;
+        Assert.Equal("invalid", (string?)envelope["status"]);
+        Assert.Equal(expectedParameter, (string?)envelope["hints"]!["parameter"]);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(-3)]
+    public void FleetParamRefusal_RefusesANegativeWorstCount(int worstCount)
+    {
+        var refusal = DarlingWebEndpoints.FleetParamRefusal(24, worstCount, k => k == "worst_count" ? worstCount.ToString() : null);
+
+        Assert.NotNull(refusal);
+        var envelope = JsonNode.Parse(refusal)!;
+        Assert.Equal("invalid", (string?)envelope["status"]);
+        Assert.Equal("worst_count", (string?)envelope["hints"]!["parameter"]);
+    }
+
+    [Theory]
+    [InlineData(1, 0)]
+    [InlineData(1, 5)]
+    [InlineData(24, 5)]
+    [InlineData(168, 5)]
+    public void FleetParamRefusal_AnswersInRangeRequests(int hours, int worstCount)
+    {
+        Assert.Null(DarlingWebEndpoints.FleetParamRefusal(hours, worstCount, k => k == "hours" ? hours.ToString() : null));
+    }
+
+    /// <summary>The /api/fleet route runs that refusal before it reads, and no longer clamps the window or the count.</summary>
+    [Fact]
+    public void FleetRoute_RefusesBeforeReading_AndDoesNotClamp()
+    {
+        var source = ReadSource(WebEndpointsSourcePath);
+        var start = source.IndexOf("app.MapGet(\"/api/fleet\"", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the /api/fleet route has moved; update this pin.");
+        var end = source.IndexOf("app.MapGet(", start + 10, StringComparison.Ordinal);
+        var route = source[start..end];
+
+        Assert.Contains("FleetParamRefusal(", route, StringComparison.Ordinal);
+        Assert.DoesNotContain("Math.Clamp", route, StringComparison.Ordinal);
+        Assert.DoesNotContain("Math.Max", route, StringComparison.Ordinal);
+        Assert.True(
+            route.IndexOf("FleetParamRefusal(", StringComparison.Ordinal) < route.IndexOf("GetFleetOverviewAsync", StringComparison.Ordinal),
+            "the refusal must come before the read");
     }
 
     private static string ReadSource(string relative)

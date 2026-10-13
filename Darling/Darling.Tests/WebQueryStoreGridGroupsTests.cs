@@ -90,7 +90,7 @@ public sealed class WebQueryStoreGridGroupsTests
         Assert.Equal(new[] { "Time", "Statement", "EventType", "Duration", "CPU", "Result", "Database", "Object", "QueryHash" },
             Arr(r, "completions", "heads"));
         Assert.Equal(new[] { "Columns:", "Plans", "Plan metrics", "Lifecycle" }, Arr(r, "corrections", "toggles"));
-        Assert.Equal(new[] { "Collected", "Query", "Database", "State", "StateReason", "Reason", "Score", "Est.gain(s)", "QueryID" },
+        Assert.Equal(new[] { "Firstseen", "Lastseen", "Captures", "Query", "Database", "State", "StateReason", "Reason", "Score", "Est.gain(s)", "QueryID" },
             Arr(r, "corrections", "heads"));
     }
 
@@ -126,9 +126,9 @@ public sealed class WebQueryStoreGridGroupsTests
         var r = Run("localTime");
         var expected = r.GetProperty("expected").GetString()!;
         Assert.Equal("1/15/2026, 12:30:00 PM", expected);
-        // Collected, Valid Since, Last Refresh and Executed At (Lifecycle is on in this scenario).
+        // First seen, Last seen, Valid Since, Last Refresh and Executed At (Lifecycle is on in this scenario; #5644 W21 put two stamps and Captures first).
         var cells = Arr(r, "cells");
-        foreach (var i in new[] { 0, 9, 10, 12 }) Assert.Equal(expected, cells[i]);
+        foreach (var i in new[] { 0, 1, 11, 12, 14 }) Assert.Equal(expected, cells[i]);
         Assert.Equal(expected, Arr(r, "regressionCells").Last());
         Assert.Equal(expected, Arr(r, "completionCells").First());
     }

@@ -365,6 +365,25 @@ public sealed class CollectionCycleSkipTests : IDisposable
     }
 
     [Fact]
+    public async Task ASkippedCycle_NamesTheHousekeepingStepsThatOverlappedTheGap_InTheLogAndTheRow()
+    {
+        var f = await OpenAsync();
+        /* #5731: archival ran 4 minutes inside the gap; a step from the day before did not overlap it. */
+        f.Loop.HousekeepingLedger.Record("archival", T0 + TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(4));
+        f.Loop.HousekeepingLedger.Record("retention", T0 - TimeSpan.FromHours(20), TimeSpan.FromMinutes(2));
+
+        await f.Loop.ReportSkippedSlotsAsync(T0, T0 + TimeSpan.FromMinutes(6), TimeSpan.FromSeconds(312), TimeSpan.FromSeconds(48),
+            Steps(), CancellationToken.None);
+
+        var warning = Assert.Single(f.Log);
+        Assert.Contains(" Housekeeping in that window: archival 240s.", warning.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("retention 120s", warning.Message, StringComparison.Ordinal);
+        var row = (await RowsAsync(f.DuckDb))[RemoteCollectorService.GetServerId(f.Enabled1)];
+        Assert.Equal(warning.Message, row.Message);
+        Assert.Equal("archival", row.SlowestItem); /* slowest_item is still the cycle's own slowest step */
+    }
+
+    [Fact]
     public async Task AWaitThatOverran_WritesTheWaitAsTheSlowestItem()
     {
         var f = await OpenAsync();
@@ -447,6 +466,91 @@ public sealed class CollectionCycleSkipTests : IDisposable
         Assert.Equal(9, count);
     }
 
+    [Fact]
+    public void TheDailySummaryAndCollectionHealthSql_CarryTheCollectorNamesValue_NotTheBracedTemplate()
+    {
+        /* #5644 merge guard: a literal that holds the {CollectionCycleSkip.CollectorName} hole but lost its $ prefix still
+           compiles, and the daily summary then compares collector_name against the template text and counts skipped
+           cycles as runs again. Read the built SQL, not the source. DailySummaryRangeSql is private, so it is read by
+           reflection; CollectionHealthSql is internal. */
+        var daily = (string)typeof(LocalDataService)
+            .GetField("DailySummaryRangeSql", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .GetValue(null)!;
+
+        foreach (var sql in new[] { daily, LocalDataService.CollectionHealthSql })
+        {
+            Assert.Contains("collector_name <> '" + CollectionCycleSkip.CollectorName + "'", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("{CollectionCycleSkip", sql, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void EveryPredicateHole_SitsInAnInterpolatedLiteral()
+    {
+        /* The twin of the pin above for the readers whose SQL is composed inside a method (Overview, the collection-health
+           lookups, runs, config changes, the runtime precondition): walk each file's string literals and require that every
+           literal holding the hole starts with $. */
+        var services = Path.Combine(RepoRootFromThisFile(), "Lite", "Services");
+        const string hole = "{CollectionCycleSkip.CollectorName}";
+        var holes = 0;
+        var bare = new List<string>();
+        foreach (var file in Directory.EnumerateFiles(services, "LocalDataService.*.cs"))
+        {
+            var s = File.ReadAllText(file);
+            var i = 0;
+            while (i < s.Length)
+            {
+                if (string.CompareOrdinal(s, i, "//", 0, 2) == 0) { var e = s.IndexOf('\n', i); i = e < 0 ? s.Length : e; }
+                else if (string.CompareOrdinal(s, i, "/*", 0, 2) == 0) { i = s.IndexOf("*/", i + 2, StringComparison.Ordinal) + 2; }
+                else if (s[i] == '\'') { i++; while (s[i] != '\'') i += s[i] == '\\' ? 2 : 1; i++; }
+                else
+                {
+                    var start = i;
+                    while (i < s.Length && (s[i] == '$' || s[i] == '@')) i++;
+                    if (i < s.Length && s[i] == '"')
+                    {
+                        var prefix = s[start..i];
+                        var verbatim = prefix.Contains('@', StringComparison.Ordinal);
+                        var j = i + 1;
+                        while (true)
+                        {
+                            if (prefix.Contains('$', StringComparison.Ordinal) && s[j] == '{')
+                            {
+                                /* An interpolation hole may hold its own quotes (string.Join(", ", ids)); skip it whole. */
+                                if (s[j + 1] == '{') { j += 2; continue; }
+                                var depth = 0;
+                                do
+                                {
+                                    if (s[j] == '{') depth++;
+                                    else if (s[j] == '}') depth--;
+                                    else if (s[j] == '"') { j++; while (s[j] != '"') j += s[j] == '\\' ? 2 : 1; }
+                                    j++;
+                                } while (depth > 0);
+                            }
+                            else if (verbatim && string.CompareOrdinal(s, j, "\"\"", 0, 2) == 0) j += 2;
+                            else if (!verbatim && s[j] == '\\') j += 2;
+                            else if (s[j] == '"') break;
+                            else j++;
+                        }
+                        var body = s[i..j];
+                        var at = body.IndexOf(hole, StringComparison.Ordinal);
+                        if (at >= 0)
+                        {
+                            holes++;
+                            if (!prefix.Contains('$', StringComparison.Ordinal))
+                                bare.Add(Path.GetFileName(file) + ":" + (s.Take(i + at).Count(c => c == '\n') + 1));
+                        }
+                        i = j + 1;
+                    }
+                    else if (i == start) i++;
+                }
+            }
+        }
+
+        Assert.Empty(bare);
+        Assert.True(holes >= 8, "expected the nine predicates to sit in at least eight literals, saw " + holes);
+    }
+
     private static string RepoRootFromThisFile([CallerFilePath] string thisFile = "")
         => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, ".."));
 
@@ -462,9 +566,9 @@ public sealed class CollectionCycleSkipTests : IDisposable
         var body = source[source.IndexOf("protected override async Task ExecuteAsync", StringComparison.Ordinal)..];
         body = body[..body.IndexOf("The pileup loop ends on the same token", StringComparison.Ordinal)];
 
+        /* #5731: the six housekeeping awaits (and their Laps) moved to the housekeeping loops; what is left is timed. */
         var lastIndex = -1;
-        foreach (var step in new[] { "connection_check", "collectors", "archival", "query_store_backfill", "retention",
-                     "findings_cleanup", "dismissed_alerts_cleanup", "analysis" })
+        foreach (var step in new[] { "connection_check", "collectors" })
         {
             var index = body.IndexOf($"Lap(\"{step}\")", StringComparison.Ordinal);
             Assert.True(index > lastIndex, $"step {step} is not timed in loop order");
@@ -474,8 +578,12 @@ public sealed class CollectionCycleSkipTests : IDisposable
         var wait = body.IndexOf("await WaitForNextCycleAsync(", StringComparison.Ordinal);
         var report = body.IndexOf("await ReportSkippedSlotsAsync(previousCycleStart, cycleStart", StringComparison.Ordinal);
         Assert.True(wait > 0 && report > wait, "the skipped-slot report must follow the wait that returns the new stamp");
-        /* A step added to the loop without a Lap falls out of the report: every awaited housekeeping call is followed by one. */
-        Assert.Equal(8, System.Text.RegularExpressions.Regex.Matches(body, @"Lap[(]""").Count);
-        Assert.Equal(6, System.Text.RegularExpressions.Regex.Matches(body, @"await Run\w+IfDueAsync\([^)]*\);\s*Lap\(").Count);
+        /* A step added to the loop without a Lap falls out of the report. Housekeeping is not one of them any more: no
+           Run*IfDueAsync is awaited from the collection loop, and the loops that run them are started before it (#5731). */
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(body, @"Lap[(]""").Count);
+        Assert.DoesNotMatch(@"await Run\w+IfDueAsync\(", body);
+        var housekeeping = body.IndexOf("StartHousekeepingLoops(", StringComparison.Ordinal);
+        var cycle = body.IndexOf("while (!stoppingToken.IsCancellationRequested)", StringComparison.Ordinal);
+        Assert.True(housekeeping > 0 && cycle > housekeeping, "the housekeeping loops must start before the collection loop");
     }
 }

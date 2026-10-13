@@ -134,7 +134,7 @@ public sealed class WebWaitsActivityTrendsBehaviourTests
         {
             var r = Run(scenario);
             Assert.Equal(JsonValueKind.Null, r.GetProperty("chart").ValueKind);
-            Assert.Contains("recorded in the last 24 hour(s)", Strings(r.GetProperty("empties")).Single());
+            Assert.Contains("recorded in the last 24 hours", Strings(r.GetProperty("empties")).Single());
         }
     }
 

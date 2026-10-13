@@ -64,7 +64,7 @@ public sealed class WebCollectionHealthRunAtColumnTests
 
         Assert.Contains("{ key: \"run_at\", label: \"Run at\", hideWhenEmpty: true },", columns, StringComparison.Ordinal);
         Assert.Contains("{ key: \"next_run_utc\", label: \"Next run\", format: \"time\", hideWhenEmpty: true },", columns, StringComparison.Ordinal);
-        Assert.Contains("{ key: \"run_time_note\", label: \"Run time\", wrap: true, hideWhenEmpty: true },", columns, StringComparison.Ordinal);
+        Assert.Contains("{ key: \"run_time_note\", label: \"Run time\", clamp: true, localizeText: true, hideWhenEmpty: true },", columns, StringComparison.Ordinal);
         Assert.True(columns.IndexOf("key: \"last_success\"", StringComparison.Ordinal) < columns.IndexOf("key: \"run_at\"", StringComparison.Ordinal));
     }
 

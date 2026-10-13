@@ -838,8 +838,15 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DES
         var endTime = clock.ToServerLocal(windowEndUtc).AddHours(1);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
+        /* #5644 W6: DISTINCT drops the stored copies of one event (the Begin and Commit rows of a DDL that an older
+           build kept, and an event re-stored by the datetime watermark round trip): a copy repeats every column
+           selected here INCLUDING event_sequence. Two real events with identical columns (the same DBCC or audit event
+           from one spid in one 3.33 ms tick) carry different sequences and both stay; a row stored before the column
+           existed has a NULL sequence, which DISTINCT keeps as the column-only key. filename and event_class are
+           selected for the same reason as the MCP reader and the viewer key on them (the grid does not show them): two
+           Data File Auto Grow rows for different files in one tick are two events. */
         command.CommandText = @"
-SELECT
+SELECT DISTINCT
     event_time,
     event_name,
     database_name,
@@ -852,7 +859,10 @@ SELECT
     integer_data,
     severity,
     error_number,
-    text_data
+    text_data,
+    filename,
+    event_class,
+    event_sequence
 FROM v_default_trace_events
 WHERE server_id = $1
 AND   event_time >= $2

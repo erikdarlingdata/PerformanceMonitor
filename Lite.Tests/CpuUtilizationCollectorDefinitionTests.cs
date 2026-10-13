@@ -261,6 +261,36 @@ public sealed class CpuUtilizationCollectorDefinitionTests
         Assert.True(row.SampleTime < watermarkUtc, "the fixture must put every LOCAL stamp below the UTC watermark, or this pin cannot tell the two frames apart");
     }
 
+    /// <summary>
+    /// #5644 W3: the ring buffer record that is already stored comes back on the next poll with a recomputed
+    /// stamp a few milliseconds ABOVE the stored one (SYSDATETIME() and ms_ticks drift apart: 8 ms in 68 s on the
+    /// test box), so a strict `&lt;= watermark` test stored it again, 82-87 samples an hour against 60 records.
+    /// The same record, drifted 8 ms and then 3 s above the watermark, is dropped in either frame; the next
+    /// record, 60 s later, still lands.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReadAsync_RingBuffer_AlreadyStoredRecordWithDriftedStamp_IsNotStoredAgain(bool fromUtc)
+    {
+        var utcBase = new DateTime(2026, 7, 1, 16, 0, 0, DateTimeKind.Utc);
+        var localBase = utcBase.AddHours(-4);   /* the server sits at UTC-4 */
+        object[] Row(TimeSpan at, int cpu) => new object[] { localBase + at, cpu, 1, utcBase + at };
+        using var reader = new FakeCollectorDataReader(
+            Row(TimeSpan.FromSeconds(60.008), 50),        /* the genuinely new record */
+            Row(TimeSpan.FromMilliseconds(8), 40),        /* the stored record, recomputed 8 ms later */
+            Row(TimeSpan.FromSeconds(3), 41),             /* a larger drift still inside the window */
+            Row(TimeSpan.Zero, 30));                      /* the stored record exactly */
+
+        var rows = await CpuUtilizationCollector.Instance.ReadAsync(
+            reader,
+            CollectorTestContext.Make(s_deltas, isAzureSqlDb: false, watermark: fromUtc ? utcBase : localBase, watermarkFromUtcColumn: fromUtc),
+            CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(50, row.SqlServerCpuUtilization);
+    }
+
     /* ── #3778: the three acceptance sequences, through the REAL ReadAsync dedup rather than WritePayload ── */
 
     /// <summary>

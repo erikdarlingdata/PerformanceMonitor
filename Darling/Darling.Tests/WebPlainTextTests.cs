@@ -97,6 +97,85 @@ public sealed class WebPlainTextTests
         Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[0]);
     }
 
+    /* #5644 W8 (live check): the CPU and Memory pages have no bucket control, the Waits and Activity notes print raw field names, and a
+       window count printed "24 hour(s)". */
+    [Fact]
+    public void TrendNotes_NameTheTimeRange_TheColumnLabels_AndAgreeInNumber()
+    {
+        var o = Run(
+        [
+            "Each point averages the samples in one 5-minute bucket and is stamped at the bucket's start. A level is averaged, never summed, so a spike inside a bucket is smoothed into its average; narrow the bucket to see it. The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
+            "wait_time_ms_per_second is recomputed from the summed wait time over the seconds the collections covered.",
+            "collisions_per_second is recomputed from the summed delta.",
+            "The session counts are levels, averaged, never summed; top_application_name, top_application_connections, top_host_name and top_host_connections are the newest collection's own values in the bucket.",
+            "No query-stats group on SRV in the last 24 hour(s) has a cached plan.",
+            "No blocking was recorded in the last 1 hour(s). 288 collector run(s) DID execute; 1 collector run(s) failed.",
+            "3 query(s) failed, 1 query(s) retried, 2 policy(s) skipped.",
+        ], out _);
+        Assert.DoesNotContain("narrow the bucket", o[0]);
+        Assert.Contains("narrow the time range to see it", o[0]);
+        Assert.DoesNotContain("wait_time_ms_per_second", o[1]);
+        Assert.StartsWith("Wait ms/s is recomputed", o[1]);
+        Assert.StartsWith("Coll/s is recomputed", o[2]);
+        Assert.DoesNotContain("top_application_name", o[3]);
+        Assert.Contains("the top application, its connection count, the top host and its connection count are", o[3]);
+        Assert.Equal("No query-stats group on SRV in the last 24 hours has a cached plan.", o[4]);
+        Assert.Equal("No blocking was recorded in the last 1 hour. 288 collector runs DID execute; 1 collector run failed.", o[5]);
+        /* a noun ending in a consonant plus y takes "ies", not a bare "s" */
+        Assert.Equal("3 queries failed, 1 query retried, 2 policies skipped.", o[6]);
+    }
+
+    /* #5644 W8: the clauses that point an MCP caller at a parameter the page has no control for. */
+    [Fact]
+    public void ParameterClauses_ForAnMcpCaller_AreDroppedOrSaidInThePagesWords()
+    {
+        var o = Run(
+        [
+            "The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
+            "TRUNCATED: 300 indexes match and 200 were returned. Rows are ordered by total wait time descending; raise limit to see more.",
+            "TRUNCATED: 9 indexes match database 'x' and 5 were returned. This says nothing about databases outside the filter — raise limit to see more.",
+            "TRUNCATED: 9 indexes match and 5 were returned. This is not evidence that a database was not collected — pass database_name to ask about one, or raise limit.",
+            " truncated: 5 of 9 returned; raise limit (now 5) for more.",
+            "The row limit of 50 was REACHED: databases[] holds the 50 biggest spillers and the totals above still cover every database - raise limit to see the rest of the rows.",
+            "At least one database's statistics WERE reset in this window - see stats_reset_count per database, and raise limit if none of the databases returned shows one - so its totals are lower bounds.",
+            "No active query snapshots on SQL2025 in the last 1 hour(s) matched blocking_only. The filters were applied in SQL over the whole window.",
+            "No active query snapshots on SQL2025 in the last 1 hour(s) matched database_name 'Sales' with blocking_only with wait_type 'LCK_M_X'.",
+            "3 sp_server_diagnostics event(s) were captured for SQL2025 in the last 1 hour(s) and none qualified. Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
+            "TRUNCATED: 40 groups were in scope; only the top 25 (by name) are returned. Scope by server_name, or raise limit, to see the rest.",
+        ], out _);
+
+        Assert.Equal("The width was chosen to keep this answer near 1500 points; narrow the time range for finer points.", o[0]);
+        Assert.Equal("TRUNCATED: 300 indexes match and 200 were returned. Rows are ordered by total wait time descending.", o[1]);
+        Assert.EndsWith("outside the filter.", o[2]);
+        Assert.EndsWith("filter by database to ask about one.", o[3]);
+        Assert.Equal(" truncated: 5 of 9 returned.", o[4]);
+        Assert.EndsWith("still cover every database.", o[5]);
+        Assert.Contains("per database - so its totals", o[6]);
+        Assert.Equal("No active query snapshots on SQL2025 in the last 1 hour matched blocking queries only. The filters were applied in SQL over the whole window.", o[7]);
+        Assert.Contains("matched database 'Sales' with blocking queries only with wait type 'LCK_M_X'.", o[8]);
+        Assert.Contains("so this is a normal result, not missing data.", o[9]);
+        Assert.EndsWith("Select a single server to see the rest.", o[10]);
+        foreach (var line in o)
+        {
+            Assert.DoesNotContain("raise limit", line);
+            Assert.DoesNotContain("bucket_minutes", line);
+            Assert.DoesNotContain("blocking_only", line);
+            Assert.DoesNotContain("healthy answer for this read", line);
+        }
+    }
+
+    [Fact]
+    public void AParameterNamedInRealText_IsLeftAlone()
+    {
+        string[] same =
+        [
+            "Column limit_value was reset",
+            "relation database_name_idx does not exist",
+            "blocking_only_tbl",
+        ];
+        Assert.Equal(same, Run(same, out _));
+    }
+
     [Fact]
     public void UserDataAndRealErrors_ReachThePageAsWritten()
     {

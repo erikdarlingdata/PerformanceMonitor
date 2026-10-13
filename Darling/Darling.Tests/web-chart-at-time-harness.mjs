@@ -99,7 +99,7 @@ const panelHead = (title, index) => {
 const tabPanels = {
   queries: ["Active Queries"],
   /* The Blocking tab in its order: the Deadlocks chart (1) and the Deadlocks grid (3) share a title. */
-  blocking: ["Blocking Events", "Deadlocks", "Blocking", "Deadlocks", "Waiting Tasks", "Blocked Sessions", "Lock Waits", "Blocking Severity", "Deadlock Severity", "Deadlock Graphs", "Blocked Process Reports"],
+  blocking: ["Blocked process report trend", "Deadlocks", "Blocking", "Deadlocks", "Waiting Tasks", "Blocked Sessions", "Lock Waits", "Blocking Severity", "Deadlock Severity", "Deadlock Graphs", "Blocked Process Reports"],
 };
 const runHashchange = () => {
   panelHeads = (tabPanels[hashValue.split("/").pop()] || []).map((title, index) => panelHead(title, index));

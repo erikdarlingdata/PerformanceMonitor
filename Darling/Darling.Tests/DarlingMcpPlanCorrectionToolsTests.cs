@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Reflection;
@@ -93,6 +94,49 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
         Assert.DoesNotContain("LIMIT 200", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>#5644 W21: the web's collapsed read keeps ONE row per recommendation (its newest capture), counts the captures
+    /// and reports the oldest, under the same window, scope, cap and database filter as the per-capture read.</summary>
+    [Fact]
+    public void PlanCorrectionsCollapsedSql_OneRowPerRecommendation_NewestCapture_WithFirstSeenAndCount()
+    {
+        var sql = DarlingPlanCorrectionReader.PlanCorrectionsCollapsedSql;
+
+        SqlTextPin.AssertExpresses("PARTITION BY database_name, recommendation_name, query_id ORDER BY collection_time DESC, score DESC NULLS LAST, regressed_plan_id DESC NULLS LAST, last_refresh DESC NULLS LAST", sql,
+            "the newest capture of each recommendation is no longer the one row kept, or a collection_time tie no longer resolves deterministically");
+        SqlTextPin.AssertExpresses("MIN(collection_time) OVER (PARTITION BY database_name, recommendation_name, query_id) AS first_seen", sql,
+            "the recommendation's first capture is no longer reported, or two queries sharing a recommendation name collapse into one row");
+        SqlTextPin.AssertExpresses("COUNT(*) OVER (PARTITION BY database_name, recommendation_name, query_id) AS capture_count", sql,
+            "the capture count is no longer reported, or two queries sharing a recommendation name collapse into one row");
+        SqlTextPin.AssertExpresses("WHERE newest_rank = 1", sql, "every capture, not one per recommendation, comes back");
+        SqlTextPin.AssertExpresses("recommendation_name IS NOT NULL", sql, "enablement-only rows come back as phantom recommendations");
+        SqlTextPin.AssertExpresses("WHERE server_id = $1", sql, "the read is not scoped to the requested server");
+        SqlTextPin.AssertExpresses("collection_time >= $2", sql, "the window's start no longer bounds the read");
+        SqlTextPin.AssertExpresses("collection_time <= $3", sql, "the window's end no longer bounds the read");
+        SqlTextPin.AssertExpresses("($5::text[] IS NULL OR database_name = ANY($5))", sql, "the database filter no longer narrows the read");
+        SqlTextPin.AssertExpresses("ORDER BY collection_time DESC, score DESC", sql, "the newest recommendations no longer come first");
+        SqlTextPin.AssertExpresses("LIMIT $4", sql, "the row cap is no longer the caller's limit");
+    }
+
+    /// <summary>#5644 W21: the web-only keys are added to the serialized rows, and the MCP tool's own call never reaches them.</summary>
+    [Fact]
+    public void WithSeenKeys_AddsFirstSeenLastSeenAndCount_ToEachRow()
+    {
+        var newest = new DateTime(2026, 10, 12, 8, 5, 0);
+        var oldest = new DateTime(2026, 10, 11, 8, 5, 0);
+        var page = new List<DarlingPlanCorrectionReader.PlanCorrectionRow>
+        {
+            new(newest, "db", null, "Active", null, null, 80, null, 7, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, oldest, 17),
+        };
+
+        var array = DarlingMcpPlanCorrectionTools.WithSeenKeys(new object[] { new { database_name = "db", query_id = 7 } }, page);
+
+        var row = array[0]!.AsObject();
+        Assert.Equal("db", (string?)row["database_name"]);
+        Assert.Equal(newest.ToString("o"), (string?)row["last_seen"]);
+        Assert.Equal(oldest.ToString("o"), (string?)row["first_seen"]);
+        Assert.Equal(17L, (long?)row["capture_count"]);
+    }
+
     [Fact]
     public void AutomaticTuningSql_NewestCaptureOnly_OneRowPerDatabase()
     {
@@ -114,6 +158,7 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
 
     [Theory]
     [InlineData(nameof(DarlingPlanCorrectionReader.PlanCorrectionsSql))]
+    [InlineData(nameof(DarlingPlanCorrectionReader.PlanCorrectionsCollapsedSql))]
     [InlineData(nameof(DarlingPlanCorrectionReader.AutomaticTuningSql))]
     public void Reads_ArePostgresDialect_NoTsqlIsms(string sqlName)
     {

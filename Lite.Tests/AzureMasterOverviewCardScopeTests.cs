@@ -53,8 +53,8 @@ public class AzureMasterOverviewCardScopeTests : IClassFixture<SharedDuckDbFixtu
     {
         for (var i = 0; i < count; i++)
             await ExecAsync(
-                "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name, database_name, wait_time_ms) VALUES ($1,$2,$2,$3,'TestServer',$4,1000)",
-                _nextId--, DateTime.UtcNow.AddMinutes(-10 - i), ServerId, database);
+                "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name, database_name, wait_time_ms, blocked_spid, blocking_spid) VALUES ($1,$2,$2,$3,'TestServer',$4,1000,$5,50)",
+                _nextId--, DateTime.UtcNow.AddMinutes(-10 - i), ServerId, database, 1000 - (int)_nextId);   /* a blocked session of its own per row: seeded rows are separate waits (#5644 W1) */
     }
 
     private static string Graph(params string[] databases) =>
@@ -74,8 +74,8 @@ public class AzureMasterOverviewCardScopeTests : IClassFixture<SharedDuckDbFixtu
     {
         for (var i = 0; i < count; i++)
             await ExecAsync(
-                "INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, event_time, server_id, server_name, database_name, monitor_loop, wait_time_ms) VALUES ($1,$2,$2,$3,'TestServer',$4,1,1000)",
-                _nextId--, DateTime.UtcNow.AddMinutes(-10 - i), ServerId, database);
+                "INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, event_time, server_id, server_name, database_name, monitor_loop, wait_time_ms, blocked_spid, blocking_spid) VALUES ($1,$2,$2,$3,'TestServer',$4,1,1000,$5,50)",
+                _nextId--, DateTime.UtcNow.AddMinutes(-10 - i), ServerId, database, 1000 - (int)_nextId);
     }
 
     private async Task SeedDeadlockRowAsync(string rowDatabase, params string[] graphDatabases) =>

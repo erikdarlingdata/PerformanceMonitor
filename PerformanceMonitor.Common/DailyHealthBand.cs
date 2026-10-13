@@ -103,11 +103,20 @@ namespace PerformanceMonitor.Common
         /// rate — see <see cref="DailyHealthThresholds.HighCpuCriticalSamplesFor"/>.</summary>
         public long HighCpuEvents { get; init; }
 
-        /// <summary>Blocking events in the window (blocked-process reports, falling back to DMV blocking
-        /// snapshots). Banded as a RATE over <see cref="Window"/> through the card band's own
+        /// <summary>Blocking events in the window, counted as WAITS (#5644): one per blocked session, blocker and wait
+        /// start, from blocked-process reports and falling back to DMV blocking snapshots. The figure every surface
+        /// DISPLAYS. The band does not read it when <see cref="BlockingReports"/> is set.</summary>
+        public long BlockingEvents { get; init; }
+
+        /// <summary>The blocked-process REPORT rows (DMV snapshot rows on the fallback) behind
+        /// <see cref="BlockingEvents"/> (#5644), or <c>null</c> when the producer does not carry the report count,
+        /// in which case <see cref="BlockingEvents"/> is banded. SQL Server writes about eleven reports for one
+        /// one-minute wait, and <see cref="ServerHealthThresholds.BlockingWarnPerHour"/> and
+        /// <see cref="ServerHealthThresholds.BlockingCriticalPerHour"/> were measured in reports per server-hour, so the
+        /// band keeps that unit: it reads this count as a RATE over <see cref="Window"/> through the card band's own
         /// <see cref="ServerHealthClassifier.BlockingSeverity"/> (#3539 A2/A3), together with
         /// <see cref="PeakBlockWaitMs"/>.</summary>
-        public long BlockingEvents { get; init; }
+        public long? BlockingReports { get; init; }
 
         /// <summary>The longest single block in the window, in milliseconds (#3539 A2) — the blocking
         /// band's rate-independent wait arm: a 60-second block is Critical and a 10-second one Warning
@@ -266,7 +275,7 @@ namespace PerformanceMonitor.Common
                undeclared span) is the fallback this classifier wants: a non-zero count reads Warning, a zero
                count (Unknown) stays out of the blocking trigger. */
             var blockingSeverity = ServerHealthClassifier.BlockingSeverity(
-                signals.BlockingEvents, signals.PeakBlockWaitMs / 1000.0, signals.Window);
+                signals.BlockingReports ?? signals.BlockingEvents, signals.PeakBlockWaitMs / 1000.0, signals.Window);
 
             var cpuSeverity = HighCpuSeverity(signals.HighCpuEvents, signals.Window, t);
             var collectionSeverity = CollectionErrorSeverity(signals.CollectionErrors, signals.CollectionRuns);
@@ -626,9 +635,12 @@ namespace PerformanceMonitor.Common
             lines.Add(line);
         }
 
-        /// <summary>The blocking line — the count, then the per-hour rate the band evaluated when the window
-        /// is rateable (#3539 A3, the deadlock line's rule), then the peak block duration when one is known,
-        /// e.g. "42 blocking events (1.8/hr, peak block 12.5 s)". An unrateable window prints no rate.</summary>
+        /// <summary>The blocking line — the count (of WAITS, #5644), then the per-hour rate the band evaluated when the
+        /// window is rateable (#3539 A3, the deadlock line's rule), then the peak block duration when one is known,
+        /// e.g. "42 blocking events (1.8/hr, peak block 12.5 s)". The band's tiers are measured in blocked-process
+        /// reports per hour, so when <see cref="DailyHealthSignals.BlockingReports"/> is carried the rate is that
+        /// count's and says so ("19.8 reports/hr"), instead of a wait count's rate the band never read. An unrateable
+        /// window prints no rate.</summary>
         private static void AppendBlocking(List<string> lines, in DailyHealthSignals signals, long peakBlockMs)
         {
             var count = signals.BlockingEvents;
@@ -639,9 +651,10 @@ namespace PerformanceMonitor.Common
             var line = count.ToString("N0", CultureInfo.InvariantCulture) + " " + noun;
 
             var qualifiers = new List<string>(2);
-            var rate = ServerHealthClassifier.BlockingRatePerHour(count, signals.Window);
+            var rate = ServerHealthClassifier.BlockingRatePerHour(signals.BlockingReports ?? count, signals.Window);
             if (rate.HasValue)
-                qualifiers.Add(rate.Value.ToString("0.0", CultureInfo.InvariantCulture) + "/hr");
+                qualifiers.Add(rate.Value.ToString("0.0", CultureInfo.InvariantCulture)
+                    + (signals.BlockingReports.HasValue ? " reports/hr" : "/hr"));
             if (peakBlockMs > 0)
                 qualifiers.Add("peak block " + FormatDurationMs(peakBlockMs));
             if (qualifiers.Count > 0)

@@ -243,13 +243,31 @@ JOIN sys.databases AS d
   ON d.database_id = pvss.database_id
 OUTER APPLY
 (
+    /* #5644 W5: sys.master_files holds tempdb's size at startup (32 GB against a live 44 GB in the audit), so
+       database_id 2 reads its live size from tempdb.sys.database_files instead. The two legs are exclusive
+       on database_id, and the aggregate stays scalar: exactly one row, so this cannot multiply the PVS rows. */
     SELECT
         total_db_size_kb =
-            SUM(mf.size * 8.0)
-    FROM sys.master_files AS mf
-    WHERE mf.database_id = pvss.database_id
-    AND   mf.state = 0 /*ONLINE*/
-    AND   mf.type = 0 /*ROWS*/
+            SUM(sz.size * 8.0)
+    FROM
+    (
+        SELECT
+            mf.size
+        FROM sys.master_files AS mf
+        WHERE mf.database_id = pvss.database_id
+        AND   mf.database_id <> 2
+        AND   mf.state = 0 /*ONLINE*/
+        AND   mf.type = 0 /*ROWS*/
+
+        UNION ALL
+
+        SELECT
+            tdbf.size
+        FROM tempdb.sys.database_files AS tdbf
+        WHERE pvss.database_id = 2
+        AND   tdbf.state = 0 /*ONLINE*/
+        AND   tdbf.type = 0 /*ROWS*/
+    ) AS sz
 ) AS df
 WHERE 1 = 1
 /*EXCLUSION_FILTER*/

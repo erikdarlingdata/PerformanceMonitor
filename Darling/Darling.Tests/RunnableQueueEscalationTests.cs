@@ -63,13 +63,13 @@ public sealed class RunnableQueueEscalationTests
     }
 
     [Fact]
-    public void RunnableQueueIsTheOnlyAlertThatOptedIn()
+    public void RunnableQueueIsAnOptedInAlert_AndTheOthersKeepTheOldBehaviour()
     {
-        Assert.Equal(new[] { "Client Timeouts", "Runnable Queue" }, TierEscalation.OptedInMetrics.OrderBy(m => m, StringComparer.Ordinal));
+        /* The full list is pinned in TwoTierEscalationTests (#5715 added High CPU, Deadlocks, Poison Wait and Volume Free Space). */
         Assert.True(TierEscalation.IsOptedIn(RunnableQueueEvaluator.MetricName));
 
-        /* The two-level alerts that keep the old behaviour: a worsening inside the window waits for the cooldown. */
-        foreach (var metric in new[] { "High CPU", "Poison Wait", "Deadlocks Detected", "Blocking Detected", "tempdb Space" })
+        /* The alerts that keep the old behaviour: a worsening inside the window waits for the cooldown. */
+        foreach (var metric in new[] { "Blocking Detected", "tempdb Space" })
         {
             Assert.False(TierEscalation.IsOptedIn(metric), metric);
         }
@@ -78,15 +78,19 @@ public sealed class RunnableQueueEscalationTests
     }
 
     [Fact]
-    public void TheEngineAsksTheEscalationHelperAtTheRunnableQueueFireSiteOnly()
+    public void TheEngineAsksTheEscalationHelperAtTheSixOptedInFireSitesOnly()
     {
         var engine = System.IO.File.ReadAllText(RepoFile("PerformanceMonitor.Alerting/AlertEngine.cs"));
 
-        /* Runnable Queue and Client Timeouts (#5640) are the two fire sites. */
-        Assert.Equal(2, Count(engine, "IsEscalation("));
+        /* Runnable Queue, Client Timeouts (#5640) and the four older two-tier alerts (#5715) are the six fire sites. */
+        Assert.Equal(6, Count(engine, "IsEscalation("));
         Assert.Equal(1, Count(engine, "_runnableQueueEscalation.IsEscalation("));
         Assert.Equal(1, Count(engine, "_attentionEscalation.IsEscalation("));
-        Assert.Equal(2, Count(engine, "EscalationBypassesCooldown ="));
+        Assert.Equal(1, Count(engine, "_cpuEscalation.IsEscalation("));
+        Assert.Equal(1, Count(engine, "_deadlockEscalation.IsEscalation("));
+        Assert.Equal(1, Count(engine, "_poisonWaitEscalation.IsEscalation("));
+        Assert.Equal(1, Count(engine, "_lowDiskEscalation.IsEscalation("));
+        Assert.Equal(6, Count(engine, "EscalationBypassesCooldown ="));
     }
 
     /* ---------------- the engine ---------------- */
@@ -215,6 +219,45 @@ public sealed class RunnableQueueEscalationTests
 
     /* ---------------- the shared cooldown and the repeat ceiling ---------------- */
 
+    private static AlertDelivery FailedByWebhook() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.Failed, WebhookSendError: "Teams: 429 Too Many Requests", AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    [Fact]
+    public async Task AnEscalationWhoseEveryChannelFailed_BacksOffLikeAnyFailedSend_AndADeliveredSendEndsTheStreak()
+    {
+        /* #5715 part A: the escalation skipped the cooldown stamp a failed send back-dates (#4752), so a Critical went out at
+           every evaluation while every channel was down. While the family and key have an open streak it waits for the stamp. */
+        var (h, engine) = Engine();
+
+        Assert.Equal(1, await EvaluateAsync(h, engine, T0, 9, 9, 9));
+
+        h.Deliverer.Report = _ => FailedByWebhook();
+        Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(1), 9, 9, 9, 60));      /* failure 1: retry in 1 minute */
+        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(1).AddSeconds(30), 9, 9, 9, 60));
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(1).AddSeconds(59), 9, 9, 9, 60));
+
+        Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(2), 9, 9, 9, 60));      /* failure 2: retry in 2 minutes */
+        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(3), 9, 9, 60, 60));
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(3).AddSeconds(59), 9, 60, 60, 60));
+
+        h.Deliverer.Report = null;
+        Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(4), 60, 60, 60, 60));   /* delivered: the streak ends */
+        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(4).AddSeconds(30), 60, 60, 60, 60, 60));
+
+        /* A later incident's escalation goes at once again, inside the cooldown. */
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(5), 0, 0, 0, 0, 0));
+        var later = T0.AddMinutes(4).Add(TimeSpan.FromMinutes(h.Settings.CooldownMinutes)).AddMinutes(1);
+        Assert.Equal(1, await EvaluateAsync(h, engine, later, 9, 9, 9));
+        Assert.Equal(1, await EvaluateAsync(h, engine, later.AddMinutes(1), 9, 9, 9, 60));
+        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
+    }
+
     [Fact]
     public async Task TheSharedCooldown_LetsTheFlaggedEscalationThroughInsideTheWindow_AndTheStampRestartsIt()
     {
@@ -297,9 +340,9 @@ public sealed class RunnableQueueEscalationTests
         var coordinator = new AlertToastCoordinator(TimeSpan.FromMinutes(20));
         var cooldown = TimeSpan.FromMinutes(5);
 
-        Assert.Single(coordinator.SelectToasts(new[] { Row(T0, AlertSeverityLevel.Warning, "Poison Wait") }, T0.AddSeconds(5), cooldown));
+        Assert.Single(coordinator.SelectToasts(new[] { Row(T0, AlertSeverityLevel.Warning, "Blocking Detected") }, T0.AddSeconds(5), cooldown));
         Assert.Empty(coordinator.SelectToasts(
-            new[] { Row(T0.AddMinutes(1), AlertSeverityLevel.Critical, "Poison Wait") }, T0.AddMinutes(1).AddSeconds(5), cooldown));
+            new[] { Row(T0.AddMinutes(1), AlertSeverityLevel.Critical, "Blocking Detected") }, T0.AddMinutes(1).AddSeconds(5), cooldown));
     }
 
     /* ---------------- helpers ---------------- */

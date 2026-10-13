@@ -50,12 +50,14 @@ public class AzureMasterDailySummaryScopeTests : IClassFixture<SharedDuckDbFixtu
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task SeedBprAsync(int count, string database)
+    /* #5644: the day counts WAITS; reports with the same time and wait time (and, here, no session ids) are one
+       wait, so callers seeding two databases in one day give each its own start minute. */
+    private async Task SeedBprAsync(int count, string database, int startMinute = 0)
     {
         for (var i = 0; i < count; i++)
             await ExecAsync(
                 "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name, database_name, wait_time_ms) VALUES ($1,$2,$2,$3,'TestServer',$4,1000)",
-                _nextId--, Day.AddHours(1).AddMinutes(i), ServerId, database);
+                _nextId--, Day.AddHours(1).AddMinutes(startMinute + i), ServerId, database);
     }
 
     private async Task SeedDmvAsync(int count, string database)
@@ -138,7 +140,7 @@ public class AzureMasterDailySummaryScopeTests : IClassFixture<SharedDuckDbFixtu
     public async Task SqlServerTarget_AndSiblinglessMaster_CountEverything(bool emptyList)
     {
         await SeedBprAsync(4, "GP");
-        await SeedBprAsync(3, "master");
+        await SeedBprAsync(3, "master", startMinute: 30);
         await SeedDeadlocksAsync(5, "GP");
         await SeedDeadlocksAsync(3, "master");
         AnalysisService.SeparatelyMonitoredDatabasesProvider = _ => emptyList ? Array.Empty<string>() : null;

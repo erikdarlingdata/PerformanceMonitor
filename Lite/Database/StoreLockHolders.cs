@@ -62,6 +62,9 @@ internal static class StoreLockHolders
         return id;
     }
 
+    /// <summary>The registered name of hold <paramref name="id"/>, or "unknown caller" once it is gone (#5731 hold watchdog).</summary>
+    internal static string HolderName(long id) => s_holds.TryGetValue(id, out var e) ? e.Name : "unknown caller";
+
     internal static void Unregister(long id) => s_holds.TryRemove(id, out _);
 
     /// <summary>

@@ -77,8 +77,11 @@ public sealed class ViewerFleetRollupSqlTests
            series), and the single window over the whole fleet's rows (27 s for 30 days on a 50-server store)
            stays gone. */
         Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("PARTITION BY server_id", sql, StringComparison.Ordinal);
-        Assert.Equal(1, CountOccurrences(sql, "OVER ("));
+        /* #5644 W1: the blocking-wait CTEs (BlockingWaits.WaitsCteSql) carry their own windows, partitioned by
+           server_id; the deadlock read below them is judged on its own. */
+        var deadlockRead = sql[sql.LastIndexOf("r.wait_rank = 1", StringComparison.Ordinal)..];
+        Assert.DoesNotContain("PARTITION BY server_id", deadlockRead, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(deadlockRead, "OVER ("));
         /* A pair whose counter never takes two values has only zero or NULL differences and adds nothing to the
            total, so it is dropped before the ordered pass (this read needs no "a counter in every row" half:
            it returns the total, not the number of differences). */

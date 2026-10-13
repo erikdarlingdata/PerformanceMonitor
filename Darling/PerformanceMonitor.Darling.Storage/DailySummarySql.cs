@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -38,7 +39,7 @@ public static class DailySummarySql
     /// per-stored-name aggregation this read always ran; <c>wait_per_type</c> merges its groups, so the trim runs
     /// once per group rather than once per row.
     /// </summary>
-    public const string RangeSql = """
+    private const string RangeSqlTemplate = """
         WITH wait_per_spelling AS (
             SELECT date_trunc('day', collection_time) AS d, wait_type, SUM(delta_wait_time_ms) AS ms
             FROM v_wait_stats
@@ -87,17 +88,19 @@ public static class DailySummarySql
             AND   collection_time >= $4
             GROUP BY 1
         ),
+        /*blocking-waits*/
         bpr AS (
-            SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
-            FROM v_blocked_process_reports
-            WHERE server_id = $1 AND event_time >= $2 AND event_time < $3
-            AND   collection_time >= $4
+            /* #5644: counts WAITS, not report rows (BlockingWaits.WaitsCteSql, the one definition the alert, the
+               fleet tile and the MCP counts share), bucketed on the day of the wait's longest report. */
+            SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms,
+                   SUM(wait_reports)::bigint AS reports
+            FROM bpr_waits
             GROUP BY 1
         ),
         dmv AS (
-            SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
-            FROM v_dmv_blocking_snapshots
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+            SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms,
+                   SUM(wait_reports)::bigint AS reports
+            FROM dmv_waits
             GROUP BY 1
         ),
         cpu AS (
@@ -207,7 +210,13 @@ public static class DailySummarySql
               + (CASE WHEN b.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN dm.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN cp.d IS NULL THEN 0 ELSE 1 END)
-              + (CASE WHEN m.d IS NULL THEN 0 ELSE 1 END) AS signal_sources_present
+              + (CASE WHEN m.d IS NULL THEN 0 ELSE 1 END) AS signal_sources_present,
+            /* #5644: the day's blocked-process REPORT rows (DMV snapshot rows on the fallback), from the SAME source
+               and day bucket as blocking_events, which counts WAITS. The health band's count tiers
+               (ServerHealthThresholds.BlockingWarnPerHour/CriticalPerHour) were measured in reports per server-hour,
+               so the band reads this column; every displayed count stays blocking_events. Appended LAST, after
+               signal_sources_present, so every existing ordinal read stays where it was. */
+            CASE WHEN COALESCE(b.c, 0) > 0 THEN b.reports ELSE COALESCE(dm.reports, 0) END AS blocking_reports
         FROM day_spine s
         LEFT JOIN waits w ON w.d = s.d
         LEFT JOIN queries q ON q.d = s.d
@@ -220,6 +229,24 @@ public static class DailySummarySql
         LEFT JOIN alerts al ON al.d = s.d
         ORDER BY s.d
         """;
+
+    /// <summary>
+    /// <see cref="RangeSqlTemplate"/> with the two blocking-wait chains spliced in (#5644): the day's
+    /// <c>blocking_events</c> counts blocking WAITS, as the alert value, the fleet "Blocking" tile and the MCP counts
+    /// do (<see cref="BlockingWaits.WaitsCteSql"/>), not blocked-process report rows (SQL Server writes about eleven
+    /// per one-minute wait). The blocked-process side carries <c>database_name</c> for
+    /// <see cref="DailySummaryAzureMasterScope"/>'s filter; the DMV side keeps its collected-day bucket.
+    /// </summary>
+    public static readonly string RangeSql = RangeSqlTemplate.Replace(
+        "/*blocking-waits*/",
+        BlockingWaits.WaitsCteSql(
+            BlockingWaits.SqlDialect.Postgres, "bpr_waits",
+            @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms, database_name FROM v_blocked_process_reports
+    WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4", reportCount: true) + "," + BlockingWaits.WaitsCteSql(
+            BlockingWaits.SqlDialect.Postgres, "dmv_waits",
+            @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3", reportCount: true) + ",",
+        StringComparison.Ordinal);
 
     /// <summary>
     /// The <c>queries</c> CTE exactly as it appears in <see cref="RangeSql"/> — the ONE part of the

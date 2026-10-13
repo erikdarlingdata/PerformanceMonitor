@@ -87,10 +87,19 @@ LIMIT 1";
     /// $3 the <see cref="EventWindowFloor"/> for $2 — the partition-column bound the event window cannot supply
     /// (#3895, the fleet card's <c>DarlingFleetReader.FleetBlockingSql</c> carries the same one), so the counts
     /// open the window's chunks rather than every retained one.</summary>
-    public const string ServerSummaryBlockingSql = @"
+    /// <remarks>#5644 W1: both counts are WAITS, not report rows (<see cref="BlockingWaits.WaitsCteSql"/>, the
+    /// definition the alert engine, the analysis fact and the fleet tile share), so the summary agrees with the tile.</remarks>
+    public static readonly string ServerSummaryBlockingSql = @"
+WITH " + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "xe_waits",
+        @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_blocked_process_reports
+    WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + "," + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "dmv_waits",
+        @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + @"
 SELECT
-    (SELECT COUNT(*) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3),
-    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots  WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3)";
+    (SELECT COUNT(*) FROM xe_waits),
+    (SELECT COUNT(*) FROM dmv_waits)";
 
     /// <summary>Deadlock count in the window. $1 server_id, $2 window start, $3 the
     /// <see cref="EventWindowFloor"/> for $2 (#3895).</summary>
@@ -294,6 +303,12 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
         /// from a day the purge has not reached.</summary>
         public int SignalSourcesPresent { get; init; }
 
+        /// <summary>The blocked-process report rows behind <see cref="BlockingEvents"/> (#5644), from the aggregate's
+        /// trailing <c>blocking_reports</c> column. <see cref="BlockingEvents"/> counts WAITS and is what every
+        /// payload shows; the band's count tiers were measured in reports, so the band reads this. <c>null</c> on a
+        /// hand-built row, which bands its <see cref="BlockingEvents"/>.</summary>
+        public long? BlockingReports { get; init; }
+
         public DailyHealthSignals ToSignals() => new()
         {
             /* #3541 A9: a purged or past-horizon day is a NoData day to the band, whatever the spine still
@@ -307,6 +322,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
             CollectionRuns = CollectionRuns,
             HighCpuEvents = HighCpuEvents,
             BlockingEvents = BlockingEvents,
+            BlockingReports = BlockingReports,
             /* #3539 A2: the day bands blocking through the card's BlockingSeverity, whose wait arm reads the
                longest block — so the peak travels in the signals rather than only into the reasons line. */
             PeakBlockWaitMs = MaxBlockDurationMs,
@@ -332,7 +348,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
     /// viewer's Performance Calendar. This was a hand-copied literal described as "verbatim" with nothing
     /// enforcing it, so the calendar and this MCP tool could silently answer the same day differently (#1661).
     /// </summary>
-    public const string DailySummaryRangeSql = DailySummarySql.RangeSql;
+    public static readonly string DailySummaryRangeSql = DailySummarySql.RangeSql;
 
     /// <summary>The range read's rows plus the horizon they were judged against (#3541 A9).</summary>
     /// <param name="Rows">One row per day the spine holds, oldest first, each stamped with its <see cref="DailySummaryReadRow.DataState"/>.</param>
@@ -722,5 +738,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
         CollectionRuns = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
         /* #3541 A9: the signal-presence count, after collection_runs. */
         SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
+        /* #5644: the report count the band reads, after signal_sources_present. */
+        BlockingReports = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
     };
 }
