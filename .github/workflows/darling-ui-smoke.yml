@@ -12,6 +12,8 @@ name: Darling UI smoke
 # Not a required check. A workflow that is skipped by its path filter never reports, so it cannot be one; the job
 # name is left free of the names build.yml's ruleset uses.
 on:
+  push:  # TEMPORARY (#5701): proves the run before the file reaches the default branch; removed before merge
+    branches: [fix/5701-ui-smoke]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
