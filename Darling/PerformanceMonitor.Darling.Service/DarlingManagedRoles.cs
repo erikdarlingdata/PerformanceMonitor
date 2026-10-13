@@ -1631,7 +1631,6 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLeg
 --     rebuilt on every start. NOT a versioned migration, for the section 10 reason. EXECUTE goes to the registered
 --     source logins only (section 10c); the three Darling roles hold none.
 {BuildExternalAlertSubmitFunctionSql(config)}
-REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {admin}, {viewer}, {mcp};
 
 -- 10c. External alert tables and source logins (#5654). The three tables (V180) are written only by the store owner and
 --     by the section 10b function. The blanket grants above gave admin INSERT/UPDATE/DELETE on every config table (section
@@ -1838,8 +1837,9 @@ REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignat
     /// every start. A login is touched only when the registry names it AND the role exists AND it carries
     /// <see cref="AlertSourceRoleMarker"/>. Per role: LOGIN, every widening attribute off, NOINHERIT, every
     /// membership revoked (GRANTED BY the recorded grantor, CASCADE: section 11's rule), then CONNECT on the current
-    /// database, USAGE on the config schema and EXECUTE on the submit function, nothing else (a table or sequence privilege
-    /// found on the login in the config or collect schema is revoked first).
+    /// database, USAGE on the config schema and EXECUTE on the submit function, nothing else (the function is also revoked from admin, viewer and mcp, and a table or sequence privilege
+    /// found on the login in the config or collect schema is revoked first). Kept out of the statements the batch
+    /// replays for a role (a test replays every GRANT and REVOKE that names viewer on a store that has no such function).
     /// </summary>
     internal static string BuildExternalAlertSourceRolesSql(string config) => $@"
 DO $do$
@@ -1847,6 +1847,8 @@ DECLARE
    source_login record;
    membership record;
 BEGIN
+   REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {DarlingManagedPostgres.AdminRoleName}, {DarlingManagedPostgres.ViewerRoleName}, {DarlingManagedPostgres.McpRoleName};
+
    FOR source_login IN
       SELECT s.role_name, r.oid AS role_oid, (shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}') AS marked
       FROM {config}.external_alert_source AS s
