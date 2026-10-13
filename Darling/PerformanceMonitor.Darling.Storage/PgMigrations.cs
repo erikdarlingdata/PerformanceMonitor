@@ -8194,6 +8194,8 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
                 "connection; find it with: SELECT a.pid, a.state, a.query_start, a.query FROM pg_locks l " +
                 "JOIN pg_stat_activity a USING (pid) WHERE l.locktype = 'advisory';",
                 totalWaited, attempts, storeVersion, StorageVersion.SchemaVersion);
+            /* #5773: this path skips MigrateLockedAsync, so it makes the newer-store check itself. */
+            WarnIfStoreNewerThanBuild(logger, storeVersion, Scripts[^1].Version);
             return false;
         }
 
@@ -8259,6 +8261,42 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         return Convert.ToInt32(await read.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// #5773: the README section the newer-store warning sends the operator to. It lists, rung by rung, what a
+    /// build older than that rung reads differently.
+    /// </summary>
+    internal const string RollbackReadmeSection = "\"Rolling back to an older build\" in Darling/README.md";
+
+    /// <summary>
+    /// #5773: logs ONE warning when the store's stamped version is above the highest rung this build knows, and
+    /// returns whether it did. A newer build migrated this store and this one was started against it, which is the
+    /// documented rollback (upgrade-darling.ps1 restores the install files, not the store). Rungs are additive, so
+    /// this build keeps starting; refusing would break that rollback. But an older build can read some newer data
+    /// differently, and without this line nothing tells the operator. The README section lists each case.
+    /// The seam the startup check goes through: <see cref="MigrateAsync(NpgsqlConnection, ILogger, CancellationToken)"/>
+    /// passes the version it read and <c>Scripts[^1].Version</c>, and tests plant any pair without a store.
+    /// </summary>
+    internal static bool WarnIfStoreNewerThanBuild(ILogger? logger, int storeVersion, int buildVersion)
+    {
+        if (storeVersion <= buildVersion)
+        {
+            return false;
+        }
+
+        var unknownRungs = storeVersion == buildVersion + 1
+            ? "V" + storeVersion.ToString(System.Globalization.CultureInfo.InvariantCulture) + " is"
+            : "V" + (buildVersion + 1).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + "-V" + storeVersion.ToString(System.Globalization.CultureInfo.InvariantCulture) + " are";
+
+        logger?.LogWarning(
+            "The store is at V{StoreVersion}; this build knows up to V{BuildVersion}, so {UnknownRungs} unknown to it. " +
+            "A newer build migrated this store. This build keeps running against it, because migrations only add, " +
+            "but it can read some of the data those rungs added differently. See {ReadmeSection} for what each rung " +
+            "changes for an older build, and what to do before rolling back.",
+            storeVersion, buildVersion, unknownRungs, RollbackReadmeSection);
+        return true;
+    }
+
     private static async Task<int> MigrateLockedAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
     {
         /* Resolve bare names through collect/config for this migrate session. Load-bearing from V8
@@ -8283,6 +8321,10 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         {
             currentVersion = Convert.ToInt32(await readVersion.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
         }
+
+        /* #5773: a store above this build's top rung was migrated by a newer build. Warn and carry on: the loop below
+           applies nothing, since every rung this build has is at or below the stamp. */
+        WarnIfStoreNewerThanBuild(logger, currentVersion, Scripts[^1].Version);
 
         var applied = 0;
         foreach (var migration in Scripts)
