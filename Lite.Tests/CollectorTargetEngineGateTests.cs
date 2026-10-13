@@ -22,6 +22,7 @@ namespace Lite.Tests;
 /// must never be dispatched at the other engine, and adding that dimension must not have moved a
 /// single existing dispatch decision.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class CollectorTargetEngineGateTests
 {
     /// <summary>

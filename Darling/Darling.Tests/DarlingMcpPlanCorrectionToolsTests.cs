@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// recommendation fields are NULL), and the tuning-state read must take exactly the NEWEST capture and
 /// DISTINCT it back to one row per database (the enablement columns repeat on every recommendation row).
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpPlanCorrectionToolsTests
 {
     private static MethodInfo[] ToolMethods() => typeof(DarlingMcpPlanCorrectionTools)

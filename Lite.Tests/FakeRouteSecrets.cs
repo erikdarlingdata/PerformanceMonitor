@@ -53,7 +53,9 @@ internal sealed class FakeRouteSecrets
         }
     }
 
-    public bool Write(string key, string value)
+    /// <summary>Null when stored; otherwise the reason, worded like <see cref="PerformanceMonitor.Common.CredentialStore"/>'s for
+    /// a value over its limit, and never containing the value.</summary>
+    public string? Write(string key, string value)
     {
         lock (_lock)
         {
@@ -61,11 +63,13 @@ internal sealed class FakeRouteSecrets
             WriteCalls++;
             if (!WriteGate(key, value))
             {
-                return false;
+                return value.Length > PerformanceMonitor.Common.CredentialStore.MaxSecretLength
+                    ? $"it is {value.Length:N0} characters long, and Windows Credential Manager stores at most {PerformanceMonitor.Common.CredentialStore.MaxSecretLength:N0}"
+                    : "the fake refused it";
             }
 
             _values[key] = Keeps(value);
-            return true;
+            return null;
         }
     }
 

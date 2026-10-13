@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// create_custom_view / update_custom_view run the SAME DarlingWebEndpoints.ValidateDefinition authority BEFORE
 /// any persistence — an invalid definition never reaches the store. The live CRUD + run round-trip is gated below.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpCustomViewToolsSurfaceTests
 {
     /// <summary>A dead data source (unroutable port) — proves the validate-before-persist tools bail on a bad

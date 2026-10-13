@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// <c>pg_wait_sampling</c>. That map goes stale only when PostgreSQL's extensions change, not when this
 /// repo adds a collector, which is the drift that actually happened.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgExtensionDependencyContractTests
 {
     /// <summary>

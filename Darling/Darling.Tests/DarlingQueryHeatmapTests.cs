@@ -37,6 +37,7 @@ namespace Darling.Tests;
 /// hardcodes, and the seven log-magnitude bands. Both are pinned, on both SKUs, along with the epoch ORIGIN —
 /// which is invisible at the default and load-bearing the moment the bin width became a parameter.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingQueryHeatmapSurfaceAndSqlTests
 {
     private static readonly string[] ToolSurface =

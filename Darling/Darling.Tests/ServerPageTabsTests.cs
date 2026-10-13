@@ -45,6 +45,7 @@ namespace Darling.Tests;
 /// actually issued was recorded, and all eight <c>get_pg_*</c> reads were asserted to have been genuinely
 /// FETCHED from the PostgreSQL registry and from neither tab of the SQL Server one. See the PR.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ServerPageTabsTests
 {
     private static string ServerTabsJs => ReadRepoFileLf(Path.Combine(

@@ -26,6 +26,7 @@ namespace Lite.Tests;
 /// <c>WithGeminiCompatibleTools</c> path the host registers every tool with — no running server
 /// required. Darling twin: <see cref="Darling.Tests.McpAlwaysLoadedToolsTests"/>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class McpAlwaysLoadedToolsTests
 {
     private static readonly string[] ExpectedAlwaysLoaded =

@@ -58,6 +58,7 @@ namespace Lite.Tests;
 /// at most 1,000 characters (the target is 600), every parameter description at most 200, and every tail and
 /// topic small enough to be served whole by one <c>get_tool_guide</c> answer.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class McpToolsListBudgetTests
 {
     private readonly ITestOutputHelper _output;

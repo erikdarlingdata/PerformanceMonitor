@@ -916,6 +916,7 @@ public sealed class CollectorRuntimePreconditionTests
 /// Nothing in the type system enforces that, and a <c>??</c> chain is trivially reorderable.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
+[Trait("Stage", "Guard")]
 public sealed class RuntimePreconditionReadWiringTests
 {
     private const string DarlingMcp = "Darling/PerformanceMonitor.Darling.Service/Mcp";

@@ -47,6 +47,7 @@ namespace PerformanceMonitorLite.Tests;
 /* The behaviour check installs ServerTimeHelper.ActiveServerClock and CurrentDisplayMode, process-wide mutable statics;
    the class joins the collection every other class that writes them uses. */
 [Collection("server-time-helper")]
+[Trait("Stage", "Guard")]
 public sealed class GridTimeColumnSortMemberTests : IDisposable
 {
     private readonly ServerClock _savedClock = ServerTimeHelper.ActiveServerClock;

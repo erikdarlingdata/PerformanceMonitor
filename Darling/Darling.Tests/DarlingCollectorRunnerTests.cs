@@ -906,6 +906,7 @@ public class ServerWatermarkReadFloorTests
 /// than equalities so the sets can grow on their own but cannot quietly shrink to nothing and pass
 /// vacuously — the failure mode a derived pin has instead of a stale one.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public class ServerWatermarkDispatchGateTests
 {
     /* The both-watermark-columns family, and the two dispatch shapes inside it, derived by invoking the

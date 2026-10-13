@@ -45,6 +45,7 @@ namespace Darling.Tests;
 /// SET-EQUALITY — a registration naming a class that declares no tools registers NOTHING silently, a stale
 /// line that reads as coverage while delivering none, so it reds too.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class McpToolTypeRegistrationTests
 {
     [Fact]

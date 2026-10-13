@@ -395,7 +395,7 @@ public partial class App : Application
     {
         try
         {
-            var credService = new Services.CredentialService();
+            var credService = NewCredentialService();
             var cred = credService.GetCredential(credentialKey);
             return cred?.Password ?? "";
         }
@@ -407,25 +407,66 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Saves a webhook URL to Windows Credential Manager.
+    /// A credential service wired to the app log, so a refused or failed Credential Manager write leaves a
+    /// log line (#5772). It used to be created bare, which made every failure invisible.
     /// </summary>
-    public static void SaveWebhookUrl(string credentialKey, string url)
+    private static Services.CredentialService NewCredentialService() =>
+        new(new AppLoggerAdapter<Services.CredentialService>());
+
+    /// <summary>
+    /// The name the Settings window shows for a webhook credential key, used in the "was not saved" message.
+    /// </summary>
+    public static string WebhookDisplayName(string credentialKey) => credentialKey switch
     {
+        TeamsWebhookCredentialKey => "Teams webhook URL",
+        SlackWebhookCredentialKey => "Slack webhook URL",
+        GenericWebhookCredentialKey => "generic webhook URL",
+        GenericWebhookHeadersCredentialKey => "generic webhook headers",
+        PagerDutyWebhookCredentialKey => "PagerDuty routing key",
+        _ => "webhook setting"
+    };
+
+    /// <summary>
+    /// Saves a webhook URL (or header JSON, or routing key) to Windows Credential Manager, up to the
+    /// <see cref="CredentialStore.MaxSecretLength"/> characters Windows allows. A blank value deletes the
+    /// entry; an entry that is already gone counts as deleted. Returns null when the value was saved or
+    /// deleted, otherwise a sentence saying which webhook was not saved or not removed and why, fit to show
+    /// the user (#5772). The log line and the sentence carry the key name and the length, never the value.
+    /// </summary>
+    public static string? SaveWebhookUrl(string credentialKey, string url)
+    {
+        var name = WebhookDisplayName(credentialKey);
         try
         {
-            var credService = new Services.CredentialService();
+            var credService = NewCredentialService();
             if (string.IsNullOrWhiteSpace(url))
             {
-                credService.DeleteCredential(credentialKey);
+                /* The blank box is the one way to stop a channel for good: the store is read first at every
+                   start, so an entry that could not be removed would come back. Say so instead of
+                   reporting a save. */
+                var removed = credService.TryDeleteCredential(credentialKey);
+                if (removed.Succeeded)
+                {
+                    return null;
+                }
+
+                AppLogger.Error("App", $"Failed to remove {credentialKey}: {removed.Failure}");
+                return $"The {name} was not removed because {removed.Failure}.";
             }
-            else
+
+            var result = credService.TrySaveCredential(credentialKey, "webhook", url);
+            if (result.Succeeded)
             {
-                credService.SaveCredential(credentialKey, "webhook", url);
+                return null;
             }
+
+            AppLogger.Error("App", $"Failed to save {credentialKey} ({url.Length} characters): {result.Failure}");
+            return $"The {name} was not saved because {result.Failure}.";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("App", $"Failed to save webhook URL for {credentialKey}: {ex.Message}");
+            AppLogger.Error("App", $"Failed to save webhook URL for {credentialKey} ({url?.Length ?? 0} characters): {ex.Message}");
+            return $"The {name} was not saved because {ex.Message.TrimEnd('.', ' ')}.";
         }
     }
 
@@ -447,7 +488,7 @@ public partial class App : Application
     {
         try
         {
-            var credService = new Services.CredentialService();
+            var credService = NewCredentialService();
             var cred = credService.GetCredential(SmtpCredentialKey);
             return cred?.Password;
         }
@@ -459,18 +500,42 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Saves the SMTP password to Windows Credential Manager.
+    /// Saves the SMTP password to Windows Credential Manager; a blank password removes the entry. Returns
+    /// null when it was saved or removed, otherwise a sentence saying why it was not, fit to show the user
+    /// (#5772). The log line and the sentence never carry the password.
     /// </summary>
-    public static void SaveSmtpPassword(string password)
+    public static string? SaveSmtpPassword(string password)
     {
+        const string name = "SMTP password";
         try
         {
-            var credService = new Services.CredentialService();
-            credService.SaveCredential(SmtpCredentialKey, string.IsNullOrEmpty(SmtpUsername) ? "smtp" : SmtpUsername, password);
+            var credService = NewCredentialService();
+            if (string.IsNullOrEmpty(password))
+            {
+                var removed = credService.TryDeleteCredential(SmtpCredentialKey);
+                if (removed.Succeeded)
+                {
+                    return null;
+                }
+
+                AppLogger.Error("App", $"Failed to remove the SMTP password: {removed.Failure}");
+                return $"The {name} was not removed because {removed.Failure}.";
+            }
+
+            var result = credService.TrySaveCredential(
+                SmtpCredentialKey, string.IsNullOrEmpty(SmtpUsername) ? "smtp" : SmtpUsername, password);
+            if (result.Succeeded)
+            {
+                return null;
+            }
+
+            AppLogger.Error("App", $"Failed to save the SMTP password ({password.Length} characters): {result.Failure}");
+            return $"The {name} was not saved because {result.Failure}.";
         }
         catch (Exception ex)
         {
             AppLogger.Error("App", $"Failed to save SMTP password: {ex.Message}");
+            return $"The {name} was not saved because {ex.Message.TrimEnd('.', ' ')}.";
         }
     }
 
@@ -1196,7 +1261,7 @@ public partial class App : Application
             settings.State == SettingsFileState.Unreadable ? null : settings.Text);
     }
 
-    public static void LoadAlertSettings() => LoadAlertSettings(ConfigDirectory, GetWebhookUrl, SaveWebhookUrl);
+    public static void LoadAlertSettings() => LoadAlertSettings(ConfigDirectory, GetWebhookUrl, (key, url) => SaveWebhookUrl(key, url));
 
     /// <summary>
     /// The settings window's SMTP warning, for the settings just loaded: non-null when SMTP is on, SSL is off and a

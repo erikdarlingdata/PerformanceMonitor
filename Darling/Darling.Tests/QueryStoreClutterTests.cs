@@ -36,6 +36,7 @@ namespace Darling.Tests;
 /// here by one constant rather than by a dozen literals. Each boundary is exercised on both sides.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
+[Trait("Stage", "Guard")]
 public sealed class QueryStoreClutterTests
 {
     private const string ToolName = "get_query_store_clutter";

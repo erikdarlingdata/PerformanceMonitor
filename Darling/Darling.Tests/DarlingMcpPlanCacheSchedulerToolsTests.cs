@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// (v_plan_cache_stats / v_cpu_scheduler_stats), the reproduced #1410 classifications (plan-cache bloat_level,
 /// cpu-scheduler pressure_level / recommendation), and the Gemini-clean advertised schema.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpPlanCacheSchedulerToolsSurfaceAndSqlTests
 {
     private static readonly string[] PlanCacheSchedulerToolSurface =

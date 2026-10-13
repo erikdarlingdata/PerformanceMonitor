@@ -20,6 +20,7 @@ namespace Lite.Tests;
 /// Pins the xmin-horizon collector, whose entire value is attribution: all four causes look identical
 /// from the symptom side, so the collector must name which one is holding the horizon.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class PgXminHorizonCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

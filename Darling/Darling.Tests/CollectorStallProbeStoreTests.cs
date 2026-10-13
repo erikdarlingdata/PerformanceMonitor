@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// <para>The probe's firing condition and its bounds are pinned separately in
 /// <c>Lite.Tests/StallWaitProbePolicyTests</c>, where they need no store, no target and no host.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public class CollectorStallProbeStoreTests
 {
     internal const int RungVersion = 112;

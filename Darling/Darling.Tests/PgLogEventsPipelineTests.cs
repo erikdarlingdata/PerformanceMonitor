@@ -39,6 +39,7 @@ namespace Darling.Tests;
 /// prefix). Identifiers are synthesised; shapes are verbatim.</para>
 /// </summary>
 [Collection("timing")]
+[Trait("Stage", "Guard")]
 public sealed class PgLogEventsPipelineTests
 {
     /* ---- fixtures ------------------------------------------------------------------------------------ */
@@ -2509,6 +2510,7 @@ public sealed class PgLogEventsPipelineTests
 /// the upgrade banner correct in both directions — and the V101 pairing: V129's CREATE now carries V130's
 /// columns for the fresh population, because the generator does.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgLogEventsRungTests
 {
     private const int RungVersion = 129;

@@ -21,6 +21,7 @@ namespace Lite.Tests;
 /// Pins the first PostgreSQL collector: the Aurora-only gate, the verified function signatures in its
 /// query, the wait-type noise filter, and delta keying on the numeric event id rather than the name.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class PgWaitStatsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

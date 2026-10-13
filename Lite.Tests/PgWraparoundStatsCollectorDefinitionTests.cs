@@ -20,6 +20,7 @@ namespace Lite.Tests;
 /// Pins the freeze-headroom collector: it runs on any PostgreSQL target (not just Aurora), it collects
 /// MultiXact age as a first-class second counter, and its percentages use the right denominators.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class PgWraparoundStatsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

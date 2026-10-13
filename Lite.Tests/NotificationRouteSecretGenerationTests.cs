@@ -11,6 +11,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -33,7 +34,7 @@ public sealed class NotificationRouteSecretGenerationTests : IDisposable
     private const string NewTeams = "https://teams.new-secret.test/hook/bbb222";
     private const string OldSlack = "https://hooks.slack.old-secret.test/T0/B0/xyz";
     private const string NewSlack = "https://hooks.slack.new-secret.test/T1/B1/uvw";
-    private const int StorableLength = 512;
+    private const int StorableLength = CredentialStore.MaxSecretLength;
 
     private readonly string _tempDir;
     private readonly string _dbPath;
@@ -345,7 +346,7 @@ public sealed class NotificationRouteSecretGenerationTests : IDisposable
         var ex = await Assert.ThrowsAsync<RouteSecretException>(async () =>
             await _store.UpdateAsync((await _store.GetAsync(id))! with { ScopeServerId = 7102, TeamsUrl = longUrl }));
 
-        Assert.Contains("512 characters", ex.Message);
+        Assert.Contains("at most 1,280", ex.Message);
         Assert.DoesNotContain("long-secret", ex.Message, StringComparison.Ordinal);
         Assert.Equal(gen, await GenAsync(id, "teams_secret_gen"));
         Assert.Equal(new[] { DuckDbNotificationRouteStore.SecretKey(id, "Teams", gen!) }, _secrets.Keys.ToArray());

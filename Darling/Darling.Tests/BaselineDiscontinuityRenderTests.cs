@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// Storage reader is the one door both the service and the viewer read through; and the viewer's reason word
 /// and accent are the shared ones. The store-side execution is the live class below.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class BaselineDiscontinuityRenderTests
 {
     private static readonly string[] Roster =

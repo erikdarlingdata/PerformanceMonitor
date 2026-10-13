@@ -40,6 +40,7 @@ namespace Darling.Tests;
 /// identity, not the edition. A pair of differently-constructed fakes would leave "it keyed off something
 /// about the instance" open; this does not.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectorEngineCapabilityMovingGateTests
 {
     private const int Enterprise = 3;
@@ -647,6 +648,7 @@ public sealed class CollectorEngineCapabilityMovingGateTests
 /// connector, read by no definition at all, and harmless. The guard fires at the moment the harm becomes
 /// possible, which is the moment a gate reads the fact.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectorEngineCapabilitySweepDimensionTests
 {
     /// <summary>The same contiguous edition domain the moving-gate tests use.</summary>

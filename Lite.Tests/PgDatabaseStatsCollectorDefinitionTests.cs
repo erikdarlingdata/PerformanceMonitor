@@ -22,6 +22,7 @@ namespace Lite.Tests;
 /// produces — the shared-relations row with no database name, and a <c>stats_reset</c> that is NULL until
 /// the first reset ever.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class PgDatabaseStatsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

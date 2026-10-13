@@ -40,6 +40,7 @@ namespace Darling.Tests;
 /// store, real rows, the tool called against a real TimescaleDB) runs in the out-of-band harness the
 /// lane's verification uses, since this project cannot execute on the store's platform matrix.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpFleetSweepToolsTests
 {
     /// <summary>A dead data source (unroutable port) — proves every refusal path bails WITHOUT opening a

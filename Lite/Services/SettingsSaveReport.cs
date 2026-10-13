@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System.Collections.Generic;
+
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>
@@ -52,24 +54,62 @@ public static class SettingsSaveReport
     /// <param name="mcpValid">Whether the MCP port validated and could be bound.</param>
     /// <param name="webhooksValid">Whether the generic webhook configuration validated.</param>
     /// <param name="memoryLimitValid">Whether the DuckDB memory limit box was inside its range (#5457).</param>
+    /// <param name="credentialsSaved">Whether every password, webhook URL and routing key reached Windows
+    /// Credential Manager (#5772). Those writes do not go through settings.json, so a failure there is a
+    /// separate fact from <paramref name="documentWritten"/>; it is reported by
+    /// <see cref="CredentialFailureText"/> once the write above is known.</param>
     public static SettingsSaveOutcome Classify(
         bool documentWritten,
         bool mcpChanged,
         bool alertsValid,
         bool mcpValid,
         bool webhooksValid,
-        bool memoryLimitValid = true)
+        bool memoryLimitValid = true,
+        bool credentialsSaved = true)
     {
         if (!documentWritten)
         {
             return SettingsSaveOutcome.NothingWritten;
         }
 
-        if (!alertsValid || !mcpValid || !webhooksValid || !memoryLimitValid)
+        if (!alertsValid || !mcpValid || !webhooksValid || !memoryLimitValid || !credentialsSaved)
         {
             return SettingsSaveOutcome.WrittenWithObjections;
         }
 
         return mcpChanged ? SettingsSaveOutcome.SavedAndMcpNeedsRestart : SettingsSaveOutcome.Saved;
+    }
+
+    /// <summary>What the dialog says when settings.json could not be written and nothing else needs saying.</summary>
+    public const string NothingWrittenText =
+        "Your settings could not be written to settings.json, so nothing was saved and the "
+        + "changes on this page will be gone when the window closes. The application log says why.";
+
+    /// <summary>
+    /// The one dialog text for a click of Save where a password, webhook URL or routing key could not be
+    /// stored in Windows Credential Manager (#5772), or null when none failed. It is built after the write of
+    /// settings.json is known, so it never claims anything about the rest of the page before that is true:
+    /// when the document was written it says the rest of the page was saved, and when it was not it says
+    /// nothing was saved, in the one dialog.
+    /// </summary>
+    /// <param name="documentWritten">Whether the one write of settings.json succeeded.</param>
+    /// <param name="failures">One sentence per value that was not stored, each naming the value and the reason.</param>
+    /// <param name="webhookValueHeld">Whether a failed value is one Lite holds in memory for this run, so the
+    /// note about what Lite uses until it restarts applies.</param>
+    public static string? CredentialFailureText(bool documentWritten, IReadOnlyList<string> failures, bool webhookValueHeld)
+    {
+        if (failures == null || failures.Count == 0)
+        {
+            return null;
+        }
+
+        var list = string.Join("\n\n", failures);
+        var note = webhookValueHeld
+            ? " Lite keeps using the value you typed until it restarts, then goes back to the value saved before, if there was one."
+            : "";
+
+        return documentWritten
+            ? list + "\n\nThe rest of this page was saved." + note
+            : list + "\n\n" + NothingWrittenText + note;
     }
 }

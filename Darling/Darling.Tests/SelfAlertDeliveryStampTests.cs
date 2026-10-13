@@ -45,6 +45,7 @@ namespace Darling.Tests;
 /// The two are asserted in the same file so neither can be "fixed" at the other's expense: a gate that
 /// never re-delivers passes the first and fails the second; a gate that always re-delivers, the reverse.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public class SelfAlertDeliveryStampTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;

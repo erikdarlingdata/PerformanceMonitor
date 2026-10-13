@@ -57,6 +57,7 @@ namespace Darling.Tests;
 /// that the key discriminates collectors, that the builder is not dead code the pin drives alone, and that
 /// the discrimination survives a rebuild.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public class PlanFetchCarryoverKeyTests
 {
     private const string PlanDebtField = "_planFetchCarryover";

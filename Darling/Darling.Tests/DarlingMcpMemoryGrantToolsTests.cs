@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// Gemini-clean advertised schema.
 /// </summary>
 [Trait("Reads", "Lite")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpMemoryGrantToolsSurfaceAndSqlTests
 {
     private static readonly string[] MemoryGrantToolSurface =

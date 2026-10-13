@@ -37,6 +37,7 @@ namespace Lite.Tests;
 /// Text-scans the reader source (no DuckDB / WPF needed) and locates Lite via
 /// <see cref="CallerFilePathAttribute"/>, exactly like <c>ThemeCompletenessTests</c>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectorViewerCoverageTests
 {
     /// <summary>
