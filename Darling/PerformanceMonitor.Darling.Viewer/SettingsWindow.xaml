@@ -981,13 +981,13 @@
                 <TextBlock Text="Alert Severity Colors" FontWeight="SemiBold" FontSize="12"
                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,16,0,4"/>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                    <Run Foreground="#DC2626" FontWeight="Bold" Text="&#x25A0; Red" /> — Critical (Deadlocks, Poison Waits, Server Unreachable)
+                    <Run Foreground="#DC2626" FontWeight="Bold" Text="&#x25A0; Red" /> — Critical (Deadlocks, Poison Waits, Runnable Queue at the Critical bar, Server Unreachable)
                 </TextBlock>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                    <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" /> — Alert / Warning (Blocking, Long-Running Queries, tempdb, Jobs)
+                    <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" /> — Alert / Warning (Blocking, Long-Running Queries, Runnable Queue, tempdb, Jobs)
                 </TextBlock>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                    <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" /> — Warning (High CPU, Runnable Queue)
+                    <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" /> — Warning (High CPU)
                 </TextBlock>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
                     <Run Foreground="#16A34A" FontWeight="Bold" Text="&#x25A0; Green" /> — Resolved (Server Restored)

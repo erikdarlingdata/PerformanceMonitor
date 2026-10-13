@@ -169,7 +169,11 @@ public sealed class IncidentCooldown
             if (dedupKey is not null)
             {
                 fingerprinted = true;
-                if (fresh)
+                /* #5641: a bypassed send delivers the whole alert, so every fingerprint it carries is
+                   deliverable, not just the ones whose window has elapsed. Left on the freshness list, an
+                   escalation inside the window would go out with no dedup keys and the delivery filter would
+                   cut every incident from the card. */
+                if (fresh || bypassCooldown)
                     deliverable.Add(dedupKey);
             }
         }
