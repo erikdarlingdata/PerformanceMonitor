@@ -107,8 +107,9 @@ public sealed class SerialLoopStoreSizeSourceTests
             + "one-shot, under ServiceCommandDeadlines.CliStoreReadSeconds (10s) rather than the serial "
             + "loop's 5s bound, and never called from the collection loop or at service startup: ruling 9 "
             + "keeps every store fact that scales with the store out of the startup profile log, so "
-            + "GatherStoreFactsAsync's only TWO callers are --check-settings and the get_store_host MCP "
-            + "read below, neither of them the collection loop"),
+            + "GatherStoreFactsAsync's live size read is paid only by --check-settings (the polled "
+            + "get_store_host MCP and web read takes the hourly sweep's stored figure instead, #5718: "
+            + "TheMcpStoreHostRead_IsNotAPgDatabaseSizePayer pins it), and neither is the collection loop"),
     };
 
     /// <summary>
@@ -352,6 +353,23 @@ public sealed class SerialLoopStoreSizeSourceTests
                 $"{relative} was expected to run pg_database_size {occurrences}x ({why}) but runs it "
                 + $"{(byFile.TryGetValue(relative, out var got) ? got : 0)}x");
         }
+    }
+
+    /// <summary>
+    /// #5718: the polled <c>get_store_host</c> read (MCP, and the web card through the same method) is NOT a
+    /// <c>pg_database_size</c> payer: it takes the stored sweep figure, so the tool file carries neither the
+    /// literal nor the live <c>StoreSizeSql</c> constant, and asks for the stored size. The one live payer on
+    /// this surface is <c>--check-settings</c>, which is why it stays in <c>s_pgDatabaseSizeOwners</c>.
+    /// </summary>
+    [Fact]
+    public void TheMcpStoreHostRead_IsNotAPgDatabaseSizePayer()
+    {
+        var tool = File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpStoreHostTools.cs"));
+
+        Assert.DoesNotContain("pg_database_size", tool, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("StoreSizeSql", tool, StringComparison.Ordinal);
+        Assert.Contains("useStoredStoreSize: true", tool, StringComparison.Ordinal);
     }
 
     /// <summary>
