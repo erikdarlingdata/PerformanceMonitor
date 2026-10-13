@@ -468,7 +468,9 @@ public class DarlingHardenFilesJunctionTests
 
             var refusal = DarlingFileSecurity.HardenWithoutFollowingLinks(backup, isDirectory: false, allowInteractive: false, install);
 
-            Assert.Equal($"{backup} is a hard link: the file has 2 names, and its ACL is the same under every one of them", refusal);
+            Assert.StartsWith($"{backup} is a hard link: the file has 2 names, and its ACL is the same under every one of them. Its other name(s): ", refusal, StringComparison.Ordinal);
+            Assert.Contains(@"\victim\someones.txt", refusal, StringComparison.OrdinalIgnoreCase);
+            Assert.EndsWith($". To list every name, run: fsutil hardlink list \"{backup}\"", refusal, StringComparison.Ordinal);
             Assert.Equal(victimFileAcl, Sddl(victimFile));
 
             /* The verb finds it as a config backup beside darling.json. The store directory is a scratch path that does
@@ -483,6 +485,8 @@ public class DarlingHardenFilesJunctionTests
 
             Assert.Equal(1, exit);
             Assert.Contains($"REFUSED  {backup} (a config backup): {backup} is a hard link", error.ToString(), StringComparison.Ordinal);
+            Assert.Contains(@"\victim\someones.txt", error.ToString(), StringComparison.OrdinalIgnoreCase);
+            Assert.Contains($"fsutil hardlink list \"{backup}\"", error.ToString(), StringComparison.Ordinal);
             Assert.Contains($"SECURED  {config} (the live config)", output.ToString(), StringComparison.Ordinal);
             Assert.Equal(victimFileAcl, Sddl(victimFile));
         }

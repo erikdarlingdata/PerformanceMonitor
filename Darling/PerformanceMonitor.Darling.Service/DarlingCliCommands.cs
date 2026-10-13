@@ -4215,8 +4215,26 @@ public static class DarlingCliCommands
     }
 
     /// <summary>The tally <see cref="HardenTlsKeyFiles"/> hands <see cref="HardenFiles"/>: files that exist and were
-    /// examined, files still readable by ordinary users or not changed, files refused, and files named but not found.</summary>
-    internal readonly record struct TlsKeyFileResult(int Examined, int Exposed, int Refused, int Missing);
+    /// examined; files readable by ordinary users, or whose ACL could not be applied or leaves the service locked out
+    /// (<c>Exposed</c>); files that accounts other than SYSTEM, Administrators and the service account are allowed to
+    /// (<c>OtherAccess</c>); files whose owner is not one of the three (<c>UntrustedOwner</c>); files refused; and files
+    /// named but not found. A file that ordinary users can read is counted only as readable, not also as open to other accounts; it can still be in the owner count. Each needs an administrator's action.</summary>
+    internal readonly record struct TlsKeyFileResult(int Examined, int Exposed, int Refused, int Missing, int OtherAccess = 0, int UntrustedOwner = 0);
+
+    /// <summary>The closing lines for the other-access and untrusted-owner counts of <paramref name="tls"/>, each in its
+    /// own words, shared by <see cref="HardenFiles"/> and <see cref="HardenTlsKeyFilesOnly(string?, TextWriter, TextWriter)"/>.</summary>
+    internal static IEnumerable<string> TlsKeyFileAccessCountLines(TlsKeyFileResult tls)
+    {
+        if (tls.OtherAccess > 0)
+        {
+            yield return $"{tls.OtherAccess} of {tls.Examined} TLS key file(s) are open to accounts other than SYSTEM, Administrators and the service account (see the lines above for who).";
+        }
+
+        if (tls.UntrustedOwner > 0)
+        {
+            yield return $"{tls.UntrustedOwner} of {tls.Examined} TLS key file(s) have an owner who is not SYSTEM, Administrators or the service account, so the owner can change who may read them.";
+        }
+    }
 
     /// <summary>
     /// The TLS key-file step of <see cref="HardenFiles"/> (#5700): each private-key file darling.json names, one
@@ -4234,6 +4252,8 @@ public static class DarlingCliCommands
     {
         var examined = 0;
         var exposed = 0;
+        var otherAccess = 0;
+        var untrustedOwner = 0;
         var refused = 0;
         var missing = 0;
         var notKeyFiles = configFile is null ? new List<NotKeyTarget>() : NotKeyTargets(config, configFile);
@@ -4304,9 +4324,19 @@ public static class DarlingCliCommands
                     $"  NOT CHANGED (outside the install folder)  {full} ({what}): {note}" +
                     $". To restrict it to SYSTEM, Administrators and the service account, run from an elevated prompt: {TlsKeyFileIcaclsLine(full)}" +
                     (ownerTrusted ? string.Empty : $" and then make Administrators the owner: takeown /a /f \"{full}\""));
-                if (readable || others is not null || !ownerTrusted)
+                if (readable)
                 {
                     exposed++;
+                }
+
+                if (others is not null && !readable)
+                {
+                    otherAccess++;
+                }
+
+                if (!ownerTrusted)
+                {
+                    untrustedOwner++;
                 }
 
                 continue;
@@ -4344,7 +4374,18 @@ public static class DarlingCliCommands
             if (TlsKeyFileUnsecured(full, what) is { } unsecured)
             {
                 problems.WriteLine(unsecured);
-                exposed++;
+                if (unsecured.StartsWith("  OTHER ACCESS", StringComparison.Ordinal))
+                {
+                    otherAccess++;
+                }
+                else if (unsecured.StartsWith("  UNTRUSTED OWNER", StringComparison.Ordinal))
+                {
+                    untrustedOwner++;
+                }
+                else
+                {
+                    exposed++;
+                }
             }
             else
             {
@@ -4352,7 +4393,7 @@ public static class DarlingCliCommands
             }
         }
 
-        return new TlsKeyFileResult(examined, exposed, refused, missing);
+        return new TlsKeyFileResult(examined, exposed, refused, missing, otherAccess, untrustedOwner);
     }
 
     /// <summary>A file or folder <see cref="HardenFiles"/> hardens under a rule of its own, which a TLS key setting must not
@@ -4365,9 +4406,10 @@ public static class DarlingCliCommands
     }
 
     /// <summary>
-    /// What a TLS key setting may not name (#5700): the config file the verb loaded, its backups, the store's folder,
-    /// credentials and TLS key, the log-hash key and the folder it lives in. These are the targets <see cref="HardenFiles"/>
-    /// hardens under their own rules, so a setting that named one would give it the key ACL instead.
+    /// What a TLS key setting may not name (#5700): the config file the verb loaded, its backups, the store's files
+    /// (its credentials and TLS key), the log-hash key and the folder it lives in. The store's own folder is not listed:
+    /// only files, and the log-hash key folder, are kept from the targets <see cref="HardenFiles"/> hardens under their
+    /// own rules, so a setting that named one would give it the key ACL instead.
     /// </summary>
     [SupportedOSPlatform("windows")]
     internal static List<NotKeyTarget> NotKeyTargets(DarlingConfig config, string configFile)
@@ -4474,7 +4516,20 @@ public static class DarlingCliCommands
         }
 
         var installRoot = Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory;
-        HardenTlsKeyFiles(config, installRoot, output, output, resolvedConfig);
+        var tls = HardenTlsKeyFiles(config, installRoot, output, output, resolvedConfig);
+
+        /* The exit code is 0 whenever the step ran (the scripts read a nonzero code as "could not run"); the counts that
+           need an administrator are in the closing lines. */
+        if (tls.Exposed > 0)
+        {
+            output.WriteLine($"{tls.Exposed} of {tls.Examined} TLS key file(s) are STILL readable by ordinary users or could not be secured.");
+        }
+
+        foreach (var line in TlsKeyFileAccessCountLines(tls))
+        {
+            output.WriteLine(line);
+        }
+
         return 0;
     }
 
@@ -4698,6 +4753,7 @@ public static class DarlingCliCommands
 
         /* #5700: the TLS private-key files darling.json names. */
         var tlsExamined = 0;
+        var tlsResult = default(TlsKeyFileResult);
         if (loadedConfig is null)
         {
             error.WriteLine("The TLS key files named in darling.json were not checked, because darling.json did not load. Fix it and re-run --harden-files.");
@@ -4708,6 +4764,7 @@ public static class DarlingCliCommands
             tlsExamined = tls.Examined;
             touched += tls.Examined;
             exposed += tls.Exposed;
+            tlsResult = tls;
             refused += tls.Refused;
             if (tls.Missing > 0)
             {
@@ -4734,10 +4791,15 @@ public static class DarlingCliCommands
             error.WriteLine($"{exposed} of {touched} item(s) are STILL readable by ordinary users.");
             error.WriteLine("Run this from an ELEVATED prompt. If it was already elevated, the owner is the");
             error.WriteLine("problem: ownership carries WRITE_DAC, so take ownership first, then re-run.");
-            return 1;
         }
 
-        if (refused > 0)
+        /* Each count needs an administrator's action, so each ends the run with exit 1. */
+        foreach (var line in TlsKeyFileAccessCountLines(tlsResult))
+        {
+            error.WriteLine(line);
+        }
+
+        if (exposed > 0 || tlsResult.OtherAccess > 0 || tlsResult.UntrustedOwner > 0 || refused > 0)
         {
             return 1;
         }

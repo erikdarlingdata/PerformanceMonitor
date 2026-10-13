@@ -275,7 +275,10 @@ public class DarlingTlsKeyFileHardenTests
             Assert.Equal("", error);
             Assert.Equal(keyBefore, Snapshot(key));
             Assert.Equal(folderBefore, Convert.ToHexString(new DirectoryInfo(outside).GetAccessControl().GetSecurityDescriptorBinaryForm()));
-            var line = Assert.Single(output.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
+            var lines = output.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+            var line = lines[0];
+            Assert.Equal(2, lines.Length);
+            Assert.Equal("1 of 1 TLS key file(s) are STILL readable by ordinary users or could not be secured.", lines[1]);
             Assert.StartsWith($"  NOT CHANGED (outside the install folder)  {key} (the TLS key file, web.network.tls.keyPath): ordinary users can read it", line, StringComparison.Ordinal);
             Assert.EndsWith(DarlingCliCommands.TlsKeyFileIcaclsLine(key), line, StringComparison.Ordinal);
             Assert.EndsWith(":(R)\"", line, StringComparison.Ordinal);
@@ -377,7 +380,8 @@ public class DarlingTlsKeyFileHardenTests
             Assert.Equal(0, exit);
             Assert.Equal("", error);
             var lines = output.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
-            Assert.Equal(4, lines.Length);
+            Assert.Equal(5, lines.Length);
+            Assert.Equal("1 of 3 TLS key file(s) are STILL readable by ordinary users or could not be secured.", lines[4]);
             Assert.StartsWith("  SECURED  ", lines[0], StringComparison.Ordinal);
             Assert.StartsWith("  REFUSED  ", lines[1], StringComparison.Ordinal);
             Assert.StartsWith("  MISSING  ", lines[2], StringComparison.Ordinal);
@@ -724,6 +728,276 @@ public class DarlingTlsKeyFileHardenTests
         }
     }
 
+    private const string OtherAccessLine = "1 of 1 TLS key file(s) are open to accounts other than SYSTEM, Administrators and the service account (see the lines above for who).";
+    private const string OwnerLine = "1 of 1 TLS key file(s) have an owner who is not SYSTEM, Administrators or the service account, so the owner can change who may read them.";
+    private const string ReadableLine = "1 of 1 TLS key file(s) are STILL readable by ordinary users or could not be secured.";
+
+    private static string LastLine(string text) => text.ReplaceLineEndings("\n").TrimEnd().Split('\n').Last();
+
+    private static string[] Lines(string text) => text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+    /// <summary>Replaces <paramref name="key"/>'s DACL with exactly <paramref name="grants"/>, nothing inherited.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void ProtectKey(string key, params (SecurityIdentifier Sid, FileSystemRights Rights)[] grants)
+    {
+        var security = new FileInfo(key).GetAccessControl();
+        security.SetAccessRuleProtection(true, false);
+        foreach (FileSystemAccessRule rule in security.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+        {
+            security.RemoveAccessRuleAll(rule);
+        }
+
+        foreach (var (sid, rights) in grants)
+        {
+            security.AddAccessRule(new FileSystemAccessRule(sid, rights, AccessControlType.Allow));
+        }
+
+        new FileInfo(key).SetAccessControl(security);
+    }
+
+    private static readonly (SecurityIdentifier Sid, FileSystemRights Rights) SystemFull =
+        (new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl);
+
+    private static readonly (SecurityIdentifier Sid, FileSystemRights Rights) AdministratorsFull =
+        (new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl);
+
+    /// <summary>An outside key the service can read, that only an extra account is allowed beyond: not readable by ordinary
+    /// users, and its owner is the account that made it. The count is "other accounts", never "readable", so the closing
+    /// line does not say ordinary users can read a file they cannot. The step exits 0 whenever it ran; the full verb exits 1.</summary>
+    [Fact]
+    public void AnOutsideKeyWithOnlyAnExtraAccount_IsCountedAsOtherAccess_NotAsReadable()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-out-extra-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var outside = MakeFolder(Path.Combine(scratch.FullName, "outside"));
+            var key = MakeKey(outside, "mcp.key");
+            ProtectKey(key, SystemFull, AdministratorsFull,
+                (ServiceSid, FileSystemRights.Read | FileSystemRights.Synchronize),
+                (new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null), FileSystemRights.Read));
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(key));
+            var keyBefore = Snapshot(key);
+            var config = WriteConfig(install, "{\"keyPath\":" + Json(key) + "}");
+
+            var (exit, output, error) = Run(config);
+
+            Assert.Equal(0, exit);
+            Assert.Equal("", error);
+            Assert.Equal(keyBefore, Snapshot(key));
+            Assert.Equal(2, Lines(output).Length);
+            Assert.StartsWith($"  NOT CHANGED (outside the install folder)  {key} ", Lines(output)[0], StringComparison.Ordinal);
+            Assert.Equal(OtherAccessLine, LastLine(output));
+            Assert.DoesNotContain("STILL readable", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("owner who is not", output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>The same key through the full verb: exit 1 (an administrator has to act), the other-access line and no claim
+    /// that ordinary users can read anything.</summary>
+    [Fact]
+    public void TheFullVerb_ExitsOne_ForAnOutsideKeyWithOnlyAnExtraAccount_WithoutSayingItIsReadable()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        Assert.SkipWhen(DarlingFileSecurity.RegisteredServiceAccount("PerformanceMonitor Darling") is not null,
+            "The Darling service is registered on this machine.");
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-full-extra-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var outside = MakeFolder(Path.Combine(scratch.FullName, "outside"));
+            var key = MakeKey(outside, "mcp.key");
+            ProtectKey(key, SystemFull, AdministratorsFull,
+                (ServiceSid, FileSystemRights.Read | FileSystemRights.Synchronize),
+                (new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null), FileSystemRights.Read));
+            var config = WriteStoreLessConfig(install, scratch.FullName, "{\"keyPath\":" + Json(key) + "}");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = DarlingCliCommands.HardenFiles(config, output, error);
+
+            Assert.Equal(1, exit);
+            Assert.Contains(OtherAccessLine, Lines(error.ToString()));
+            Assert.DoesNotContain("STILL readable", error.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("ELEVATED", error.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("owner who is not", error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>An outside key that only an untrusted owner stands out on: nobody else is allowed, and ordinary users cannot
+    /// read it. The count is "owner", with its own words. Made with the owner set to the current user and the service told to
+    /// be another account, which needs no elevation. The full verb cannot be given another service account without a
+    /// registered service, so its exit code for this count is the shared condition the extra-account test pins.</summary>
+    [Fact]
+    public void AnOutsideKeyWithOnlyAnUntrustedOwner_IsCountedAsOwner_NotAsReadable()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-out-ownonly-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var outside = MakeFolder(Path.Combine(scratch.FullName, "outside"));
+            var key = MakeKey(outside, "mcp.key");
+            var other = new SecurityIdentifier("S-1-5-80-5700-1-2-3-4");
+            var owned = new FileInfo(key).GetAccessControl();
+            owned.SetOwner(ServiceSid);
+            new FileInfo(key).SetAccessControl(owned);
+            ProtectKey(key, SystemFull, AdministratorsFull, (other, FileSystemRights.Read | FileSystemRights.Synchronize));
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(key));
+            var config = WriteConfig(install, "{\"keyPath\":" + Json(key) + "}");
+            try
+            {
+                var (exit, output, error) = Run(config, account: other);
+
+                Assert.Equal(0, exit);
+                Assert.Equal("", error);
+                Assert.Equal(2, Lines(output).Length);
+                Assert.Contains("its owner is not SYSTEM, Administrators or the service account", Lines(output)[0], StringComparison.Ordinal);
+                Assert.Equal(OwnerLine, LastLine(output));
+                Assert.DoesNotContain("STILL readable", output, StringComparison.Ordinal);
+                Assert.DoesNotContain("open to accounts", output, StringComparison.Ordinal);
+            }
+            finally
+            {
+                DarlingFileSecurity.HardenForAccount(ServiceSid);
+            }
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>An outside key ordinary users can read is the "readable" count: the step exits 0 and the closing line names
+    /// it; the full verb exits 1 and says so out of all the items it examined.</summary>
+    [Fact]
+    public void AnOutsideKeyReadableByUsers_IsCountedAsReadable_AndTheFullVerbExitsOne()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-out-readable-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var outside = MakeFolder(Path.Combine(scratch.FullName, "outside"));
+            var key = MakeKey(outside, "mcp.key");
+            var config = WriteConfig(install, "{\"keyPath\":" + Json(key) + "}");
+
+            var (exit, output, _) = Run(config);
+
+            Assert.Equal(0, exit);
+            Assert.Equal(ReadableLine, LastLine(output));
+
+            if (DarlingFileSecurity.RegisteredServiceAccount("PerformanceMonitor Darling") is not null)
+            {
+                return;
+            }
+
+            var fullConfig = WriteStoreLessConfig(install, scratch.FullName, "{\"keyPath\":" + Json(key) + "}");
+            var fullOutput = new StringWriter();
+            var fullError = new StringWriter();
+
+            var fullExit = DarlingCliCommands.HardenFiles(fullConfig, fullOutput, fullError);
+
+            Assert.Equal(1, fullExit);
+            Assert.Contains("1 of 2 item(s) are STILL readable by ordinary users.", Lines(fullError.ToString()));
+            Assert.DoesNotContain("open to accounts", fullError.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>Each count has its own closing line, none for a count of zero, and the two share their words between the
+    /// full verb and the step.</summary>
+    [Fact]
+    public void TheAccessCountLines_NameEachNonZeroCount_InItsOwnWords()
+    {
+        Assert.Empty(DarlingCliCommands.TlsKeyFileAccessCountLines(new DarlingCliCommands.TlsKeyFileResult(3, 2, 0, 0)));
+        Assert.Equal(
+            new[] { "2 of 3 TLS key file(s) are open to accounts other than SYSTEM, Administrators and the service account (see the lines above for who)." },
+            DarlingCliCommands.TlsKeyFileAccessCountLines(new DarlingCliCommands.TlsKeyFileResult(3, 0, 0, 0, OtherAccess: 2)));
+        Assert.Equal(
+            new[] { "1 of 3 TLS key file(s) have an owner who is not SYSTEM, Administrators or the service account, so the owner can change who may read them." },
+            DarlingCliCommands.TlsKeyFileAccessCountLines(new DarlingCliCommands.TlsKeyFileResult(3, 0, 0, 0, UntrustedOwner: 1)));
+        Assert.Equal(2, DarlingCliCommands.TlsKeyFileAccessCountLines(new DarlingCliCommands.TlsKeyFileResult(3, 0, 0, 0, 1, 1)).Count());
+    }
+
+    /// <summary>A key in the install folder whose DACL denies the caller WRITE_DAC (and has no OWNER RIGHTS entry that would
+    /// give the owner it back): the open with the owner right is denied, the retry without it is denied too, and the key is
+    /// reported FAILED with the system's access-denied words, counted as not secured, and its descriptor is byte-identical.</summary>
+    [Fact]
+    public void AKeyWhoseAclTheCallerMayNotChange_IsReportedFailed_WithTheAccessDenial_AndNothingChanges()
+    {
+        if (!WindowsOnly())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-5700-denied-");
+        try
+        {
+            var install = MakeFolder(Path.Combine(scratch.FullName, "install"));
+            var key = MakeKey(install, "web.pfx");
+            var me = ServiceSid;
+            var security = new FileInfo(key).GetAccessControl();
+            security.SetAccessRuleProtection(true, false);
+            foreach (FileSystemAccessRule rule in security.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+            {
+                security.RemoveAccessRuleAll(rule);
+            }
+
+            security.AddAccessRule(new FileSystemAccessRule(me, FileSystemRights.Read | FileSystemRights.Synchronize, AccessControlType.Allow));
+            security.AddAccessRule(new FileSystemAccessRule(me, FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership, AccessControlType.Deny));
+            /* OWNER RIGHTS: with an entry for it, the owner no longer gets READ_CONTROL and WRITE_DAC without being asked. */
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier("S-1-3-4"), FileSystemRights.ReadPermissions, AccessControlType.Allow));
+            new FileInfo(key).SetAccessControl(security);
+            var keyBefore = Snapshot(key);
+            var config = WriteConfig(install, "{\"pfxPath\":" + Json(key) + "}");
+
+            var (exit, output, error) = Run(config);
+
+            Assert.Equal(0, exit);
+            Assert.Equal("", error);
+            var failed = Lines(output)[0];
+            Assert.StartsWith($"  FAILED   {key} (the TLS key file, web.network.tls.pfxPath): {key} could not be opened: ", failed, StringComparison.Ordinal);
+            Assert.Contains(new System.ComponentModel.Win32Exception(5).Message, failed, StringComparison.Ordinal);
+            Assert.DoesNotContain("SECURED", output, StringComparison.Ordinal);
+            Assert.Equal(ReadableLine, LastLine(output));
+            Assert.Equal(keyBefore, Snapshot(key));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
     /// <summary>With TLS key files counted, the closing line says the service re-asserts only the other items and tells
     /// the operator to re-run the verb after replacing a key file; with none counted it is the old sentence.</summary>
     [Fact]
@@ -830,7 +1104,8 @@ public class DarlingTlsKeyFileHardenTests
             Assert.Equal(0, exit);
             Assert.Equal("", error);
             var lines = output.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
-            Assert.Equal(2, lines.Length);
+            Assert.Equal(3, lines.Length);
+            Assert.Equal("1 of 2 TLS key file(s) are STILL readable by ordinary users or could not be secured.", lines[2]);
             Assert.Equal($"  SECURED  {inside} (the TLS key password file, web.network.tls.pfxPassword)", lines[0]);
             Assert.StartsWith($"  NOT CHANGED (outside the install folder)  {away} (the TLS key password file, mcp.network.tls.pfxPassword): ordinary users can read it", lines[1], StringComparison.Ordinal);
             Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(inside));

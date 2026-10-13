@@ -693,7 +693,8 @@ public static class DarlingFileSecurity
         {
             var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
             handle.Dispose();
-            throw new System.ComponentModel.Win32Exception(error, $"{path} could not be opened");
+            /* The system's own words for the error go on the end, so a denied open reads as "Access is denied". */
+            throw new System.ComponentModel.Win32Exception(error, $"{path} could not be opened: {new System.ComponentModel.Win32Exception(error).Message}");
         }
 
         return handle;
