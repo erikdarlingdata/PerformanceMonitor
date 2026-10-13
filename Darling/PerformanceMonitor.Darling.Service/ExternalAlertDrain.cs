@@ -284,16 +284,13 @@ public sealed class ExternalAlertDrain
 
         /* Darling's own clears write a history row and post nothing (BuildResolutionRecord); this one carries the pending
            id in its context so the reap can tell it was written. */
-        var resolved = DarlingSelfAlertEvaluator.BuildResolutionRecord(new AlertResolution(
-            server.Key, server.Label, firingMetric, ResolvedMetricNameFor(row.SourceName, row.AlertKey), message));
-        resolved = resolved with
+        var resolvedContext = AlertContextSerializer.Serialize(new AlertContext
         {
-            ContextJson = AlertContextSerializer.Serialize(new AlertContext
-            {
-                External = new AlertExternalOrigin(row.SourceName, row.AlertKey, row.PendingId),
-            }),
-        };
-        await _history.RecordAlertAsync(resolved);
+            External = new AlertExternalOrigin(row.SourceName, row.AlertKey, row.PendingId),
+        });
+        await _history.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(new AlertResolution(
+            server.Key, server.Label, firingMetric, ResolvedMetricNameFor(row.SourceName, row.AlertKey), message))
+            with { ContextJson = resolvedContext });
 
         await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Delivered,
             pagerDuty == AlertChannelOutcome.Delivered ? "resolved; the PagerDuty incident was closed" : "resolved");
