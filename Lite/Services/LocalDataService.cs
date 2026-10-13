@@ -51,6 +51,10 @@ public partial class LocalDataService
         _userWriteLockBudget = userWriteLockBudget;
     }
 
+    /// <summary>The database this service reads, for the MCP notification-route tools (#5750): they build a
+    /// <see cref="DuckDbNotificationRouteStore"/> over it without the host registering one (the host composition is unchanged).</summary>
+    internal DuckDbInitializer Database => _duckDb;
+
     /// <summary>Lite's own database after a fatal error, for Collection Health. Read from memory, never the database.</summary>
     public LocalDatabaseHealth LocalDatabaseHealth => _duckDb.LocalDatabaseHealth;
 

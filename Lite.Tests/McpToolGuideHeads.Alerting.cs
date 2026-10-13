@@ -64,7 +64,7 @@ public sealed class McpToolGuideHeadsAlertingTests
         var head = McpToolGuideTests.Served("get_notification_routes").Served;
         Assert.Contains("Zero routes is the ordinary state", head, StringComparison.Ordinal);
         Assert.Contains("EMPTY channel on a route INHERITS the parent's", head, StringComparison.Ordinal);
-        Assert.Contains("routes_supported is false", head, StringComparison.Ordinal);
+        Assert.Contains("resolution is scope first (server, tag, fleet-wide)", head, StringComparison.Ordinal);
         Assert.Contains("Routing decides WHERE a post lands, never WHETHER it is sent", head, StringComparison.Ordinal);
     }
 
@@ -81,8 +81,9 @@ public sealed class McpToolGuideHeadsAlertingTests
         Assert.Contains("smtp", settingsTail, StringComparison.Ordinal);
 
         var routesTail = McpToolGuideTests.Served("get_notification_routes").Tail!;
-        Assert.Contains("routes_supported is false here", routesTail, StringComparison.Ordinal);
-        Assert.Contains("The taxonomy is the shared", routesTail, StringComparison.Ordinal);
+        Assert.Contains("Lite and Darling report the same route fields", routesTail, StringComparison.Ordinal);
+        Assert.Contains("modified_at_utc is null in Lite", routesTail, StringComparison.Ordinal);
+        Assert.Contains("kept in Windows Credential Manager", routesTail, StringComparison.Ordinal);
     }
 
     /// <summary>#3898 lane L3c: get_alert_history's head, byte-identical to Darling's (D6) — the

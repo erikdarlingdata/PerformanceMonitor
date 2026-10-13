@@ -34,7 +34,7 @@ internal static class McpWritePolicy
     internal const string WritesSetting = "mcp_allow_writes";
 
     /// <summary>
-    /// Every registered tool that writes to what Lite stores: the analysis mute and its undo. The other 88 tools
+    /// Every registered tool that writes to what Lite stores: the analysis mute and its undo, and the notification-route disable and delete. The other tools
     /// only read. <c>analyze_server</c> persists the findings it derives but changes no setting of the
     /// operator's, and it is a read here, as it is on Darling. <c>McpWritePolicyTests</c> lists every
     /// registered tool and fails unless each one is in this set or on that test's explicit read-only list, so a new
@@ -44,6 +44,11 @@ internal static class McpWritePolicy
     {
         "mute_analysis_finding",
         "unmute_analysis_finding",
+
+        /* #5750: the notification-route disable and delete. Classified here, the one place a write is declared, so the existing
+           switch serves them only when mcp_allow_writes is true. get_notification_routes is a read. */
+        "set_notification_route_enabled",
+        "delete_notification_route",
     };
 
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);

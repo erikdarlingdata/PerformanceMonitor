@@ -269,12 +269,12 @@ public sealed class McpHostService : BackgroundService
             if (_allowWrites)
             {
                 AppLogger.Warn("MCP",
-                    $"MCP write tools are ON ({McpWritePolicy.WritesSetting}): mute_analysis_finding and unmute_analysis_finding are served to any client that reaches this port.");
+                    $"MCP write tools are ON ({McpWritePolicy.WritesSetting}): the write tools (mute_analysis_finding, unmute_analysis_finding, set_notification_route_enabled, delete_notification_route) are served to any client that reaches this port.");
             }
             else
             {
                 AppLogger.Info("MCP",
-                    $"MCP write tools are off (the default): mute_analysis_finding and unmute_analysis_finding are not served. To serve them set {McpWritePolicy.WritesSetting} to true in settings.json and restart.");
+                    $"MCP write tools are off (the default): the write tools (mute_analysis_finding, unmute_analysis_finding, set_notification_route_enabled, delete_notification_route) are not served. To serve them set {McpWritePolicy.WritesSetting} to true in settings.json and restart.");
             }
 
             await _app.RunAsync(stoppingToken);

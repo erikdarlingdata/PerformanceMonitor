@@ -72,7 +72,7 @@ public sealed class McpToolGuideHeadsAlertingTests
         var head = McpToolGuideTests.Served("get_notification_routes").Served;
         Assert.Contains("Zero routes is the ordinary state", head, StringComparison.Ordinal);
         Assert.Contains("EMPTY channel on a route INHERITS the parent's", head, StringComparison.Ordinal);
-        Assert.Contains("routes_supported is false", head, StringComparison.Ordinal);
+        Assert.Contains("Lite and Darling report the same fields", head, StringComparison.Ordinal);
         Assert.Contains("Routing decides WHERE a post lands, never WHETHER it is sent", head, StringComparison.Ordinal);
     }
 

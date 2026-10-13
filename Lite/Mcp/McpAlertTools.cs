@@ -3,6 +3,8 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
 
@@ -416,39 +418,228 @@ public sealed class McpAlertTools
     }
 
     [McpServerTool(Name = "get_notification_routes"), Description(
-        "Gets the alert family taxonomy, and where each family's posts go. Zero routes is the ordinary state: every alert goes to every parent channel configured in Settings. Darling: sparse routes layered over that parent set; an EMPTY channel on a route INHERITS the parent's rather than silencing it; resolution is exact metric, then family, then parent. Lite: routes_supported is false, so no routes exist to edit. Routing decides WHERE a post lands, never WHETHER it is sent.<<GUIDE>>Gets the alert FAMILY taxonomy — which metric names belong to self-monitor, reports, agent-jobs " +
-        "and performance — and reports that this edition has NO notification routes: every alert goes to every " +
-        "channel configured in Settings. The Darling edition's twin of this tool also lists the sparse routes " +
-        "layered over its central store's channel set; routes_supported is false here, so an agent asked to route " +
-        "a family on this instance should say so rather than look for a route to edit. The taxonomy is the shared " +
-        "one, so an alert seen in get_alert_history classifies identically on both editions.")]
-    public static Task<string> GetNotificationRoutes()
+        "Gets the alert family taxonomy, and where each family's posts go. Zero routes is the ordinary state: every alert goes to every parent channel configured in Settings. Sparse routes are layered over that parent set; an EMPTY channel on a route INHERITS the parent's rather than silencing it; resolution is scope first (server, tag, fleet-wide), then exact metric, then family, then parent; routes report scope and orphaned. Lite and Darling report the same fields. Routing decides WHERE a post lands, never WHETHER it is sent.<<GUIDE>>Gets the alert FAMILY taxonomy — which metric names belong to self-monitor, reports, agent-jobs " +
+        "and performance — and the sparse notification routes layered over the parent channel set. Lite and Darling report the same route fields. Zero routes " +
+        "means every alert goes to every channel configured in Settings (the parent). A route names a family (or one " +
+        "exact metric name, or * on a scoped route) and a destination per channel type; an EMPTY channel on a route " +
+        "INHERITS the parent's, so a route can redirect Slack for one family and leave PagerDuty as the parent has it. " +
+        "A route cannot silence a channel the parent has: empty means inherit, not off. A route may be scoped to one " +
+        "server (scope_server_id) or to a tag and every tag under it (scope_tag_id); a route whose server or tag was " +
+        "deleted stays, is orphaned = true, and matches nothing. Resolution order per channel: scope first (a route " +
+        "for the alert's server, then one for a tag it is under, the deeper tag first, then a fleet-wide route), and " +
+        "inside a scope an enabled route matching the metric EXACTLY, then its FAMILY, then * (scoped routes only), " +
+        "then the parent; within a level the lowest route_id with a non-empty column wins. A recovery routes as its " +
+        "firing. Routing sits AFTER the cooldown: it changes where a post lands, never whether it is sent. " +
+        "Destinations (webhook URLs, the PagerDuty routing key) are bearer secrets kept in Windows Credential Manager " +
+        "and are NOT reported: configured_channels lists which channels each route sets, by name; smtp_recipients is " +
+        "reported because an address list is not a secret. modified_at_utc is null in Lite, which does not stamp a " +
+        "route's last change. Routes are authored in Settings > Manage Notification Routes; here they can be disabled " +
+        "or deleted (set_notification_route_enabled / delete_notification_route, served when mcp_allow_writes is true).")]
+    public static async Task<string> GetNotificationRoutes(
+        LocalDataService dataService,
+        ServerManager serverManager)
     {
         try
         {
-            return Task.FromResult(JsonSerializer.Serialize(new
-            {
-                families = AlertFamily.All.Select(family => new
-                {
-                    family,
-                    metrics = AlertFamily.MetricFamilies
-                        .Where(kv => kv.Value == family && !AlertFamily.RecoveryPairs.ContainsKey(kv.Key))
-                        .Select(kv => kv.Key)
-                        .OrderBy(m => m, StringComparer.Ordinal),
-                    metric_prefixes = AlertFamily.PrefixFamilies.Where(p => p.Family == family).Select(p => p.Prefix + "*"),
-                }),
-                recoveries_route_as_their_firing = AlertFamily.RecoveryPairs.Select(kv => new { recovery = kv.Key, firing = kv.Value }),
-                unclassified_metrics_route_as = AlertFamily.Performance,
-                routes_supported = false,
-                route_count = 0,
-                routes = Array.Empty<object>(),
-                note = "This edition delivers every alert to every configured channel; per-family routes are a Darling (central store) feature.",
-            }, McpHelpers.JsonOptions));
+            return await ReadNotificationRoutesAsync(
+                CreateRouteStore(dataService, serverManager),
+                serverManager.GetAllServers(),
+                await dataService.GetServerTagsAsync());
         }
         catch (Exception ex)
         {
-            return Task.FromResult(McpHelpers.FormatError("get_notification_routes", ex));
+            return McpHelpers.FormatError("get_notification_routes", ex);
         }
+    }
+
+    /// <summary>The store the route tools use, built over the service's own database without the host registering one (#5750).</summary>
+    private static DuckDbNotificationRouteStore CreateRouteStore(LocalDataService dataService, ServerManager serverManager) =>
+        new(dataService.Database, serverManager.GetKnownServerIds);
+
+    /// <summary>The get_notification_routes payload. Same top-level and per-route field names as Darling's twin (a test pins
+    /// them equal). Never carries a URL, key or host: only the channel names. Internal to the tests so they can hand it a store
+    /// that keeps its secrets in memory.</summary>
+    internal static async Task<string> ReadNotificationRoutesAsync(
+        DuckDbNotificationRouteStore store,
+        IReadOnlyCollection<ServerConnection> servers,
+        IReadOnlyCollection<ServerTag> tags)
+    {
+        var routes = await store.ListAsync();
+
+        var serverNames = ServerNames(servers);
+        var tagNames = tags.ToDictionary(t => t.Id, t => t.Name);
+
+        return JsonSerializer.Serialize(new
+        {
+            families = AlertFamily.All.Select(family => new
+            {
+                family,
+                metrics = AlertFamily.MetricFamilies
+                    .Where(kv => kv.Value == family && !AlertFamily.RecoveryPairs.ContainsKey(kv.Key))
+                    .Select(kv => kv.Key)
+                    .OrderBy(m => m, StringComparer.Ordinal),
+                metric_prefixes = AlertFamily.PrefixFamilies.Where(p => p.Family == family).Select(p => p.Prefix + "*"),
+            }),
+            recoveries_route_as_their_firing = AlertFamily.RecoveryPairs.Select(kv => new { recovery = kv.Key, firing = kv.Value }),
+            unclassified_metrics_route_as = AlertFamily.Performance,
+            resolution_order = new[] { "server-scoped route", "tag-scoped route (deeper tag first)", "fleet-wide route", "parent channel (Settings > Notifications)" },
+            resolution_within_a_scope = new[] { "exact metric", "family", "* (scoped routes only)" },
+            route_count = routes.Count,
+            enabled_route_count = routes.Count(r => r.Enabled),
+            routes = routes.Select(r => RoutePayload(r, serverNames, tagNames)),
+        }, McpHelpers.JsonOptions);
+    }
+
+    internal static object RoutePayload(NotificationRoute r, IReadOnlyDictionary<int, string> serverNames, IReadOnlyDictionary<int, string> tagNames)
+    {
+        /* Channel names, in Darling's order. A channel saved but unreadable (off) is still configured. */
+        var channels = new List<string>();
+        foreach (var channel in new[] { NotificationRouter.TeamsChannel, NotificationRouter.SlackChannel, NotificationRouter.GenericChannel, NotificationRouter.PagerDutyChannel })
+        {
+            if (r.HasWebhookDestinationFor(channel) || r.IsOffFor(channel))
+            {
+                channels.Add(channel);
+            }
+        }
+
+        if (r.HasEmailDestination)
+        {
+            channels.Add(NotificationRouter.EmailChannel);
+        }
+
+        return new
+        {
+            route_id = r.RouteId,
+            metric_match = r.MetricMatch,
+            match_kind = r.Family is null ? "exact_metric" : "family",
+            family = r.Family ?? AlertFamily.Of(r.MetricMatch),
+            configured_channels = channels,
+            smtp_recipients = r.SmtpRecipients,
+            enabled = r.Enabled,
+            modified_at_utc = (DateTime?)null,
+            scope_server_id = r.ScopeServerId,
+            scope_server_name = r.ScopeServerId is { } sid && serverNames.TryGetValue(sid, out var sn) ? sn : null,
+            scope_tag_id = r.ScopeTagId,
+            scope_tag_name = r.ScopeTagId is { } tid && tagNames.TryGetValue(tid, out var tn) ? tn : null,
+            expanded_server_count = r.IsScoped ? r.ExpandedServerIds?.Count ?? 0 : (int?)null,
+            orphaned = r.Orphaned,
+        };
+    }
+
+    [McpServerTool(Name = "set_notification_route_enabled"), Description(
+        "Enables or disables a notification route by route_id, WITHOUT deleting it. Changes shared alert configuration the service delivers on: a disabled route is skipped at resolution as if it did not exist, so its alerts fall to the next level (family route, then parent channels). Reversible: re-enabling restores it exactly. Returns updated (route as stored), unchanged (already that value, safe to retry), or not_found. Cannot author or re-point a route; that is Settings-window only.<<GUIDE>>" +
+        "Enables or disables a notification route by its route_id (from get_notification_routes) WITHOUT deleting it. " +
+        "A disabled route is skipped at resolution exactly as if it did not exist, so the alerts it matched fall to " +
+        "the next level (a family route, then the parent channels) on the next firing. Returns {status:\"updated\", " +
+        "route:{...}} with the route AS STORED, {status:\"unchanged\", route:{...}} when it already holds that value " +
+        "(a retry is safe), or {status:\"not_found\"}. Lite only: {status:\"unavailable\"} while an earlier database " +
+        "reset's saved-settings restore is pending (it finishes at the next Lite start). Served only when " +
+        "mcp_allow_writes is true. This tool cannot author or re-point a route: destinations are bearer secrets and " +
+        "are set only in Settings > Manage Notification Routes.")]
+    public static async Task<string> SetNotificationRouteEnabled(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        [Description("The route_id to enable or disable (from get_notification_routes).")] int route_id,
+        [Description("true to put the route back in force, false to skip it at resolution while keeping it.")] bool enabled)
+    {
+        try
+        {
+            return await SetRouteEnabledAsync(
+                CreateRouteStore(dataService, serverManager),
+                serverManager.GetAllServers(),
+                await dataService.GetServerTagsAsync(),
+                route_id,
+                enabled);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("set_notification_route_enabled", ex);
+        }
+    }
+
+    internal static async Task<string> SetRouteEnabledAsync(
+        DuckDbNotificationRouteStore store,
+        IReadOnlyCollection<ServerConnection> servers,
+        IReadOnlyCollection<ServerTag> tags,
+        int route_id,
+        bool enabled)
+    {
+        try
+        {
+            var existing = await store.GetAsync(route_id);
+            if (existing is null)
+            {
+                return McpHelpers.Status("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            if (existing.Enabled == enabled)
+            {
+                return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing, ServerNames(servers), tags.ToDictionary(t => t.Id, t => t.Name)) }, McpHelpers.JsonOptions);
+            }
+
+            if (!await store.SetEnabledAsync(route_id, enabled))
+            {
+                return McpHelpers.Status("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            /* Re-read AFTER the write, so the reported row is the stored one. */
+            var stored = await store.GetAsync(route_id);
+            return JsonSerializer.Serialize(new
+            {
+                status = "updated",
+                route = stored is null ? null : RoutePayload(stored, ServerNames(servers), tags.ToDictionary(t => t.Id, t => t.Name)),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (PendingRestoreException ex)
+        {
+            return McpHelpers.Status("unavailable", ex.Message);
+        }
+    }
+
+    [McpServerTool(Name = "delete_notification_route"), Description(
+        "Deletes a notification route by its route_id (from get_notification_routes), and its saved URLs and key from Windows Credential Manager. Permanent: the alerts it matched fall to the next level (a family route, then the parent channels) on the next firing. " +
+        "Returns {status:\"deleted\", route_id}, {status:\"not_found\"}, or {status:\"unavailable\"} while an earlier database reset's saved-settings restore is pending (it finishes at the next Lite start). " +
+        "Prefer set_notification_route_enabled for a temporary change - a deleted route's destinations are gone and only Settings > Manage Notification Routes can author them again. Served only when mcp_allow_writes is true.")]
+    public static async Task<string> DeleteNotificationRoute(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        [Description("The route_id to delete (from get_notification_routes).")] int route_id)
+    {
+        try
+        {
+            return await DeleteRouteAsync(CreateRouteStore(dataService, serverManager), route_id);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("delete_notification_route", ex);
+        }
+    }
+
+    internal static async Task<string> DeleteRouteAsync(DuckDbNotificationRouteStore store, int route_id)
+    {
+        try
+        {
+            return await store.DeleteAsync(route_id)
+                ? JsonSerializer.Serialize(new { status = "deleted", route_id }, McpHelpers.JsonOptions)
+                : McpHelpers.Status("not_found", $"No notification route with route_id {route_id}.");
+        }
+        catch (PendingRestoreException ex)
+        {
+            return McpHelpers.Status("unavailable", ex.Message);
+        }
+    }
+
+    /// <summary>A Lite server's id is the hash of its storage name, the id the alert path and the tag map use.</summary>
+    private static Dictionary<int, string> ServerNames(IReadOnlyCollection<ServerConnection> servers)
+    {
+        var names = new Dictionary<int, string>();
+        foreach (var s in servers)
+        {
+            var id = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s));
+            names[id] = string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName;
+        }
+
+        return names;
     }
 
     [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts while still logging them.")]

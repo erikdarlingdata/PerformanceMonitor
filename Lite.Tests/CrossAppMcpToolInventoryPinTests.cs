@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor Lite.
@@ -342,14 +342,8 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "delete_mute_rule",
         "set_mute_rule_enabled",
 
-        /* #3598: the notification-route write tools — set_notification_route_enabled / delete_notification_route
-           over config.config_notification_routes (V131), the shape of set_mute_rule_enabled / delete_mute_rule.
-           Darling-ONLY by architecture, the same entry kind as the alert-tuning tools above: a route is a row
-           in the central store's config plane that the headless service hot-reloads, and Lite has no routes
-           table (every alert goes to every configured channel). The READ half, get_notification_routes, IS
-           shared: Lite's twin publishes the same family taxonomy and states routes_supported: false. */
-        "set_notification_route_enabled",
-        "delete_notification_route",
+        /* #5750: set_notification_route_enabled / delete_notification_route are NOT here any more: Lite serves them too (behind
+           mcp_allow_writes), over its own scoped notification-route store, so they are shared names. */
 
         /* Darling MCP server-onboarding write tools — add/remove the monitored servers in the CENTRAL store the
            whole fleet shares (config.config_monitored_servers). add_servers bulk-onboards (validate + in-process
