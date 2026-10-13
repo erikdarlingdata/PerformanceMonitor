@@ -466,11 +466,14 @@ public sealed class AlertReadRetrySeamTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 
-        /* Twelve public reads across the adapter's nineteen commands: the multi-command reads (database
+        /* Thirteen public reads across the adapter's twenty commands: the multi-command reads (database
            state's four maintenance statements ahead of its deviation read, anomalous jobs' freshness probe
            ahead of its page) are ONE read each and retry as a unit, which is sound because every statement
-           in them is idempotent by construction. */
-        Assert.Equal(12, forwarders.Count);
+           in them is idempotent by construction. The thirteenth is #5641's Runnable Queue sample read
+           (GetRunnableQueueSamplesAsync), a forwarder over a private Core sibling like the other twelve and
+           seamed under "runnable queue", the name the engine's catch arm records; the per-forwarder loop and
+           the name check below cover it without a roster entry. */
+        Assert.Equal(13, forwarders.Count);
 
         /* No public read is left in the old self-executing shape. The control below proves this pattern
            can match, so its silence here is a real absence. */
@@ -512,7 +515,7 @@ public sealed class AlertReadRetrySeamTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 
-        Assert.Equal(12, seamNames.Count);
+        Assert.Equal(13, seamNames.Count);
         Assert.Equal(seamNames.Count, seamNames.Distinct(StringComparer.Ordinal).Count());
 
         var engine = RepoFile.ReadRepoFile("PerformanceMonitor.Alerting", "AlertEngine.cs");

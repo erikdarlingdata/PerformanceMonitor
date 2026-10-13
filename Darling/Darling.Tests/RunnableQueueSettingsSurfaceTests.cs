@@ -8,8 +8,12 @@
 
 using System;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Runtime.CompilerServices;
+using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -57,6 +61,62 @@ public sealed class RunnableQueueSettingsSurfaceTests
             ViewerDataService.AlertSettingsSelectSql, StringComparison.Ordinal);
         Assert.Contains("$73,", ViewerDataService.AlertSettingsUpsertSql, StringComparison.Ordinal);
         Assert.DoesNotContain("$74", ViewerDataService.AlertSettingsUpsertSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// V177's three columns sit at the FIXED ordinals 70, 71 and 72 (parameters $71 to $73) on every settings-row
+    /// surface that is positional, and the row is 73 columns wide. This rung is the newest append, so it owns the
+    /// total: the earlier knobs pin their own column's ordinal and no longer claim the end
+    /// (<c>UncorroboratedRouteStoreKnobTests</c>, whose column is 69). The next rung to append moves this total on
+    /// purpose and pins its own columns the same way.
+    /// </summary>
+    [Fact]
+    public void TheThreeColumns_SitAtOrdinals70To72_OnEveryPositionalSurface_OfA73ColumnRow()
+    {
+        var expected = new[] { "runnable_queue_enabled", "runnable_queue_warning_per_scheduler", "runnable_queue_critical_per_scheduler" };
+
+        /* The viewer's select, and the service's own read. */
+        var viewerColumns = ViewerDataService.AlertSettingsSelectSql
+            .Replace("SELECT ", "", StringComparison.Ordinal).Split(" FROM ")[0]
+            .Split(',').Select(c => c.Trim()).ToList();
+        Assert.Equal(73, viewerColumns.Count);
+        Assert.Equal(expected, viewerColumns.Skip(70).ToArray());
+
+        var service = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "StoreConfigProvider.cs"));
+        var start = service.IndexOf("ReadAlertSettingsAsync(NpgsqlConnection connection", StringComparison.Ordinal);
+        Assert.True(start > 0, "the service's alert-settings read could not be located");
+        var select = service[start..];
+        select = select[(select.IndexOf("SELECT", StringComparison.Ordinal) + 6)..select.IndexOf("FROM config_alert_settings WHERE id = 1", StringComparison.Ordinal)];
+        var serviceColumns = select.Split(',').Select(c => c.Trim()).Where(c => c.Length > 0).ToList();
+        Assert.Equal(73, serviceColumns.Count);
+        Assert.Equal(expected, serviceColumns.Skip(70).ToArray());
+        Assert.Contains("RunnableQueueEnabled = reader.GetBoolean(70),", service, StringComparison.Ordinal);
+        Assert.Contains("RunnableQueueWarningPerScheduler = reader.GetInt32(71),", service, StringComparison.Ordinal);
+        Assert.Contains("RunnableQueueCriticalPerScheduler = reader.GetInt32(72),", service, StringComparison.Ordinal);
+
+        /* The MCP read and its positional record. */
+        var mcpColumns = DarlingAlertReader.AlertSettingsSelectSql
+            .Split("FROM config_alert_settings")[0].Replace("SELECT", "", StringComparison.Ordinal)
+            .Split(',').Select(c => c.Trim()).Where(c => c.Length > 0).ToList();
+        Assert.Equal(73, mcpColumns.Count);
+        Assert.Equal(expected, mcpColumns.Skip(70).ToArray());
+        var parameters = typeof(DarlingAlertReader.AlertSettingsReadRow).GetConstructors().Single().GetParameters();
+        Assert.Equal(73, parameters.Length);
+        Assert.Equal(new[] { "RunnableQueueEnabled", "RunnableQueueWarningPerScheduler", "RunnableQueueCriticalPerScheduler" },
+            parameters.Skip(70).Select(p => p.Name!).ToArray());
+        Assert.Equal(typeof(bool), parameters[70].ParameterType);
+        Assert.Equal(typeof(int), parameters[71].ParameterType);
+        Assert.Equal(typeof(int), parameters[72].ParameterType);
+
+        /* The viewer's bind supplies $71 to $73 at indexes 70 to 72, in column order, and nothing after them. */
+        var bind = typeof(ViewerDataService).GetMethod("BindAlertSettings", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var row = new AlertSettingsRow { RunnableQueueEnabled = false, RunnableQueueWarningPerScheduler = 5, RunnableQueueCriticalPerScheduler = 11 };
+        using var command = new NpgsqlCommand();
+        bind.Invoke(null, new object[] { command, row });
+        Assert.Equal(73, command.Parameters.Count);
+        Assert.Equal(false, command.Parameters[70].Value);
+        Assert.Equal(5, command.Parameters[71].Value);
+        Assert.Equal(11, command.Parameters[72].Value);
     }
 
     [Fact]
