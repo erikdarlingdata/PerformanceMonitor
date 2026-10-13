@@ -908,9 +908,11 @@ function Get-DarlingTlsKeyFileVerbCommand([string]$exe, [string]$configPath) {
 # the one place that reads darling.json for the key files it names (a pfxPath or keyPath under the web and mcp tls blocks) and sets
 # their permissions; this script reads no key path and sets no key permission itself. $configPath is the darling.json in the
 # install folder, the one the service itself reads, so a DARLING_CONFIG in this session cannot point the verb at another file. The
-# verb prints one line per file, which this echoes; a line that reports a key file it refused, left unchanged, left readable or
-# found open to other accounts (REFUSED, NOT CHANGED, STILL READABLE, OTHER ACCESS, UNTRUSTED OWNER) is written as a warning even
-# when the exit code is 0. The exit code is 0 when it ran, whatever it reported per file, and nonzero only when it could not run.
+# verb prints one line per file, which this echoes. Every line that starts with two spaces is a status line (SECURED, or one of
+# REFUSED, SKIPPED, FAILED, MISSING, NOT CHANGED, STILL READABLE, LOCKED OUT, OTHER ACCESS, UNTRUSTED OWNER, and any status the verb gains
+# later), and every one but SECURED is written as a warning, even when the exit code is 0. The `Config file:` line, the
+# parenthesised DARLING_CONFIG note and the `No TLS key files` line stay plain output. The exit code is 0 when it ran, whatever
+# it reported per file, and nonzero only when it could not run.
 # Returns $null when it ran, otherwise the sentence to warn with, which carries the verb to run by hand. It never throws, so an
 # install or upgrade is never failed over it. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Invoke-DarlingTlsKeyFileHardening([string]$exe, [string]$configPath) {
@@ -920,7 +922,7 @@ function Invoke-DarlingTlsKeyFileHardening([string]$exe, [string]$configPath) {
     try {
         & $exe --harden-files --tls-key-files-only --config $configPath 2>&1 | ForEach-Object {
             $line = "$_"
-            if ($line -match '^  (REFUSED|NOT CHANGED|STILL READABLE|OTHER ACCESS|UNTRUSTED OWNER)') { Write-Warning $line }
+            if ($line -match '^  ' -and $line -notmatch '^  (SECURED  |\()') { Write-Warning $line }
             else { Write-Host $line }
         }
         if ($LASTEXITCODE -ne 0) { $reason = "exit code $LASTEXITCODE" }

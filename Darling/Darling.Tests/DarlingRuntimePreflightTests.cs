@@ -505,13 +505,7 @@ public class DarlingRuntimePreflightTests
         File.WriteAllText(path, script);
         try
         {
-            using var process = Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            });
+            using var process = Process.Start(WindowsPowerShellStartInfo.ForScript(path));
             Assert.NotNull(process);
 
             var stdout = process!.StandardOutput.ReadToEnd();

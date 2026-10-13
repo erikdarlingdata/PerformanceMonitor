@@ -267,13 +267,7 @@ public sealed class DarlingOperatorGroupScriptTests
         File.WriteAllText(path, script);
         try
         {
-            using var process = Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            });
+            using var process = Process.Start(WindowsPowerShellStartInfo.ForScript(path));
             Assert.NotNull(process);
 
             /* Both streams are drained concurrently: reading one to the end before the other deadlocks when the

@@ -190,17 +190,57 @@ public sealed class DarlingTlsKeyFileScriptTests
         Assert.Matches(@"missing=The service could not check the TLS key files darling\.json names \(.+\).*--harden-files --tls-key-files-only --config ""[^""]*install root\\darling\.json""", all);
     }
 
-    /// <summary>A line of the verb's output that reports a key file it refused, left unchanged, left readable or found open to
-    /// other accounts is written as a warning even when the exit code is 0; the other lines are plain output and no warning.</summary>
+    /// <summary>The status words the key file part of the verb can print, as the verb's source spells them: the words after two
+    /// spaces in the text from <c>HardenTlsKeyFiles</c> to <c>HardenTargets</c>, which holds the per-file lines, the unsecured
+    /// check and the notes. Read from the code, so a status the verb gains is found here and not remembered.</summary>
+    private static List<string> VerbStatusWordsInSource()
+    {
+        var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs");
+        var start = source.IndexOf("internal static TlsKeyFileResult HardenTlsKeyFiles(", StringComparison.Ordinal);
+        var end = source.IndexOf("private static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
+        Assert.True(start > 0 && end > start, $"the verb's key file section was not found (start {start}, end {end}).");
+
+        return Regex.Matches(source[start..end], @"""  ([A-Z]{2,}(?: [A-Z]{2,})*)(?= |""|\))")
+            .Select(m => m.Groups[1].Value)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(w => w, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>The status words the stub in <see cref="TheVerbCall_WritesEveryStatusLineButSecuredAsAWarning_EvenOnExitCodeZero"/>
+    /// prints. <see cref="TheStatusWordList_MatchesTheWordsTheVerbCanPrint"/> holds it to the verb's source.</summary>
+    private static readonly string[] s_statusWords =
+    [
+        "SECURED", "REFUSED", "SKIPPED", "FAILED", "MISSING", "NOT CHANGED", "STILL READABLE", "LOCKED OUT", "OTHER ACCESS", "UNTRUSTED OWNER",
+    ];
+
+    /// <summary>The list the status test prints from is the list of words the verb's source holds, no more and no fewer.</summary>
+    [Fact]
+    public void TheStatusWordList_MatchesTheWordsTheVerbCanPrint()
+    {
+        var inSource = VerbStatusWordsInSource();
+
+        Assert.Equal(s_statusWords.OrderBy(w => w, StringComparer.Ordinal), inSource);
+    }
+
+    /// <summary>Every status line of the verb's output other than SECURED is written as a warning, even when the exit code is 0:
+    /// the stub prints one line for each status word the verb can print. The lines that are not status lines (the config file
+    /// line, the DARLING_CONFIG note and the no-key-files line) and SECURED stay plain output.</summary>
     [Theory]
     [InlineData("install-darling.ps1")]
     [InlineData("upgrade-darling.ps1")]
-    public void TheVerbCall_WritesProblemLinesAsWarnings_EvenOnExitCodeZero(string scriptName)
+    public void TheVerbCall_WritesEveryStatusLineButSecuredAsAWarning_EvenOnExitCodeZero(string scriptName)
     {
         if (!OperatingSystem.IsWindows())
         {
             Assert.Skip("Windows PowerShell and .cmd stubs are Windows'.");
             return;
+        }
+
+        var stubLines = new StringBuilder();
+        for (var i = 0; i < s_statusWords.Length; i++)
+        {
+            stubLines.AppendLine($"                    'echo.  {s_statusWords[i]}  C:\\root\\k{i}.pfx (web): detail',");
         }
 
         var probe = new StringBuilder();
@@ -213,13 +253,9 @@ public sealed class DarlingTlsKeyFileScriptTests
                 $stub = Join-Path $dir 'lines.cmd'
                 Set-Content -LiteralPath $stub -Encoding ASCII -Value @(
                     '@echo off',
-                    'echo.  SECURED  C:\root\web.pfx (web)',
-                    'echo.  REFUSED  C:\root\a.pfx (web): it has more than one name',
-                    'echo.  NOT CHANGED (outside the install folder)  D:\k\b.key (mcp): note',
-                    'echo.  STILL READABLE  C:\root\c.pfx (web)',
-                    'echo.  OTHER ACCESS  C:\root\d.pfx (web): others',
-                    'echo.  UNTRUSTED OWNER  C:\root\e.pfx (web): owner',
-                    'echo.  MISSING  C:\root\f.pfx (web): not found',
+                    'echo.Config file: C:\root\darling.json',
+                    'echo.  (taken from the DARLING_CONFIG environment variable)',
+            #STATUSLINES#
                     'echo.No TLS key files are named in darling.json.',
                     'exit /b 0')
                 & { Invoke-DarlingTlsKeyFileHardening $stub (Join-Path $dir 'darling.json') } 3>&1 6>&1 | ForEach-Object {
@@ -229,19 +265,27 @@ public sealed class DarlingTlsKeyFileScriptTests
                 }
             }
             finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
-            """);
+            """.Replace("#STATUSLINES#", stubLines.ToString().TrimEnd('\r', '\n')));
 
         var lines = RunWindowsPowerShell(probe.ToString());
         var all = string.Join("\n", lines);
 
-        foreach (var problem in new[] { "REFUSED  C:\\root\\a.pfx", "NOT CHANGED (outside the install folder)  D:\\k\\b.key", "STILL READABLE  C:\\root\\c.pfx", "OTHER ACCESS  C:\\root\\d.pfx", "UNTRUSTED OWNER  C:\\root\\e.pfx" })
+        for (var i = 0; i < s_statusWords.Length; i++)
         {
-            Assert.True(lines.Contains("W|  " + problem, StringComparer.Ordinal) || lines.Any(l => l.StartsWith("W|  " + problem, StringComparison.Ordinal)), $"no warning for '{problem}':\n{all}");
+            var expected = $"  {s_statusWords[i]}  C:\\root\\k{i}.pfx (web): detail";
+            if (s_statusWords[i] == "SECURED")
+            {
+                Assert.True(lines.Contains("H|" + expected, StringComparer.Ordinal), $"SECURED was not plain output:\n{all}");
+            }
+            else
+            {
+                Assert.True(lines.Contains("W|" + expected, StringComparer.Ordinal), $"no warning for '{s_statusWords[i]}':\n{all}");
+            }
         }
 
-        Assert.Equal(5, lines.Count(l => l.StartsWith("W|", StringComparison.Ordinal)));
-        Assert.Contains("H|  SECURED  C:\\root\\web.pfx (web)", lines);
-        Assert.Contains("H|  MISSING  C:\\root\\f.pfx (web): not found", lines);
+        Assert.Equal(s_statusWords.Length - 1, lines.Count(l => l.StartsWith("W|", StringComparison.Ordinal)));
+        Assert.Contains("H|Config file: C:\\root\\darling.json", lines);
+        Assert.Contains("H|  (taken from the DARLING_CONFIG environment variable)", lines);
         Assert.Contains("H|No TLS key files are named in darling.json.", lines);
         Assert.DoesNotContain(lines, l => l.StartsWith("R|", StringComparison.Ordinal));
     }
@@ -682,13 +726,7 @@ public sealed class DarlingTlsKeyFileScriptTests
         File.WriteAllText(path, script);
         try
         {
-            using var process = Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            });
+            using var process = Process.Start(WindowsPowerShellStartInfo.ForScript(path));
             Assert.NotNull(process);
 
             var stdoutTask = process!.StandardOutput.ReadToEndAsync();

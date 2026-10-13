@@ -310,18 +310,9 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
             var arguments = OperatingSystem.IsWindows()
                 ? $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{path}\""
                 : $"-NoProfile -File \"{path}\"";
-            var startInfo = new ProcessStartInfo(pwsh, arguments)
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            /* A test host started from PowerShell 7 (CI's step shell) hands down a PSModulePath that points
-               Windows PowerShell 5.1 at PowerShell 7's modules, and 5.1 then cannot autoload the ones it
-               ships - the same problem DarlingInstallLocationTests works around for its own extracted
-               functions. Without the variable, 5.1 builds its own default, as an operator's console does. */
-            if (OperatingSystem.IsWindows()) { startInfo.Environment.Remove("PSModulePath"); }
+            /* The PowerShell 5.1 case goes through the shared helper, which leaves PSModulePath for the shell to build
+               (a test host started from PowerShell 7 would otherwise hand 5.1 its own modules). */
+            var startInfo = WindowsPowerShellStartInfo.Create(pwsh, arguments);
 
             using var process = Process.Start(startInfo);
             Assert.NotNull(process);
