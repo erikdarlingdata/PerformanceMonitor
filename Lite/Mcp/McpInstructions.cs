@@ -11,7 +11,41 @@ namespace PerformanceMonitorLite.Mcp;
 /// </summary>
 internal static class McpInstructions
 {
-    public const string Text = """
+    /// <summary>
+    /// The instructions with the census of the whole catalog. The host no longer sends this text as-is (#5789):
+    /// <see cref="McpWritePolicy.AddMcpWritePolicy"/> renders the census from the tools it actually serves,
+    /// through <see cref="Build"/>. This stays as the reference rendering the content and budget tests read.
+    /// </summary>
+    public const string Text = Head + "\n\n" + CatalogCensus + Tail;
+
+    /// <summary>The census of the whole catalog, as <see cref="Text"/> carries it.</summary>
+    private const string CatalogCensus = "93 tools (89 by default; `mcp_allow_writes` adds the four write tools)";
+
+    /// <summary>
+    /// #5789: the instructions THIS server sends. The census counts <paramref name="served"/> (the tools left after
+    /// the write switch, the same collection <c>tools/list</c> lists), and when that is fewer than
+    /// <paramref name="catalog"/> (every registered tool) it says the write switch is off.
+    /// </summary>
+    internal static string Build(IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served)
+    {
+        var count = served.Count;
+        var total = catalog.Count;
+        var writeCount = catalog.Count(McpWritePolicy.IsWrite);
+
+        string census;
+        if (count == total)
+            census = writeCount == 0
+                ? $"{total} tools"
+                : $"{total} tools (the {writeCount} write tools included: `{McpWritePolicy.WritesSetting}` is on)";
+        else if (!served.Any(McpWritePolicy.IsWrite))
+            census = $"{count} tools ({total} in the catalog; `{McpWritePolicy.WritesSetting}` is off, so the {total - count} write tools are not served)";
+        else
+            census = $"{count} tools ({total} in the catalog; the other {total - count} are not served in this configuration)";
+
+        return Head + "\n\n" + census + Tail;
+    }
+
+    private const string Head = """
         You are connected to a SQL Server performance monitoring tool via Performance Monitor Lite.
 
         ## What this server can and cannot do
@@ -25,8 +59,10 @@ internal static class McpInstructions
         Performance Monitor Lite collects into local DuckDB/Parquet, every 1-15 minutes by collector. Data is only as fresh as the last collection. Delta-based collectors (procedure stats, perfmon counters) need two cycles before non-zero values — a newly added server shows empty procedure stats for ~30 minutes, and `execution_count` 0 beside non-zero CPU/elapsed is that same delta artifact, not an error. `server_name` is used automatically when only one server is configured.
 
         ## Tools
+        """;
 
-        93 tools (89 by default; `mcp_allow_writes` adds the four write tools): discovery/health, waits, CPU, contention, plan cache, query performance, blocking/deadlocks, memory, I/O, tempdb, storage/index, perfmon, alerts, jobs, configuration, system-health parse-on-read + Default Trace, server info, sessions/active queries, and execution-plan + diagnostic analysis.
+    private const string Tail = """
+        : discovery/health, waits, CPU, contention, plan cache, query performance, blocking/deadlocks, memory, I/O, tempdb, storage/index, perfmon, alerts, jobs, configuration, system-health parse-on-read + Default Trace, server info, sessions/active queries, and execution-plan + diagnostic analysis.
 
         ### Reading an empty result
 

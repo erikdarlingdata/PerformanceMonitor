@@ -227,11 +227,47 @@ public sealed class DarlingMcpWritePolicyTests
         Assert.Equal(defaultCount, DarlingMcpWritePolicy.FilterToolCollection(all, writesNoToken).Count);
         Assert.Equal(writesCount, DarlingMcpWritePolicy.FilterToolCollection(all, writesWithToken).Count);
 
-        var text = DarlingMcpInstructions.Text;
-        Assert.Contains($"This server exposes {total} tools.", text, StringComparison.Ordinal);
-        Assert.Contains($" Default {defaultCount}; ", text, StringComparison.Ordinal);
-        Assert.Contains($"+{writesCount - defaultCount} `{DarlingMcpWritePolicy.WritesSetting}` with a token", text, StringComparison.Ordinal);
-        Assert.Contains($"+{adminCount - writesCount} `{DarlingMcpWritePolicy.ServerAdminSetting}`", text, StringComparison.Ordinal);
+        /* #5789: the census is now rendered from the served set, so each switch state's own text carries its own
+           count and the "Default N; +M" tail is gone; DarlingMcpInstructionsBudgetTests pins each rendering. */
+        var catalog = DarlingMcpWritePolicy.ToolNames(all);
+        Assert.Contains($"This server exposes {total} tools.", DarlingMcpInstructions.Text, StringComparison.Ordinal);
+        Assert.Contains(
+            $"This server exposes {defaultCount} of its {total} tools: ",
+            DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog,
+                DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(all, writesNoToken))),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"This server exposes {writesCount} of its {total} tools: ",
+            DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog,
+                DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(all, writesWithToken))),
+            StringComparison.Ordinal);
+    }
+
+    /* #5789: the defect end to end. Through the host's own pipeline, the count initialize's instructions state is
+       the length of tools/list on the same server, with the writes off (where it said 182 beside 160) and on. */
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InitializeInstructions_CountTheToolsThatToolsListServes(bool everything)
+    {
+        using var server = everything ? await BuildServer(EverythingConfig, Token) : await BuildServer(NoWrites, "");
+        var bearer = everything ? Token : null;
+
+        var (_, toolsBody) = await ToolsListAsync(server, bearer);
+        var served = ToolsOf(toolsBody).Count;
+
+        var (status, initBody) = await PostAsync(server, bearer,
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"," +
+            "\"capabilities\":{},\"clientInfo\":{\"name\":\"census-test\",\"version\":\"1.0\"}}}");
+        Assert.Equal(StatusCodes.Status200OK, status);
+        var dataLine = initBody.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+        using var document = JsonDocument.Parse(dataLine is null ? initBody : dataLine["data:".Length..].Trim());
+        var instructions = document.RootElement.GetProperty("result").GetProperty("instructions").GetString() ?? "";
+
+        var census = System.Text.RegularExpressions.Regex.Match(instructions, @"This server exposes (\d+) ");
+        Assert.True(census.Success, "the instructions carry no 'This server exposes N' census");
+        Assert.Equal(served, int.Parse(census.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Equal(everything, !instructions.Contains(" of its ", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -431,6 +467,28 @@ public sealed class DarlingMcpWritePolicyTests
 
         await app.StartAsync();
         return app.GetTestServer();
+    }
+
+    private static async Task<(int StatusCode, string Body)> PostAsync(TestServer server, string? bearer, string json)
+    {
+        var ctx = await server.SendAsync(c =>
+        {
+            c.Request.Method = "POST";
+            c.Request.Path = "/";
+            c.Request.Headers.Host = "localhost";
+            c.Request.Headers.Accept = "application/json, text/event-stream";
+            c.Request.ContentType = "application/json";
+            var bytes = Encoding.UTF8.GetBytes(json);
+            c.Request.Body = new System.IO.MemoryStream(bytes);
+            c.Request.ContentLength = bytes.Length;
+            c.Connection.RemoteIpAddress = IPAddress.Loopback;
+            if (bearer is not null)
+                c.Request.Headers.Authorization = $"Bearer {bearer}";
+        });
+
+        using var reader = new System.IO.StreamReader(ctx.Response.Body);
+        var body = await reader.ReadToEndAsync();
+        return (ctx.Response.StatusCode, body);
     }
 
     private static async Task<(int StatusCode, string Body)> ToolsListAsync(TestServer server, string? bearer)
