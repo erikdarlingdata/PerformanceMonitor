@@ -1929,6 +1929,12 @@ public sealed class DarlingMcpDataTools
                 resolved.ServerId.ToString(CultureInfo.InvariantCulture));
             var alertReadFinding = AlertReadFailureCounter.FormatFinding(alertReads);
 
+            /* #5735: the collection loop's skipped slots over the last 24 h, read fresh and OUTSIDE the one-minute
+               collector-health memo above (the rows are not collectors, so the collector half never carries them, and a
+               row just written must not show a minute late). One index seek on the watermark index. */
+            var skippedCycles = await SkippedCycleReader.GetSkippedCycleSummaryAsync(
+                postgres, resolved.ServerId, cancellationToken: cancellationToken);
+
             /* #3691: wraps the whole payload rather than sitting in it as a property — McpHelpers.JsonOptions
                WRITES nulls, so a property would ship analysis_caveats: null on every clean answer — and it reads
                the process-wide ledger because the scheduled sweep builds a fresh analysis service per pass.
@@ -2046,6 +2052,9 @@ public sealed class DarlingMcpDataTools
                     finding = alertReadFinding,
                     note = AlertReadFailureCounter.WindowNote
                 },
+                /* #5735: always present; zero is a real answer (count_24h 0, slots 0, the rest null), so a missing
+                   field never reads as "none". On this SKU a slot is one scheduled run of one collector. */
+                skipped_cycles = SkippedCyclesBlock(skippedCycles),
                 sweep_pressure = new
                 {
                     busy_ms_per_minute = Math.Round(pressure.BusyMsPerMinute, 0),
@@ -2110,6 +2119,21 @@ public sealed class DarlingMcpDataTools
             return McpHelpers.FormatError("get_collection_health", ex);
         }
     }
+
+    /// <summary>
+    /// #5735: the <c>skipped_cycles</c> block of <c>get_collection_health</c>. A server whose loop stepped over
+    /// collection slots writes one <c>collection_cycle</c>/<c>SKIPPED</c> row (coalesced to one per five minutes). Zero is a
+    /// real answer (count_24h 0, slots_skipped_24h 0, the rest null); the block is always present.
+    /// </summary>
+    internal static object SkippedCyclesBlock(SkippedCycleSummary s) => new
+    {
+        count_24h = s.Count,
+        slots_skipped_24h = s.SlotsSkipped,
+        last_at = s.LastAtUtc?.ToString("o"),
+        last_slowest_step = s.LastSlowestStep,
+        last_slowest_step_ms = s.LastSlowestStepMs,
+        last_message = s.LastMessage
+    };
 
     /// <summary>
     /// #4999: the collectors whose single-run cost the server's sequential pass pays: every row except those that

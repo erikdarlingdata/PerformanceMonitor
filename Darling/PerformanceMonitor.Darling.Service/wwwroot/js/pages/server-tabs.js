@@ -1994,6 +1994,10 @@ export const SERVER_TABS = [
          heaviest query three times to open it. */
       ...fanout("get_collection_health", { server }, [
         { title: "Sweep Pressure", subtitle: "trailing 7 days", viz: "stat", stats: SWEEP_STATS },
+        /* #5735: the collection loop's skipped slots, from the same get_collection_health read (its `skipped_cycles`
+           block, always present: count 0 is a real answer). Its own panel because its window is 24 hours, not the 7 days
+           beside it. */
+        { title: "Skipped Cycles", subtitle: "trailing 24 hours", viz: "stat", stats: SKIPPED_CYCLES_STATS },
         /* #3013: the alerting layer's own store reads, which appear on no other health surface. Its own
            panel rather than a tile on Sweep Pressure specifically because of the SUBTITLE: these figures are
            in-memory counts since the service started, and inheriting "trailing 7 days" would have made the
@@ -2152,6 +2156,10 @@ export const POSTGRES_TABS = [
          three panels, for the reason fanout exists. */
       ...fanout("get_collection_health", { server }, [
         { title: "Sweep Pressure", subtitle: "trailing 7 days", viz: "stat", stats: SWEEP_STATS },
+        /* #5735: the collection loop's skipped slots, from the same get_collection_health read (its `skipped_cycles`
+           block, always present: count 0 is a real answer). Its own panel because its window is 24 hours, not the 7 days
+           beside it. */
+        { title: "Skipped Cycles", subtitle: "trailing 24 hours", viz: "stat", stats: SKIPPED_CYCLES_STATS },
         /* #3013: the alerting layer's own store reads, which appear on no other health surface. Its own
            panel rather than a tile on Sweep Pressure specifically because of the SUBTITLE: these figures are
            in-memory counts since the service started, and inheriting "trailing 7 days" would have made the
@@ -3140,6 +3148,18 @@ const SWEEP_STATS = [
   { key: "sweep_pressure.peak_cycle_ms", label: "Peak cycle", format: "ms" },
   { key: "sweep_pressure.peak_cycle_percent", label: "Peak cycle %", format: "num1" },
   { key: "sweep_pressure.peak_cycle_risk", label: "Peak risk", format: "text", small: true },
+];
+
+/* #5735: the `skipped_cycles` block of get_collection_health. A slot is one scheduled run of one collector the loop stepped
+   over, summed across the server's collectors. Zero is real (count 0, the other tiles dashes); the message tile is dropped
+   when there is none rather than showing a dash. */
+const SKIPPED_CYCLES_STATS = [
+  { key: "skipped_cycles.count_24h", label: "Late cycles", format: "int" },
+  { key: "skipped_cycles.slots_skipped_24h", label: "Slots skipped", format: "int" },
+  { key: "skipped_cycles.last_at", label: "Last", format: "reltime", small: true },
+  { key: "skipped_cycles.last_slowest_step", label: "Cause", format: "text", small: true },
+  { key: "skipped_cycles.last_slowest_step_ms", label: "Cause ran for", format: "ms" },
+  { key: "skipped_cycles.last_message", label: "Last message", format: "text", small: true, hideWhenEmpty: true },
 ];
 
 /* ─────────────────────────── line series ─────────────────────────── */
