@@ -261,7 +261,9 @@ public sealed class McpToolsListBudgetTests
     /* #5750: get_notification_routes' head names the scope tier in its resolution order and says routes report scope and orphaned
        (the tool's line 502 -> 555 bytes); the per-route scope fields are in the guide after the marker. The measured total went
        198,817 -> 198,869 bytes. */
-    private const int TotalCeilingBytes = 198_869;
+    /* #5750 F10: re-measured at the head of the shared branch: 198,844 bytes, so the 198,869 above no longer holds (the head text changed
+       since it was measured). Constant set to the measured value. */
+    private const int TotalCeilingBytes = 198_844;
 
 
 

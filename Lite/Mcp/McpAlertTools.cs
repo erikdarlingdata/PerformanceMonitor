@@ -522,6 +522,7 @@ public sealed class McpAlertTools
             scope_server_name = r.ScopeServerId is { } sid && serverNames.TryGetValue(sid, out var sn) ? sn : null,
             scope_tag_id = r.ScopeTagId,
             scope_tag_name = r.ScopeTagId is { } tid && tagNames.TryGetValue(tid, out var tn) ? tn : null,
+            /* Null for a fleet-wide route and for a scoped route whose scope could not be read (scope_unreadable tells the two apart). */
             expanded_server_count = r.IsScoped && !r.ScopeUnexpanded ? r.ExpandedServerIds?.Count ?? 0 : (int?)null,
             orphaned = r.Orphaned,
             scope_unreadable = r.ScopeUnexpanded,
