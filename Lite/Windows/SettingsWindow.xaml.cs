@@ -1428,11 +1428,31 @@ public partial class SettingsWindow : Window
         /* Save webhook URLs to Credential Manager instead of settings.json. The generic channel's headers
            JSON goes there too — it carries the Authorization bearer token (#1506). The PagerDuty routing
            key is a bearer secret like the webhook URLs. */
-        App.SaveWebhookUrl("TeamsWebhook", App.TeamsWebhookUrl);
-        App.SaveWebhookUrl("SlackWebhook", App.SlackWebhookUrl);
-        App.SaveWebhookUrl("GenericWebhook", App.GenericWebhookUrl);
-        App.SaveWebhookUrl("GenericWebhookHeaders", App.GenericWebhookHeadersJson);
-        App.SaveWebhookUrl("PagerDutyWebhook", App.PagerDutyRoutingKey);
+        var secretFailures = new System.Collections.Generic.List<string>();
+        foreach (var failure in new[]
+        {
+            App.SaveWebhookUrl("TeamsWebhook", App.TeamsWebhookUrl),
+            App.SaveWebhookUrl("SlackWebhook", App.SlackWebhookUrl),
+            App.SaveWebhookUrl("GenericWebhook", App.GenericWebhookUrl),
+            App.SaveWebhookUrl("GenericWebhookHeaders", App.GenericWebhookHeadersJson),
+            App.SaveWebhookUrl("PagerDutyWebhook", App.PagerDutyRoutingKey)
+        })
+        {
+            if (failure != null) secretFailures.Add(failure);
+        }
+
+        /* #5772: a refused Credential Manager write used to vanish. The value that did not save keeps its
+           old stored copy (or none), so the dialog says which one and that the rest of the page saved. The
+           window stays open and the toast is suppressed through the false return, like the generic-config
+           check below. */
+        if (secretFailures.Count > 0)
+        {
+            MessageBox.Show(
+                string.Join(Environment.NewLine + Environment.NewLine, secretFailures)
+                + Environment.NewLine + Environment.NewLine + "Your other settings were saved. Lite keeps using the value you typed until it restarts, "
+                + "then goes back to the value saved before, if there was one.",
+                "Webhook Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
 
         root["teams_webhook_enabled"] = App.TeamsWebhookEnabled;
         root["teams_proxy_address"] = App.TeamsProxyAddress;
@@ -1472,7 +1492,7 @@ public partial class SettingsWindow : Window
             }
         }
 
-        return true;
+        return secretFailures.Count == 0;
     }
 
     private void TeamsWebhookEnabledCheckBox_Changed(object sender, RoutedEventArgs e)

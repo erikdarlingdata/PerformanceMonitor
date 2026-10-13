@@ -43,6 +43,13 @@ public class CredentialService
         => _store.SaveCredential(serverId, username, password);
 
     /// <summary>
+    /// Saves a credential and returns why it failed when it does (#5772). Accepts a secret of up to
+    /// <see cref="CredentialStore.MaxSecretLength"/> characters; the failure text never contains the secret.
+    /// </summary>
+    public CredentialSaveResult TrySaveCredential(string serverId, string username, string password)
+        => _store.TrySaveCredential(serverId, username, password);
+
+    /// <summary>
     /// Retrieves SQL Server credentials from Windows Credential Manager.
     /// </summary>
     public (string Username, string Password)? GetCredential(string serverId)

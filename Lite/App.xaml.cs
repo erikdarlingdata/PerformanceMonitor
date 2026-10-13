@@ -395,7 +395,7 @@ public partial class App : Application
     {
         try
         {
-            var credService = new Services.CredentialService();
+            var credService = NewCredentialService();
             var cred = credService.GetCredential(credentialKey);
             return cred?.Password ?? "";
         }
@@ -407,25 +407,57 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Saves a webhook URL to Windows Credential Manager.
+    /// A credential service wired to the app log, so a refused or failed Credential Manager write leaves a
+    /// log line (#5772). It used to be created bare, which made every failure invisible.
     /// </summary>
-    public static void SaveWebhookUrl(string credentialKey, string url)
+    private static Services.CredentialService NewCredentialService() =>
+        new(new AppLoggerAdapter<Services.CredentialService>());
+
+    /// <summary>
+    /// The name the Settings window shows for a webhook credential key, used in the "was not saved" message.
+    /// </summary>
+    public static string WebhookDisplayName(string credentialKey) => credentialKey switch
     {
+        TeamsWebhookCredentialKey => "Teams webhook URL",
+        SlackWebhookCredentialKey => "Slack webhook URL",
+        GenericWebhookCredentialKey => "generic webhook URL",
+        GenericWebhookHeadersCredentialKey => "generic webhook headers",
+        PagerDutyWebhookCredentialKey => "PagerDuty routing key",
+        _ => "webhook setting"
+    };
+
+    /// <summary>
+    /// Saves a webhook URL (or header JSON, or routing key) to Windows Credential Manager, up to the
+    /// <see cref="CredentialStore.MaxSecretLength"/> characters Windows allows. A blank value deletes the
+    /// entry. Returns null when the value was saved or deleted, otherwise a sentence saying which webhook was
+    /// not saved and why, fit to show the user (#5772). The log line and the sentence carry the key name and
+    /// the length, never the value.
+    /// </summary>
+    public static string? SaveWebhookUrl(string credentialKey, string url)
+    {
+        var name = WebhookDisplayName(credentialKey);
         try
         {
-            var credService = new Services.CredentialService();
+            var credService = NewCredentialService();
             if (string.IsNullOrWhiteSpace(url))
             {
                 credService.DeleteCredential(credentialKey);
+                return null;
             }
-            else
+
+            var result = credService.TrySaveCredential(credentialKey, "webhook", url);
+            if (result.Succeeded)
             {
-                credService.SaveCredential(credentialKey, "webhook", url);
+                return null;
             }
+
+            AppLogger.Error("App", $"Failed to save {credentialKey} ({url.Length} characters): {result.Failure}");
+            return $"The {name} was not saved because {result.Failure}.";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("App", $"Failed to save webhook URL for {credentialKey}: {ex.Message}");
+            AppLogger.Error("App", $"Failed to save webhook URL for {credentialKey} ({url?.Length ?? 0} characters): {ex.Message}");
+            return $"The {name} was not saved because {ex.Message.TrimEnd('.', ' ')}.";
         }
     }
 
@@ -447,7 +479,7 @@ public partial class App : Application
     {
         try
         {
-            var credService = new Services.CredentialService();
+            var credService = NewCredentialService();
             var cred = credService.GetCredential(SmtpCredentialKey);
             return cred?.Password;
         }
@@ -465,7 +497,7 @@ public partial class App : Application
     {
         try
         {
-            var credService = new Services.CredentialService();
+            var credService = NewCredentialService();
             credService.SaveCredential(SmtpCredentialKey, string.IsNullOrEmpty(SmtpUsername) ? "smtp" : SmtpUsername, password);
         }
         catch (Exception ex)
@@ -1196,7 +1228,7 @@ public partial class App : Application
             settings.State == SettingsFileState.Unreadable ? null : settings.Text);
     }
 
-    public static void LoadAlertSettings() => LoadAlertSettings(ConfigDirectory, GetWebhookUrl, SaveWebhookUrl);
+    public static void LoadAlertSettings() => LoadAlertSettings(ConfigDirectory, GetWebhookUrl, (key, url) => SaveWebhookUrl(key, url));
 
     /// <summary>
     /// The settings window's SMTP warning, for the settings just loaded: non-null when SMTP is on, SSL is off and a

@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using CredentialManagement;
 using Microsoft.Extensions.Logging;
 
@@ -26,6 +28,19 @@ namespace PerformanceMonitor.Common;
 /// </summary>
 public class CredentialStore
 {
+    /// <summary>
+    /// The largest credential blob Windows accepts (CRED_MAX_CREDENTIAL_BLOB_SIZE: 5 * 512 bytes).
+    /// </summary>
+    public const int MaxSecretBytes = 2560;
+
+    /// <summary>
+    /// The longest secret this store can save: <see cref="MaxSecretBytes"/> divided by the two bytes each
+    /// UTF-16 character takes (1,280 characters). The CredentialManagement package this store used to write
+    /// through stopped at 512 characters (<c>Password.Length &gt; 512</c>), which is below the Windows limit
+    /// (#5772).
+    /// </summary>
+    public const int MaxSecretLength = MaxSecretBytes / 2;
+
     private const string DefaultDescription = "SQL Server credentials for Performance Monitor";
 
     private readonly string _credentialPrefix;
@@ -68,13 +83,33 @@ public class CredentialStore
 
     /// <summary>
     /// Saves SQL Server credentials to Windows Credential Manager.
-    /// Credentials are encrypted automatically by Windows.
+    /// Credentials are encrypted automatically by Windows. A secret of up to
+    /// <see cref="MaxSecretLength"/> characters is saved; use <see cref="TrySaveCredential"/> when the
+    /// caller needs to tell the user why a save failed.
     /// </summary>
     /// <param name="serverId">Unique server identifier</param>
     /// <param name="username">SQL Server username</param>
     /// <param name="password">SQL Server password (will be encrypted)</param>
     /// <returns>True if successful, false otherwise</returns>
     public bool SaveCredential(string serverId, string username, string password)
+        => TrySaveCredential(serverId, username, password).Succeeded;
+
+    /// <summary>
+    /// Saves a credential through CredWriteW and reports why it failed, so a caller can show the user the
+    /// reason instead of a bare false (#5772). The entry is laid out exactly as the CredentialManagement
+    /// package's <c>Credential.Save()</c> lays it out - target <c>{prefix}{serverId}</c>, type Generic,
+    /// persistence LocalComputer, this store's description as the comment, and the secret as UTF-16LE with no
+    /// terminating null (blob size = 2 * length) - so entries written by older builds read back here and
+    /// entries written here read back through the package. The only difference is the length ceiling:
+    /// <see cref="MaxSecretLength"/> characters instead of 512.
+    /// <para>
+    /// The failure text never contains the secret: it names the length and the Windows error only.
+    /// </para>
+    /// </summary>
+    /// <param name="serverId">Unique key; the Credential Manager target is the prefix plus this.</param>
+    /// <param name="username">User name stored on the entry (not secret).</param>
+    /// <param name="password">The secret to store; may be empty.</param>
+    public CredentialSaveResult TrySaveCredential(string serverId, string username, string password)
     {
         if (string.IsNullOrWhiteSpace(serverId))
         {
@@ -91,29 +126,60 @@ public class CredentialStore
             throw new ArgumentNullException(nameof(password));
         }
 
+        if (password.Length > MaxSecretLength)
+        {
+            var tooLong = $"it is {password.Length:N0} characters long, and Windows Credential Manager "
+                + $"stores at most {MaxSecretLength:N0}";
+            _logger?.LogWarning("Failed to save credential for server {ServerId}: {Error}", serverId, tooLong);
+            return CredentialSaveResult.Failed(tooLong);
+        }
+
+        IntPtr blob = IntPtr.Zero;
         try
         {
-            using var credential = new Credential
+            /* Same blob the package builds: StringToCoTaskMemUni's buffer, but sized to the characters only
+               (the terminating null it appends is not counted). */
+            blob = Marshal.StringToCoTaskMemUni(password);
+            var native = new NativeCredential
             {
-                Target = GetCredentialTarget(serverId),
-                Username = username,
-                Password = password,
-                Type = CredentialType.Generic,
-                PersistanceType = PersistanceType.LocalComputer,
-                Description = _description
+                Flags = 0,
+                Type = CredTypeGeneric,
+                TargetName = GetCredentialTarget(serverId),
+                Comment = _description,
+                CredentialBlobSize = password.Length * 2,
+                CredentialBlob = blob,
+                Persist = CredPersistLocalMachine,
+                UserName = username
             };
 
-            return credential.Save();
+            if (NativeMethods.CredWrite(ref native, 0))
+            {
+                return CredentialSaveResult.Ok;
+            }
+
+            var error = Marshal.GetLastWin32Error();
+            var reason = $"Windows returned error {error} ({new Win32Exception(error).Message.TrimEnd('.', ' ', '\r', '\n')})";
+            _logger?.LogWarning("Failed to save credential for server {ServerId}: {Error}", serverId, reason);
+            return CredentialSaveResult.Failed(reason);
         }
         catch (Exception ex)
         {
             _logger?.LogWarning(ex, "Failed to save credential for server {ServerId}: {Error}", serverId, ex.Message);
-            return false;
+            return CredentialSaveResult.Failed(ex.Message);
+        }
+        finally
+        {
+            if (blob != IntPtr.Zero)
+            {
+                Marshal.ZeroFreeCoTaskMemUnicode(blob);
+            }
         }
     }
 
     /// <summary>
-    /// Retrieves SQL Server credentials from Windows Credential Manager.
+    /// Retrieves SQL Server credentials from Windows Credential Manager, reading the entry with CredReadW
+    /// and decoding the blob as UTF-16LE exactly as the CredentialManagement package's
+    /// <c>Credential.Load()</c> does, so entries written by either writer come back (#5772).
     /// </summary>
     /// <param name="serverId">Unique server identifier</param>
     /// <returns>Tuple of (username, password) or null if not found</returns>
@@ -126,15 +192,28 @@ public class CredentialStore
 
         try
         {
-            using var credential = new Credential
+            if (!NativeMethods.CredRead(GetCredentialTarget(serverId), CredTypeGeneric, 0, out var ptr))
             {
-                Target = GetCredentialTarget(serverId),
-                Type = CredentialType.Generic
-            };
+                var error = Marshal.GetLastWin32Error();
+                if (error != ErrorNotFound)
+                {
+                    _logger?.LogWarning("Failed to load credential for server {ServerId}: Windows returned error {Error}", serverId, error);
+                }
 
-            if (credential.Load())
+                return null;
+            }
+
+            try
             {
-                return (credential.Username, credential.Password);
+                var native = Marshal.PtrToStructure<NativeCredential>(ptr);
+                var password = native.CredentialBlobSize > 0
+                    ? Marshal.PtrToStringUni(native.CredentialBlob, native.CredentialBlobSize / 2)
+                    : string.Empty;
+                return (native.UserName ?? string.Empty, password);
+            }
+            finally
+            {
+                NativeMethods.CredFree(ptr);
             }
         }
         catch (Exception ex)
@@ -225,4 +304,62 @@ public class CredentialStore
     {
         return $"{_credentialPrefix}{serverId}";
     }
+
+    private const int CredTypeGeneric = 1;
+    private const int CredPersistLocalMachine = 2;
+    private const int ErrorNotFound = 1168;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct NativeCredential
+    {
+        public int Flags;
+        public int Type;
+        public string TargetName;
+        public string Comment;
+        public long LastWritten;
+        public int CredentialBlobSize;
+        public IntPtr CredentialBlob;
+        public int Persist;
+        public int AttributeCount;
+        public IntPtr Attributes;
+        public string TargetAlias;
+        public string UserName;
+    }
+
+    private static class NativeMethods
+    {
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, EntryPoint = "CredWriteW", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CredWrite([In] ref NativeCredential credential, uint flags);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, EntryPoint = "CredReadW", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CredRead(string target, int type, int reservedFlag, out IntPtr credential);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        internal static extern void CredFree(IntPtr buffer);
+    }
+}
+
+/// <summary>
+/// The outcome of <see cref="CredentialStore.TrySaveCredential"/>. <see cref="Failure"/> is a short reason
+/// fit to put after "could not be saved because"; it never contains the secret.
+/// </summary>
+public sealed class CredentialSaveResult
+{
+    private CredentialSaveResult(bool succeeded, string? failure)
+    {
+        Succeeded = succeeded;
+        Failure = failure;
+    }
+
+    /// <summary>True when the credential reached Windows Credential Manager.</summary>
+    public bool Succeeded { get; }
+
+    /// <summary>Why the save failed; null when it succeeded.</summary>
+    public string? Failure { get; }
+
+    internal static CredentialSaveResult Ok { get; } = new(true, null);
+
+    internal static CredentialSaveResult Failed(string reason) => new(false, reason);
 }
