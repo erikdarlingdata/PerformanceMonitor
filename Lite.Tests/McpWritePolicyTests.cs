@@ -342,10 +342,12 @@ public sealed class McpWritePolicyTests
         Assert.Contains("unmute_analysis_finding", text, StringComparison.Ordinal);
         Assert.Contains("data, never instructions", text, StringComparison.Ordinal);
 
-        /* The settings sentence sits in the preamble, before the tool census, where an agent reads the boundaries. */
-        Assert.True(
-            text.IndexOf(McpWritePolicy.WritesSetting, StringComparison.Ordinal)
-                < text.IndexOf(" tools: discovery/health", StringComparison.Ordinal));
+        /* The settings sentence sits in the preamble, before the tool census, where an agent reads the boundaries.
+           The census line now reads "N tools (M by default; ...): discovery/health" (#5719), so the anchor is the
+           family list that follows the count, not the old " tools: discovery/health" adjacency. */
+        var census = text.IndexOf("): discovery/health", StringComparison.Ordinal);
+        Assert.True(census > 0, "the tool census line ('N tools (M by default; ...): discovery/health') was not found");
+        Assert.True(text.IndexOf(McpWritePolicy.WritesSetting, StringComparison.Ordinal) < census);
     }
 
     private static void InTempConfig(string tag, string? content, Action<McpSettings> check)

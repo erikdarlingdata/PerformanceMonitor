@@ -85,10 +85,10 @@ internal static class DarlingMcpInstructions
         |------|------|
         | `get_query_store_health` | Per-database Query Store health (latest hourly snapshot) — actual vs desired state, readonly_reason decoded, storage vs cap, cleanup thresholds, and the two capture modes (`query_capture_mode` ALL / AUTO / CUSTOM / NONE — ALL is the plan-churn factory; `wait_stats_capture_mode` ON / OFF; null = pre-rung row or pre-2017 engine) |
 
-        `update_alert_settings`/`update_mute_rule` are PARTIAL updates: read `get_alert_settings`/`get_mute_rules` FIRST, send back only changed fields. For Custom Views, call `describe_custom_view_catalog` FIRST, then `validate_custom_view` before `create_custom_view`/`update_custom_view`.
+        `update_alert_settings`/`update_mute_rule` are PARTIAL updates: read `get_alert_settings`/`get_mute_rules` FIRST, send only changed fields. For Custom Views, call `describe_custom_view_catalog` FIRST, then `validate_custom_view` before `create_custom_view`/`update_custom_view`.
 
         ## Workflow
 
-        `list_servers` -> `get_collection_health` -> `analyze_server` (follow each finding's `next_tools`) -> `compare_analysis`/`audit_config` -> `mute_analysis_finding` to silence one.
+        `list_servers` -> `get_collection_health` -> `analyze_server` (follow each finding's `next_tools`) -> `compare_analysis`/`audit_config` -> `mute_analysis_finding` to silence an accepted pattern.
         """;
 }
