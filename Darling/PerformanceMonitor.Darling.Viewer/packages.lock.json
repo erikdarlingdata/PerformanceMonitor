@@ -464,17 +464,20 @@
       "performancemonitor.alerting": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.9.0, )",
-          "PerformanceMonitor.Notifications": "[3.9.0, )"
+          "PerformanceMonitor.Common": "[3.10.0, )",
+          "PerformanceMonitor.Notifications": "[3.10.0, )"
         }
       },
       "performancemonitor.analysis": {
-        "type": "Project"
+        "type": "Project",
+        "dependencies": {
+          "PerformanceMonitor.Common": "[3.10.0, )"
+        }
       },
       "performancemonitor.collectors": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.9.0, )"
+          "PerformanceMonitor.Common": "[3.10.0, )"
         }
       },
       "performancemonitor.common": {
@@ -491,45 +494,43 @@
           "Microsoft.Data.SqlClient": "[7.1.1, )",
           "Microsoft.Data.SqlClient.Extensions.Azure": "[7.1.1, )",
           "ModelContextProtocol": "[2.2.0, )",
-          "PerformanceMonitor.Analysis": "[3.9.0, )",
-          "PerformanceMonitor.Collectors": "[3.9.0, )",
-          "PerformanceMonitor.Common": "[3.9.0, )",
-          "PerformanceMonitor.Darling.Storage": "[3.9.0, )",
-          "PerformanceMonitor.Notifications": "[3.9.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.9.0, )",
-          "System.Security.Cryptography.ProtectedData": "[10.0.11, )"
+          "PerformanceMonitor.Analysis": "[3.10.0, )",
+          "PerformanceMonitor.Collectors": "[3.10.0, )",
+          "PerformanceMonitor.Common": "[3.10.0, )",
+          "PerformanceMonitor.Darling.Storage": "[3.10.0, )",
+          "PerformanceMonitor.Notifications": "[3.10.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.10.0, )"
         }
       },
       "performancemonitor.darling.storage": {
         "type": "Project",
         "dependencies": {
           "Npgsql": "[10.0.3, )",
-          "PerformanceMonitor.Analysis": "[3.9.0, )",
-          "PerformanceMonitor.Collectors": "[3.9.0, )",
-          "PerformanceMonitor.Common": "[3.9.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.9.0, )"
+          "PerformanceMonitor.Analysis": "[3.10.0, )",
+          "PerformanceMonitor.Collectors": "[3.10.0, )",
+          "PerformanceMonitor.Common": "[3.10.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.10.0, )"
         }
       },
       "performancemonitor.notifications": {
         "type": "Project",
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.12, )",
-          "PerformanceMonitor.Analysis": "[3.9.0, )"
+          "PerformanceMonitor.Analysis": "[3.10.0, )"
         }
       },
       "performancemonitor.plananalysis": {
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.1.1, )",
-          "PerformanceMonitor.Common": "[3.9.0, )",
-          "System.Security.Cryptography.ProtectedData": "[10.0.11, )"
+          "PerformanceMonitor.Common": "[3.10.0, )"
         }
       },
       "performancemonitor.ui": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.9.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.9.0, )",
+          "PerformanceMonitor.Common": "[3.10.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.10.0, )",
           "ScottPlot.WPF": "[5.1.59, )"
         }
       },
@@ -599,12 +600,6 @@
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "10.0.0"
         }
-      },
-      "System.Security.Cryptography.ProtectedData": {
-        "type": "CentralTransitive",
-        "requested": "[10.0.12, )",
-        "resolved": "10.0.11",
-        "contentHash": "PNoxCTPb+Tlux+GJyq4c89ddYdpioVSqfGx8pqOF6shCSKwUNNctXhQtRkCICjbJmGrJJsW8NY52kVYO/b8mlQ=="
       }
     }
   }
