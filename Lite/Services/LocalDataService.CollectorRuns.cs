@@ -184,13 +184,13 @@ public partial class LocalDataService
         {
             /* The server's first and last collection come from the same statement as the collectors, so the first-run
                grace compares two instants of one read. */
-            command.CommandText = @"
+            command.CommandText = $@"
 SELECT collector_name,
        MIN(collection_time) AS first_collected,
        MAX(collection_time) AS last_collected
 FROM v_collection_log
 WHERE server_id = $1
-AND   collector_name <> 'collection_cycle'
+AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
 GROUP BY collector_name";
 
             command.Parameters.Add(new DuckDBParameter { Value = serverId });

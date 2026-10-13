@@ -229,7 +229,7 @@ WITH health AS
     AND   collection_time >= $2
     -- #5643: the loop's skipped-slots row is not a collector run; as a collector it would show a row here and its
     -- SKIPPED status would count as a healthy run (last_success_time).
-    AND   collector_name <> 'collection_cycle'
+    AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
     GROUP BY collector_name
 )
 SELECT
@@ -701,11 +701,11 @@ ORDER BY h.collector_name";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = @"
+        command.CommandText = $@"
 SELECT 1
 FROM v_collection_log
 WHERE server_id = $1
-AND   collector_name <> 'collection_cycle'
+AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
 LIMIT 1";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -906,7 +906,7 @@ ORDER BY 1, 2";
 SELECT 1
 FROM v_collection_log
 WHERE server_id IN ({string.Join(",", serverIds)})
-AND   collector_name <> 'collection_cycle'
+AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
 LIMIT 1";
 
         return await command.ExecuteScalarAsync() is not null and not DBNull;

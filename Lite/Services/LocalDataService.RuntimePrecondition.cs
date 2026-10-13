@@ -86,7 +86,7 @@ LIMIT 1";
         using var command = connection.CreateCommand();
 
         /* All three halves read the bare collection_log together, on purpose (see the summary). */
-        command.CommandText = @"
+        command.CommandText = $@"
 SELECT (
            SELECT collection_time
            FROM collection_log
@@ -99,13 +99,13 @@ SELECT (
            SELECT MAX(collection_time)
            FROM collection_log
            WHERE server_id = $1
-           AND   collector_name <> 'collection_cycle'
+           AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
        ) AS server_last_collected,
        (
            SELECT MIN(collection_time)
            FROM collection_log
            WHERE server_id = $1
-           AND   collector_name <> 'collection_cycle'
+           AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
        ) AS server_first_collected";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

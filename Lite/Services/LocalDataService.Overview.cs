@@ -162,9 +162,9 @@ WHERE server_id = $1 AND deadlock_time >= $2";
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SELECT MAX(collection_time)
-FROM " + relation + @"
+FROM " + relation + $@"
 WHERE server_id = $1
-AND   collector_name <> 'collection_cycle'";
+AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             var result = await cmd.ExecuteScalarAsync();
             if (result != null && result != DBNull.Value)

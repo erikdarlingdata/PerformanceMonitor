@@ -54,7 +54,7 @@ deadlocks AS (
 ),
 bpr AS (
     SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3/*scope*/") + @" AS ev
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3/*scope*/") + $@" AS ev
     GROUP BY 1
 ),
 dmv AS (
@@ -85,7 +85,7 @@ coll AS (
            COUNT(*) FILTER (WHERE status = 'ERROR') AS errs
     FROM v_collection_log
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-    AND   collector_name <> 'collection_cycle'
+    AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
     GROUP BY 1
 ),
 mem AS (
