@@ -192,6 +192,11 @@ namespace PerformanceMonitor.Common
 
             /* #5641: Runnable Queue carries the window's average runnable tasks per scheduler, and the bar it crossed. */
             "Runnable Queue" => $"{value:F1} per scheduler",
+
+            /* #5640: Client Timeouts carries the attentions (client cancels and timeouts) per minute over the covered span, and the
+               bar it crossed. This leaf assembly cannot see the constant (AlertFamily.ClientTimeoutsMetric), so the name is a
+               literal here and a test pins it. */
+            "Client Timeouts" => $"{value:F1} per minute",
             "Long-Running Query" => $"{value:F0} m",
 
             /* #5450: "Collection Gap At Start" carries the whole minutes the service was not collecting before

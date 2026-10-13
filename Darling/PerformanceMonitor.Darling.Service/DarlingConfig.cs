@@ -814,6 +814,22 @@ public sealed class AlertsConfig
     [JsonPropertyName("runnableQueueCriticalPerScheduler")]
     public int RunnableQueueCriticalPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultCriticalPerScheduler;
 
+    /// <summary>The Client Timeouts alert (#5640) switch: client attentions (a client cancelled or timed out a query) per
+    /// minute, from the attention collector. OFF by default: the bars are a guess until checked against captured data.
+    /// Persisted as the store column <c>client_timeouts_enabled</c> (V179).</summary>
+    [JsonPropertyName("clientTimeoutsEnabled")]
+    public bool ClientTimeoutsEnabled { get; set; }
+
+    /// <summary>Client Timeouts Warning bar (#5640), attentions per minute over the covered span. Shipped 10. Read through
+    /// <see cref="AttentionEvaluator.ClampBars"/>. Store column <c>client_timeouts_warning_per_minute</c> (V179).</summary>
+    [JsonPropertyName("clientTimeoutsWarningPerMinute")]
+    public int ClientTimeoutsWarningPerMinute { get; set; } = AttentionEvaluator.DefaultWarningPerMinute;
+
+    /// <summary>Client Timeouts Critical bar (#5640). Shipped 60. Never read below the Warning bar. Store column
+    /// <c>client_timeouts_critical_per_minute</c> (V179).</summary>
+    [JsonPropertyName("clientTimeoutsCriticalPerMinute")]
+    public int ClientTimeoutsCriticalPerMinute { get; set; } = AttentionEvaluator.DefaultCriticalPerMinute;
+
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;
 

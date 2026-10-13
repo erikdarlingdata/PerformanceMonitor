@@ -884,6 +884,72 @@ ORDER BY collection_time DESC
         return samples;
     }
 
+    /* ---------------- client timeouts (#5640) ---------------- */
+
+    /// <summary>
+    /// The Client Timeouts alert's window read (#5640), the PostgreSQL-store twin of
+    /// <c>LocalDataService.GetAttentionWindowAsync</c>: five statements from the one shared <see cref="AttentionWindowSql"/> text over
+    /// <c>collection_log</c> and <c>attention_events</c> (successful runs, count rows, sample groups, then the three top-5
+    /// lists), on ONE connection. $1 server_id, $2 the parameterized naive-UTC floor (a bare <c>now()</c> is timestamptz and
+    /// would compare in the server's time zone against these naive-UTC columns; PostgreSQL keeps microseconds, so the floor is
+    /// a full-precision <see cref="DateTime"/>). Dumb by contract: no span, threshold or rule is applied here.
+    /// </summary>
+    public Task<AttentionWindow> GetAttentionWindowAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
+    {
+        /* The one retry seam (#3848), under the name the engine's catch arm records a failure under. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetAttentionWindowCoreAsync(serverKey, lookbackMinutes, ct),
+            serverKey,
+            "client timeouts",
+            cancellationToken);
+    }
+
+    private async Task<AttentionWindow> GetAttentionWindowCoreAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken)
+    {
+        var serverId = ParseServerKey(serverKey);
+        var floor = NaiveUtcNow().AddMinutes(-lookbackMinutes);
+
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+
+        var runs = await QueryAttentionAsync(connection, AttentionWindowSql.Runs("collection_log"), serverId, floor,
+            r => r.GetDateTime(0), cancellationToken);
+        var counts = await QueryAttentionAsync(connection, AttentionWindowSql.Counts("attention_events"), serverId, floor,
+            r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)), cancellationToken);
+        var groups = await QueryAttentionAsync(connection, AttentionWindowSql.SampleGroups("attention_events"), serverId, floor,
+            r => new AttentionSampleGroup(
+                r.GetDateTime(0),
+                r.IsDBNull(1) ? null : r.GetString(1),
+                r.IsDBNull(2) ? null : r.GetString(2),
+                r.GetInt64(3)), cancellationToken);
+        var statements = await QueryAttentionAsync(connection, AttentionWindowSql.TopStatements("attention_events"), serverId, floor,
+            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1), r.IsDBNull(2) ? null : r.GetString(2)), cancellationToken);
+        var databases = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "database_name"), serverId, floor,
+            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
+        var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "client_app_name"), serverId, floor,
+            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
+
+        return new AttentionWindow(runs, counts, groups, statements, databases, applications);
+    }
+
+    private static async Task<List<T>> QueryAttentionAsync<T>(
+        NpgsqlConnection connection, string sql, int serverId, DateTime floor, Func<NpgsqlDataReader, T> map, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(floor);
+
+        var rows = new List<T>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(map(reader));
+        }
+
+        return rows;
+    }
+
     /* ---------------- long-running queries ---------------- */
 
     /// <summary>The characters of a statement the long-running-query alert prints (#5320: judged whole, then cut to this).</summary>

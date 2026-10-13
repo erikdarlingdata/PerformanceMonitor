@@ -38,7 +38,7 @@ namespace PerformanceMonitor.Alerting;
 /// <para><b>Opt-in.</b> One instance per alert family, held by the engine; the fire site calls
 /// <see cref="IsEscalation"/> before its cooldown test, <see cref="Record"/> when it fires and <see cref="Close"/>
 /// when the incident clears. <see cref="IsOptedIn"/> names the metrics that do so, for the one downstream reader
-/// that has only the metric name (the Darling viewer's tray-toast cooldown). Runnable Queue is the only member.
+/// that has only the metric name (the Darling viewer's tray-toast cooldown). Runnable Queue and Client Timeouts (#5640) are the members.
 /// Every other alert with a Warning and a Critical level keeps the old behaviour: a worsening inside the window
 /// waits for the cooldown.</para>
 /// </summary>
