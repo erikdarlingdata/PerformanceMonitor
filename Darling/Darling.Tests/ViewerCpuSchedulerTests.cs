@@ -58,8 +58,13 @@ public sealed class ViewerCpuSchedulerSqlTests
         var sql = ViewerDataService.CpuSchedulerSnapshotSql;
 
         Assert.Contains("FROM v_cpu_scheduler_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        /* #5710: the newest collection_time in the window is found first and ALL of its rows are combined into one
+           (a collection written before the collector fix can be split across rows), so there is no ORDER BY ... LIMIT 1
+           row pick any more. */
+        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(total_runnable_tasks_count) AS integer) AS total_runnable_tasks_count", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
 
         /* The warning flags + NUMA / OS-memory columns the metric grid renders. */
         foreach (var column in new[]
@@ -363,6 +368,65 @@ public sealed class ViewerCpuSchedulerLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #5710: the rows of ONE collection_time are one collection. A split collection (two rows that each cover some of
+    /// the 8 schedulers) plots ONE trend point with the SUMmed runnable tasks (the blocked and queued counts are
+    /// repeats of one workload-group read, so their MAX), and the latest snapshot reads the SUM and the summed total
+    /// over scheduler_count, not whichever piece sorts first. The SUM test passes only when both rows count: 3 + 2.
+    /// </summary>
+    [Fact]
+    public async Task SplitCollection_PlotsOnePoint_AndTheSnapshotCombinesItsRows_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live cpu-scheduler test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteAsync(connection, ServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
+            var t2 = t1.AddMinutes(5);
+
+            /* t1: one exact row. t2: split in two, the higher collection_id inserted first. */
+            await InsertAsync(connection, 10, t1, runnable: 2, blocked: 0, queued: 0, workerWarn: false);
+            await InsertAsync(connection, 22, t2, runnable: 2, blocked: 4, queued: 1, workerWarn: false);
+            await InsertAsync(connection, 21, t2, runnable: 3, blocked: 4, queued: 1, workerWarn: false);
+
+            var trend = await viewer.GetCpuSchedulerTrendAsync(ServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
+            Assert.Equal(2, trend.Count);
+            Assert.Equal(new[] { 2, 5 }, trend.Select(p => p.RunnableTasks));
+            Assert.Equal(new[] { 0, 4 }, trend.Select(p => p.BlockedTasks));
+
+            var snapshot = await viewer.GetCpuSchedulerSnapshotAsync(ServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
+            Assert.NotNull(snapshot);
+            Assert.Equal(t2.Ticks, snapshot!.CollectionTime.Ticks);
+            Assert.Equal(8, snapshot.SchedulerCount);
+            Assert.Equal(5, snapshot.TotalRunnableTasksCount);
+            Assert.Equal(0.63m, snapshot.AvgRunnableTasksCount);
+            Assert.Equal(256, snapshot.TotalCurrentWorkersCount);
+
+            /* A one-row collection keeps its stored average (the helper's rule when COUNT(*) = 1). */
+            var single = await viewer.GetCpuSchedulerSnapshotAsync(ServerId, t1.AddMinutes(-1), t1.AddMinutes(1));
+            Assert.NotNull(single);
+            Assert.Equal(2, single!.TotalRunnableTasksCount);
+            Assert.Equal(0.5m, single.AvgRunnableTasksCount);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, ServerId, cleanupCt));
+        }
+    }
+
     private static async Task InsertAsync(
         NpgsqlConnection connection, long collectionId, DateTime collectionTimeUtc,
         int runnable, int blocked, int queued, bool workerWarn)
@@ -389,6 +453,112 @@ VALUES ($1, $2, $3, $4, 512, 8, 8, $5, 0, 128, 0.5, 2, $6, $7, 0, 3, 20, 12.5,
         command.Parameters.AddWithValue(queued);
         command.Parameters.AddWithValue(blocked);
         command.Parameters.AddWithValue(workerWarn);
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>
+    /// #5712 review: the request triple (<c>runnable_request_count</c>, <c>total_request_count</c>, <c>runnable_percent</c>)
+    /// and the memory group (total, available, state text, pressure flag) of a split collection each come from ONE stored
+    /// row, and the split average divides by <c>scheduler_count</c> even when offline CPUs are stored. Each collection is
+    /// built so independent MAX() columns would print a contradiction.
+    /// </summary>
+    [Fact]
+    public async Task SplitCollection_RequestAndMemoryGroupsComeFromOneRow_AndTheDivisorIsSchedulerCount_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live cpu-scheduler test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteAsync(connection, ServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-20));
+            var t2 = t1.AddMinutes(5);
+            var t3 = t1.AddMinutes(10);
+
+            /* t1: piece A (4 runnable of 8 requests, 50 %, ample memory) has the higher collection_id; piece B (3 of 9, 33.33 %)
+               holds the most requests and the LOW memory reading. MAX() columns would print 4 of 9 at 50 % and 65,536,000 KB
+               total with 32,768,000 KB available and no pressure; one row is B's triple and B's memory, pressure TRUE. */
+            await InsertFullAsync(connection, 31, t1, 4, 0, 4, 8, 50.00m, 65536000L, 32768000L, "Available physical memory is high");
+            await InsertFullAsync(connection, 30, t1, 4, 0, 3, 9, 33.33m, 60000000L, 4000000L, "Available physical memory is low");
+            var s1 = await viewer.GetCpuSchedulerSnapshotAsync(ServerId, t1.AddMinutes(-1), t1.AddMinutes(1));
+            Assert.NotNull(s1);
+            Assert.Equal(3, s1!.RunnableRequestCount);
+            Assert.Equal(9, s1.TotalRequestCount);
+            Assert.Equal(33.33m, s1.RunnablePercent);
+            Assert.Equal(60000000L, s1.TotalPhysicalMemoryKb);
+            Assert.Equal(4000000L, s1.AvailablePhysicalMemoryKb);
+            Assert.Equal("Available physical memory is low", s1.SystemMemoryStateDesc);
+            Assert.True(s1.PhysicalMemoryPressureWarning);
+
+            /* t2: equal request totals (10); the tie goes to the most runnable requests. Piece A is (5 of 10, 70 %), piece B
+               (6 of 10, 60 %): one row prints (6, 10, 60.00); MAX() would print the contradiction (6, 10, 70.00). */
+            await InsertFullAsync(connection, 41, t2, 4, 0, 5, 10, 70.00m, 65536000L, 32768000L, "Available physical memory is high");
+            await InsertFullAsync(connection, 40, t2, 4, 0, 6, 10, 60.00m, 65536000L, 32768000L, "Available physical memory is high");
+            var s2 = await viewer.GetCpuSchedulerSnapshotAsync(ServerId, t2.AddMinutes(-1), t2.AddMinutes(1));
+            Assert.NotNull(s2);
+            Assert.Equal(6, s2!.RunnableRequestCount);
+            Assert.Equal(10, s2.TotalRequestCount);
+            Assert.Equal(60.00m, s2.RunnablePercent);
+
+            /* t3: the measured affinity case, scheduler_count 1 with 3 offline CPUs stored (4 CPUs, AFFINITY CPU = 0). The split
+               average is 5 runnable tasks over scheduler_count 1, not NULL. */
+            await InsertFullAsync(connection, 51, t3, 1, 3, 4, 8, 50.00m, 65536000L, 32768000L, "Available physical memory is high", runnable: 3);
+            await InsertFullAsync(connection, 50, t3, 1, 3, 4, 8, 50.00m, 65536000L, 32768000L, "Available physical memory is high", runnable: 2);
+            var s3 = await viewer.GetCpuSchedulerSnapshotAsync(ServerId, t3.AddMinutes(-1), t3.AddMinutes(1));
+            Assert.NotNull(s3);
+            Assert.Equal(5, s3!.TotalRunnableTasksCount);
+            Assert.Equal(5.00m, s3.AvgRunnableTasksCount);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, ServerId, cleanupCt));
+        }
+    }
+
+    private static async Task InsertFullAsync(
+        NpgsqlConnection connection, long collectionId, DateTime collectionTimeUtc, int schedulerCount, int offlineCpus,
+        int runnableRequests, int totalRequests, decimal runnablePercent, long totalMemoryKb, long availableMemoryKb,
+        string memoryState, int runnable = 1)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO cpu_scheduler_stats
+    (collection_id, collection_time, server_id, server_name,
+     max_workers_count, scheduler_count, cpu_count,
+     total_runnable_tasks_count, total_work_queue_count, total_current_workers_count,
+     avg_runnable_tasks_count, total_active_request_count, total_queued_request_count,
+     total_blocked_task_count, total_active_parallel_thread_count,
+     runnable_request_count, total_request_count, runnable_percent,
+     worker_thread_exhaustion_warning, runnable_tasks_warning, blocked_tasks_warning,
+     queued_requests_warning, total_physical_memory_kb, available_physical_memory_kb,
+     system_memory_state_desc, physical_memory_pressure_warning,
+     total_node_count, nodes_online_count, offline_cpu_count, offline_cpu_warning)
+VALUES ($1, $2, $3, $4, 512, $5, 4, $6, 0, 64, 0.5, $7, 0, 0, 0, $8, $9, $10,
+        false, false, false, false, $11, $12, $13, false, 1, 1, $14, false)", connection);
+        command.Parameters.AddWithValue(collectionId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue(schedulerCount);
+        command.Parameters.AddWithValue(runnable);
+        command.Parameters.AddWithValue(totalRequests);
+        command.Parameters.AddWithValue(runnableRequests);
+        command.Parameters.AddWithValue(totalRequests);
+        command.Parameters.AddWithValue(runnablePercent);
+        command.Parameters.AddWithValue(totalMemoryKb);
+        command.Parameters.AddWithValue(availableMemoryKb);
+        command.Parameters.AddWithValue(memoryState);
+        command.Parameters.AddWithValue(offlineCpus);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 

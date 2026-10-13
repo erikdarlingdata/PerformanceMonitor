@@ -82,7 +82,7 @@ public sealed class TraceFlagEmptyRunLivePostgresTests
             /* The viewer's and the analysis pass's SQL are twins of the MCP reader's: same rows. */
             Assert.Equal(
                 runs.OrderBy(t => t),
-                (await ReadTimesAsync(postgres, ViewerDataService.EmptyTraceFlagRunsSql, windowStart, now, ct)).OrderBy(t => t));
+                (await ReadTimesAsync(postgres, DarlingRetentionHorizons.EmptyTraceFlagRunsSql, windowStart, now, ct)).OrderBy(t => t));
             Assert.Equal(
                 runs.OrderBy(t => t),
                 (await ReadTimesAsync(postgres, DarlingAnalysisService.EmptyTraceFlagRunsForAttributionSql, windowStart, now, ct)).OrderBy(t => t));
@@ -179,7 +179,7 @@ public sealed class TraceFlagEmptyRunLivePostgresTests
 
             /* Default retention 30 days: the floor is windowStart - 30 days = day -37, so the day -50 run is no baseline. */
             Assert.Empty(await DarlingCollectorRunFactsReader.ReadEmptyTraceFlagRunsAsync(postgres, ServerId, windowStart, now, ct));
-            Assert.Empty(await ReadTimesAsync(postgres, ViewerDataService.EmptyTraceFlagRunsSql, windowStart, now, ct));
+            Assert.Empty(await ReadTimesAsync(postgres, DarlingRetentionHorizons.EmptyTraceFlagRunsSql, windowStart, now, ct));
             Assert.Empty(await ReadTimesAsync(postgres, DarlingAnalysisService.EmptyTraceFlagRunsForAttributionSql, windowStart, now, ct));
             var json = await DarlingMcpConfigHistoryTools.GetTraceFlagChanges(postgres, ServerName);
             Assert.DoesNotContain("enabled", json.Replace("\"change_type\":\"modified\"", string.Empty));
@@ -195,7 +195,7 @@ public sealed class TraceFlagEmptyRunLivePostgresTests
                 var runs = await DarlingCollectorRunFactsReader.ReadEmptyTraceFlagRunsAsync(postgres, ServerId, windowStart, now, ct);
                 Assert.Single(runs);
                 Assert.True(Within(runs[0], tooOld));
-                Assert.Single(await ReadTimesAsync(postgres, ViewerDataService.EmptyTraceFlagRunsSql, windowStart, now, ct));
+                Assert.Single(await ReadTimesAsync(postgres, DarlingRetentionHorizons.EmptyTraceFlagRunsSql, windowStart, now, ct));
                 Assert.Single(await ReadTimesAsync(postgres, DarlingAnalysisService.EmptyTraceFlagRunsForAttributionSql, windowStart, now, ct));
             }
 

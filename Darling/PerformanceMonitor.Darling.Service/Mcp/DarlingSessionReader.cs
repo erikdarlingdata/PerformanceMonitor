@@ -389,6 +389,10 @@ internal static class DarlingSessionReader
     /// longest-waiting thread blocked by another session, so a real blocker is never dropped. <c>blocking_session_ids</c> lists every
     /// distinct blocker other than the session itself, only when the threads have more than one.</para>
     ///
+    /// <para><b>The wait type is grouped and projected trimmed (#5633 review).</b> Rows written before #4884 carry a trailing space
+    /// (<c>'LCK_M_X '</c>), and a raw <c>GROUP BY wait_type</c> split one wait into two rows; <c>rtrim(wait_type)</c> is what Lite and
+    /// <c>ViewerDataService.BlockingTrends</c> already group on.</para>
+    ///
     /// <para>The cap is a PARAMETER, not a literal (#3541 A3). It was <c>LIMIT 500</c> under a tool that
     /// advertised <c>limit</c>, applied it with <c>Take(limit)</c>, and then published a bare envelope with no
     /// window, no count and no bound — so a caller could not tell thirty tasks from thirty of five thousand.</para>
@@ -397,7 +401,7 @@ internal static class DarlingSessionReader
         SELECT
             collection_time,
             session_id,
-            wait_type,
+            rtrim(wait_type) AS wait_type,
             MAX(wait_duration_ms) AS wait_duration_ms,
             COALESCE(
                 (array_agg(CASE WHEN blocking_session_id <> session_id THEN blocking_session_id END
@@ -417,7 +421,7 @@ internal static class DarlingSessionReader
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
         {{DatabaseFilter.All.Clause("database_name", 5)}}
-        GROUP BY collection_time, session_id, wait_type, database_name
+        GROUP BY collection_time, session_id, rtrim(wait_type), database_name
         ORDER BY collection_time DESC, MAX(wait_duration_ms) DESC
         LIMIT $4
         """;

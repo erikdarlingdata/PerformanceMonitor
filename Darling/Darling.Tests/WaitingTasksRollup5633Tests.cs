@@ -35,7 +35,9 @@ public sealed class WaitingTasksRollup5633Tests
     public void WaitingTasksSql_RollsUpPerSessionAndWaitType_AndNeverReportsSelfBlocking()
     {
         var sql = DarlingSessionReader.WaitingTasksSql;
-        Assert.Contains("GROUP BY collection_time, session_id, wait_type", sql, StringComparison.Ordinal);
+        /* #5633 review: grouped and projected on the trimmed name, like Lite and ViewerDataService.BlockingTrends. */
+        Assert.Contains("GROUP BY collection_time, session_id, rtrim(wait_type)", sql, StringComparison.Ordinal);
+        Assert.Contains("rtrim(wait_type) AS wait_type", sql, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) AS thread_count", sql, StringComparison.Ordinal);
         Assert.Contains("FILTER (WHERE blocking_session_id <> session_id)", sql, StringComparison.Ordinal);
         Assert.Contains("BOOL_OR(blocking_session_id = session_id)", sql, StringComparison.Ordinal);
@@ -215,6 +217,59 @@ public sealed class WaitingTasksRollup5633Tests
             Assert.Equal("res-22", equal.GetProperty("resource_description").GetString());
             Assert.Equal(22, equal.GetProperty("blocking_session_id").GetInt32());
             Assert.Equal(new[] { 22, 33 }, equal.GetProperty("blocking_session_ids").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM collect.waiting_tasks WHERE server_id = $1", serverId);
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM collect.servers WHERE server_id = $1", serverId);
+            });
+        }
+    }
+
+    /// <summary>#5633 review: rows written before #4884 carry the DMV's trailing space (<c>'LCK_M_X '</c>). A raw <c>GROUP BY wait_type</c>
+    /// split one session's wait into a padded row and a trimmed row, and projected the padded name. The rollup groups and projects
+    /// <c>rtrim(wait_type)</c>, the way Lite and <c>ViewerDataService.BlockingTrends</c> do.</summary>
+    [Fact]
+    public async Task PaddedAndTrimmedWaitType_AreOneRow_ProjectedTrimmed()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the waiting-tasks rollup live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        var serverName = "wt5633d_" + Guid.NewGuid().ToString("N");
+        var serverId = ServerIdHelper.GetDeterministicHashCode(serverName);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            var capture = DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-5), DateTimeKind.Unspecified);
+            await using (var seed = new NpgsqlConnection(cs))
+            {
+                await seed.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(seed, ct);
+                await DarlingMcpTestData.RegisterServerAsync(seed, serverId, serverName, ct);
+
+                /* Session 90: one thread stored padded (pre-#4884), one trimmed. Session 91: only a padded row. */
+                await InsertAsync(seed, serverId, serverName, capture, 90, "LCK_M_X ", 400, 12, ct, "res-padded");
+                await InsertAsync(seed, serverId, serverName, capture, 90, "LCK_M_X", 200, 12, ct, "res-trimmed");
+                await InsertAsync(seed, serverId, serverName, capture, 91, "PAGEIOLATCH_SH ", 300, null, ct, "res-only-padded");
+            }
+
+            using var doc = JsonDocument.Parse(await DarlingMcpSessionTools.GetWaitingTasks(postgres, serverName, 1, 30, cancellationToken: ct));
+            var tasks = doc.RootElement.GetProperty("tasks").EnumerateArray().ToList();
+            Assert.Equal(2, tasks.Count);
+
+            var mixed = tasks.Single(t => t.GetProperty("session_id").GetInt32() == 90);
+            Assert.Equal("LCK_M_X", mixed.GetProperty("wait_type").GetString());
+            Assert.Equal(2, mixed.GetProperty("thread_count").GetInt32());
+            Assert.Equal(400, mixed.GetProperty("wait_duration_ms").GetInt64());
+
+            var padded = tasks.Single(t => t.GetProperty("session_id").GetInt32() == 91);
+            Assert.Equal("PAGEIOLATCH_SH", padded.GetProperty("wait_type").GetString());
 
             bodySucceeded = true;
         }

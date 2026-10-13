@@ -72,21 +72,19 @@ LIMIT 1";
         }
     }
 
-    /// <summary>#3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A
-    /// run-overlap or clock-resolution collision can store two DIFFERENT snapshots under one
-    /// <c>collection_time</c> — <c>collection_id</c> is the per-process monotonic counter every row already
-    /// carries, so it orders two same-instant rows the same way on every read instead of a bare
-    /// <c>LIMIT 1</c> returning either one depending on physical row order, which would otherwise make the
-    /// RUNNABLE_TASKS fact (and the THREADPOOL amplifier reading its warning flag) flip between two answers
-    /// across analysis passes with no change in the server.</summary>
-    public const string RunnableTaskStatsSql = @"
+    /// <summary>#5710: the newest <c>collection_time</c> is found first, then ALL of its rows are combined into one
+    /// (<see cref="PerformanceMonitor.Common.CpuSchedulerCollectionSql"/>): a collection written before the collector
+    /// fix can be split across several rows that each cover some of the schedulers, so the runnable tasks are their SUM
+    /// and the warning flag is recomputed from that sum. This replaces the #3936 <c>collection_id DESC</c> tiebreak, which
+    /// kept the RUNNABLE_TASKS fact (and the THREADPOOL amplifier reading its warning flag) from flipping between two
+    /// answers across analysis passes: with every same-instant row folded into one, no physical row order can change it.</summary>
+    public static readonly string RunnableTaskStatsSql = $@"
+WITH newest AS
+(
+    {PerformanceMonitor.Common.CpuSchedulerCollectionSql.PerCollection("cpu_scheduler_stats", "server_id = $1 AND collection_time >= $2 AND collection_time <= $3", newestOnly: true)}
+)
 SELECT total_runnable_tasks_count, runnable_tasks_warning
-FROM cpu_scheduler_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-ORDER BY collection_time DESC, collection_id DESC
-LIMIT 1";
+FROM newest";
 
     /// <summary>
     /// Collects the runnable-task-queue pressure signal from the EXISTING cpu_scheduler_stats snapshot

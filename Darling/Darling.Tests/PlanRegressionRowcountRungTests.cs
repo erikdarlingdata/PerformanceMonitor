@@ -120,21 +120,26 @@ public sealed class PlanRegressionRowcountRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         Assert.Equal("hasPlanRegressionDailyRowcount", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasServiceVersion", parameters[ProbeOrdinal - 1].Name);
-        Assert.Equal(ProbeOrdinal, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 1, parameters.Length - 1);
 
         /* Every sentinel present maps to exactly this build's version; this sentinel absent maps one rung back. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-        Assert.Equal(RungVersion, (int)method.Invoke(null, all)!);
+        /* V176 (#5638) sits above this rung: with only this sentinel and those below it the store maps to this rung. */
+        var topAbsent = (object[])all.Clone();
+        topAbsent[ProbeOrdinal + 1] = false;
+        Assert.Equal(RungVersion, (int)method.Invoke(null, topAbsent)!);
 
         var behind = (object[])all.Clone();
         behind[ProbeOrdinal] = false;
+        behind[ProbeOrdinal + 1] = false;
         Assert.Equal(RungVersion - 1, (int)method.Invoke(null, behind)!);
 
         /* In the source the arm sits ABOVE V174's and returns this rung's version. */
