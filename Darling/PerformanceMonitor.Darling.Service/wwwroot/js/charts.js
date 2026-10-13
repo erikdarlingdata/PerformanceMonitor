@@ -189,11 +189,16 @@ function watchPlotWidth(host, draw, key, drawnW) {
    point to point would run a straight diagonal across it and read as data. A gap is a jump between two neighbouring
    timestamps of more than GAP_FACTOR times the series' own median interval, never less than GAP_FLOOR_MS (a collector can
    miss a cycle without that being worth a break). Fewer than three points have no normal interval to compare against, so
-   they never break. Every time-series line, area and stacked chart goes through this, so no caller inserts null points. */
+   they never break. Every time-series line, area and stacked chart goes through this, so no caller inserts null points.
+   A break is for a SAMPLED series that went silent, so it needs a cadence to be silent against. A series of events
+   (clusters of rows with hours between them) has none: its spacing runs from seconds to hours, the median is tiny, and
+   the floor would cut it into lone dots. A series has a cadence when its interquartile spacing is tight (the 75th
+   percentile of the intervals is within GAP_FACTOR times the 25th); one with no cadence never breaks (#5644 H4b). */
 const GAP_FACTOR = 3;
 const GAP_FLOOR_MS = 5 * 60 * 1000;
 
-/* The break threshold, in ms, for ascending timestamps (epoch ms); Infinity when there is nothing to compare against. */
+/* The break threshold, in ms, for ascending timestamps (epoch ms); Infinity when there is nothing to compare against or
+   the series has no regular cadence (events). */
 export function gapThresholdMs(times) {
   const deltas = [];
   for (let i = 1; i < times.length; i++) {
@@ -203,6 +208,8 @@ export function gapThresholdMs(times) {
   if (deltas.length < 2) return Infinity;
   deltas.sort((a, b) => a - b);
   const mid = deltas.length >> 1;
+  const quantile = (p) => deltas[Math.round((deltas.length - 1) * p)];
+  if (quantile(0.75) > GAP_FACTOR * quantile(0.25)) return Infinity;
   const median = deltas.length % 2 ? deltas[mid] : (deltas[mid - 1] + deltas[mid]) / 2;
   return Math.max(GAP_FACTOR * median, GAP_FLOOR_MS);
 }
