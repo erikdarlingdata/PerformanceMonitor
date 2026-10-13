@@ -69,7 +69,9 @@ At each report:
 At each wave boundary, backtrack every issue number the wave filed or touched:
 - close what is done;
 - give every open issue a disposition comment and a work-order rank;
-- fix the `in-progress` labels.
+- fix the `in-progress` labels;
+- run `pwsh -NoProfile -File .claude/skills/lane-orders/rig-sweep.ps1` and act on its summary: it stops the rigs
+  whose lane is gone, and lists unregistered `postgres.exe` postmasters for you to check by PID (#5787).
 A wave that files follow-ups faster than it closes them hides its own backlog.
 
 After each wave, measure it with `lane-audit.py`, as the guardrails' "Measure every wave" section says. Record the
@@ -132,22 +134,30 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
 
 1. Use a current runtime zip at `<PG_RUNTIME_ZIP>`. If it is missing or stale, run `Darling/tools/fetch-pg-runtime.ps1`,
    which is what CI runs. A stale zip fails the runtime-version pin tests.
-2. Extract it to `<RIG_DIR>`, then run `initdb -D <RIG_DIR>/data -U darling -A trust --encoding=UTF8`.
-3. Append to `postgresql.conf`:
-   - `shared_preload_libraries = 'timescaledb,pg_stat_statements'`. This is the exact value the `darling-pg` job's
+2. Start the rig with the start helper, never by hand. Use your own `<RIG_PORT>`, one per lane, and a `<RIG_DIR>`
+   under your scratchpad folder or a worktree (the helpers refuse any other place). `-Owner` is your worktree path:
+
+       pwsh -NoProfile -File C:\GitHub\PerformanceMonitor\.claude\skills\lane-orders\rig-start.ps1 -Port <RIG_PORT> -RigDir <RIG_DIR> -Owner <your worktree path>
+
+   It refuses a busy port or a non-empty `<RIG_DIR>`, extracts `-Zip` (default: the runtime zip above) into
+   `<RIG_DIR>`, runs `initdb -D <RIG_DIR>/data -U darling -A trust --encoding=UTF8`, and appends to
+   `postgresql.conf`, before the server starts:
+   - `shared_preload_libraries = 'timescaledb,pg_stat_statements'`, the exact value the `darling-pg` job's
      "Initialize and start throwaway PostgreSQL" step writes in `.github/workflows/build.yml`. Without
      `pg_stat_statements` a rig skips the live tests that count statements through it (for example
      `StoreSizeCacheLiveTests`) instead of running them, so a green local run proves less than CI's.
-   - `port = <RIG_PORT>`
-   - `listen_addresses = '127.0.0.1'`
-   - `timescaledb.max_background_workers` and `max_worker_processes`, as CI's `darling-pg` job sets them.
+   - `port`, `listen_addresses = '127.0.0.1'`, and `timescaledb.max_background_workers` and
+     `max_worker_processes` as CI's `darling-pg` job sets them.
    - `timezone = 'UTC'` and `log_timezone = 'UTC'`. initdb takes the machine's time zone, but CI's runners run
      in UTC, and a rig must match CI: time-sensitive live tests have failed on a rig in another time zone. A rig
      in UTC does not excuse a failure: CI still decides whose it is.
-   - Change `postgresql.conf` before you start the server. A restart during a running suite breaks that run's
-     results, and so does a re-run on the database that run left behind.
-4. Check the port is free. Start the server in the background, because `pg_ctl -w start` hangs a tool call, and
-   confirm "ready to accept connections" in the log.
+
+   It then starts the server without holding your tool call open, checks the log says "ready to accept
+   connections", and registers the cluster in `C:\GitHub\worktrees\.rig-registry.tsv` (outside every repo, never
+   committed): data directory, postmaster PID, port, start time (UTC) and owner.
+3. Never edit `postgresql.conf` and restart during a suite. A restart during a running suite breaks that run's
+   results, and so does a re-run on the database that run left behind.
+4. A rig started by hand is not registered: the sweep lists it but cannot tell whether its lane is gone.
 5. Create `darlingtest` for the suite, and a separate `probe` database for hand-run SQL. A suite database reused
    across several full runs produces false failures; drop and recreate it before a final run. Also create a
    database named `darling`, exactly as CI's init step does: `createdb -h 127.0.0.1 -p <RIG_PORT> -U darling darling`.
@@ -155,7 +165,14 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
    without it.
 6. Set `DARLING_TEST_PG` to `Host=127.0.0.1;Port=<RIG_PORT>;Username=darling;Database=darlingtest`. Set
    `DARLING_TEST_PGRUNTIME=<RIG_DIR>` only when you touch the managed runtime or role provisioning.
-7. Stop the server when you finish.
+7. Stop the rig when you finish, and before your wall clock runs out, with the stop helper:
+
+       pwsh -NoProfile -File C:\GitHub\PerformanceMonitor\.claude\skills\lane-orders\rig-stop.ps1 -DataDir <RIG_DIR>/data
+
+   It runs `pg_ctl stop -m fast` from the rig's own runtime; when `pg_ctl` is missing it stops the PID in
+   `postmaster.pid`, only once that PID proves to be `postgres.exe` started on that data directory. It never stops
+   by image name. Then it deletes the rig folder and drops the registry line. A rig you leave running is stopped by
+   the coordinator's `rig-sweep.ps1` at the wave boundary once your worktree is gone or its postmaster has died.
 
 ## Build and test
 
