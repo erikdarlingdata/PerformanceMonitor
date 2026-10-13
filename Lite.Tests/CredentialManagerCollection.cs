@@ -39,6 +39,7 @@ public sealed class CredentialManagerCollection
 /// races every other one, because Windows can lose a read of one entry while another thread writes or deletes a
 /// different one. The scan looks for the calls that reach the real store from a test.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CredentialManagerCollectionCensusTests
 {
     /* The calls that reach the real Credential Manager from a test: a real CredentialService or CredentialStore, the one a
