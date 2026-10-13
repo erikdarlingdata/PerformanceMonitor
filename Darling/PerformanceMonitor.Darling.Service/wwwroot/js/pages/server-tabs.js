@@ -40,7 +40,7 @@
  */
 
 import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, metricNote, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
-import { renderPanel, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
+import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { pgPlanColumn } from "./pg-plan-viewer.js";
@@ -217,7 +217,7 @@ function fanout(read, params, specs) {
       const body = shells[i].body;
       if (hidesPanel(spec, res, shells[i], keys[i])) return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-      if (res.kind === "empty") return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), emptyStrip(res.message)]);
+      if (res.kind === "empty") return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), emptyStrip(emptyHeadline(spec, res))]);
       try {
         /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so
            hand vizLine the fetch's `hours` as `windowHours` — otherwise a fanout line panel (Current Waits,
@@ -1000,9 +1000,9 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  * and its process rows follow the database filter.
  * `control` (#5226) is a node drawn under the title, before the rows: the ranking selector on the Top Queries and Top Procedures cards.
  */
-function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null) {
+function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false) {
   if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");
-  const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope, extensionMissingLine };
+  const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope, extensionMissingLine, emptyWins };
   if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
   if (control) desc.control = control;
   return renderPanel(desc);
@@ -1054,8 +1054,12 @@ function line(title, read, params, rowsKey, xKey, series, opts = {}) {
     format: opts.format,
     unit: opts.unit,
     emptyText: opts.emptyText,
+    /* #5644 W16: the page's one sentence replaces the read's own empty message. */
+    emptyWins: opts.emptyWins === true,
     /* #5244: the answer's field naming the collector that answered (get_blocking_trend's `source`); absent on every other line. */
     sourceKey: opts.sourceKey,
+    /* #5644 W16: wording that follows the collector that answered (see BLOCKING_BY_SOURCE); absent on every other line. */
+    bySource: opts.bySource,
     /* The panel is not drawn when the server answers "not collected" (it does not apply to this kind of server). */
     hideWhenNotCollected: opts.hideWhenNotCollected === true,
     span: opts.span ?? 1,
@@ -1095,12 +1099,14 @@ export const SERVER_TABS = [
         format: "mb",
         emptyText: "No memory samples in this window.",
       }),
-      line("Blocking Events", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
+      line("Blocked process report trend", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", BLOCKING_REPORT_SERIES, {
         subtitle: ctx.label,
         format: "int",
+        unit: "reports",
         atTimeItem: "blocking",
         sourceKey: "source",
-        emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
+        bySource: BLOCKING_BY_SOURCE,
+        emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
       }),
       line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
@@ -1316,18 +1322,21 @@ export const SERVER_TABS = [
       daysText(widestHours) +
       ". A Custom View can show more blocking and deadlock history.",
     build: (server, ctx) => [
-      line("Blocking Events", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
+      line("Blocked process report trend", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", BLOCKING_REPORT_SERIES, {
         subtitle: ctx.label,
         format: "int",
+        unit: "reports",
         atTimeItem: "blocking",
         sourceKey: "source",
-        emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
+        bySource: BLOCKING_BY_SOURCE,
+        emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
       }),
       line("Deadlock trend", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
         format: "int",
         atTimeItem: "deadlocks",
         emptyText: DEADLOCKS_EMPTY_TEXT,
+        emptyWins: true,
       }),
       table(
         "Blocking",
@@ -1351,7 +1360,13 @@ export const SERVER_TABS = [
         ctx.label,
         DEADLOCKS_EMPTY_TEXT,
         2,
-        "separately_monitored_note"
+        "separately_monitored_note",
+        null,
+        null,
+        null,
+        null,
+        null,
+        true
       ),
       /* #2484: the Current Waits tab the viewer has and the browser did not. ONE read, two panels --
          via fanout, not two line() calls, because the tab must not fetch the same read twice (there is
@@ -1418,7 +1433,8 @@ export const SERVER_TABS = [
           rowsKey: "deadlock_severity",
           xKey: "time",
           series: DEADLOCK_SEVERITY_SERIES,
-          emptyText: "No deadlocks in this window.",
+          emptyText: DEADLOCKS_EMPTY_TEXT,
+          emptyWins: true,
         },
       ]),
       deadlockGraphsPanel(server, ctx),
@@ -3165,6 +3181,14 @@ const MEMORY_SERIES = [
 /* The two trend reads that return {time, count}. Every panel that charts them declares `format: "int"`: counts
    put their gridlines on whole numbers (charts.js integerTicks) instead of repeating one label down a 0-1 axis. */
 const COUNT_SERIES = [{ key: "count", label: "Events" }];
+
+/* #5644 W16: get_blocking_trend counts one point per blocked-process REPORT (a single wait can produce several), so the
+   chart says "reports" where the tile beside it counts one event per wait. Same read and same count as COUNT_SERIES. */
+const BLOCKING_REPORT_SERIES = [{ key: "count", label: "Reports" }];
+/* When get_blocking_trend has no blocked process reports for the window and falls back to the DMV blocking snapshot (AWS RDS and any
+   server without the blocked process report event), a point counts snapshot rows, not reports: title, legend and axis follow the
+   answer's `source` (panels.js applies it), so the chart never calls snapshot rows reports. */
+const BLOCKING_BY_SOURCE = { "DMV snapshot": { title: "Blocking snapshot trend", label: "Snapshot rows", unit: "snapshot rows" } };
 
 /* #2484: the aggregate lock-wait rate. One numeric key, per the same reasoning as the Current Waits series
    below — the LCK wait type is the grouping the read applied, not a second axis. */

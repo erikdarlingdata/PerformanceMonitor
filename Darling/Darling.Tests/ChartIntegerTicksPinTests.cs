@@ -71,9 +71,9 @@ public sealed class ChartIntegerTicksPinTests
 
         /* The four Blocking Events / Deadlocks line panels (Overview and Locking tabs): each one that charts
            COUNT_SERIES carries the format, counted against the panels that chart it. */
-        var countPanels = Regex.Matches(tabs, @"COUNT_SERIES, \{").Count;
+        var countPanels = Regex.Matches(tabs, @"(?:COUNT_SERIES|BLOCKING_REPORT_SERIES), \{").Count;
         Assert.Equal(4, countPanels);
-        Assert.Equal(countPanels, Regex.Matches(tabs, @"COUNT_SERIES, \{\n\s+subtitle: ctx\.label,\n\s+format: ""int"",").Count);
+        Assert.Equal(countPanels, Regex.Matches(tabs, @"(?:COUNT_SERIES|BLOCKING_REPORT_SERIES), \{\n\s+subtitle: ctx\.label,\n\s+format: ""int"",").Count);
 
         /* The Blocked Sessions chart is a fanout spec rather than a line() call. */
         Assert.Matches(@"series: BLOCKED_SESSION_SERIES,\n\s+format: ""int"",", tabs);
@@ -85,7 +85,7 @@ public sealed class ChartIntegerTicksPinTests
     public void TheStarterDashboardAndComposedCountCharts_AskForWholeNumberTicks()
     {
         var templates = Js("view-templates.js");
-        Assert.Matches(@"series: \[\{ key: ""count"", label: ""Events"" \}\],\n\s+format: ""int"",", templates);
+        Assert.Matches(@"series: \[\{ key: ""count"", label: ""Reports"" \}\],\n\s+format: ""int"",", templates);
         Assert.Contains("...READ_FIELDS.get_deadlock_trend.line,", templates, StringComparison.Ordinal);
         Assert.Matches(@"get_deadlock_trend: \{[\s\S]*?line: \{[^}]*?format: ""int"",[^}]*?label: ""Deadlocks""", Js("read-fields.js"));
 

@@ -151,6 +151,23 @@ public sealed class WebClampCellBehaviourTests
     }
 
     [Fact]
+    public void TheAlertHistoryDetailColumn_LocalizesItsTimeLines_AndNeverTheSqlLines()
+    {
+        // #5644 W20 (H1): get_alert_history's detail_text opts in with localizeAlertDetail; localizeText is never used on a column of SQL.
+        var d = Run().GetProperty("alertDetail");
+        var raw = d.GetProperty("raw").GetString()!;
+        Assert.Equal(raw, d.GetProperty("notOpted").GetString());
+        var opted = d.GetProperty("opted").GetString()!;
+        Assert.Contains(d.GetProperty("sinceLocal").GetString()!, opted);
+        Assert.Contains(d.GetProperty("sampleLocal").GetString()!, opted);
+        Assert.Contains(d.GetProperty("sqlLine").GetString()!, opted);
+        Assert.DoesNotContain("23:13:00Z", opted);
+
+        var fields = Wwwroot("js", "read-fields.js");
+        Assert.Contains("{ key: \"detail_text\", label: \"Detail\", wrap: true, localizeAlertDetail: true },", fields, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void EnterOpensTheCell_AndOtherKeysDoNot()
     {
         var r = Run();
