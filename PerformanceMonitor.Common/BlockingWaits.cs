@@ -57,12 +57,13 @@ public static class BlockingWaits
     /// wait time. Evidence: a DMV snapshot's <c>event_time</c> is the collector's own stamp
     /// (<c>CollectionTimeClock.NextStrictlyAfter(..., DateTime.UtcNow)</c>), taken at the start of the run, before
     /// the store connection and the SQL Server connection open and before the query reads
-    /// <c>wait_duration_ms</c>; the derived start is therefore the true start minus that run's lead time, tens of
-    /// milliseconds on a pooled connection and varying from run to run. PostgreSQL and DuckDB keep microseconds, so
-    /// the store adds none. 150 ms covers that spread and stays under the 200 ms re-block gap #5743 reports (the
-    /// ceiling: a larger value would merge that case again). A continuing wait first seen with a
-    /// <c>wait_time_ms</c> below this value can still split, when its next row's lead time is longer by more than
-    /// the first row's wait time plus this value.
+    /// <c>wait_duration_ms</c>; the derived start is therefore the true start minus that run's lead time, which
+    /// varies from run to run (not measured). PostgreSQL and DuckDB keep microseconds, so the store adds none.
+    /// 150 ms stays under the 200 ms re-block gap #5743 reports (the ceiling: a larger value would merge that case
+    /// again). A continuing wait splits by mistake only when its next row's lead time is longer than its first
+    /// row's by more than the first row's wait time plus this value. The collector keeps only waits of at least
+    /// 500 ms (page latches; 1 s, 2 s and 5 s for the other wait types it reads), so that takes a run-to-run lead
+    /// difference above 650 ms.
     /// </summary>
     public const long WaitStartJitterMs = 150;
 
