@@ -87,6 +87,38 @@ public sealed class ClientTimeoutAlertDetailTests
     }
 
     [Fact]
+    public void ASpanWithSamples_ListsAreTheSpans_HeadingsStayPlain_AndThePrefillTakesTheirTopEntries()
+    {
+        var items = AlertContextBuilders.BuildClientTimeoutItems(Finding(false), Window());
+
+        Assert.Contains(items, i => i.Heading == "Top databases (sampled events)");
+        Assert.Contains(items, i => i.Heading == "Top client applications (sampled events)");
+        Assert.DoesNotContain(items, i => i.Heading.Contains("in the last", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ASpanWithNoSamples_ShowsTheLookbackLists_SaysTheirRealSpan_AndPrefillsNothingFromThem()
+    {
+        var window = Window() with { TopsFromLookback = true };
+        var context = new AlertContext();
+        foreach (var item in AlertContextBuilders.BuildClientTimeoutItems(Finding(false), window))
+        {
+            context.Details.Add(item);
+        }
+
+        var headings = context.Details.Select(i => i.Heading).ToList();
+        Assert.Contains("Top databases (sampled events in the last 60 minutes)", headings);
+        Assert.Contains("Top client applications (sampled events in the last 60 minutes)", headings);
+        Assert.Contains(headings, h => h.StartsWith("Top statement 1: ", StringComparison.Ordinal)
+            && h.EndsWith(" in the last 60 minutes", StringComparison.Ordinal));
+
+        var mute = new AlertMuteContext { ServerName = "sql01", MetricName = AttentionEvaluator.MetricName };
+        mute.PopulateFromDetailText(AlertContextBuilders.ContextToDetailText(context), AttentionEvaluator.MetricName);
+        Assert.Null(mute.ClientAppName);
+        Assert.Null(mute.DatabaseName);
+    }
+
+    [Fact]
     public void TheWebPrefill_ParsesTheSameLabelsAsTheDesktopDialogs()
     {
         var script = System.IO.File.ReadAllText(RepoFile("Darling/PerformanceMonitor.Darling.Service/wwwroot/js/mute-context.js"));

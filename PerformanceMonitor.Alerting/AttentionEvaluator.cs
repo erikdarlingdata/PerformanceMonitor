@@ -29,7 +29,8 @@ public sealed record AttentionCountRow(DateTime CollectionTime, long Count);
 public sealed record AttentionSampleGroup(DateTime CollectionTime, string? DatabaseName, string? ClientAppName, long Samples);
 
 /// <summary>One entry of a top-5 list in the read: a statement fingerprint, a database or a client application, ranked by
-/// its sampled event count over the whole lookback.</summary>
+/// its sampled event count over the range the read covers (the alert card's covered span, or the whole lookback when the span kept
+/// no samples; see <see cref="AttentionWindow.TopsFromLookback"/>).</summary>
 /// <param name="Name">The fingerprint, database name or application name. Rows that carry none are not listed.</param>
 /// <param name="Samples">Sampled events carrying it in the lookback.</param>
 /// <param name="SampleText">For a statement fingerprint, one sample's statement text (already through the statement filter);
@@ -47,13 +48,17 @@ public sealed record AttentionTopItem(string Name, long Samples, string? SampleT
 /// <param name="TopStatements">The top 5 statement fingerprints by sampled events, each with one sample text.</param>
 /// <param name="TopDatabases">The top 5 databases by sampled events.</param>
 /// <param name="TopApplications">The top 5 client applications by sampled events.</param>
+/// <param name="TopsFromLookback">False (the default): the three top lists cover the samples inside the covered span
+/// (<see cref="AttentionEvaluator.SpanBoundary"/> onward), the alert card's reading. True: the span kept no samples, so the lists
+/// cover the whole lookback and the card says so in its headings (round 2 of #5714, L6).</param>
 public sealed record AttentionWindow(
     IReadOnlyList<DateTime> RunTimes,
     IReadOnlyList<AttentionCountRow> Counts,
     IReadOnlyList<AttentionSampleGroup> SampleGroups,
     IReadOnlyList<AttentionTopItem> TopStatements,
     IReadOnlyList<AttentionTopItem> TopDatabases,
-    IReadOnlyList<AttentionTopItem> TopApplications)
+    IReadOnlyList<AttentionTopItem> TopApplications,
+    bool TopsFromLookback = false)
 {
     /// <summary>No runs, no rows: what a read of a server that never ran the collector returns.</summary>
     public static AttentionWindow Empty { get; } = new(
@@ -179,6 +184,13 @@ public static class AttentionEvaluator
             return null;
         }
 
+        return Take(window, runs, OldestTaken(runs));
+    }
+
+    /// <summary>The index of the oldest run <see cref="Read"/> takes: runs are added newest first until the span from the run before
+    /// the oldest taken run to the newest run reaches <see cref="WindowMinutes"/>, or the history runs out. Needs at least two runs.</summary>
+    private static int OldestTaken(List<DateTime> runs)
+    {
         var newest = runs[0];
         var oldestTaken = 0;
         for (var k = 0; k < runs.Count - 1; k++)
@@ -190,7 +202,41 @@ public static class AttentionEvaluator
             }
         }
 
-        return Take(window, runs, oldestTaken);
+        return oldestTaken;
+    }
+
+    /// <summary>
+    /// The instant after which a row belongs to the span <see cref="Read"/> judges (round 2 of #5714, L6): the midpoint between the
+    /// base run and the oldest taken run. The alert reads' adapters start the card's top lists here, so the top statements,
+    /// databases and applications cover the alert's own few minutes and not the whole lookback. Null when fewer than two runs
+    /// make no span. Freshness is not asked: a stale window is "not observed" and never reaches a card.
+    /// </summary>
+    public static DateTime? SpanBoundary(IReadOnlyList<DateTime> runTimes)
+    {
+        var runs = runTimes.Distinct().OrderByDescending(t => t).ToList();
+        return runs.Count < 2 ? null : Boundary(runs, OldestTaken(runs));
+    }
+
+    /// <summary>
+    /// Where the alert read's three top lists start (round 2 of #5714, L6), and whether they are the lookback's. The span's boundary
+    /// when the span kept sampled events; otherwise (no span, or a span with no samples) the whole lookback, flagged so the card
+    /// says its real range. Both alert adapters call this once, after the runs and sample groups are read.
+    /// </summary>
+    public static (DateTime Floor, bool FromLookback) TopListFloor(
+        IReadOnlyList<DateTime> runTimes, IReadOnlyList<AttentionSampleGroup> sampleGroups, DateTime lookbackFloor)
+    {
+        if (SpanBoundary(runTimes) is { } boundary && sampleGroups.Any(g => g.CollectionTime > boundary))
+        {
+            return (boundary, false);
+        }
+
+        return (lookbackFloor, true);
+    }
+
+    private static DateTime Boundary(List<DateTime> runs, int oldestTaken)
+    {
+        var baseRun = runs[oldestTaken + 1];
+        return baseRun + ((runs[oldestTaken] - baseRun) / 2);
     }
 
     /// <summary>
@@ -231,15 +277,8 @@ public static class AttentionEvaluator
             return null;
         }
 
-        return RowSpanOf(runs[^1], runs[^2], runs[0]);
+        return (Boundary(runs, runs.Count - 2), runs[0].AddSeconds(RowSkewSeconds));
     }
-
-    private static (DateTime Boundary, DateTime Ceiling) RowSpanOf(DateTime baseRun, DateTime oldestTaken, DateTime newest) =>
-        /* A row belongs to the span when it sits after the midpoint between the base run and the oldest taken run. The
-           collection log stamps a run when it starts and the rows carry the time the runner took a moment later, so the
-           two clocks differ by seconds; the midpoint keeps the base run's own row out and the oldest taken run's row in
-           for any cadence. The ceiling is the newest run plus the same skew. */
-        (baseRun + ((oldestTaken - baseRun) / 2), newest.AddSeconds(RowSkewSeconds));
 
     private static AttentionReading Take(AttentionWindow window, List<DateTime> runs, int oldestTaken)
     {
@@ -247,7 +286,13 @@ public static class AttentionEvaluator
         var baseRun = runs[oldestTaken + 1];
         var covered = Math.Max(1d, (newest - baseRun).TotalMinutes);
 
-        var (boundary, ceiling) = RowSpanOf(baseRun, runs[oldestTaken], newest);
+        /* A row belongs to the span when it sits after the midpoint between the base run and the oldest taken run. The
+           collection log stamps a run when it starts and the rows carry the time the runner took a moment later, so the
+           two clocks differ by seconds; the midpoint keeps the base run's own row out and the oldest taken run's row in
+           for any cadence. */
+        var boundary = Boundary(runs, oldestTaken);
+
+        var ceiling = newest.AddSeconds(RowSkewSeconds);
 
         var total = window.Counts.Where(c => c.CollectionTime > boundary && c.CollectionTime <= ceiling).Sum(c => c.Count);
         var groups = window.SampleGroups
@@ -283,6 +328,15 @@ public static class AttentionEvaluator
         var sampleTotal = reading.SampleTotal;
         var judgedCount = (double)reading.TotalCount;
         var estimated = false;
+        if (sampleTotal == 0 && isGroupMuted is not null && isGroupMuted(null, null))
+        {
+            /* Round 2 of #5714 (M1): a span that kept no samples is judged at the full count, and the server-wide mute still
+               applies. A rule with a database or app pattern never matches a null database and app, so only a rule on the
+               server and metric alone is asked here and can mute. The finding is Muted at the full count's grade. */
+            return new Finding(fullSeverity, fullRate, fullBar, reading.TotalCount, judgedCount, reading.CoveredMinutes,
+                reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime);
+        }
+
         if (sampleTotal > 0 && isGroupMuted is not null)
         {
             var unmuted = reading.Groups.Where(g => !isGroupMuted(g.DatabaseName, g.ClientAppName)).Sum(g => g.Samples);
