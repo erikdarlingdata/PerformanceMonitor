@@ -553,6 +553,9 @@ public sealed class McpHealthTools
                #3013 measured on a Postgres store does not apply here - but the SURFACE gap did, and this
                block is a parity change, not a port of the mechanism. */
             var alertReads = AlertReadFailureCounter.Shared.ReadFor(resolved.ServerId.ToString());
+            /* #5643: the collection loop's late cycles over the last 24 h. Their rows are not collectors, so the collector
+               rows above never carry them. */
+            var skippedCycles = await dataService.GetSkippedCycleSummaryAsync(resolved.ServerId);
             var alertReadFinding = AlertReadFailureCounter.FormatFinding(alertReads);
 
             /* #3691: wraps the whole payload rather than sitting in it as a property — McpHelpers.JsonOptions
@@ -664,6 +667,7 @@ public sealed class McpHealthTools
                     finding = alertReadFinding,
                     note = AlertReadFailureCounter.WindowNote
                 },
+                skipped_cycles = SkippedCyclesBlock(skippedCycles),
                 sweep_pressure = new
                 {
                     busy_ms_per_minute = Math.Round(pressure.BusyMsPerMinute, 0),
@@ -715,6 +719,21 @@ public sealed class McpHealthTools
             return McpHelpers.FormatError("get_collection_health", ex);
         }
     }
+
+    /// <summary>
+    /// #5643: the <c>skipped_cycles</c> block of <c>get_collection_health</c>. A late collection cycle skipped the slots it ran
+    /// through; the loop logs one <c>collection_cycle</c>/<c>SKIPPED</c> row per server for it. Zero is a real answer (count_24h 0,
+    /// the rest null); the block is always present, so a missing field never reads as "none".
+    /// </summary>
+    internal static object SkippedCyclesBlock(SkippedCycleSummary s) => new
+    {
+        count_24h = s.Count,
+        slots_skipped_24h = s.SlotsSkipped,
+        last_at = s.LastAtUtc?.ToString("o"),
+        last_slowest_step = s.LastSlowestStep,
+        last_slowest_step_ms = s.LastSlowestStepMs,
+        last_message = s.LastMessage
+    };
 
     /* #4198: the default-argument size cut for get_collection_health, which unlike a row-limited tool has no
        row to drop — every collector on the server is one row, and a health read must never hide one that is

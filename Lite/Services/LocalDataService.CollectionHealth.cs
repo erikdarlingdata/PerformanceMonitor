@@ -570,6 +570,15 @@ ORDER BY h.collector_name";
         using var rowReadScope = timer.Measure(ReadPhaseTimer.RowRead);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* #5643: the collection loop's late-cycle row is not a collector. It has no schedule or cadence, so it would read as
+               a stale collector with a SKIPPED status. It is surfaced by GetSkippedCycleSummaryAsync, in the tab's summary line
+               and the tool's skipped_cycles block, instead. Dropped here so the grid, the MCP rows, and every other caller of
+               this read never see it. The aggregate itself is left byte-identical to Darling's. */
+            if (SkippedCycleLog.IsCycleRow(reader.GetString(0)))
+            {
+                continue;
+            }
+
             items.Add(new CollectorHealthRow
             {
                 CollectorName = reader.GetString(0),
