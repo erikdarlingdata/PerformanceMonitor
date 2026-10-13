@@ -767,7 +767,7 @@ LIMIT 1";
             ? "ORDER BY collection_time DESC, duration_ms DESC NULLS LAST"
             : "ORDER BY duration_ms DESC NULLS LAST, collection_time DESC";
 
-        /* #5731: no collector_name <> 'collection_cycle' predicate, on purpose. This is the log as ROWS (the grid and
+        /* #5731: no collection_cycle exclusion predicate, on purpose. This is the log as ROWS (the grid and
            get_collection_log), where a late cycle's collection_cycle/SKIPPED row belongs; status = SKIPPED finds it.
            get_collection_log counts it apart from the runs (skipped_cycle_rows). */
         command.CommandText = @"
@@ -937,7 +937,7 @@ LIMIT 1";
             ? "ORDER BY collection_time DESC, duration_ms DESC NULLS LAST"
             : "ORDER BY duration_ms DESC NULLS LAST, collection_time DESC";
 
-        /* #5731: no collector_name <> 'collection_cycle' predicate here either, on purpose: the fleet form of the log as rows. */
+        /* #5731: no collection_cycle exclusion predicate here either, on purpose: the fleet form of the log as rows. */
         command.CommandText = $@"
 SELECT
     collector_name,
