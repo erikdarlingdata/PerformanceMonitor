@@ -16,27 +16,15 @@ using PerformanceMonitor.Analysis.Baselines;
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>
-/// #5643: the collection loop's late cycles, as the loop records them. A cycle that overran its slot skips the slots it
-/// ran through, and the loop writes ONE <c>collection_log</c> row per enabled server for it: collector
-/// <see cref="CollectorName"/>, status <see cref="Status"/>, <c>fanout_item_count</c> = the slots skipped,
-/// <c>slowest_item</c>/<c>slowest_item_ms</c> = the slowest step of the cycle, <c>duration_ms</c> = the cycle's total.
-/// The row is not a collector: no schedule, no cadence, no health band. The collector grid leaves it out and the reader
-/// here is the one that surfaces it.
+/// #5643: the trailing window the tab and the MCP tool summarise the loop's late cycles over. The rows themselves are
+/// <see cref="CollectionCycleSkip"/>'s: collector <see cref="CollectionCycleSkip.CollectorName"/>, status
+/// <see cref="CollectionCycleSkip.Status"/>, <c>fanout_item_count</c> = the slots skipped, <c>slowest_item</c>/<c>slowest_item_ms</c>
+/// = the cycle's slowest step, <c>duration_ms</c> = the cycle's total.
 /// </summary>
 internal static class SkippedCycleLog
 {
-    /// <summary>The <c>collector_name</c> of a late cycle's row.</summary>
-    internal const string CollectorName = "collection_cycle";
-
-    /// <summary>The <c>status</c> of a late cycle's row.</summary>
-    internal const string Status = "SKIPPED";
-
     /// <summary>The trailing window the tab and the MCP tool summarise.</summary>
     internal static readonly TimeSpan Window = TimeSpan.FromHours(24);
-
-    /// <summary>True when <paramref name="collectorName"/> is the cycle row's name, not a collector's.</summary>
-    internal static bool IsCycleRow(string? collectorName) =>
-        string.Equals(collectorName, CollectorName, StringComparison.Ordinal);
 }
 
 /// <summary>
@@ -124,8 +112,8 @@ AND   collection_time >= $4
 AND   collection_time <= $5";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = SkippedCycleLog.CollectorName });
-        command.Parameters.Add(new DuckDBParameter { Value = SkippedCycleLog.Status });
+        command.Parameters.Add(new DuckDBParameter { Value = CollectionCycleSkip.CollectorName });
+        command.Parameters.Add(new DuckDBParameter { Value = CollectionCycleSkip.Status });
         command.Parameters.Add(new DuckDBParameter { Value = start });
         command.Parameters.Add(new DuckDBParameter { Value = end });
 

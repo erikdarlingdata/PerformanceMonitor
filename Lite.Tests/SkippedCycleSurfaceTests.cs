@@ -197,7 +197,7 @@ public sealed class SkippedCycleSurfaceTests : IClassFixture<SharedDuckDbFixture
         Assert.Contains("SkippedCyclesSummary.Text = ", refresh, StringComparison.Ordinal);
         Assert.Contains(".SummaryLine(tabClock)", refresh, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"SkippedCyclesSummary\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("SkippedCycleLog.IsCycleRow(reader.GetString(0))", health, StringComparison.Ordinal);
+        Assert.Contains("AND   collector_name <> 'collection_cycle'", health, StringComparison.Ordinal);
     }
 
     private static string RepoRoot()
