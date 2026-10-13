@@ -340,14 +340,26 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
         try
         {
             var since = SinceFor(watermarkBefore, utcNow, slack);
-            if (IsCappedByLookback(watermarkBefore, utcNow, slack))
+            if (IsCappedByLookback(watermarkBefore, utcNow, slack) && watermarkBefore is { } cappedWatermark)
             {
                 /* The map shares this property with the rollup route and the daily refresh: a stall longer than the
                    lookback leaves the span between the old watermark and the floor unread, and the map keeps the
-                   names it already had for it. Say so once per run instead of hiding it. */
-                logger?.LogWarning(
-                    "{Label}: the watermark {Watermark:yyyy-MM-dd HH:mm:ss} is older than the {Days}-day lookback, so procedure_stats rows between it and {Since:yyyy-MM-dd HH:mm:ss} were not re-read; module names for that span come from the map as it was.",
-                    label, watermarkBefore, MaxLookback.TotalDays, since);
+                   names it already had for it. Say so once per run instead of hiding it -- but only when that span
+                   holds procedure_stats rows (#5729). On a quiet fleet it holds none, nothing was missed, and the
+                   watermark (which only a read of rows advances) would otherwise repeat the warning every run. */
+                if (await SkippedSpanHasRowsAsync(connection, logger, cappedWatermark, since, cancellationToken))
+                {
+                    logger?.LogWarning(
+                        "{Label}: the watermark {Watermark:yyyy-MM-dd HH:mm:ss} is older than the {Days}-day lookback, so procedure_stats rows between it and {Since:yyyy-MM-dd HH:mm:ss} were not re-read; module names for that span come from the map as it was.",
+                        label, cappedWatermark, MaxLookback.TotalDays, since);
+                }
+                else
+                {
+                    logger?.LogDebug(
+                        "{Label}: the watermark {Watermark:yyyy-MM-dd HH:mm:ss} is older than the {Days}-day lookback, but procedure_stats holds no rows between it and {Since:yyyy-MM-dd HH:mm:ss}, so nothing was missed; moving the watermark to that floor.",
+                        label, cappedWatermark, MaxLookback.TotalDays, since);
+                    await AdvanceWatermarkToFloorAsync(connection, logger, since, label, cancellationToken);
+                }
             }
 
             using var command = new NpgsqlCommand(RefreshSinceSql, connection) { CommandTimeout = SetupTimeoutSeconds };
@@ -362,6 +374,55 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
         {
             logger?.LogWarning("{Label} failed — the existing map keeps serving and the next run reads from the same watermark: {Message}", label, ex.Message);
             return 0;
+        }
+    }
+
+    /// <summary>Any procedure_stats row with <c>collection_time</c> in <c>[$1, $2)</c>: the span a capped refresh
+    /// skips (#5729). Bounded on the time column, so the hypertable excludes every chunk outside the span.</summary>
+    public const string SkippedSpanHasRowsSql =
+        "SELECT EXISTS (SELECT 1 FROM collect.procedure_stats WHERE collection_time >= $1 AND collection_time < $2)";
+
+    /// <summary>Moves the watermark up to <c>$1</c>, never back (GREATEST, as <see cref="UpsertAndAdvanceTail"/>
+    /// does). <c>refreshed_at</c> stays: it stamps the last refresh that read rows. No clock inside the statement.</summary>
+    public const string AdvanceWatermarkToFloorSql =
+        "UPDATE collect.module_map_state SET refreshed_through = GREATEST(refreshed_through, $1) WHERE id = 1";
+
+    /// <summary>True when procedure_stats has a row in <c>[watermark, floor)</c>, the span a capped refresh does not
+    /// re-read. A failed check answers true: the caller then warns, as it did before this check existed (#5729).</summary>
+    private static async Task<bool> SkippedSpanHasRowsAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime watermark, DateTime floor, CancellationToken cancellationToken)
+    {
+        if (watermark >= floor)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var command = new NpgsqlCommand(SkippedSpanHasRowsSql, connection) { CommandTimeout = WatermarkReadTimeoutSeconds };
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(watermark, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(floor, DateTimeKind.Unspecified) });
+            return await command.ExecuteScalarAsync(cancellationToken) is not false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("module_map: could not check the skipped span for procedure_stats rows, so the lookback warning stands: {Message}", ex.Message);
+            return true;
+        }
+    }
+
+    private static async Task AdvanceWatermarkToFloorAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime floor, string label, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand(AdvanceWatermarkToFloorSql, connection) { CommandTimeout = WatermarkReadTimeoutSeconds };
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(floor, DateTimeKind.Unspecified) });
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning("{Label}: could not move the watermark to the lookback floor; the next run checks the span again: {Message}", label, ex.Message);
         }
     }
 
