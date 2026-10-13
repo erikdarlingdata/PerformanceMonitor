@@ -160,11 +160,16 @@ DO $do$
 DECLARE
    r text;
 BEGIN
-   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{RoleA}', '{RoleB}', '{RoleUnmarked}', '{RoleSuper}') LOOP
+   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{RoleA}', '{RoleB}', '{RoleUnmarked}', '{RoleSuper}', '{DarlingManagedRoles.AlertSourceGroupRoleName}') LOOP
       EXECUTE format('DROP OWNED BY %I', r);
       EXECUTE format('DROP ROLE %I', r);
    END LOOP;
-END $do$", ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked, RoleSuper], cleanupCt));
+END $do$", ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked, RoleSuper, DarlingManagedRoles.AlertSourceGroupRoleName], cleanupCt));
+
+    /// <summary>The roles <paramref name="role"/> is a member of, by name (#5654: a source login's only one is the alert source group).</summary>
+    private static async Task<string> MembershipsOfAsync(NpgsqlConnection owner, string role, CancellationToken ct) =>
+        await ScalarAsync<string>(owner,
+            $"SELECT COALESCE(string_agg(g.rolname::text, ',' ORDER BY g.rolname::text), '') FROM pg_auth_members AS a JOIN pg_roles AS g ON g.oid = a.roleid WHERE a.member = '{role}'::regrole", ct);
 
     [Fact]
     public async Task ASourceLogin_CanExecuteTheFunction_AndHoldsNoOtherPrivilege()
@@ -182,8 +187,7 @@ END $do$", ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked, RoleSuper], cl
             /* What the login is, read as the owner. */
             Assert.True(await ScalarAsync<bool>(owner,
                 $"SELECT rolcanlogin AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit FROM pg_roles WHERE rolname = '{RoleA}'", ct));
-            Assert.Equal(0, await ScalarAsync<long>(owner,
-                $"SELECT count(*) FROM pg_auth_members WHERE member = '{RoleA}'::regrole", ct));
+            Assert.Equal(DarlingManagedRoles.AlertSourceGroupRoleName, await MembershipsOfAsync(owner, RoleA, ct));
 
             /* No privilege of any kind on a table, view or sequence in the two Darling schemas, and none on a column. */
             Assert.Empty(await ColumnAsync(owner, $@"
@@ -502,7 +506,7 @@ SET search_path = pg_temp, config, public", ct);
 
             Assert.True(await ScalarAsync<bool>(owner,
                 $"SELECT NOT rolcreatedb AND NOT rolinherit AND rolcanlogin FROM pg_roles WHERE rolname = '{RoleA}'", ct));
-            Assert.Equal(0, await ScalarAsync<long>(owner, $"SELECT count(*) FROM pg_auth_members WHERE member = '{RoleA}'::regrole", ct));
+            Assert.Equal(DarlingManagedRoles.AlertSourceGroupRoleName, await MembershipsOfAsync(owner, RoleA, ct));
             Assert.True(await ScalarAsync<bool>(owner,
                 $"SELECT has_function_privilege('{RoleA}', 'config.submit_external_alert(text, text, text, text, text, text, double precision)', 'EXECUTE')", ct));
 
@@ -846,6 +850,9 @@ SET search_path = pg_temp, config, public", ct);
             await ExecAsync(owner, script, ct);
 
             Assert.Equal(5, await ScalarAsync<int>(owner, $"SELECT rolconnlimit FROM pg_roles WHERE rolname = '{RoleA}'", ct));
+            Assert.Equal(DarlingManagedRoles.AlertSourceGroupRoleName, await MembershipsOfAsync(owner, RoleA, ct));
+            Assert.Equal(DarlingManagedRoles.AlertSourceGroupRoleMarker, await ScalarAsync<string>(owner,
+                $"SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = '{DarlingManagedRoles.AlertSourceGroupRoleName}'", ct));
             Assert.False(await ScalarAsync<bool>(owner, $"SELECT has_database_privilege('public', '{scratch.DatabaseName}', 'CONNECT')", ct));
 
             await using (var sourceA = await LoginAsync(scratch, RoleA, SourcePassword, ct))

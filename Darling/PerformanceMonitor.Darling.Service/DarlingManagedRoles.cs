@@ -111,6 +111,21 @@ public static class DarlingManagedRoles
     /// </summary>
     public const string AlertSourceRoleMarker = "darling-alert-source";
 
+    /// <summary>
+    /// The NOLOGIN group role every registered external alert source login is a member of (#5654). It holds no privilege on
+    /// anything; it exists so one pg_hba line (<c>hostssl darling +darling_alert_sources …</c>, written when
+    /// <c>postgres.network.role</c> lists <c>sources</c>) admits every source login and nothing else. The membership is granted
+    /// WITH INHERIT FALSE, SET FALSE on PostgreSQL 16 and later, and the source logins are NOINHERIT, so belonging to it gives a
+    /// login nothing but the pg_hba match.
+    /// </summary>
+    public const string AlertSourceGroupRoleName = "darling_alert_sources";
+
+    /// <summary>
+    /// The marker comment on <see cref="AlertSourceGroupRoleName"/> (#5654). The same rule as <see cref="RoleMarker"/>: a role of
+    /// that name without this marker makes provisioning fail rather than be taken over.
+    /// </summary>
+    public const string AlertSourceGroupRoleMarker = "darling-alert-source-group";
+
     /// <summary>The number of connections one external alert source login may hold at once (#5654), set on every start. A login cannot raise its own limit.</summary>
     public const int AlertSourceConnectionLimit = 5;
 
@@ -1642,9 +1657,13 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLeg
 --     to the three roles (an operator reads the queue and the registry). It runs after every blanket grant above, and before 10a so that the password key tables' revoke stays the last
 --     grant-side statement of the batch.
 --     Then, for each registered source login that carries the '{AlertSourceRoleMarker}' marker: every attribute that widens
---     a role off, NOINHERIT, every role membership revoked (a source holds none), and exactly three grants -- CONNECT on this
---     database, USAGE on the {config} schema, EXECUTE on the 10b function. A registry row naming a role with no
---     marker, or no role at all, is skipped with a WARNING; a skipped role that exists loses EXECUTE on the 10b function.
+--     a role off, NOINHERIT, every role membership revoked, then membership in the '{AlertSourceGroupRoleName}' group granted
+--     back (WITH INHERIT FALSE, SET FALSE from PostgreSQL 16), and exactly three grants -- CONNECT on this database, USAGE on
+--     the {config} schema, EXECUTE on the 10b function. A registry row naming a role with no marker, or no role at all, is
+--     skipped with a WARNING; a skipped role that exists loses EXECUTE on the 10b function.
+--     The group is a NOLOGIN role marked '{AlertSourceGroupRoleMarker}' that holds nothing (an unmarked role of that name stops
+--     the batch, the section 1 rule): it exists so the pg_hba line written for postgres.network.role ""sources"" names one
+--     role. Every member that is not a registered, marked source login is revoked from it.
 REVOKE ALL ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
    FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
 GRANT SELECT ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
@@ -1853,14 +1872,71 @@ REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignat
     /// database, USAGE on the config schema and EXECUTE on the submit function, nothing else (the function is also revoked from admin, viewer and mcp, and a table or sequence privilege
     /// found on the login in the config or collect schema is revoked first). Kept out of the statements the batch
     /// replays for a role (a test replays every GRANT and REVOKE that names viewer on a store that has no such function).
+    /// <para>The same block owns <see cref="AlertSourceGroupRoleName"/>: it creates the NOLOGIN group with
+    /// <see cref="AlertSourceGroupRoleMarker"/> (an unmarked role of that name raises, as section 1 does for admin, viewer and mcp),
+    /// takes from it every membership and every privilege on the database, the config and collect schemas, their tables and
+    /// sequences and the submit function, revokes it from every member that is not a registered, marked source login, and grants
+    /// it to each source login after that login's memberships are revoked: WITH INHERIT FALSE, SET FALSE from PostgreSQL 16, a
+    /// plain GRANT before (the group holds nothing, so the membership carries nothing). <see cref="ExternalAlertSourceAdmin"/>
+    /// runs this block in the transaction that creates a login, so a new source is a member when the verb returns.</para>
     /// </summary>
     internal static string BuildExternalAlertSourceRolesSql(string config) => $@"
 DO $do$
 DECLARE
    source_login record;
    membership record;
+   group_oid oid;
 BEGIN
    REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {DarlingManagedPostgres.AdminRoleName}, {DarlingManagedPostgres.ViewerRoleName}, {DarlingManagedPostgres.McpRoleName};
+
+   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '{AlertSourceGroupRoleName}') THEN
+      CREATE ROLE {AlertSourceGroupRoleName} NOLOGIN NOINHERIT;
+      COMMENT ON ROLE {AlertSourceGroupRoleName} IS '{AlertSourceGroupRoleMarker}';
+   ELSIF shobj_description((SELECT oid FROM pg_catalog.pg_roles WHERE rolname = '{AlertSourceGroupRoleName}'), 'pg_authid') IS DISTINCT FROM '{AlertSourceGroupRoleMarker}' THEN
+      RAISE EXCEPTION 'Role ""{AlertSourceGroupRoleName}"" already exists and was not created by Darling (missing the ''{AlertSourceGroupRoleMarker}'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated role.';
+   END IF;
+
+   SELECT oid INTO group_oid FROM pg_catalog.pg_roles WHERE rolname = '{AlertSourceGroupRoleName}';
+   ALTER ROLE {AlertSourceGroupRoleName} NOLOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS NOINHERIT;
+
+   FOR membership IN
+      SELECT g.rolname AS granted, b.rolname AS grantor
+      FROM pg_catalog.pg_auth_members AS a
+      JOIN pg_catalog.pg_roles AS g ON g.oid = a.roleid
+      LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
+      WHERE a.member = group_oid
+   LOOP
+      EXECUTE format('REVOKE %I FROM %I', membership.granted, '{AlertSourceGroupRoleName}')
+         || CASE WHEN membership.grantor IS NULL THEN '' ELSE format(' GRANTED BY %I', membership.grantor) END
+         || ' CASCADE';
+   END LOOP;
+
+   EXECUTE format('REVOKE ALL ON DATABASE %I FROM {AlertSourceGroupRoleName}', current_database());
+   REVOKE ALL ON SCHEMA {config}, {PgSchemaGenerator.CollectSchema} FROM {AlertSourceGroupRoleName};
+   REVOKE ALL ON ALL TABLES IN SCHEMA {config}, {PgSchemaGenerator.CollectSchema} FROM {AlertSourceGroupRoleName};
+   REVOKE ALL ON ALL SEQUENCES IN SCHEMA {config}, {PgSchemaGenerator.CollectSchema} FROM {AlertSourceGroupRoleName};
+   REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {AlertSourceGroupRoleName};
+
+   FOR membership IN
+      SELECT m.rolname AS member_name, b.rolname AS grantor
+      FROM pg_catalog.pg_auth_members AS a
+      JOIN pg_catalog.pg_roles AS m ON m.oid = a.member
+      LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
+      WHERE a.roleid = group_oid
+        AND NOT EXISTS (
+           SELECT 1
+           FROM {config}.external_alert_source AS s
+           WHERE s.role_name = m.rolname
+             AND shobj_description(m.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}'
+             AND m.rolname NOT IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
+             AND m.rolname <> current_user
+             AND NOT m.rolsuper
+             AND m.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = current_database()))
+   LOOP
+      EXECUTE format('REVOKE %I FROM %I', '{AlertSourceGroupRoleName}', membership.member_name)
+         || CASE WHEN membership.grantor IS NULL THEN '' ELSE format(' GRANTED BY %I', membership.grantor) END
+         || ' CASCADE';
+   END LOOP;
 
    FOR source_login IN
       SELECT s.role_name, r.oid AS role_oid, (shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}') AS marked,
@@ -1903,6 +1979,11 @@ BEGIN
       EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), source_login.role_name);
       EXECUTE format('GRANT USAGE ON SCHEMA {config} TO %I', source_login.role_name);
       EXECUTE format('GRANT EXECUTE ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) TO %I', source_login.role_name);
+      IF current_setting('server_version_num')::int >= 160000 THEN
+         EXECUTE format('GRANT %I TO %I WITH INHERIT FALSE, SET FALSE', '{AlertSourceGroupRoleName}', source_login.role_name);
+      ELSE
+         EXECUTE format('GRANT %I TO %I', '{AlertSourceGroupRoleName}', source_login.role_name);
+      END IF;
    END LOOP;
 END $do$;";
 

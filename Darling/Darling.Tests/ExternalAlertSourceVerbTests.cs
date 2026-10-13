@@ -143,7 +143,7 @@ public sealed class ExternalAlertSourceVerbTests
     {
         var password = DarlingManagedPostgres.GeneratePassword();
         var verifier = ScramSha256Verifier.Create(password);
-        var add = ExternalAlertSourceAdmin.BuildAddSqlForDba("darling_src_orders", verifier, "darling");
+        var add = ExternalAlertSourceAdmin.BuildAddSqlForDba("darling_src_orders", verifier, "darling", 16);
 
         Assert.Contains("CREATE ROLE \"darling_src_orders\"", add);
         Assert.Contains($"PASSWORD '{verifier}'", add);
@@ -152,8 +152,50 @@ public sealed class ExternalAlertSourceVerbTests
         Assert.Contains("NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT", add);
         Assert.DoesNotContain(password, add);
 
+        /* #5654: the membership in the group the pg_hba "sources" line names, last, with the PostgreSQL 16 options only where
+           the server takes them. */
+        Assert.EndsWith("GRANT \"darling_alert_sources\" TO \"darling_src_orders\" WITH INHERIT FALSE, SET FALSE;", add);
+        Assert.EndsWith("GRANT \"darling_alert_sources\" TO \"darling_src_orders\";",
+            ExternalAlertSourceAdmin.BuildAddSqlForDba("darling_src_orders", verifier, "darling", 15));
+
         var remove = ExternalAlertSourceAdmin.BuildRemoveSqlForDba("darling_src_orders", "darling");
         Assert.Contains("DROP ROLE \"darling_src_orders\"", remove);
+    }
+
+    [Theory]
+    [InlineData(null, "192.0.2.10", "not list \"sources\"", "\"role\": \"viewer,sources\"")]
+    [InlineData("", "192.0.2.10", "not list \"sources\"", "\"role\": \"viewer,sources\"")]
+    [InlineData("admin", "192.0.2.10", "not list \"sources\"", "\"role\": \"admin,sources\"")]
+    [InlineData("admin,viewer", null, "not list \"sources\"", "\"role\": \"admin,viewer,sources\"")]
+    [InlineData("viewer,sources", null, "not a network address", "listen and allowFrom must also be set")]
+    [InlineData("viewr", "192.0.2.10", "is not valid", "\"role\": \"viewer,sources\"")]
+    public void TheNetworkNote_SaysWhatToChange_WhenSourcesAreNotAdmitted(string? role, string? listen, string first, string change)
+    {
+        var postgres = new PostgresConfig { Managed = true, Network = new PostgresNetworkConfig { Listen = listen, AllowFrom = "192.0.2.0/24", Role = role } };
+        var note = string.Join("\n", DarlingCliCommands.BuildAlertSourceNetworkNote(postgres));
+
+        Assert.Contains(first, note, StringComparison.Ordinal);
+        Assert.Contains(change, note, StringComparison.Ordinal);
+        Assert.Contains("restart", note, StringComparison.Ordinal);
+        Assert.Contains("TLS", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheNetworkNote_SaysSourcesAreAdmitted_WhenTheRoleListsThem()
+    {
+        var postgres = new PostgresConfig { Managed = true, Network = new PostgresNetworkConfig { Listen = "192.0.2.10", AllowFrom = "192.0.2.0/24", Role = "viewer+sources" } };
+        var note = Assert.Single(DarlingCliCommands.BuildAlertSourceNetworkNote(postgres));
+
+        Assert.Contains("lists \"sources\"", note, StringComparison.Ordinal);
+        Assert.Contains("TLS from 192.0.2.0/24", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("restart", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheNetworkNote_ForABringYourOwnStore_NamesThePgHbaLine()
+    {
+        var note = string.Join("\n", DarlingCliCommands.BuildAlertSourceNetworkNote(new PostgresConfig { Managed = false }));
+        Assert.Contains("hostssl <database> +darling_alert_sources <range> scram-sha-256", note, StringComparison.Ordinal);
     }
 
     [Fact]

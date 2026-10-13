@@ -1386,13 +1386,27 @@ public static class DarlingCliCommands
            An explicitly-invalid value is a hard error: the store degrades to loopback for it, so no remote
            connection exists at all. */
         var network = postgres.Network;
-        var roles = DarlingNetwork.NormalizeNetworkRoles(network?.Role);
-        if (roles is null || roles.Count == 0)
+        var allRoles = DarlingNetwork.NormalizeNetworkRoles(network?.Role);
+        if (allRoles is null || allRoles.Count == 0)
         {
             error.WriteLine(
                 $"postgres.network.role '{network?.Role}' is invalid — it must be \"viewer\" (default, read-only), " +
-                $"\"admin\", or both (e.g. \"admin,viewer\"). The store degrades to loopback for an unknown role, so " +
-                $"there is no remote connection to {action}.");
+                $"\"admin\", \"sources\" (external alert source logins), or several (e.g. \"admin,viewer\"). The store " +
+                $"degrades to loopback for an unknown role, so there is no remote connection to {action}.");
+            return null;
+        }
+
+        /* #5654: "sources" admits the external alert source logins, which are not a viewer seat: each source's connection
+           string comes from --add-alert-source, and there is no credential file for it here. */
+        var roles = allRoles
+            .Where(r => !string.Equals(r, DarlingManagedPostgres.AlertSourcesNetworkToken, StringComparison.Ordinal))
+            .ToList();
+        if (roles.Count == 0)
+        {
+            error.WriteLine(
+                $"postgres.network.role admits only external alert source logins (\"sources\"), so there is no viewer seat " +
+                $"to {action}. Add \"viewer\" or \"admin\" to the field for a remote Viewer; a source's connection string " +
+                "comes from --add-alert-source.");
             return null;
         }
 
@@ -2743,9 +2757,10 @@ public static class DarlingCliCommands
             }
 
             output.WriteLine("Remote pg_hba role(s): 'viewer' (read-only, the secure default), 'admin' (remote WRITES),");
-            output.WriteLine("or BOTH as 'admin,viewer' — that writes one hostssl rule per role inside the managed block, so");
-            output.WriteLine("an admin seat and read-only seats can reach the same store and a later CIDR narrowing tightens");
-            output.WriteLine("all of them together (#2665).");
+            output.WriteLine("'sources' (external alert source logins, made by --add-alert-source), or several, e.g.");
+            output.WriteLine("'admin,viewer' or 'viewer,sources' — that writes one hostssl rule per role inside the managed");
+            output.WriteLine("block, so the seats and sources can reach the same store and a later CIDR narrowing tightens");
+            output.WriteLine("all of them together (#2665, #5654).");
             var role = Prompt(input, output, "Role(s)", "viewer");
             if (role is null)
             {
@@ -5932,11 +5947,23 @@ public static class DarlingCliCommands
             return CollectorToggleExitCode.UsageOrConfig;
         }
 
+        /* The config already loaded once inside TryCreateCollectorStoreDataSource; read again here for the network block,
+           which the add and rotate text describe (whether a source on another machine is admitted). */
+        PostgresConfig? postgres = null;
+        try
+        {
+            postgres = DarlingConfig.Load(configPath).Postgres;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            postgres = null;
+        }
+
         await using var dataSource = created;
         try
         {
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
-            return await RunAlertSourceVerbAsync(verb, connection, sourceName, dataSource.ConnectionString, output, error, cancellationToken);
+            return await RunAlertSourceVerbAsync(verb, connection, sourceName, dataSource.ConnectionString, output, error, cancellationToken, postgres);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -5948,7 +5975,7 @@ public static class DarlingCliCommands
     /// <summary>The verb on an open owner connection, so a live test drives exactly what the command line does.</summary>
     internal static async Task<int> RunAlertSourceVerbAsync(
         string verb, NpgsqlConnection connection, string? sourceName, string storeConnectionString,
-        TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        TextWriter output, TextWriter error, CancellationToken cancellationToken, PostgresConfig? postgres = null)
     {
         if (IsListAlertSourcesVerb(verb))
         {
@@ -5958,12 +5985,13 @@ public static class DarlingCliCommands
         var result = IsAddAlertSourceVerb(verb) ? await ExternalAlertSourceAdmin.AddAsync(connection, sourceName!, cancellationToken)
             : IsRotateAlertSourceVerb(verb) ? await ExternalAlertSourceAdmin.RotateAsync(connection, sourceName!, cancellationToken)
             : await ExternalAlertSourceAdmin.RemoveAsync(connection, sourceName!, cancellationToken);
-        return PrintAlertSourceResult(verb, result, sourceName!, storeConnectionString, output, error);
+        return PrintAlertSourceResult(verb, result, sourceName!, storeConnectionString, output, error, postgres);
     }
 
     /// <summary>Prints what an add, rotate or remove did, and returns the exit code. The only place a password is written, and only inside the connection string.</summary>
     internal static int PrintAlertSourceResult(
-        string verb, ExternalAlertSourceAdmin.Result result, string sourceName, string storeConnectionString, TextWriter output, TextWriter error)
+        string verb, ExternalAlertSourceAdmin.Result result, string sourceName, string storeConnectionString, TextWriter output, TextWriter error,
+        PostgresConfig? postgres = null)
     {
         switch (result.Outcome)
         {
@@ -6006,7 +6034,12 @@ public static class DarlingCliCommands
             output.WriteLine();
             output.WriteLine("  " + ExternalAlertSourceAdmin.BuildSourceConnectionString(storeConnectionString, result.RoleName, result.Password!));
             output.WriteLine();
-            output.WriteLine("The host above is the address this service uses for its store. A source on another machine needs the address it reaches the store at, and a pg_hba rule that lets this login in from there.");
+            output.WriteLine("The host above is the address this service uses for its store. A source on another machine uses the address it reaches the store at.");
+            foreach (var line in BuildAlertSourceNetworkNote(postgres))
+            {
+                output.WriteLine(line);
+            }
+
             output.WriteLine("The source sends an alert with:  SELECT config.submit_external_alert('fire', 'key', 'warning', 'title', 'detail', 'server name', 1);");
         }
 
@@ -6020,6 +6053,68 @@ public static class DarlingCliCommands
 
         output.WriteLine();
         return CollectorToggleExitCode.Success;
+    }
+
+    /// <summary>
+    /// The add and rotate text's note on a source that runs on another machine (#5654): whether the store admits alert source
+    /// logins from the network now, and if not, the one change that does. On the managed store that is the <c>sources</c> token
+    /// in <c>postgres.network.role</c>, which writes <c>hostssl darling +darling_alert_sources &lt;allowFrom&gt; scram-sha-256</c>
+    /// into the managed pg_hba block; the suggested value keeps every role the field admits today. A bring-your-own store's own
+    /// pg_hba.conf decides, so the note names the line to add there. Pure.
+    /// </summary>
+    internal static IReadOnlyList<string> BuildAlertSourceNetworkNote(PostgresConfig? postgres)
+    {
+        const string token = "sources";
+        if (postgres is null)
+        {
+            return new[] { $"A source on another machine is admitted only when postgres.network.role lists \"{token}\" (see the README's \"Alert sources on another machine\")." };
+        }
+
+        if (!postgres.Managed)
+        {
+            return new[]
+            {
+                "This store is your own PostgreSQL, so its pg_hba.conf decides who connects from another machine. This line admits every alert source login, and no other role, from one range over TLS:",
+                $"  hostssl <database> +{DarlingManagedRoles.AlertSourceGroupRoleName} <range> scram-sha-256",
+            };
+        }
+
+        var network = postgres.Network;
+        var roles = DarlingNetwork.NormalizeNetworkRoles(network?.Role);
+        var exposed = DarlingNetwork.IsExposedListenAddress(network?.Listen);
+
+        if (roles is not null && roles.Contains(token, StringComparer.Ordinal) && exposed)
+        {
+            return new[]
+            {
+                $"postgres.network.role lists \"{token}\", so a source on another machine connects with TLS from {network!.AllowFrom} (postgres.network.allowFrom), to {network.Listen}.",
+            };
+        }
+
+        var lines = new List<string>();
+        if (roles is null)
+        {
+            lines.Add($"postgres.network.role '{network?.Role}' is not valid, so the store admits no connection from the network.");
+            lines.Add($"To admit alert sources from another machine, set \"role\": \"viewer,{token}\" in postgres.network.");
+        }
+        else if (!roles.Contains(token, StringComparer.Ordinal))
+        {
+            var suggested = string.Join(",", roles.Append(token));
+            lines.Add($"postgres.network.role does not list \"{token}\", so the store admits no alert source login from another machine.");
+            lines.Add($"To admit them, set \"role\": \"{suggested}\" in postgres.network (it keeps the roles admitted now).");
+        }
+        else
+        {
+            lines.Add($"postgres.network.role lists \"{token}\", but postgres.network.listen is not a network address, so the store is reachable only from this machine.");
+        }
+
+        if (!exposed)
+        {
+            lines.Add("postgres.network.listen and allowFrom must also be set: the store listens on that address and admits only that range.");
+        }
+
+        lines.Add("A service restart applies the change. The source then connects with TLS from the postgres.network.allowFrom range.");
+        return lines;
     }
 
     /// <summary>Prints the source table. No secret is in it.</summary>

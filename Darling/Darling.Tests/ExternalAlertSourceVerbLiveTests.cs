@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -39,6 +40,17 @@ public sealed class ExternalAlertSourceVerbLiveTests
     private static readonly string SourceName = "live_" + Guid.NewGuid().ToString("N")[..8];
 
     private static readonly string RoleName = ExternalAlertSourceAdmin.RoleNameFor(SourceName);
+
+    private static readonly string StrayName = "stray_" + Guid.NewGuid().ToString("N")[..8];
+
+    private const string GroupName = DarlingManagedRoles.AlertSourceGroupRoleName;
+
+    private static async Task<string[]> GroupMembersAsync(NpgsqlConnection owner, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            $"SELECT COALESCE(array_agg(m.rolname::text ORDER BY m.rolname::text COLLATE \"C\"), ARRAY[]::text[]) FROM pg_auth_members AS a JOIN pg_roles AS m ON m.oid = a.member WHERE a.roleid = '{GroupName}'::regrole", owner);
+        return (string[])(await command.ExecuteScalarAsync(ct))!;
+    }
 
     private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
@@ -75,6 +87,55 @@ public sealed class ExternalAlertSourceVerbLiveTests
         catch (PostgresException ex) when (ex.SqlState == "42501")
         {
             return null;
+        }
+    }
+
+    [Fact]
+    public async Task ASameNamedGroupRoleWithoutTheMarker_StopsProvisioning_AndIsLeftAsItWas()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres (+TimescaleDB) connection string, owner/superuser, to run the alert source verb live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+            Assert.SkipWhen(
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct),
+                "A cluster-wide admin/viewer/mcp role already exists on this rig; the managed provisioning batch would adopt it.");
+
+            /* The group is cluster-wide and holds nothing, so one another class left behind is dropped here (the class is in the
+               pg-cluster-roles collection, so no other provisioning batch runs meanwhile). */
+            await ExecAsync(owner, $"DROP ROLE IF EXISTS {GroupName}", ct);
+            await ExecAsync(owner, $"CREATE ROLE {GroupName} NOLOGIN; COMMENT ON ROLE {GroupName} IS 'someone else''s'", ct);
+            var ownerRole = new NpgsqlConnectionStringBuilder(scratch.ConnectionString).Username ?? "darling";
+
+            var refused = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(owner,
+                DarlingManagedRoles.BuildProvisioningSql(
+                    ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+                    15, PasswordReassert.All, ProvisioningTarget.ComposeStore(ownerRole, scratch.DatabaseName)),
+                ct));
+            Assert.Contains("already exists and was not created by Darling", refused.MessageText, StringComparison.Ordinal);
+            Assert.Equal("someone else's", await ScalarAsync<string>(owner, $"SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = '{GroupName}'", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await new LiveCleanupBatch(cleanup).DropRolesAsync($@"
+DO $do$
+DECLARE
+   r text;
+BEGIN
+   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{GroupName}') LOOP
+      EXECUTE format('DROP OWNED BY %I', r);
+      EXECUTE format('DROP ROLE %I', r);
+   END LOOP;
+END $do$", ["admin", "viewer", "mcp", GroupName], cleanupCt));
         }
     }
 
@@ -127,6 +188,27 @@ public sealed class ExternalAlertSourceVerbLiveTests
                 await ScalarAsync<string>(owner, $"SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = '{RoleName}'", ct));
             Assert.True(await ScalarAsync<bool>(owner,
                 $"SELECT rolcanlogin AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolinherit AND rolconnlimit = {DarlingManagedRoles.AlertSourceConnectionLimit} FROM pg_roles WHERE rolname = '{RoleName}'", ct));
+            /* #5654: the batch made the NOLOGIN group with its marker, and add made the login a member in the same transaction:
+               WITH INHERIT FALSE, SET FALSE from PostgreSQL 16, so the membership carries nothing but the pg_hba match. */
+            Assert.Equal(DarlingManagedRoles.AlertSourceGroupRoleMarker,
+                await ScalarAsync<string>(owner, $"SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = '{GroupName}'", ct));
+            Assert.True(await ScalarAsync<bool>(owner,
+                $"SELECT NOT rolcanlogin AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolinherit FROM pg_roles WHERE rolname = '{GroupName}'", ct));
+            Assert.Equal(new[] { RoleName }, await GroupMembersAsync(owner, ct));
+            if (owner.PostgreSqlVersion.Major >= 16)
+            {
+                Assert.True(await ScalarAsync<bool>(owner,
+                    $"SELECT bool_and(NOT a.inherit_option AND NOT a.set_option AND NOT a.admin_option) FROM pg_auth_members AS a WHERE a.roleid = '{GroupName}'::regrole", ct));
+            }
+
+            Assert.Equal(0L, await ScalarAsync<long>(owner, $"SELECT count(*) FROM pg_auth_members WHERE member = '{GroupName}'::regrole", ct));
+
+            /* A role that is not a registered, marked source is revoked from the group on the next run of the step; the source stays. */
+            await ExecAsync(owner, $"CREATE ROLE {StrayName} LOGIN; GRANT {GroupName} TO {StrayName}", ct);
+            Assert.Equal(new[] { RoleName, StrayName }.OrderBy(n => n, StringComparer.Ordinal).ToArray(), await GroupMembersAsync(owner, ct));
+            await ExecAsync(owner, DarlingManagedRoles.BuildExternalAlertSourceRolesSql("config"), ct);
+            Assert.Equal(new[] { RoleName }, await GroupMembersAsync(owner, ct));
+
             var firstVerifier = await VerifierOfAsync(owner, ct);
             if (firstVerifier is not null)
             {
@@ -204,6 +286,7 @@ public sealed class ExternalAlertSourceVerbLiveTests
             Assert.Contains("dropped", remove.Output);
             Assert.Contains("2 queued alert row(s), 2 of them not yet delivered", remove.Output);
             Assert.False(await ScalarAsync<bool>(owner, $"SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RoleName}')", ct));
+            Assert.Empty(await GroupMembersAsync(owner, ct));
             Assert.Equal(0, await ScalarAsync<long>(owner, "SELECT count(*) FROM config.external_alert_source", ct));
             Assert.Equal(0, await ScalarAsync<long>(owner, "SELECT count(*) FROM config.external_alert_pending", ct));
             await Assert.ThrowsAsync<PostgresException>(() => SubmitAsync(secondString, "after-remove", ct));
@@ -222,11 +305,11 @@ DO $do$
 DECLARE
    r text;
 BEGIN
-   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{RoleName}') LOOP
+   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{RoleName}', '{StrayName}', '{GroupName}') LOOP
       EXECUTE format('DROP OWNED BY %I', r);
       EXECUTE format('DROP ROLE %I', r);
    END LOOP;
-END $do$", ["admin", "viewer", "mcp", RoleName], cleanupCt));
+END $do$", ["admin", "viewer", "mcp", RoleName, StrayName, GroupName], cleanupCt));
         }
     }
 }

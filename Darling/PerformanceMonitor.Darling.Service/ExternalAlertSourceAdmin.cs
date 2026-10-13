@@ -156,9 +156,12 @@ internal static class ExternalAlertSourceAdmin
         if (!canManageLogins)
         {
             await transaction.CommitAsync(ct);
-            return new Result(Outcome.NeedsDbaSql, role, password, BuildAddSqlForDba(role, verifier, await DatabaseNameAsync(owner, ct)));
+            return new Result(Outcome.NeedsDbaSql, role, password, BuildAddSqlForDba(role, verifier, await DatabaseNameAsync(owner, ct), owner.PostgreSqlVersion.Major));
         }
 
+        /* The shared step also makes the login a member of darling_alert_sources (the group the pg_hba line for
+           postgres.network.role "sources" names), in this transaction, so the new source is admitted from the network as
+           soon as the verb returns wherever that line is written. */
         await ExecAsync(owner, transaction, DarlingManagedRoles.BuildExternalAlertSourceRolesSql(Schema), ct);
         await transaction.CommitAsync(ct);
         return new Result(Outcome.Done, role, password);
@@ -285,8 +288,13 @@ ORDER BY s.source_id", owner);
         return rows;
     }
 
-    /// <summary>The statements a database administrator runs to make a source's login when the store owner cannot (the verifier is the only secret in them, and it is not a password).</summary>
-    internal static string BuildAddSqlForDba(string role, string verifier, string database)
+    /// <summary>
+    /// The statements a database administrator runs to make a source's login when the store owner cannot (the verifier is the only
+    /// secret in them, and it is not a password). They end with the membership in <see cref="DarlingManagedRoles.AlertSourceGroupRoleName"/>
+    /// that the provisioning step grants (WITH INHERIT FALSE, SET FALSE from PostgreSQL 16, which <paramref name="serverMajorVersion"/>
+    /// decides); <c>tools/provision-roles.sql</c> makes the group.
+    /// </summary>
+    internal static string BuildAddSqlForDba(string role, string verifier, string database, int serverMajorVersion)
     {
         var quoted = Quote(role);
         return string.Join(Environment.NewLine,
@@ -294,7 +302,8 @@ ORDER BY s.source_id", owner);
             $"COMMENT ON ROLE {quoted} IS '{DarlingManagedRoles.AlertSourceRoleMarker}';",
             $"GRANT CONNECT ON DATABASE {Quote(database)} TO {quoted};",
             $"GRANT USAGE ON SCHEMA {Schema} TO {quoted};",
-            $"GRANT EXECUTE ON FUNCTION {Schema}.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) TO {quoted};");
+            $"GRANT EXECUTE ON FUNCTION {Schema}.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) TO {quoted};",
+            $"GRANT {Quote(DarlingManagedRoles.AlertSourceGroupRoleName)} TO {quoted}{(serverMajorVersion >= 16 ? " WITH INHERIT FALSE, SET FALSE" : string.Empty)};");
     }
 
     /// <summary>The statements a database administrator runs to drop a source's login when the store owner cannot.</summary>

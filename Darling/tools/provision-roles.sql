@@ -1101,7 +1101,11 @@ GRANT UPDATE (server_id, name, host, database, auth, username, encrypted_passwor
 --     The three tables (V180) are written only by the owner and by this function: the REVOKE below takes the
 --     INSERT/UPDATE/DELETE that step 3 and the default privileges gave admin. A source login is touched only when the registry names it
 --     and it carries the 'darling-alert-source' marker comment; each gets LOGIN, every widening attribute off, NOINHERIT,
---     no role membership, CONNECT on this database, USAGE on config and EXECUTE on the function, and nothing else. On a
+--     no role membership but darling_alert_sources (WITH INHERIT FALSE, SET FALSE from PostgreSQL 16), CONNECT on this
+--     database, USAGE on config and EXECUTE on the function, and nothing else. darling_alert_sources is a NOLOGIN group
+--     marked 'darling-alert-source-group' that holds nothing; it exists so the managed pg_hba line for
+--     postgres.network.role "sources" names one role. An unmarked role of that name stops the script (the step 1 rule), and
+--     every member that is not a registered, marked source login is revoked from it. On a
 --     store below V180 the block warns and skips the tables and the logins (the function itself is created either way);
 --     re-run the script once the service has migrated the store to V180, and again after each add-alert-source.
 CREATE OR REPLACE FUNCTION config.submit_external_alert(
@@ -1197,7 +1201,45 @@ DECLARE
    source_login record;
    membership record;
    attribute text;
+   group_oid oid;
 BEGIN
+   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'darling_alert_sources') THEN
+      CREATE ROLE darling_alert_sources NOLOGIN NOINHERIT;
+      COMMENT ON ROLE darling_alert_sources IS 'darling-alert-source-group';
+   ELSIF pg_catalog.shobj_description((SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'darling_alert_sources'), 'pg_authid') IS DISTINCT FROM 'darling-alert-source-group' THEN
+      RAISE EXCEPTION 'Role "darling_alert_sources" already exists and was not created by Darling (missing the ''darling-alert-source-group'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated role.';
+   END IF;
+
+   SELECT oid INTO group_oid FROM pg_catalog.pg_roles WHERE rolname = 'darling_alert_sources';
+   BEGIN
+      ALTER ROLE darling_alert_sources NOLOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS NOINHERIT;
+   EXCEPTION WHEN insufficient_privilege THEN
+      RAISE WARNING 'Role "darling_alert_sources" could not be set to NOLOGIN NOINHERIT with every widening attribute off: this needs a superuser, or CREATEROLE and, from PostgreSQL 16, ADMIN OPTION on the role.';
+   END;
+
+   FOR membership IN
+      SELECT g.rolname AS granted, b.rolname AS grantor
+      FROM pg_catalog.pg_auth_members AS a
+      JOIN pg_catalog.pg_roles AS g ON g.oid = a.roleid
+      LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
+      WHERE a.member = group_oid
+   LOOP
+      BEGIN
+         EXECUTE pg_catalog.format('REVOKE %I FROM darling_alert_sources', membership.granted)
+            || CASE WHEN (as_superuser OR pg_catalog.current_setting('server_version_num')::int >= 160000) AND membership.grantor IS NOT NULL
+                    THEN pg_catalog.format(' GRANTED BY %I', membership.grantor) ELSE '' END
+            || ' CASCADE';
+      EXCEPTION WHEN insufficient_privilege THEN
+         RAISE WARNING 'Role "darling_alert_sources" is still a member of "%": revoking that needs a superuser, or ADMIN OPTION on it.', membership.granted;
+      END;
+   END LOOP;
+
+   EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM darling_alert_sources', pg_catalog.current_database());
+   REVOKE ALL ON SCHEMA config, collect FROM darling_alert_sources;
+   REVOKE ALL ON ALL TABLES IN SCHEMA config, collect FROM darling_alert_sources;
+   REVOKE ALL ON ALL SEQUENCES IN SCHEMA config, collect FROM darling_alert_sources;
+   REVOKE ALL ON FUNCTION config.submit_external_alert(text, text, text, text, text, text, double precision) FROM darling_alert_sources;
+
    IF pg_catalog.to_regclass('config.external_alert_source') IS NULL
       OR pg_catalog.to_regclass('config.external_alert_pending') IS NULL
       OR pg_catalog.to_regclass('config.external_alert_state') IS NULL THEN
@@ -1211,6 +1253,32 @@ BEGIN
       TO admin, viewer;
    GRANT SELECT ON config.external_alert_source, config.external_alert_pending, config.external_alert_state
       TO mcp;
+
+   FOR membership IN
+      SELECT m.rolname AS member_name, b.rolname AS grantor
+      FROM pg_catalog.pg_auth_members AS a
+      JOIN pg_catalog.pg_roles AS m ON m.oid = a.member
+      LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
+      WHERE a.roleid = group_oid
+        AND NOT EXISTS (
+           SELECT 1
+           FROM config.external_alert_source AS s
+           WHERE s.role_name = m.rolname
+             AND pg_catalog.shobj_description(m.oid, 'pg_authid') IS NOT DISTINCT FROM 'darling-alert-source'
+             AND m.rolname NOT IN ('admin', 'viewer', 'mcp')
+             AND m.rolname <> current_user
+             AND NOT m.rolsuper
+             AND m.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database()))
+   LOOP
+      BEGIN
+         EXECUTE pg_catalog.format('REVOKE darling_alert_sources FROM %I', membership.member_name)
+            || CASE WHEN (as_superuser OR pg_catalog.current_setting('server_version_num')::int >= 160000) AND membership.grantor IS NOT NULL
+                    THEN pg_catalog.format(' GRANTED BY %I', membership.grantor) ELSE '' END
+            || ' CASCADE';
+      EXCEPTION WHEN insufficient_privilege THEN
+         RAISE WARNING 'Login "%" is still a member of "darling_alert_sources": revoking that needs a superuser, or ADMIN OPTION on it.', membership.member_name;
+      END;
+   END LOOP;
 
    FOR source_login IN
       SELECT s.role_name, r.oid AS role_oid, r.rolsuper, r.rolcreaterole, r.rolcreatedb, r.rolreplication, r.rolbypassrls,
@@ -1278,6 +1346,15 @@ BEGIN
       EXECUTE pg_catalog.format('GRANT USAGE ON SCHEMA config TO %I', source_login.role_name);
       EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION config.submit_external_alert(%s) TO %I',
          'text, text, text, text, text, text, double precision', source_login.role_name);
+      BEGIN
+         IF pg_catalog.current_setting('server_version_num')::int >= 160000 THEN
+            EXECUTE pg_catalog.format('GRANT darling_alert_sources TO %I WITH INHERIT FALSE, SET FALSE', source_login.role_name);
+         ELSE
+            EXECUTE pg_catalog.format('GRANT darling_alert_sources TO %I', source_login.role_name);
+         END IF;
+      EXCEPTION WHEN insufficient_privilege THEN
+         RAISE WARNING 'Login "%" could not be made a member of "darling_alert_sources": this needs a superuser, or ADMIN OPTION on the group.', source_login.role_name;
+      END;
    END LOOP;
 END $do$;
 

@@ -2160,8 +2160,10 @@ public static class DarlingNetwork
     /// read-only <c>viewer</c> ones — which the roles have always supported and the single generated
     /// <c>hostssl</c> line did not.
     ///
-    /// <para>Accepts <c>"admin"</c>, <c>"viewer"</c>, or both in one string separated by a comma, a plus or
-    /// whitespace (<c>"admin,viewer"</c>, <c>"admin+viewer"</c>). A JSON array would be the tidier surface
+    /// <para>Accepts <c>"admin"</c>, <c>"viewer"</c> and <c>"sources"</c> (#5654: every external alert source login, through
+    /// the <c>darling_alert_sources</c> group), alone or several in one string separated by a comma, a plus or
+    /// whitespace (<c>"admin,viewer"</c>, <c>"viewer+sources"</c>). <c>sources</c> is a token, not a role name: the pg_hba
+    /// line writes it as <c>+darling_alert_sources</c> (<c>DarlingManagedPostgres.PgHbaRoleField</c>). A JSON array would be the tidier surface
     /// and is not worth a breaking change to a field that has shipped: everything already written stays
     /// valid, and a list is expressible without it.</para>
     ///
@@ -2201,7 +2203,7 @@ public static class DarlingNetwork
         {
             var normalized = part.ToLowerInvariant();
 
-            if (normalized is not ("viewer" or "admin"))
+            if (normalized is not ("viewer" or "admin" or "sources"))
             {
                 return null;
             }
@@ -2214,7 +2216,7 @@ public static class DarlingNetwork
 
         /* Stable order regardless of how it was written, so the generated pg_hba block is identical for
            "admin,viewer" and "viewer,admin" — otherwise the reconciler rewrites the file and reloads the
-           server every time somebody reorders the field. */
+           server every time somebody reorders the field. Ordinal order: admin, sources, viewer. */
         seen.Sort(StringComparer.Ordinal);
         return seen;
     }

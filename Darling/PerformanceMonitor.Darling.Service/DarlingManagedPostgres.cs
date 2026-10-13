@@ -5806,8 +5806,8 @@ public sealed class DarlingManagedPostgres
         if (roles is null || roles.Count == 0)
         {
             return Degrade(
-                $"postgres.network.role '{network.Role}' must be 'viewer', 'admin', or both "
-                + "(e.g. \"admin,viewer\") — never the superuser");
+                $"postgres.network.role '{network.Role}' must be 'viewer', 'admin', 'sources' (external alert source logins), "
+                + "or several of them (e.g. \"admin,viewer\" or \"viewer,sources\") — never the superuser");
         }
 
         /* The cert path rides the -o string, which cannot nest-quote a space -> a spaced path fail-DEADS
@@ -6066,7 +6066,25 @@ public sealed class DarlingManagedPostgres
     /// the given login role and CIDR; never <c>all</c>, never the superuser (D5/D6). Pure + testable.
     /// </summary>
     internal static string BuildNetworkPgHbaLine(string role, string cidr)
-        => $"hostssl {DatabaseName} {role} {cidr} scram-sha-256";
+        => $"hostssl {DatabaseName} {PgHbaRoleField(role)} {cidr} scram-sha-256";
+
+    /// <summary>
+    /// The pg_hba user field for one <c>postgres.network.role</c> token (#5654), mapped explicitly: <c>viewer</c> and
+    /// <c>admin</c> are the login roles of those names, and <c>sources</c> is <c>+darling_alert_sources</c>, the group every
+    /// registered external alert source login belongs to (pg_hba's <c>+</c> matches a role's members). Anything else throws:
+    /// the normalizer admits only these three, and a pg_hba line must never fall back to <c>all</c> or a name it did not
+    /// check. Pure.
+    /// </summary>
+    internal static string PgHbaRoleField(string token) => token switch
+    {
+        ViewerRoleName => ViewerRoleName,
+        AdminRoleName => AdminRoleName,
+        AlertSourcesNetworkToken => "+" + DarlingManagedRoles.AlertSourceGroupRoleName,
+        _ => throw new ArgumentOutOfRangeException(nameof(token), token, "Not a postgres.network.role token."),
+    };
+
+    /// <summary>The <c>postgres.network.role</c> token that admits every external alert source login (#5654).</summary>
+    internal const string AlertSourcesNetworkToken = "sources";
 
     /// <summary>
     /// The managed pg_hba block for every admitted role (#2665) — one <c>hostssl</c> line each, in the
@@ -6293,7 +6311,7 @@ public sealed class DarlingManagedPostgres
                     + "WHERE r.type = 'hostssl' AND $1 = ANY(r.database) AND u = ANY($2::text[])",
                     connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
                 command.Parameters.AddWithValue(DatabaseName);
-                command.Parameters.AddWithValue(plan.Roles!.ToArray());
+                command.Parameters.AddWithValue(plan.Roles!.Select(PgHbaRoleField).ToArray());
                 present = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
 
                 if (present < plan.Roles!.Count)
