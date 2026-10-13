@@ -598,6 +598,36 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
 
         Assert.Equal(["wait_stats"], names);
     });
+
+    /// <summary>
+    /// Group 8 (#5735, twin of Lite's #5731): get_collection_log shows the skipped-slots row on the page (the raw log, by design)
+    /// and does not count it as a collector run. The server has one collector run and one cycle row: <c>run_count</c> 1,
+    /// <c>skipped_cycle_rows</c> 1, the cycle row still in <c>runs</c>. The fleet form counts the same way across the two
+    /// servers: one run, three cycle rows.
+    /// </summary>
+    [Fact]
+    public Task Group8_CollectionLog_ShowsTheCycleRow_ButCountsItApartFromTheRuns() => RunReaderAsync(async (f, _, ct) =>
+    {
+        using (var one = System.Text.Json.JsonDocument.Parse(
+            await DarlingMcpDataTools.GetCollectionLog(f.Postgres, "cycle-reader-old", 24, 200)))
+        {
+            var root = one.RootElement;
+            Assert.Equal(1, root.GetProperty("run_count").GetInt32());
+            Assert.Equal(1, root.GetProperty("skipped_cycle_rows").GetInt32());
+            Assert.Equal(2, root.GetProperty("runs").GetArrayLength());
+            Assert.Contains(root.GetProperty("runs").EnumerateArray(),
+                r => r.GetProperty("collector").GetString() == CollectionCycleRow.CollectorName
+                  && r.GetProperty("status").GetString() == CollectionCycleRow.Status);
+        }
+
+        using var fleet = System.Text.Json.JsonDocument.Parse(
+            await DarlingMcpDataTools.GetCollectionLog(f.Postgres, "*", 24, 200));
+        var fleetRoot = fleet.RootElement;
+        Assert.Equal("fleet", fleetRoot.GetProperty("scope").GetString());
+        Assert.Equal(1, fleetRoot.GetProperty("run_count").GetInt32());
+        Assert.Equal(3, fleetRoot.GetProperty("skipped_cycle_rows").GetInt32());
+        Assert.Equal(4, fleetRoot.GetProperty("runs").GetArrayLength());
+    });
 }
 
 /// <summary>

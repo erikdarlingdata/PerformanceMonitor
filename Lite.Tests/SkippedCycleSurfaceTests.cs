@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
@@ -184,8 +185,9 @@ public sealed class SkippedCycleSurfaceTests : IClassFixture<SharedDuckDbFixture
         }));
 
         Assert.Equal(
-            new[] { "count_24h", "last_at", "last_message", "last_slowest_step", "last_slowest_step_ms", "slots_skipped_24h" },
+            new[] { "count_24h", "last_at", "last_message", "last_slowest_step", "last_slowest_step_ms", "slots_skipped_24h", "status" },
             some.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        Assert.Equal("ok", some.GetProperty("status").GetString());
         Assert.Equal(3, some.GetProperty("count_24h").GetInt64());
         Assert.Equal(6, some.GetProperty("slots_skipped_24h").GetInt64());
         Assert.Equal("collectors", some.GetProperty("last_slowest_step").GetString());
@@ -197,6 +199,38 @@ public sealed class SkippedCycleSurfaceTests : IClassFixture<SharedDuckDbFixture
         Assert.Equal(0, none.GetProperty("slots_skipped_24h").GetInt64());
         Assert.Equal(JsonValueKind.Null, none.GetProperty("last_at").ValueKind);
         Assert.Equal(JsonValueKind.Null, none.GetProperty("last_slowest_step_ms").ValueKind);
+    }
+
+    /// <summary>
+    /// #5735: the block of a read that failed. Same fields as Darling's twin, status "unavailable", every figure null: a count of 0
+    /// would read as the all-clear on the one block whose job is to say the loop fell behind.
+    /// </summary>
+    [Fact]
+    public void TheDegradedBlock_SaysUnavailable_WithEveryFigureNull_NeverAZero()
+    {
+        var block = JsonSerializer.SerializeToElement(McpHealthTools.SkippedCyclesBlock(null));
+
+        Assert.Equal(
+            new[] { "status", "count_24h", "slots_skipped_24h", "last_at", "last_slowest_step", "last_slowest_step_ms", "last_message" },
+            block.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal("unavailable", block.GetProperty("status").GetString());
+        foreach (var p in block.EnumerateObject().Where(p => p.Name != "status"))
+        {
+            Assert.Equal(JsonValueKind.Null, p.Value.ValueKind);
+        }
+    }
+
+    /// <summary>#5735: a failed read is null (the tool then degrades the block), a good one passes through, cancellation propagates.</summary>
+    [Fact]
+    public async Task AFailedRead_IsNull_ASuccessfulOneIsPassedThrough_CancellationPropagates()
+    {
+        Assert.Null(await McpHealthTools.ReadSkippedCyclesOrNullAsync(() => throw new TimeoutException("deadline")));
+        Assert.Null(await McpHealthTools.ReadSkippedCyclesOrNullAsync(() => Task.FromException<SkippedCycleSummary>(new InvalidOperationException())));
+        Assert.Same(SkippedCycleSummary.None, await McpHealthTools.ReadSkippedCyclesOrNullAsync(() => Task.FromResult(SkippedCycleSummary.None)));
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            McpHealthTools.ReadSkippedCyclesOrNullAsync(() => throw new OperationCanceledException()));
+        await Assert.ThrowsAsync<TaskCanceledException>(() =>
+            McpHealthTools.ReadSkippedCyclesOrNullAsync(() => Task.FromCanceled<SkippedCycleSummary>(new CancellationToken(true))));
     }
 
     /// <summary>
@@ -214,6 +248,7 @@ public sealed class SkippedCycleSurfaceTests : IClassFixture<SharedDuckDbFixture
 
         Assert.Contains("skipped_cycles = SkippedCyclesBlock(skippedCycles),", tool, StringComparison.Ordinal);
         Assert.Contains("dataService.GetSkippedCycleSummaryAsync(resolved.ServerId)", tool, StringComparison.Ordinal);
+        Assert.Contains("await ReadSkippedCyclesOrNullAsync(", tool, StringComparison.Ordinal);
         Assert.Contains("SkippedCyclesSummary.Text = ", refresh, StringComparison.Ordinal);
         Assert.Contains(".SummaryLine(tabClock)", refresh, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"SkippedCyclesSummary\"", xaml, StringComparison.Ordinal);
