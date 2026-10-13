@@ -13,6 +13,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- #5758: the statement-identity rule for an unknown query hash (QueryHashIdentity) has one definition, in Common.
+         Common references no project, so this edge cannot make a cycle. -->
+    <ProjectReference Include="..\PerformanceMonitor.Common\PerformanceMonitor.Common.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="PerformanceMonitorLite" />
     <InternalsVisibleTo Include="PerformanceMonitorDashboard" />
     <InternalsVisibleTo Include="Lite.Tests" />

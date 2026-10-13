@@ -375,4 +375,115 @@ public sealed class BlockingWaitCountTests
         Assert.Equal(fromCSharp.OrderBy(k => k, StringComparer.Ordinal), fromSql.OrderBy(k => k, StringComparer.Ordinal));
         Assert.Equal(8, fromSql.Count);
     }
+
+    /* ── #5743: DMV snapshot rows, where a wait of any length is caught ── */
+
+    /// <summary>
+    /// DMV snapshot shapes, milliseconds from <c>T0</c> (a row is event time and wait time; its derived start is
+    /// event minus wait). Expected waits per blocked session are in <see cref="DmvExpectedWaits"/>.
+    /// 21: the issue's example (wait 1.5 s seen at T, the pair blocks again 200 ms later and is seen 10 s later at
+    /// 9.8 s: starts 1.7 s apart, under the 2 s tolerance, 200 ms after the first wait was last seen) is TWO waits.
+    /// 22: a continuing wait first seen at 300 ms and again 10.04 s later at 10.3 s (start jitter +40 ms) is one.
+    /// 23: first seen at 10 ms, again with a derived start +50 ms later (inside <see cref="BlockingWaits.WaitStartJitterMs"/>): one.
+    /// 24: derived start exactly 150 ms after the earlier row's event time still merges (the comparison is strict): one.
+    /// 25: 151 ms after it splits: two.
+    /// 26: three rows of one continuing wait whose derived starts jitter by up to 120 ms and whose event order
+    /// differs from the start order: one.
+    /// 27: the running maximum covers ALL preceding rows, not only the previous one: the third row's start is 200 ms
+    /// after the second row's event, but the first row (earlier start, later event) saw the wait alive: one.
+    /// </summary>
+    internal static List<NullableReport> DmvSnapshotCases()
+    {
+        DateTime At(long ms) => T0.AddMilliseconds(ms);
+        const long T = 10_000;
+        return new List<NullableReport>
+        {
+            new(21, 20, At(T), 1500), new(21, 20, At(T + 10_000), 9800),
+            new(22, 20, At(T), 300), new(22, 20, At(T + 10_040), 10300),
+            new(23, 20, At(T), 10), new(23, 20, At(T + 10_000), 9950),
+            new(24, 20, At(T), 10), new(24, 20, At(T + 10_000), 9850),
+            new(25, 20, At(T), 10), new(25, 20, At(T + 10_000), 9849),
+            new(26, 20, At(T), 20), new(26, 20, At(T + 10_000), 9990), new(26, 20, At(T + 5_000), 4900),
+            new(27, 20, At(T + 9_000), 10_000), new(27, 20, At(T - 800), 100), new(27, 20, At(T + 9_400), 10_000),
+        };
+    }
+
+    internal static readonly IReadOnlyDictionary<int, int> DmvExpectedWaits = new Dictionary<int, int>
+    {
+        [21] = 2, [22] = 1, [23] = 1, [24] = 1, [25] = 2, [26] = 1, [27] = 1,
+    };
+
+    [Fact]
+    public void DmvSnapshots_AWaitCannotStartBeforeThePreviousWasLastSeen()
+    {
+        var waits = CollapseEdgeCases(DmvSnapshotCases());
+
+        foreach (var (blocked, expected) in DmvExpectedWaits)
+        {
+            Assert.Equal(expected, waits.Count(w => w.Blocked == blocked));
+        }
+    }
+
+    [Fact]
+    public async Task PostgresSql_AgreesWithTheCSharpRule_OnDmvSnapshotRows()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString), "Set DARLING_TEST_PG to run the live wait-count SQL test.");
+
+        var sql = "WITH " + BlockingWaits.WaitsCteSql(BlockingWaits.SqlDialect.Postgres, "waits", EdgeValuesSource(DmvSnapshotCases()))
+            + " SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM waits";
+        var fromSql = new List<string>();
+        var perPair = new Dictionary<int, int>();
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = new NpgsqlCommand(sql, connection);
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                fromSql.Add(EdgeKey(reader.GetInt32(0), reader.GetInt32(1), reader.GetDateTime(2), reader.GetInt64(3)));
+                perPair[reader.GetInt32(0)] = perPair.GetValueOrDefault(reader.GetInt32(0)) + 1;
+            }
+        }
+
+        var fromCSharp = CollapseEdgeCases(DmvSnapshotCases()).Select(w => EdgeKey(w.Blocked, w.Blocker, w.Time, w.Wait));
+        Assert.Equal(fromCSharp.OrderBy(k => k, StringComparer.Ordinal), fromSql.OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal(DmvExpectedWaits.OrderBy(p => p.Key), perPair.OrderBy(p => p.Key));
+    }
+
+    /// <summary>
+    /// Blocked-process reports are untouched by #5743: two waits whose starts are 6 s apart are two waits, one
+    /// eleven-report wait is one, and <c>wait_reports</c> still counts each wait's reports (1 and 2, then 11).
+    /// </summary>
+    [Fact]
+    public async Task BlockedProcessReports_KeepTheirWaitCounts_AndReportCounts()
+    {
+        var rows = new List<BlockedProcessAlertRow>();
+        rows.AddRange(OneWait(102, 100, T0, 1));
+        rows.AddRange(OneWait(102, 100, T0.AddSeconds(6), 2));
+        rows.AddRange(OneWait(103, 100, T0, 11));
+
+        var collapsed = Collapse(rows);
+        Assert.Equal(2, collapsed.Count(w => w.BlockedSpid == 102));
+        Assert.Equal(1, collapsed.Count(w => w.BlockedSpid == 103));
+
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString), "Set DARLING_TEST_PG to run the live wait-count SQL test.");
+
+        var sql = "WITH " + BlockingWaits.WaitsCteSql(
+            BlockingWaits.SqlDialect.Postgres, "waits", ValuesSource(rows, 1), new[] { "server_id" }, reportCount: true)
+            + " SELECT blocked_spid, wait_reports FROM waits ORDER BY blocked_spid, wait_reports";
+        var fromSql = new List<string>();
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            fromSql.Add(reader.GetInt32(0).ToString(CultureInfo.InvariantCulture) + ":"
+                + Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture));
+        }
+
+        Assert.Equal(new[] { "102:1", "102:2", "103:11" }, fromSql);
+    }
 }
