@@ -122,6 +122,7 @@ public static class ComposeCompiler
 
     /// <summary>The one source table whose RAW rows need a per-interval dedup before aggregation (#1841).</summary>
     private const string QueryStoreTable = "query_store_stats";
+    private const string DefaultTraceTable = "default_trace_events";
 
     /// <summary>The source table whose raw rows are combined to one row per (server, collection_time) before aggregation (#5710).</summary>
     internal const string CpuSchedulerTable = "cpu_scheduler_stats";
@@ -268,6 +269,21 @@ public static class ComposeCompiler
                 + "GROUP BY server_id, server_name, collection_time)";
         }
 
+        /* #5738: the Default Trace readers (MCP get_default_trace_events, the viewer, Lite) collapse stored copies of one event by
+           s_defaultTracePartitionKey, so a measure over default_trace_events counts a copy once too. Same shape as the Query Store raw
+           dedupe below: one ROW_NUMBER per key inside the window, newest collection first. Every key column is a partition column, so
+           the outer server scope and dimension filters (event_name, database_name, object_name, login_name, server) push into this
+           subquery, below the WindowAgg, and no partition restriction is needed. */
+        if (string.Equals(sourceTable, DefaultTraceTable, StringComparison.Ordinal))
+        {
+            return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY "
+                + string.Join(", ", s_defaultTracePartitionKey)
+                + $" ORDER BY {timeColumn} DESC, default_trace_event_id DESC) AS dte_rn "
+                + $"FROM {PgSchemaGenerator.CollectSchema}.{DefaultTraceTable} "
+                + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam}"
+                + ") AS dte_ranked WHERE dte_rn = 1)";
+        }
+
         if (!string.Equals(sourceTable, QueryStoreTable, StringComparison.Ordinal))
         {
             return $"{PgSchemaGenerator.CollectSchema}.{sourceTable}";
@@ -306,6 +322,17 @@ public static class ComposeCompiler
             + QueryStorePartitionRestriction(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe)
             + ") AS qs_ranked WHERE qs_rn = 1)";
     }
+
+    /* #5738: the key a stored copy of one Default Trace event shares: the server, then the readers' 16 columns (the 15 fields of
+       DarlingDefaultTraceReader.DefaultTraceEventRow plus event_sequence). A row stored before event_sequence existed has a NULL one
+       and PARTITION BY groups NULLs together, so it keeps the column-only key, as the readers do. server_name rides with server_id
+       as in the Query Store key, so a server_name scope filter pushes below the window function. A census test pins this list equal
+       to the MCP reader's key. */
+    internal static readonly string[] s_defaultTracePartitionKey =
+    {
+        "server_id", "server_name", "event_time", "event_name", "event_class", "spid", "database_name", "login_name", "host_name",
+        "application_name", "object_name", "filename", "text_data", "error_number", "severity", "duration_us", "integer_data", "event_sequence",
+    };
 
     /* The partition key the restriction joins on. The dedupe's PARTITION BY text above spells the same list as a literal (the tie-break
        source guard reads it there); a test pins the two equal. */
