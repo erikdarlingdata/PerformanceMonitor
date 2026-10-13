@@ -221,19 +221,9 @@ public sealed class NotificationRouteStoreTests : IDisposable
         Assert.True(_secrets.Has(keep, "Teams"));
     }
 
-    [Fact]
-    public async Task ACredentialThatCannotBeRead_TurnsThatChannelOff_InsteadOfInheriting()
-    {
-        var id = await _store.InsertAsync(Route("High CPU", TeamsUrl, server: 7101, slack: SlackUrl));
-        _secrets.Lose(id, "Teams");
-
-        var route = (await _store.GetAsync(id))!;
-
-        Assert.Equal("", route.TeamsUrl);
-        Assert.True(route.IsOffFor(NotificationRouter.TeamsChannel));
-        Assert.False(route.IsOffFor(NotificationRouter.SlackChannel));
-        Assert.Equal(SlackUrl, route.SlackUrl);
-    }
+    /* ACredentialThatCannotBeRead_TurnsThatChannelOff_InsteadOfInheriting lives in NotificationRouteTruthfulnessTests: reading a lost
+       secret logs a warning into the shared buffer, and that class (collection app-logger-statics) counts those warnings while
+       this one (app-alert-statics) runs beside it. */
 
     // ---- scope expansion through the store ----------------------------------------------------------
 

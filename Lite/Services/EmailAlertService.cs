@@ -32,6 +32,10 @@ public class EmailAlertService : IFindingAlertSender
     /// <summary>Test seam: the branding this app feeds the shared email/template renderer.</summary>
     internal static AlertBranding Branding => s_branding;
 
+    /// <summary>#5750: how long an alert waits for the first load of the notification routes before it reads what is loaded.
+    /// The wait is an await, so it holds no thread, and it ends at once when the routes are already loaded.</summary>
+    private static readonly TimeSpan s_routeFirstLoadWait = TimeSpan.FromSeconds(5);
+
     private readonly IAlertHistoryStore _historyStore;
     private readonly EmailSendCore _core;
     private readonly ILogger<EmailAlertService> _logger;
@@ -109,6 +113,7 @@ public class EmailAlertService : IFindingAlertSender
     {
         try
         {
+            await NotificationRouteCache.WaitForFirstLoadAsync(s_routeFirstLoadWait);
             var result = await _core.TrySendAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted,
                 detailText: deliverProse ? detailText : null, deliveryMode: deliveryMode,
@@ -124,9 +129,9 @@ public class EmailAlertService : IFindingAlertSender
             var delivery = AlertDelivery.FromFanout(result, muted, trayChannelPresent: trayShown);
 
             /* #3598 / #4750: the row records where the posts went and what each channel's send did, exactly as
-               the headless service's DarlingAlertDeliverer does. Lite has no routes table, so the record lists
-               the channels the parent settings resolved to (source "Default"), each with "delivered", "failed"
-               or "not attempted" — an alert that reached one webhook and failed on another used to read as one
+               the headless service's DarlingAlertDeliverer does. The record lists the channels the firing resolved
+               to, each with the route that supplied it (route_id; source "Exact", "Family" or "Wildcard", or "Default"
+               for the parent settings since #5750) and "delivered", "failed" or "not attempted" — an alert that reached one webhook and failed on another used to read as one
                delivery. Only the outcome word is stored: a webhook error can carry its endpoint's URL, so the
                reason stays in send_error. Null when no channel reached resolution (throttled, folded, muted,
                unconfigured), and the context is created here if the alert had none. */
@@ -239,6 +244,7 @@ public class EmailAlertService : IFindingAlertSender
            digest row, the channels and the history row all carry the filtered context and prose. */
             named = AlertStatementFilter.Apply(named);
             var (serverName, currentValue, context) = FindingSummary.Compose(named);
+            await NotificationRouteCache.WaitForFirstLoadAsync(s_routeFirstLoadWait);
             var result = await _core.TrySendAsync(
                 FindingSummary.MetricName, serverName, currentValue, named.Count.ToString(),
                 named[0].ServerId, context, attemptChannels: true);

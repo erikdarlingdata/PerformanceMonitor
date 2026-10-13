@@ -2192,7 +2192,7 @@ public partial class MainWindow : Window
     /// The tray notice for a webhook channel that keeps failing (#4750), on the same status timer as
     /// <see cref="CheckConnectionsAndNotify"/>: one notice when a channel reaches
     /// <see cref="WebhookAlertService.FailingChannelThreshold"/> failures in a row, one when it delivers again
-    /// or is turned off (no destination left in the settings; Lite has no routes), and none in between — an
+    /// or is turned off (no destination left in the settings or on an enabled route), and none in between — an
     /// edge like the server-down notice, decided by the same
     /// <see cref="WebhookChannelFailurePolicy"/> Darling's "Notification Channel Failing" alert uses. A channel
     /// can fail for weeks while another one delivers every alert, and nothing else told the user.

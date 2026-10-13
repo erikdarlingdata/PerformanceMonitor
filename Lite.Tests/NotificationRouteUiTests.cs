@@ -350,6 +350,26 @@ public sealed class NotificationRouteUiTests : IDisposable
         Assert.Contains("NotificationRouteStore, _dataService", Lite.Tests.ParitySource.ReadFile("Lite/MainWindow.xaml.cs"), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void TheOrphanedAndUnreadableStatusWords_LiveInTheSharedProject_AndBothProductsAliasThem()
+    {
+        var shared = Lite.Tests.ParitySource.ReadFile("PerformanceMonitor.Notifications/NotificationRouteStatusText.cs");
+        foreach (var word in new[] { "Orphaned: server removed", "Orphaned: tag deleted", "Not active: tag data unreadable", "Not active: scope data unreadable" })
+        {
+            Assert.Contains("\"" + word + "\"", shared, StringComparison.Ordinal);
+        }
+
+        /* #5750 review: the two products used to spell these words twice, each pinned to a literal of its own, so a reworded copy
+           passed both suites. A second spelling in either UI helper is the regression. */
+        foreach (var file in new[] { "Lite/Helpers/NotificationRouteUi.cs", "Darling/PerformanceMonitor.Darling.Viewer/ViewerNotificationRouteScope.cs" })
+        {
+            var source = Lite.Tests.ParitySource.ReadFile(file);
+            Assert.DoesNotContain("\"Orphaned: ", source, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"Not active: ", source, StringComparison.Ordinal);
+            Assert.Contains("NotificationRouteStatusText.", source, StringComparison.Ordinal);
+        }
+    }
+
     private static string MethodBody(string file, string method)
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(Lite.Tests.ParitySource.ReadFile(file));

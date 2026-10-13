@@ -586,8 +586,8 @@ public class WebhookAlertService
     /// at its last value until the process restarted and the signal would never close. Each count therefore
     /// says whether the channel is still <see cref="WebhookChannelFailureCount.Configured"/>: the parent's
     /// settings carry a destination, or an enabled route does
-    /// (<see cref="NotificationRouter.AnyRouteConfiguresWebhookChannel"/>; Lite has no routes, so there only the
-    /// settings count). For a channel with none, this returns that channel's CURRENT count with Configured
+    /// (<see cref="NotificationRouter.AnyRouteConfiguresWebhookChannel"/>; Lite's routes count too since #5750, read
+    /// from the cache, which the dispatcher-thread status timer reaches without loading). For a channel with none, this returns that channel's CURRENT count with Configured
     /// false, so the host can close what it announced, and THEN resets the count to 0 and clears the last
     /// error, as a delivery does. A channel that is turned back on starts from zero, and does not raise the
     /// signal at once on a count from before it was turned off. So the read is not idempotent for a channel

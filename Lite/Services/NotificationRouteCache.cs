@@ -35,6 +35,14 @@ namespace PerformanceMonitorLite.Services;
 /// <see cref="Current"/> still finds the routes stale (the background reload has not finished, or the retry window is open),
 /// it reloads on the calling thread as before, joining a reload already in flight through the same gate.</para>
 ///
+/// <para><b>The WPF dispatcher thread never loads and never takes the gate</b> (#5750 review). The 30 second status timer
+/// (<c>WebhookAlertService.GetChannelFailureCounts</c> reads the routes) and the synchronous start of an alert send both run
+/// on it, and the load takes the DuckDB read lock with no timeout. On that thread <see cref="Current"/> returns the last
+/// snapshot, and starts the background reload if one is due. <see cref="Configure"/> primes the first load the same way. An
+/// alert must still not read the empty pre-load list, which would send a scoped server's alert to the app-wide destinations:
+/// <c>EmailAlertService</c> awaits <see cref="WaitForFirstLoadAsync"/> (bounded, no thread blocked) before the send core
+/// reads the routes, and every other thread reloads inline as before.</para>
+///
 /// <para><b>A failed reload keeps the routes already in force</b> (the same posture as MuteRuleService), logs, and retries
 /// no sooner than 30 seconds later, so a broken store costs one failed read per half minute, not one per alert. A store whose
 /// tag tables cannot be read is handled inside the loader (tag-scoped routes match nothing; server-scoped ones still expand).</para>
@@ -53,6 +61,11 @@ public static class NotificationRouteCache
     /// <summary>The expanded routes in force, reloading first when something invalidated them.</summary>
     public static IReadOnlyList<NotificationRoute> Current => s_core.Current;
 
+    /// <summary>Completes once the first load attempt since <see cref="Configure"/> has finished, or after <paramref name="timeout"/>.
+    /// The alert path awaits this before it reads <see cref="Current"/>, so an alert sent right after start does not read
+    /// the empty pre-load list and fall through to the app-wide destinations. Never blocks a thread.</summary>
+    public static Task WaitForFirstLoadAsync(TimeSpan timeout) => s_core.WaitForFirstLoadAsync(timeout);
+
     /// <summary>Whether a background reload is running; tests wait for it to finish.</summary>
     internal static bool BackgroundReloadRunning => s_core.BackgroundReloadRunning;
 }
@@ -66,6 +79,8 @@ internal sealed class NotificationRouteCacheCore
 {
     private readonly object _gate = new();
     private readonly TimeSpan _retryAfterFailure = TimeSpan.FromSeconds(30);
+    private readonly Func<bool> _isUiThread;
+    private TaskCompletionSource<bool> _firstLoad = NewFirstLoad();
 
     private Func<IReadOnlyList<NotificationRoute>>? _loader;
     private IReadOnlyList<NotificationRoute> _routes = Array.Empty<NotificationRoute>();
@@ -73,6 +88,18 @@ internal sealed class NotificationRouteCacheCore
     private long _loadedVersion = -1;
     private long _retryAfterTicks;
     private int _backgroundRunning;
+
+    /// <param name="isUiThread">Whether the calling thread is one that must never wait on a load (the WPF dispatcher thread).
+    /// Null: the application dispatcher, and false when there is none (a test, a console host).</param>
+    public NotificationRouteCacheCore(Func<bool>? isUiThread = null)
+    {
+        _isUiThread = isUiThread ?? OnApplicationDispatcher;
+    }
+
+    private static bool OnApplicationDispatcher() =>
+        System.Windows.Application.Current?.Dispatcher?.CheckAccess() == true;
+
+    private static TaskCompletionSource<bool> NewFirstLoad() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>Installs the loader (null removes it, and the cache serves no routes). Resets the held routes.</summary>
     public void Configure(Func<IReadOnlyList<NotificationRoute>>? loader)
@@ -84,6 +111,37 @@ internal sealed class NotificationRouteCacheCore
             _loadedVersion = -1;
             Volatile.Write(ref _retryAfterTicks, 0);
             Interlocked.Increment(ref _version);
+            _firstLoad = NewFirstLoad();
+        }
+
+        /* Prime the first load now, so the first status tick and the first alert find it done or in flight. */
+        StartBackgroundReload();
+    }
+
+    /// <summary>Completes once the first load attempt since <see cref="Configure"/> has finished, or after the timeout; at once when no
+    /// loader is installed or the routes are already loaded. Starts the background load if it is not running. No thread blocks.</summary>
+    public async Task WaitForFirstLoadAsync(TimeSpan timeout)
+    {
+        if (Volatile.Read(ref _loader) is null)
+        {
+            return;
+        }
+
+        TaskCompletionSource<bool> first;
+        lock (_gate)
+        {
+            first = _firstLoad;
+        }
+
+        if (first.Task.IsCompleted)
+        {
+            return;
+        }
+
+        StartBackgroundReload();
+        if (await Task.WhenAny(first.Task, Task.Delay(timeout)).ConfigureAwait(false) != first.Task)
+        {
+            AppLogger.Warn("NotificationRoutes", $"The notification routes had not finished their first load after {timeout.TotalSeconds:0} seconds; this alert reads the routes loaded so far.");
         }
     }
 
@@ -142,6 +200,14 @@ internal sealed class NotificationRouteCacheCore
                 return Volatile.Read(ref _routes);
             }
 
+            /* The dispatcher thread reads what is held and never loads or takes the gate: a load can wait on the DuckDB write
+               lock with no timeout. The background reload brings the routes up to date. */
+            if (_isUiThread())
+            {
+                StartBackgroundReload();
+                return Volatile.Read(ref _routes);
+            }
+
             lock (_gate)
             {
                 var version = Volatile.Read(ref _version);
@@ -160,11 +226,15 @@ internal sealed class NotificationRouteCacheCore
                     _routes = loader();
                     _loadedVersion = version;
                     Volatile.Write(ref _retryAfterTicks, 0);
+                    _firstLoad.TrySetResult(true);
                 }
                 catch (Exception ex)
                 {
                     AppLogger.Warn("NotificationRoutes", $"Reloading the notification routes failed; the routes already loaded stay in force: {ex.Message}");
                     Volatile.Write(ref _retryAfterTicks, (DateTime.UtcNow + _retryAfterFailure).Ticks);
+
+                    /* A failed first attempt still ends the wait: the 30 second retry window, not each alert, paces the retries. */
+                    _firstLoad.TrySetResult(true);
                 }
 
                 return _routes;

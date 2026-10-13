@@ -37,19 +37,20 @@ internal sealed record RouteScopeOption(RouteScopeKind Kind, int? Id, string Lab
 internal static class NotificationRouteUi
 {
     internal const string AllServersLabel = "All servers";
-    internal const string OrphanedServerStatus = "Orphaned: server removed";
-    internal const string OrphanedTagStatus = "Orphaned: tag deleted";
+    internal const string OrphanedServerStatus = NotificationRouteStatusText.OrphanedServer;
+    internal const string OrphanedTagStatus = NotificationRouteStatusText.OrphanedTag;
     internal const string UnreadableStatus = "Saved, unreadable";
 
     /// <summary>The status of a tag-scoped route the loader could not expand because the tag tables could not be read (#5750):
-    /// the route matches nothing until a reload succeeds, so it is never shown as "OK". The text is the Darling viewer's
-    /// (<c>ViewerNotificationRouteScope.TagDataUnreadableStatus</c>), word for word.</summary>
-    internal const string TagsUnreadableStatus = "Not active: tag data unreadable";
+    /// the route matches nothing until a reload succeeds, so it is never shown as "OK". The text is the shared
+    /// <see cref="NotificationRouteStatusText.TagDataUnreadable"/>, which the Darling viewer's
+    /// <c>ViewerNotificationRouteScope.TagDataUnreadableStatus</c> aliases too.</summary>
+    internal const string TagsUnreadableStatus = NotificationRouteStatusText.TagDataUnreadable;
 
     /// <summary>The same for a server-scoped route the loader could not expand. A failed tag read does not cause it (a server
-    /// route's ids come from the server list, as in Darling); only a server list that could not be built does. Darling
-    /// viewer's <c>ScopeDataUnreadableStatus</c> text.</summary>
-    internal const string ScopeUnreadableStatus = "Not active: scope data unreadable";
+    /// route's ids come from the server list, as in Darling); only a server list that could not be built does. The text is the
+    /// shared <see cref="NotificationRouteStatusText.ScopeDataUnreadable"/>.</summary>
+    internal const string ScopeUnreadableStatus = NotificationRouteStatusText.ScopeDataUnreadable;
     internal const string SetMarker = "Set";
     internal const string NotSetMarker = "Not set";
     internal const string UnreadableMarker = "Unreadable";

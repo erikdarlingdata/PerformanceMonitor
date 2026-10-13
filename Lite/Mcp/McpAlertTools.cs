@@ -120,8 +120,9 @@ public sealed class McpAlertTools
                     severity,
                     severity_source = severitySource,
                     /* #3598: the Darling twin's routing provenance, read through the shared serializer for
-                       parity of shape. This edition has no routes table, so a row's route names the parent
-                       settings' channels (family and source "Default"). #4750: each destination also says what
+                       parity of shape. A row's route names the channels the firing resolved to: route_id is the
+                       route that supplied each (null = the parent settings) and source is "Exact", "Family" or
+                       "Wildcard" for a route, "Default" for the parent (#5750). #4750: each destination also says what
                        the send to it did ("delivered", "failed" or "not attempted"; null on a row written
                        before that was recorded), so a channel that failed beside one that delivered shows
                        here. The outcome word only: the failure's reason stays in send_error. A row whose

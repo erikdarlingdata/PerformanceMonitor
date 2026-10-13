@@ -90,6 +90,21 @@ public sealed class NotificationRouteTruthfulnessTests : IDisposable
     }
 
     [Fact]
+    public async Task ACredentialThatCannotBeRead_TurnsThatChannelOff_InsteadOfInheriting()
+    {
+        const string slackUrl = "https://hooks.slack.r7-secret.test/T0/B0/xyz";
+        var id = await _store.InsertAsync(Route("High CPU", teams: TeamsUrl, server: 7101) with { SlackUrl = slackUrl });
+        _secrets.Lose(id, NotificationRouter.TeamsChannel);
+
+        var route = (await _store.GetAsync(id))!;
+
+        Assert.Equal("", route.TeamsUrl);
+        Assert.True(route.IsOffFor(NotificationRouter.TeamsChannel));
+        Assert.False(route.IsOffFor(NotificationRouter.SlackChannel));
+        Assert.Equal(slackUrl, route.SlackUrl);
+    }
+
+    [Fact]
     public async Task AReadableSecret_LogsNothing()
     {
         await _store.InsertAsync(Route("High CPU", teams: TeamsUrl));

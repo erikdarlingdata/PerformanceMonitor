@@ -178,7 +178,7 @@ public static class NotificationRouter
 
     /// <summary>
     /// Resolves the destinations for one firing. <paramref name="routes"/> may be null or empty (the shared
-    /// default - every SKU without a routes table), in which case the answer is the parent defaults.
+    /// default - an adapter that serves no routes), in which case the answer is the parent defaults.
     /// <paramref name="serverId"/> (#5750) is the product's server id for the firing - Lite's hash id, Darling's
     /// registry id - or null for a firing with no server (a fleet-level preview): only fleet-wide routes can match
     /// then. Optional so a caller with no server keeps compiling.

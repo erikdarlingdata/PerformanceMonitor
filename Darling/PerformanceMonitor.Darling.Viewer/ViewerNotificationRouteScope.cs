@@ -80,10 +80,10 @@ public sealed partial class ViewerDataService
 public static class ViewerNotificationRouteScope
 {
     public const string AllServersLabel = "All servers";
-    public const string OrphanedServerStatus = "Orphaned: server removed";
-    public const string OrphanedTagStatus = "Orphaned: tag deleted";
-    public const string TagDataUnreadableStatus = "Not active: tag data unreadable";
-    public const string ScopeDataUnreadableStatus = "Not active: scope data unreadable";
+    public const string OrphanedServerStatus = NotificationRouteStatusText.OrphanedServer;
+    public const string OrphanedTagStatus = NotificationRouteStatusText.OrphanedTag;
+    public const string TagDataUnreadableStatus = NotificationRouteStatusText.TagDataUnreadable;
+    public const string ScopeDataUnreadableStatus = NotificationRouteStatusText.ScopeDataUnreadable;
     public const string DisabledStatus = "Disabled";
     public const string OkStatus = "OK";
 

@@ -155,8 +155,9 @@ public interface IAlertSettings
     ///
     /// <para>Defaulted to EMPTY on the interface rather than declared abstract, deliberately: an empty list
     /// resolves every channel to the parent default and the fan-out is byte-identical to the pre-routes
-    /// one, so an adapter that does not implement this member has opted out of nothing — Lite has no
-    /// routes table and its adapter takes this default. Only Darling's store-backed adapter overrides it.</para>
+    /// one, so an adapter that does not implement this member has opted out of nothing. Both products' store-backed
+    /// adapters override it (Darling's from its routes table, Lite's, since #5750, from the expanded-routes cache); an
+    /// adapter that takes this default serves no routes.</para>
     /// </summary>
     System.Collections.Generic.IReadOnlyList<NotificationRoute> NotificationRoutes => System.Array.Empty<NotificationRoute>();
 
