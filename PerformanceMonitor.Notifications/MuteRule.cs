@@ -58,7 +58,7 @@ public class MuteRule
 
     /// <summary>The refusal text for a source name <see cref="IsValidExternalSource"/> rejects.</summary>
     public static string InvalidExternalSourceMessage(string? name) =>
-        $"external_source '{name}' is not a valid source name. A source name is 2 to 31 characters, lower case: a letter, then letters, digits or underscores (e.g. 'nagios').";
+        $"'external_source' is not a valid source name (got '{name}'). A source name is 2 to 31 characters, lower case: a letter, then letters, digits or underscores (e.g. 'nagios').";
 
     public string? MetricName { get; set; }
     public string? DatabasePattern { get; set; }

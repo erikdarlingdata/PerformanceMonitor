@@ -2,6 +2,7 @@
 tool create_mute_rule 528
 param create_mute_rule.database_pattern 89
 param create_mute_rule.expires_at 121
+param create_mute_rule.external_source 117
 param create_mute_rule.job_name_pattern 79
 param create_mute_rule.metric_name 110
 param create_mute_rule.query_text_pattern 83

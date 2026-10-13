@@ -212,6 +212,20 @@ public sealed class LiteSampleAgeHistoryTests : IClassFixture<SharedDuckDbFixtur
         Assert.Equal(JsonValueKind.Null, jobs.GetProperty("newest_sample").ValueKind);
     }
 
+    /// <summary>#5654: Lite has no external alert intake, but its history rows carry Darling's external_source key
+    /// (always null) so both products return one row shape.</summary>
+    [Fact]
+    public async Task TheMcpHistoryRowCarriesTheExternalSourceKey_AlwaysNull()
+    {
+        await RecordAsync("High CPU", new AlertContext(), "Total CPU at 97%");
+
+        var json = await McpAlertTools.GetAlertHistory(new LocalDataService(_duckDb), 24, 50);
+
+        using var doc = JsonDocument.Parse(json);
+        var row = doc.RootElement.GetProperty("alerts").EnumerateArray().Single();
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("external_source").ValueKind);
+    }
+
     [Fact]
     public void TheTabAndTheDetailWindowShowTheRowsPersistedLine()
     {

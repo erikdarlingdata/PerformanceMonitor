@@ -742,7 +742,7 @@ public sealed class DarlingMcpAlertTools
         modified_at_utc = r.ModifiedAtUtc,
     };
 
-    [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, external alert source, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed.")]
+    [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed.")]
     public static async Task<string> GetMuteRules(
         NpgsqlDataSource postgres,
         [Description("Include only enabled, non-expired rules. Default true.")] bool enabled_only = true,
@@ -1030,7 +1030,7 @@ public sealed class DarlingMcpAlertTools
         [Description("Optional human-readable reason, shown in the mute-rule list.")] string? reason = null,
         [Description("Optional ISO-8601 UTC expiry (e.g. 2026-08-01T00:00:00Z); after this the rule no longer mutes. Omit for a permanent rule.")] string? expires_at = null,
         [Description("Optional server_id (from get_fleet_overview) to key the rule on that one server.")] int? server_id = null,
-        [Description("Optional external alert source name (lower case, e.g. 'nagios'): the rule then mutes only alerts that source raised, never a built-in alert or another source's. Omit for a rule not limited to a source.")] string? external_source = null) =>
+        [Description("Optional external alert source name (lower case, e.g. 'nagios'): mute only that source's alerts. Omit for any source.")] string? external_source = null) =>
         CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
             wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), external_source);
 

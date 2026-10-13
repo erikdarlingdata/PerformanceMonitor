@@ -29,6 +29,8 @@ import * as api from "../alerts-api.js";
 export const TEXT_FIELDS = [
   { key: "server_name", label: "Server name (exact)" },
   { key: "metric_name", label: "Metric" },
+  /* #5654: limits the rule to alerts one external source raised; empty (the default) leaves it unlimited. */
+  { key: "external_source", label: "External source (lower case, e.g. nagios)" },
   { key: "database_pattern", label: "Database (substring)" },
   { key: "wait_type_pattern", label: "Wait type (substring)" },
   { key: "query_text_pattern", label: "Query text (substring)" },
@@ -217,7 +219,7 @@ async function refreshList(state) {
 
 function drawList(state) {
   if (!state.rules.length) return mount(state.listBox, emptyStrip("No mute rules are configured."));
-  const head = ["Status", "Scope", "Reason", "Expires", "Created", state.canEdit ? "" : null]
+  const head = ["Status", "Scope", "External source", "Reason", "Expires", "Created", state.canEdit ? "" : null]
     .filter((h) => h !== null)
     .map((h) => el("th", { text: h }));
   const rows = state.rules.map((r) => ruleRow(r, state.canEdit));
@@ -238,6 +240,7 @@ function ruleRow(r, canEdit) {
   const cells = [
     el("td", {}, [el("span", { class: st === "Enabled" ? "status-cell sev-Healthy" : "paused-badge", text: st })]),
     el("td", { text: scope, title: r.server_id != null ? "server_id " + r.server_id : null }),
+    el("td", { text: r.external_source || "—" }),
     el("td", { text: r.reason || "—" }),
     el("td", { text: r.expires_at_utc ? localTime(r.expires_at_utc) + (isExpired(r) ? " (expired)" : "") : "Never" }),
     el("td", { text: r.created_at_utc ? localTime(r.created_at_utc) : "—" }),
