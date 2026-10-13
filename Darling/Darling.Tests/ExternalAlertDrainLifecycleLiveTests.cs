@@ -36,7 +36,7 @@ namespace Darling.Tests;
 /// left open gives up after two seconds and the row goes back for a retry (it is not dropped as interrupted); a pass that is
 /// cancelled midway gives the rows it never reached back to the queue; a row stuck claimed with no owner is reaped by a
 /// later pass of the same run; a pass restamps its claims, so a live pass's own rows are never reaped; a row the reap took
-/// is not sent; and a send the answer cannot show stayed inside the process is never repeated.
+/// is not sent; and a fire every channel failed to send is tried again (delivery is at least once), with the same PagerDuty dedup key.
 /// </summary>
 public sealed class ExternalAlertDrainLifecycleLiveTests
 {
@@ -246,7 +246,7 @@ public sealed class ExternalAlertDrainLifecycleLiveTests
     [Fact]
     public async Task AFailedPagerDutyResolve_GoesBackToTheQueue_AndTheClearIsHandledOnce()
     {
-        /* A repeat resolve leaves the incident as it is, so it is the one failed send that is tried again. */
+        /* A repeat resolve leaves the incident as it is. */
         await WithRigAsync(async rig =>
         {
             await rig.SubmitAsync("fire", "disk", server: "SQL01");
@@ -270,8 +270,9 @@ public sealed class ExternalAlertDrainLifecycleLiveTests
     [Theory]
     [InlineData("failed", "the webhook post timed out after 10 seconds")]
     [InlineData("email", "the SMTP session was reset")]
-    public async Task AFireThatFailedOnEveryChannel_IsMarkedFailed_WhateverTheChannel_AndNeverRetried(string channel, string error)
+    public async Task AFireThatFailedOnEveryChannel_GoesBackToTheQueue_WhateverTheChannel_AndIsSentAgainWhenDue(string channel, string error)
     {
+        /* Delivery is at least once: a timeout after the request left reads the same as a refused connection. */
         await WithRigAsync(async rig =>
         {
             rig.Answer = AlertDelivery.FromLegacyStoredColumns(false, channel, error);
@@ -279,13 +280,54 @@ public sealed class ExternalAlertDrainLifecycleLiveTests
 
             var pass = await rig.Drain.RunPassAsync(rig.Ct);
 
-            Assert.Equal(1, pass.Failed);
-            Assert.Equal(0, pass.Retried);
-            Assert.Equal("failed", await rig.StatusAsync(id));
-            Assert.Equal("0", await rig.ScalarAsync($"SELECT attempts::text FROM config.external_alert_pending WHERE pending_id = {id}"));
-            Assert.Contains("not sent again", await rig.ScalarAsync($"SELECT reason FROM config.external_alert_pending WHERE pending_id = {id}"), StringComparison.Ordinal);
+            Assert.Equal(0, pass.Failed);
+            Assert.Equal(1, pass.Retried);
+            Assert.Equal("pending", await rig.StatusAsync(id));
+            Assert.Equal("1", await rig.ScalarAsync($"SELECT attempts::text FROM config.external_alert_pending WHERE pending_id = {id}"));
+            Assert.Contains("attempt 1 of 4", await rig.ScalarAsync($"SELECT reason FROM config.external_alert_pending WHERE pending_id = {id}"), StringComparison.Ordinal);
             Assert.Equal(0, (await rig.Drain.RunPassAsync(rig.Ct)).Claimed);
-            Assert.Single(rig.Sent);
+
+            rig.Answer = AlertDelivery.FromLegacyStoredColumns(true, "webhook", null);
+            await rig.ExecAsync($"UPDATE config.external_alert_pending SET next_attempt_at = now() - interval '1 second' WHERE pending_id = {id}");
+            var retry = await rig.Drain.RunPassAsync(rig.Ct);
+
+            Assert.Equal(1, retry.Delivered);
+            Assert.Equal("delivered", await rig.StatusAsync(id));
+            Assert.Equal(2, rig.Sent.Count);
+        });
+    }
+
+    [Fact]
+    public async Task ARetriedFire_CarriesTheSamePagerDutyDedupKeyOnEveryAttempt()
+    {
+        /* PagerDuty drops a repeat trigger that carries the dedup key of an open incident, so a fire sent again after a
+           timeout does not open a second one. The key comes from the server key and the metric name alone. */
+        await WithRigAsync(async rig =>
+        {
+            rig.Answer = AlertDelivery.FromLegacyStoredColumns(false, "failed", "the webhook post timed out after 10 seconds");
+            var id = await rig.SubmitAsync("fire", "disk", server: "SQL01");
+
+            for (var attempt = 1; attempt <= 3; attempt++)
+            {
+                Assert.Equal(1, (await rig.Drain.RunPassAsync(rig.Ct)).Retried);
+                await rig.ExecAsync($"UPDATE config.external_alert_pending SET next_attempt_at = now() - interval '1 second' WHERE pending_id = {id}");
+            }
+
+            rig.Answer = AlertDelivery.FromLegacyStoredColumns(true, "webhook", null);
+            Assert.Equal(1, (await rig.Drain.RunPassAsync(rig.Ct)).Delivered);
+
+            Assert.Equal(4, rig.Sent.Count);
+            var keys = rig.Sent
+                .Select(o => WebhookAlertService.DerivePagerDutyDedupKey(o.ServerKey, o.MetricName, o.Context, autoResolve: true))
+                .Distinct()
+                .ToList();
+            Assert.Single(keys);
+            Assert.Equal(rig.Sent[0].ServerKey + ":" + rig.Sent[0].MetricName, keys[0]);
+            var plain = rig.Sent
+                .Select(o => WebhookAlertService.DerivePagerDutyDedupKey(o.ServerKey, o.MetricName, o.Context))
+                .Distinct()
+                .ToList();
+            Assert.Single(plain);
         });
     }
 

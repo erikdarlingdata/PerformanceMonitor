@@ -31,7 +31,7 @@ namespace Darling.Tests;
 /// <summary>
 /// The external alert drain against a real store with a fake deliverer that writes the history row the way the real one
 /// does, after its send (#5654): a fire is sent once and leaves one history row, a fire and its clear arrive in order, a muted
-/// fire is recorded as muted and sends nothing, a fire every channel refused is marked failed and not sent again, an unregistered server lands in bucket 0,
+/// fire is recorded as muted and sends nothing, a fire every channel refused is tried again after 1, 2 and 4 minutes and marked failed on the fourth attempt, an unregistered server lands in bucket 0,
 /// a restart finds a claimed row delivered when the history has its row and interrupted when not (neither is sent again), and
 /// the PagerDuty resolve is asked for only on a clear of a firing key.
 /// </summary>
@@ -222,25 +222,46 @@ public sealed class ExternalAlertDrainLiveTests
     }
 
     [Fact]
-    public async Task AFireEveryChannelFailed_IsMarkedFailedAtOnce_AndNotSentAgain()
+    public async Task AFireEveryChannelFailed_GoesBackToTheQueue_WaitsOneTwoFourMinutes_AndIsMarkedFailedOnTheFourthAttempt()
     {
-        /* #5654: a webhook that timed out after its request was sent, or answered with an error, reads the same as a
-           refused connection, so a failed fire is never put back in the queue. */
+        /* #5654: delivery is at least once. A webhook that timed out after its request was sent reads the same as a refused
+           connection, so a repeat can post twice, and a brief channel outage must not lose the alert. */
         await WithDrainAsync(async rig =>
         {
             rig.Answer = AlertDelivery.FromLegacyStoredColumns(false, "failed", "boom");
             var id = await rig.SubmitAsync("fire", "disk");
+            var expectedWaitSeconds = new[] { 60, 120, 240 };
 
-            var pass = await rig.Drain.RunPassAsync(rig.Ct);
-            var again = await rig.Drain.RunPassAsync(rig.Ct);
+            for (var attempt = 1; attempt <= ExternalAlertDrain.MaxSendAttempts; attempt++)
+            {
+                var pass = await rig.Drain.RunPassAsync(rig.Ct);
+                Assert.Equal(1, pass.Claimed);
+                Assert.Equal(attempt, rig.Sent.Count);
+                if (attempt < ExternalAlertDrain.MaxSendAttempts)
+                {
+                    Assert.Equal(1, pass.Retried);
+                    Assert.Equal(0, pass.Failed);
+                    Assert.Equal("pending", await rig.StatusAsync(id));
+                    Assert.Equal(attempt.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        await rig.ScalarAsync($"SELECT attempts::text FROM config.external_alert_pending WHERE pending_id = {id}"));
+                    var waitSeconds = double.Parse(
+                        (await rig.ScalarAsync($"SELECT extract(epoch FROM next_attempt_at - now())::text FROM config.external_alert_pending WHERE pending_id = {id}"))!,
+                        System.Globalization.CultureInfo.InvariantCulture);
+                    Assert.InRange(waitSeconds, expectedWaitSeconds[attempt - 1] - 15, expectedWaitSeconds[attempt - 1] + 1);
+                    /* Not due yet: the next pass takes nothing until the wait is over. */
+                    Assert.Equal(0, (await rig.Drain.RunPassAsync(rig.Ct)).Claimed);
+                    await rig.ExecAsync($"UPDATE config.external_alert_pending SET next_attempt_at = now() - interval '1 second' WHERE pending_id = {id}");
+                }
+                else
+                {
+                    Assert.Equal(1, pass.Failed);
+                    Assert.Equal(0, pass.Retried);
+                }
+            }
 
-            Assert.Equal(1, pass.Claimed);
-            Assert.Equal(1, pass.Failed);
-            Assert.Equal(0, pass.Retried);
-            Assert.Equal(0, again.Claimed);
             Assert.Equal("failed", await rig.StatusAsync(id));
-            Assert.Equal("0", await rig.ScalarAsync($"SELECT attempts::text FROM config.external_alert_pending WHERE pending_id = {id}"));
-            Assert.Single(rig.Sent);
+            Assert.Equal(ExternalAlertDrain.MaxSendAttempts, rig.Sent.Count);
+            Assert.Equal(0, (await rig.Drain.RunPassAsync(rig.Ct)).Claimed);
         });
     }
 

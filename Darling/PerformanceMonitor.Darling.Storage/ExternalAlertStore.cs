@@ -89,12 +89,14 @@ public sealed record ExternalAlertFiringState(
 /// <c>config.submit_external_alert</c>, records what became of each row, expires what nobody took in time, reaps what a
 /// dead run left claimed, and remembers which keys are firing so a clear pairs with its fire.
 ///
-/// <para><b>Delivery is at most once.</b> A row moves <c>pending</c> to <c>claimed</c> to one terminal status. Only two
-/// calls move a claimed row back: <see cref="ReleaseForRetryAsync"/>, which the drain calls only when it knows nothing
-/// left the process (a state write that timed out on a lock, a PagerDuty resolve, which a repeat leaves unchanged), and
-/// <see cref="ReleaseUnattemptedAsync"/>, for rows a stopping pass never attempted. A run that dies between a send and the
-/// mark leaves a claimed row; the reap, which every pass runs, marks it <c>delivered</c> or <c>interrupted</c> once its
-/// claim is old enough, and it is never claimed again, because a second send could page someone twice for one fire.</para>
+/// <para><b>Delivery is at least once.</b> A row moves <c>pending</c> to <c>claimed</c> to one terminal status, and goes back
+/// to <c>pending</c> through two calls only: <see cref="ReleaseForRetryAsync"/>, which the drain calls for a state write that
+/// timed out on a lock (nothing was sent), a fire that every channel failed to send, and a PagerDuty resolve that failed
+/// (a repeat leaves the incident as it is), and <see cref="ReleaseUnattemptedAsync"/>, for rows a stopping pass never
+/// attempted. A send that timed out after its request left can therefore post twice: PagerDuty drops a repeat trigger that
+/// carries the same dedup key, but Slack, Teams, a generic webhook and email can show a duplicate. A run that dies between a
+/// send and the mark leaves a claimed row; the reap, which every pass runs, marks it <c>delivered</c> or <c>interrupted</c>
+/// once its claim is old enough, and it is not claimed again.</para>
 ///
 /// <para><b>Order.</b> A claim takes at most one row per <c>(source, key)</c>, and only when no earlier row of that key is
 /// still pending or claimed, so a fire and the clear that follows it reach the drain in order. The claim runs under a
@@ -406,8 +408,9 @@ RETURNING fired_severity";
 
     /// <summary>
     /// Puts a claimed row back in the queue to be tried again at <paramref name="nextAttemptAtUtc"/>, and counts the attempt.
-    /// Only for a row whose handling is known to have sent nothing, or whose send a repeat leaves unchanged; expiry still ends
-    /// the row if the retries run past its deadline.
+    /// Delivery is at least once: a send that timed out after the request left can post twice. PagerDuty drops a repeat trigger
+    /// with the same dedup key, but Slack, Teams, a webhook and email can show a duplicate. Expiry still ends the row if the
+    /// retries run past its deadline.
     /// </summary>
     public async Task<bool> ReleaseForRetryAsync(
         long pendingId, DateTime nextAttemptAtUtc, string? reason, CancellationToken cancellationToken = default)

@@ -32,15 +32,15 @@ public sealed record ExternalAlertDrainResult(
 /// Darling's own alerts use: the same mute check, the same record-and-send deliverer (its channels, routes, per-fingerprint
 /// cooldown, statement filter and history row), and a resolution row the way Darling's own clears write one.
 ///
-/// <para><b>Once only.</b> A row is claimed (<c>claimed</c>), handled exactly once, and then marked. The send happens
-/// before the mark, so a run that dies between them leaves a claimed row; the reap, which every pass runs, marks it
-/// <c>delivered</c> when the alert history holds the row the deliverer writes after a send (the row carries the pending id in
-/// its <c>context_json</c>), else <c>interrupted</c>, once its claim is older than <see cref="ReapClaimsOlderThan"/>. A pass
-/// restamps its claims before each row, so the age is never reached by a live pass. A claimed row is never sent a second
-/// time. A row goes back to <c>pending</c> only when nothing was sent for it: a state write that timed out on a lock, a
-/// PagerDuty resolve that failed (a repeat resolve leaves the incident as it is), and the rows of a stopping pass that were
-/// never attempted. A fire that every channel refused is marked <c>failed</c>, because the deliverer's answer cannot show
-/// that no request left the process (a timeout after the request was sent reads the same as a refused connection).</para>
+/// <para><b>At least once.</b> A row is claimed (<c>claimed</c>), handled, and then marked. The send happens before the mark,
+/// so a run that dies between them leaves a claimed row; the reap, which every pass runs, marks it <c>delivered</c> when the
+/// alert history holds the row the deliverer writes after a send (the row carries the pending id in its <c>context_json</c>),
+/// else <c>interrupted</c>, once its claim is older than <see cref="ReapClaimsOlderThan"/>. A pass restamps its claims before
+/// each row, so the age is never reached by a live pass. A reaped row is not claimed again. A row goes back to <c>pending</c>
+/// for a state write that timed out on a lock, a fire every channel failed to send, a PagerDuty resolve that failed, and the
+/// rows of a stopping pass that were never attempted. A fire that every channel failed to send waits 1, 2 and 4 minutes
+/// and is marked <c>failed</c> on the fourth attempt. A send that timed out after its request left can post twice:
+/// PagerDuty drops a repeat trigger with the same dedup key, but Slack, Teams, a webhook and email can show a duplicate.</para>
 ///
 /// <para><b>Order.</b> The store's claim hands out at most one row per source and key per call, and none while an earlier
 /// row of the key is still pending or claimed, so a fire and its clear are handled in the order they were submitted. A fire
@@ -291,12 +291,11 @@ public sealed class ExternalAlertDrain
 
         if (FailedSendBackoff.EveryChannelFailed(delivery))
         {
-            /* The answer cannot show that no request left the process: a webhook that timed out, or answered with an error,
-               or an SMTP session that broke, may already have reached its destination. A repeat could post the alert twice,
-               so the row is closed. */
-            await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Failed,
-                Trim("every channel failed, and a request may have reached its destination, so it is not sent again; the alert history row has the error"));
-            return ExternalAlertOutcome.Failed;
+            /* Delivery is at least once: a fire every channel refused goes back for another attempt. The answer cannot show
+               that no request left the process (a webhook that timed out after its request was sent reads the same as a
+               refused connection), so a repeat can post twice. PagerDuty drops a repeat trigger that carries the same dedup
+               key, and the key is derived from the server and the metric name, so every attempt of this row sends the same one. */
+            return await RetryOrFailAsync(row, "every channel failed; the alert history row has the error", cancellationToken);
         }
 
         if (delivery.Sent)
