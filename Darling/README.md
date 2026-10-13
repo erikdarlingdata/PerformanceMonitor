@@ -285,6 +285,8 @@ The service reports the set once per start with a count, a total and that comman
 
 **The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints the post-start checklist; work it about 10–15 minutes later against the store, and hold the upgrade unverified until every line passes.
 
+Before you run an older build against the store, disable or delete every scoped notification route in the Notification Routes window. A route can be limited to one server or one tag ([#5750](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5750)), and the store keeps that limit in two new columns. A build from before that change does not read them. It treats each scoped route as if it covered all servers, so a route meant for one server sends the alerts of every server.
+
 #### Upgrading from a build that predates the script
 
 `upgrade-darling.ps1` was added after 3.5.0, so upgrading **from 3.5.0 or earlier** is a manual

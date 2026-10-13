@@ -454,7 +454,7 @@ public sealed class McpAlertTools
 
     /// <summary>The store the route tools use, built over the service's own database without the host registering one (#5750).</summary>
     private static DuckDbNotificationRouteStore CreateRouteStore(LocalDataService dataService, ServerManager serverManager) =>
-        new(dataService.Database, serverManager.GetKnownServerIds);
+        new(dataService.Database, serverManager.GetKnownServerIds, App.GetWebhookUrl, DuckDbNotificationRouteStore.SaveToCredentialManager);
 
     /// <summary>The get_notification_routes payload. Same top-level and per-route field names as Darling's twin (a test pins
     /// them equal). Never carries a URL, key or host: only the channel names. Internal to the tests so they can hand it a store

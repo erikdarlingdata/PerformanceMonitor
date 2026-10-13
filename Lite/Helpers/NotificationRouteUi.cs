@@ -215,7 +215,16 @@ internal static class NotificationRouteUi
     /// saved value is never put in a box.</summary>
     internal const string KeepMask = "••••••••";
 
-    internal static string SecretBoxInitialText(string? stored) => string.IsNullOrWhiteSpace(stored) ? "" : KeepMask;
+    internal static string SecretBoxInitialText(string? stored, bool unreadable = false) =>
+        string.IsNullOrWhiteSpace(stored) && !unreadable ? "" : KeepMask;
+
+    /// <summary>True when a channel's saved destination could not be read (<paramref name="unreadable"/>, empty
+    /// <paramref name="stored"/>) and its box still holds the mask: the user left it alone. The route then names the channel in
+    /// <see cref="NotificationRoute.OffChannels"/> and the store keeps the has-value flag, so the channel stays off for the
+    /// route (#5366) rather than falling through to the fleet-wide route or the app-wide URL. Clearing the box is the explicit
+    /// remove; typing replaces it (#5750).</summary>
+    internal static bool KeepsUnreadable(string? boxText, string? stored, bool unreadable) =>
+        unreadable && string.IsNullOrWhiteSpace(stored) && (boxText ?? "").Trim() == KeepMask;
 
     /// <summary>
     /// What to save for one destination box. <c>UpdateAsync</c> replaces a route's destinations whole, and an empty value
@@ -225,8 +234,8 @@ internal static class NotificationRouteUi
     /// <item>the box is empty: remove the destination;</item>
     /// <item>anything else: that is the new value (a mask the user typed over keeps only what follows it).</item>
     /// </list>
-    /// A channel whose saved destination was unreadable has an empty <paramref name="stored"/>, so leaving it untouched
-    /// clears it rather than keeping a value nobody can read.
+    /// A channel whose saved destination was unreadable has an empty <paramref name="stored"/>, so this returns empty for it;
+    /// <see cref="KeepsUnreadable"/> is what tells the store to keep that channel's flag instead of removing it.
     /// </summary>
     internal static string ResolveSecret(string? boxText, string? stored)
     {

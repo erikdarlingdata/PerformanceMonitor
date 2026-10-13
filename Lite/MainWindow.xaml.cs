@@ -154,7 +154,13 @@ public partial class MainWindow : Window
         /* #5750: the scoped notification routes. Any route, tag or server edit invalidates the cache, which starts one
            background reload (see NotificationRouteCache); a read that still finds it stale reloads on the calling thread.
            Task.Run keeps that reload off the UI thread's synchronization context. */
-        NotificationRouteStore = new DuckDbNotificationRouteStore(_databaseInitializer, _serverManager.GetKnownServerIds);
+        /* The route secrets go straight to CredentialService (SaveToCredentialManager) so a refused save is reported (#5750);
+           App.SaveWebhookUrl ignores the result, and it and the 512-character limit are #5772. */
+        NotificationRouteStore = new DuckDbNotificationRouteStore(
+            _databaseInitializer,
+            _serverManager.GetKnownServerIds,
+            App.GetWebhookUrl,
+            DuckDbNotificationRouteStore.SaveToCredentialManager);
         var routeStore = NotificationRouteStore;
         NotificationRouteCache.Configure(() => Task.Run(() => routeStore.ListAsync()).GetAwaiter().GetResult());
         /* The edition comes from _engineEditions, the same as the alert sweep's: the live status when it has read

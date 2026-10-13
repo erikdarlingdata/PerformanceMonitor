@@ -15,6 +15,7 @@ using System.Windows.Controls;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Helpers;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Windows;
 
@@ -100,14 +101,14 @@ public partial class NotificationRouteEditDialog : Window
 
     private static void InitSecretBox(PasswordBox box, string stored, bool unreadable)
     {
-        box.Password = NotificationRouteUi.SecretBoxInitialText(stored);
+        box.Password = NotificationRouteUi.SecretBoxInitialText(stored, unreadable);
         if (!string.IsNullOrWhiteSpace(stored))
         {
             box.ToolTip = "A destination is saved. Leave the dots to keep it, type to replace it, or clear the box to remove it.";
         }
         else if (unreadable)
         {
-            box.ToolTip = "A destination was saved but Windows Credential Manager could not return it, so this channel is off for the route. Type a new value to replace it; saving with the box empty removes it.";
+            box.ToolTip = "A destination was saved but Windows Credential Manager could not return it, so this channel is off for the route. Leave the dots to keep it off, type a new value to replace it, or clear the box to remove it.";
         }
     }
 
@@ -192,6 +193,21 @@ public partial class NotificationRouteEditDialog : Window
             match = family;
         }
 
+        /* An unreadable saved destination left alone keeps its flag (the channel stays off, #5366); clearing its box removes it. */
+        var keepOff = new List<string>();
+        void KeepIfLeftAlone(string channel, PasswordBox box, string? stored)
+        {
+            if (NotificationRouteUi.KeepsUnreadable(box.Password, stored, _stored?.IsOffFor(channel) == true))
+            {
+                keepOff.Add(channel);
+            }
+        }
+
+        KeepIfLeftAlone(NotificationRouter.TeamsChannel, TeamsUrlBox, _stored?.TeamsUrl);
+        KeepIfLeftAlone(NotificationRouter.SlackChannel, SlackUrlBox, _stored?.SlackUrl);
+        KeepIfLeftAlone(NotificationRouter.GenericChannel, GenericUrlBox, _stored?.GenericUrl);
+        KeepIfLeftAlone(NotificationRouter.PagerDutyChannel, PagerDutyKeyBox, _stored?.PagerDutyRoutingKey);
+
         return new NotificationRoute(
             _stored?.RouteId ?? 0,
             match,
@@ -203,7 +219,8 @@ public partial class NotificationRouteEditDialog : Window
             EnabledCheckBox.IsChecked == true)
         {
             ScopeServerId = serverId,
-            ScopeTagId = tagId
+            ScopeTagId = tagId,
+            OffChannels = keepOff.Count == 0 ? null : keepOff
         };
     }
 
@@ -234,6 +251,11 @@ public partial class NotificationRouteEditDialog : Window
         }
         catch (PendingRestoreException ex)
         {
+            ShowInline(ex.Message);
+        }
+        catch (RouteSecretException ex)
+        {
+            /* Credential Manager refused a destination: the route is unchanged (#5750). The message names the channel, never the value. */
             ShowInline(ex.Message);
         }
         catch (Exception ex)

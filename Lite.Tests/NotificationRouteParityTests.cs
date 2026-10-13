@@ -69,7 +69,7 @@ public sealed class NotificationRouteParityTests : IDisposable
             _initializer,
             () => _registry.Select(IdOf).ToArray(),
             key => { lock (_secretsLock) { return _secrets.TryGetValue(key, out var v) ? v : ""; } },
-            (key, value) => { lock (_secretsLock) { if (string.IsNullOrWhiteSpace(value)) _secrets.Remove(key); else _secrets[key] = value; } });
+            (key, value) => { lock (_secretsLock) { if (string.IsNullOrWhiteSpace(value)) _secrets.Remove(key); else _secrets[key] = value; } return true; });
         var tags = new LocalDataService(_initializer);
 
         /* The tag tree, in creation order, so a parent exists before its child. */

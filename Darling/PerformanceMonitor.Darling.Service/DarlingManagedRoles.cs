@@ -1483,8 +1483,9 @@ GRANT UPDATE ON {config}.config_alert_settings TO {mcp};
 GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
 -- #5085: the fleet server-tag write tools (create/update/delete/assign/unassign_server_tag) run as mcp. The admin
 --    gate is these two single-table grants and nothing else: a role without them gets 42501 on a tag write.
---    Both tables are non-secret, have no reload-beacon trigger (so no config_service column is needed) and
---    server_tags.id is GENERATED ALWAYS AS IDENTITY (so no sequence grant). Provisioning re-runs every start, so
+--    Both tables are non-secret and server_tags.id is GENERATED ALWAYS AS IDENTITY (so no sequence grant). V181 (#5750)
+--    put a statement-level reload-beacon trigger on each, so a tag write bumps config_service; the config_service column
+--    grant above covers that. Provisioning re-runs every start, so
 --    no migration rung carries this.
 GRANT INSERT, UPDATE, DELETE ON {config}.server_tags TO {mcp};
 GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {mcp};
@@ -1518,7 +1519,7 @@ GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {viewer};
 -- #5085: the web dashboard's server-tag endpoints (POST/PATCH/DELETE under /api/server-tags) run as viewer, so it
 --    gets the SAME two single-table writes mcp holds above. The seat model decides who may call them (a read-only
 --    seat is refused every unsafe method); these grants are only the floor beneath that gate. Both tables are
---    non-secret and carry no reload-beacon trigger, so no config_service column is involved. The WPF Viewer's
+--    non-secret. V181 (#5750) put a reload-beacon trigger on each, covered by the viewer's config_service column grant. The WPF Viewer's
 --    read-only probe is unchanged: it discriminates on config_alert_log UPDATE (ViewerDataService.ReadOnlyProbeSql),
 --    which these grants do not touch, so a read-only desktop seat still reads as read-only and its tag editors
 --    stay disabled. A server removal also clears that server's server_tag_map rows, which needs the DELETE here.

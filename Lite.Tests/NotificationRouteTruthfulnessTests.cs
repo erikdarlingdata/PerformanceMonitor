@@ -49,7 +49,7 @@ public sealed class NotificationRouteTruthfulnessTests : IDisposable
             _initializer,
             () => new[] { 7101, 7102 },
             key => { lock (_secretsLock) { return _secrets.TryGetValue(key, out var v) ? v : ""; } },
-            (key, value) => { lock (_secretsLock) { if (string.IsNullOrWhiteSpace(value)) _secrets.Remove(key); else _secrets[key] = value; } });
+            (key, value) => { lock (_secretsLock) { if (string.IsNullOrWhiteSpace(value)) _secrets.Remove(key); else _secrets[key] = value; } return true; });
     }
 
     public void Dispose()

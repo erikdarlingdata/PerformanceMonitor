@@ -240,7 +240,7 @@ public sealed class NotificationRouteUiTests : IDisposable
         var store = new DuckDbNotificationRouteStore(
             initializer, () => new[] { 7101 },
             key => secrets.TryGetValue(key, out var v) ? v : "",
-            (key, value) => { if (string.IsNullOrWhiteSpace(value)) secrets.Remove(key); else secrets[key] = value; });
+            (key, value) => { if (string.IsNullOrWhiteSpace(value)) secrets.Remove(key); else secrets[key] = value; return true; });
 
         var id = await store.InsertAsync(Route(server: 7101, teams: TeamsUrl, slack: SlackUrl, generic: GenericUrl, pager: PagerKey));
         var stored = (await store.GetAsync(id))!;
@@ -268,12 +268,12 @@ public sealed class NotificationRouteUiTests : IDisposable
     public void TheStoresRefusals_ShowWithoutTheParameterSuffix()
     {
         var both = Assert.Throws<ArgumentException>(() =>
-            new DuckDbNotificationRouteStore(null!, () => Array.Empty<int>(), _ => "", (_, _) => { })
+            new DuckDbNotificationRouteStore(null!, () => Array.Empty<int>(), _ => "", (_, _) => true)
                 .InsertAsync(Route(server: 1, tag: 2)).GetAwaiter().GetResult());
         Assert.Equal("A notification route is scoped to a server or to a tag, never both.", NotificationRouteUi.InlineMessage(both));
 
         var star = Assert.Throws<ArgumentException>(() =>
-            new DuckDbNotificationRouteStore(null!, () => Array.Empty<int>(), _ => "", (_, _) => { })
+            new DuckDbNotificationRouteStore(null!, () => Array.Empty<int>(), _ => "", (_, _) => true)
                 .InsertAsync(Route(match: "*")).GetAwaiter().GetResult());
         Assert.StartsWith("The every-metric match ('*') needs a server or tag scope", NotificationRouteUi.InlineMessage(star), StringComparison.Ordinal);
         Assert.DoesNotContain("(Parameter", NotificationRouteUi.InlineMessage(star), StringComparison.Ordinal);

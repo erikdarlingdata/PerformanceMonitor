@@ -692,7 +692,8 @@ GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;
 GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO mcp;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
 -- #5085: the fleet server-tag write tools run as mcp; these two single-table grants are the admin gate. Both
---     tables are non-secret with no beacon trigger, and server_tags.id is an identity column (no sequence grant).
+--     tables are non-secret, and server_tags.id is an identity column (no sequence grant). V181 (#5750) put a
+--     statement-level reload-beacon trigger on each, so a tag write bumps config_service; the config_service column grant above covers it.
 GRANT INSERT, UPDATE, DELETE ON config.server_tags TO mcp;
 GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;
 
