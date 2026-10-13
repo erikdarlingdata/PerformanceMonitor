@@ -125,6 +125,33 @@ public class ArchiveService
        budget: a deferred compaction is idempotent and the next hourly pass merges the group. */
     internal TimeSpan WriteLockBudget { get; set; } = LocalDataService.WriteLockBudget;
 
+    /* #5691: how long one read hold of the periodic export aims to last. A writer that queues while the export reads
+       waits for the hold to end, and every background writer gives up after WriteLockBudget, so a hold has to end well
+       inside that: half of it. A table whose rows fit in one hold of this length is exported in one hold, as before;
+       a bigger one (the backlog after Lite was closed for a while, or a table with large rows) is exported one time
+       slice per hold, the way compaction merges one group per lock (#5410). */
+    internal TimeSpan ExportReadHoldTarget => WriteLockBudget / 2;
+
+    /* #5691: rows the first hold of a table exports before any rate for that table has been measured. Each hold
+       measures the table's export rate, and the slices after it (and the table's first hold in later passes) are sized
+       from that rate to last ExportReadHoldTarget. Small on purpose: an overestimate costs one long hold, an
+       underestimate only a few short ones. A test sets a smaller number. */
+    internal long ExportSeedSliceRows { get; set; } = 10_000;
+
+    /* #5691: the most holds one table's export is cut into, so a range whose rows all share a few timestamps cannot
+       turn into thousands of tiny slices. */
+    private const int MaxExportSlices = 256;
+
+    /* #5691: rows per second each table's export ran at, measured per hold; sizes the next hold of the same table. */
+    private readonly Dictionary<string, double> _exportRowsPerSecond = new(StringComparer.Ordinal);
+
+    /* Fires with (table, slice, entered) right after the export takes a read hold (entered true) and right before it
+       releases it (false), on the exporting thread (#5691). A test records the holds and queues a writer inside one. */
+    internal Action<string, int, bool>? ExportReadHoldForTests { get; set; }
+
+    /* #5691: the rows older than the cutoff changed between a table's export and its promote; the table is skipped. */
+    private sealed class ArchiveExportStaleException(string message) : Exception(message);
+
     /* Replaces the minute-resolution file-name prefix, so a test can put two runs in different "minutes"
        without waiting for the clock. */
     internal string? TimestampForTests { get; set; }
@@ -290,8 +317,12 @@ public class ArchiveService
 
            Exporting and promoting in separate lock scopes is safe here: the
            DELETE only removes rows older than cutoffDate, and collectors only
-           ever insert rows timestamped "now", so nothing archivable can be
-           written into the gap between the export and the DELETE. */
+           ever insert rows timestamped "now", so nothing archivable is
+           written into the gap between the export and the DELETE. #5691 split
+           the export into one read hold per table slice, which widens that gap,
+           so the write lock now checks it: the rows older than the cutoff must
+           still be exactly as many as the export wrote, or the table is skipped
+           this pass with nothing promoted and nothing deleted. */
         foreach (var (table, timeColumn) in ArchivableTables)
         {
             /* #5731: stop between tables. A table already promoted stays promoted (the views are rebuilt below). */
@@ -326,32 +357,13 @@ public class ArchiveService
                 var tempParquetPath = parquetPath + ".tmp";
                 exportedTemp = tempParquetPath;
 
-                long rowCount;
-
-                /* Export under a read lock — runs alongside UI queries. */
-                using (_duckDb.AcquireReadLock())
+                /* Export under read locks, alongside UI queries: one hold per table, or one per time slice of a
+                   table too big for one hold (#5691). Each hold is released before the next is taken, so a writer
+                   that queued during one gets in before the next. */
+                var rowCount = await ExportTableAsync(table, timeColumn, cutoffDate, tempParquetPath);
+                if (rowCount == 0)
                 {
-                    using var readConnection = _duckDb.CreateConnection();
-                    await readConnection.OpenAsync(CancellationToken.None);
-
-                    rowCount = await GetRowCountBeforeCutoff(readConnection, table, timeColumn, cutoffDate);
-                    if (rowCount == 0)
-                    {
-                        continue;
-                    }
-
-                    /* DuckDB keeps the partial file when a COPY fails partway through its query, and the move
-                       below never runs then, so nothing else would remove it: the hourly retry would add
-                       another partial file each time. */
-                    try
-                    {
-                        await ExportToParquet(readConnection, table, timeColumn, cutoffDate, tempParquetPath);
-                    }
-                    catch
-                    {
-                        try { File.Delete(tempParquetPath); } catch { /* best effort */ }
-                        throw;
-                    }
+                    continue;
                 }
 
                 /* The promote and the DELETE share one write lock (#4824). A view is the table UNION ALL its
@@ -372,6 +384,18 @@ public class ArchiveService
                    and the DELETE are both fast, so the UI stall is short. */
                 using (_duckDb.AcquireWriteLock(WriteLockBudget))
                 {
+                    /* #5691: the export ran under read locks that were released before this write lock, so a writer
+                       could get in between. The DELETE below removes every row older than the cutoff, so it must
+                       find exactly the rows the export wrote; a row older than the cutoff that was written (or
+                       removed) in that gap would otherwise be deleted without being archived. Throwing here leaves
+                       everything as it was: nothing promoted, the rows in the table, exported again next pass. */
+                    var rowsNow = await CountRowsBeforeCutoffAsync(table, timeColumn, cutoffDate);
+                    if (rowsNow != rowCount)
+                    {
+                        throw new ArchiveExportStaleException(
+                            $"{rowsNow} rows of {table} are older than the cutoff now, but the export wrote {rowCount}.");
+                    }
+
                     try
                     {
                         WritePendingArchive(table, cutoffDate, Path.GetFileName(parquetPath));
@@ -419,6 +443,18 @@ public class ArchiveService
                    the rows are still in the table and still go next pass. The export itself is done and unused;
                    remove it, so the retry does not pile another file up beside it. Information, not Error: this is
                    the designed answer to a busy store, and the caller retries in minutes. */
+                if (exportedTemp is not null)
+                {
+                    try { File.Delete(exportedTemp); } catch { /* best effort */ }
+                }
+
+                complete = false;
+                _logger?.LogInformation("Archival of {Table} skipped: {Message} The rows stay in the table and are archived on a later pass", table, ex.Message);
+            }
+            catch (ArchiveExportStaleException ex)
+            {
+                /* #5691: the table changed below the cutoff between the export and the DELETE. Nothing was promoted;
+                   drop the export and let the next pass export the table as it is then. */
                 if (exportedTemp is not null)
                 {
                     try { File.Delete(exportedTemp); } catch { /* best effort */ }
@@ -745,27 +781,263 @@ public class ArchiveService
         }
     }
 
-    private static async Task<long> GetRowCountBeforeCutoff(DuckDBConnection connection, string table, string timeColumn, DateTime cutoff)
+    /// <summary>
+    /// Exports the rows of <paramref name="table"/> older than <paramref name="cutoff"/> to <paramref name="tempPath"/>
+    /// and returns how many it wrote; 0 means none, and then no file is written (#5691).
+    /// <para>Before #5691 one read hold covered the whole COPY of a table, however many rows it had: the first pass
+    /// after Lite had been closed for a day, or a table of large rows, could hold the store for longer than any
+    /// background writer waits (<see cref="WriteLockBudget"/>), and every write queued behind it gave up. Now the first
+    /// hold counts the rows and, when they fit in one hold of <see cref="ExportReadHoldTarget"/> at the table's
+    /// measured rate, exports them all in that hold, as before. Otherwise the rows are exported one time slice per
+    /// hold, each hold released before the next is taken, and the slices are merged into the one file outside the
+    /// store lock. The merge reads only the slice files, so it holds nothing a writer waits for.</para>
+    /// </summary>
+    private async Task<long> ExportTableAsync(string table, string timeColumn, DateTime cutoff, string tempPath)
     {
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"SELECT COUNT(*) FROM {table} WHERE {timeColumn} < $1";
-        cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
-        var result = await cmd.ExecuteScalarAsync();
-        return Convert.ToInt64(result);
+        var sliceRows = SliceRowsFor(table);
+        var slice = 0;
+        long total;
+        DateTime oldest;
+        DateTime newest;
+
+        /* The first hold counts, and exports too when the rows fit: the hourly pass finds about an hour of rows per
+           table, so it still takes one hold per table. */
+        using (_duckDb.AcquireReadLock())
+        {
+            ExportReadHoldForTests?.Invoke(table, slice, true);
+            try
+            {
+                using var connection = _duckDb.CreateConnection();
+                await connection.OpenAsync(CancellationToken.None);
+                var started = Stopwatch.GetTimestamp();
+
+                (total, oldest, newest) = await CountAndSpanBeforeCutoffAsync(connection, table, timeColumn, cutoff);
+                if (total == 0)
+                {
+                    return 0;
+                }
+
+                if (total <= sliceRows)
+                {
+                    await ExportRangeAsync(connection, table, timeColumn, lower: null, cutoff, tempPath);
+                    RecordExportRate(table, total, Stopwatch.GetElapsedTime(started));
+                    return total;
+                }
+            }
+            finally
+            {
+                ExportReadHoldForTests?.Invoke(table, slice, false);
+            }
+        }
+
+        /* Too many rows for one hold: cut [oldest, newest] into time slices sized for sliceRows each, assuming the rows
+           are spread evenly over it, then resize each next slice from how long the last hold took. The first slice has no
+           lower bound and the last ends at the cutoff, so together they cover exactly the rows the DELETE removes. */
+        var range = newest - oldest + TimeSpan.FromTicks(1);
+        var minWidth = TimeSpan.FromTicks(Math.Max(range.Ticks / MaxExportSlices, TimeSpan.TicksPerMillisecond));
+        var width = TimeSpan.FromTicks(Math.Max((long)(range.Ticks * ((double)sliceRows / total)), minWidth.Ticks));
+        var slicePaths = new List<string>();
+        long exported = 0;
+        DateTime? lower = null;
+        var upper = oldest;
+
+        try
+        {
+            while (true)
+            {
+                slice++;
+                upper += width;
+                var last = upper > newest || upper >= cutoff;
+                if (last)
+                {
+                    upper = cutoff;
+                }
+
+                var slicePath = $"{tempPath}.{slice:D3}.tmp";
+                long rows;
+                TimeSpan held;
+                using (_duckDb.AcquireReadLock())
+                {
+                    ExportReadHoldForTests?.Invoke(table, slice, true);
+                    try
+                    {
+                        using var connection = _duckDb.CreateConnection();
+                        await connection.OpenAsync(CancellationToken.None);
+                        var started = Stopwatch.GetTimestamp();
+
+                        rows = await CountRangeAsync(connection, table, timeColumn, lower, upper);
+                        if (rows > 0)
+                        {
+                            await ExportRangeAsync(connection, table, timeColumn, lower, upper, slicePath);
+                            slicePaths.Add(slicePath);
+                        }
+
+                        held = Stopwatch.GetElapsedTime(started);
+                    }
+                    finally
+                    {
+                        ExportReadHoldForTests?.Invoke(table, slice, false);
+                    }
+                }
+
+                exported += rows;
+                if (rows > 0)
+                {
+                    RecordExportRate(table, rows, held);
+                }
+
+                if (last)
+                {
+                    break;
+                }
+
+                /* Aim the next hold at the target, moving the width at most fourfold either way per slice. */
+                if (held > TimeSpan.Zero)
+                {
+                    var factor = Math.Clamp(ExportReadHoldTarget / held, 0.25, 4.0);
+                    width = TimeSpan.FromTicks(Math.Max((long)(width.Ticks * factor), minWidth.Ticks));
+                }
+
+                lower = upper;
+            }
+
+            if (exported == 0)
+            {
+                return 0;
+            }
+
+            if (slicePaths.Count == 1)
+            {
+                File.Move(slicePaths[0], tempPath);
+            }
+            else
+            {
+                MergeExportSlices(slicePaths, tempPath);
+            }
+
+            return exported;
+        }
+        catch
+        {
+            try { File.Delete(tempPath); } catch { /* best effort */ }
+            throw;
+        }
+        finally
+        {
+            foreach (var path in slicePaths)
+            {
+                try { File.Delete(path); } catch { /* best effort */ }
+            }
+        }
     }
 
-    private static async Task ExportToParquet(DuckDBConnection connection, string table, string timeColumn, DateTime cutoff, string filePath)
+    /* #5691: rows for a table's first hold: its measured rate times the target, or the seed before any rate. */
+    private long SliceRowsFor(string table) =>
+        _exportRowsPerSecond.TryGetValue(table, out var rate)
+            ? Math.Max(1, (long)(rate * ExportReadHoldTarget.TotalSeconds))
+            : ExportSeedSliceRows;
+
+    /* A hold shorter than a tenth of the target is mostly the fixed cost of opening and writing a file, so its rate
+       says only "fast", not how fast; it does not replace the estimate. */
+    private void RecordExportRate(string table, long rows, TimeSpan held)
     {
-        await WithRaisedCopyMemoryLimit(connection, async () =>
+        if (held < ExportReadHoldTarget / 10)
         {
-            using var cmd = connection.CreateCommand();
-            cmd.CommandText = $@"
+            return;
+        }
+
+        _exportRowsPerSecond[table] = rows / held.TotalSeconds;
+    }
+
+    private static async Task<(long Count, DateTime Oldest, DateTime Newest)> CountAndSpanBeforeCutoffAsync(
+        DuckDBConnection connection, string table, string timeColumn, DateTime cutoff)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"SELECT COUNT(*), MIN({timeColumn}), MAX({timeColumn}) FROM {table} WHERE {timeColumn} < $1";
+        cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
+        using var reader = await cmd.ExecuteReaderAsync();
+        await reader.ReadAsync();
+        var count = Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
+        return count == 0 ? (0, cutoff, cutoff) : (count, reader.GetDateTime(1), reader.GetDateTime(2));
+    }
+
+    private static async Task<long> CountRangeAsync(
+        DuckDBConnection connection, string table, string timeColumn, DateTime? lower, DateTime upper)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"SELECT COUNT(*) FROM {table} WHERE {RangePredicate(timeColumn, lower)}";
+        AddRangeParameters(cmd, lower, upper);
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(), CultureInfo.InvariantCulture);
+    }
+
+    /* The rows the DELETE would remove, counted under its write lock (#5691). */
+    private async Task<long> CountRowsBeforeCutoffAsync(string table, string timeColumn, DateTime cutoff)
+    {
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+        return await CountRangeAsync(connection, table, timeColumn, lower: null, cutoff);
+    }
+
+    /* $1 is the exclusive upper bound, $2 the inclusive lower one when there is one. */
+    private static string RangePredicate(string timeColumn, DateTime? lower) =>
+        lower is null ? $"{timeColumn} < $1" : $"{timeColumn} < $1 AND {timeColumn} >= $2";
+
+    private static void AddRangeParameters(DuckDBCommand cmd, DateTime? lower, DateTime upper)
+    {
+        cmd.Parameters.Add(new DuckDBParameter { Value = upper });
+        if (lower is not null)
+        {
+            cmd.Parameters.Add(new DuckDBParameter { Value = lower.Value });
+        }
+    }
+
+    private static async Task ExportRangeAsync(
+        DuckDBConnection connection, string table, string timeColumn, DateTime? lower, DateTime upper, string filePath)
+    {
+        /* DuckDB keeps the partial file when a COPY fails partway through its query, and nothing after a failed
+           export would remove it: the hourly retry would add another partial file each time. */
+        try
+        {
+            await WithRaisedCopyMemoryLimit(connection, async () =>
+            {
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = $@"
 COPY (
-    SELECT * FROM {table} WHERE {timeColumn} < $1
+    SELECT * FROM {table} WHERE {RangePredicate(timeColumn, lower)}
 ) TO '{EscapeSqlPath(filePath)}' ({ParquetCompaction.ArchiveCopyOptions})";
-            cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
-            await cmd.ExecuteNonQueryAsync();
-        });
+                AddRangeParameters(cmd, lower, upper);
+                await cmd.ExecuteNonQueryAsync();
+            });
+        }
+        catch
+        {
+            try { File.Delete(filePath); } catch { /* best effort */ }
+            throw;
+        }
+    }
+
+    /* #5691: joins a sliced export's files into the one file the pass promotes, on an in-memory DuckDB of its own, so
+       it holds no store lock. The export's COPY options, so the file is the one a single COPY would have written; the
+       settings are compaction's (ParquetCompaction.MergeBatchToFile), which streams parquet files this way. */
+    private void MergeExportSlices(List<string> slicePaths, string outputPath)
+    {
+        var spillDir = Path.Combine(_archivePath, "duckdb_tmp");
+        Directory.CreateDirectory(spillDir);
+
+        using var connection = new DuckDBConnection("DataSource=:memory:");
+        connection.Open();
+        using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText =
+                $"SET memory_limit = '{ParquetCompaction.DefaultMemoryLimit}'; SET threads = {ParquetCompaction.DefaultThreads}; " +
+                $"SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDir.Replace("\\", "/"))}';";
+            pragma.ExecuteNonQuery();
+        }
+
+        var pathList = string.Join(", ", slicePaths.Select(p => $"'{EscapeSqlPath(p.Replace("\\", "/"))}'"));
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"COPY (SELECT * FROM read_parquet([{pathList}])) TO '{EscapeSqlPath(outputPath)}' ({ParquetCompaction.ArchiveCopyOptions})";
+        cmd.ExecuteNonQuery();
     }
 
     private static string EscapeSqlPath(string path) => DuckDbInitializer.EscapeSqlPath(path);
