@@ -664,6 +664,7 @@ public sealed class DarlingMcpAlertTools
                     scope_tag_name = r.ScopeTagName,
                     expanded_server_count = r.ExpandedServerCount,
                     orphaned = r.Orphaned,
+                    scope_unreadable = r.ScopeUnreadable,
                 }),
             }, McpHelpers.JsonOptions);
         }

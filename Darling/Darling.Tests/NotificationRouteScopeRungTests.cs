@@ -320,6 +320,7 @@ INSERT INTO config.config_notification_routes (metric_match, slack_url) VALUES (
                 Assert.Equal("West", tagRow.GetProperty("scope_tag_name").GetString());
                 Assert.Equal(3, tagRow.GetProperty("expanded_server_count").GetInt32());
                 Assert.False(tagRow.GetProperty("orphaned").GetBoolean());
+                Assert.False(tagRow.GetProperty("scope_unreadable").GetBoolean());
                 var serverRow = rows.Single(r => r.GetProperty("scope_server_id").ValueKind == JsonValueKind.Number && r.GetProperty("scope_server_id").GetInt32() == 4);
                 Assert.Equal("sql-d", serverRow.GetProperty("scope_server_name").GetString());
                 Assert.Equal(1, serverRow.GetProperty("expanded_server_count").GetInt32());
@@ -357,6 +358,18 @@ INSERT INTO config.config_notification_routes (metric_match, slack_url, scope_se
                 Assert.False(tagRoute.CanMatch);
                 Assert.False(tagRoute.Orphaned);
                 Assert.Equal(new[] { 5 }, routes.Single(r => r.ScopeServerId == 5).ExpandedServerIds!.OrderBy(i => i));
+
+                /* The MCP read says so too: the tag route is flagged scope_unreadable (not orphaned, no count), the server route
+                   is an ordinary active one (#5750). */
+                using var unreadable = JsonDocument.Parse(await DarlingMcpAlertTools.GetNotificationRoutes(dataSource, ct));
+                var mcpRows = unreadable.RootElement.GetProperty("routes").EnumerateArray().ToList();
+                var mcpTag = mcpRows.Single(r => r.GetProperty("scope_tag_id").ValueKind == JsonValueKind.Number && r.GetProperty("scope_tag_id").GetInt32() == again);
+                Assert.True(mcpTag.GetProperty("scope_unreadable").GetBoolean());
+                Assert.False(mcpTag.GetProperty("orphaned").GetBoolean());
+                Assert.Equal(JsonValueKind.Null, mcpTag.GetProperty("expanded_server_count").ValueKind);
+                var mcpServer = mcpRows.Single(r => r.GetProperty("scope_server_id").ValueKind == JsonValueKind.Number && r.GetProperty("scope_server_id").GetInt32() == 5);
+                Assert.False(mcpServer.GetProperty("scope_unreadable").GetBoolean());
+                Assert.Equal(1, mcpServer.GetProperty("expanded_server_count").GetInt32());
             }
             finally
             {

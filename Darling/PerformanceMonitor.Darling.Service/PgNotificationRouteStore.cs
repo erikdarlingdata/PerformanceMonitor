@@ -66,6 +66,11 @@ public sealed class PgNotificationRouteStore
 
         /// <summary>True when the scoped server or tag no longer exists: the route stays as written and matches nothing (#5750).</summary>
         public bool Orphaned { get; init; }
+
+        /// <summary>True when the route is scoped but its scope could not be read just now (the tag tables failed, for a tag-scoped route):
+        /// it matches nothing until a read succeeds, and is not orphaned, since the tag may still exist. The loader's rule
+        /// (<see cref="StoreConfigProvider.ExpandRoutes"/>), so the tool never shows such a route as an ordinary active one (#5750).</summary>
+        public bool ScopeUnreadable { get; init; }
     }
 
     /// <summary>The non-secret projection. Public-const so the ACL pin can assert every column named here is
@@ -123,7 +128,7 @@ UPDATE config_notification_routes
     }
 
     /// <summary>
-    /// Names each scope and expands it with the shared <see cref="NotificationRouteScopeExpander"/>, the same code the service's loader
+    /// Names each scope and expands it with the shared <see cref="NotificationRouteScopeExpander"/>, the same code (and the same unreadable-tag rule) the service's loader
     /// uses, so the count and the orphan flag the tool reports are the ones delivery acts on (#5750). Only run when a route is scoped.
     /// </summary>
     private async Task<List<RouteSummary>> DescribeScopesAsync(List<RouteSummary> routes, CancellationToken cancellationToken)
@@ -143,41 +148,56 @@ UPDATE config_notification_routes
             }
         }
 
-        await using (var command = _dataSource.CreateCommand(ScopeTagsSql))
+        /* The tag tables are a side read, as in the service's loader: a failure there narrows what a tag-scoped route matches and
+           is reported, never an error for the whole tool, and a server-scoped route still expands from the server list. */
+        var tagsReadable = true;
+        try
         {
-            command.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            await using (var command = _dataSource.CreateCommand(ScopeTagsSql))
             {
-                tagNames[reader.GetInt32(0)] = reader.GetString(1);
-                tagParents[reader.GetInt32(0)] = reader.IsDBNull(2) ? null : reader.GetInt32(2);
+                command.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    tagNames[reader.GetInt32(0)] = reader.GetString(1);
+                    tagParents[reader.GetInt32(0)] = reader.IsDBNull(2) ? null : reader.GetInt32(2);
+                }
+            }
+
+            await using (var command = _dataSource.CreateCommand(ScopeTagMapSql))
+            {
+                command.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var serverId = reader.GetInt32(0);
+                    if (!serverTags.TryGetValue(serverId, out var tags))
+                    {
+                        serverTags[serverId] = tags = new HashSet<int>();
+                    }
+
+                    tags.Add(reader.GetInt32(1));
+                }
             }
         }
-
-        await using (var command = _dataSource.CreateCommand(ScopeTagMapSql))
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            command.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                var serverId = reader.GetInt32(0);
-                if (!serverTags.TryGetValue(serverId, out var tags))
-                {
-                    serverTags[serverId] = tags = new HashSet<int>();
-                }
-
-                tags.Add(reader.GetInt32(1));
-            }
+            tagsReadable = false;
+            tagNames.Clear();
+            tagParents.Clear();
+            serverTags.Clear();
         }
 
         var scopeOnly = routes
             .Select(r => new NotificationRoute(r.RouteId, r.MetricMatch, "", "", "", "", "", r.Enabled) { ScopeServerId = r.ScopeServerId, ScopeTagId = r.ScopeTagId })
             .ToList();
-        var expanded = NotificationRouteScopeExpander.Expand(
+        var expanded = StoreConfigProvider.ExpandRoutes(
             scopeOnly,
-            serverNames.Keys.ToHashSet(),
-            tagParents,
-            serverTags.ToDictionary(p => p.Key, p => (IReadOnlyCollection<int>)p.Value));
+            new StoreConfigProvider.RouteScopeInputs(
+                serverNames.Keys.ToHashSet(),
+                tagParents,
+                serverTags.ToDictionary(p => p.Key, p => (IReadOnlyCollection<int>)p.Value),
+                tagsReadable));
 
         var described = new List<RouteSummary>(routes.Count);
         for (var i = 0; i < routes.Count; i++)
@@ -188,8 +208,9 @@ UPDATE config_notification_routes
             {
                 ScopeServerName = r.ScopeServerId is { } sid && serverNames.TryGetValue(sid, out var sn) ? sn : null,
                 ScopeTagName = r.ScopeTagId is { } tid && tagNames.TryGetValue(tid, out var tn) ? tn : null,
-                ExpandedServerCount = e.IsScoped ? e.ExpandedServerIds?.Count ?? 0 : null,
+                ExpandedServerCount = e.IsScoped && !e.ScopeUnexpanded ? e.ExpandedServerIds?.Count ?? 0 : null,
                 Orphaned = e.Orphaned,
+                ScopeUnreadable = e.ScopeUnexpanded,
             });
         }
 

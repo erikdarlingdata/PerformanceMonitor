@@ -31,7 +31,7 @@
         <TextBlock Grid.Row="1" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundDimBrush}" Margin="0,0,0,15"
                    Text="Alerts that match go to the destinations below. A destination replaces the app-wide one for that channel only; leave a channel empty to keep using the app-wide setting for it."/>
 
-        <TextBlock Grid.Row="2" Text="Scope" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <TextBlock Grid.Row="2" Text="Applies to" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
         <ComboBox Grid.Row="3" x:Name="ScopeCombo" Margin="0,0,0,4" SelectionChanged="ScopeCombo_SelectionChanged"
                   ToolTip="All servers, one server, or one tag. A tag covers every server under it and under its sub-tags."/>
         <TextBlock Grid.Row="4" Foreground="{DynamicResource ForegroundDimBrush}" TextWrapping="Wrap" Margin="0,0,0,12"
@@ -52,7 +52,7 @@
         <TextBlock Grid.Row="7" x:Name="MatchDescriptionText" Foreground="{DynamicResource ForegroundDimBrush}"
                    TextWrapping="Wrap" Margin="0,0,0,12"/>
 
-        <TextBlock Grid.Row="8" Text="Destinations (empty = use the app-wide setting)" FontSize="14" FontWeight="SemiBold"
+        <TextBlock Grid.Row="8" Text="Destinations (empty = inherit)" FontSize="14" FontWeight="SemiBold"
                    Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"/>
         <Grid Grid.Row="9" Margin="0,0,0,4">
             <Grid.ColumnDefinitions>

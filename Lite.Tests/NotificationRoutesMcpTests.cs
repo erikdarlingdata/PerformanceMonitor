@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Threading.Tasks;
+using DuckDB.NET.Data;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
@@ -120,6 +121,7 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         Assert.Equal(JsonValueKind.Null, fleet.GetProperty("scope_tag_id").ValueKind);
         Assert.Equal(JsonValueKind.Null, fleet.GetProperty("expanded_server_count").ValueKind);
         Assert.False(fleet.GetProperty("orphaned").GetBoolean());
+        Assert.False(fleet.GetProperty("scope_unreadable").GetBoolean());
         Assert.Equal(new[] { "Teams", "Email" }, fleet.GetProperty("configured_channels").EnumerateArray().Select(c => c.GetString()).ToArray());
         Assert.Equal("ops@r6.test", fleet.GetProperty("smtp_recipients").GetString());
         Assert.Equal("family", fleet.GetProperty("match_kind").GetString());
@@ -143,6 +145,36 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         Assert.Equal(424242, orphan.GetProperty("scope_server_id").GetInt32());
         Assert.Equal(JsonValueKind.Null, orphan.GetProperty("scope_server_name").ValueKind);
         Assert.Equal(0, orphan.GetProperty("expanded_server_count").GetInt32());
+    }
+
+    [Fact]
+    public async Task AnUnreadableScope_IsReportedAsScopeUnreadable_NotShownAsAnOrdinaryActiveRoute()
+    {
+        var ids = await SeedAsync();
+        var tags = await _data.GetServerTagsAsync();
+        using (var conn = new DuckDBConnection($"Data Source={Path.Combine(_tempDir, "lite.duckdb")}"))
+        {
+            await conn.OpenAsync(TestContext.Current.CancellationToken);
+            using var drop = conn.CreateCommand();
+            drop.CommandText = "DROP TABLE server_tag_map";
+            await drop.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        using var doc = JsonDocument.Parse(await McpAlertTools.ReadNotificationRoutesAsync(_store, _servers, tags));
+        var routes = doc.RootElement.GetProperty("routes").EnumerateArray().ToDictionary(r => r.GetProperty("route_id").GetInt32());
+
+        /* The tag route cannot be expanded: it matches nothing, is not orphaned, and says so. Same rule as Darling's loader (#5750). */
+        var tag = routes[ids.Tag];
+        Assert.True(tag.GetProperty("scope_unreadable").GetBoolean());
+        Assert.False(tag.GetProperty("orphaned").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, tag.GetProperty("expanded_server_count").ValueKind);
+
+        /* The server-scoped, orphaned and fleet-wide routes are unaffected. */
+        Assert.False(routes[ids.Server].GetProperty("scope_unreadable").GetBoolean());
+        Assert.Equal(1, routes[ids.Server].GetProperty("expanded_server_count").GetInt32());
+        Assert.True(routes[ids.Orphan].GetProperty("orphaned").GetBoolean());
+        Assert.False(routes[ids.Orphan].GetProperty("scope_unreadable").GetBoolean());
+        Assert.False(routes[ids.Fleet].GetProperty("scope_unreadable").GetBoolean());
     }
 
     [Fact]

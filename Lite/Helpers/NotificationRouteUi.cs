@@ -46,9 +46,9 @@ internal static class NotificationRouteUi
     /// (<c>ViewerNotificationRouteScope.TagDataUnreadableStatus</c>), word for word.</summary>
     internal const string TagsUnreadableStatus = "Not active: tag data unreadable";
 
-    /// <summary>The same for a server-scoped route. Lite's loader gives up on the whole expansion when the tag read fails, so a
-    /// server-scoped route is unexpanded too, though it names no tag (Darling still expands it). Darling viewer's
-    /// <c>ScopeDataUnreadableStatus</c> text.</summary>
+    /// <summary>The same for a server-scoped route the loader could not expand. A failed tag read does not cause it (a server
+    /// route's ids come from the server list, as in Darling); only a server list that could not be built does. Darling
+    /// viewer's <c>ScopeDataUnreadableStatus</c> text.</summary>
     internal const string ScopeUnreadableStatus = "Not active: scope data unreadable";
     internal const string SetMarker = "Set";
     internal const string NotSetMarker = "Not set";

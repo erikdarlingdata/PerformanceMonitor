@@ -300,8 +300,10 @@ public sealed class NotificationRouteStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task AFailedTagRead_FailsClosed_ScopedRoutesMatchNothing_FleetWideRoutesStay()
+    public async Task AFailedTagRead_FailsClosedForTagRoutesOnly_ServerAndFleetWideRoutesStay()
     {
+        /* Darling's loader behaves this way (StoreConfigProvider.ExpandRoutes keeps a tag-scoped route unexpanded and expands
+           the rest): a server route's ids come from the server list, not the tag tables (#5750 parity ruling). */
         var scoped = await _store.InsertAsync(Route("High CPU", TeamsUrl, tag: 1));
         var serverScoped = await _store.InsertAsync(Route("High CPU", TeamsUrl, server: 7101));
         var fleet = await _store.InsertAsync(Route("High CPU", slack: SlackUrl));
@@ -311,11 +313,14 @@ public sealed class NotificationRouteStoreTests : IDisposable
             await ExecAsync(conn, "DROP TABLE server_tag_map");
         }
 
-        await Assert.ThrowsAnyAsync<Exception>(() => _store.GatherScopeInputsAsync());
+        var inputs = await _store.GatherScopeInputsAsync();
         var list = await _store.ListAsync();
 
+        Assert.False(inputs.TagsReadable);
         Assert.False(list.Single(r => r.RouteId == scoped).CanMatch);
-        Assert.False(list.Single(r => r.RouteId == serverScoped).CanMatch);
+        Assert.True(list.Single(r => r.RouteId == scoped).ScopeUnexpanded);
+        Assert.True(list.Single(r => r.RouteId == serverScoped).CanMatch);
+        Assert.Equal(new[] { 7101 }, list.Single(r => r.RouteId == serverScoped).ExpandedServerIds!.ToArray());
         Assert.True(list.Single(r => r.RouteId == fleet).CanMatch);
     }
 

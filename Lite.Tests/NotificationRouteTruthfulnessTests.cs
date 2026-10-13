@@ -108,7 +108,7 @@ public sealed class NotificationRouteTruthfulnessTests : IDisposable
     // ---- (b) a failed tag read is "not active", not "OK" ---------------------------------------
 
     [Fact]
-    public async Task WhenTheTagReadFails_TheScopedRoutesAreNotActive_NotOk_AndTheFleetWideRouteIs()
+    public async Task WhenTheTagReadFails_TheTagRouteIsNotActive_NotOk_AndTheServerAndFleetWideRoutesAre()
     {
         var tagRoute = await _store.InsertAsync(Route("High CPU", teams: TeamsUrl, tag: 1));
         var serverRoute = await _store.InsertAsync(Route("High CPU", teams: TeamsUrl, server: 7101));
@@ -129,9 +129,14 @@ public sealed class NotificationRouteTruthfulnessTests : IDisposable
         Assert.False(scoped.Orphaned);
         /* The Darling viewer's texts, word for word (ViewerNotificationRouteScope). */
         Assert.Equal("Not active: tag data unreadable", NotificationRouteUi.StatusText(scoped));
+        /* Darling's loader still expands a server-scoped route when only the tag read fails (its ids come from the server
+           list), so Lite does too: the route is active, not "scope data unreadable". */
         var byServer = list.Single(r => r.RouteId == serverRoute);
-        Assert.True(byServer.ScopeUnexpanded);
-        Assert.Equal("Not active: scope data unreadable", NotificationRouteUi.StatusText(byServer));
+        Assert.False(byServer.ScopeUnexpanded);
+        Assert.True(byServer.CanMatch);
+        Assert.Equal("OK", NotificationRouteUi.StatusText(byServer));
+        /* The text for a server-scoped route that is unexpanded for any other reason stays the Darling viewer's, word for word. */
+        Assert.Equal("Not active: scope data unreadable", NotificationRouteUi.StatusText(byServer with { ExpandedServerIds = null }));
 
         var fleetRoute = list.Single(r => r.RouteId == fleet);
         Assert.False(fleetRoute.ScopeUnexpanded);

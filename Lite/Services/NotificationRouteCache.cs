@@ -37,7 +37,7 @@ namespace PerformanceMonitorLite.Services;
 ///
 /// <para><b>A failed reload keeps the routes already in force</b> (the same posture as MuteRuleService), logs, and retries
 /// no sooner than 30 seconds later, so a broken store costs one failed read per half minute, not one per alert. A store whose
-/// tag tables cannot be read is handled inside the loader (scoped routes match nothing).</para>
+/// tag tables cannot be read is handled inside the loader (tag-scoped routes match nothing; server-scoped ones still expand).</para>
 /// </summary>
 public static class NotificationRouteCache
 {

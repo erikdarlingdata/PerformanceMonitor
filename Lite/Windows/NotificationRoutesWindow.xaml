@@ -42,7 +42,7 @@
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
-                    <DataGridTextColumn Header="Route" Binding="{Binding RouteId}" Width="50"
+                    <DataGridTextColumn Header="#" Binding="{Binding RouteId}" Width="50"
                                         SortDirection="Descending" ElementStyle="{StaticResource DataGridCellText}"/>
                     <DataGridTextColumn Header="Matches" Binding="{Binding MetricMatch}" Width="150"
                                         ElementStyle="{StaticResource DataGridCellText}"/>

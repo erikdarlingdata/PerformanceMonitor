@@ -19,11 +19,14 @@ namespace PerformanceMonitorLite.Services;
 
 /// <summary>What <see cref="NotificationRouteScopeExpander.Expand"/> needs besides the routes themselves (#5750):
 /// the configured servers' hash ids, the tag parent map and the server-to-tags map. One value so the parity pin
-/// can feed Lite's real gathered inputs to the same expander Darling's loader calls.</summary>
+/// can feed Lite's real gathered inputs to the same expander Darling's loader calls. <see cref="TagsReadable"/> is false
+/// when the tag tables could not be read: the tag maps are then empty and
+/// <see cref="DuckDbNotificationRouteStore.ExpandRoutes"/> leaves a tag-scoped route unexpanded, as Darling's loader does.</summary>
 public sealed record NotificationRouteScopeInputs(
     IReadOnlyCollection<int> KnownServerIds,
     IReadOnlyDictionary<int, int?> TagParents,
-    IReadOnlyDictionary<int, IReadOnlyCollection<int>> ServerTags);
+    IReadOnlyDictionary<int, IReadOnlyCollection<int>> ServerTags,
+    bool TagsReadable = true);
 
 /// <summary>
 /// DuckDB-backed store for the scoped notification routes (#5750) over <c>notification_routes</c> (schema v69), with
@@ -94,7 +97,8 @@ public sealed class DuckDbNotificationRouteStore
         string.Create(System.Globalization.CultureInfo.InvariantCulture, $"NotificationRoute_{routeId}_{channel}");
 
     /// <summary>Every route with its destinations read from Credential Manager and its scope expanded. Callers must not
-    /// log the URLs. A tag-read failure is logged and leaves the scoped routes unexpanded, so they match nothing.</summary>
+    /// log the URLs. A tag-read failure is logged and leaves only the tag-scoped routes unexpanded, so they match nothing;
+    /// server-scoped and fleet-wide routes still work, as in Darling's loader (#5750).</summary>
     public async Task<IReadOnlyList<NotificationRoute>> ListAsync(CancellationToken cancellationToken = default)
     {
         var rows = await ReadRowsAsync(cancellationToken);
@@ -111,13 +115,33 @@ public sealed class DuckDbNotificationRouteStore
         }
         catch (Exception ex)
         {
-            /* Fail closed: a scoped route that was never expanded matches nothing (NotificationRoute.CanMatch), and no
-               tag read means the sets cannot be known. Fleet-wide routes are untouched. */
-            AppLogger.Warn("NotificationRoutes", $"Could not read the server tags, so scoped notification routes match nothing until the next successful reload: {ex.Message}");
+            /* The server list itself could not be built, so no scope can be expanded. Fail closed: a scoped route that was
+               never expanded matches nothing (NotificationRoute.CanMatch). Fleet-wide routes are untouched. */
+            AppLogger.Warn("NotificationRoutes", $"Could not read the servers, so scoped notification routes match nothing until the next successful reload: {ex.Message}");
             return routes;
         }
 
-        return NotificationRouteScopeExpander.Expand(routes, inputs.KnownServerIds, inputs.TagParents, inputs.ServerTags);
+        return ExpandRoutes(routes, inputs);
+    }
+
+    /// <summary>Expands the routes with the given inputs. When the tag tables were unreadable, a tag-scoped route is returned
+    /// unexpanded (it matches nothing and is not marked orphaned, since the tag may still exist); server-scoped routes expand
+    /// from the server list. The same rule as Darling's <c>StoreConfigProvider.ExpandRoutes</c> (#5750).</summary>
+    public static IReadOnlyList<NotificationRoute> ExpandRoutes(IReadOnlyList<NotificationRoute> routes, NotificationRouteScopeInputs inputs)
+    {
+        var expanded = NotificationRouteScopeExpander.Expand(routes, inputs.KnownServerIds, inputs.TagParents, inputs.ServerTags);
+        if (inputs.TagsReadable)
+        {
+            return expanded;
+        }
+
+        var result = new List<NotificationRoute>(expanded.Count);
+        for (var i = 0; i < expanded.Count; i++)
+        {
+            result.Add(routes[i].ScopeTagId.HasValue ? routes[i] : expanded[i]);
+        }
+
+        return result;
     }
 
     /// <summary>One route (secrets and expansion included), or null.</summary>
@@ -125,8 +149,11 @@ public sealed class DuckDbNotificationRouteStore
         (await ListAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == routeId);
 
     /// <summary>The three inputs <see cref="NotificationRouteScopeExpander.Expand"/> takes besides the routes: the configured
-    /// servers' hash ids, the tag parent map (<c>server_tags</c>) and the server-to-tags map (<c>server_tag_map</c>). Throws
-    /// when a tag table cannot be read. The one place Lite gathers them; the parity pin calls it.</summary>
+    /// servers' hash ids, the tag parent map (<c>server_tags</c>) and the server-to-tags map (<c>server_tag_map</c>). A failed
+    /// tag read is logged and reported through <see cref="NotificationRouteScopeInputs.TagsReadable"/> (the tag maps are then
+    /// empty), the same as Darling's <c>ReadRouteScopeInputsAsync</c>: a transient failure there must narrow what a route
+    /// matches, never widen it, and the server list does not come from the tag tables. The one place Lite gathers them; the
+    /// parity pin calls it.</summary>
     public async Task<NotificationRouteScopeInputs> GatherScopeInputsAsync(CancellationToken cancellationToken = default)
     {
         var known = _knownServerIds().ToArray();
@@ -137,30 +164,42 @@ public sealed class DuckDbNotificationRouteStore
         using var connection = _dbInitializer.CreateConnection();
         await connection.OpenAsync(cancellationToken);
 
-        using (var tags = connection.CreateCommand())
+        try
         {
-            tags.CommandText = "SELECT id, parent_id FROM server_tags";
-            using var reader = await tags.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            using (var tags = connection.CreateCommand())
             {
-                parents[reader.GetInt32(0)] = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+                tags.CommandText = "SELECT id, parent_id FROM server_tags";
+                using var reader = await tags.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    parents[reader.GetInt32(0)] = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+                }
+            }
+
+            using (var map = connection.CreateCommand())
+            {
+                map.CommandText = "SELECT server_id, tag_id FROM server_tag_map";
+                using var reader = await map.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var serverId = reader.GetInt32(0);
+                    if (!serverTags.TryGetValue(serverId, out var list))
+                    {
+                        serverTags[serverId] = list = [];
+                    }
+
+                    list.Add(reader.GetInt32(1));
+                }
             }
         }
-
-        using (var map = connection.CreateCommand())
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            map.CommandText = "SELECT server_id, tag_id FROM server_tag_map";
-            using var reader = await map.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                var serverId = reader.GetInt32(0);
-                if (!serverTags.TryGetValue(serverId, out var list))
-                {
-                    serverTags[serverId] = list = [];
-                }
-
-                list.Add(reader.GetInt32(1));
-            }
+            AppLogger.Warn("NotificationRoutes", $"Could not read the server tags, so tag-scoped notification routes match nothing until the next successful reload: {ex.Message}");
+            return new NotificationRouteScopeInputs(
+                known,
+                new Dictionary<int, int?>(),
+                new Dictionary<int, IReadOnlyCollection<int>>(),
+                TagsReadable: false);
         }
 
         return new NotificationRouteScopeInputs(
