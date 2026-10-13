@@ -43,7 +43,7 @@ internal static class ViewerGrantReplay
 
             var marker = isGrant ? " TO " : " FROM ";
             var at = statement.LastIndexOf(marker, StringComparison.Ordinal);
-            if (at < 0 || statement.Contains("EXECUTE ON FUNCTION", StringComparison.Ordinal))
+            if (at < 0 || statement.Contains("ON FUNCTION", StringComparison.Ordinal))
             {
                 continue;
             }
