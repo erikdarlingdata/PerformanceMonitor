@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
@@ -466,7 +467,10 @@ public static class DarlingRetention
                     continue;
                 }
 
-                if (timescaleAvailable)
+                /* #5640: a catalog entry that stays a plain table (the attention table) has no chunks to drop, so on
+                   a TimescaleDB store it takes the same time-sliced DELETE a plain-PostgreSQL store runs, straight
+                   away, instead of a drop_chunks call that fails and warns once per sweep before falling back. */
+                if (timescaleAvailable && !definition.StaysPlainTable)
                 {
                     var dropped = await DropChunksOneAsync(
                         postgres, definition.TargetTable, DropChunksSqlFor(definition, retentionDays),
@@ -1020,6 +1024,28 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* collect.query_store_watermarks (#5684, V178): the per-batch watermark side table of the Query Store per-database
+               watermark read. NOT in CollectorCatalog.All (the collector runner's COPY transaction writes it), so the loop above skips it.
+               A FIXED two days (QueryStoreWatermarks.RetentionDays), NOT Query Store's retention: the read never looks back more than
+               three hours, so the table only has to clear that. A plain table and a plain DELETE served by its collection_time index;
+               about one row per database per collection, so one execution IS the whole purge and dispatches single-shot, like the hour
+               ledger above. The one-row coverage table beside it is never purged. Failure-isolated like every sibling. */
+            var queryStoreWatermarksDeleted = await PurgeOneAsync(
+                postgres, QueryStoreWatermarks.Table,
+                QueryStoreWatermarks.PruneSql,
+                utcNow.AddDays(-QueryStoreWatermarks.RetentionDays), logger, cancellationToken,
+                batchSize: SingleShotStatement,
+                pacer: walPacer);
+            if (queryStoreWatermarksDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += queryStoreWatermarksDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* collect.pg_io_stats_hourly (#5495, V170): the hourly rollup of pg_io_stats. NOT in CollectorCatalog.All (the hourly
                tick's builder writes it), so the loop above skips it. It keeps exactly the raw collector's retention (the same
                resolved days, so a per-collector override moves both): a rollup hour whose raw rows are gone makes the read's count guard
@@ -1039,6 +1065,44 @@ public static class DarlingRetention
             {
                 tablesPurged++;
                 totalRowsDeleted += pgIoHourlyDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+            /* collect.procedure_stats_totals (#5638, V176): the per-collection totals of procedure_stats. NOT in CollectorCatalog.All
+               (the collector runner's COPY transaction writes it), so the loop above skips it. It ages with the raw collector it
+               summarises: the same resolved days as procedure_stats (EffectivePurgeRetentionDays, so a per-collector override moves both),
+               and a row is never purged before the procedure_stats rows of its age (ProcedureStatsTotals.PrunePredicate also keeps every
+               totals row at or after the oldest raw row, because on TimescaleDB the raw chunks leave through the gated purge, which can
+               hold them past the horizon). A plain table with a plain time-sliced DELETE on both store kinds; about one row per database
+               per collection, so a slice is a small fraction of a raw slice. Failure-isolated like every sibling. */
+            var procedureTotalsDays = EffectivePurgeRetentionDays(
+                "procedure_stats",
+                retentionDaysFor?.Invoke("procedure_stats")
+                    ?? (CollectorScheduleDefaults.All.TryGetValue("procedure_stats", out var procedureSchedule) ? procedureSchedule.RetentionDays : DataRetentionBaseDays));
+            /* The raw floor is measured ONCE, by PurgeOneAsync itself, and bound as $2 (review of #5706, #1815): the predicate used to
+               carry an unbounded min() over procedure_stats that the slice statement expands three times, a whole-table scan each, and
+               the chunk-catalog form is how the digest floor above survives compressed chunks. The measurement is a callback that runs
+               on the purge's own connection AFTER PurgeOneAsync's #5592 wall-budget gate (round 2, L4), so a pass whose budget is spent
+               opens no connection and runs no probe for this table. A floor that cannot be measured throws out of the callback, so the
+               table counts failed and its purge is skipped for the cycle: without the floor the guard against deleting totals the raw
+               trend still reads is unknown, and the totals only age out a sweep later. */
+            var procedureTotalsDeleted = await PurgeOneAsync(
+                postgres, ProcedureStatsTotals.Table,
+                TimeSlicedDeleteSql(ProcedureStatsTotals.Table, "collection_time", ProcedureStatsTotals.PrunePredicate),
+                utcNow.AddDays(-procedureTotalsDays), logger, cancellationToken,
+                pacer: walPacer,
+                secondParameterFactory: async (floorConnection, ct) =>
+                {
+                    var procedureRawFloor = await ProcedureStatsTotals.MeasureRawFloorAsync(
+                        floorConnection, timescaleAvailable, DeleteTimeoutSeconds, ct);
+                    return new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = procedureRawFloor is { } floorValue ? floorValue : DBNull.Value };
+                });
+            if (procedureTotalsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += procedureTotalsDeleted.Value;
             }
             else
             {
@@ -1845,6 +1909,10 @@ public static class DarlingRetention
     /// COMMAND-TIMEOUT batch at half its cap instead of failing the table outright — the field failure this
     /// exists for was one 50k-row batch passing the 300 s command timeout under first-start load, on a
     /// store whose steady-state margin was ~2x rather than the cap's designed 5x.</para>
+    ///
+    /// <para><paramref name="secondParameterFactory"/> (the unsliced shape only) builds the statement's <c>$2</c> from the purge's own
+    /// connection once the #5592 budget gate has passed, so a measurement the second parameter needs (the procedure totals' raw
+    /// floor) is never taken for a table the pass will not start. A throw out of it fails the table like any other fault.</para>
     /// </summary>
     private static async Task<int?> PurgeOneAsync(
         NpgsqlDataSource postgres,
@@ -1855,7 +1923,8 @@ public static class DarlingRetention
         CancellationToken cancellationToken,
         int batchSize = 1,
         string? adaptiveRowCapTimeColumn = null,
-        RetentionWalPacer? pacer = null)
+        RetentionWalPacer? pacer = null,
+        Func<NpgsqlConnection, CancellationToken, Task<NpgsqlParameter>>? secondParameterFactory = null)
     {
         /* #5592: a pass whose wall budget is already spent starts no further table: no connection, no statement.
            Every table's purge comes through here, so this is the one place that skips them. Nothing was deleted,
@@ -1912,6 +1981,10 @@ public static class DarlingRetention
             {
                 using var command = new NpgsqlCommand(deleteSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
                 command.Parameters.AddWithValue(cutoff);
+                if (secondParameterFactory is not null)
+                {
+                    command.Parameters.Add(await secondParameterFactory(connection, cancellationToken));
+                }
 
                 drained = await DrainBatchesAsync(
                     async ct =>

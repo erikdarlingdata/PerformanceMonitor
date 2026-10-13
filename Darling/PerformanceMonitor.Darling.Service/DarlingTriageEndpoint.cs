@@ -219,6 +219,14 @@ internal static class DarlingTriageEndpoint
                 S("PostgreSQL waits", "get_pg_wait_stats", ("hours", "4"), ("limit", "20")),
                 S("Waiting tasks", "get_waiting_tasks", ("hours", "1"), ("limit", "25")),
             },
+            /* #5641: runnable tasks per scheduler - the queue behind a CPU-bound server - so the reads are the
+               scheduler snapshot, CPU, and what is running. */
+            ["Runnable Queue"] = new[]
+            {
+                S("Scheduler pressure", "get_cpu_scheduler_pressure"),
+                S("CPU utilization", "get_cpu_utilization", ("hours", "4")),
+                S("Active queries", "get_active_queries", ("hours", "1"), ("limit", "25")),
+            },
             ["Long-Running Query"] = new[]
             {
                 S("Active queries", "get_active_queries", ("hours", "1"), ("limit", "25")),

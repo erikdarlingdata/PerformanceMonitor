@@ -223,6 +223,17 @@ public partial class App : Application
     public static int AlertDeadlockThreshold { get; set; } = 1;
     public static bool AlertPoisonWaitEnabled { get; set; } = true;
     public static int AlertPoisonWaitThresholdMs { get; set; } = 500;
+    /* #5641: the Runnable Queue alert - runnable tasks per visible online scheduler, averaged over the last 5 minutes' collections
+       (at least 3, else the newest 3 inside 10 minutes). The pair is
+       clamped on read by RunnableQueueEvaluator.ClampBars (Warning at least 1, Critical never below Warning). */
+    public static bool AlertRunnableQueueEnabled { get; set; } = true;
+    public static int AlertRunnableQueueWarningPerScheduler { get; set; } = PerformanceMonitor.Alerting.RunnableQueueEvaluator.DefaultWarningPerScheduler;
+    public static int AlertRunnableQueueCriticalPerScheduler { get; set; } = PerformanceMonitor.Alerting.RunnableQueueEvaluator.DefaultCriticalPerScheduler;
+    /* #5640: the Client Timeouts alert - client attentions (cancels and timeouts) per minute over the covered span. OFF by default
+       (the bars are a guess until checked against captured data). The pair is clamped on read by AttentionEvaluator.ClampBars. */
+    public static bool AlertClientTimeoutsEnabled { get; set; }
+    public static int AlertClientTimeoutsWarningPerMinute { get; set; } = PerformanceMonitor.Alerting.AttentionEvaluator.DefaultWarningPerMinute;
+    public static int AlertClientTimeoutsCriticalPerMinute { get; set; } = PerformanceMonitor.Alerting.AttentionEvaluator.DefaultCriticalPerMinute;
     public static bool AlertLongRunningQueryEnabled { get; set; } = true;
     public static int AlertLongRunningQueryThresholdMinutes { get; set; } = 30;
     public static int AlertLongRunningQueryMaxResults { get; set; } = 5;
@@ -1284,6 +1295,12 @@ public partial class App : Application
             if (read.TryGetProperty("alert_deadlock_threshold", out v)) AlertDeadlockThreshold = v.WholeNumber(AlertDeadlockThreshold);
             if (read.TryGetProperty("alert_poison_wait_enabled", out v)) AlertPoisonWaitEnabled = v.Bool(AlertPoisonWaitEnabled);
             if (read.TryGetProperty("alert_poison_wait_threshold_ms", out v)) AlertPoisonWaitThresholdMs = v.WholeNumber(AlertPoisonWaitThresholdMs);
+            if (read.TryGetProperty("alert_runnable_queue_enabled", out v)) AlertRunnableQueueEnabled = v.Bool(AlertRunnableQueueEnabled);
+            if (read.TryGetProperty("alert_runnable_queue_warning_per_scheduler", out v)) AlertRunnableQueueWarningPerScheduler = v.WholeNumber(AlertRunnableQueueWarningPerScheduler, 1, int.MaxValue);
+            if (read.TryGetProperty("alert_runnable_queue_critical_per_scheduler", out v)) AlertRunnableQueueCriticalPerScheduler = v.WholeNumber(AlertRunnableQueueCriticalPerScheduler, 1, int.MaxValue);
+            if (read.TryGetProperty("alert_client_timeouts_enabled", out v)) AlertClientTimeoutsEnabled = v.Bool(AlertClientTimeoutsEnabled);
+            if (read.TryGetProperty("alert_client_timeouts_warning_per_minute", out v)) AlertClientTimeoutsWarningPerMinute = v.WholeNumber(AlertClientTimeoutsWarningPerMinute, 1, int.MaxValue);
+            if (read.TryGetProperty("alert_client_timeouts_critical_per_minute", out v)) AlertClientTimeoutsCriticalPerMinute = v.WholeNumber(AlertClientTimeoutsCriticalPerMinute, 1, int.MaxValue);
             if (read.TryGetProperty("alert_long_running_query_enabled", out v)) AlertLongRunningQueryEnabled = v.Bool(AlertLongRunningQueryEnabled);
             if (read.TryGetProperty("alert_long_running_query_threshold_minutes", out v)) AlertLongRunningQueryThresholdMinutes = v.WholeNumber(AlertLongRunningQueryThresholdMinutes);
             if (read.TryGetProperty("alert_long_running_query_max_results", out v)) AlertLongRunningQueryMaxResults = v.WholeNumber(AlertLongRunningQueryMaxResults, 1, 1000);

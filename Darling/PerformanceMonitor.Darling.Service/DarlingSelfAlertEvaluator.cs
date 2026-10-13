@@ -8359,6 +8359,13 @@ FROM
      AND   cl.collector_name = 'blocked_process_report'
      ORDER BY cl.collection_time DESC
      LIMIT 1)
+    UNION ALL
+    (SELECT cl.collector_name, cl.status
+     FROM collection_log AS cl
+     WHERE cl.server_id = $1
+     AND   cl.collector_name = 'attention'
+     ORDER BY cl.collection_time DESC
+     LIMIT 1)
 ) AS x
 WHERE x.status = 'SESSION_MISSING'
 ORDER BY x.collector_name";
@@ -8416,7 +8423,12 @@ ORDER BY x.collector_name";
         while (await reader.ReadAsync(cancellationToken))
         {
             var collectorName = reader.GetString(0);
-            missing.Add(collectorName == "deadlocks" ? "Deadlock" : "Blocking");
+            missing.Add(collectorName switch
+            {
+                "deadlocks" => "Deadlock",
+                "attention" => "Client timeouts",
+                _ => "Blocking",
+            });
         }
 
         return missing;

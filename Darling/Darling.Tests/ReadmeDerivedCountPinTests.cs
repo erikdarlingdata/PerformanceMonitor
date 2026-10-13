@@ -175,7 +175,8 @@ public sealed class ReadmeDerivedCountPinTests
         yield return (
             "the worker-sizing paragraph",
             new Regex(@"Today that is \*\*(\d+)\*\* and \*\*(\d+)\*\* for (\d+) hypertables \(the (\d+) collector tables plus"),
-            () => new[] { BackgroundWorkers, WorkerProcesses, Hypertables, CollectorTotal });
+            /* The 4th figure is the collector tables that are HYPERTABLES, not the catalog: the attention table stays plain (#5640). */
+            () => new[] { BackgroundWorkers, WorkerProcesses, Hypertables, TimescaleSupport.HypertableTables.Count });
 
         yield return (
             "the empty-PostgreSQL-tables sentence",

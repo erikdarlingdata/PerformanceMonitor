@@ -122,6 +122,11 @@ public sealed class RepoFileAdoptionTests
            between its declaration and the next top-level function, so the ban is scoped to real code and
            not tripped by the file's own prose comment saying "never innerHTML". */
         "AlertNotebookRenderClientTests.cs",
+        /* #5640: its plain-table pin anchors the `StaysPlainTable` override's multi-line summary and the runner's
+           `AttentionCollector =>` switch arm across line breaks in AttentionCollector.cs / DarlingCollectorRunner.cs. */
+        "AttentionPlainTableTests.cs",
+        /* #5640: its session-DDL pins anchor multi-line statements of the attention session's create and ensure text. */
+        "AttentionXeSessionTests.cs",
         "BuiltinAlertPersistenceRungTests.cs",
         /* Its count-chart pins anchor the `COUNT_SERIES, {` panels' option blocks across their line breaks (the
            subtitle line and the format line that follows it) and slice niceScale's own body, so the panels that
@@ -163,6 +168,8 @@ public sealed class RepoFileAdoptionTests
            (`\n  darling-linux:`), so the text must be LF whatever the checkout's line endings. */
         "PasswordKeySelfCheckTests.cs",
         "FleetPageAttentionFilterTests.cs",
+        /* #5640: its viewer-dialog and MCP-description pins anchor text that spans line breaks. */
+        "MuteRuleClientAppTests.cs",
         /* Its every-site pins match each `new AlertMuteContext { ... };` initializer across its line breaks in
            AlertEngine.cs and the Darling producers, and assert each one sets ServerId. */
         "MuteRuleServerIdTests.cs",

@@ -103,6 +103,7 @@ SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.s
            AND   m.query_text_pattern IS NULL
            AND   m.wait_type_pattern IS NULL
            AND   m.job_name_pattern IS NULL
+           AND   m.client_app_pattern IS NULL
        ) AS is_silenced
 FROM servers s
 WHERE s.is_enabled
@@ -306,13 +307,11 @@ AND   {SqlServerCollectedTargetSql}";
     /// per-server probe <see cref="FleetCpuSql"/> describes (#3895): 37.6 ms plus 46.0 ms of planning on
     /// DARLING01 as a <c>DISTINCT ON</c> over every retained row.
     ///
-    /// <para>#3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A
-    /// run-overlap or clock-resolution collision can store two DIFFERENT snapshots under one
-    /// <c>collection_time</c> for one server — <c>collection_id</c> is the per-process monotonic counter
-    /// every row already carries (<see cref="PerformanceMonitor.Collectors.CollectionIdGenerator"/>), so it
-    /// is the one column guaranteed to order two same-instant rows the same way on every read, instead of a
-    /// bare <c>LIMIT 1</c> returning either one depending on physical row order.</para></summary>
-    public const string FleetThreadsSql = $@"
+    /// <para>#5710: the newest <c>collection_time</c> is found first, then ALL of its rows are combined into one
+    /// (<see cref="CpuSchedulerCollectionSql"/>): a collection written before the collector fix can be split across
+    /// several rows that each cover some of the schedulers, so the workers and runnable tasks are their SUM. This
+    /// replaces the #3936 <c>collection_id DESC</c> tiebreak.</para></summary>
+    public static readonly string FleetThreadsSql = $@"
 SELECT
     s.server_id,
     latest.max_workers_count,
@@ -327,10 +326,11 @@ CROSS JOIN LATERAL
         total_current_workers_count,
         total_runnable_tasks_count,
         total_work_queue_count
-    FROM v_cpu_scheduler_stats
-    WHERE server_id = s.server_id
-    ORDER BY collection_time DESC, collection_id DESC
-    LIMIT 1
+    FROM
+    (
+        {CpuSchedulerCollectionSql.PerCollection("v_cpu_scheduler_stats", "server_id = s.server_id", newestOnly: true)}
+    ) AS combined
+    LIMIT 1 /*the combine is already one row; the LIMIT is the probe's stated bound (#3895)*/
 ) AS latest
 WHERE s.is_enabled
 AND   {SqlServerCollectedTargetSql}";

@@ -254,6 +254,20 @@ public sealed class DarlingPathFilterGateTests
     }
 
     /// <summary>
+    /// The UI-smoke workflow and its harness folder reach the Darling gate (#5701). Darling.Tests parses the workflow
+    /// (CiClusterWorkerSizingTests) and UiSmokeSeedAppliesLiveTests pins the row counts in tools/ui-smoke/seed.sql, so a
+    /// pull request that edits only one of them must not be waved through with every shard skipped.
+    /// </summary>
+    [Fact]
+    public void TheDarlingGate_CoversTheUiSmokeWorkflowAndHarness()
+    {
+        var patterns = FilterPatterns(ReadRepoFileLf(s_gateSegments), "darling");
+
+        Assert.Contains(".github/workflows/darling-ui-smoke.yml", patterns, StringComparer.Ordinal);
+        Assert.Contains("tools/ui-smoke/**/!(*.md)", patterns, StringComparer.Ordinal);
+    }
+
+    /// <summary>
     /// The coverage check reports an injected gap, the same shape as
     /// <see cref="TheCoverageCheck_ReportsAnInjectedGap"/> above and for the same reason: a parser that
     /// matched nothing would report this gate complete too, which is the failure this test would otherwise

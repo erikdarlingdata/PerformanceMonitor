@@ -167,6 +167,35 @@ public class AlertContextBuildersTests
         Assert.Null(context.Incidents);
     }
 
+    [Fact]
+    public void BuildLongRunningQueryContext_ZeroQueryHash_EmitsNoIncident()
+    {
+        /* #5711: an all-zero hash is "the engine did not say", the same as NULL, so it emits no incident either. */
+        var context = AlertContextBuilders.BuildLongRunningQueryContext(Server, new List<LongRunningQueryInfo>
+        {
+            Lrq(71, 90, db: "StackOverflow", query: "BACKUP DATABASE [StackOverflow] TO DISK = N'nul'", hash: "0x0000000000000000")
+        });
+
+        Assert.NotNull(context);
+        Assert.Single(context!.Details);
+        Assert.Null(context.Incidents);
+    }
+
+    [Fact]
+    public void BuildLongRunningQueryContext_ZeroQueryHashes_OfDifferentStatements_EmitNoIncident_AndAreNotPooled()
+    {
+        /* #5711: before the fix both rows keyed on the same zero hash and folded into ONE incident. */
+        var context = AlertContextBuilders.BuildLongRunningQueryContext(Server, new List<LongRunningQueryInfo>
+        {
+            Lrq(71, 90, db: "StackOverflow", query: "BACKUP DATABASE [StackOverflow] TO DISK = N'nul'", hash: "0x0000000000000000"),
+            Lrq(72, 80, db: "StackOverflow", query: "DBCC CHECKDB (N'StackOverflow')", hash: "0x0000000000000000")
+        });
+
+        Assert.NotNull(context);
+        Assert.Equal(2, context!.Details.Count);
+        Assert.Null(context.Incidents);
+    }
+
     /* ---------------- #3497: the Agent-job annotation ---------------- */
 
     /// <summary>msdb job_id AB6D9F63-3B01-4E15-9F34-B0A0F0B355A2, step 3, spelled the way SQL Agent

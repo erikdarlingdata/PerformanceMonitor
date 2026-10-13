@@ -77,10 +77,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        item 13) added cpu_utilization_stats.sample_time_utc, so 68 over 70, 50 SqlServer; V139 (#3955)
        added pg_write_stats.postmaster_start_time (AT TIME ZONE 'UTC' inline), so 69 over 71, 19 PostgreSql;
        V155 (#4765) added query_store_stats.interval_end_time_utc beside interval_start_time_utc, so 70 over 71,
-       51 SqlServer. Pinned exactly rather than as a floor because the whole point is a closed census — a floor would let
+       51 SqlServer; #5640 added attention_events.event_time (a SQL Server XE table), so 71, 52 SqlServer. Pinned exactly rather than as a floor because the whole point is a closed census — a floor would let
        a column vanish. */
-    private const int TimestampColumnCount = 70;
-    private const int SqlServerTimestampColumnCount = 51;
+    private const int TimestampColumnCount = 71;
+    private const int SqlServerTimestampColumnCount = 52;
     private const int PostgresTimestampColumnCount = 19;
 
     private static IReadOnlyList<(string Table, string Column, string Collector, CollectorTargetEngine Engine)>
@@ -273,8 +273,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        SYSUTCDATETIME() — the first SqlServer table to carry BOTH frames as two columns, and the reason
        the sibling sample_time stays ServerLocal beside it rather than flipping. */
     /* 13 until V155 (#4765): query_store_stats.interval_end_time_utc is read as Utc off its own
-       AT TIME ZONE 'UTC', the twin of interval_start_time_utc beside it. */
-    private const int TsqlUtcCount = 14;
+       AT TIME ZONE 'UTC', the twin of interval_start_time_utc beside it.
+       15 since #5640: attention_events.event_time is read as Utc off the XE event's own @timestamp, like the other XE tables. */
+    private const int TsqlUtcCount = 15;
 
     /// <summary>
     /// The classifier's verdict per column, in the census's own (table, column) ordinal order — the whole
@@ -300,6 +301,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         "ag_database_replica_states.last_received_time=ServerLocal",
         "ag_database_replica_states.last_redone_time=ServerLocal",
         "agent_status.next_scheduled_run=ServerLocal",
+        "attention_events.event_time=Utc",
         "blocked_process_reports.event_time=Utc",
         "cpu_utilization_stats.sample_time=ServerLocal",
         /* V134 (#3653 item 13): the same instant in UTC beside the local stamp, derived by the same DATEADD

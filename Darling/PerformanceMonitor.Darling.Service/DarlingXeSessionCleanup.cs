@@ -139,6 +139,7 @@ public static class DarlingXeSessionCleanup
     {
         DeadlocksCollector.XeSessionName,
         BlockedProcessReportCollector.XeSessionName,
+        AlwaysOnXeSessions.AttentionXeSessionName,
         /* The legacy long-query name, on purpose (#4961): this verb finds and drops the session that older versions made and
            every install shared. An install now makes its own session, named from its id, and this list does not name it yet. */
         LongQueryCompletionsCollector.LegacyXeSessionName,
@@ -161,6 +162,7 @@ public static class DarlingXeSessionCleanup
             LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.DarlingProduct, installId),
             AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, installId, AlwaysOnXeSessionKind.Deadlock),
             AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, installId, AlwaysOnXeSessionKind.BlockedProcess),
+            AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, installId, AlwaysOnXeSessionKind.Attention),
         };
     }
 
@@ -193,7 +195,8 @@ public static class DarlingXeSessionCleanup
 
         var shaped = LongQueryCompletionsCollector.IsInstallSessionName(name)
             || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.Deadlock)
-            || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.BlockedProcess);
+            || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.BlockedProcess)
+            || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.Attention);
         return shaped && !InstallSessionNames(installId).Contains(name, StringComparer.OrdinalIgnoreCase);
     }
 
@@ -216,6 +219,7 @@ public static class DarlingXeSessionCleanup
             LongQueryCompletionsCollector.LegacyXeSessionName,
             DeadlocksCollector.XeSessionName,
             BlockedProcessReportCollector.XeSessionName,
+            AlwaysOnXeSessions.AttentionXeSessionName,
         }.Select(PerInstallPattern).ToList();
 
         var conditions = string.Join(Environment.NewLine + "OR ", patterns.Select(pattern => $"{alias}.name LIKE N'{pattern}'"));
@@ -298,6 +302,7 @@ WHERE {conditions};";
     private static string? CapturePhrase(string name) =>
         name == DeadlocksCollector.XeSessionName || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.Deadlock) ? "deadlocks"
         : name == BlockedProcessReportCollector.XeSessionName || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.BlockedProcess) ? "blocked processes"
+        : name == AlwaysOnXeSessions.AttentionXeSessionName || AlwaysOnXeSessions.IsOwnName(name, AlwaysOnXeSessionKind.Attention) ? "client timeouts"
         : name == LongQueryCompletionsCollector.LegacyXeSessionName || LongQueryCompletionsCollector.IsInstallSessionName(name) ? "long query completions"
         : null;
 
@@ -313,7 +318,7 @@ WHERE {conditions};";
     {
         ArgumentNullException.ThrowIfNull(dropped);
 
-        var order = new[] { "deadlocks", "blocked processes", "long query completions" };
+        var order = new[] { "deadlocks", "blocked processes", "client timeouts", "long query completions" };
         var captures = dropped
             .Select(d => CapturePhrase(d.Name))
             .OfType<string>()
@@ -420,7 +425,7 @@ WHERE {alias}.name IN ({literals});";
             return LongQueryCompletionsCollector.BuildStopSessionSql(sessionName);
         }
 
-        foreach (var kind in new[] { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess })
+        foreach (var kind in new[] { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess, AlwaysOnXeSessionKind.Attention })
         {
             if (AlwaysOnXeSessions.IsOwnName(sessionName, kind))
             {
@@ -592,6 +597,7 @@ END;";
             LongQueryCompletionsCollector.LegacyXeSessionName,
             DeadlocksCollector.XeSessionName,
             BlockedProcessReportCollector.XeSessionName,
+            AlwaysOnXeSessions.AttentionXeSessionName,
         }.Select(PerInstallPattern).ToList();
         for (var i = 0; i < patterns.Count; i++)
         {

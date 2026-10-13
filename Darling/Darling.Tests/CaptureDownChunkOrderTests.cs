@@ -56,10 +56,15 @@ public sealed class CaptureDownChunkOrderTests
         var sql = DarlingSelfAlertEvaluator.MissingCaptureSessionsSql;
 
         /* One arm per capture collector, UNION ALL between them, each stopping at its newest row. */
-        Assert.Equal(2, Regex.Matches(sql, @"ORDER BY cl\.collection_time DESC\s+LIMIT 1").Count);
-        Assert.Single(Regex.Matches(sql, @"\bUNION ALL\b"));
+        Assert.Equal(3, Regex.Matches(sql, @"ORDER BY cl\.collection_time DESC\s+LIMIT 1").Count);
+        Assert.Equal(2, Regex.Matches(sql, @"\bUNION ALL\b").Count);
         Assert.Contains("cl.collector_name = 'deadlocks'", sql, StringComparison.Ordinal);
         Assert.Contains("cl.collector_name = 'blocked_process_report'", sql, StringComparison.Ordinal);
+
+        /* The third arm (#5640): the attention collector's SESSION_MISSING is a capture-down too. It is its own LIMIT 1 arm,
+           not a collector name tacked onto an existing predicate, so it keeps the newest-chunk-only plan. */
+        Assert.Contains("cl.collector_name = 'attention'", sql, StringComparison.Ordinal);
+        Assert.Matches(new Regex(@"collector_name = 'attention'\s+ORDER BY cl\.collection_time DESC\s+LIMIT 1"), sql);
 
         /* The verdict is still on the LATEST run's status, applied after each arm has picked its row. */
         Assert.Contains("WHERE x.status = 'SESSION_MISSING'", sql, StringComparison.Ordinal);
@@ -135,6 +140,8 @@ public sealed class CaptureDownChunkOrderTests
             await InsertAsync(connection, 9_100_000_001, "deadlocks", utcNow.AddDays(-3).AddSeconds(7), "SESSION_MISSING", ct);
             await InsertAsync(connection, 9_100_000_002, "deadlocks", utcNow.AddMinutes(-1), "SUCCESS", ct);
             await InsertAsync(connection, 9_100_000_003, "blocked_process_report", utcNow.AddMinutes(-1), "SESSION_MISSING", ct);
+            /* attention (the third arm, #5640): SESSION_MISSING a minute ago - missing, and named by its friendly label. */
+            await InsertAsync(connection, 9_100_000_004, "attention", utcNow.AddMinutes(-1), "SESSION_MISSING", ct);
 
             using (var analyze = new NpgsqlCommand("ANALYZE collect.collection_log", connection))
             {
@@ -161,17 +168,17 @@ public sealed class CaptureDownChunkOrderTests
                     .ToList();
                 if (visited.Count > 0)
                 {
-                    Assert.True(visited.Count == 2 && visited.All(v => v == 1),
+                    Assert.True(visited.Count == 3 && visited.All(v => v == 1),
                         "expected each arm's deferred chunk append to visit exactly the newest chunk:\n" + plan);
                 }
                 else
                 {
-                    Assert.True(chunkScans.Count >= 2 * 8,
+                    Assert.True(chunkScans.Count >= 3 * 8,
                         "expected the plan to carry at least eight chunk scans per arm (eight seeded days):\n" + plan);
                 }
 
                 var executed = chunkScans.Where(l => !l.Contains("never executed", StringComparison.Ordinal)).ToList();
-                Assert.True(executed.Count <= 2,
+                Assert.True(executed.Count <= 3,
                     "more than one chunk executed per arm — the read is walking history again:\n" + plan);
             }
 
@@ -182,7 +189,7 @@ public sealed class CaptureDownChunkOrderTests
             var h = new DarlingSelfAlertTests.Harness();
             var evaluator = new DarlingSelfAlertEvaluator(h.Settings, h.Deliverer, h.History, _ => false);
             var missing = await evaluator.ReadMissingCaptureSessionsAsync(postgres, TestServerId, ct);
-            Assert.Equal(new[] { "Blocking" }, missing);
+            Assert.Equal(new[] { "Client timeouts", "Blocking" }, missing);
 
             bodySucceeded = true;
         }

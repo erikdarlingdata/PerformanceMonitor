@@ -1213,7 +1213,7 @@ END;", connection);
                 .Where(other => other.Id != server.Id && string.Equals(other.ServerName.Trim(), hostKey, StringComparison.OrdinalIgnoreCase))
                 .Select(other => other.Id)
                 .ToList();
-            foreach (var kind in new[] { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess })
+            foreach (var kind in new[] { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess, AlwaysOnXeSessionKind.Attention })
             {
                 var ownName = AlwaysOnOwnSessionName(kind);
                 if (ownName is null)

@@ -361,12 +361,14 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("CASE WHEN is_stored AND max_interval_seconds = 0 THEN NULL", sql, StringComparison.Ordinal);
         Assert.Contains($"CASE WHEN gap_seconds <= {CollectorDeltaCalculator.DefaultMaxGapSeconds} THEN gap_seconds END", sql, StringComparison.Ordinal);
         Assert.Contains("WHEN is_stored THEN NULLIF(max_interval_seconds, 0)", sql, StringComparison.Ordinal);
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time >= \$2 - INTERVAL '3600 seconds'").Count);
+        /* #5638: the stored collections come from two arms (the rows below the server's totals floor, the totals from it), each bounded
+           from $2 less the gap, and the runs are the third. */
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time >= \$2 - INTERVAL '3600 seconds'").Count);
         Assert.Contains("FROM gapped\nWHERE collection_time >= $2", string.Join('\n', Lines(sql)), StringComparison.Ordinal);
         /* A run is logged after it finishes, so one that began inside the window can be logged just past its end: the runs are read
-           an hour past $3 (once), the stored rows and the final points stop at $3 (twice). */
+           an hour past $3 (once), the stored rows, the stored totals and the final points stop at $3 (three times, #5638). */
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time <= \$3 \+ INTERVAL '3600 seconds'"));
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time <= \$3\r?\n").Count);
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time <= \$3\r?\n").Count);
         Assert.DoesNotContain("COALESCE(MAX(", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("series_first", sql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
@@ -379,13 +381,15 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
            carries NO database term, so the interval is the collection's), is the same text. */
         static bool IsFilteredSumLine(string l) =>
             l.Contains("delta_elapsed_time", StringComparison.Ordinal) || l.Contains("delta_execution_count", StringComparison.Ordinal)
+            || l.Contains("total_elapsed_time", StringComparison.Ordinal) || l.Contains("total_execution_count", StringComparison.Ordinal)
             || l.Contains("matched_rows", StringComparison.Ordinal);
         foreach (var cte in new[] { "stored AS\n(", "runs AS\n(", "events AS\n(", "sequenced AS\n(", "points AS\n(", "gapped AS\n(", "raw AS\n(" })
         {
             var viewerCte = Cte(Lf(ViewerDataService.ProcedureDurationTrendSql), cte);
             if (cte == "stored AS\n(")
             {
-                Assert.Equal(3, viewerCte.Split('\n').Count(l => l.Contains("FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4))", StringComparison.Ordinal)));
+                /* #5638: three filtered sums on the rows arm and three on the totals arm. */
+                Assert.Equal(6, viewerCte.Split('\n').Count(l => l.Contains("FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4))", StringComparison.Ordinal)));
             }
             var viewer = string.Join('\n', viewerCte.Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
             var mcp = string.Join('\n', Cte(Lf(sql), cte).Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));

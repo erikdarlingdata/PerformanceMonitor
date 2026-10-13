@@ -51,7 +51,7 @@ public sealed partial class ViewerDataService
     public const string MuteRulesSelectSql = @"
 SELECT id, enabled, created_at_utc, expires_at_utc, reason,
        server_name, metric_name, database_pattern,
-       query_text_pattern, wait_type_pattern, job_name_pattern, server_id, external_source
+       query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source
 FROM config_mute_rules
 ORDER BY created_at_utc DESC";
 
@@ -59,15 +59,15 @@ ORDER BY created_at_utc DESC";
 INSERT INTO config_mute_rules
     (id, enabled, created_at_utc, expires_at_utc, reason,
      server_name, metric_name, database_pattern,
-     query_text_pattern, wait_type_pattern, job_name_pattern, server_id, external_source)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
+     query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
 
     public const string MuteRuleUpdateSql = @"
 UPDATE config_mute_rules SET
     enabled = $2, expires_at_utc = $3, reason = $4,
     server_name = $5, metric_name = $6, database_pattern = $7,
-    query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10, server_id = $11,
-    external_source = $12
+    query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10, server_id = $11, client_app_pattern = $12,
+    external_source = $13
 WHERE id = $1";
 
     public const string MuteRuleSetEnabledSql = "UPDATE config_mute_rules SET enabled = $2 WHERE id = $1";
@@ -97,7 +97,7 @@ WHERE id = $1";
         Reason = ServerSilenceReason,
         Enabled = true,
         ExpiresAtUtc = null,
-        /* MetricName/DatabasePattern/QueryTextPattern/WaitTypePattern/JobNamePattern stay null → matches all. */
+        /* MetricName/DatabasePattern/QueryTextPattern/WaitTypePattern/JobNamePattern/ClientAppPattern stay null → matches all. */
     };
 
     /// <summary>The <see cref="MuteRule.Reason"/> prefix a tray-toast Snooze stamps ("Snoozed from tray (4h)"), so
@@ -156,6 +156,7 @@ WHERE id = $1";
         && rule.WaitTypePattern is null
         && rule.JobNamePattern is null
         /* A rule limited to one external source is narrower than a whole-server silence (#5654). */
+        && rule.ClientAppPattern is null
         && rule.ExternalSource is null;
 
     /// <summary>What "Unsilence" does for one server: the silence rules to delete, and the id-keyed silences to
@@ -235,6 +236,8 @@ WHERE id = $1";
     {
         var rules = new List<MuteRule>();
 
+        /* client_app_pattern (#5640) exists from V179, and the viewer refuses to connect to a store below its own
+           RequiredStoreSchemaVersion (MainWindow's connect-time gate), so no read reaches an older store: one statement. */
         await using var command = _dataSource.CreateCommand(MuteRulesSelectSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -254,7 +257,8 @@ WHERE id = $1";
                 WaitTypePattern = reader.IsDBNull(9) ? null : reader.GetString(9),
                 JobNamePattern = reader.IsDBNull(10) ? null : reader.GetString(10),
                 ServerId = reader.IsDBNull(11) ? null : reader.GetInt32(11),
-                ExternalSource = reader.IsDBNull(12) ? null : reader.GetString(12),
+                ClientAppPattern = reader.IsDBNull(12) ? null : reader.GetString(12),
+                ExternalSource = reader.IsDBNull(13) ? null : reader.GetString(13),
             });
         }
 
@@ -283,6 +287,7 @@ WHERE id = $1";
         AddNullableText(command, rule.WaitTypePattern);
         AddNullableText(command, rule.JobNamePattern);
         AddNullableInt(command, rule.ServerId);
+        AddNullableText(command, rule.ClientAppPattern);
         AddNullableText(command, rule.ExternalSource);
         await ExecuteWriteAsync(command, cancellationToken);
         await SignalConfigReloadAsync(cancellationToken);
@@ -309,6 +314,7 @@ WHERE id = $1";
         AddNullableText(command, rule.WaitTypePattern);
         AddNullableText(command, rule.JobNamePattern);
         AddNullableInt(command, rule.ServerId);
+        AddNullableText(command, rule.ClientAppPattern);
         AddNullableText(command, rule.ExternalSource);
         await ExecuteWriteAsync(command, cancellationToken);
         await SignalConfigReloadAsync(cancellationToken);

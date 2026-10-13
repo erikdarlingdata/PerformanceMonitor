@@ -49,11 +49,11 @@ namespace Darling.Tests;
 public sealed class CiClusterWorkerSizingTests
 {
     /// <summary>
-    /// The workflows that stand up the gated-live throwaway cluster. Both, not just <c>build.yml</c>: the PR
-    /// leg and the nightly leg are separate copies of the same steps, and a fix applied to one of them is the
-    /// ordinary way these two drift apart.
+    /// The workflows that stand up a throwaway cluster. All of them, not just <c>build.yml</c>: the PR leg, the
+    /// nightly leg and the UI-smoke leg (#5701) are separate copies of the same steps, and a fix applied to one of
+    /// them is the ordinary way these drift apart.
     /// </summary>
-    public static TheoryData<string> ClusterWorkflows() => new() { "build.yml", "nightly.yml" };
+    public static TheoryData<string> ClusterWorkflows() => new() { "build.yml", "nightly.yml", "darling-ui-smoke.yml" };
 
     /// <summary>
     /// <c>Add-Content -Path "$dataDir\postgresql.conf" -Value "setting = value"</c> — how both workflows append

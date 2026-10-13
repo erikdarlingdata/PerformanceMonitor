@@ -114,28 +114,47 @@ public sealed class PlanRegressionRowcountRungTests
     }
 
     [Fact]
-    public void TheProbeNamesTheColumn_AndMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeNamesTheColumn_AndMapsToThisRungWhenNoLaterSentinelIsPresent()
     {
         Assert.Contains("attname = 'rowcount_sum'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        /* V180's sentinel (#5654) sits above this one; the probe's last ordinal is the newest rung's. */
+        /* V176's (#5638), V177's (#5641), V178's (#5684), V179's (#5640) and V180's (#5654) sentinels are appended after this one, so this rung is no longer the top. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         Assert.Equal("hasPlanRegressionDailyRowcount", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasServiceVersion", parameters[ProbeOrdinal - 1].Name);
-        /* V180 (#5654) adds one more sentinel above this one. */
-        Assert.Equal(ProbeOrdinal + 1, parameters.Length - 1);
+        Assert.Equal("hasProcedureStatsTotals", parameters[ProbeOrdinal + 1].Name);
+        Assert.Equal("hasRunnableQueueSettings", parameters[ProbeOrdinal + 2].Name);
+        Assert.Equal("hasQueryStoreWatermarks", parameters[ProbeOrdinal + 3].Name);
+        Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal + 4].Name);
+        Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal + 5].Name);
+        Assert.Equal(ProbeOrdinal + 5, parameters.Length - 1);
 
-        /* Every sentinel up to this rung's present, none of a newer rung's: maps to this rung; this sentinel absent maps one rung back. */
-        var all = Enumerable.Range(0, parameters.Length).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
-        Assert.Equal(RungVersion, (int)method.Invoke(null, all)!);
+        /* Every sentinel present maps to exactly this build's version. With the later sentinels absent this rung is the
+           answer; with this one absent too, one rung back. */
+        var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
+        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        /* V176 (#5638) sits above this rung: with only this sentinel and those below it the store maps to this rung. */
+        var withoutLater = (object[])all.Clone();
+        withoutLater[ProbeOrdinal + 1] = false;
+        /* V177 (#5641), V178 (#5684) and V179 (#5640) sit above V176 and are appended after it, so they go absent too. */
+        withoutLater[ProbeOrdinal + 2] = false;
+        withoutLater[ProbeOrdinal + 3] = false;
+        withoutLater[ProbeOrdinal + 4] = false;
+        /* V180 (#5654) sits above V179 and goes absent too. */
+        withoutLater[ProbeOrdinal + 5] = false;
+        Assert.Equal(RungVersion, (int)method.Invoke(null, withoutLater)!);
 
-        var behind = (object[])all.Clone();
+        var behind = (object[])withoutLater.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(RungVersion - 1, (int)method.Invoke(null, behind)!);
 

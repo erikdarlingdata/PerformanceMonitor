@@ -943,6 +943,53 @@ END $$;";
     private static readonly string V174Sql = ServiceVersionTable.CreateSql;
 
     /// <summary>
+    /// V179 (#5640) - everything the Client Timeouts alert needs in the store, in one rung. (1) <c>collect.attention_events</c>: the
+    /// <c>AttentionCollector</c> table, a <c>count</c> row for each run whose event_counter delta is above zero (event_time NULL; a quiet run writes none) plus one <c>sample</c> row per kept ring-buffer
+    /// event (attention_count 0). A collector table that stays a PLAIN table on every store (<c>ICollectorSchemaInfo.StaysPlainTable</c>): no hypertable, no compression and no
+    /// Timescale retention policy, because the 73rd hypertable is a grid decision (#3035, #3044, #3107) and its rows are low volume. Its 30-day
+    /// retention is the time-sliced DELETE the retention sweep runs on both store kinds. A fresh store already has it from V1's catalog walk, so
+    /// the CREATE is a no-op there and the real create on upgrade.
+    /// Columns are exactly <c>PgSchemaGenerator.CreateTable</c>'s output for the catalog entry. (2)
+    /// <c>config.config_mute_rules.client_app_pattern</c>: the client-application match for mute rules (nullable text, no default,
+    /// like V157's <c>server_id</c>). (3) Three alert settings on <c>config.config_alert_settings</c>, named like V177's:
+    /// <c>client_timeouts_enabled</c> (<c>boolean NOT NULL DEFAULT FALSE</c>: the alert ships OFF until the bars are checked against a
+    /// week of capture on the field stores), <c>client_timeouts_warning_per_minute</c> (default 10) and
+    /// <c>client_timeouts_critical_per_minute</c> (default 60), attentions per minute averaged over three minutes. The defaults are
+    /// a guess from "a healthy app rarely times out", not a measured normal rate. Written as literals because a migration's text is
+    /// frozen at the version it ships in. No CHECK on the bounds, no reload beacon of its own (V17's trigger bumps the version on any
+    /// write to the settings row), no GRANT (the <c>collect</c> and <c>config</c> schemas carry blanket SELECT and table-level
+    /// grants). Catalog-only: every added column is nullable or has a constant default. Every statement is idempotent. <b>Lite twin:</b>
+    /// the DuckDB bump to schema 68. Sequenced after V176-V178 (#5638, #5641, #5684), which are in other open changes.
+    /// </summary>
+    private const string V179Sql = @"
+CREATE TABLE IF NOT EXISTS collect.attention_events (
+    attention_event_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    event_time timestamp,
+    event_kind text,
+    attention_count bigint,
+    database_name text,
+    client_app_name text,
+    client_hostname text,
+    session_id integer,
+    request_id integer,
+    interrupt_duration_us bigint,
+    statement_fingerprint text,
+    statement_text text
+);
+
+CREATE INDEX IF NOT EXISTS idx_attention_events_time ON collect.attention_events(server_id, collection_time);
+
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS client_app_pattern text;
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS client_timeouts_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS client_timeouts_warning_per_minute integer NOT NULL DEFAULT 10,
+    ADD COLUMN IF NOT EXISTS client_timeouts_critical_per_minute integer NOT NULL DEFAULT 60;";
+
+    /// <summary>
     /// V175 (#5631) — <c>collect.plan_regression_daily.rowcount_sum</c>: the day's sum of <c>avg_rowcount * execution_count</c> for
     /// the plan, so PLAN_REGRESSION can tell a plan whose cost followed a much bigger output from a real regression on the daily
     /// path, as it can on the raw and interval-table paths. NULL when any interval of the day had no <c>avg_rowcount</c>, so a
@@ -993,6 +1040,54 @@ END
 $$;";
 
     /// <summary>
+    /// V176 (#5638) - <c>collect.procedure_stats_totals</c>: the per-collection totals of <c>collect.procedure_stats</c> that the raw
+    /// procedure duration trend reads instead of every row of every collection (about 560 to 1,060 rows per collection since #5463).
+    /// The collector writes it on the COPY's own transaction (<c>ProcedureStatsTotalsWriter</c>); the grain, the measures, the
+    /// NULL database handling and the retention are on <see cref="ProcedureStatsTotals"/>, which the rung embeds.
+    ///
+    /// <para><b>Empty when created, no backfill</b> (the data-moving census therefore has nothing to declare): a collection written
+    /// before the rung has no totals row and the read keeps reading its rows. A plain table, not a collector, so no catalog, hypertable or
+    /// grant change; the <c>collect</c> schema's blanket SELECT and owner default privileges cover it. No Lite twin: Lite's store is
+    /// DuckDB with its own procedure trend.</para>
+    /// </summary>
+    private const string V176Sql = ProcedureStatsTotals.CreateSql;
+
+    /// <summary>
+    /// V177 (#5641) - the Runnable Queue alert's three settings on <c>config.config_alert_settings</c>:
+    /// <c>runnable_queue_enabled</c> (<c>boolean NOT NULL DEFAULT TRUE</c>, like <c>poison_wait_enabled</c>) and the two bars,
+    /// <c>runnable_queue_warning_per_scheduler</c> (default 8) and <c>runnable_queue_critical_per_scheduler</c> (default 16),
+    /// runnable tasks per visible online scheduler, averaged over the collections of the last 5 minutes when there are at least 3, otherwise over
+    /// the newest 3 if all fall in the last 10 minutes (the rule as shipped; the migration's SQL text says nothing of the window). The defaults are
+    /// <c>RunnableQueueEvaluator.DefaultWarningPerScheduler</c> / <c>DefaultCriticalPerScheduler</c>, written as literals here
+    /// because a migration's text is frozen at the version it ships in; the defaults pin in the rung's test holds them equal.
+    ///
+    /// <para>No CHECK enforcing the bounds, matching V119/V120/V122/V124/V126: the floor (Warning at least 1, Critical never
+    /// below Warning) is the <c>update_alert_settings</c> write bound and <c>DarlingAlertSettings</c>' read-side clamp, the
+    /// raw-in/clamped-out split every knob on this table uses. Catalog-only: a column with a constant default does not rewrite
+    /// the one-row table. No reload beacon of its own: V17's statement-level <c>trg_bump_alert_settings</c> already bumps
+    /// <c>config_service.config_version</c> on any write here. No GRANT: this table carries table-level grants with no column
+    /// carve. <b>No Lite twin:</b> Lite keeps these as settings-file keys. Sequenced after V176 (#5638, procedure_stats_totals).
+    /// </summary>
+    private const string V177Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS runnable_queue_enabled boolean NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS runnable_queue_warning_per_scheduler integer NOT NULL DEFAULT 8,
+    ADD COLUMN IF NOT EXISTS runnable_queue_critical_per_scheduler integer NOT NULL DEFAULT 16;";
+
+    /// <summary>
+    /// V178 (#5684) - <c>collect.query_store_watermarks</c> and <c>collect.query_store_watermarks_coverage</c>: one row per
+    /// (server, database, collection_time) with that key's <c>MAX(last_execution_time)</c>, so the Query Store per-database watermark
+    /// seed read touches about thirty-six rows instead of every <c>query_store_stats</c> row of the pair's last three hours. The
+    /// collector writes it on the COPY's own transaction behind a savepoint (<c>QueryStoreWatermarks.TryUpsertBatchAsync</c>); the grain,
+    /// the types, the only-up upsert, the coverage start and the two-day retention are on <see cref="QueryStoreWatermarks"/>, which the
+    /// rung embeds.
+    ///
+    /// <para><b>Empty when created, no backfill</b> (the data-moving census therefore has nothing to declare), except the one coverage row
+    /// the rung inserts: the store's own clock at the moment the rung ran, kept on a re-run. A reader treats everything before it as raw's.
+    /// A plain table, not a collector, so no catalog, hypertable or grant change. No Lite twin: Lite's store is DuckDB with its own
+    /// watermark read.</para>
+    /// </summary>
+    private const string V178Sql = QueryStoreWatermarks.CreateSql;
     /// V180 (#5654) — the tables for alerts that another service raises through Darling's channels, routes and mute rules:
     /// <c>config.external_alert_source</c> (the registry that maps a login role to a source name), <c>config.external_alert_pending</c>
     /// (the queue the provisioned function appends to and the service drains) and <c>config.external_alert_state</c> (which keys are
@@ -1291,6 +1386,10 @@ $rung$;";
         new Migration(173, "query-store-compose-stamp", V173Sql),
         new Migration(174, "service-version", V174Sql),
         new Migration(175, "plan-regression-daily-rowcount", V175Sql),
+        new Migration(176, "procedure-stats-totals", V176Sql),
+        new Migration(177, "runnable-queue-alert-settings", V177Sql),
+        new Migration(178, "query-store-watermarks", V178Sql),
+        new Migration(179, "client-timeouts-alert", V179Sql),
         new Migration(180, "external-alerts", V180Sql),
     };
 

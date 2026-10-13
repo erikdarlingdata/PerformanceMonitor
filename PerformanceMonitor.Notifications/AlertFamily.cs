@@ -70,6 +70,13 @@ public static class AlertFamily
 
     /// <summary>The metric-name prefix of an external alert (#5654): <c>External:&lt;source&gt;:&lt;key&gt;</c>.</summary>
     public const string ExternalMetricPrefix = "External:";
+    /// <summary>
+    /// The Client Timeouts alert's metric name (#5640): the ONE declaration. The engine's evaluator
+    /// (<c>AttentionEvaluator.MetricName</c>) takes it from here, because this assembly sits below the engine, and the
+    /// severity map in this assembly uses it too. Only <c>AlertMetricClassifier</c> (a leaf assembly that cannot see
+    /// this one) spells it as a literal, and a test pins that literal to this constant.
+    /// </summary>
+    public const string ClientTimeoutsMetric = "Client Timeouts";
 
     /// <summary>Every family, in the order the settings surfaces list them.</summary>
     public static readonly IReadOnlyList<string> All = new[] { SelfMonitor, Reports, AgentJobs, Performance, External };
@@ -88,6 +95,8 @@ public static class AlertFamily
         ["Blocking Wait Time"] = Performance,
         ["Deadlocks Detected"] = Performance,
         ["Poison Wait"] = Performance,
+        ["Runnable Queue"] = Performance,
+        [ClientTimeoutsMetric] = Performance,
         ["Long-Running Query"] = Performance,
         ["tempdb Space"] = Performance,
         ["Volume Free Space"] = Performance,

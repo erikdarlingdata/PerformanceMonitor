@@ -34,7 +34,7 @@ internal static class DarlingAlwaysOnXeSessions
     /// sentence when a create or start failed, and leaves the choice as it was: one broken database or session never blocks
     /// the rest.
     /// </summary>
-    internal static async Task EnsureAsync(
+    internal static async Task<DarlingXeSessions.AttentionEnsureFault?> EnsureAsync(
         IAlwaysOnXeDatabase database,
         DarlingCollectorRunner runner,
         ServerRuntime server,
@@ -58,6 +58,11 @@ internal static class DarlingAlwaysOnXeSessions
                     logger?.LogInformation("[{Server}] [{Database}] Created and started {Capture} XE session (database-scoped, {Choice} session)",
                         server.Config.DisplayName, databaseName, captureName, result.Choice == AlwaysOnXeChoice.Own ? "own" : "shared");
                     break;
+                case AlwaysOnXeChange.CreatedWithoutStatementText:
+                    /* #5640: the capture note for an Azure create the engine refused for an unproved action (error 25744). */
+                    logger?.LogWarning("[{Server}] [{Database}] Created and started {Capture} XE session without statement text: Azure SQL Database refused an action of the full definition (error 25744), so these client timeouts carry no sql_text",
+                        server.Config.DisplayName, databaseName, captureName);
+                    break;
                 case AlwaysOnXeChange.Started:
                     logger?.LogInformation("[{Server}] [{Database}] {Capture} XE session was stopped and has been started ({Choice} session)",
                         server.Config.DisplayName, databaseName, captureName, result.Choice == AlwaysOnXeChoice.Own ? "own" : "shared");
@@ -73,6 +78,8 @@ internal static class DarlingAlwaysOnXeSessions
                 default:
                     break;
             }
+
+            return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException && DarlingXeSessions.IsReadOnlyDatabaseRefusal(ex))
         {
@@ -82,11 +89,15 @@ internal static class DarlingAlwaysOnXeSessions
             var first = runner.AlwaysOnChoices.MarkReadOnlyRefusal(ServerKey(server), databaseName, kind);
             logger?.Log(first ? LogLevel.Warning : LogLevel.Debug, "[{Server}] [{Database}] {Message}",
                 server.Config.DisplayName, databaseName, AlwaysOnXeSessions.ReadOnlyDatabaseMessage(kind));
+            return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning("[{Server}] [{Database}] Failed to ensure {Capture} XE session: {Message}",
                 server.Config.DisplayName, databaseName, captureName, AlwaysOnXeSessions.DescribeFailure(ex));
+
+            /* #5640 (H2): the client-timeout session's permission denial, for the run to record as PERMISSIONS. */
+            return kind == AlwaysOnXeSessionKind.Attention ? DarlingXeSessions.AttentionFaultFor(ex) : null;
         }
     }
 

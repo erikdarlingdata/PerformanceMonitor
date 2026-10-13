@@ -163,7 +163,7 @@ public sealed class CompressionPhaseAssignmentTests
         /* Exactly one: the totals have to agree, which is what rules out a table counted twice or dropped. */
         Assert.Equal(TimescaleSupport.CompressionPhaseOrder.Count, byMinute.Values.Sum(v => v.Count));
         Assert.Equal(TimescaleSupport.HypertableCount, byMinute.Values.Sum(v => v.Count));
-        Assert.Equal(CollectorCatalog.All.Count + 1, byMinute.Values.Sum(v => v.Count));
+        Assert.Equal(TimescaleSupport.HypertableTables.Count + 1, byMinute.Values.Sum(v => v.Count));
 
         /* Every minute of the band is occupied — the band is sized to hold the whole catalog at the ceiling,
            so an unused minute means the fill stopped spreading. */

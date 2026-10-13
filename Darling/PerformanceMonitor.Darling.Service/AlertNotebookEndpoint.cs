@@ -564,6 +564,8 @@ internal static partial class AlertNotebookEndpoint
             new AuthoredTemplateEntry("authored/pg-xmin-horizon", PgXminHorizonTemplateVersion, BuildPgXminHorizonCells)),
         (new[] { "PostgreSQL Wraparound Risk" },
             new AuthoredTemplateEntry("authored/pg-wraparound", PgWraparoundTemplateVersion, BuildPgWraparoundCells)),
+        (new[] { "Runnable Queue" },
+            new AuthoredTemplateEntry("authored/runnable-queue", RunnableQueueTemplateVersion, BuildRunnableQueueCells)),
         (new[] { "Server Unreachable", "Server Restored" },
             new AuthoredTemplateEntry("authored/server-connect", ServerConnectTemplateVersion, BuildServerConnectCells)),
     };

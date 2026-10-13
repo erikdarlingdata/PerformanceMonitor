@@ -72,6 +72,16 @@ public sealed class DarlingMcpStoreHostToolsLiveTests
         await PgMigrations.MigrateAsync(owner, ct);
         await CreateTestRolesAsync(owner, ct);
 
+        /* #5718: the polled read takes the store size from the hourly sweep's stored row (readable under each
+           role through the same collect SELECT grant), so a store that has never swept reports it unavailable.
+           Record one so the size assertion below proves the grant, not an empty table. */
+        await using (var seedSweep = new NpgsqlCommand(
+            "INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_bytes) "
+            + "VALUES ((now() AT TIME ZONE 'UTC') - interval '1 minute', 'store_5718_hostroles', 'store', 123456789)", owner))
+        {
+            await seedSweep.ExecuteNonQueryAsync(ct);
+        }
+
         var bodySucceeded = false;
         var root = Directory.CreateTempSubdirectory("darling-storehost-roles-");
         try
@@ -146,6 +156,8 @@ public sealed class DarlingMcpStoreHostToolsLiveTests
                    not a thrown exception, so only an explicit not-null assertion catches it. */
                 var store = managed.RootElement.GetProperty("store");
                 Assert.NotEqual(JsonValueKind.Null, store.GetProperty("size_bytes").ValueKind);
+                Assert.NotEqual(JsonValueKind.Null, store.GetProperty("size_as_of").ValueKind);
+                Assert.NotEqual(JsonValueKind.Null, store.GetProperty("size_age_seconds").ValueKind);
                 Assert.NotEqual(JsonValueKind.Null, store.GetProperty("timescale_version").ValueKind);
 
                 /* uncompressed_chunk_count against OWNER-side reads of the exact same query
@@ -173,6 +185,9 @@ public sealed class DarlingMcpStoreHostToolsLiveTests
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 await DropTestRolesAsync(cleanup, cleanupCt);
+                await using var dropSeed = new NpgsqlCommand(
+                    "DELETE FROM collect.store_metrics WHERE object_name = 'store_5718_hostroles'", cleanup);
+                await dropSeed.ExecuteNonQueryAsync(cleanupCt);
             });
         }
     }

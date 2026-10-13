@@ -62,6 +62,23 @@
   "alert_poison_wait_enabled": true,
   "alert_poison_wait_threshold_ms": 500,
 
+  // ---- Runnable queue (#5641) --------------------------------------------------------
+  // Alerts on the AVERAGE runnable tasks per scheduler over the collections of the last 5 minutes
+  // (at least 3; otherwise the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates)). The bars are whole numbers: Warning at least 1, Critical never below
+  // Warning (a lower Critical is raised to the Warning bar).
+  "alert_runnable_queue_enabled": true,
+  "alert_runnable_queue_warning_per_scheduler": 8,
+  "alert_runnable_queue_critical_per_scheduler": 16,
+
+  // ---- Client timeouts (#5640) -------------------------------------------------------
+  // Alerts on client attentions (a client cancelled a query or its timeout expired) per minute over the
+  // covered span of the attention collector's last runs (about 3 minutes). OFF by default: no measured
+  // normal rate exists yet (#5736 sets the bars from field data). The bars are whole numbers: Warning at
+  // least 1, Critical never below Warning (a lower Critical is raised to the Warning bar).
+  "alert_client_timeouts_enabled": false,
+  "alert_client_timeouts_warning_per_minute": 10,
+  "alert_client_timeouts_critical_per_minute": 60,
+
   // ---- Long-running queries ----------------------------------------------------------
   // The five exclude_* switches suppress the queries that are long-running by design and
   // would otherwise be the only thing this alert ever reports.

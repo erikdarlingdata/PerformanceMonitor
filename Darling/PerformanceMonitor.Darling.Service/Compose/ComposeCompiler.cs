@@ -123,6 +123,9 @@ public static class ComposeCompiler
     /// <summary>The one source table whose RAW rows need a per-interval dedup before aggregation (#1841).</summary>
     private const string QueryStoreTable = "query_store_stats";
 
+    /// <summary>The source table whose raw rows are combined to one row per (server, collection_time) before aggregation (#5710).</summary>
+    internal const string CpuSchedulerTable = "cpu_scheduler_stats";
+
     /// <summary>The residual series label a <see cref="PanelMode.RankedTimeSeries"/> panel emits when the
     /// spec sets <c>includeOther</c> (#2734). Parenthesized-lowercase matches the product's sentinel family
     /// (<see cref="MeasureCatalog.AdHocLabel"/>, "(unknown)", "(none)") — distinct from every member of it —
@@ -249,6 +252,20 @@ public static class ComposeCompiler
                whole and AppendFactBody's own " AS f" suffix applies to it as a no-op repeat of the SAME
                alias the clause already carries — see the guard in DarlingComposeTests pinning that shape. */
             return route.CaggFromClause ?? $"{PgSchemaGenerator.CollectSchema}.{route.CaggRelation!}";
+        }
+
+        /* #5710: a cpu_scheduler_stats collection written before the collector fix is split across several rows that share a
+           collection_time, each covering some of the schedulers (runnable tasks 83 + 18 for one 101-task reading). The panel's time
+           aggregate must run over COLLECTIONS, so the relation is the shared per-collection combine (CpuSchedulerCollectionSql: sums
+           for the counts, MAX for the repeated columns), grouped per server too because a panel can span servers. The window is
+           the panel's own (the outer WHERE repeats it on the combined rows, with the server scope and any filters); every row of
+           one collection shares its collection_time, so the window never cuts a collection in half. */
+        if (string.Equals(sourceTable, CpuSchedulerTable, StringComparison.Ordinal))
+        {
+            return $"(SELECT server_id, server_name, {PerformanceMonitor.Common.CpuSchedulerCollectionSql.CombinedColumns} "
+                + $"FROM {PgSchemaGenerator.CollectSchema}.{CpuSchedulerTable} "
+                + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam} "
+                + "GROUP BY server_id, server_name, collection_time)";
         }
 
         if (!string.Equals(sourceTable, QueryStoreTable, StringComparison.Ordinal))

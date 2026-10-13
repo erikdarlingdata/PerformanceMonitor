@@ -60,6 +60,12 @@ public sealed class McpToolGuideHeadsLongQueryTests
         var tail = McpToolGuideTests.Served(Tool).Tail!;
         Assert.Contains("Shows duration, CPU, reads/writes, row count, result (OK/Error/Abort", tail, StringComparison.Ordinal);
         Assert.Contains("Both SKUs keep the same population.", tail, StringComparison.Ordinal);
+        /* #5711: the guide names the field to group by; batch-level events carry no query_hash. */
+        Assert.Contains("query_identity is the key to group rows by", tail, StringComparison.Ordinal);
+        Assert.Contains("batch-level events carry none, so query_hash is null there", tail, StringComparison.Ordinal);
+        /* #5711 review: attentions store no statement text, so they have no identity; the guide must say so. */
+        Assert.Contains("An attention row (client cancel or timeout) carries no statement text, so its query_identity is null", tail, StringComparison.Ordinal);
+        Assert.Contains("a null query_identity is never a group key", tail, StringComparison.Ordinal);
         Assert.Contains(
             "The collector is OFF by default; if it returns empty, enable the 'long_query_completions' collector in the schedule.",
             tail, StringComparison.Ordinal);

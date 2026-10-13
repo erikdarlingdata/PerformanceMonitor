@@ -66,6 +66,7 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.Contains("m.query_text_pattern IS NULL", sql, StringComparison.Ordinal);
         Assert.Contains("m.wait_type_pattern IS NULL", sql, StringComparison.Ordinal);
         Assert.Contains("m.job_name_pattern IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("m.client_app_pattern IS NULL", sql, StringComparison.Ordinal);
         Assert.Contains("AS is_silenced", sql, StringComparison.Ordinal);
     }
 
@@ -96,7 +97,6 @@ public sealed class DarlingFleetReaderSqlTests
     [Theory]
     [InlineData(nameof(DarlingFleetReader.FleetCpuSql), "FROM v_cpu_utilization_stats", "ORDER BY collection_time DESC, sample_time DESC")]
     [InlineData(nameof(DarlingFleetReader.FleetMemorySql), "FROM v_memory_stats", "ORDER BY collection_time DESC")]
-    [InlineData(nameof(DarlingFleetReader.FleetThreadsSql), "FROM v_cpu_scheduler_stats", "ORDER BY collection_time DESC, collection_id DESC")]
     [InlineData(nameof(DarlingFleetReader.FleetMemoryPressureSql), "FROM v_memory_grant_stats", "ORDER BY collection_time DESC")]
     public void LatestSnapshotReads_AreOnePerServerProbeFromTheRegistry(string constName, string source, string ordering)
     {
@@ -115,6 +115,30 @@ public sealed class DarlingFleetReaderSqlTests
         /* The replaced shape, in any spelling that sorts the whole relation to keep one row per server. */
         Assert.DoesNotContain("DISTINCT ON", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("GROUP BY", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5710: the threads probe still reads ONE collection per server from the registry through an index probe on the
+    /// newest <c>collection_time</c> (never a sort of the whole relation), and combines that collection's rows: a
+    /// collection written before the collector fix can be split across several rows that each cover some of the
+    /// schedulers, so the workers and runnable tasks are SUMs over the collection.
+    /// </summary>
+    [Fact]
+    public void FleetThreadsSql_CombinesTheNewestCollectionsRows_PerServer()
+    {
+        var sql = DarlingFleetReader.FleetThreadsSql;
+
+        Assert.Contains("FROM servers AS s", sql, StringComparison.Ordinal);
+        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM v_cpu_scheduler_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = s.server_id", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(total_runnable_tasks_count) AS integer) AS total_runnable_tasks_count", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(total_current_workers_count) AS integer) AS total_current_workers_count", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE s.is_enabled", sql, StringComparison.Ordinal);
+        Assert.Contains(DarlingFleetReader.SqlServerCollectedTargetSql, sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("DISTINCT ON", sql, StringComparison.Ordinal);
+        Assert.Matches(@"LIMIT 1[^\r\n]*\r?\n\) AS latest", sql);
     }
 
     /// <summary>
@@ -272,7 +296,9 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.DoesNotContain("N'", sql, StringComparison.Ordinal);         // no N'' literals
         Assert.DoesNotContain("now(", sql.ToLowerInvariant());              // no bare now()
         Assert.DoesNotContain("getdate", sql.ToLowerInvariant());           // no T-SQL GETDATE()
-        Assert.DoesNotContain("[", sql, StringComparison.Ordinal);          // no T-SQL bracket identifiers
+        /* No T-SQL bracket identifiers. The one allowed "[": the ")[1]" array subscript that picks the first element of
+           (ARRAY_AGG(col ORDER BY ...)) in the shared cpu_scheduler_stats combine (#5710), which PostgreSQL and DuckDB both run. */
+        Assert.DoesNotContain("[", sql.Replace(")[1]", ")", StringComparison.Ordinal), StringComparison.Ordinal);
     }
 }
 

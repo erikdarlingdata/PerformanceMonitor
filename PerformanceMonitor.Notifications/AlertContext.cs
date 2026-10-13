@@ -53,6 +53,16 @@ public class AlertContext
     public AlertSeverityLevel? SeverityOverride { get; set; }
 
     /// <summary>
+    /// True when this firing is a tier ESCALATION the engine wants delivered at once (#5641): an open incident that
+    /// was delivered at Warning has just been graded Critical. The email and webhook cooldowns
+    /// (<see cref="IncidentCooldown"/>) and the repeat ceiling (<see cref="RepeatDeliveryBudget"/>) read it and let
+    /// the firing through inside the window; a successful send still stamps the cooldown, so it restarts the
+    /// clock. Set by the engine's <c>TierEscalation</c> helper, for the alerts that opt in (Runnable Queue only
+    /// today). Transient: never persisted (the serializer's projection does not carry it) and never rendered.
+    /// </summary>
+    public bool EscalationBypassesCooldown { get; set; }
+
+    /// <summary>
     /// One entry per distinct grouped incident this alert covers (#1140). Carries the stable
     /// dedup fingerprint + human-readable involved objects that downstream automation uses to
     /// collapse recurrences of the same incident. <c>null</c>/empty = no fingerprintable incident

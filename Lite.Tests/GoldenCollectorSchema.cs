@@ -1011,6 +1011,23 @@ internal static class GoldenCollectorSchema
     state_desc VARCHAR,
     is_in_standby BOOLEAN
 )",
+        ["attention_events"] = @"CREATE TABLE IF NOT EXISTS attention_events (
+    attention_event_id BIGINT PRIMARY KEY,
+    collection_time TIMESTAMP NOT NULL,
+    server_id INTEGER NOT NULL,
+    server_name VARCHAR NOT NULL,
+    event_time TIMESTAMP,
+    event_kind VARCHAR,
+    attention_count BIGINT,
+    database_name VARCHAR,
+    client_app_name VARCHAR,
+    client_hostname VARCHAR,
+    session_id INTEGER,
+    request_id INTEGER,
+    interrupt_duration_us BIGINT,
+    statement_fingerprint VARCHAR,
+    statement_text VARCHAR
+)",
     };
 
     /// <summary>Pre-change CREATE INDEX DDL, keyed by collector target table (35 entries; server_config and database_config have no index).</summary>
@@ -1056,5 +1073,6 @@ internal static class GoldenCollectorSchema
         ["plan_correction"] = @"CREATE INDEX IF NOT EXISTS idx_plan_correction_time ON plan_correction(server_id, collection_time)",
         ["pvs_stats"] = @"CREATE INDEX IF NOT EXISTS idx_pvs_stats_time ON pvs_stats(server_id, collection_time)",
         ["database_states"] = @"CREATE INDEX IF NOT EXISTS idx_database_states_time ON database_states(server_id, collection_time)",
+        ["attention_events"] = @"CREATE INDEX IF NOT EXISTS idx_attention_events_time ON attention_events(server_id, collection_time)",
     };
 }

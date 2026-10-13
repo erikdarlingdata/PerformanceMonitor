@@ -94,6 +94,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpTrendTools
 {
+    /// <summary>
+    /// The clock the duration-trend tools hand to the tier decision (#5638), captured ONCE per call: with no
+    /// <paramref name="asOf"/> the window ends now, so the window's end IS the clock; with one it is a wall-clock reading, never the
+    /// anchor. The rule lives in <see cref="DurationTrendRouting.TierClock"/> (#5725), shared with the viewer.
+    /// </summary>
+    internal static DateTime TierClock(string? asOf, DateTime windowEndUtc, Func<DateTime>? wallClock = null) =>
+        DurationTrendRouting.TierClock(string.IsNullOrWhiteSpace(asOf), windowEndUtc, wallClock);
+
     [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage over time in time buckets: total server, target, buffer pool and plan cache memory, with granted memory from the memory-grant series joined per bucket. total_granted_mb is null where that series has no snapshot (granted_note says why); use get_memory_grants for grant detail." + BaselineDiscontinuities.DescriptionSentence)]
     public static Task<string> GetMemoryTrend(
         NpgsqlDataSource postgres,
@@ -552,7 +560,7 @@ public sealed class DarlingMcpTrendTools
                 as_of anchor decides the window, not how old its rows are.
             */
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
-            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(startUtc, rollups, coverage, windowEndUtc: now);
+            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(startUtc, rollups, coverage, nowUtc: TierClock(as_of, now), windowEndUtc: now);
 
             /* #3897: the hourly rollup's points are whole hours, so a width it cannot serve is refused rather than
                quietly answered at another, and an automatic width is never finer than the rollup's hour. */
@@ -639,7 +647,7 @@ public sealed class DarlingMcpTrendTools
             /* #3541 A2 — the same routing as get_query_duration_trend, over the procedure pair, and #3897 the same
                width rule on the hourly tier. */
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
-            var route = DarlingTrendReader.ResolveProcedureDurationTrendRoute(startUtc, rollups, coverage, windowEndUtc: now);
+            var route = DarlingTrendReader.ResolveProcedureDurationTrendRoute(startUtc, rollups, coverage, nowUtc: TierClock(as_of, now), windowEndUtc: now);
             if (route.Tier == RetentionTier.Hourly)
             {
                 var hourlyError = TrendBuckets.RequireWholeHours(bucket_minutes, RawRetentionDays);

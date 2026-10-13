@@ -46,18 +46,18 @@ internal static class DarlingMcpInstructions
 
         ## CRITICAL: What this server can and cannot do
 
-        This MCP server reads previously collected performance data. It cannot run SQL on a monitored server, kill sessions, change a monitored server's settings, alter collected data, or run diagnostics the collectors did not capture.
+        This server reads previously collected performance data. It cannot run SQL on a monitored server, kill sessions, change a monitored server's settings, alter collected data, or run ad-hoc diagnostics.
 
         """ + DarlingMcpWritePolicy.InstructionsLine;
 
     private const string Body = """
         ## How Data Is Collected
 
-        The Darling service collects 24/7, every 1-15 minutes depending on the collector. Data is only as fresh as the last collection. `server_name` resolves against the registry (exact, then partial). `analyze_server` needs 24+ hours of history (`wait_stats` for a SQL Server target, `pg_database_stats` for a PostgreSQL target) or returns `insufficient_data`.
+        The Darling service collects 24/7, every 1-15 minutes by collector. Data is only as fresh as the last collection. `server_name` resolves against the registry (exact, then partial). `analyze_server` needs 24+ hours of history (`wait_stats` for a SQL Server target, `pg_database_stats` for a PostgreSQL target) or returns `insufficient_data`.
 
         ## Tools
 
-        This server exposes 181 tools. 88 are the same names Performance Monitor Lite exposes. The remaining 93 are unique to Darling: thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server-tag and onboarding tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — `get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.
+        This server exposes 182 tools. 89 are the same names Lite exposes. The remaining 93 are unique to Darling: thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server-tag and onboarding tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — `get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`. Default 160; +19 `mcp.allowWrites` with a token, +3 `mcp.allowServerAdmin`.
 
         ### Reading an empty result
 
@@ -73,10 +73,10 @@ internal static class DarlingMcpInstructions
 
         ### Asking about a PAST window
 
-        Every tool below that takes `hours_back` also takes `as_of`: an ISO-8601 UTC instant that moves the window's END off "now"; `hours_back` stays the LENGTH. Reach for it whenever the question is about a time rather than about the present, and do NOT substitute a wider `hours_back`: for an aggregate read a wider window is a DIFFERENT answer, not the same answer with more rows.
+        Every tool below that takes `hours_back` also takes `as_of`: an ISO-8601 UTC instant that moves the window's END off "now"; `hours_back` stays the LENGTH. Use it for any past-time question, and do NOT substitute a wider `hours_back`: for an aggregate read a wider window is a DIFFERENT answer, not the same answer with more rows.
 
         - Accepted: full ISO-8601 with an offset, or a bare `2026-08-19` (midnight UTC). An unparseable or future `as_of` is REFUSED, not read as "now"; an older one returns the normal `empty` / `unavailable`.
-        - Latest-snapshot reads take no `as_of` — read `captured_at` / `age_seconds` instead. `get_pvs_stats`, `get_fleet_overview`, `get_store_metrics` never take it.
+        - Latest-snapshot reads take no `as_of` — read `captured_at` / `age_seconds`. `get_pvs_stats`, `get_fleet_overview`, `get_store_metrics` never take it.
         - The analysis family DOES take it: `get_analysis_facts`/`analyze_server` re-run fact collection, anomaly detection and scoring over the anchored window (`analyze_server` with `as_of` is EXPLORATORY, does not persist).
 
         Each finding's `confidence` is an EVIDENCE score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens — a lone uncorroborated symptom is 0.20, never 1.0) and `confidence_basis` says in words what it rests on (an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`).
@@ -85,7 +85,7 @@ internal static class DarlingMcpInstructions
         |------|------|
         | `get_query_store_health` | Per-database Query Store health (latest hourly snapshot) — actual vs desired state, readonly_reason decoded, storage vs cap, cleanup thresholds, and the two capture modes (`query_capture_mode` ALL / AUTO / CUSTOM / NONE — ALL is the plan-churn factory; `wait_stats_capture_mode` ON / OFF; null = pre-rung row or pre-2017 engine) |
 
-        `update_alert_settings`/`update_mute_rule` are PARTIAL updates: read `get_alert_settings`/`get_mute_rules` FIRST, send back only changed fields. For Custom Views, call `describe_custom_view_catalog` FIRST, then `validate_custom_view` before `create_custom_view`/`update_custom_view`.
+        `update_alert_settings`/`update_mute_rule` are PARTIAL updates: read `get_alert_settings`/`get_mute_rules` FIRST, send only changed fields. For Custom Views, call `describe_custom_view_catalog` FIRST, then `validate_custom_view` before `create_custom_view`/`update_custom_view`.
 
         ## Workflow
 

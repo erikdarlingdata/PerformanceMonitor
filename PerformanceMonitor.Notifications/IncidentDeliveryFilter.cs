@@ -86,7 +86,7 @@ public static class IncidentDeliveryFilter
     /// <paramref name="deliverableDedupKeys"/> is <see cref="IncidentCooldown.Decision.DeliverableDedupKeys"/>:
     /// the fingerprints that were outside their own window at evaluation time. <c>null</c> means the alert
     /// carried no fingerprint at all and was evaluated on the metric-level fallback key (CPU, memory,
-    /// poison wait, tempdb, failed job, and the #2109 AG database alerts, whose context is one plain detail
+    /// poison wait, runnable queue, tempdb, failed job, and the #2109 AG database alerts, whose context is one plain detail
     /// item and no incidents) — there is nothing to filter, so the input is returned unchanged.
     /// </para>
     /// <para>
@@ -176,6 +176,10 @@ public static class IncidentDeliveryFilter
             AgReplicaIdentity = context.AgReplicaIdentity,
             External = context.External,
             NewestSample = context.NewestSample,
+            /* #5641: a tier escalation's cooldown bypass is about the firing, not one incident, so the filtered copy
+               keeps it. The email and webhook sends read the flag off the context they are handed, which is this
+               copy when a delivery filter ran; dropping it here made a filtered escalation wait out the cooldown. */
+            EscalationBypassesCooldown = context.EscalationBypassesCooldown,
             Incidents = kept
         };
 
@@ -250,6 +254,8 @@ public static class IncidentDeliveryFilter
             AgReplicaIdentity = context?.AgReplicaIdentity,
             External = context?.External,
             NewestSample = context?.NewestSample,
+            /* #5641: the same cooldown bypass the filtered copy keeps (see ForDelivery's render copy). */
+            EscalationBypassesCooldown = context?.EscalationBypassesCooldown ?? false,
             Incidents = context?.Incidents
         };
 

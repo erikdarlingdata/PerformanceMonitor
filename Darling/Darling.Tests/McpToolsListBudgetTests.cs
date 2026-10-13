@@ -251,10 +251,13 @@ public sealed class McpToolsListBudgetTests
        196,205 -> 196,787 bytes (+582), measured. */
     /* #5244 PR6 (W6): get_database_config_changes, get_default_trace_events and get_health_parser_severe_errors gain database_name (the
        46-character shared sentence, as Lite's twins; the other three configuration reads already took one): 196,787 -> 197,078 bytes (+291), measured. */
-    /* #5654 D2: create_mute_rule gains the external_source parameter (a 117-character description, the rest is its schema entry): the tree measured
-       before this change at 197,466 bytes (the previous constant, which the tree met exactly); 197,466 -> 197,628 bytes (+162), measured. The new guidance
-       text (what the source limits, the update rules) sits after the tools' <<GUIDE>> markers, not in the heads. */
-    private const int TotalCeilingBytes = 197_628;
+    /* #5640 Lane D: create_mute_rule gains client_app_pattern (a 107-byte parameter description; the update verb's field list
+       gains the name): the measured total went to 197,621 bytes. */
+    /* #5640 Lane E2: get_client_timeouts is a new read (a 394-byte head, four parameters): the measured total went to 198,604 bytes. */
+    /* #5640 Lane F: get_client_timeouts gains its reading guide (the 31-byte guide pointer; the head names not_collected on both SKUs and is
+       byte-identical to Lite's): 394 -> 422 bytes, the measured total went to 198,632 bytes. */
+    /* #5654 D2: create_mute_rule also gains external_source (a 117-character description, +162 bytes). */
+    private const int TotalCeilingBytes = 198_794;
 
 
 

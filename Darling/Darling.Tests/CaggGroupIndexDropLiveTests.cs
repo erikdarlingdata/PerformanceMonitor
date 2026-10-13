@@ -325,6 +325,31 @@ public sealed class CaggGroupIndexDropLiveTests
             await dropExternalAlerts.ExecuteNonQueryAsync(ct);
         }
 
+        if (simulatedVersion < 179)
+        {
+            /* V179 (#5640) - the Client Timeouts settings columns are the probe's newest sentinel. The shared helper owns the removal. */
+            await RungRewindArtifacts.DropV179SentinelAsync(connection, ct);
+        }
+
+        if (simulatedVersion < QueryStoreWatermarks.RungVersion)
+        {
+            /* V178 (#5684) - the per-batch Query Store watermark table is the probe's newest sentinel; the coverage table goes with it. The shared helper owns the removal. */
+            await RungRewindArtifacts.DropV178SentinelAsync(connection, ct);
+        }
+
+        if (simulatedVersion < 177)
+        {
+            /* V177 (#5641) - the Runnable Queue settings columns are the next sentinel down. The shared helper owns the removal. */
+            await RungRewindArtifacts.DropV177SentinelAsync(connection, ct);
+        }
+
+        if (simulatedVersion < ProcedureStatsTotals.RungVersion)
+        {
+            /* V176 (#5638) - the per-collection procedure totals table is the probe's sentinel. */
+            await using var dropTotals = new NpgsqlCommand("DROP TABLE IF EXISTS collect.procedure_stats_totals", connection);
+            await dropTotals.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < 175)
         {
             /* V175 (#5631) - the rows-per-call column of the daily plan regression totals is the probe's sentinel. */

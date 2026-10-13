@@ -505,6 +505,46 @@ def self_test():
     finally:
         os.unlink(nested)
 
+    # #5737: the body is read from the event payload, so a description past the 128 KB
+    # environment-string limit must load whole, a null one must load as '', and PR_BODY must
+    # still win when it is set.
+    def event_file(payload):
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False,
+                                         encoding='utf-8') as handle:
+            json.dump(payload, handle)
+            return handle.name
+
+    big = '`WidgetReader` ' + 'x' * (200 * 1024)
+    paths = [event_file({'pull_request': {'body': big}}),
+             event_file({'pull_request': {'body': None}}),
+             event_file({'action': 'x'})]
+    try:
+        warned = []
+        check('a body over 128 KB loads whole from the event file',
+              load_body({'GITHUB_EVENT_PATH': paths[0]}, warned.append) == big
+              and len(big) > 131072)
+        check('a null body loads as an empty string',
+              load_body({'GITHUB_EVENT_PATH': paths[1]}, warned.append) == '')
+        check('PR_BODY wins over the event file when set',
+              load_body({'PR_BODY': 'from env', 'GITHUB_EVENT_PATH': paths[0]},
+                        warned.append) == 'from env')
+        check('an empty PR_BODY still wins over the event file',
+              load_body({'PR_BODY': '', 'GITHUB_EVENT_PATH': paths[0]}, warned.append) == '')
+        check('neither source set loads as empty without warning',
+              load_body({}, warned.append) == '' and not warned)
+        check('a large event-file body flows through to a verdict',
+              assess(load_body({'GITHUB_EVENT_PATH': paths[0]}, warned.append),
+                     FIXTURE_DIFF)[0] == 'clear')
+        check('an event with no pull_request loads as empty and warns',
+              load_body({'GITHUB_EVENT_PATH': paths[2]}, warned.append) == ''
+              and len(warned) == 1)
+        check('a missing event file loads as empty and warns',
+              load_body({'GITHUB_EVENT_PATH': '/nonexistent/event.json'}, warned.append) == ''
+              and len(warned) == 2)
+    finally:
+        for path in paths:
+            os.unlink(path)
+
     failed = [n for n, ok in cases if not ok]
     for name, ok in cases:
         print(f'  {"ok  " if ok else "FAIL"}  {name}')
@@ -569,6 +609,39 @@ def load_files(path, warn=None):
     return [f for f in files if isinstance(f, dict)]
 
 
+def load_body(environ=None, warn=None):
+    """The pull request description, read without passing it through a shell (#5737).
+
+    `PR_BODY` wins when it is set, which keeps a local run a one-liner. On the runner it is
+    NOT set: the body comes from the event payload at `GITHUB_EVENT_PATH`. The workflow used to
+    hand the body over as an environment string, and Linux caps one environment string at
+    128 KB (MAX_ARG_STRLEN), so a larger description stopped the step before this script
+    started ("Argument list too long"). A file has no such limit, and the body still never
+    reaches a shell or a workflow expression. A null body (the API returns null for an empty
+    description) reads as ''.
+
+    Never raises: this check is advisory, so an unreadable payload abstains loudly with a
+    warning rather than failing the job. `environ` and `warn` are injectable for the self-test.
+    """
+    environ = environ if environ is not None else os.environ
+    warn = warn if warn is not None else (lambda message: print(
+        f'::warning title=Description drift could not read the description::{message}'))
+    if 'PR_BODY' in environ:
+        return environ['PR_BODY']
+    path = environ.get('GITHUB_EVENT_PATH')
+    if not path:
+        return ''
+    try:
+        with open(path, encoding='utf-8') as handle:
+            event = json.load(handle)
+        body = event['pull_request']['body']
+    except (OSError, ValueError, KeyError, TypeError) as problem:
+        warn(f'{problem!r}. The description was NOT read on this run, so it was not compared '
+             f'against the diff.')
+        return ''
+    return body if isinstance(body, str) else ''
+
+
 # ---------------------------------------------------------------- entry point
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -584,10 +657,11 @@ def main():
     if args.corpus:
         return measure(args.corpus)
 
-    # The body arrives through the environment, never through a command line or a workflow
-    # expression: it is author-controlled text on a public repo, and interpolating it into a
-    # shell would be a script-injection seam.
-    body = os.environ.get('PR_BODY', '')
+    # The body is read from the event payload file, never from a command line, a workflow
+    # expression or an environment string: it is author-controlled text on a public repo, so
+    # interpolating it into a shell would be a script-injection seam, and an environment string
+    # over 128 KB stops the runner from starting the step at all (#5737).
+    body = load_body()
     files = load_files(args.files)
 
     verdict, missing, hit = assess(body, files)
