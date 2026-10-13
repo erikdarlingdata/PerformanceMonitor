@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitorLite.Services;
@@ -25,10 +26,14 @@ namespace PerformanceMonitorLite.Services;
 /// <c>ImportServersFromFile</c> (a rename changes the server's hash id). Not <c>SaveServers</c>, which also runs on
 /// last-connected and favorite updates.</para>
 ///
-/// <para><b>Invalidate only bumps a counter</b> (no I/O), so it is safe to call under the DuckDB write lock the writers
-/// hold. The reload runs on the next read of <see cref="Current"/>, outside any lock of ours, and takes the read lock, so it
-/// waits for the write that invalidated it. A write that lands while a reload is running leaves the counter ahead of the
-/// loaded one, so the next read reloads again.</para>
+/// <para><b>Invalidate does no I/O itself</b>: it bumps a counter and starts ONE background reload, so it is safe to call
+/// under the DuckDB write lock the writers hold and an alert after an edit rarely waits. The background reload runs outside
+/// any lock of ours and takes the DuckDB read lock, so it waits for the write that invalidated it. It is single-flight: an
+/// Invalidate while a reload is running starts nothing new, and the running one loads once more after it finishes, so any
+/// number of edits during a reload cost one extra load. Invalidate never takes the cache's gate (a reload holds it while it
+/// waits for the read lock, and the writer holding the write lock calls Invalidate: taking it there would deadlock). When
+/// <see cref="Current"/> still finds the routes stale (the background reload has not finished, or the retry window is open),
+/// it reloads on the calling thread as before, joining a reload already in flight through the same gate.</para>
 ///
 /// <para><b>A failed reload keeps the routes already in force</b> (the same posture as MuteRuleService), logs, and retries
 /// no sooner than 30 seconds later, so a broken store costs one failed read per half minute, not one per alert. A store whose
@@ -36,73 +41,133 @@ namespace PerformanceMonitorLite.Services;
 /// </summary>
 public static class NotificationRouteCache
 {
-    private static readonly object s_gate = new();
-    private static readonly TimeSpan s_retryAfterFailure = TimeSpan.FromSeconds(30);
-
-    private static Func<IReadOnlyList<NotificationRoute>>? s_loader;
-    private static IReadOnlyList<NotificationRoute> s_routes = Array.Empty<NotificationRoute>();
-    private static long s_version;
-    private static long s_loadedVersion = -1;
-    private static DateTime s_retryAfterUtc = DateTime.MinValue;
+    private static readonly NotificationRouteCacheCore s_core = new();
 
     /// <summary>Installs the loader (null removes it, and the cache serves no routes). Resets the held routes.</summary>
-    public static void Configure(Func<IReadOnlyList<NotificationRoute>>? loader)
+    public static void Configure(Func<IReadOnlyList<NotificationRoute>>? loader) => s_core.Configure(loader);
+
+    /// <summary>Marks the held routes stale and starts one background reload (none when one is already running: that one
+    /// loads again when it finishes). No I/O on the calling thread and no lock of ours.</summary>
+    public static void Invalidate() => s_core.Invalidate();
+
+    /// <summary>The expanded routes in force, reloading first when something invalidated them.</summary>
+    public static IReadOnlyList<NotificationRoute> Current => s_core.Current;
+
+    /// <summary>Whether a background reload is running; tests wait for it to finish.</summary>
+    internal static bool BackgroundReloadRunning => s_core.BackgroundReloadRunning;
+}
+
+/// <summary>
+/// The cache's logic as an instance, so a test can exercise the single-flight reload on its own instance: the static
+/// <see cref="NotificationRouteCache"/> is invalidated by every server and tag writer in the process, and a test that
+/// counts loads on it would count another test's Invalidate.
+/// </summary>
+internal sealed class NotificationRouteCacheCore
+{
+    private readonly object _gate = new();
+    private readonly TimeSpan _retryAfterFailure = TimeSpan.FromSeconds(30);
+
+    private Func<IReadOnlyList<NotificationRoute>>? _loader;
+    private IReadOnlyList<NotificationRoute> _routes = Array.Empty<NotificationRoute>();
+    private long _version;
+    private long _loadedVersion = -1;
+    private long _retryAfterTicks;
+    private int _backgroundRunning;
+
+    /// <summary>Installs the loader (null removes it, and the cache serves no routes). Resets the held routes.</summary>
+    public void Configure(Func<IReadOnlyList<NotificationRoute>>? loader)
     {
-        lock (s_gate)
+        lock (_gate)
         {
-            s_loader = loader;
-            s_routes = Array.Empty<NotificationRoute>();
-            s_loadedVersion = -1;
-            s_retryAfterUtc = DateTime.MinValue;
-            Interlocked.Increment(ref s_version);
+            _loader = loader;
+            _routes = Array.Empty<NotificationRoute>();
+            _loadedVersion = -1;
+            Volatile.Write(ref _retryAfterTicks, 0);
+            Interlocked.Increment(ref _version);
         }
     }
 
-    /// <summary>Marks the held routes stale; the next <see cref="Current"/> reloads them. No I/O.</summary>
-    public static void Invalidate() => Interlocked.Increment(ref s_version);
+    /// <summary>Marks the held routes stale and starts one background reload (none when one is already running: that one
+    /// loads again when it finishes). No I/O on the calling thread and no lock of ours.</summary>
+    public void Invalidate()
+    {
+        Interlocked.Increment(ref _version);
+        StartBackgroundReload();
+    }
+
+    private void StartBackgroundReload()
+    {
+        if (Volatile.Read(ref _loader) is null || Interlocked.CompareExchange(ref _backgroundRunning, 1, 0) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(BackgroundReloadLoop);
+    }
+
+    private void BackgroundReloadLoop()
+    {
+        do
+        {
+            /* Current reloads when stale and logs a failed load itself, so nothing here can throw past a loader's catch. */
+            _ = Current;
+            Volatile.Write(ref _backgroundRunning, 0);
+
+            /* Look again after clearing the flag: an Invalidate that landed during the load saw the flag set and started
+               nothing, so this pass loads once more (or that Invalidate won the race and started its own loop). Stop while the
+               30 second retry window is open, or a broken store would spin. */
+        }
+        while (Volatile.Read(ref _loader) is not null
+               && Volatile.Read(ref _loadedVersion) != Volatile.Read(ref _version)
+               && DateTime.UtcNow.Ticks >= Volatile.Read(ref _retryAfterTicks)
+               && Interlocked.CompareExchange(ref _backgroundRunning, 1, 0) == 0);
+    }
+
+    /// <summary>Whether a background reload is running; tests wait for it to finish.</summary>
+    internal bool BackgroundReloadRunning => Volatile.Read(ref _backgroundRunning) != 0;
 
     /// <summary>The expanded routes in force, reloading first when something invalidated them.</summary>
-    public static IReadOnlyList<NotificationRoute> Current
+    public IReadOnlyList<NotificationRoute> Current
     {
         get
         {
-            var loader = Volatile.Read(ref s_loader);
+            var loader = Volatile.Read(ref _loader);
             if (loader is null)
             {
                 return Array.Empty<NotificationRoute>();
             }
 
-            if (Volatile.Read(ref s_loadedVersion) == Volatile.Read(ref s_version))
+            if (Volatile.Read(ref _loadedVersion) == Volatile.Read(ref _version))
             {
-                return Volatile.Read(ref s_routes);
+                return Volatile.Read(ref _routes);
             }
 
-            lock (s_gate)
+            lock (_gate)
             {
-                var version = Volatile.Read(ref s_version);
-                if (s_loadedVersion == version || s_loader is null)
+                var version = Volatile.Read(ref _version);
+                if (_loadedVersion == version || _loader is null)
                 {
-                    return s_routes;
+                    return _routes;
                 }
 
-                if (DateTime.UtcNow < s_retryAfterUtc)
+                if (DateTime.UtcNow.Ticks < Volatile.Read(ref _retryAfterTicks))
                 {
-                    return s_routes;
+                    return _routes;
                 }
 
                 try
                 {
-                    s_routes = loader();
-                    s_loadedVersion = version;
-                    s_retryAfterUtc = DateTime.MinValue;
+                    _routes = loader();
+                    _loadedVersion = version;
+                    Volatile.Write(ref _retryAfterTicks, 0);
                 }
                 catch (Exception ex)
                 {
                     AppLogger.Warn("NotificationRoutes", $"Reloading the notification routes failed; the routes already loaded stay in force: {ex.Message}");
-                    s_retryAfterUtc = DateTime.UtcNow + s_retryAfterFailure;
+                    Volatile.Write(ref _retryAfterTicks, (DateTime.UtcNow + _retryAfterFailure).Ticks);
                 }
 
-                return s_routes;
+                return _routes;
             }
         }
     }

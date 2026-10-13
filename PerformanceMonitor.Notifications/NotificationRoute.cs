@@ -103,6 +103,14 @@ public sealed record NotificationRoute(
     /// <summary>Whether this route carries a stored scope (#5750).</summary>
     public bool IsScoped => ScopeServerId.HasValue || ScopeTagId.HasValue;
 
+    /// <summary>Whether this route has a well-formed scope that no loader expanded (#5750): it is scoped, not orphaned,
+    /// and <see cref="ExpandedServerIds"/> is null. A loader leaves a scoped route this way when it could not read what the
+    /// expansion needs (Lite: the tag tables), so the route matches nothing even though its server or tag still exists.
+    /// Surfaces that report a route's state (Lite's routes window, its MCP read) show this as "not active", never as
+    /// "OK" or "orphaned".</summary>
+    public bool ScopeUnexpanded =>
+        IsScoped && !Orphaned && !(ScopeServerId.HasValue && ScopeTagId.HasValue) && ExpandedServerIds is null;
+
     /// <summary>The scope tier this route sits in (#5750): server-scoped, tag-scoped, or fleet-wide. A route with
     /// both scopes set is malformed and reports the server tier but never matches (<see cref="CanMatch"/>).</summary>
     public RouteScopeTier ScopeTier =>

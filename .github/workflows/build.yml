@@ -737,6 +737,8 @@ jobs:
               - 'Lite.Tests/LiteTimeRangeGapTests.cs'
               # #5641: Darling.Tests compiles this Lite.Tests file in (Linked\AlertLegendParityTests.cs), so an edit to it has to reach the Darling suite.
               - 'Lite.Tests/AlertLegendParityTests.cs'
+              # #5750: Darling.Tests compiles this Lite.Tests file in (Linked\NotificationRouteParityFixture.cs), so an edit to it has to reach the Darling suite.
+              - 'Lite.Tests/NotificationRouteParityFixture.cs'
               # #5644: Darling.Tests compiles this Lite.Tests file in (Linked\DefaultTraceEventSequenceWatermarkTests.cs), so an edit to it has to reach the Darling suite.
               - 'Lite.Tests/DefaultTraceEventSequenceWatermarkTests.cs'
               # #5596: Darling.Tests' WpfExitSwitchPinTests reads this project file for the WPF exit switch, so an edit to it has to reach the Darling suite.

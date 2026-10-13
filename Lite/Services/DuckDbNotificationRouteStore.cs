@@ -67,6 +67,11 @@ public sealed class DuckDbNotificationRouteStore
     private readonly Func<string, string> _getSecret;
     private readonly Action<string, string> _saveSecret;
 
+    /* Route and channel pairs already warned about (#5750): a saved destination Credential Manager cannot give back is logged
+       once per process per route and channel, not on every reload. The key is the credential name, which carries the route id
+       and the channel and never the destination. The one store instance lives for the process. */
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _warnedUnreadable = new();
+
     /// <param name="dbInitializer">The Lite database.</param>
     /// <param name="knownServerIds">The configured servers' hash ids (the ids the alert path and server_tag_map use).</param>
     /// <param name="getSecret">Reads a credential by key; empty when absent or unreadable. Defaults to the app-wide
@@ -321,8 +326,13 @@ public sealed class DuckDbNotificationRouteStore
             var value = _getSecret(SecretKey(row.RouteId, channel)) ?? "";
             if (string.IsNullOrWhiteSpace(value))
             {
-                /* Saved, but Credential Manager gave nothing back: off, not inherited (#5366). */
+                /* Saved, but Credential Manager gave nothing back: off, not inherited (#5366). Say so once; never the URL. */
                 off.Add(channel);
+                if (_warnedUnreadable.TryAdd(SecretKey(row.RouteId, channel), 0))
+                {
+                    AppLogger.Warn("NotificationRoutes", $"Notification route {row.RouteId} has a saved {channel} destination that could not be read from Credential Manager, so that channel is off for the route until the destination is entered again.");
+                }
+
                 return "";
             }
 
