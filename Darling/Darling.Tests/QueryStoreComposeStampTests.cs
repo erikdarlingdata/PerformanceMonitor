@@ -430,7 +430,7 @@ public sealed class QueryStoreComposeStampTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        /* V174's (#5655), V175's (#5631) and V176's (#5638) sentinels sit above this one; the probe's last ordinal is the newest rung's. */
+        /* V174's (#5655), V175's (#5631), V176's (#5638) and V177's (#5641) sentinels sit above this one; the probe's last ordinal is the newest rung's. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);

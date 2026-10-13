@@ -98,13 +98,13 @@ public class DarlingHardenFilesVerbTests
         var source = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
 
-        var at = source.IndexOf("public static int HardenFiles(", StringComparison.Ordinal);
+        var at = source.IndexOf("private static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
         Assert.True(at >= 0, "HardenFiles is gone (#2352)");
 
         /* The same window as the two pins below: #4004's review added the log-hash key's targets to the list, which
            moved the verify pass past the old 6,000, and its round 2 the junction refusal (DarlingHardenFilesJunctionTests),
-           which moved it past 8,000. */
-        var body = source[at..Math.Min(source.Length, at + 10000)];
+           which moved it past 8,000, and #5700 the TLS key files (past 10,000). */
+        var body = source[at..Math.Min(source.Length, at + 17000)];
 
         /* It re-reads rather than trusting the call. */
         Assert.Contains("DarlingFileSecurity.IsReadableByOrdinaryUsers(", body, StringComparison.Ordinal);
@@ -143,10 +143,10 @@ public class DarlingHardenFilesVerbTests
         var source = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
 
-        var at = source.IndexOf("public static int HardenFiles(", StringComparison.Ordinal);
+        var at = source.IndexOf("private static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
         Assert.True(at >= 0, "HardenFiles is gone (#2352)");
 
-        var body = source[at..Math.Min(source.Length, at + 10000)];
+        var body = source[at..Math.Min(source.Length, at + 17000)];
 
         /* It asks the SCM, and hardens for what it gets back. */
         Assert.Contains("RegisteredServiceAccount(ServiceName)", body, StringComparison.Ordinal);
@@ -173,9 +173,9 @@ public class DarlingHardenFilesVerbTests
         var source = ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
 
-        var at = source.IndexOf("public static int HardenFiles(", StringComparison.Ordinal);
+        var at = source.IndexOf("private static List<HardenTarget> HardenTargets(", StringComparison.Ordinal);
         /* 11,000: the viewer and mcp credentials joined the target list, which moved the verify pass past 10,000. */
-        var body = source[at..Math.Min(source.Length, at + 11000)];
+        var body = source[at..Math.Min(source.Length, at + 18000)];
 
         Assert.Contains("GrantsHardenedAccount(", body, StringComparison.Ordinal);
         Assert.Contains("LOCKED OUT", body, StringComparison.Ordinal);
@@ -468,7 +468,9 @@ public class DarlingHardenFilesJunctionTests
 
             var refusal = DarlingFileSecurity.HardenWithoutFollowingLinks(backup, isDirectory: false, allowInteractive: false, install);
 
-            Assert.Equal($"{backup} is a hard link: the file has 2 names, and its ACL is the same under every one of them", refusal);
+            Assert.StartsWith($"{backup} is a hard link: the file has 2 names, and its ACL is the same under every one of them. Its other name(s): ", refusal, StringComparison.Ordinal);
+            Assert.Contains(@"\victim\someones.txt", refusal, StringComparison.OrdinalIgnoreCase);
+            Assert.EndsWith($". To list every name, run: fsutil hardlink list \"{backup}\"", refusal, StringComparison.Ordinal);
             Assert.Equal(victimFileAcl, Sddl(victimFile));
 
             /* The verb finds it as a config backup beside darling.json. The store directory is a scratch path that does
@@ -483,6 +485,8 @@ public class DarlingHardenFilesJunctionTests
 
             Assert.Equal(1, exit);
             Assert.Contains($"REFUSED  {backup} (a config backup): {backup} is a hard link", error.ToString(), StringComparison.Ordinal);
+            Assert.Contains(@"\victim\someones.txt", error.ToString(), StringComparison.OrdinalIgnoreCase);
+            Assert.Contains($"fsutil hardlink list \"{backup}\"", error.ToString(), StringComparison.Ordinal);
             Assert.Contains($"SECURED  {config} (the live config)", output.ToString(), StringComparison.Ordinal);
             Assert.Equal(victimFileAcl, Sddl(victimFile));
         }

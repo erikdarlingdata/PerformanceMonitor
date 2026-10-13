@@ -320,9 +320,14 @@ public sealed class CaggGroupIndexDropLiveTests
     {
         if (simulatedVersion < 179)
         {
-            /* V179 (#5640) - the Client Timeouts alert's enabled flag on the alert settings row is the probe's sentinel. */
-            await using var dropClientTimeouts = new NpgsqlCommand("ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS client_timeouts_enabled", connection);
-            await dropClientTimeouts.ExecuteNonQueryAsync(ct);
+            /* V179 (#5640) - the Client Timeouts settings columns are the probe's newest sentinel. The shared helper owns the removal. */
+            await RungRewindArtifacts.DropV179SentinelAsync(connection, ct);
+        }
+
+        if (simulatedVersion < 177)
+        {
+            /* V177 (#5641) - the Runnable Queue settings columns are the next sentinel down. The shared helper owns the removal. */
+            await RungRewindArtifacts.DropV177SentinelAsync(connection, ct);
         }
 
         if (simulatedVersion < ProcedureStatsTotals.RungVersion)

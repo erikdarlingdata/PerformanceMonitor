@@ -373,14 +373,19 @@ public sealed class DarlingConfig
 
     private HeartbeatConfig _heartbeat = new();
 
-    public static string ResolveConfigPath(string? explicitPath = null)
+    public static string ResolveConfigPath(string? explicitPath = null) =>
+        ResolveConfigPath(explicitPath, Environment.GetEnvironmentVariable);
+
+    /// <summary><see cref="ResolveConfigPath(string?)"/> reading the environment through <paramref name="environment"/>, so a
+    /// test can supply <c>DARLING_CONFIG</c> without setting it for the whole process.</summary>
+    internal static string ResolveConfigPath(string? explicitPath, Func<string, string?> environment)
     {
         if (!string.IsNullOrWhiteSpace(explicitPath))
         {
             return explicitPath;
         }
 
-        var fromEnvironment = Environment.GetEnvironmentVariable("DARLING_CONFIG");
+        var fromEnvironment = environment("DARLING_CONFIG");
         if (!string.IsNullOrWhiteSpace(fromEnvironment))
         {
             return fromEnvironment;
@@ -791,6 +796,23 @@ public sealed class AlertsConfig
     /// store's control-plane row keep round-tripping.</summary>
     [JsonPropertyName("poisonWaitThresholdMs")]
     public int PoisonWaitThresholdMs { get; set; } = 500;
+
+    /// <summary>The Runnable Queue alert (#5641) switch: runnable tasks per visible online scheduler, averaged over
+    /// <see cref="RunnableQueueEvaluator.WindowMinutes"/> minutes. ON by default, like Poison Wait. Persisted as the
+    /// store column <c>runnable_queue_enabled</c> (V177).</summary>
+    [JsonPropertyName("runnableQueueEnabled")]
+    public bool RunnableQueueEnabled { get; set; } = true;
+
+    /// <summary>Runnable Queue Warning bar (#5641), runnable tasks per scheduler, window average. Shipped 8 (the
+    /// measurement is on <see cref="RunnableQueueEvaluator"/>). Read through <see cref="RunnableQueueEvaluator.ClampBars"/>.
+    /// Store column <c>runnable_queue_warning_per_scheduler</c> (V177).</summary>
+    [JsonPropertyName("runnableQueueWarningPerScheduler")]
+    public int RunnableQueueWarningPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultWarningPerScheduler;
+
+    /// <summary>Runnable Queue Critical bar (#5641). Shipped 16. Never read below the Warning bar. Store column
+    /// <c>runnable_queue_critical_per_scheduler</c> (V177).</summary>
+    [JsonPropertyName("runnableQueueCriticalPerScheduler")]
+    public int RunnableQueueCriticalPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultCriticalPerScheduler;
 
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;

@@ -72,6 +72,7 @@
             <ComboBoxItem Content="Deadlocks Detected"/>
             <ComboBoxItem Content="High CPU"/>
             <ComboBoxItem Content="Poison Wait"/>
+            <ComboBoxItem Content="Runnable Queue"/>
             <ComboBoxItem Content="Long-Running Query"/>
             <ComboBoxItem Content="tempdb Space"/>
             <ComboBoxItem Content="Volume Free Space"/>

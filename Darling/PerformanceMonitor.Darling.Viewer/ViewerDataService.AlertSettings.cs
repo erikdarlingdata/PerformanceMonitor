@@ -82,7 +82,9 @@ public sealed partial class ViewerDataService
         "long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins, " +
         /* #3712 (V137): the uncorroborated-finding route knob's STORE half — nullable text under a CHECK, the one
            tri-state on the row (NULL = the file governs), APPENDED for the same reason. */
-        "analysis_uncorroborated_route";
+        "analysis_uncorroborated_route, " +
+        /* #5641 (V177): the Runnable Queue alert's switch and two bars, APPENDED for the same reason. */
+        "runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -99,7 +101,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67, $68, $69, $70,
+        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -172,6 +174,9 @@ ON CONFLICT (id) DO UPDATE SET
     long_running_query_excluded_program_name_prefixes = EXCLUDED.long_running_query_excluded_program_name_prefixes,
     long_running_query_excluded_logins = EXCLUDED.long_running_query_excluded_logins,
     analysis_uncorroborated_route = EXCLUDED.analysis_uncorroborated_route,
+    runnable_queue_enabled = EXCLUDED.runnable_queue_enabled,
+    runnable_queue_warning_per_scheduler = EXCLUDED.runnable_queue_warning_per_scheduler,
+    runnable_queue_critical_per_scheduler = EXCLUDED.runnable_queue_critical_per_scheduler,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -284,6 +289,12 @@ ON CONFLICT (id) DO UPDATE SET
            parameter keeps its type on the INSERT arm. */
         var route = FindingRouting.TryParseRoute(r.AnalysisUncorroboratedRoute);
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = route is { } parsed ? FindingRouting.RouteText(parsed) : DBNull.Value }); // $70 (#3712, V137)
+        /* #5641 (V177): the Runnable Queue switch and bars. The bars go through the engine's own clamp (Warning at
+           least 1, Critical never below Warning) so the store never holds a pair the engine would rewrite on read. */
+        var (rqWarning, rqCritical) = RunnableQueueEvaluator.ClampBars(r.RunnableQueueWarningPerScheduler, r.RunnableQueueCriticalPerScheduler);
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.RunnableQueueEnabled });          // $71 (#5641, V177)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = rqWarning });                        // $72 (#5641, V177)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = rqCritical });                       // $73 (#5641, V177)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -374,6 +385,10 @@ ON CONFLICT (id) DO UPDATE SET
         /* #3712 (V137) the route knob's store half appended at ordinal 69 (nullable text; NULL is the expected
            reading on every store nobody has written a route into, and it means "darling.json governs"). */
         AnalysisUncorroboratedRoute = reader.IsDBNull(69) ? null : reader.GetString(69),
+        /* #5641 (V177) Runnable Queue switch and bars appended at ordinals 70-72 (NOT NULL, DEFAULT true / 8 / 16). */
+        RunnableQueueEnabled = reader.GetBoolean(70),
+        RunnableQueueWarningPerScheduler = reader.GetInt32(71),
+        RunnableQueueCriticalPerScheduler = reader.GetInt32(72),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -500,6 +515,12 @@ public sealed class AlertSettingsRow
     public int DeadlockCountThreshold { get; set; } = 1;
     public bool PoisonWaitEnabled { get; set; } = true;
     public int PoisonWaitThresholdMs { get; set; } = 500;
+    /// <summary>#5641 (V177): the Runnable Queue alert's switch (default on, like Poison Wait).</summary>
+    public bool RunnableQueueEnabled { get; set; } = true;
+    /// <summary>#5641 (V177): Warning bar, runnable tasks per scheduler (average of the last 5 minutes' collections, or the newest 3 inside 10 minutes). Default 8.</summary>
+    public int RunnableQueueWarningPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultWarningPerScheduler;
+    /// <summary>#5641 (V177): Critical bar, runnable tasks per scheduler. Default 16; never below the Warning bar.</summary>
+    public int RunnableQueueCriticalPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultCriticalPerScheduler;
     public bool LongRunningQueryEnabled { get; set; } = true;
     public int LongRunningQueryThresholdMinutes { get; set; } = 30;
     public bool TempDbSpaceEnabled { get; set; } = true;
@@ -614,6 +635,9 @@ public sealed class AlertSettingsRow
             && DeadlockCountThreshold == other.DeadlockCountThreshold
             && PoisonWaitEnabled == other.PoisonWaitEnabled
             && PoisonWaitThresholdMs == other.PoisonWaitThresholdMs
+            && RunnableQueueEnabled == other.RunnableQueueEnabled
+            && RunnableQueueWarningPerScheduler == other.RunnableQueueWarningPerScheduler
+            && RunnableQueueCriticalPerScheduler == other.RunnableQueueCriticalPerScheduler
             && LongRunningQueryEnabled == other.LongRunningQueryEnabled
             && LongRunningQueryThresholdMinutes == other.LongRunningQueryThresholdMinutes
             && TempDbSpaceEnabled == other.TempDbSpaceEnabled
