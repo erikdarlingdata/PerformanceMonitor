@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
@@ -83,7 +84,7 @@ public partial class MainWindow
                 .ToList();
             _fleet.SetTags(_tags, assignments);
 
-            ServerListView.ItemsSource = _fleet.Visible;
+            ServerListKeyboard.Rebind(ServerListView, _fleet.Visible);
             ServerListView.SelectedItem = _fleet.ResolveSelection(previousServerId);
         }
         finally
@@ -132,7 +133,7 @@ public partial class MainWindow
         try
         {
             _fleet.ToggleExpanded(header);
-            ServerListView.ItemsSource = _fleet.Visible;
+            ServerListKeyboard.Rebind(ServerListView, _fleet.Visible);
             ServerListView.SelectedItem = _fleet.ResolveSelection(previousServerId);
             PersistCollapseState();
         }

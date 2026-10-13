@@ -937,7 +937,17 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Double-click opens (or focuses) the selected server's per-server tab (Lite's rule).</summary>
-    private void ServerList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    private void ServerList_MouseDoubleClick(object sender, MouseButtonEventArgs e) => OpenSelectedServerTab();
+
+    /// <summary>#5763: Enter on the server list opens the selected server's tab, through the same
+    /// <see cref="OpenSelectedServerTab"/> the double-click runs. The key is marked handled so the list does not
+    /// also beep or move the selection.</summary>
+    private void ServerList_KeyDown(object sender, KeyEventArgs e) =>
+        ServerListKeyboard.HandleKeyDown(e, OpenSelectedServerTab);
+
+    /// <summary>Opens (or focuses) the selected server's per-server tab: the one body behind the list's
+    /// double-click and its Enter key. A header row opens nothing.</summary>
+    private void OpenSelectedServerTab()
     {
         if (ServerList.SelectedItem is FleetServerRow row)
         {
@@ -957,7 +967,7 @@ public partial class MainWindow : Window
         try
         {
             _fleet.ToggleExpanded(header);
-            ServerList.ItemsSource = _fleet.Visible;
+            ServerListKeyboard.Rebind(ServerList, _fleet.Visible);
             ServerList.SelectedItem = _fleet.ResolveSelection(previousServerId);
             PersistCollapseState();
         }
@@ -1026,8 +1036,24 @@ public partial class MainWindow : Window
     /// </summary>
     private void ServerSearchBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
     {
+        /* #5763: replacing the list's items drops its selection, so a filter keystroke would leave the sidebar on
+           no server. The server that was selected is found again BY ID among the rows still showing and re-selected
+           under the suppression guard (the tabs already show it, so there is nothing to reload); a server the
+           filter hides leaves the list with no selection, as before. */
+        var previousServerId = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
         _fleet.SetSearch(ServerSearchBox.Text);
-        ServerList.ItemsSource = _fleet.Visible;
+        _suppressSidebarSelection = true;
+        try
+        {
+            ServerListKeyboard.Rebind(ServerList, _fleet.Visible);
+            ServerList.SelectedItem = ServerListKeyboard.FindByIdentity(
+                _fleet.Visible.OfType<FleetServerRow>(), previousServerId, r => r.Server.ServerId);
+        }
+        finally
+        {
+            _suppressSidebarSelection = false;
+        }
+
         UpdateServerCountText();
     }
 
@@ -1095,7 +1121,7 @@ public partial class MainWindow : Window
             var previousSelection = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
             var previousRecoServer = (RecommendationsServerSelector.SelectedItem as DarlingServer)?.ServerId;
             _fleet.SetAll(servers);
-            ServerList.ItemsSource = _fleet.Visible;
+            ServerListKeyboard.Rebind(ServerList, _fleet.Visible);
             UpdateServerCountText();
 
             /* The sidebar's server after this load: the prior one after a server add/edit/remove

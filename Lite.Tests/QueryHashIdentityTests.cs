@@ -17,80 +17,118 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #5711: an all-zero <c>query_hash</c> is "the engine did not say", never a query, and the two grouping sites over
+/// #5711 / #5758: an all-zero <c>query_hash</c> is "the engine did not say", never a query, and the two grouping sites over
 /// <c>query_snapshots.query_hash</c> (the same-statement pileup detector and the long-running-query alert's incident
 /// key) must not pool unrelated requests under it.
 ///
-/// <para><b>The parity half.</b> <c>PerformanceMonitor.Analysis</c> cannot reference <c>PerformanceMonitor.Common</c>
-/// (a ProjectReference changes the committed lock files of the deprecated Dashboard projects too), so the detector
-/// carries a copy of <see cref="QueryHashIdentity"/>'s hash test and statement fingerprint. Two copies of one
-/// definition fail only after BOTH drift (#3684) unless they are run over one corpus, which is what
-/// <see cref="TheDetectorsCopy_AgreesWithTheCommonDefinition_OverOneCorpus"/> does.</para>
+/// <para>The rule has one definition, <see cref="QueryHashIdentity"/> in <c>PerformanceMonitor.Common</c>; the detector's
+/// <see cref="SameStatementPileupDetector.StatementIdentity"/> calls it (#5758). These tests pin that definition's
+/// cases (the corpus below, with each expected identity written out) and the detector's row path over the same corpus.</para>
 /// </summary>
-public class QueryHashIdentityParityTests
+public class QueryHashIdentityTests
 {
     private const string Zero = "0x0000000000000000";
     private const string RealHash = "0x8A2F19C4BE77D301";
     private const string Marker = "-- statement text withheld (#4348)";
 
-    /// <summary>Hashes: NULL, empty, blanks, the zero spellings, a real hash in two cases, padded.</summary>
+    /// <summary>
+    /// Hashes: NULL, empty, blanks, the zero spellings, a real hash in two cases, padded. Each with whether it is unknown
+    /// and, when known, its identity (trimmed, lower-cased).
+    /// </summary>
     public static IEnumerable<object?[]> Hashes() =>
-        new[] { null, "", "  ", "0", "00", "0x", "0X0", Zero, "0X0000000000000000", " 0x0000000000000000 ", RealHash, RealHash.ToLowerInvariant(), "  " + RealHash + " ", "0x0000000000000001", "x0" }
-            .Select(h => new object?[] { h });
-
-    /// <summary>Statement text: whitespace, case, comments, literals, the withheld marker, empty.</summary>
-    public static readonly string?[] Texts =
     [
-        null,
-        "",
-        "   \t\r\n ",
-        "select 1",
-        "SELECT   1",
-        "select\r\n1",
-        "  select 1  ",
-        "select 2",
-        "SELECT * FROM dbo.Orders WHERE OrderId = 42",
-        "select * from dbo.orders where orderid = 43",
-        "select * from dbo.orders /* hint */ where orderid = 42",
-        "select 'A' + 'b'",
-        "select 'a' + 'B'",
-        Marker,
-        "  " + Marker + "  ",
-        Marker + " ",
-        "-- statement text withheld",
-        "BACKUP DATABASE [tenant_shared] TO DISK = N'nul'",
-        "DBCC CHECKDB (N'tenant_shared') WITH NO_INFOMSGS",
-        "café",
-        "CAFÉ",
+        [null, true, null],
+        ["", true, null],
+        ["  ", true, null],
+        ["0", true, null],
+        ["00", true, null],
+        ["0x", false, "0x"],
+        ["0X0", true, null],
+        [Zero, true, null],
+        ["0X0000000000000000", true, null],
+        [" 0x0000000000000000 ", true, null],
+        [RealHash, false, "0x8a2f19c4be77d301"],
+        [RealHash.ToLowerInvariant(), false, "0x8a2f19c4be77d301"],
+        ["  " + RealHash + " ", false, "0x8a2f19c4be77d301"],
+        ["0x0000000000000001", false, "0x0000000000000001"],
+        ["x0", false, "x0"],
+    ];
+
+    /// <summary>
+    /// Statement text: whitespace, case, comments, literals, the withheld marker, empty; each with its fingerprint
+    /// (NULL for no usable text and for the marker). Texts that differ only in case or whitespace share a fingerprint.
+    /// </summary>
+    public static IEnumerable<object?[]> Texts() =>
+    [
+        [null, null],
+        ["", null],
+        ["   \t\r\n ", null],
+        ["select 1", "text:822ae07d4783158b"],
+        ["SELECT   1", "text:822ae07d4783158b"],
+        ["select\r\n1", "text:822ae07d4783158b"],
+        ["  select 1  ", "text:822ae07d4783158b"],
+        ["select 2", "text:3cf988cc782b44bc"],
+        ["SELECT * FROM dbo.Orders WHERE OrderId = 42", "text:d1b5d6fb3619562c"],
+        ["select * from dbo.orders where orderid = 43", "text:ead1ef3092666a9b"],
+        ["select * from dbo.orders /* hint */ where orderid = 42", "text:f6e81ab16a1fa8dd"],
+        ["select 'A' + 'b'", "text:f4150cb87bc18753"],
+        ["select 'a' + 'B'", "text:f4150cb87bc18753"],
+        [Marker, null],
+        ["  " + Marker + "  ", null],
+        [Marker + " ", null],
+        ["-- statement text withheld", "text:b269cb30b8cebcbd"],
+        ["BACKUP DATABASE [tenant_shared] TO DISK = N'nul'", "text:74738d493704fd0c"],
+        ["DBCC CHECKDB (N'tenant_shared') WITH NO_INFOMSGS", "text:41d3551a3531440e"],
+        ["café", "text:850f7dc43910ff89"],
+        ["CAFÉ", "text:850f7dc43910ff89"],
     ];
 
     private static SameStatementPileupDetector.SnapshotRow Row(string? hash, string? text) =>
         new(DateTime.UtcNow, 1, hash, text, "db", "running", null, null, 30_000, 100, 1_000, 0, text);
 
+    [Theory]
+    [MemberData(nameof(Hashes))]
+    public void IsUnknown_AndKnownHash_FollowTheHashCorpus(string? hash, bool unknown, string? identity)
+    {
+        Assert.Equal(unknown, QueryHashIdentity.IsUnknown(hash));
+        Assert.Equal(unknown ? null : hash!.Trim(), QueryHashIdentity.KnownHash(hash));
+        Assert.Equal(identity is null, unknown);
+    }
+
+    [Theory]
+    [MemberData(nameof(Texts))]
+    public void StatementFingerprint_FollowsTheTextCorpus(string? text, string? fingerprint) =>
+        Assert.Equal(fingerprint, QueryHashIdentity.StatementFingerprint(text));
+
     /// <summary>
-    /// Every (hash, text) pair in the corpus keys identically through the detector's copy and through
-    /// <see cref="QueryHashIdentity.Identity"/> — which covers the hash test (<c>IsUnknown</c> against the detector's
-    /// <c>IsUnknownHash</c>) and the fingerprint (<c>StatementFingerprint</c> against the detector's text hash) at
-    /// once, including the shapes that mint NULL.
+    /// Every (hash, text) pair in the corpus has the expected identity through <see cref="QueryHashIdentity.Identity"/>
+    /// and through the detector's row path: the real hash (trimmed, lower-cased) when the hash is known, else the
+    /// text fingerprint, else NULL (the shapes that mint NULL included).
     /// </summary>
     [Fact]
-    public void TheDetectorsCopy_AgreesWithTheCommonDefinition_OverOneCorpus()
+    public void Identity_AndTheDetectorsRowPath_FollowTheCorpus()
     {
         var compared = 0;
         foreach (var hashRow in Hashes())
         {
             var hash = (string?)hashRow[0];
-            foreach (var text in Texts)
+            var knownIdentity = (string?)hashRow[2];
+            foreach (var textRow in Texts())
             {
+                var text = (string?)textRow[0];
+                var expected = knownIdentity ?? (string?)textRow[1];
+                var identity = QueryHashIdentity.Identity(hash, text);
                 var detector = SameStatementPileupDetector.StatementIdentity(Row(hash, text));
-                var common = QueryHashIdentity.Identity(hash, text);
-                Assert.True(string.Equals(common, detector, StringComparison.Ordinal),
-                    $"hash={hash ?? "<null>"} text={text ?? "<null>"}: Common says {common ?? "<null>"}, the detector says {detector ?? "<null>"}");
+                var where = $"hash={hash ?? "<null>"} text={text ?? "<null>"}";
+                Assert.True(string.Equals(expected, identity, StringComparison.Ordinal),
+                    $"{where}: expected {expected ?? "<null>"}, Identity says {identity ?? "<null>"}");
+                Assert.True(string.Equals(expected, detector, StringComparison.Ordinal),
+                    $"{where}: expected {expected ?? "<null>"}, the detector says {detector ?? "<null>"}");
                 compared++;
             }
         }
 
-        Assert.Equal(Hashes().Count() * Texts.Length, compared);
+        Assert.Equal(Hashes().Count() * Texts().Count(), compared);
     }
 
     /// <summary>The corpus is not vacuous: it reaches a hash identity, a text fingerprint, and a NULL.</summary>
@@ -98,7 +136,7 @@ public class QueryHashIdentityParityTests
     public void TheCorpus_ReachesEveryOutcome()
     {
         var identities = Hashes()
-            .SelectMany(h => Texts.Select(t => SameStatementPileupDetector.StatementIdentity(Row((string?)h[0], t))))
+            .SelectMany(h => Texts().Select(t => SameStatementPileupDetector.StatementIdentity(Row((string?)h[0], (string?)t[0]))))
             .ToList();
 
         Assert.Contains(identities, i => i is null);

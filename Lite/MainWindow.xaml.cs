@@ -972,9 +972,19 @@ public partial class MainWindow : Window
         return clock;
     }
 
-    private void ServerListView_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    private void ServerListView_MouseDoubleClick(object sender, MouseButtonEventArgs e) => OpenSelectedServerTab();
+
+    /// <summary>#5763: Enter on the server list opens the selected server's tab, through the same
+    /// <see cref="OpenSelectedServerTab"/> the double-click runs. The key is marked handled so the list does not
+    /// also beep or move the selection.</summary>
+    private void ServerListView_KeyDown(object sender, KeyEventArgs e) =>
+        ServerListKeyboard.HandleKeyDown(e, OpenSelectedServerTab);
+
+    /// <summary>Opens (or focuses) the selected server's tab: the one body behind the list's double-click and its
+    /// Enter key.</summary>
+    private void OpenSelectedServerTab()
     {
-        /* Only a server row connects; a header row's double-click is a no-op (a single click already
+        /* Only a server row connects; a header row's double-click or Enter is a no-op (a single click already
            toggles its expand/collapse via SelectionChanged). */
         if (ServerListView.SelectedItem is FleetServerRow row && row.Server.Connection is { } server)
         {

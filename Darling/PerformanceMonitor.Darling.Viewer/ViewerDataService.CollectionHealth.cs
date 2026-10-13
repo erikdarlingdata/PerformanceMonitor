@@ -164,6 +164,7 @@ public sealed partial class ViewerDataService
             FROM v_collection_log
             WHERE server_id = $1
             AND   collection_time >= $2
+            AND   {CollectionCycleRow.NotCycleRowSql}
             GROUP BY collector_name
         )
         SELECT
@@ -592,6 +593,7 @@ public sealed partial class ViewerDataService
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id <> 0
+        AND   {CollectionCycleRow.NotCycleRowSql}
         GROUP BY server_id, collector_name
         """;
 

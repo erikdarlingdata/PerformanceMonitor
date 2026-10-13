@@ -312,4 +312,101 @@ public class BlockingWaitDuckDbTests : IClassFixture<SharedDuckDbFixture>, IDisp
         Assert.Equal(fromCSharp.OrderBy(k => k, StringComparer.Ordinal), fromSql.OrderBy(k => k, StringComparer.Ordinal));
         Assert.Equal(8, fromSql.Count);
     }
+
+    /* ── #5743: DMV snapshot rows, where a wait of any length is caught ── */
+
+    /* The same cases Darling.Tests BlockingWaitCountTests.DmvSnapshotCases runs on PostgreSQL (milliseconds from t0;
+       a row is event time and wait time). 21: the issue's example, two waits (starts 1.7 s apart, but the pair was
+       last seen 200 ms before the second wait began). 22: a continuing wait first seen at 300 ms, one (+40 ms start
+       jitter). 23: first seen at 10 ms, start +50 ms later, one. 24: exactly 150 ms (WaitStartJitterMs) after the
+       earlier row's event time, one. 25: 151 ms, two. 26: three rows of one wait, jittered and out of event order,
+       one. 27: the running maximum covers ALL preceding rows, one. */
+    private static List<Edge> DmvSnapshotReports()
+    {
+        var t0 = new DateTime(2026, 10, 9, 9, 0, 0, DateTimeKind.Unspecified);
+        DateTime At(long ms) => t0.AddMilliseconds(ms);
+        const long T = 10_000;
+        return new List<Edge>
+        {
+            new(21, 20, At(T), 1500), new(21, 20, At(T + 10_000), 9800),
+            new(22, 20, At(T), 300), new(22, 20, At(T + 10_040), 10300),
+            new(23, 20, At(T), 10), new(23, 20, At(T + 10_000), 9950),
+            new(24, 20, At(T), 10), new(24, 20, At(T + 10_000), 9850),
+            new(25, 20, At(T), 10), new(25, 20, At(T + 10_000), 9849),
+            new(26, 20, At(T), 20), new(26, 20, At(T + 10_000), 9990), new(26, 20, At(T + 5_000), 4900),
+            new(27, 20, At(T + 9_000), 10_000), new(27, 20, At(T - 800), 100), new(27, 20, At(T + 9_400), 10_000),
+        };
+    }
+
+    private static readonly Dictionary<int, int> DmvExpectedWaits = new()
+    {
+        [21] = 2, [22] = 1, [23] = 1, [24] = 1, [25] = 2, [26] = 1, [27] = 1,
+    };
+
+    [Fact]
+    public async Task DuckDbSql_AgreesWithTheCSharpRule_OnDmvSnapshotRows()
+    {
+        var rows = DmvSnapshotReports();
+        var source = "SELECT v.blocked_spid, v.blocking_spid, v.event_time, v.wait_time_ms FROM (VALUES "
+            + string.Join(",", rows.Select(r => string.Format(
+                System.Globalization.CultureInfo.InvariantCulture, "({0},{1},CAST('{2:yyyy-MM-dd HH:mm:ss.ffffff}' AS TIMESTAMP),CAST({3} AS BIGINT))",
+                r.Blocked, r.Blocker, r.Time, r.Wait)))
+            + ") AS v(blocked_spid, blocking_spid, event_time, wait_time_ms)";
+
+        var fromSql = new List<string>();
+        var perPair = new Dictionary<int, int>();
+        using (var readLock = _duckDb.AcquireReadLock())
+        {
+            _conn ??= _duckDb.CreateConnection();
+            if (_conn.State != System.Data.ConnectionState.Open) await _conn.OpenAsync();
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "WITH " + BlockingWaits.WaitsCteSql(BlockingWaits.SqlDialect.DuckDb, "waits", source)
+                + " SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM waits";
+            using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                var blocked = Convert.ToInt32(reader.GetValue(0));
+                fromSql.Add(EdgeKey(blocked, Convert.ToInt32(reader.GetValue(1)), reader.GetDateTime(2), Convert.ToInt64(reader.GetValue(3))));
+                perPair[blocked] = perPair.GetValueOrDefault(blocked) + 1;
+            }
+        }
+
+        var collapsed = BlockingWaits.Collapse(rows, _ => "xe", r => r.Blocked, r => r.Blocker, r => r.Time, r => r.Wait);
+        var fromCSharp = collapsed.Select(w => EdgeKey(w.Blocked, w.Blocker, w.Time, w.Wait));
+        Assert.Equal(fromCSharp.OrderBy(k => k, StringComparer.Ordinal), fromSql.OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal(DmvExpectedWaits.OrderBy(p => p.Key), perPair.OrderBy(p => p.Key));
+        foreach (var (blocked, expected) in DmvExpectedWaits)
+            Assert.Equal(expected, collapsed.Count(w => w.Blocked == blocked));
+    }
+
+    /// <summary>The issue's example through the real reader: the overview card and the C# rule both say two waits
+    /// for DMV snapshot rows (the fallback, no blocked-process reports).</summary>
+    [Fact]
+    public async Task DmvSnapshots_OfTwoShortWaits_LessThanTwoSecondsApart_AreTwoWaits()
+    {
+        var t = Ago(30);
+        foreach (var (eventTime, waitMs) in new[] { (t, 1500L), (t.AddSeconds(10), 9800L) })
+        {
+            _seeded.Add(new Report(52, 51, eventTime, waitMs));
+            await ExecAsync(
+                "INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, event_time, server_id, server_name, database_name, monitor_loop, wait_time_ms, blocked_spid, blocking_spid) VALUES ($1,$2,$2,$3,'TestServer','db',1,$4,$5,$6)",
+                _nextId--, eventTime, ServerId, waitMs, 52, 51);
+        }
+
+        /* The analysis fact reads blocked-process reports only; the DMV fallback is the overview card's. */
+        Assert.Equal(2, CSharpWaitCount());
+        Assert.Equal(2, await OverviewCountAsync());
+    }
+
+    /// <summary>Blocked-process reports are untouched by #5743: waits whose starts are 6 s apart are two waits, one
+    /// eleven-report wait is one.</summary>
+    [Fact]
+    public async Task BlockedProcessReports_KeepTheirWaitCounts()
+    {
+        await SeedWaitAsync(52, 51, Ago(40), reports: 1);
+        await SeedWaitAsync(52, 51, Ago(40).AddSeconds(6), reports: 2);
+        await SeedWaitAsync(53, 51, Ago(30), reports: 11);
+
+        await AssertAllThreeAgreeAsync(expectedWaits: 3);
+    }
 }

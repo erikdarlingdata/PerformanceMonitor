@@ -42,7 +42,7 @@ public sealed partial class ViewerDataService
     /// last collection too; unbounded, because that "last collected" may be weeks old and is still the
     /// answer. The two callers look up registry ids only, so the rows they read are identical.</para>
     /// </summary>
-    public const string ServerFreshnessSql = @"
+    public const string ServerFreshnessSql = $@"
 SELECT
     s.server_id,
     latest.collection_time
@@ -52,6 +52,7 @@ CROSS JOIN LATERAL
     SELECT collection_time
     FROM v_collection_log
     WHERE server_id = s.server_id
+    AND   {CollectionCycleRow.NotCycleRowSql}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest

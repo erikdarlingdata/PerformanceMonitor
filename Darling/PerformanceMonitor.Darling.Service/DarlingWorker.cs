@@ -1594,6 +1594,18 @@ LIMIT 1";
            written ONLY by the sweep loop's own thread (CountHeldSlots), so a plain map is enough. */
         public Dictionary<string, HeldSlotMark> HeldSlotMarks { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+        /* #5735: the slots this server has lost since its last collection_cycle row, fed by the three places that step over a
+           slot and flushed by the body (DarlingCycleSkip). */
+        public CycleSkipAccumulator CycleSkips { get; } = new();
+
+        /* #5735: the last finished body's length and its slowest collector, and the time the current body queued for a fleet
+           slot. Written by the body's own chain (bodies never overlap on one server), read by the next body when it words the
+           cause of the slots it stepped over. */
+        public long LastBodyMs;
+        public string? LastBodySlowestName;
+        public long LastBodySlowestMs;
+        public long LastGateWaitMs;
+
         /// <summary>#5597: the UTC ticks at which the connect body finished seeding this server's collector due stamps (0 =
         /// never). The stamps are seeded from a clock read before the body's on-load snapshots, so a slot that came due
         /// while that body ran could not have run; the slot count starts at this instant
@@ -4525,7 +4537,9 @@ LIMIT 1";
            cancel records nothing (the throw skips the line below), like the permit it never took. */
         var gateWaitStarted = Stopwatch.GetTimestamp();
         await gate.WaitAsync(stoppingToken);
-        _fleetGateStats?.RecordQueueWait(Stopwatch.GetElapsedTime(gateWaitStarted));
+        var gateWaited = Stopwatch.GetElapsedTime(gateWaitStarted);
+        _fleetGateStats?.RecordQueueWait(gateWaited);
+        server.LastGateWaitMs = (long)gateWaited.TotalMilliseconds;
 
         /* The permit is held: this body has STOPPED queueing and STARTED running. Stamp the run start so the
            outer launch loop's watchdog can tell a genuine hang from a body that was merely waiting its turn.
@@ -12331,8 +12345,12 @@ AND   j.hypertable_name = '{relation}'", connection))
                    with a run time loses its day once the grace after the stamp has passed (StepRunTimeCollector). */
                 var serveWindow = effective.RunAtMinute is not null ? CollectorRunTime.Grace : interval;
                 server.HeldSlotMarks.TryGetValue(name, out var mark);
-                counted += HeldSlots.Newly(due, nowUtc, floor, interval, serveWindow, ref mark);
+                var newlyHeld = HeldSlots.Newly(due, nowUtc, floor, interval, serveWindow, ref mark);
+                counted += newlyHeld;
                 server.HeldSlotMarks[name] = mark;
+                /* #5735: only fills the server's tally; the body that runs after the release writes the row (this runs on the
+                   sweep thread, under memory pressure). */
+                server.CycleSkips.AddHeld(name, newlyHeld, due);
             }
         }
 
@@ -13766,6 +13784,14 @@ AND   j.hypertable_name = '{relation}'", connection))
         {
             var now = DateTime.UtcNow;
 
+            /* #5735: what the PREVIOUS body measured is the cause of any slot this one steps over, so it is read before this
+               body overwrites it. */
+            var priorCauses = new CycleSkipCauses(
+                server.LastBodyMs, server.LastBodySlowestName, server.LastBodySlowestMs, server.LastGateWaitMs);
+            var bodyStarted = Stopwatch.GetTimestamp();
+            var bodySlowestName = (string?)null;
+            var bodySlowestMs = 0L;
+
             /* #2864: the peer high-water mark describes ONE body. Reset here rather than decayed, because
                the comparison it feeds is 'were this sweep's other collectors slow', and a mark carried
                across bodies would answer a different question with the same number. */
@@ -13893,6 +13919,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                     if (step.Action == RunTimeAction.SkipDay)
                     {
                         _fleetGateStats?.RecordSkippedSlots(step.Skipped);
+                        server.CycleSkips.AddDailyLost(name, step.Skipped, due);
                         _logger.LogInformation(
                             "  [{Server}] {Collector} skipped today's run: the pass could not hand it off within {Grace} minutes of its run time, so it waits for its next run time, {Next:u} (#4938)",
                             server.Config.DisplayName, name, CollectorRunTime.GraceMinutes, step.NextDue);
@@ -13937,7 +13964,9 @@ AND   j.hypertable_name = '{relation}'", connection))
                        skipped by a gate that was too narrow. A body that starts late because the gate was full, while the
                        loop keeps ticking, still counts them all. */
                     var seeded = new DateTime(SkipCreditFloor.ClampSeedStamp(ref server.SeedFinishedTicks, now), DateTimeKind.Utc);
-                    _fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan, seeded));
+                    var gridSkipped = _skipCreditFloor.Skipped(due, now, intervalSpan, seeded);
+                    _fleetGateStats?.RecordSlot(gridSkipped);
+                    server.CycleSkips.AddGrid(name, gridSkipped, due);
                     server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);
                 }
 
@@ -13982,7 +14011,14 @@ AND   j.hypertable_name = '{relation}'", connection))
                    disagree about what runs in the body. */
                 if (!RunsDetached(name, interval))
                 {
+                    var collectorStarted = Stopwatch.GetTimestamp();
                     await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, runTimeHandOff: handOff);
+                    var collectorMs = (long)Stopwatch.GetElapsedTime(collectorStarted).TotalMilliseconds;
+                    if (collectorMs > bodySlowestMs)
+                    {
+                        bodySlowestMs = collectorMs;
+                        bodySlowestName = name;
+                    }
                 }
                 else if (IsDetachedByName(name))
                 {
@@ -14008,10 +14044,49 @@ AND   j.hypertable_name = '{relation}'", connection))
                     TrackDetachedRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true, runTimeHandOff: handOff));
                 }
             }
+
+            /* #5735: the slots this server lost since its last row, written as one row by the body that noticed (at most one in
+               DarlingCycleSkip.RowMinInterval), then this body's own length is kept for the next one's cause. */
+            await FlushCycleSkipAsync(server, runtime, priorCauses, cancellationToken);
+            server.LastBodyMs = (long)Stopwatch.GetElapsedTime(bodyStarted).TotalMilliseconds;
+            server.LastBodySlowestName = bodySlowestName;
+            server.LastBodySlowestMs = bodySlowestMs;
         }
         finally
         {
             server.CollectionGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// #5735: writes the server's pending stepped-over slots as one <c>collection_cycle</c> row, or nothing when there are
+    /// none, the last row is under <see cref="DarlingCycleSkip.RowMinInterval"/> old, or the server is retired. A failed
+    /// write keeps the pending counts for the next body. A restart loses them (the in-memory gate stats do too).
+    /// </summary>
+    internal async Task FlushCycleSkipAsync(ServerLoopState server, ServerRuntime runtime, CycleSkipCauses causes, CancellationToken cancellationToken)
+    {
+        var postgres = _postgres;
+        if (postgres is null || server.Retired)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var taken = server.CycleSkips.TryTake(now, DarlingCycleSkip.RowMinInterval);
+        if (taken is null)
+        {
+            return;
+        }
+
+        var report = DarlingCycleSkip.Build(taken, causes, now);
+        if (report is null)
+        {
+            return;
+        }
+
+        if (await DarlingObservability.LogCycleSkipAsync(postgres, runtime, now, report, _logger, cancellationToken))
+        {
+            server.CycleSkips.Commit(taken, now);
         }
     }
 

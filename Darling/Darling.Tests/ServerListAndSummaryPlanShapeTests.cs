@@ -128,7 +128,8 @@ public sealed class ServerListAndSummaryPlanShapeTests
                    varies run to run and is not this test's to control. This is ServerListSql's own LATERAL
                    body (asserted below, ignoring formatting), parameterized, so it proves the identical
                    per-server mechanism without that noise. */
-                const string LateralProbe = "SELECT cl.collection_time FROM v_collection_log cl WHERE cl.server_id = $1 ORDER BY cl.collection_time DESC LIMIT 1";
+                /* #5735: the probe carries the skipped-slots exclusion the shipped read now has. */
+                const string LateralProbe = "SELECT cl.collection_time FROM v_collection_log cl WHERE cl.server_id = $1 AND " + CollectionCycleRow.NotCycleRowSql + " ORDER BY cl.collection_time DESC LIMIT 1";
                 var flattenedServerListSql = Regex.Replace(DarlingDataReader.ServerListSql, @"\s+", " ");
                 Assert.Contains(
                     LateralProbe.Replace("cl.server_id = $1", "cl.server_id = s.server_id", StringComparison.Ordinal),

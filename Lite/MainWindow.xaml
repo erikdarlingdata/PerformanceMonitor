@@ -253,7 +253,7 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0">
                             <TextBlock x:Name="SidebarTitle" Text="SQL Servers" FontSize="16" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}"/>
-                            <TextBlock x:Name="SidebarSubtitle" Text="Double-click to connect" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,0,0"/>
+                            <TextBlock x:Name="SidebarSubtitle" Text="Double-click or press Enter to open a server tab" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,0,0"/>
                         </StackPanel>
                         <Button Grid.Column="1" Content="«" Click="ToggleSidebar_Click"
                                 ToolTip="Toggle sidebar" VerticalAlignment="Top"
@@ -268,6 +268,7 @@
                          SelectionMode="Single"
                          SelectionChanged="ServerListView_SelectionChanged"
                          MouseDoubleClick="ServerListView_MouseDoubleClick"
+                         KeyDown="ServerListView_KeyDown"
                          Margin="8"
                          Background="Transparent"
                          BorderThickness="0"
