@@ -164,13 +164,20 @@ public sealed class NotificationRouteCacheBackgroundTests
     public async Task AnAlertBeforeTheFirstLoad_WaitsForTheRoutes_InsteadOfReadingTheEmptyList()
     {
         var testThread = Environment.CurrentManagedThreadId;
+        using var entered = new ManualResetEventSlim(false);
         using var release = new ManualResetEventSlim(false);
         var cache = new NotificationRouteCacheCore(isUiThread: () => Environment.CurrentManagedThreadId == testThread);
         cache.Configure(() =>
         {
+            entered.Set();
             release.Wait(TimeSpan.FromSeconds(10));
             return new[] { Route(11) };
         });
+
+        /* The loader is inside its load, which holds the cache's gate: the worst case, and the only order this test checks (it
+           was racy before: the wait ran either ahead of the primed load or behind it). A wait that took the gate would block
+           this thread until the loader's own 10 second wait ran out and then report itself completed. */
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(10)), "Configure did not start the first load.");
 
         /* What EmailAlertService does before it reads the routes: await the first load. The wait holds no thread, so the
            "dispatcher" is free, and the alert resumes with the routes loaded rather than the pre-load empty list. */
