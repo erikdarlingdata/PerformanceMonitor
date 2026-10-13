@@ -27,7 +27,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// would hand the <c>admin</c> role INSERT, UPDATE and DELETE on tables the rung creates, and on a store the operator
 /// provisions with <c>tools/provision-roles.sql</c> those defaults are in place before the rung runs. The last statement
 /// of <see cref="CreateSql"/> revokes every write privilege (INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER) on the
-/// three tables from every grantee other than the owner, so no role holds one between the rung and the next run of the
+/// three tables from PUBLIC and from the <c>admin</c>, <c>viewer</c> and <c>mcp</c> roles when they exist (a block of literal
+/// statements, because the ladder holds no dynamic SQL), so none of them holds one between the rung and the next run of the
 /// provisioning script. The <c>config</c> schema's SELECT stays for the viewer roles, as it does for every plain
 /// <c>config</c> table. Giving a source role its one EXECUTE, and re-asserting these revokes, belong to the provisioning
 /// batch that runs on every start, so they also reach a store that was provisioned before this rung.</para>
@@ -113,21 +114,17 @@ CREATE TABLE IF NOT EXISTS config.external_alert_state
 ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS external_source text;
 
 DO $do$
-DECLARE
-   held record;
 BEGIN
-   FOR held IN
-      SELECT c.oid::regclass::text AS table_name,
-             CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(r.rolname) END AS grantee_name
-      FROM pg_catalog.pg_class AS c
-      CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
-      LEFT JOIN pg_catalog.pg_roles AS r ON r.oid = a.grantee
-      WHERE c.oid IN ('config.external_alert_source'::regclass, 'config.external_alert_pending'::regclass, 'config.external_alert_state'::regclass)
-        AND a.grantee <> c.relowner
-        AND a.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER')
-   LOOP
-      EXECUTE pg_catalog.format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON %s FROM %s', held.table_name, held.grantee_name);
-   END LOOP;
+   REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.external_alert_source, config.external_alert_pending, config.external_alert_state FROM PUBLIC;
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'admin') THEN
+      REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.external_alert_source, config.external_alert_pending, config.external_alert_state FROM admin;
+   END IF;
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'viewer') THEN
+      REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.external_alert_source, config.external_alert_pending, config.external_alert_state FROM viewer;
+   END IF;
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'mcp') THEN
+      REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.external_alert_source, config.external_alert_pending, config.external_alert_state FROM mcp;
+   END IF;
 END $do$;
 ";
 }

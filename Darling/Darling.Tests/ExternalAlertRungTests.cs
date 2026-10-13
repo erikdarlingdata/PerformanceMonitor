@@ -78,14 +78,21 @@ public sealed class ExternalAlertRungTests
         Assert.Contains("submitted_at timestamptz NOT NULL DEFAULT now()", sql, StringComparison.Ordinal);
         Assert.Contains("source_name ~ '^[a-z][a-z0-9_]{1,30}$'", sql, StringComparison.Ordinal);
 
-        /* The rung moves nothing and grants nothing; its one privilege statement is the guarded revoke of write privileges
-           from every non-owner grantee (inside a DO block, so no line starts with the verb). */
+        /* The rung moves nothing and grants nothing; its one privilege statement is the revoke of write privileges
+           from PUBLIC and the three Darling roles (literal statements in one DO block, since the ladder holds no dynamic SQL). */
+        var outsideTheRevokeBlock = Regex.Replace(sql, @"DO \$do\$.*?END \$do\$;", " ", RegexOptions.Singleline);
+        Assert.Single(Regex.Matches(sql, @"DO \$do\$"));
         foreach (var verb in new[] { "UPDATE", "DELETE", "INSERT", "GRANT", "REVOKE", "TRUNCATE", "DROP" })
         {
-            Assert.DoesNotMatch(@"(?m)^\s*" + verb + @"\b", sql);
+            Assert.DoesNotMatch(@"(?m)^\s*" + verb + @"\b", outsideTheRevokeBlock);
         }
 
-        Assert.Single(Regex.Matches(sql, @"EXECUTE pg_catalog\.format\('REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON %s FROM %s'"));
+        foreach (var grantee in new[] { "PUBLIC", "admin", "viewer", "mcp" })
+        {
+            Assert.Contains(
+                "REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.external_alert_source, config.external_alert_pending, config.external_alert_state FROM " + grantee + ";",
+                sql, StringComparison.Ordinal);
+        }
         Assert.DoesNotContain("GRANT", sql, StringComparison.Ordinal);
     }
 

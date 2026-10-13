@@ -44,8 +44,6 @@ public sealed class ExternalAlertGrantLiveTests
 
     private static readonly string RoleUnmarked = "ea_plain_" + RunSuffix;
 
-    private static readonly string RoleDefault = "ea_def_" + RunSuffix;
-
     private const string SourcePassword = "ExtAlertSrcPw0123456789abcdef01";
 
     private static string RequireLivePostgres()
@@ -160,11 +158,11 @@ DO $do$
 DECLARE
    r text;
 BEGIN
-   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{RoleA}', '{RoleB}', '{RoleUnmarked}', '{RoleDefault}') LOOP
+   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{RoleA}', '{RoleB}', '{RoleUnmarked}') LOOP
       EXECUTE format('DROP OWNED BY %I', r);
       EXECUTE format('DROP ROLE %I', r);
    END LOOP;
-END $do$", ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked, RoleDefault], cleanupCt));
+END $do$", ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked], cleanupCt));
 
     [Fact]
     public async Task ASourceLogin_CanExecuteTheFunction_AndHoldsNoOtherPrivilege()
@@ -761,7 +759,7 @@ SET search_path = pg_temp, config, public", ct);
     /// provisioning script leaves) gets the three tables with no write privilege for that role, from the rung itself.
     /// </summary>
     [Fact]
-    public async Task TheRung_TakesWritePrivilegesFromEveryNonOwnerGrantee_OfTheThreeTables()
+    public async Task TheRung_TakesWritePrivilegesFromPublicAndTheAdminRole_OfTheThreeTables()
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
@@ -772,9 +770,12 @@ SET search_path = pg_temp, config, public", ct);
             await using var owner = new NpgsqlConnection(scratch.ConnectionString);
             await owner.OpenAsync(ct);
             await PgMigrations.MigrateAsync(owner, ct);
-            await ExecAsync(owner, $"CREATE ROLE {RoleDefault} NOLOGIN", ct);
+            Assert.SkipWhen(
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct),
+                "A cluster-wide admin/viewer/mcp role already exists on this rig.");
+            await ExecAsync(owner, "CREATE ROLE admin NOLOGIN", ct);
             await ExecAsync(owner, $@"
-ALTER DEFAULT PRIVILEGES IN SCHEMA config GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO {RoleDefault};
+ALTER DEFAULT PRIVILEGES IN SCHEMA config GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO admin;
 ALTER DEFAULT PRIVILEGES IN SCHEMA config GRANT INSERT ON TABLES TO PUBLIC;
 DROP TABLE config.external_alert_state, config.external_alert_pending, config.external_alert_source;
 ALTER TABLE config.config_mute_rules DROP COLUMN external_source", ct);
@@ -785,13 +786,13 @@ ALTER TABLE config.config_mute_rules DROP COLUMN external_source", ct);
                 foreach (var table in new[] { "external_alert_source", "external_alert_pending", "external_alert_state" })
                 {
                     Assert.False(await ScalarAsync<bool>(owner,
-                        $"SELECT has_table_privilege('{RoleDefault}', 'config.{table}', 'INSERT, UPDATE, DELETE, TRUNCATE') OR has_table_privilege('public', 'config.{table}', 'INSERT')", ct));
-                    Assert.True(await ScalarAsync<bool>(owner, $"SELECT has_table_privilege('{RoleDefault}', 'config.{table}', 'SELECT')", ct));
+                        $"SELECT has_table_privilege('admin', 'config.{table}', 'INSERT, UPDATE, DELETE, TRUNCATE') OR has_table_privilege('public', 'config.{table}', 'INSERT')", ct));
+                    Assert.True(await ScalarAsync<bool>(owner, $"SELECT has_table_privilege('admin', 'config.{table}', 'SELECT')", ct));
                 }
             }
             finally
             {
-                await ExecAsync(owner, $"ALTER DEFAULT PRIVILEGES IN SCHEMA config REVOKE ALL ON TABLES FROM {RoleDefault}; ALTER DEFAULT PRIVILEGES IN SCHEMA config REVOKE ALL ON TABLES FROM PUBLIC", ct);
+                await ExecAsync(owner, $"ALTER DEFAULT PRIVILEGES IN SCHEMA config REVOKE ALL ON TABLES FROM admin; ALTER DEFAULT PRIVILEGES IN SCHEMA config REVOKE ALL ON TABLES FROM PUBLIC", ct);
             }
 
             bodySucceeded = true;
