@@ -120,18 +120,20 @@ public sealed class PlanRegressionRowcountRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        /* V176's (#5638) and V177's (#5641) sentinels are appended after this one, so this rung is no longer the top. */
+        /* V176's (#5638), V177's (#5641) and V178's (#5684) sentinels are appended after this one, so this rung is no longer the top. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         Assert.Equal("hasPlanRegressionDailyRowcount", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasServiceVersion", parameters[ProbeOrdinal - 1].Name);
-        Assert.Equal(ProbeOrdinal + 2, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 3, parameters.Length - 1);
         Assert.Equal("hasProcedureStatsTotals", parameters[ProbeOrdinal + 1].Name);
         Assert.Equal("hasRunnableQueueSettings", parameters[ProbeOrdinal + 2].Name);
+        Assert.Equal("hasQueryStoreWatermarks", parameters[ProbeOrdinal + 3].Name);
 
         /* Every sentinel present maps to exactly this build's version. With the later sentinels absent this rung is the
            answer; with this one absent too, one rung back. */
@@ -141,6 +143,7 @@ public sealed class PlanRegressionRowcountRungTests
         var withoutLater = (object[])all.Clone();
         withoutLater[ProbeOrdinal + 1] = false;
         withoutLater[ProbeOrdinal + 2] = false;
+        withoutLater[ProbeOrdinal + 3] = false;
         Assert.Equal(RungVersion, (int)method.Invoke(null, withoutLater)!);
 
         var behind = (object[])withoutLater.Clone();

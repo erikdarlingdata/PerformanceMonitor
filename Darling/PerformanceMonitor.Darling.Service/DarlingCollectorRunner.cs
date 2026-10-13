@@ -492,6 +492,11 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     private readonly DatabaseWatermarkCache _databaseWatermarkCache = new();
 
+    /// <summary>The Query Store seed read's side-table reader (#5684); it owns the fallback counter and log throttle.</summary>
+    private readonly QueryStoreWatermarkReader _queryStoreWatermarkReader;
+
+    internal QueryStoreWatermarkReader QueryStoreWatermarkSeedReader => _queryStoreWatermarkReader;
+
     /// <summary>
     /// When a server's live query_store collection last failed a per-database item — the backfill
     /// worker's yield-to-live signal (#2111), read through <see cref="LastQueryStoreItemFailureUtc"/>
@@ -831,6 +836,7 @@ public sealed class DarlingCollectorRunner
         _queryStoreWriteFence = queryStoreWriteFence;
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
         _logger = logger;
+        _queryStoreWatermarkReader = new QueryStoreWatermarkReader(logger);
         _capturePlans = capturePlans ?? (() => true);
         /* Null provider = keep the collector's own compile-time budget (what Lite and every test does). */
         _textBudgetMb = textBudgetMb ?? (() => 0);
@@ -2010,12 +2016,22 @@ public sealed class DarlingCollectorRunner
         return new StagedDatabaseWatermark(max, foreign, collectionTime);
     }
 
-    /// <summary>A failed item may or may not have committed rows: drop its staged contribution and its cache entry.</summary>
+    /// <summary>
+    /// A failed item: drop its staged contribution, and its cache entry only if a batch was staged (#5684, the
+    /// same rule as the Azure per-database arm's #5514 gate). The staging happens at the end of the item's
+    /// read, and the driver's writeBatch runs only after the read returned, outside the try that routes to
+    /// onItemError. So a fault that reaches here with nothing staged came before any write of this database's
+    /// <c>query_store_stats</c> rows (the plan and text fetches write other tables), the stored maximum did not
+    /// move, and the cached value is still exact. A database that fails every cycle must not turn back into a
+    /// store read every cycle. With a staged batch the write may or may not have committed, so the key goes.
+    /// </summary>
     internal void DiscardQueryStoreDatabaseWatermark(
         ServerRuntime server, string database, Dictionary<string, StagedDatabaseWatermark> staged)
     {
-        staged.Remove(database);
-        _databaseWatermarkCache.Invalidate(server.ServerId, database);
+        if (staged.Remove(database))
+        {
+            _databaseWatermarkCache.Invalidate(server.ServerId, database);
+        }
     }
 
     /// <summary>Lands a staged contribution. Called only after the item's COPY transaction committed.</summary>
@@ -4481,6 +4497,14 @@ public sealed class DarlingCollectorRunner
             writer.CountNonZeroAt(QueryStatsHourLedgerWriter.IntervalPayloadIndex(definition));
         }
 
+        /* #5684: a query_store_stats batch also writes its per-database watermark rows (QueryStoreWatermarks, V178), in the COPY's
+           own transaction below behind its own savepoint. Chosen by the table this COPY writes, the way ledgerBatch is, so a definition
+           aimed at query_store_stats that is not the catalog's QueryStoreCollector (an import or the backfill) opens the transaction too.
+           Only QueryStoreCollector.Row rows are summarised (OfType below), so a definition that writes another row type to
+           query_store_stats writes no side row, and the reader then reads raw (safe).
+           Unlike the ledger, a fault never fails the batch: a missing side row only LOWERS what a reader sees. */
+        var watermarkBatch = string.Equals(definition.TargetTable, QueryStoreCollector.Instance.TargetTable, StringComparison.OrdinalIgnoreCase);
+
         /* #5638: a procedure_stats batch also brings the per-collection totals up to date (ProcedureStatsTotalsWriter), in
            the COPY's own transaction below. Like the ledger, it is chosen by the table this COPY writes, so a definition aimed
            at procedure_stats that is not the catalog's ProcedureStatsCollector (an import or backfill) writes its totals too. */
@@ -4522,7 +4546,7 @@ public sealed class DarlingCollectorRunner
                transaction; everything else keeps the pre-#1767 single-COPY commit and pays nothing. query_stats diverts
                its text and plans today, so the ledger term does not add a transaction; it is named so that the ledger
                upsert can never be left without the transaction its atomicity with the COPY depends on. */
-            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch || totalsBatch
+            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch || totalsBatch || watermarkBatch
                 ? await pgConnection.BeginTransactionAsync(cancellationToken)
                 : null;
 
@@ -4724,6 +4748,20 @@ public sealed class DarlingCollectorRunner
                         skipApply: !queryStoreWidePrepared, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
                 }
 
+                /* #5684: the batch's per-database watermark rows, after the COPY and the interval applies, on THIS transaction behind
+                   QueryStoreWatermarks.SavepointName. A fault rolls back to the savepoint and is logged; raw commits either way, and
+                   the missing side row can only lower a reader's answer (a pair with no side row above the floor reads raw). The rows
+                   are summarised in memory per database: the COPY above is a straight binary import, so every row of the batch is in
+                   raw once this transaction commits, and no read-back of the shared collection_time is needed (#5707). A batch of 0
+                   rows writes nothing. Only QueryStoreCollector.Row rows are summarised; any other row type writes no side row (safe, as above). */
+                if (watermarkBatch && rowsWritten > 0)
+                {
+                    await QueryStoreWatermarks.TryUpsertBatchAsync(
+                        pgConnection, transaction, server.ServerId, storedCollectionTime,
+                        rows.OfType<QueryStoreCollector.Row>().Select(static r => new QueryStoreWatermarks.BatchRow(r.DatabaseName, r.QueryId, r.PlanId, r.LastExecutionTime)),
+                        ServiceCommandDeadlines.CollectionSweepSeconds, _logger, cancellationToken);
+                }
+
                 await transaction.CommitAsync(cancellationToken);
             }
 
@@ -4863,17 +4901,22 @@ public sealed class DarlingCollectorRunner
     /// <summary>
     /// The per-database watermark SQL for the Query Store cache's seed read (#4749): the bounded value, plus its
     /// witness, which is the newest <c>collection_time</c> among the rows AT that value inside the bound. Same
-    /// predicates as <see cref="BuildServerWatermarkForDatabaseSql"/> (bounded, <c>collection_time</c> last as
-    /// $3), repeated in the inner query in the shape <see cref="BuildServerWatermarkInstanceIdSql"/> already
-    /// uses to pick the newest batch. The unaliased <c>MAX(</c>column<c>)</c> stays in the text: the tests that
-    /// count watermark reads match on it. Exposed for the same reason as its siblings, so a pin asserts the
-    /// SHIPPED string.
+    /// bounded predicates as <see cref="BuildServerWatermarkForDatabaseSql"/> (<c>collection_time</c> last as $3).
+    ///
+    /// <para>#5684: ONE pass, not the inner-<c>MAX</c> two-scan shape it had. The newest row by
+    /// (<c>last_execution_time</c> DESC, <c>collection_time</c> DESC) IS the answer: its first column is the
+    /// maximum, its second the newest stamp among the rows at that maximum. <c>IS NOT NULL</c> stands in for
+    /// <c>MAX</c> ignoring NULLs (PostgreSQL sorts NULLs FIRST in a descending sort, so without it a NULL row would
+    /// win). An empty window and an all-NULL window return NO row where the old text returned one row of NULLs;
+    /// <see cref="ReadLastCollectedTimeAndWitnessForDatabaseAsync"/> reads both as (null, null, succeeded). The
+    /// leading <see cref="QueryStoreWatermarkReader.SeedMarker"/> (the one copy of the marker, #5707) is what the read-counting tests match. Exposed for the
+    /// same reason as its siblings, so a pin asserts the SHIPPED string.</para>
     /// </summary>
     internal static string BuildServerWatermarkWithWitnessForDatabaseSql(string tableName, string columnName, string databaseColumnName) =>
-        $"SELECT MAX({columnName}), MAX(collection_time) FROM {tableName} "
+        $"{QueryStoreWatermarkReader.SeedMarker} SELECT {columnName}, collection_time FROM {tableName} "
         + $"WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3 "
-        + $"AND {columnName} = (SELECT MAX({columnName}) FROM {tableName} "
-        + $"WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3)";
+        + $"AND {columnName} IS NOT NULL "
+        + $"ORDER BY {columnName} DESC, collection_time DESC LIMIT 1";
 
     /// <summary>
     /// The numeric (bigint identity) watermark SQL behind <see cref="GetLastCollectedInstanceIdAsync"/>
@@ -6885,6 +6928,12 @@ RETURNING s.state_key";
         return (null, !failed);
     }
 
+    /// <summary>True when the seed read is the Query Store one the per-batch side table (#5684) answers.</summary>
+    private static bool IsQueryStoreWatermarkShape(string tableName, string columnName, string databaseColumnName) =>
+        string.Equals(tableName, "query_store_stats", StringComparison.Ordinal)
+        && string.Equals(columnName, "last_execution_time", StringComparison.Ordinal)
+        && string.Equals(databaseColumnName, "database_name", StringComparison.Ordinal);
+
     /// <summary>
     /// The seed read for the per-database Query Store watermark cache (#4749): the bounded read behind
     /// <see cref="ReadLastCollectedTimeForDatabaseAsync"/> (same bound, same failure handling), plus the
@@ -6900,8 +6949,16 @@ RETURNING s.state_key";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(
-                BuildServerWatermarkWithWitnessForDatabaseSql(tableName, columnName, databaseColumnName), connection);
+            var rawSql = BuildServerWatermarkWithWitnessForDatabaseSql(tableName, columnName, databaseColumnName);
+            if (IsQueryStoreWatermarkShape(tableName, columnName, databaseColumnName))
+            {
+                /* #5684: the stitched read (side table + coverage + verification), never above the raw read. */
+                var (stitchedValue, stitchedWitness) = await _queryStoreWatermarkReader.ReadAsync(
+                    connection, serverId, databaseName, collectedSince, rawSql, CommandTimeoutSeconds, cancellationToken);
+                return (stitchedValue, stitchedWitness, true);
+            }
+
+            using var command = new NpgsqlCommand(rawSql, connection);
             command.CommandTimeout = CommandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(databaseName);

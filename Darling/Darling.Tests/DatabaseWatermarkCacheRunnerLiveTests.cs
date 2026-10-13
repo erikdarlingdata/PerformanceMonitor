@@ -94,7 +94,9 @@ public sealed class DatabaseWatermarkCacheRunnerLiveTests
         runner.CommitQueryStoreDatabaseWatermark(
             server, Db, DarlingCollectorRunner.StageQueryStoreDatabaseWatermark(rows, Db, ct));
 
-    private static long Reads(CommandCountingLoggerFactory f) => f.Provider.CountContaining("MAX(last_execution_time)");
+    /* #5684: the seed read is counted by the marker it carries. The seed text no longer holds MAX(last_execution_time);
+       the plain bounded oracle read still does, and must not be counted here. */
+    private static long Reads(CommandCountingLoggerFactory f) => f.Provider.CountContaining("pm:qs-watermark-seed");
 
     private sealed class Rig : IAsyncDisposable
     {
@@ -378,6 +380,40 @@ public sealed class DatabaseWatermarkCacheRunnerLiveTests
         await AssertNextReadsStoreOnceAsync(rig, server, token);
     }
 
+    /// <summary>
+    /// #5684: an item error with NOTHING staged came before any write of that database's rows (the stage sits
+    /// between the read and the driver's write, see the wiring pin), so the stored maximum did not move and the
+    /// entry stays: the next resolve is a cache hit with no store read, and still equals the bounded store read.
+    /// </summary>
+    [Fact]
+    public async Task H2_AnItemError_WithNothingStaged_KeepsTheEntry_AndTheNextResolveIsACacheHit()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #5684 pins.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var server = MakeServer();
+        var rows = new List<QueryStoreCollector.Row> { Row(1, T0.AddMinutes(-5)) };
+
+        await ResolveAsync(rig.Runner, server, T0, token);
+        await WriteAsync(rig.Runner, rig.Connection, server, rows, T0, token);
+        Commit(rig.Runner, server, rows, T0);
+
+        /* Another database's staged batch must not be touched either. */
+        var staged = new Dictionary<string, StagedDatabaseWatermark>
+        {
+            ["otherdb"] = DarlingCollectorRunner.StageQueryStoreDatabaseWatermark(new List<QueryStoreCollector.Row>(), "otherdb", T0),
+        };
+        rig.Runner.DiscardQueryStoreDatabaseWatermark(server, Db, staged);
+        Assert.Single(staged);
+
+        rig.Logger.Provider.Reset();
+        var next = T0.AddMinutes(1);
+        var cached = await ResolveAsync(rig.Runner, server, next, token);
+        Assert.Equal(0, Reads(rig.Logger));
+        Assert.NotNull(cached);
+        Assert.Equal(await StoreAsync(rig.Runner, next, token), cached);
+    }
+
     [Fact]
     public async Task H_AnItemError_DropsThatDatabasesEntry_AndItsStagedContribution()
     {
@@ -522,5 +558,114 @@ public sealed class DatabaseWatermarkCacheRunnerLiveTests
         Assert.NotNull(lower);
         Assert.True(lower < seeded);
         Assert.Equal(await StoreAsync(rig.Runner, newestGone, token), lower);
+    }
+
+    /* The two-scan seed statement as it shipped before #5684, kept here as the oracle the one-pass text must equal. */
+    private const string OldSeedSql =
+        "SELECT MAX(last_execution_time), MAX(collection_time) FROM query_store_stats "
+        + "WHERE server_id = $1 AND database_name = $2 AND collection_time > $3 "
+        + "AND last_execution_time = (SELECT MAX(last_execution_time) FROM query_store_stats "
+        + "WHERE server_id = $1 AND database_name = $2 AND collection_time > $3)";
+
+    private static async Task<(DateTime? Value, DateTime? Witness, int Rows)> RunOldSeedSqlAsync(
+        NpgsqlConnection connection, string database, DateTime bound, CancellationToken token)
+    {
+        await using var cmd = new NpgsqlCommand(OldSeedSql.Replace("FROM query_store_stats", "FROM collect.query_store_stats"), connection);
+        cmd.Parameters.AddWithValue(ServerId);
+        cmd.Parameters.AddWithValue(database);
+        cmd.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
+        await using var reader = await cmd.ExecuteReaderAsync(token);
+        var rows = 0;
+        DateTime? value = null;
+        DateTime? witness = null;
+        while (await reader.ReadAsync(token))
+        {
+            rows++;
+            value = reader.GetValue(0) as DateTime?;
+            witness = reader.GetValue(1) as DateTime?;
+        }
+
+        return (value, witness, rows);
+    }
+
+    /// <summary>
+    /// #5684: the one-pass seed read equals the two-scan statement it replaced, on the same rows, for every shape
+    /// that can tell them apart: ties on the maximum value with different collection_time stamps, a NULL
+    /// last_execution_time on the newest row, an empty window, an all-NULL window, rows at and below the bound,
+    /// and a newer collection_time at a LOWER value. The product read goes through the new text.
+    /// </summary>
+    [Fact]
+    public async Task M_TheOnePassSeedRead_EqualsTheTwoScanStatement_OnTiesNullsEmptyAndBelowBoundWindows()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #5684 pins.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var server = MakeServer();
+        var bound = T0;
+        var v = T0.AddMinutes(30);
+        long id = 100;
+
+        async Task PutAsync(string db, DateTime? last, DateTime collection) =>
+            await WriteAsync(rig.Runner, rig.Connection, server, new List<QueryStoreCollector.Row> { Row(id++, last, db) }, collection, token);
+
+        /* ties: three rows at the maximum value, stamped differently, plus a NEWER stamp at a lower value. */
+        await PutAsync("ties", v, T0.AddMinutes(10));
+        await PutAsync("ties", v, T0.AddMinutes(25));
+        await PutAsync("ties", v, T0.AddMinutes(15));
+        await PutAsync("ties", v.AddHours(-1), T0.AddMinutes(40));
+        /* a NULL last_execution_time on the newest row: PostgreSQL sorts it FIRST in DESC. */
+        await PutAsync("nullnewest", v, T0.AddMinutes(12));
+        await PutAsync("nullnewest", null, T0.AddMinutes(50));
+        /* only NULLs. */
+        await PutAsync("allnull", null, T0.AddMinutes(5));
+        await PutAsync("allnull", null, T0.AddMinutes(6));
+        /* the maximum is at the bound (excluded, strict >) and below it; a lower value inside. */
+        await PutAsync("belowbound", v.AddHours(2), bound);
+        await PutAsync("belowbound", v.AddHours(1), bound.AddMinutes(-5));
+        await PutAsync("belowbound", v.AddMinutes(-20), bound.AddMinutes(3));
+        /* every row at or below the bound: an empty window. */
+        await PutAsync("allbelow", v, bound);
+        await PutAsync("allbelow", v, bound.AddMinutes(-9));
+        /* sub-microsecond ticks round the way the store keeps them. */
+        await PutAsync("ticks", v.AddTicks(1234567), T0.AddMinutes(7));
+        await PutAsync("ticks", v.AddTicks(1234567), T0.AddMinutes(8));
+
+        var expected = new Dictionary<string, (bool HasValue, DateTime? Witness)>
+        {
+            ["ties"] = (true, T0.AddMinutes(25)),
+            ["nullnewest"] = (true, T0.AddMinutes(12)),
+            ["allnull"] = (false, null),
+            ["belowbound"] = (true, bound.AddMinutes(3)),
+            ["allbelow"] = (false, null),
+            ["ticks"] = (true, T0.AddMinutes(8)),
+            ["nosuchdb"] = (false, null),
+        };
+
+        foreach (var (db, want) in expected)
+        {
+            var old = await RunOldSeedSqlAsync(rig.Connection, db, bound, token);
+            var now = await rig.Runner.ReadLastCollectedTimeAndWitnessForDatabaseAsync(
+                ServerId, "query_store_stats", "last_execution_time", "database_name", db, bound, token);
+
+            Assert.True(now.Succeeded, db);
+            Assert.Equal(old.Value, now.Value);
+            Assert.Equal(old.Witness, now.Witness);
+            Assert.Equal(want.HasValue, now.Value is not null);
+            if (want.HasValue)
+            {
+                Assert.Equal(want.Witness!.Value, now.Witness!.Value);
+            }
+            else
+            {
+                Assert.Null(now.Witness);
+            }
+
+            /* The old text answers an empty or all-NULL window with ONE row of NULLs; the new text with none. */
+            Assert.Equal(1, old.Rows);
+        }
+
+        /* The shipped text is the one-pass shape (a zero-row answer is the empty/all-NULL case). */
+        Assert.Contains("LIMIT 1", DarlingCollectorRunner.BuildServerWatermarkWithWitnessForDatabaseSql(
+            "query_store_stats", "last_execution_time", "database_name"), StringComparison.Ordinal);
     }
 }
