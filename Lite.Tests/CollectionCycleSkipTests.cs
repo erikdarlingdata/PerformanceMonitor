@@ -365,6 +365,25 @@ public sealed class CollectionCycleSkipTests : IDisposable
     }
 
     [Fact]
+    public async Task ASkippedCycle_NamesTheHousekeepingStepsThatOverlappedTheGap_InTheLogAndTheRow()
+    {
+        var f = await OpenAsync();
+        /* #5731: archival ran 4 minutes inside the gap; a step from the day before did not overlap it. */
+        f.Loop.HousekeepingLedger.Record("archival", T0 + TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(4));
+        f.Loop.HousekeepingLedger.Record("retention", T0 - TimeSpan.FromHours(20), TimeSpan.FromMinutes(2));
+
+        await f.Loop.ReportSkippedSlotsAsync(T0, T0 + TimeSpan.FromMinutes(6), TimeSpan.FromSeconds(312), TimeSpan.FromSeconds(48),
+            Steps(), CancellationToken.None);
+
+        var warning = Assert.Single(f.Log);
+        Assert.Contains(" Housekeeping in that window: archival 240s.", warning.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("retention 120s", warning.Message, StringComparison.Ordinal);
+        var row = (await RowsAsync(f.DuckDb))[RemoteCollectorService.GetServerId(f.Enabled1)];
+        Assert.Equal(warning.Message, row.Message);
+        Assert.Equal("archival", row.SlowestItem); /* slowest_item is still the cycle's own slowest step */
+    }
+
+    [Fact]
     public async Task AWaitThatOverran_WritesTheWaitAsTheSlowestItem()
     {
         var f = await OpenAsync();
