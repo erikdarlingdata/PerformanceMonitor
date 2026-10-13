@@ -117,8 +117,10 @@ jobs:
     # Skips while the pull request is a draft, as claude-review.yml does: there is no review to wait for.
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    # The review is capped at 30 minutes; leave room to observe one that uses all of it.
-    timeout-minutes: 40
+    # The review is capped at 30 minutes; leave room to observe one that uses all of it (the run
+    # poll waits up to 35), plus up to ten more minutes for the jobs API to list the finished
+    # review job's steps (#5783).
+    timeout-minutes: 50
     # No issues: scope here, despite the tally reading repos/.../issues/$PR/comments for
     # top-level output. A pull request IS an issue to that API, and the PullRequests scope
     # covers its comments: run 31726598542 was granted exactly Actions/Checks/Contents/
@@ -435,17 +437,87 @@ jobs:
           # per page of the jobs list. It is safe here: a run of the review workflow has two jobs
           # (decide and review), so the list is one page, and the step and the job named each
           # appear in it once.
+          # One read gives three fields: the review job's conclusion, how many steps the API lists
+          # under that job, and the review step's conclusion ("-" stands for a field that is absent).
+          # The count matters because the jobs API can list a finished job with an EMPTY steps list
+          # for many minutes after the run completed (#5783: a successful run whose bot verdict was
+          # already on the head listed `steps: []` for both its jobs, and so did a Build run of the
+          # same minute). A job that ran always has steps, so an empty list under a review job that
+          # did not skip means "not listed yet", not "the step was renamed".
+          jobs_jq='([.jobs[] | select(.name == env.REVIEW_JOB)] | .[0]) as $j
+            | "\($j.conclusion // "-") \(($j.steps // []) | length)"
+              + " \(([.jobs[].steps[]? | select(.name == env.REVIEW_STEP)] | .[0].conclusion) // "-")"'
           lookup "review-run jobs (step conclusion)" "repos/$R/actions/runs/$run_id/jobs" --paginate \
-            --jq '[.jobs[].steps[]? | select(.name == env.REVIEW_STEP)] | .[0].conclusion // empty'
-          step=$LOOKUP_OUT
+            --jq "$jobs_jq"
+          read -r review_job review_steps step <<<"$LOOKUP_OUT"
+          if [ "$step" = "-" ]; then step=''; fi
+
+          # #5783: the review job finished without skipping and the API lists no steps under it. Ask
+          # again every 30 seconds, for about ten minutes, before deciding anything. A read that fails
+          # here uses up one try and keeps the last answer, as the run poll above does (#2309).
+          steps_unlisted() {
+            [ "$review_job" != "-" ] && [ "$review_job" != "skipped" ] && [ "$review_steps" = "0" ]
+          }
+          steps_tries=0
+          while steps_unlisted && [ "$steps_tries" -lt 20 ]; do
+            steps_tries=$((steps_tries + 1))
+            echo "::notice title=Waiting for the review job's steps::Try $steps_tries of 20: the"\
+              "'$REVIEW_JOB' job of run $run_id concluded '$review_job', but the jobs API lists no"\
+              "steps under it yet (#5783). Asking again in 30 seconds."
+            sleep 30
+            if gh_capture "repos/$R/actions/runs/$run_id/jobs" --paginate --jq "$jobs_jq" \
+                && [ -n "$LOOKUP_OUT" ]; then
+              read -r review_job review_steps step <<<"$LOOKUP_OUT"
+              if [ "$step" = "-" ]; then step=''; fi
+            fi
+          done
+
+          if steps_unlisted; then
+            # Still no steps after about ten minutes. Decide from what the API does list: the review
+            # job's conclusion, and whether $REVIEW_BOT submitted a review on this head. A job that
+            # succeeded and a review on $SHA mean the review step ran and posted, so the checks below
+            # go on as for a step that reported success. Anything else cannot be told apart from a
+            # skipped step or a silent run, so the check fails and says why.
+            summary "- The jobs API listed no steps under the \`$REVIEW_JOB\` job of run $run_id after"\
+              "$steps_tries tries (#5783). Decided from that job's conclusion (\`$review_job\`) and"\
+              "$REVIEW_BOT's reviews on ${SHA:0:12}."
+            if [ "$review_job" != "success" ]; then
+              echo "::error title=Review job failed::The '$REVIEW_JOB' job of run $run_id concluded"\
+                "'$review_job', and the jobs API never listed its steps, so no review of this head can"\
+                "be confirmed. Read that run for the cause; do NOT read this PR as reviewed."
+              summary "### Claude review job concluded \`$review_job\`"
+              exit 1
+            fi
+            lookup "bot reviews on the head (steps fallback)" "repos/$R/pulls/$PR/reviews" --paginate \
+              --jq '.[] | select(.user.login == env.REVIEW_BOT) | select(.submitted_at != null)
+                    | select(.commit_id == env.SHA) | .id'
+            if [ -z "$LOOKUP_OUT" ]; then
+              echo "::error title=Review step not listed::The '$REVIEW_JOB' job of run $run_id"\
+                "succeeded, but after $steps_tries tries the jobs API still lists no steps under it,"\
+                "and $REVIEW_BOT submitted no review on $SHA. Without the '$REVIEW_STEP' step this"\
+                "guard cannot tell a skipped review from one that ran and posted nothing, so the"\
+                "check fails (#5783). Re-run this guard later; the jobs API fills the steps in late."
+              summary "### Guard could not read the review step, and $REVIEW_BOT left no review on this head"
+              exit 1
+            fi
+            echo "::notice title=Review step decided without the step::The jobs API never listed the"\
+              "steps of run $run_id, so the review counts as run: its '$REVIEW_JOB' job succeeded and"\
+              "$REVIEW_BOT submitted a review on $SHA (#5783)."
+            summary "- Decided by the fallback: \`$REVIEW_JOB\` succeeded and $REVIEW_BOT reviewed this head."
+            step=success
+          elif [ -n "$step" ]; then
+            listed_late=''
+            if [ "$steps_tries" -gt 0 ]; then
+              listed_late=" The jobs API listed the steps after $steps_tries extra tries (#5783)."
+            fi
+            summary "- Decided by the \`$REVIEW_STEP\` step: it reported \`$step\`.$listed_late"
+          fi
 
           if [ -z "$step" ]; then
             # A SKIPPED review job has no steps. That is a decided skip (a push after the follow-up,
             # or no secret) only when the run itself succeeded, which means the decide job did too:
             # a decide job that failed skips the review job as well, and must not pass as a skip.
-            lookup "review-run jobs (review job conclusion)" "repos/$R/actions/runs/$run_id/jobs" --paginate \
-              --jq '[.jobs[] | select(.name == env.REVIEW_JOB)] | .[0].conclusion // empty'
-            if [ "$LOOKUP_OUT" = "skipped" ] && [ "$conclusion" = "success" ]; then
+            if [ "$review_job" = "skipped" ] && [ "$conclusion" = "success" ]; then
               echo "::notice title=Review skipped on purpose::The '$REVIEW_JOB' job of run $run_id was"\
                 "skipped by the decide job (a push after the follow-up, or no CLAUDE_CODE_OAUTH_TOKEN"\
                 "or a fork PR). This push has no review to verify; the standing verdict is checked."
@@ -454,9 +526,13 @@ jobs:
                 "Add the re-review label to get a fresh full review (its verdict replaces this one)," \
                 "or dismiss the review if the findings are wrong."
             fi
+            # Reached only with the steps listed, a review job that skipped, or no job named
+            # $REVIEW_JOB at all ("-"): an empty list under a job that ran was waited out above.
             echo "::error title=Guard cannot find the review step::No step named"\
               "'$REVIEW_STEP' in run $run_id, and the run did not skip its review job on purpose"\
-              "(run conclusion: $conclusion). This guard reads that step to verify the review, so"\
+              "(run conclusion: $conclusion; the '$REVIEW_JOB' job: '$review_job', with $review_steps"\
+              "steps listed; '-' means no job has that name, and renaming the job in $WF blinds this"\
+              "guard the same way). This guard reads that step to verify the review, so"\
               "renaming it in $WF blinds the guard -- update REVIEW_STEP here to match. A run that"\
               "ended '$conclusion' with the review job skipped means the decide job failed: read it."
             summary "### Guard is blind: no step named \`$REVIEW_STEP\` in the review run"
