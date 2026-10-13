@@ -33,6 +33,7 @@ export const TEXT_FIELDS = [
   { key: "wait_type_pattern", label: "Wait type (substring)" },
   { key: "query_text_pattern", label: "Query text (substring)" },
   { key: "job_name_pattern", label: "Job name (substring)" },
+  { key: "client_app_pattern", label: "Client application (substring)" },
   { key: "reason", label: "Reason" },
 ];
 const EXPIRY = "expires_at_utc";

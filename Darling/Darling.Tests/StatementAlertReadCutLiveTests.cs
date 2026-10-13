@@ -61,7 +61,7 @@ VALUES ($1, $2, $3, $4, 71, 'UriDb', $5, 900000, 1, 1, 0, '0x01', 'CXPACKET'), (
             var read = await adapter.GetLongRunningQueriesAsync(
                 ServerId.ToString(System.Globalization.CultureInfo.InvariantCulture), thresholdMinutes: 5, maxResults: 5,
                 excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true, excludeMiscWaits: true,
-                excludeCdc: true, excludedDatabases: Array.Empty<string>(), LongRunningQueryExclusions.None, ct);
+                excludeCdc: true, excludedDatabases: Array.Empty<string>(), LongRunningQueryExclusions.None, cancellationToken: ct);
 
             var named = read.Sessions.Single(q => q.SessionId == 71).QueryText;
             Assert.DoesNotContain(StatementScrubCanary.UriSecretPartial, named, StringComparison.Ordinal);

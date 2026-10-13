@@ -388,7 +388,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 67;
+    internal const int CurrentSchemaVersion = 68;
 
     private readonly string _archivePath;
 
@@ -2900,6 +2900,18 @@ public partial class DuckDbInitializer : IDisposable
                 _logger?.LogWarning("Migration to v67 on total_size_mb encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
+
+        if (fromVersion < 68)
+        {
+            /* v68 (#5640): the Client Timeouts alert. Two additions, both additive. (1) The attention_events table is a collector
+                    table, generated from the catalog by the table statements that run right after the migrations, so a database
+                    older than v68 gets it there, and nothing in this step names it. (2) config_mute_rules.client_app_pattern,
+                    the client-application match of a mute rule, is a nullable VARCHAR added through the shared added-columns
+                    list, so a failed add is retried on the next start like every other entry. Nothing to backfill: a rule saved
+                    before the upgrade has no client-application match. */
+            _logger?.LogInformation("Running migration to v68: config_mute_rules.client_app_pattern (Client Timeouts alert)");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(68));
+        }
     }
 
     /// <summary>
@@ -2928,6 +2940,7 @@ public partial class DuckDbInitializer : IDisposable
         (65, "ag_replica_states", "group_id", "VARCHAR"),
         (65, "ag_database_replica_states", "group_id", "VARCHAR"),
         (66, "query_store_stats", "interval_end_time_utc", "TIMESTAMP"),
+        (68, "config_mute_rules", "client_app_pattern", "VARCHAR"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

@@ -60,6 +60,10 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
     public virtual IReadOnlyList<PgExtensionDependency> RequiredPgExtensions =>
         System.Array.Empty<PgExtensionDependency>();
 
+    /* Declared here as well as on the interface, the RequiredPgExtensions pair and for the same reason: a derived
+       definition cannot override the interface's default through the class type. See ICollectorSchemaInfo.StaysPlainTable. */
+    public virtual bool StaysPlainTable => false;
+
     public virtual int? PerItemRowCountWarnThreshold => null;
 
     public virtual int? PerItemTextByteBudget => null;

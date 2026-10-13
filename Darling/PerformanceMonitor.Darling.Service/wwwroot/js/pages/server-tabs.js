@@ -145,7 +145,8 @@ function sentinelDuration(key) {
    drawn under the title, before the body: the ranking selector of the Top Queries card. */
 function panelShell(title, subtitle, span = 2, read = null, dbScope = null, control = null) {
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
-  const panel = el("div", { class: "panel card" + (span === 2 ? " span-2" : "") }, [
+  /* #5701: `data-panel` (the read) and `data-title` are the hooks the web UI smoke check finds a panel by. */
+  const panel = el("div", { class: "panel card" + (span === 2 ? " span-2" : ""), "data-panel": read || title, "data-title": title }, [
     el("h3", {}, [title, subtitle ? el("span", { class: "panel-sub", text: " " + subtitle }) : null, dbScopeChip(read, dbScope)]),
     control,
     body,

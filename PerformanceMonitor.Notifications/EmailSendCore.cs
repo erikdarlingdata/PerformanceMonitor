@@ -151,7 +151,8 @@ public sealed class EmailSendCore
                WHETHER to send only; #3313's filter below decides WHICH incidents the email contains. */
             var window = TimeSpan.FromMinutes(_settings.EmailCooldownMinutes);
             var decision = await _cooldown.EvaluateAsync(
-                serverId, metricName, context?.Incidents, window);
+                serverId, metricName, context?.Incidents, window,
+                bypassCooldown: context?.EscalationBypassesCooldown == true /* #5641 */);
 
             /* #3430: the per-metric repeat ceiling, on the email channel's own budget and the cooldown's own
                instant. Consulted only once the cooldown has already said this alert sends — an alert inside

@@ -210,6 +210,40 @@ public sealed class CollectorEngineCapabilityTests
     }
 
     /// <summary>
+    /// The exemption that once held <c>attention</c> (#5640) ahead of its read is gone: <c>get_client_timeouts</c> asks the
+    /// capability question about it in both SKUs, so the prose table is reached by a shipped read.
+    /// </summary>
+    [Fact]
+    public void TheAttentionCapturePathEntry_IsReachedByAShippedRead()
+    {
+        Assert.Contains("attention", EngineCapabilityReadWiringTests.AllWiredCollectors());
+    }
+
+    /// <summary>
+    /// The census that would have caught the missing <c>attention</c> entry (#5640): every collector that reads a
+    /// ring-buffer extended-events session through the shred gate (<see cref="XeShredGate"/> in its state keys) is
+    /// a capture path an engine can lack, so a read of it needs a noun phrase to say what is not collected.
+    /// </summary>
+    [Fact]
+    public void EveryShredGatedXeCollector_HasACapturePathEntry()
+    {
+        var shredGated = CollectorCatalog.All
+            .Where(c => c.StateKeys.Contains(XeShredGate.StateKey))
+            .Select(c => c.Name)
+            .ToList();
+
+        /* A scan that found nothing passes for free. deadlocks, blocked_process_report and attention are the three today. */
+        Assert.True(shredGated.Count >= 3, $"only {shredGated.Count} shred-gated collectors found — the scan is broken");
+        foreach (var name in shredGated)
+        {
+            Assert.True(
+                CollectorEngineCapability.CapturePathByCollector.ContainsKey(name),
+                $"'{name}' reads an extended-events ring buffer through XeShredGate but has no CapturePathByCollector entry — " +
+                "a read of it on an engine without the capture would fall back to the generic phrasing");
+        }
+    }
+
+    /// <summary>
     /// The prose table cannot outlive the gates it describes: every key must be a real collector, and every
     /// key must be a collector its OWN <c>AppliesTo</c> gate shuts out somewhere — an entry for a collector
     /// nothing gates is prose no message can ever reach, which is how a stale explanation survives unnoticed.

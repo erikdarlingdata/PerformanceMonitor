@@ -32,6 +32,7 @@ public sealed class DropXeSessionsVerbTests
 {
     private const string Deadlock = "PerformanceMonitor_Deadlock";
     private const string Blocked = "PerformanceMonitor_BlockedProcess";
+    private const string Attention = "PerformanceMonitor_Attention";
     private const string LongQuery = "PerformanceMonitor_LongQueryCompletions";
 
     /// <summary>The words that tell an operator the service stops capturing until it reconnects: printed only by a run that dropped
@@ -513,6 +514,7 @@ public sealed class DropXeSessionsVerbTests
     [Theory]
     [InlineData(Deadlock)]
     [InlineData(Blocked)]
+    [InlineData(Attention)]
     [InlineData(LongQuery)]
     public void HelpNamesEverySessionTheVerbDrops(string name)
     {
@@ -523,7 +525,7 @@ public sealed class DropXeSessionsVerbTests
     [Fact]
     public void TheNamesReadAsOnePhrase() =>
         Assert.Equal(
-            "PerformanceMonitor_Deadlock, PerformanceMonitor_BlockedProcess and PerformanceMonitor_LongQueryCompletions",
+            "PerformanceMonitor_Deadlock, PerformanceMonitor_BlockedProcess, PerformanceMonitor_Attention and PerformanceMonitor_LongQueryCompletions",
             DarlingXeSessionCleanup.SessionNamesPhrase());
 
     [Fact]
@@ -625,23 +627,23 @@ public sealed class DropXeSessionsVerbTests
     }
 
     [Fact]
-    public void TheScriptDropsThreeNamesInTwoScopes_AndNothingElse()
+    public void TheScriptDropsTheFourNamesInTwoScopes_AndNothingElse()
     {
         var script = DarlingXeSessionCleanup.GuardedDropScript();
         var code = string.Join('\n', script.Split('\n').Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal)));
 
-        /* Six guarded drops, and the two per-install queries (one for each scope) that print a DROP statement as a column for
-           the operator to run (#4961). */
-        Assert.Equal(8, Regex.Matches(code, "DROP EVENT SESSION", RegexOptions.CultureInvariant).Count);
-        Assert.Equal(6, Regex.Matches(code, @"IF EXISTS", RegexOptions.CultureInvariant).Count);
+        /* Eight guarded drops (four names, two scopes; the client-timeout session joined in #5640), and the two per-install
+           queries (one for each scope) that print a DROP statement as a column for the operator to run (#4961). */
+        Assert.Equal(10, Regex.Matches(code, "DROP EVENT SESSION", RegexOptions.CultureInvariant).Count);
+        Assert.Equal(8, Regex.Matches(code, @"IF EXISTS", RegexOptions.CultureInvariant).Count);
         Assert.Equal(
-            new[] { Blocked, Deadlock, LongQuery },
+            new[] { Attention, Blocked, Deadlock, LongQuery },
             Regex.Matches(code, @"PerformanceMonitor_\w+").Select(m => m.Value).Distinct().OrderBy(n => n, StringComparer.Ordinal).ToArray());
         Assert.Equal(
-            new[] { Deadlock, Blocked, LongQuery },
+            new[] { Deadlock, Blocked, Attention, LongQuery },
             DarlingXeSessionCleanup.SessionNames.ToArray());
         Assert.Equal(
-            new[] { DeadlocksCollector.XeSessionName, BlockedProcessReportCollector.XeSessionName, LongQueryCompletionsCollector.LegacyXeSessionName },
+            new[] { DeadlocksCollector.XeSessionName, BlockedProcessReportCollector.XeSessionName, AlwaysOnXeSessions.AttentionXeSessionName, LongQueryCompletionsCollector.LegacyXeSessionName },
             DarlingXeSessionCleanup.SessionNames.ToArray());
         foreach (var other in new[] { "CREATE", "ALTER", "DELETE", "TRUNCATE", "EXEC", "sp_", "DROP DATABASE", "DROP TABLE", "ON ALL SERVER" })
         {
@@ -688,7 +690,7 @@ public sealed class DropXeSessionsVerbTests
         foreach (var sql in new[] { DarlingXeSessionCleanup.FindServerSessionsSql, DarlingXeSessionCleanup.FindDatabaseSessionsSql })
         {
             Assert.Equal(
-                new[] { Blocked, Deadlock, LongQuery },
+                new[] { Attention, Blocked, Deadlock, LongQuery },
                 Regex.Matches(sql, "N'([^']*)'").Select(m => m.Groups[1].Value).OrderBy(n => n, StringComparer.Ordinal).ToArray());
         }
     }

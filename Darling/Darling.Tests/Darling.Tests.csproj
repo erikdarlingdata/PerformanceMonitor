@@ -57,6 +57,8 @@
          brings its Lite.Tests namespace with it and uses only the BCL, xunit and PerformanceMonitor.Alerting,
          which both projects carry. -->
     <Compile Include="..\..\Lite.Tests\CrossSkuSurfaceSourceTests.cs" Link="Linked\CrossSkuSurfaceSourceTests.cs" />
+    <!-- #5641: the severity legend of both Settings windows, pinned to AlertSeverity.ForMetric. -->
+    <Compile Include="..\..\Lite.Tests\AlertLegendParityTests.cs" Link="Linked\AlertLegendParityTests.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -119,6 +121,9 @@
          thing that keeps CI's cluster shaped like the product's as the catalog grows. -->
     <None Include="..\..\.github\workflows\build.yml" Link="Fixtures\build.yml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\.github\workflows\nightly.yml" Link="Fixtures\nightly.yml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #5701: the UI-smoke workflow stands up a third copy of the same cluster (the same worker numbers), so it is
+         copied beside the test binary and parsed by the same formula check. -->
+    <None Include="..\..\.github\workflows\darling-ui-smoke.yml" Link="Fixtures\darling-ui-smoke.yml" CopyToOutputDirectory="PreserveNewest" />
     <!-- #5616: the shard scripts both workflows call. The cut, the chunking and the per-chunk runs moved out of the
          workflow steps into them, so the pins that read those steps (CiShardCommandLineBudgetTests,
          CiShardHangReportTests) read these copies. -->

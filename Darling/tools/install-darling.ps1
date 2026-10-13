@@ -846,6 +846,41 @@ function Get-DarlingConfiguredPathsUnder([string]$folder) {
     return [pscustomobject]@{ Lines = $found; Incomplete = $incomplete }
 }
 
+# The command that runs the service exe's own TLS key file verb by hand (#5700), with the darling.json it is to check. Kept
+# byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingTlsKeyFileVerbCommand([string]$exe, [string]$configPath) {
+    return "& `"$exe`" --harden-files --tls-key-files-only --config `"$configPath`""
+}
+
+# Runs the service exe's own TLS key file verb (#5700): `<exe> --harden-files --tls-key-files-only --config <configPath>`. The exe is
+# the one place that reads darling.json for the key files it names (a pfxPath or keyPath under the web and mcp tls blocks) and sets
+# their permissions; this script reads no key path and sets no key permission itself. $configPath is the darling.json in the
+# install folder, the one the service itself reads, so a DARLING_CONFIG in this session cannot point the verb at another file. The
+# verb prints one line per file, which this echoes. Every line that starts with two spaces is a status line (SECURED, or one of
+# REFUSED, SKIPPED, FAILED, MISSING, NOT CHANGED, STILL READABLE, LOCKED OUT, OTHER ACCESS, UNTRUSTED OWNER, and any status the verb gains
+# later), and every one but SECURED is written as a warning, even when the exit code is 0. The `Config file:` line, the
+# parenthesised DARLING_CONFIG note and the `No TLS key files` line stay plain output. The exit code is 0 when it ran, whatever
+# it reported per file, and nonzero only when it could not run.
+# Returns $null when it ran, otherwise the sentence to warn with, which carries the verb to run by hand. It never throws, so an
+# install or upgrade is never failed over it. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Invoke-DarlingTlsKeyFileHardening([string]$exe, [string]$configPath) {
+    $priorErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $reason = $null
+    try {
+        & $exe --harden-files --tls-key-files-only --config $configPath 2>&1 | ForEach-Object {
+            $line = "$_"
+            if ($line -match '^  ' -and $line -notmatch '^  (SECURED  |\()') { Write-Warning $line }
+            else { Write-Host $line }
+        }
+        if ($LASTEXITCODE -ne 0) { $reason = "exit code $LASTEXITCODE" }
+    }
+    catch { $reason = $_.Exception.Message }
+    finally { $ErrorActionPreference = $priorErrorAction }
+    if ($null -eq $reason) { return $null }
+    return "The service could not check the TLS key files darling.json names ($reason), so their permissions were not changed. Run from an elevated prompt: $(Get-DarlingTlsKeyFileVerbCommand $exe $configPath)"
+}
+
 # Where the new zip goes (#5627). Under C:\Program Files already, the folder to use is a different one.
 function Get-DarlingNewFolderPhrase([string]$oldFolder) {
     if (Test-PathIsAtOrUnder $oldFolder $env:ProgramFiles) { return 'a new, empty folder with a different name under C:\Program Files.' }
@@ -2333,6 +2368,13 @@ the service starts. Create the group from an elevated prompt, then re-run this s
   net localgroup "$operatorGroupName" /add
 "@
 }
+
+# The TLS private-key files darling.json names (#5700): the service exe's own verb sets their permissions, after the last tree lock
+# above so the lock cannot undo it and before the service starts. A key file in the install folder is limited to SYSTEM and
+# Administrators with Read for the service account; a key file outside the install folder is reported and left as it is. A verb
+# that could not run is a warning with the command to run by hand, and the install carries on.
+$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening $serviceExe $configPath
+if ($tlsKeyWarning) { Write-Host "WARNING: $tlsKeyWarning" -ForegroundColor Yellow }
 
 # -- 4b3. Create the store folder before the service does -------------------------------------------------
 # The store folder is the parent of postgres.dataDirectory: %ProgramData%\PerformanceMonitorDarling unless

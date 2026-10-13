@@ -55,6 +55,12 @@ darling:
   # either has to reach the suite.
   - '.github/workflows/darling-upgrade-shapes.yml'
   - '.github/scripts/darling-upgrade-shapes.ps1'
+  # #5701: the UI-smoke workflow stands up a third copy of the #1888 throwaway cluster, and Darling.Tests parses it
+  # (CiClusterWorkerSizingTests), so an edit to it has to reach the suite. tools/ui-smoke holds seed.sql, whose row
+  # counts UiSmokeSeedAppliesLiveTests pins against a live store: a seed-only edit would otherwise skip the PostgreSQL
+  # job and leave a stale count literal to surface as an unrelated red on the next Darling pull request.
+  - '.github/workflows/darling-ui-smoke.yml'
+  - 'tools/ui-smoke/**/!(*.md)'
 
 # Lite/** is deliberately ABSENT, though build.yml's own `darling` filter carries it. That entry
 # exists because Darling.Tests reads Lite source in its cross-app parity guards, and those guards run

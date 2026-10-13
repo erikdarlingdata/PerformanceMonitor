@@ -450,7 +450,10 @@ public static class DarlingRetention
                     continue;
                 }
 
-                if (timescaleAvailable)
+                /* #5640: a catalog entry that stays a plain table (the attention table) has no chunks to drop, so on
+                   a TimescaleDB store it takes the same time-sliced DELETE a plain-PostgreSQL store runs, straight
+                   away, instead of a drop_chunks call that fails and warns once per sweep before falling back. */
+                if (timescaleAvailable && !definition.StaysPlainTable)
                 {
                     var dropped = await DropChunksOneAsync(
                         postgres, definition.TargetTable, DropChunksSqlFor(definition, retentionDays),
@@ -974,6 +977,28 @@ public static class DarlingRetention
             {
                 tablesPurged++;
                 totalRowsDeleted += hourLedgerDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            /* collect.query_store_watermarks (#5684, V178): the per-batch watermark side table of the Query Store per-database
+               watermark read. NOT in CollectorCatalog.All (the collector runner's COPY transaction writes it), so the loop above skips it.
+               A FIXED two days (QueryStoreWatermarks.RetentionDays), NOT Query Store's retention: the read never looks back more than
+               three hours, so the table only has to clear that. A plain table and a plain DELETE served by its collection_time index;
+               about one row per database per collection, so one execution IS the whole purge and dispatches single-shot, like the hour
+               ledger above. The one-row coverage table beside it is never purged. Failure-isolated like every sibling. */
+            var queryStoreWatermarksDeleted = await PurgeOneAsync(
+                postgres, QueryStoreWatermarks.Table,
+                QueryStoreWatermarks.PruneSql,
+                utcNow.AddDays(-QueryStoreWatermarks.RetentionDays), logger, cancellationToken,
+                batchSize: SingleShotStatement,
+                pacer: walPacer);
+            if (queryStoreWatermarksDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += queryStoreWatermarksDeleted.Value;
             }
             else
             {

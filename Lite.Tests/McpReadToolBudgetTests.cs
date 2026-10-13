@@ -132,8 +132,21 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
     /// twin): its old ~30-field fallback shape used to keep every field on every row this fixture's mixed
     /// SUCCESS/ERROR collectors could not compact away, and now the rows that need a look carry the leaner
     /// partial_detail shape instead.</para>
+    ///
+    /// <para>#5640: get_collection_health is back on the list for a reason that is not a defaults bug. This
+    /// fixture seeds mixed SUCCESS/ERROR history for every collector so no row can compact, so each collector
+    /// costs a fixed ~512 B partial_detail row. origin/dev answered 32,572 B for 42 collectors, 196 B under the
+    /// 32,768 B budget; the new Client Timeouts "attention" collector is the 43rd row and makes it 33,084 B
+    /// (+512 B: the new row, plus a few bytes in sweep_pressure). The row is not needlessly long: it carries the same
+    /// fields as its 42 neighbours. A store whose collectors are mostly healthy still answers under 80% of the
+    /// budget, which CollectionHealthPayloadBudgetToolTests pins. The value is the size measured when the row
+    /// was added; the stale-exemption check fails if the tool ever fits the budget again. #5748 tracks keeping the
+    /// worst case under the budget as collectors are added.</para>
     /// </summary>
-    private static readonly Dictionary<string, int> ExemptOffenders = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, int> ExemptOffenders = new(StringComparer.Ordinal)
+    {
+        ["get_collection_health"] = 33_084,
+    };
 
     [Fact]
     public async Task EveryReadToolAnswersUnderTheDefaultBudget_UnlessListedAsA4198Offender()

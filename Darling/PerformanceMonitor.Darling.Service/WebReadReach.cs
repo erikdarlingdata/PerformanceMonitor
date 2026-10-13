@@ -146,6 +146,7 @@ internal static class WebReadReach
         ["get_blocked_process_xml"] = List("blocked_process_report"),
         ["get_blocking"] = List("blocked_process_report"),
         ["get_deadlocks"] = List("deadlocks"),
+        ["get_client_timeouts"] = List("attention"),
         ["get_deadlock_detail"] = List("deadlocks"),
         ["get_database_config_changes"] = List("database_config"),
         ["get_server_config_changes"] = List("server_config"),

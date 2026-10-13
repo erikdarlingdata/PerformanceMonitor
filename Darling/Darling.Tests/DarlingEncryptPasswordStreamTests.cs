@@ -145,13 +145,7 @@ public class DarlingEncryptPasswordStreamTests
         File.WriteAllText(path, script.ToString());
         try
         {
-            using var process = Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            });
+            using var process = Process.Start(WindowsPowerShellStartInfo.ForScript(path));
             Assert.NotNull(process);
 
             var stdoutTask = process!.StandardOutput.ReadToEndAsync();

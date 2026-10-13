@@ -806,6 +806,10 @@ public partial class RemoteCollectorService
             {
                 await EnsureDeadlockXeSessionAsync(server, engineEdition, cancellationToken);
             }
+            else if (collectorName == "attention")
+            {
+                await EnsureAttentionXeSessionAsync(server, engineEdition, cancellationToken);
+            }
 
             rowsCollected = collectorName switch
             {
@@ -833,6 +837,7 @@ public partial class RemoteCollectorService
                 "waiting_tasks" => await CollectWaitingTasksAsync(server, cancellationToken),
                 "dmv_blocking_snapshot" => await CollectDmvBlockingSnapshotAsync(server, cancellationToken),
                 "blocked_process_report" => await CollectBlockedProcessReportsAsync(server, cancellationToken),
+                "attention" => await CollectAttentionAsync(server, cancellationToken),
                 "long_query_completions" => await CollectLongQueryCompletionsAsync(server, cancellationToken),
                 "database_scoped_config" => await CollectDatabaseScopedConfigAsync(server, cancellationToken),
                 "query_store_health" => await CollectQueryStoreHealthAsync(server, cancellationToken),

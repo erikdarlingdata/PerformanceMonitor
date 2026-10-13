@@ -2323,7 +2323,7 @@ public sealed class DarlingWebHostService : BackgroundService
         context.Response.ContentType = "text/html; charset=utf-8";
         context.Response.Headers.CacheControl = "no-store";
         var html =
-            "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title></head>"
+            "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title>" + IconLinkHtml + "</head>"
             + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
             + $"<p>Signed in — continuing to <a id='go' style='color:#2eaef1' href='{linkTarget}' data-target='{linkTarget}'>the dashboard</a>…</p>"
             + LandingScriptBlock
@@ -2333,6 +2333,15 @@ public sealed class DarlingWebHostService : BackgroundService
         context.Response.Headers[DarlingWebSecurityHeaders.ContentSecurityPolicyHeader] = LandingPagePolicy;
         return context.Response.WriteAsync(html);
     }
+
+    /// <summary>
+    /// The tab-icon link every page this host writes by hand carries in its own head (#5701), the same <c>data:</c>
+    /// SVG as <c>wwwroot/index.html</c>. Without a link, a browser asks for <c>/favicon.ico</c> on its first load and
+    /// gets a 404, which the UI smoke check treats as a failed request. The default policy allows
+    /// <c>img-src data:</c>, so no page needs a file or a round trip for it.
+    /// </summary>
+    internal const string IconLinkHtml =
+        "<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231f6feb'/%3E%3Cpath d='M2 11l3-4 3 2 3-5 3 3' fill='none' stroke='white' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\" />";
 
     /// <summary>The landing page's only inline script: constant text that reads the sanitized return path from the
     /// link's data-target attribute, so its hash does not depend on the request.</summary>
@@ -2353,13 +2362,13 @@ public sealed class DarlingWebHostService : BackgroundService
 
     /// <summary>A minimal self-contained sign-in error page — same reasoning as the login form: it renders
     /// before auth, so it can reference nothing gated.</summary>
-    private static Task WriteSignInErrorAsync(HttpContext context, int statusCode, string message)
+    internal static Task WriteSignInErrorAsync(HttpContext context, int statusCode, string message)
     {
         context.Response.StatusCode = statusCode;
         context.Response.ContentType = "text/html; charset=utf-8";
         context.Response.Headers.CacheControl = "no-store";
         return context.Response.WriteAsync(
-            "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title></head>"
+            "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title>" + IconLinkHtml + "</head>"
             + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
             + $"<p>{System.Text.Encodings.Web.HtmlEncoder.Default.Encode(message)}</p>"
             + "<p><a style='color:#2eaef1' href='/'>Back to the login page</a></p>"
@@ -2405,7 +2414,8 @@ public sealed class DarlingWebHostService : BackgroundService
     /* The source file is checked out with CRLF, and a browser hashes the LF text, so the page is served in LF. */
     private static string ComposeLoginPage(bool oidcEnabled)
         => DarlingWebSecurityHeaders.NormalizeLineEndings(
-            LoginPageHtml.Replace("<!--SSO-->", oidcEnabled ? SsoFragmentHtml : string.Empty, StringComparison.Ordinal));
+            LoginPageHtml.Replace("<!--SSO-->", oidcEnabled ? SsoFragmentHtml : string.Empty, StringComparison.Ordinal)
+                .Replace("<!--ICON-->", IconLinkHtml, StringComparison.Ordinal));
 
     /// <summary>The login page, with the SSO affordance included exactly when OIDC is enabled — the token
     /// form is never removed (#2550 keeps the shared token as the scripted-caller/break-glass path).</summary>
@@ -2427,6 +2437,7 @@ public sealed class DarlingWebHostService : BackgroundService
 <meta name='referrer' content='same-origin'>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Darling Web</title>
+<!--ICON-->
 <style>
   /* Mirror of css/theme.css tokens — this page renders before auth, so it cannot link the gated stylesheet. */
   :root {

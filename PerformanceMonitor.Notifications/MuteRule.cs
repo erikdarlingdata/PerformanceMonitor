@@ -36,6 +36,11 @@ public class MuteRule
     public string? WaitTypePattern { get; set; }
     public string? JobNamePattern { get; set; }
 
+    /// <summary>Case-insensitive substring the alert's client application name must contain (#5640: mute
+    /// SSMS cancels while still alerting on an application's own timeouts). A rule with this pattern never
+    /// matches an alert that carries no client application, the same as every other text pattern.</summary>
+    public string? ClientAppPattern { get; set; }
+
     /// <summary>Whether the rule's bound has passed as of <paramref name="nowUtc"/>. The clock-taking form,
     /// so a caller that already holds an injected clock judges expiry on the SAME instant it judges
     /// everything else — a rule read as unexpired by one clock and expired by another is a rule whose
@@ -57,7 +62,8 @@ public class MuteRule
         DatabasePattern = DatabasePattern,
         QueryTextPattern = QueryTextPattern,
         WaitTypePattern = WaitTypePattern,
-        JobNamePattern = JobNamePattern
+        JobNamePattern = JobNamePattern,
+        ClientAppPattern = ClientAppPattern
     };
 
     public string ExpiresDisplay => ExpiresAtUtc.HasValue
@@ -86,6 +92,7 @@ public class MuteRule
         if (QueryTextPattern != null) parts.Add($"query≈{QueryTextPattern}");
         if (WaitTypePattern != null) parts.Add($"wait≈{WaitTypePattern}");
         if (JobNamePattern != null) parts.Add($"job≈{JobNamePattern}");
+        if (ClientAppPattern != null) parts.Add($"app≈{ClientAppPattern}");
         return parts;
     }
 
@@ -168,6 +175,11 @@ public class MuteRule
              !context.JobName.Contains(JobNamePattern, StringComparison.OrdinalIgnoreCase)))
             return false;
 
+        if (ClientAppPattern != null &&
+            (context.ClientAppName == null ||
+             !context.ClientAppName.Contains(ClientAppPattern, StringComparison.OrdinalIgnoreCase)))
+            return false;
+
         return true;
     }
 }
@@ -186,6 +198,10 @@ public class AlertMuteContext
     public string? QueryText { get; set; }
     public string? WaitType { get; set; }
     public string? JobName { get; set; }
+
+    /// <summary>The client application the alert is about (the attention events' client_app_name), or null
+    /// when the alert has none. A rule with a <see cref="MuteRule.ClientAppPattern"/> never matches a null here (#5640).</summary>
+    public string? ClientAppName { get; set; }
 
     /// <summary>The longest query-text pattern a mute dialog pre-fills from an alert.</summary>
     public const int SeedQueryTextMax = 200;
@@ -266,6 +282,13 @@ public class AlertMuteContext
             {
                 FlushQuery(ref queryBuilder);
                 JobName = trimmed.Substring("Job Name: ".Length).Trim();
+            }
+            else if (ClientAppName == null && trimmed.StartsWith("Client Application: ", StringComparison.Ordinal))
+            {
+                /* #5640: the Client Timeouts alert lists its client applications top first, and the FIRST line is the one a
+                   mute dialog pre-fills (the same first-wins rule as Database). */
+                FlushQuery(ref queryBuilder);
+                ClientAppName = trimmed.Substring("Client Application: ".Length).Trim();
             }
             else if (QueryText == null && queryBuilder == null && TryExtractQueryValue(trimmed, out var qv))
             {

@@ -117,6 +117,22 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return await Task.Run(() => _dataService.GetPoisonWaitAccumulationAsync(serverId, windowMinutes), cancellationToken);
     }
 
+    /// <summary>#5641: the Runnable Queue samples (one per collection), delegated like every other member so the engine stays free of DuckDB.</summary>
+    public async Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return await Task.Run(() => _dataService.GetRunnableQueueSamplesAsync(serverId, lookbackMinutes), cancellationToken);
+    }
+
+    /// <summary>#5640: the Client Timeouts window (runs, count rows, sample groups, top lists), delegated like every other member so the engine stays free of DuckDB.</summary>
+    public async Task<AttentionWindow> GetAttentionWindowAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return await Task.Run(() => _dataService.GetAttentionWindowAsync(serverId, lookbackMinutes), cancellationToken);
+    }
+
     public async Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         string serverKey,
         int thresholdMinutes,
@@ -128,6 +144,7 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         bool excludeCdc,
         IReadOnlyList<string> excludedDatabases,
         LongRunningQueryExclusions exclusions,
+        bool orderByCpu = false,
         CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
@@ -139,7 +156,7 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
            as its third CTE flag and counts what it removed; nothing is filtered on this side of the seam. */
         return await Task.Run(() => _dataService.GetLongRunningQueriesAsync(
             serverId, thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor,
-            excludeBackups, excludeMiscWaits, excludeCdc, exclusions, excludedDatabases), cancellationToken);
+            excludeBackups, excludeMiscWaits, excludeCdc, exclusions, excludedDatabases, orderByCpu), cancellationToken);
     }
 
     public async Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(

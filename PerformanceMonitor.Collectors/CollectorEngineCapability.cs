@@ -146,6 +146,7 @@ public static class CollectorEngineCapability
             ["session_stats"] = "the connection and session snapshot",
             ["blocked_process_report"] = "the blocked process report capture",
             ["deadlocks"] = "the captured deadlock graphs",
+            ["attention"] = "the client timeout and cancel capture",
             ["latch_stats"] = "the sys.dm_os_latch_stats totals",
             ["spinlock_stats"] = "the sys.dm_os_spinlock_stats totals",
             ["long_query_completions"] = "the long-running query completion capture",

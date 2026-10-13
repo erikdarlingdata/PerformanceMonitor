@@ -1268,6 +1268,35 @@ public sealed class McpPageContractTests
         return keys;
     }
 
+    /// <summary>
+    /// #5640: <c>get_client_timeouts</c> is a paged tool in the sense this file is about, with one difference worth pinning: its
+    /// <c>limit</c> pages only the SAMPLED events, never the count or the top lists, so a capped page can never be read as the
+    /// window's total. The cap is observed (one more event is fetched, the page is cut at <c>limit</c>, and
+    /// <c>sampled_events_truncated</c> says it was cut), the page count is named <c>*_returned</c> and never <c>total_*</c>, and the
+    /// description says samples are a subset.
+    /// </summary>
+    [Fact]
+    public void GetClientTimeouts_LimitPagesOnlyTheSamples_ObservesItsCap_AndNeverCallsThePageATotal()
+    {
+        var method = ToolMethod(typeof(DarlingMcpClientTimeoutTools), "get_client_timeouts");
+        Assert.Contains("subset", method.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
+        var limit = method.GetParameters().Single(p => p.Name == "limit");
+        Assert.Contains("Never cuts the count or top lists", limit.GetCustomAttribute<DescriptionAttribute>()!.Description, StringComparison.Ordinal);
+
+        var reader = Strip(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpClientTimeoutTools.cs"));
+        Assert.Contains("Samples(\"attention_events\", sampleLimit + 1)", reader, StringComparison.Ordinal);
+
+        var shared = Strip(ReadRepoFileLf("PerformanceMonitor.Alerting", "ClientTimeoutsRead.cs"));
+        Assert.Contains("sampled_events_truncated = samples.Count > limit", shared, StringComparison.Ordinal);
+        Assert.Contains("sampled_events_returned = Math.Min(samples.Count, limit)", shared, StringComparison.Ordinal);
+        Assert.Contains("samples.Take(limit)", shared, StringComparison.Ordinal);
+        Assert.False(TotalOfPageCount.IsMatch(shared), "a page count is published under a window's name");
+        Assert.False(TruncationInferred.IsMatch(shared), "truncation is inferred from the cap");
+
+        var lite = Strip(ReadRepoFileLf("Lite", "Services", "LocalDataService.Attention.cs"));
+        Assert.Contains("Samples(\"v_attention_events\", sampleLimit + 1)", lite, StringComparison.Ordinal);
+    }
+
     /// <summary>Comments removed, so a comment that NAMES the defect shape (as the fix's comments do) is not
     /// read as an instance of it. Line and block comments only; string literals stay, because the payload
     /// keys under test are not in strings.</summary>

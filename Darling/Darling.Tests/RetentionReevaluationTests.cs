@@ -581,7 +581,7 @@ public sealed class RetentionReevaluationLiveTests
 
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
             "the dev fixture is expected to have TimescaleDB installed");
-        Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
         /* #3893: collection_log too, as the worker's "collection_log hypertable" step does before its aggregate ensure
            (pinned in StoreObjectConvergenceTests). The off-grid collection-health aggregate is sourced from it. On a
            store whose migrations ran before CREATE EXTENSION (CI's bundled PostgreSQL), it is still a plain table here,

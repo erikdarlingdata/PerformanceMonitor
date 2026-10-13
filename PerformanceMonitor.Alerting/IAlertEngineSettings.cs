@@ -68,6 +68,18 @@ public interface IAlertEngineSettings
     bool BlockingEnabled { get; }
     bool DeadlockEnabled { get; }
     bool PoisonWaitEnabled { get; }
+
+    /// <summary>
+    /// The Runnable Queue alert (#5641): runnable tasks per visible online scheduler, averaged over
+    /// <see cref="RunnableQueueEvaluator.WindowMinutes"/> minutes. ON by default, like Poison Wait.
+    /// </summary>
+    bool RunnableQueueEnabled { get; }
+
+    /// <summary>
+    /// The Client Timeouts alert (#5640): client attentions (a client cancelled or timed out a query) per minute, from the
+    /// attention collector's <c>attention_events</c>. OFF by default: the bars are a guess until checked against captured data.
+    /// </summary>
+    bool ClientTimeoutsEnabled { get; }
     bool LongRunningQueryEnabled { get; }
     bool TempDbSpaceEnabled { get; }
     bool LowDiskEnabled { get; }
@@ -144,6 +156,32 @@ public interface IAlertEngineSettings
     /// knob's readers report it, the engine ignores it, and this comment is the record of why.
     /// </summary>
     int PoisonWaitThresholdMs { get; }
+
+    /// <summary>
+    /// Runnable Queue Warning bar (#5641): fire Warning when the window's average runnable tasks per scheduler is
+    /// at/above this. Shipped default <see cref="RunnableQueueEvaluator.DefaultWarningPerScheduler"/> (8). Both stores
+    /// apply <see cref="RunnableQueueEvaluator.ClampBars"/> on read: at least 1, and never above the Critical bar.
+    /// </summary>
+    int RunnableQueueWarningPerScheduler { get; }
+
+    /// <summary>
+    /// Runnable Queue Critical bar (#5641): Critical when the window's average is at/above this. Shipped default
+    /// <see cref="RunnableQueueEvaluator.DefaultCriticalPerScheduler"/> (16). Never below the Warning bar.
+    /// </summary>
+    int RunnableQueueCriticalPerScheduler { get; }
+
+    /// <summary>
+    /// Client Timeouts Warning bar (#5640): fire Warning when attentions (client cancels and timeouts) per minute, averaged over
+    /// the covered span, are at/above this. Shipped default <see cref="AttentionEvaluator.DefaultWarningPerMinute"/> (10).
+    /// Both stores apply <see cref="AttentionEvaluator.ClampBars"/> on read: at least 1, and never above the Critical bar.
+    /// </summary>
+    int ClientTimeoutsWarningPerMinute { get; }
+
+    /// <summary>
+    /// Client Timeouts Critical bar (#5640): Critical when the rate is at/above this. Shipped default
+    /// <see cref="AttentionEvaluator.DefaultCriticalPerMinute"/> (60). Never below the Warning bar.
+    /// </summary>
+    int ClientTimeoutsCriticalPerMinute { get; }
 
     /// <summary>Fire when a query's elapsed time is at/above this many minutes.</summary>
     int LongRunningQueryThresholdMinutes { get; }

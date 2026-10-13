@@ -162,20 +162,13 @@ WHERE ses.name = @session_name;", connection))
             {
                 if (result is int isRunning && isRunning == 0)
                 {
-                    /* Session exists but is stopped - start it */
-                    try
-                    {
-                        using var startCmd = new SqlCommand(
-                            $"ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", connection);
-                        startCmd.CommandTimeout = CommandTimeoutSeconds;
-                        await startCmd.ExecuteNonQueryAsync(cancellationToken);
-                        AppLogger.Info("XeSession", $"[{server.DisplayName}] Started blocked process XE session");
-                    }
-                    catch (SqlException ex)
-                    {
-                        AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to start blocked process XE session: {ex.Message}");
-                        throw;
-                    }
+                    /* Session exists but is stopped - start it. A failure is not logged here: it propagates to the ensure's catch, which applies the #4964
+                       log-once rule (Warn or Error on the first failing cycle, Debug after it). A line here would repeat at full level every cycle (#5640). */
+                    using var startCmd = new SqlCommand(
+                        $"ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", connection);
+                    startCmd.CommandTimeout = CommandTimeoutSeconds;
+                    await startCmd.ExecuteNonQueryAsync(cancellationToken);
+                    AppLogger.Info("XeSession", $"[{server.DisplayName}] Started blocked process XE session");
                 }
                 else
                 {
@@ -186,9 +179,8 @@ WHERE ses.name = @session_name;", connection))
         }
 
         /* Create and start server-scoped session with ring_buffer */
-        try
-        {
-            using var createCmd = new SqlCommand($@"
+        /* No catch here: a failure propagates to the ensure's catch, which logs it once at Warn or Error and then at Debug (#4964). */
+        using var createCmd = new SqlCommand($@"
 CREATE EVENT SESSION [{BlockedProcessXeSessionName}]
 ON SERVER
 ADD EVENT sqlserver.blocked_process_report
@@ -203,25 +195,9 @@ WITH
 );
 
 ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", connection);
-            createCmd.CommandTimeout = CommandTimeoutSeconds;
-            await createCmd.ExecuteNonQueryAsync(cancellationToken);
-            AppLogger.Info("XeSession", $"[{server.DisplayName}] Created and started blocked process XE session");
-        }
-        catch (SqlException ex)
-        {
-            /* Warn rather than Error when the server simply said no: a denied XE session is a least-privilege
-               posture (#1823), classified as PERMISSIONS upstream and retried no further this session.
-               Genuine failures still log at Error. */
-            if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
-            {
-                AppLogger.Warn("XeSession", $"[{server.DisplayName}] Failed to create blocked process XE session: {ex.Message}");
-            }
-            else
-            {
-                AppLogger.Error("XeSession", $"[{server.DisplayName}] Failed to create blocked process XE session: {ex.Message}");
-            }
-            throw;
-        }
+        createCmd.CommandTimeout = CommandTimeoutSeconds;
+        await createCmd.ExecuteNonQueryAsync(cancellationToken);
+        AppLogger.Info("XeSession", $"[{server.DisplayName}] Created and started blocked process XE session");
     }
 
     /// <summary>

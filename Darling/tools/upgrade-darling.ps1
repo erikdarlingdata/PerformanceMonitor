@@ -898,6 +898,147 @@ function Get-DarlingConfiguredPathsUnder([string]$folder) {
     return [pscustomobject]@{ Lines = $found; Incomplete = $incomplete }
 }
 
+# The command that runs the service exe's own TLS key file verb by hand (#5700), with the darling.json it is to check. Kept
+# byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingTlsKeyFileVerbCommand([string]$exe, [string]$configPath) {
+    return "& `"$exe`" --harden-files --tls-key-files-only --config `"$configPath`""
+}
+
+# Runs the service exe's own TLS key file verb (#5700): `<exe> --harden-files --tls-key-files-only --config <configPath>`. The exe is
+# the one place that reads darling.json for the key files it names (a pfxPath or keyPath under the web and mcp tls blocks) and sets
+# their permissions; this script reads no key path and sets no key permission itself. $configPath is the darling.json in the
+# install folder, the one the service itself reads, so a DARLING_CONFIG in this session cannot point the verb at another file. The
+# verb prints one line per file, which this echoes. Every line that starts with two spaces is a status line (SECURED, or one of
+# REFUSED, SKIPPED, FAILED, MISSING, NOT CHANGED, STILL READABLE, LOCKED OUT, OTHER ACCESS, UNTRUSTED OWNER, and any status the verb gains
+# later), and every one but SECURED is written as a warning, even when the exit code is 0. The `Config file:` line, the
+# parenthesised DARLING_CONFIG note and the `No TLS key files` line stay plain output. The exit code is 0 when it ran, whatever
+# it reported per file, and nonzero only when it could not run.
+# Returns $null when it ran, otherwise the sentence to warn with, which carries the verb to run by hand. It never throws, so an
+# install or upgrade is never failed over it. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Invoke-DarlingTlsKeyFileHardening([string]$exe, [string]$configPath) {
+    $priorErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $reason = $null
+    try {
+        & $exe --harden-files --tls-key-files-only --config $configPath 2>&1 | ForEach-Object {
+            $line = "$_"
+            if ($line -match '^  ' -and $line -notmatch '^  (SECURED  |\()') { Write-Warning $line }
+            else { Write-Host $line }
+        }
+        if ($LASTEXITCODE -ne 0) { $reason = "exit code $LASTEXITCODE" }
+    }
+    catch { $reason = $_.Exception.Message }
+    finally { $ErrorActionPreference = $priorErrorAction }
+    if ($null -eq $reason) { return $null }
+    return "The service could not check the TLS key files darling.json names ($reason), so their permissions were not changed. Run from an elevated prompt: $(Get-DarlingTlsKeyFileVerbCommand $exe $configPath)"
+}
+
+# The upgrade's TLS key file step (#5700). The verb runs the installed exe elevated, so it runs only over a tree the upgrade has
+# locked: not when a lock reported paths ordinary users can still change, not when the lock was skipped, and not under
+# -AcceptWritableExtraction (the tree may already hold a swapped binary). Otherwise it returns the warning, which names the verb and
+# the command to run once the tree is locked. Returns $null when the verb ran, like Invoke-DarlingTlsKeyFileHardening.
+function Get-UpgradeTlsKeyFileWarning([string]$exe, [string]$configPath) {
+    $why = $null
+    if ($AcceptWritableExtraction) { $why = 'this upgrade was started with -AcceptWritableExtraction, so the install folder may already hold a changed binary' }
+    elseif ($installTreeLockProblem) { $why = $installTreeLockProblem }
+    if ($why) {
+        return "The TLS key files darling.json names were not checked and their permissions were not changed, because the verb runs the installed exe elevated and $why. Once the install folder is locked, run from an elevated prompt: $(Get-DarlingTlsKeyFileVerbCommand $exe $configPath)"
+    }
+    return Invoke-DarlingTlsKeyFileHardening $exe $configPath
+}
+
+# Gives a rollback backup folder a DACL of its own (#5700): inheritance off, SYSTEM and Administrators with full control that the
+# files in it inherit, and nobody else. On a folder made for a new backup it is applied BEFORE the files are copied in, so every
+# copy is born with only that. On an older retained backup, -ResetChildren also clears every explicit entry on the files in it
+# so they inherit the folder's. A backup folder that is a link is not followed. A retained backup is walked first, and one that
+# holds a link anywhere in it, or a file with more than one name, is not changed at all and is named, because setting a folder's
+# DACL also rewrites the inherited entries of a file's other name. Each folder and file is read back, and one that still grants
+# anyone else is a problem. Returns $null when all of it held, otherwise one sentence to warn with. It never throws; the caller
+# decides what a problem means (the upgrade stops on a new backup folder it could not restrict, and warns on a retained one).
+function Protect-DarlingRollbackBackupFolder([string]$path, [switch]$ResetChildren) {
+    $ErrorActionPreference = 'Continue'
+    $fix = "icacls `"$path`" /inheritance:r /grant:r `"*S-1-5-18:(OI)(CI)F`" `"*S-1-5-32-544:(OI)(CI)F`" /T /L"
+    try {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ((-not $item.PSIsContainer) -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            return "The rollback backup '$path' is a link, not a folder, so its permissions were not changed. Remove the link, or the backup it points to is not covered."
+        }
+        $wk = [System.Security.Principal.WellKnownSidType]
+        $systemSid = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
+        $adminsSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
+        $notOnlyAdmins = {
+            param($target)
+            @($target.Access | Where-Object {
+                $aceSid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+                -not ($aceSid.Equals($systemSid) -or $aceSid.Equals($adminsSid))
+            })
+        }
+        # A retained backup is walked before anything in it is changed (links are listed, never entered). Setting the folder's DACL
+        # pushes the inherited entries onto every child, and onto the OTHER name of a file with more than one name, so a backup
+        # holding either is left exactly as it is and the warning says what to run.
+        if ($ResetChildren) {
+            $blocked = @()
+            $pending = New-Object System.Collections.Generic.Stack[string]
+            $pending.Push($path)
+            while ($pending.Count -gt 0) {
+                foreach ($entry in @(Get-ChildItem -LiteralPath $pending.Pop() -Force -ErrorAction Stop)) {
+                    if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $blocked += [pscustomobject]@{ Path = $entry.FullName; Name = $entry.Name; Link = $true } }
+                    elseif ($entry.PSIsContainer) { $pending.Push($entry.FullName) }
+                    elseif ((Get-DarlingFileNameCount $entry.FullName) -ne 1) { $blocked += [pscustomobject]@{ Path = $entry.FullName; Name = $entry.Name; Link = $false } }
+                }
+            }
+            if ($blocked.Count -gt 0) {
+                $first = $blocked[0]
+                $more = if ($blocked.Count -gt 1) { " (and $($blocked.Count - 1) more like it)" } else { '' }
+                if ($first.Link) {
+                    $why = "'$($first.Path)' is a link$more, and setting the folder's permissions could reach what it points to. To see where it points: fsutil reparsepoint query `"$($first.Path)`". Delete the link, then run this script again, or restrict the backup by hand: $fix"
+                }
+                else {
+                    $why = "'$($first.Path)' has more than one name (or its names could not be counted)$more, and setting the folder's permissions would also change the other name's permissions. To list the other names: fsutil hardlink list `"$($first.Path)`". Delete this name if it is not part of the backup (that leaves the other name as it is), then run this script again, or restrict the backup by hand: $fix"
+                }
+                return "The rollback backup '$path' was not changed, so it may still be readable by accounts other than SYSTEM and Administrators: $why"
+            }
+        }
+        # The files are reset to inherit BEFORE the folder's DACL is set, so the folder's protected DACL then reaches them as it is set.
+        $reset = @()
+        $left = @()
+        if ($ResetChildren) {
+            foreach ($child in @(Get-ChildItem -LiteralPath $path -File -Force -ErrorAction Stop)) {
+                if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or (Get-DarlingFileNameCount $child.FullName) -ne 1) {
+                    $left += $child.Name
+                    continue
+                }
+                # icacls /reset /L: the file's own entries are dropped and it inherits again, on the file itself and never on a link's target. Its exit code is judged, with the error
+                # preference local to this function, because Windows PowerShell 5.1 turns redirected native stderr into a stop.
+                & icacls.exe $child.FullName /reset /L 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { $left += $child.Name; continue }
+                $reset += $child
+            }
+        }
+        $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+        $acl = New-Object System.Security.AccessControl.DirectorySecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @($systemSid, $adminsSid)) {
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', $inherit, 'None', 'Allow')))
+        }
+        Set-Acl -LiteralPath $path -AclObject $acl -ErrorAction Stop
+        $after = (New-Object System.IO.DirectoryInfo($path)).GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        if ((-not $after.AreAccessRulesProtected) -or (& $notOnlyAdmins $after).Count -gt 0) {
+            return "The rollback backup '$path' still grants access to accounts other than SYSTEM and Administrators after its permissions were set. Run from an elevated prompt: $fix"
+        }
+        foreach ($file in $reset) {
+            if ((& $notOnlyAdmins ((New-Object System.IO.FileInfo($file.FullName)).GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access))).Count -gt 0) { $left += $file.Name }
+        }
+        if ($left.Count -gt 0) {
+            return "In the rollback backup '$path', $($left -join ', ') could not be limited to SYSTEM and Administrators (a link, a file with more than one name, or a permission that would not change). Restrict each by hand, or delete the backup."
+        }
+        return $null
+    }
+    catch {
+        return "The rollback backup '$path' could not be limited to SYSTEM and Administrators ($($_.Exception.Message)). Run from an elevated prompt: $fix"
+    }
+}
+
 # Where the new zip goes (#5627). Under C:\Program Files already, the folder to use is a different one.
 function Get-DarlingNewFolderPhrase([string]$oldFolder) {
     if (Test-PathIsAtOrUnder $oldFolder $env:ProgramFiles) { return 'a new, empty folder with a different name under C:\Program Files.' }
@@ -3273,8 +3414,12 @@ $logonAccount = Get-DarlingServiceLogonName $serviceName
 if ($logonAccount -eq 'LocalSystem') { $logonAccount = 'NT AUTHORITY\SYSTEM' }
 elseif ($logonAccount) { $logonAccount = $logonAccount -replace '^\.\\', "$env:COMPUTERNAME\" }
 
+# Set by Invoke-UpgradeTreeLock the first time a lock is skipped or leaves paths open; the TLS key file step reads it.
+$installTreeLockProblem = $null
+
 function Invoke-UpgradeTreeLock([string]$when) {
     if (-not $logonAccount) {
+        if (-not $script:installTreeLockProblem) { $script:installTreeLockProblem = "the install folder was not locked (the account '$serviceName' logs on as could not be read)" }
         Warn "Could not read which account '$serviceName' logs on as (sc.exe qc `"$serviceName`"), so the install folder was NOT locked $when rather than locked around a guess that could strip that account's access. Fix the lookup and re-run, or run install-darling.ps1."
         return
     }
@@ -3289,6 +3434,7 @@ function Invoke-UpgradeTreeLock([string]$when) {
         Good "Install folder locked ${when}: only SYSTEM and Administrators can change what runs from $InstallRoot; $logonAccount can write only its runtime folders."
         return
     }
+    if (-not $script:installTreeLockProblem) { $script:installTreeLockProblem = "ordinary users can still change $($open.Count) path(s) in the install folder" }
     Warn ("Ordinary users can still change {0} path(s) in the install folder, and the service runs from there as {1}, so anyone who can replace a binary can run code as that account. First: {2}. Fix from an elevated prompt with: icacls `"{3}`" /inheritance:d, then icacls `"{3}`" /remove:g *S-1-5-11 *S-1-5-32-545 *S-1-1-0 *S-1-5-4, then icacls `"{3}`" /grant `"*S-1-5-32-545:(OI)(CI)RX`" /grant:r `"{1}:(OI)(CI)RX`", then run this script again (it makes Administrators the owner of each path itself, and lists a file with more than one name). A path marked as a hard link (a file with more than one name): delete this name if it is not part of the install, or extract the file again if it is, and do not run icacls on it. Any other path listed as owned by an account, or below the folder, needs its own fix; these two commands are only for paths not marked as a hard link: icacls `"<path>`" /setowner *S-1-5-32-544 /L, then icacls `"<path>`" /reset /C. Remove any junction or link it names." -f $open.Count, $logonAccount, (($open | Select-Object -First 5) -join ', '), $InstallRoot)
 }
 
@@ -3305,6 +3451,15 @@ else {
     Note "Backing up the install root's files to $backupPath ..."
     try {
         New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
+        # The folder is restricted to SYSTEM and Administrators BEFORE anything is copied into it (#5700), so every copy is born
+        # with only that DACL instead of the install root's inherited one, and no file in it is ever readable by another account.
+        # A folder that could not be restricted is never copied into: the upgrade stops here, with nothing copied or overwritten.
+        $backupProblem = Protect-DarlingRollbackBackupFolder $backupPath
+        if ($backupProblem) {
+            # The empty folder is removed too, so a re-run does not take it for a backup that was taken.
+            try { [System.IO.Directory]::Delete($backupPath) } catch { $null = $_ }
+            Fail "The new rollback backup folder could not be restricted to SYSTEM and Administrators, so no file was copied into it. The service is STOPPED and NOTHING has been copied or overwritten, so the install is intact: start it with 'Start-Service ''$serviceName''', or fix the cause and re-run from an elevated prompt. Cause: $backupProblem"
+        }
         # FILES only, not subdirectories - the shape the documented procedure has always used, and the
         # reason a backup is ~120 MB rather than ~1 GB. pg-runtime is the bundled PostgreSQL (extracted on
         # first run, and hundreds of megabytes of it), and viewer\ / wwwroot\ / runtimes\ all come back
@@ -3388,6 +3543,14 @@ if ($prunable.Count -gt 0) {
     Note ("Pruning {0} rollback backup(s) past the newest {1}:" -f $prunable.Count, $KeepRollbacks)
     $result = Remove-DarlingRollbackBackups $prunable
     Good ("Reclaimed {0}." -f (Format-DarlingBytes $result.Reclaimed))
+}
+
+# Every rollback backup that is kept is limited to SYSTEM and Administrators (#5700): a backup taken by an earlier run copied the
+# install root's files under the root's inherited DACL. The folder gets the protected DACL and the files in it are reset to
+# inherit it. A problem is a warning and the upgrade carries on.
+foreach ($retained in @(Get-DarlingRollbackBackups $InstallRoot)) {
+    $retainedProblem = Protect-DarlingRollbackBackupFolder $retained.FullName -ResetChildren
+    if ($retainedProblem) { Warn $retainedProblem }
 }
 
 # THIS COPY IS AN OVERLAY, not a replacement. Expand-Archive -Force (and the Copy-Item -Recurse -Force
@@ -3587,6 +3750,15 @@ elseif ($onDomainController) {
 else {
     Warn "Could not create the local group '$operatorGroupName': $operatorGroupProblem The service will start, but darling.json and the store's admin and viewer credentials stay readable by SYSTEM, Administrators and the service account only, so the Viewer and the CLI cannot read them without elevation. Create the group from an elevated prompt (net localgroup `"$operatorGroupName`" /add), add the people who run the Viewer or the CLI, then restart the service so it grants the group."
 }
+
+# ============================ the TLS key files (#5700) ============================
+#
+# The TLS private-key files darling.json names (a pfxPath or keyPath): the service exe's own verb sets their permissions, after
+# the last tree lock above so the lock cannot undo it and before the service starts. A key file in the install folder is limited
+# to SYSTEM and Administrators with Read for the service account; a key file outside the install folder is reported and left as
+# it is. A verb that could not run is a warning with the command to run by hand, and the service still starts.
+$tlsKeyWarning = Get-UpgradeTlsKeyFileWarning (Join-Path $InstallRoot $serviceExeName) $configPath
+if ($tlsKeyWarning) { Warn $tlsKeyWarning }
 
 # ============================ the store folder ============================
 #

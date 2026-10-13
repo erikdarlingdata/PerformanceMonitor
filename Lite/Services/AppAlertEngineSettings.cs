@@ -37,6 +37,8 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public bool BlockingEnabled => App.AlertBlockingEnabled;
     public bool DeadlockEnabled => App.AlertDeadlockEnabled;
     public bool PoisonWaitEnabled => App.AlertPoisonWaitEnabled;
+    public bool RunnableQueueEnabled => App.AlertRunnableQueueEnabled;
+    public bool ClientTimeoutsEnabled => App.AlertClientTimeoutsEnabled;
     public bool LongRunningQueryEnabled => App.AlertLongRunningQueryEnabled;
     public bool TempDbSpaceEnabled => App.AlertTempDbSpaceEnabled;
     public bool LowDiskEnabled => App.AlertLowDiskEnabled;
@@ -65,6 +67,16 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public DeadlockRateThresholds DeadlockRateThresholds => DeadlockRateThresholds.Default;
     /* #3539 A4: pass-through of a knob the engine no longer reads — see the interface member's doc. */
     public int PoisonWaitThresholdMs => App.AlertPoisonWaitThresholdMs;
+    /* #5641: the pair as the engine reads it - Warning at least 1, Critical never below Warning. */
+    public int RunnableQueueWarningPerScheduler =>
+        RunnableQueueEvaluator.ClampBars(App.AlertRunnableQueueWarningPerScheduler, App.AlertRunnableQueueCriticalPerScheduler).Warning;
+    public int RunnableQueueCriticalPerScheduler =>
+        RunnableQueueEvaluator.ClampBars(App.AlertRunnableQueueWarningPerScheduler, App.AlertRunnableQueueCriticalPerScheduler).Critical;
+    /* #5640: the Client Timeouts pair as the engine reads it - Warning at least 1, Critical never below Warning. */
+    public int ClientTimeoutsWarningPerMinute =>
+        AttentionEvaluator.ClampBars(App.AlertClientTimeoutsWarningPerMinute, App.AlertClientTimeoutsCriticalPerMinute).Warning;
+    public int ClientTimeoutsCriticalPerMinute =>
+        AttentionEvaluator.ClampBars(App.AlertClientTimeoutsWarningPerMinute, App.AlertClientTimeoutsCriticalPerMinute).Critical;
     public int LongRunningQueryThresholdMinutes => App.AlertLongRunningQueryThresholdMinutes;
 
     /* The six long-running-query read knobs — Lite exposes all six as real settings. */

@@ -537,6 +537,12 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.PolicyJobFailingMetric,
             /* #3783: the store's TOAST slack and checkpointer pressure, both fired through the constant. */
             DarlingSelfAlertEvaluator.ToastSlackMetric, DarlingSelfAlertEvaluator.CheckpointerPressureMetric,
+            /* #5641: the Runnable Queue alert fires from AlertEngine.CheckRunnableQueueAsync through
+               RunnableQueueEvaluator.MetricName (a constant, so the AlertOutcome literal scan below cannot see it),
+               listed here like the engine's other constant-fired names. */
+            RunnableQueueEvaluator.MetricName,
+            /* #5640: the Client Timeouts alert fires from AlertEngine.CheckAttentionAsync through AttentionEvaluator.MetricName. */
+            AttentionEvaluator.MetricName,
         };
 
         /* The literals: the third argument of every `new AlertOutcome(` in the shared engine and the worker

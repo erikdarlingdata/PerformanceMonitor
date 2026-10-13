@@ -40,7 +40,9 @@ public sealed class QueryStoreAzureLoopWatermarkLiveTests
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static long Reads(CommandCountingLoggerFactory f) => f.Provider.CountContaining("MAX(last_execution_time)");
+    /* #5684: the seed read is counted by the marker it carries. The seed text no longer holds MAX(last_execution_time);
+       the plain bounded oracle read still does, and must not be counted here. */
+    private static long Reads(CommandCountingLoggerFactory f) => f.Provider.CountContaining("pm:qs-watermark-seed");
 
     private static ServerRuntime MakeServer() => new()
     {
@@ -128,6 +130,44 @@ public sealed class QueryStoreAzureLoopWatermarkLiveTests
 
         /* Not every database fails, so the run itself must not throw. */
         await rig.Runner.RunAsync(QueryStoreCollector.Instance, MakeServer(), token);
+    }
+
+    /// <summary>
+    /// #5707 (review round 1), through the real Azure loop: after a 2-hour collection gap the pair's raw rows are the only evidence of
+    /// where collection stopped, and the pair has NO side row (a downgrade to a build that did not write them, say). The seed read
+    /// must answer with the raw maximum, because only a non-null watermark that the catch-up clamp moves records the backfill hole;
+    /// an empty answer would start the cutoff at now-60min and record nothing, losing the rows between for good. An idle sibling
+    /// database records no hole.
+    /// </summary>
+    [Fact]
+    public async Task ADatabaseWithRawRowsButNoSideRow_StillRecordsItsCatchupHole()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #5707 Azure loop pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+
+        var gapStart = DateTime.UtcNow.AddHours(-2);
+        await using (var connection = new NpgsqlConnection(rig.Scratch.ConnectionString))
+        {
+            await connection.OpenAsync(token);
+            await using var seed = new NpgsqlCommand(
+                "INSERT INTO collect.query_store_stats (collection_id, server_id, server_name, collection_time, database_name, query_id, plan_id, last_execution_time)"
+                + " VALUES (1, @s, 'h', @t, 'alpha', 1, 2, @t);"
+                + " UPDATE collect.query_store_watermarks_coverage SET covered_since = @c;"
+                + " DELETE FROM collect.query_store_watermarks;",
+                connection);
+            seed.Parameters.AddWithValue("s", LiveServerId);
+            seed.Parameters.AddWithValue("t", DateTime.SpecifyKind(gapStart, DateTimeKind.Unspecified));
+            seed.Parameters.AddWithValue("c", DateTime.SpecifyKind(gapStart.AddHours(-3), DateTimeKind.Unspecified));
+            await seed.ExecuteNonQueryAsync(token);
+        }
+
+        await RunAsync(rig, writeFaultsOn: null, readFaultsOn: null, token);
+
+        var state = await rig.Runner.GetCollectorStateAsync(LiveServerId, QueryStoreBackfillState.StateCollectorName, token);
+        Assert.Contains(QueryStoreBackfillState.HoleKeyPrefix + Alpha, state.Keys);
+        Assert.DoesNotContain(QueryStoreBackfillState.HoleKeyPrefix + Zeta, state.Keys);
+        Assert.True(rig.Runner.QueryStoreWatermarkSeedReader.EmptySideReads >= 2);
     }
 
     [Fact]

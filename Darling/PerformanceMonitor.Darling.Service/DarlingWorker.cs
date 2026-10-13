@@ -1824,6 +1824,18 @@ LIMIT 1";
            Debug, until a run of that collector succeeds. In memory, so a restart warns again. */
         public XeSessionMissingWarnings XeSessionMissingWarnings { get; } = new();
 
+        /* #5640 (H2): the message of the last ensure of the client-timeout session that the login was refused (no ALTER ANY EVENT
+           SESSION, or no CREATE ANY DATABASE EVENT SESSION on Azure SQL Database), or null. While it is set the attention run records
+           PERMISSIONS with it instead of reading a session that cannot exist, which would record SESSION_MISSING and fire a Capture
+           Down for a least-privilege posture. Replaced by every ensure (at connect, then hourly), so a grant clears it within the
+           hour or at the next reconnect. Written on the pool thread only (INV-2), like the long-query fault. */
+        public string? AttentionXePermissionFault { get; set; }
+
+        /* #5640 (L5): whether the last ensure ran with the attention collector enabled. An ensure that skipped the client-timeout
+           session because the collector was off leaves this false, so turning the collector on makes the next sweep ensure it at
+           once and not after the hour. Reset on every (re)connect. */
+        public bool AttentionXeEnsuredWhileEnabled { get; set; }
+
         /* #4961: the long-query latch and its hourly create clock, cleared when a collector run sees the instance's
            identity move (ForgetLongQueryTraceLatchOnRestart), so the next sweep runs the whole reconcile. Not the fault,
            the partial note or the retry count: the reconcile that follows replaces them. */
@@ -1848,20 +1860,30 @@ LIMIT 1";
     /// Extended Events and is left alone.
     /// </summary>
     internal static async Task EnsureAlwaysOnXeSessionsAsync(
-        ServerLoopState server, DarlingCollectorRunner runner, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
+        ServerLoopState server, DarlingCollectorRunner runner, DateTime utcNow, ILogger logger, CancellationToken cancellationToken,
+        bool attentionEnabled = true)
     {
         /* #4961: a retired server's ensure would create the sessions its removal has just dropped. */
         if (server.Runtime is null
             || server.Retired
-            || server.Runtime.Target.Engine != CollectorTargetEngine.SqlServer
-            || !AlwaysOnXeSessions.EnsureIsDue(server.XeSessionsEnsuredAtUtc, utcNow))
+            || server.Runtime.Target.Engine != CollectorTargetEngine.SqlServer)
+        {
+            return;
+        }
+
+        /* #5640 (L5): the client-timeout session follows its collector's switch. A collector that was just turned on does not wait
+           out the hour for its session. */
+        var attentionJustEnabled = attentionEnabled && !server.AttentionXeEnsuredWhileEnabled;
+        if (!attentionJustEnabled && !AlwaysOnXeSessions.EnsureIsDue(server.XeSessionsEnsuredAtUtc, utcNow))
         {
             return;
         }
 
         /* Stamped before the ensure, so a server that refuses it is asked once an hour and not on every sweep. */
         server.XeSessionsEnsuredAtUtc = utcNow;
-        await DarlingXeSessions.EnsureAllAsync(server.Runtime, runner, logger, cancellationToken);
+        server.AttentionXeEnsuredWhileEnabled = attentionEnabled;
+        var attentionFault = await DarlingXeSessions.EnsureAllAsync(server.Runtime, runner, logger, cancellationToken, attentionEnabled);
+        server.AttentionXePermissionFault = attentionFault?.Message;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -4480,7 +4502,9 @@ LIMIT 1";
 
             /* #4961: the always-on deadlock and blocked-process sessions are ensured at connect and then once an hour, so a
                session dropped from outside comes back within the hour. */
-            await EnsureAlwaysOnXeSessionsAsync(server, runner, DateTime.UtcNow, _logger, stoppingToken);
+            await EnsureAlwaysOnXeSessionsAsync(
+                server, runner, DateTime.UtcNow, _logger, stoppingToken,
+                attentionEnabled: StoreConfigProvider.ResolveSchedule("attention", server.Config.ServerId, _scheduleOverrides).Enabled);
 
             await RunDueCollectorsAsync(server, runner, stoppingToken);
 
@@ -6025,6 +6049,13 @@ LIMIT 1";
     /// </summary>
     internal static bool IsPlanCorrectionCollector(string collectorName) =>
         string.Equals(collectorName, PlanCorrectionCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>#5640 (H2): the permission fault the attention run records as PERMISSIONS, or null for any other collector and when the ensure was not denied.</summary>
+    internal static string? AttentionPermissionFaultFor(string collectorName, ServerLoopState server) =>
+        IsAttentionCollector(collectorName) ? server.AttentionXePermissionFault : null;
+
+    internal static bool IsAttentionCollector(string collectorName) =>
+        string.Equals(collectorName, AttentionCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// #3754: whether a dispatched collector name is <c>long_query_completions</c> — the one collector whose
@@ -13287,7 +13318,10 @@ AND   j.hypertable_name = '{relation}'", connection))
                collectors are engine-gated off anyway. Confirmed on a live PostgreSQL target. */
             if (runtime.Target.Engine == CollectorTargetEngine.SqlServer)
             {
-                await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken);
+                var attentionEnabled = StoreConfigProvider.ResolveSchedule("attention", server.Config.ServerId, _scheduleOverrides).Enabled;
+                var attentionFault = await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken, attentionEnabled);
+                server.AttentionXePermissionFault = attentionFault?.Message;
+                server.AttentionXeEnsuredWhileEnabled = attentionEnabled;
                 server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
             }
 
@@ -15443,6 +15477,16 @@ LIMIT 1";
                 throw new DarlingXeSessionMissingException(traceFault);
             }
 
+            /* #5640 (H2): the client-timeout session's create was refused for permission. The read of a session that cannot exist
+               would throw "not running" and record SESSION_MISSING, and the Capture Down self-alert reads that: a permanent alert on
+               every server whose login lacks ALTER ANY EVENT SESSION (or whose engine refuses it). The same arm as the long-query
+               session's denial (#5378), so the row is PERMISSIONS. A session dropped by hand on a login that may create one is not
+               here: the ensure recreates it, and until then the read records SESSION_MISSING. */
+            if (AttentionPermissionFaultFor(collectorName, server) is { } attentionFault)
+            {
+                throw new DarlingXeSessionDeniedException(attentionFault);
+            }
+
             var result = await run(runner, runtime, cancellationToken);
 
             /* #4964: a run of this collector succeeded, so its run of missing-session failures is over: the next failure
@@ -16311,6 +16355,7 @@ LIMIT 1";
         ["query_store"] = (r, s, ct) => r.RunAsync(QueryStoreCollector.Instance, s, ct),
         ["deadlocks"] = (r, s, ct) => RunXeTolerantAsync(DeadlocksCollector.Instance, r, s, ct),
         ["blocked_process_report"] = (r, s, ct) => RunXeTolerantAsync(BlockedProcessReportCollector.Instance, r, s, ct),
+        ["attention"] = (r, s, ct) => RunXeTolerantAsync(AttentionCollector.Instance, r, s, ct),
         ["long_query_completions"] = (r, s, ct) => RunXeTolerantAsync(LongQueryCompletionsCollector.Instance, r, s, ct),
         ["system_health_events"] = (r, s, ct) => r.RunAsync(SystemHealthEventsCollector.Instance, s, ct),
         ["default_trace_events"] = (r, s, ct) => r.RunAsync(DefaultTraceEventsCollector.Instance, s, ct),

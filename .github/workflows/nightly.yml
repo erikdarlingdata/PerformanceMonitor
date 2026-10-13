@@ -1395,6 +1395,16 @@ jobs:
     if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
     uses: ./.github/workflows/darling-upgrade-shapes.yml
 
+  # #5701: the Darling web UI smoke check (darling-ui-smoke.yml, the same workflow a pull request touching the web
+  # files runs): the service on a throwaway seeded store, every page loaded in Chrome. Gated like the other jobs
+  # here. It is NOT in publish's needs: a UI-check red must report, not stop a nightly from publishing. Its failing
+  # pages' screenshots and traces are the run's `darling-ui-smoke` artifact.
+  darling-ui-smoke:
+    name: Darling web UI smoke
+    needs: check
+    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
+    uses: ./.github/workflows/darling-ui-smoke.yml
+
   # ── Linux artifact + container image (#1804) ─────────────────────────────────────────────────────
   # Runs in parallel with the windows build job — it shares only the check job's nightly stamp,
   # not any windows artifact. Publishes the linux-x64 service tar.gz with its own checksum file
