@@ -51,7 +51,7 @@ public sealed partial class ViewerDataService
     public const string MuteRulesSelectSql = @"
 SELECT id, enabled, created_at_utc, expires_at_utc, reason,
        server_name, metric_name, database_pattern,
-       query_text_pattern, wait_type_pattern, job_name_pattern, server_id
+       query_text_pattern, wait_type_pattern, job_name_pattern, server_id, external_source
 FROM config_mute_rules
 ORDER BY created_at_utc DESC";
 
@@ -59,14 +59,15 @@ ORDER BY created_at_utc DESC";
 INSERT INTO config_mute_rules
     (id, enabled, created_at_utc, expires_at_utc, reason,
      server_name, metric_name, database_pattern,
-     query_text_pattern, wait_type_pattern, job_name_pattern, server_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
+     query_text_pattern, wait_type_pattern, job_name_pattern, server_id, external_source)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
 
     public const string MuteRuleUpdateSql = @"
 UPDATE config_mute_rules SET
     enabled = $2, expires_at_utc = $3, reason = $4,
     server_name = $5, metric_name = $6, database_pattern = $7,
-    query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10, server_id = $11
+    query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10, server_id = $11,
+    external_source = $12
 WHERE id = $1";
 
     public const string MuteRuleSetEnabledSql = "UPDATE config_mute_rules SET enabled = $2 WHERE id = $1";
@@ -153,7 +154,9 @@ WHERE id = $1";
         && rule.DatabasePattern is null
         && rule.QueryTextPattern is null
         && rule.WaitTypePattern is null
-        && rule.JobNamePattern is null;
+        && rule.JobNamePattern is null
+        /* A rule limited to one external source is narrower than a whole-server silence (#5654). */
+        && rule.ExternalSource is null;
 
     /// <summary>What "Unsilence" does for one server: the silence rules to delete, and the id-keyed silences to
     /// create BEFORE deleting, for the other servers a deleted legacy rule used to cover.
@@ -251,6 +254,7 @@ WHERE id = $1";
                 WaitTypePattern = reader.IsDBNull(9) ? null : reader.GetString(9),
                 JobNamePattern = reader.IsDBNull(10) ? null : reader.GetString(10),
                 ServerId = reader.IsDBNull(11) ? null : reader.GetInt32(11),
+                ExternalSource = reader.IsDBNull(12) ? null : reader.GetString(12),
             });
         }
 
@@ -279,6 +283,7 @@ WHERE id = $1";
         AddNullableText(command, rule.WaitTypePattern);
         AddNullableText(command, rule.JobNamePattern);
         AddNullableInt(command, rule.ServerId);
+        AddNullableText(command, rule.ExternalSource);
         await ExecuteWriteAsync(command, cancellationToken);
         await SignalConfigReloadAsync(cancellationToken);
     }
@@ -304,6 +309,7 @@ WHERE id = $1";
         AddNullableText(command, rule.WaitTypePattern);
         AddNullableText(command, rule.JobNamePattern);
         AddNullableInt(command, rule.ServerId);
+        AddNullableText(command, rule.ExternalSource);
         await ExecuteWriteAsync(command, cancellationToken);
         await SignalConfigReloadAsync(cancellationToken);
     }

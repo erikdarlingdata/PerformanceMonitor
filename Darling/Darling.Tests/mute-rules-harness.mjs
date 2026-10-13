@@ -19,7 +19,7 @@ const context = vm.createContext({
   fetch: async () => ({ status: nextResponse.status, text: async () => nextResponse.text }),
   reportSessionExpired: () => { expiredCalls++; },
 });
-vm.runInContext(source + "\nglobalThis.__p = { formToCreateBody, buildPatch, isEmptyCreate, interpretWrite, EMPTY_CREATE_WARNING, send, closeForm, parsePrefill, openForm: (f) => { form = { errors: {}, ...f }; }, setLast: (v) => { lastPrefillQuery = v; }, getLast: () => lastPrefillQuery };", context);
+vm.runInContext(source + "\nglobalThis.__p = { TEXT_FIELDS, formToCreateBody, buildPatch, isEmptyCreate, interpretWrite, EMPTY_CREATE_WARNING, send, closeForm, parsePrefill, openForm: (f) => { form = { errors: {}, ...f }; }, setLast: (v) => { lastPrefillQuery = v; }, getLast: () => lastPrefillQuery };", context);
 const ctx2 = vm.createContext({});
 vm.runInContext(ctxSource + "\nglobalThis.__c = { mutePrefillParams, parseDetailContext };", ctx2);
 const c = ctx2.__c;
@@ -88,6 +88,17 @@ const scenarios = {
     scoped: p.isEmptyCreate(p.formToCreateBody({ metric_name: "High CPU" })),
     body: j(p.formToCreateBody({ server_name: " A ", reason: "", metric_name: "M" })),
     warning: p.EMPTY_CREATE_WARNING,
+  }),
+  /* #5654: the external source is a plain text field, empty by default, and a source alone is a scope. */
+  source: () => ({
+    blank: j(p.formToCreateBody({ server_name: "A" })),
+    set: j(p.formToCreateBody({ server_name: "A", external_source: " nagios " })),
+    alone: p.isEmptyCreate(p.formToCreateBody({ external_source: "nagios" })),
+    patchSet: j(p.buildPatch(original, formOf({ external_source: "nagios" }))),
+    patchCleared: j(p.buildPatch({ ...original, external_source: "nagios" }, formOf({ external_source: "" }))),
+    patchSame: j(p.buildPatch({ ...original, external_source: "nagios" }, formOf({ external_source: "nagios" }))),
+    invalid: j(p.interpretWrite(400, { status: "invalid", message: "'external_source' is not a valid source name (got 'X')." })),
+    fields: p.TEXT_FIELDS.map((f) => f.key),
   }),
   writes: () => ({
     exists: j(p.interpretWrite(409, { status: "already_exists", message: "dup", rule_id: "abc" })),

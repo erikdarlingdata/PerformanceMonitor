@@ -222,6 +222,44 @@ public sealed class ExternalAlertDrainLiveTests
     }
 
     [Fact]
+    public async Task AMuteRuleNamingOneSource_SilencesThatSourcesFire_AndNotAnotherSources()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            await rig.AddSourceAsync("zabbix");
+            rig.Rules.Add(new MuteRule { ExternalSource = "nagios" });
+            var fromNagios = await rig.SubmitAsync("fire", "disk", server: "SQL01");
+            var fromZabbix = await rig.SubmitAsync("fire", "disk", server: "SQL01", source: "zabbix");
+            var pass = await rig.Drain.RunPassAsync(rig.Ct);
+
+            /* Same key, same server, same text: the source is the only thing that tells the two apart. */
+            Assert.Equal(1, pass.Muted);
+            Assert.Equal(1, pass.Delivered);
+            Assert.Equal("muted", await rig.StatusAsync(fromNagios));
+            Assert.Equal("delivered", await rig.StatusAsync(fromZabbix));
+            Assert.Equal(2, rig.Sent.Count);
+            Assert.True(rig.Sent.Single(s => s.MetricName.StartsWith("External:nagios:", StringComparison.Ordinal)).Muted);
+            Assert.False(rig.Sent.Single(s => s.MetricName.StartsWith("External:zabbix:", StringComparison.Ordinal)).Muted);
+        });
+    }
+
+    [Fact]
+    public async Task AMuteRuleNamingOnlyAServer_StillSilencesAnExternalFireForThatServer()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            /* The kept server identity is SQL01's store id, so a rule keyed on that id matches with no source named. */
+            rig.Rules.Add(new MuteRule { ServerId = 7 });
+            var id = await rig.SubmitAsync("fire", "disk", server: "SQL01");
+            var other = await rig.SubmitAsync("fire", "disk2", server: "SQL02");
+            await rig.Drain.RunPassAsync(rig.Ct);
+
+            Assert.Equal("muted", await rig.StatusAsync(id));
+            Assert.Equal("delivered", await rig.StatusAsync(other));
+        });
+    }
+
+    [Fact]
     public async Task AFireEveryChannelFailed_GoesBackToTheQueue_WaitsOneTwoFourMinutes_AndIsMarkedFailedOnTheFourthAttempt()
     {
         /* #5654: delivery is at least once. A webhook that timed out after its request was sent reads the same as a refused
@@ -349,7 +387,7 @@ public sealed class ExternalAlertDrainLiveTests
     private sealed class Rig
     {
         private readonly NpgsqlConnection _seed;
-        private int _sourceId;
+        private readonly Dictionary<string, int> _sourceIds = new(StringComparer.Ordinal);
 
         public Rig(NpgsqlConnection seed, NpgsqlDataSource dataSource, CancellationToken ct)
         {
@@ -376,7 +414,7 @@ public sealed class ExternalAlertDrainLiveTests
                     return Task.FromResult(AlertChannelOutcome.Delivered);
                 },
                 History,
-                _ => Muted,
+                context => Muted || Rules.Any(rule => rule.Matches(context)),
                 name => Registry.TryGetValue(name, out var server) ? server : null,
                 "test:1",
                 NullLogger.Instance);
@@ -395,20 +433,25 @@ public sealed class ExternalAlertDrainLiveTests
         public Dictionary<string, ExternalAlertServer> Registry { get; } =
             new(StringComparer.OrdinalIgnoreCase) { ["SQL01"] = new ExternalAlertServer(7, "SQL01") };
         public bool Muted { get; set; }
+
+        /// <summary>Mute rules the test's mute check applies, through <see cref="MuteRule.Matches"/> as the service's does.</summary>
+        public List<MuteRule> Rules { get; } = new();
         public bool Enabled { get; set; } = true;
         public AlertDelivery Answer { get; set; } = AlertDelivery.FromLegacyStoredColumns(true, "webhook", null);
 
-        public async Task InitAsync() =>
-            _sourceId = Convert.ToInt32(
-                await ScalarAsync("INSERT INTO config.external_alert_source (source_name, role_name) VALUES ('nagios', 'role_nagios') RETURNING source_id"),
+        public Task InitAsync() => AddSourceAsync("nagios");
+
+        public async Task AddSourceAsync(string name) =>
+            _sourceIds[name] = Convert.ToInt32(
+                await ScalarAsync($"INSERT INTO config.external_alert_source (source_name, role_name) VALUES ('{name}', 'role_{name}') RETURNING source_id"),
                 CultureInfo.InvariantCulture);
 
-        public async Task<long> SubmitAsync(string kind, string key, string? server = null, double? value = null)
+        public async Task<long> SubmitAsync(string kind, string key, string? server = null, double? value = null, string source = "nagios")
         {
             await using var command = new NpgsqlCommand(
                 "INSERT INTO config.external_alert_pending (source_id, kind, alert_key, severity, title, server_name, value, expires_at)"
                 + " VALUES ($1, $2, $3, 'warning', 'a title', $4, $5, now() + interval '15 minutes') RETURNING pending_id", _seed);
-            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = _sourceId });
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = _sourceIds[source] });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = kind });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = key });
             command.Parameters.Add(new NpgsqlParameter { Value = (object?)server ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
