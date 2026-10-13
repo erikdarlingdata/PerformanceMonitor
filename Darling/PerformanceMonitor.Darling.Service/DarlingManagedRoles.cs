@@ -1790,6 +1790,11 @@ BEGIN
       RAISE EXCEPTION 'This login is not a registered external alert source.' USING ERRCODE = 'DL403';
    END IF;
 
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'submit_external_alert needs the READ COMMITTED isolation level.' USING ERRCODE = 'DL400',
+         HINT = 'Run the call outside a REPEATABLE READ or SERIALIZABLE transaction.';
+   END IF;
+
    v_severity := CASE WHEN p_severity IS NULL AND p_kind = 'clear' THEN 'warning' ELSE p_severity END;
 
    IF p_kind IS NULL OR p_kind NOT IN ('fire', 'clear') THEN
@@ -1858,10 +1863,19 @@ BEGIN
    REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {DarlingManagedPostgres.AdminRoleName}, {DarlingManagedPostgres.ViewerRoleName}, {DarlingManagedPostgres.McpRoleName};
 
    FOR source_login IN
-      SELECT s.role_name, r.oid AS role_oid, (shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}') AS marked
+      SELECT s.role_name, r.oid AS role_oid, (shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}') AS marked,
+             (r.rolname IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
+              OR r.rolname = current_user
+              OR r.rolsuper
+              OR r.oid = (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = current_database())) AS reserved
       FROM {config}.external_alert_source AS s
       LEFT JOIN pg_catalog.pg_roles AS r ON r.rolname = s.role_name
    LOOP
+      IF source_login.reserved IS TRUE THEN
+         RAISE WARNING 'External alert source login ""%"" was skipped: it is one of Darling''s own roles, the role running this step, a superuser or the database owner, and its limit, inheritance and memberships are left as they are.', source_login.role_name;
+         CONTINUE;
+      END IF;
+
       IF source_login.role_oid IS NULL OR NOT source_login.marked THEN
          RAISE WARNING 'External alert source login ""%"" was skipped: it does not exist or does not carry the ''{AlertSourceRoleMarker}'' marker comment.', source_login.role_name;
          IF source_login.role_oid IS NOT NULL THEN

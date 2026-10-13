@@ -82,6 +82,13 @@ public sealed class ExternalAlertRungTests
            from PUBLIC and the three Darling roles (literal statements in one DO block, since the ladder holds no dynamic SQL). */
         var outsideTheRevokeBlock = Regex.Replace(sql, @"DO \$do\$.*?END \$do\$;", " ", RegexOptions.Singleline);
         Assert.Single(Regex.Matches(sql, @"DO \$do\$"));
+
+        /* What is inside that one block: literal statements only (no EXECUTE, no format( call), and exactly the four REVOKEs. */
+        var revokeBlock = Regex.Match(sql, @"DO \$do\$.*?END \$do\$;", RegexOptions.Singleline).Value;
+        Assert.DoesNotContain("EXECUTE", revokeBlock, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("format(", revokeBlock, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(4, Regex.Matches(revokeBlock, @"\bREVOKE\b", RegexOptions.IgnoreCase).Count);
+        Assert.Equal(4, Regex.Matches(revokeBlock, @"REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config\.external_alert_source, config\.external_alert_pending, config\.external_alert_state FROM (PUBLIC|admin|viewer|mcp);").Count);
         foreach (var verb in new[] { "UPDATE", "DELETE", "INSERT", "GRANT", "REVOKE", "TRUNCATE", "DROP" })
         {
             Assert.DoesNotMatch(@"(?m)^\s*" + verb + @"\b", outsideTheRevokeBlock);

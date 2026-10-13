@@ -44,6 +44,8 @@ public sealed class ExternalAlertGrantLiveTests
 
     private static readonly string RoleUnmarked = "ea_plain_" + RunSuffix;
 
+    private static readonly string RoleSuper = "ea_su_" + RunSuffix;
+
     private const string SourcePassword = "ExtAlertSrcPw0123456789abcdef01";
 
     private static string RequireLivePostgres()
@@ -158,11 +160,11 @@ DO $do$
 DECLARE
    r text;
 BEGIN
-   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{RoleA}', '{RoleB}', '{RoleUnmarked}') LOOP
+   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{RoleA}', '{RoleB}', '{RoleUnmarked}', '{RoleSuper}') LOOP
       EXECUTE format('DROP OWNED BY %I', r);
       EXECUTE format('DROP ROLE %I', r);
    END LOOP;
-END $do$", ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked], cleanupCt));
+END $do$", ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked, RoleSuper], cleanupCt));
 
     [Fact]
     public async Task ASourceLogin_CanExecuteTheFunction_AndHoldsNoOtherPrivilege()
@@ -637,6 +639,123 @@ SET search_path = pg_temp, config, public", ct);
         }
     }
 
+    private static async Task<string> OwnerCommentAsync(NpgsqlConnection owner, CancellationToken ct) =>
+        await ScalarAsync<string>(owner, $"SELECT coalesce(shobj_description('{OwnerRoleOf(owner)}'::regrole, 'pg_authid'), '')", ct);
+
+    private static async Task RestoreOwnerCommentAsync(NpgsqlConnection owner, string comment, CancellationToken ct) =>
+        await ExecAsync(owner, comment.Length == 0
+            ? $"COMMENT ON ROLE {OwnerRoleOf(owner)} IS NULL"
+            : $"COMMENT ON ROLE {OwnerRoleOf(owner)} IS '{comment.Replace("'", "''", StringComparison.Ordinal)}'", ct);
+
+    /// <summary>The login attributes the source-login step can change, in one string: connection limit, inherit, login, and the sorted memberships.</summary>
+    private static Task<string> RoleStateAsync(NpgsqlConnection connection, string role, CancellationToken ct) =>
+        ScalarAsync<string>(connection,
+            $@"SELECT r.rolconnlimit || '|' || r.rolinherit || '|' || r.rolcanlogin || '|' || r.rolsuper || '|'
+                      || coalesce((SELECT string_agg(m.roleid::regrole::text, ',' ORDER BY m.roleid::regrole::text) FROM pg_auth_members AS m WHERE m.member = r.oid), '')
+               FROM pg_roles AS r WHERE r.rolname = '{role}'", ct);
+
+    /// <summary>
+    /// A submit runs only at READ COMMITTED: inside a REPEATABLE READ or SERIALIZABLE transaction it is refused with DL400 and
+    /// writes nothing, and the same call at READ COMMITTED (the default, or an explicit transaction) is accepted.
+    /// </summary>
+    [Fact]
+    public async Task ASubmit_InARepeatableReadOrSerializableTransaction_IsRefusedWithDl400_AndReadCommittedStillWorks()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await SetUpAsync(owner, scratch, ct);
+            await using var sourceA = await LoginAsync(scratch, RoleA, SourcePassword, ct);
+
+            foreach (var level in new[] { "REPEATABLE READ", "SERIALIZABLE" })
+            {
+                await ExecAsync(sourceA, $"BEGIN ISOLATION LEVEL {level}", ct);
+                await ExecAsync(sourceA, "SELECT 1", ct);
+                var refused = await Assert.ThrowsAsync<PostgresException>(() => SubmitAsync(sourceA, ct));
+                Assert.Equal("DL400", refused.SqlState);
+                Assert.Contains("READ COMMITTED", refused.MessageText, StringComparison.Ordinal);
+                await ExecAsync(sourceA, "ROLLBACK", ct);
+            }
+
+            Assert.Equal(0, await ScalarAsync<long>(owner, "SELECT count(*) FROM config.external_alert_pending", ct));
+
+            await ExecAsync(sourceA, "BEGIN ISOLATION LEVEL READ COMMITTED", ct);
+            Assert.True(await SubmitAsync(sourceA, ct, key: "in-transaction") > 0);
+            await ExecAsync(sourceA, "COMMIT", ct);
+            Assert.True(await SubmitAsync(sourceA, ct, key: "autocommit") > 0);
+            Assert.Equal(2, await ScalarAsync<long>(owner, "SELECT count(*) FROM config.external_alert_pending", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// A registry row that names the role running the batch, or a superuser, with the marker comment on that role, is skipped
+    /// with a WARNING naming the role: its connection limit, inheritance, login flag, superuser flag and memberships stay as
+    /// they were. (A marker on admin, viewer or mcp replaces the managed marker those roles carry, and the batch refuses such a
+    /// role before this step.)
+    /// </summary>
+    [Fact]
+    public async Task ARegisteredStartRoleOrSuperuser_WithTheMarker_IsSkippedWithAWarning_AndKeepsItsState()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await SetUpAsync(owner, scratch, ct);
+
+            await ExecAsync(owner, $"CREATE ROLE {RoleSuper} LOGIN SUPERUSER INHERIT CONNECTION LIMIT 7; GRANT pg_read_all_data TO {RoleSuper}", ct);
+            var protectedRoles = new[] { OwnerRoleOf(owner), RoleSuper };
+            var ownerComment = await OwnerCommentAsync(owner, ct);
+            try
+            {
+                var before = new Dictionary<string, string>();
+                foreach (var role in protectedRoles)
+                {
+                    await ExecAsync(owner, $"COMMENT ON ROLE {role} IS '{DarlingManagedRoles.AlertSourceRoleMarker}'", ct);
+                    await RegisterAsync(owner, "src_" + role.ToLowerInvariant(), role, ct);
+                    before[role] = await RoleStateAsync(owner, role, ct);
+                }
+
+                var notices = new List<string>();
+                owner.Notice += (_, e) => notices.Add(e.Notice.MessageText);
+                await RunBatchAsync(owner, scratch, ct);
+
+                foreach (var role in protectedRoles)
+                {
+                    Assert.Equal(before[role], await RoleStateAsync(owner, role, ct));
+                    Assert.Contains(notices, n => n.Contains($"\"{role}\"", StringComparison.Ordinal) && n.Contains("was skipped", StringComparison.Ordinal));
+                }
+
+                /* The ordinary marked logins are still limited as before. */
+                Assert.Equal(5, await ScalarAsync<int>(owner, $"SELECT rolconnlimit FROM pg_roles WHERE rolname = '{RoleA}'", ct));
+            }
+            finally
+            {
+                await RestoreOwnerCommentAsync(owner, ownerComment, ct);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
     /// <summary>
     /// Every start sets the source login's connection limit and takes EXECUTE from a registered role that has lost its
     /// marker; the login connects on a database whose PUBLIC has no CONNECT, so the batch's own CONNECT grant is what lets it in.
@@ -745,6 +864,47 @@ SET search_path = pg_temp, config, public", ct);
             Assert.Equal(-1, await ScalarAsync<int>(owner, $"SELECT rolconnlimit FROM pg_roles WHERE rolname = '{RoleA}'", ct));
             Assert.False(await ScalarAsync<bool>(owner,
                 $"SELECT has_function_privilege('{RoleA}', 'config.submit_external_alert(text, text, text, text, text, text, double precision)', 'EXECUTE')", ct));
+
+            /* The script's copy of the function refuses a REPEATABLE READ transaction with DL400. */
+            await ExecAsync(owner, $"COMMENT ON ROLE {RoleA} IS '{DarlingManagedRoles.AlertSourceRoleMarker}'", ct);
+            await ExecAsync(owner, script, ct);
+            await using (var sourceA = await LoginAsync(scratch, RoleA, SourcePassword, ct))
+            {
+                await ExecAsync(sourceA, "BEGIN ISOLATION LEVEL REPEATABLE READ", ct);
+                await ExecAsync(sourceA, "SELECT 1", ct);
+                var refused = await Assert.ThrowsAsync<PostgresException>(() => SubmitAsync(sourceA, ct));
+                Assert.Equal("DL400", refused.SqlState);
+                await ExecAsync(sourceA, "ROLLBACK", ct);
+                Assert.True(await SubmitAsync(sourceA, ct, key: "read-committed") > 0);
+            }
+
+            /* And its source-login step skips the role running it and a superuser that carry the marker, with a warning. */
+            await ExecAsync(owner, $"CREATE ROLE {RoleSuper} LOGIN SUPERUSER INHERIT CONNECTION LIMIT 7; GRANT pg_read_all_data TO {RoleSuper}", ct);
+            var protectedRoles = new[] { OwnerRoleOf(owner), RoleSuper };
+            var ownerComment = await OwnerCommentAsync(owner, ct);
+            try
+            {
+                var before = new Dictionary<string, string>();
+                foreach (var role in protectedRoles)
+                {
+                    await ExecAsync(owner, $"COMMENT ON ROLE {role} IS '{DarlingManagedRoles.AlertSourceRoleMarker}'", ct);
+                    await RegisterAsync(owner, "src_" + role.ToLowerInvariant(), role, ct);
+                    before[role] = await RoleStateAsync(owner, role, ct);
+                }
+
+                var notices = new List<string>();
+                owner.Notice += (_, e) => notices.Add(e.Notice.MessageText);
+                await ExecAsync(owner, script, ct);
+                foreach (var role in protectedRoles)
+                {
+                    Assert.Equal(before[role], await RoleStateAsync(owner, role, ct));
+                    Assert.Contains(notices, n => n.Contains($"\"{role}\"", StringComparison.Ordinal) && n.Contains("was skipped", StringComparison.Ordinal));
+                }
+            }
+            finally
+            {
+                await RestoreOwnerCommentAsync(owner, ownerComment, ct);
+            }
 
             bodySucceeded = true;
         }
