@@ -33,14 +33,14 @@ SELECT /* PerformanceMonitorLite */
     max_workers_count = osi.max_workers_count,
     scheduler_count = osi.scheduler_count,
     cpu_count = osi.cpu_count,
-    total_runnable_tasks_count = SUM(dos.runnable_tasks_count),
-    total_work_queue_count = SUM(dos.work_queue_count),
-    total_current_workers_count = SUM(dos.current_workers_count),
-    avg_runnable_tasks_count = CONVERT(decimal(38,2), AVG(CONVERT(decimal(38,2), dos.runnable_tasks_count))),
-    total_active_request_count = MAX(wg.active_request_count),
-    total_queued_request_count = MAX(wg.queued_request_count),
-    total_blocked_task_count = MAX(wg.blocked_task_count),
-    total_active_parallel_thread_count = MAX(wg.active_parallel_thread_count),
+    total_runnable_tasks_count = sched.total_runnable_tasks_count,
+    total_work_queue_count = sched.total_work_queue_count,
+    total_current_workers_count = sched.total_current_workers_count,
+    avg_runnable_tasks_count = sched.avg_runnable_tasks_count,
+    total_active_request_count = wg.active_request_count,
+    total_queued_request_count = wg.queued_request_count,
+    total_blocked_task_count = wg.blocked_task_count,
+    total_active_parallel_thread_count = wg.active_parallel_thread_count,
     runnable_request_count = r.runnable_count,
     total_request_count = CONVERT(integer, r.total_count),
     runnable_percent = r.runnable_pct,
@@ -49,7 +49,7 @@ SELECT /* PerformanceMonitorLite */
         (
             bit,
             CASE
-                WHEN SUM(dos.current_workers_count) >= (osi.max_workers_count * 0.90)
+                WHEN sched.total_current_workers_count >= (osi.max_workers_count * 0.90)
                 THEN 1
                 ELSE 0
             END
@@ -59,7 +59,7 @@ SELECT /* PerformanceMonitorLite */
         (
             bit,
             CASE
-                WHEN SUM(dos.runnable_tasks_count) >= osi.cpu_count
+                WHEN sched.total_runnable_tasks_count >= osi.cpu_count
                 THEN 1
                 ELSE 0
             END
@@ -69,7 +69,7 @@ SELECT /* PerformanceMonitorLite */
         (
             bit,
             CASE
-                WHEN MAX(wg.blocked_task_count) >= 10
+                WHEN wg.blocked_task_count >= 10
                 THEN 1
                 ELSE 0
             END
@@ -79,7 +79,7 @@ SELECT /* PerformanceMonitorLite */
         (
             bit,
             CASE
-                WHEN MAX(wg.queued_request_count) >= osi.cpu_count
+                WHEN wg.queued_request_count >= osi.cpu_count
                 THEN 1
                 ELSE 0
             END
@@ -110,7 +110,20 @@ SELECT /* PerformanceMonitorLite */
                 ELSE 0
             END
         )
-FROM sys.dm_os_schedulers AS dos
+FROM
+(
+    /*The scheduler aggregate stands alone with no grouping, so it is exactly one row whatever the plan does with the
+      single-row pieces cross joined below. It used to share one grouping with them (#5710): a piece read again per
+      scheduler row could return a moving value, and the schedulers fell into several groups, one stored row each.*/
+    SELECT
+        total_runnable_tasks_count = SUM(dos.runnable_tasks_count),
+        total_work_queue_count = SUM(dos.work_queue_count),
+        total_current_workers_count = SUM(dos.current_workers_count),
+        avg_runnable_tasks_count = CONVERT(decimal(38,2), AVG(CONVERT(decimal(38,2), dos.runnable_tasks_count)))
+    FROM sys.dm_os_schedulers AS dos
+    WHERE dos.status = N'VISIBLE ONLINE'
+    HAVING COUNT_BIG(*) > 0 /*no VISIBLE ONLINE scheduler writes no row (as before #5710), not one all-NULL row*/
+) AS sched
 CROSS JOIN sys.dm_os_sys_info AS osi
 CROSS JOIN sys.dm_os_sys_memory AS osm
 CROSS JOIN
@@ -180,20 +193,6 @@ OUTER APPLY
     AND   der.session_id <> @@SPID
     AND   der.status NOT IN (N'background', N'sleeping')
 ) AS r
-WHERE dos.status = N'VISIBLE ONLINE'
-GROUP BY
-    osi.max_workers_count,
-    osi.scheduler_count,
-    osi.cpu_count,
-    r.runnable_count,
-    r.total_count,
-    r.runnable_pct,
-    osm.total_physical_memory_kb,
-    osm.available_physical_memory_kb,
-    osm.system_memory_state_desc,
-    nodes.total_nodes,
-    nodes.online_nodes,
-    offline_cpus.offline_cpu_count
 OPTION(RECOMPILE);";
 
     [Fact]
@@ -205,6 +204,57 @@ OPTION(RECOMPILE);";
         Assert.Null(CpuSchedulerStatsCollector.Instance.WatermarkColumn);
         Assert.Equal("cpu_scheduler_stats", CpuSchedulerStatsCollector.Instance.Name);
         Assert.Equal("cpu_scheduler_stats", CpuSchedulerStatsCollector.Instance.TargetTable);
+    }
+
+    /* #5710: a collection must be ONE row. The scheduler aggregate used to share one GROUP BY with columns of the
+       single-row DMV pieces (sys.dm_os_sys_memory, sys.dm_exec_requests, ...). The plan read some of those pieces
+       once per scheduler row, so a value that moved between reads split the schedulers into several groups and
+       the collector stored several rows per collection. Now the aggregate is its own derived table with no GROUP
+       BY (an aggregate without GROUP BY always returns exactly one row), cross joined only to single-row pieces,
+       and the outer query has no GROUP BY at all. */
+    [Fact]
+    public void Query_AggregatesSchedulersInADerivedTableWithNoGroupBy_SoACollectionIsOneRow()
+    {
+        var sql = CpuSchedulerStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(new RecordingCollectorDeltaCalculator())).Text;
+
+        /* No GROUP BY anywhere: the only aggregates are scalar ones (the scheduler derived table, node, offline-CPU,
+           workload-group and request pieces), each of which returns exactly one row by itself. */
+        Assert.DoesNotContain("GROUP BY", sql);
+
+        /* The scheduler aggregate is one derived table, aliased and read by the select list under its own name,
+           and the VISIBLE ONLINE filter sits inside it (the outer query has no WHERE of its own). */
+        var derivedStart = sql.IndexOf("FROM\r\n(", StringComparison.Ordinal);
+        if (derivedStart < 0)
+        {
+            derivedStart = sql.IndexOf("FROM\n(", StringComparison.Ordinal);
+        }
+
+        Assert.True(derivedStart > 0, "the FROM clause must open with the scheduler derived table");
+        var derivedEnd = sql.IndexOf(") AS sched", derivedStart, StringComparison.Ordinal);
+        Assert.True(derivedEnd > derivedStart, "the scheduler derived table must be aliased sched");
+        var derived = sql[derivedStart..derivedEnd];
+        Assert.Contains("SUM(dos.runnable_tasks_count)", derived);
+        Assert.Contains("AVG(CONVERT(decimal(38,2), dos.runnable_tasks_count))", derived);
+        Assert.Contains("FROM sys.dm_os_schedulers AS dos", derived);
+        Assert.Contains("WHERE dos.status = N'VISIBLE ONLINE'", derived);
+
+        /* #5712 review: a scalar aggregate over zero rows is ONE all-NULL row, and ReadAsync's GetInt32(3) throws on it.
+           HAVING COUNT_BIG(*) > 0 (still no GROUP BY) makes an instance with no VISIBLE ONLINE scheduler write no row,
+           as before the derived table. */
+        Assert.Contains("HAVING COUNT_BIG(*) > 0", derived);
+        Assert.True(
+            derived.IndexOf("WHERE dos.status", StringComparison.Ordinal) < derived.IndexOf("HAVING COUNT_BIG(*) > 0", StringComparison.Ordinal),
+            "HAVING follows the VISIBLE ONLINE filter inside the derived table");
+
+        /* Outside the derived table sys.dm_os_schedulers is read only for the offline-CPU count, and no column
+           of a single-row piece is aggregated again. */
+        var outside = sql[..derivedStart] + sql[derivedEnd..];
+        Assert.DoesNotContain("dos.", outside.Replace("dos_offline.", string.Empty));
+        Assert.DoesNotContain("SUM(dos", outside);
+        Assert.DoesNotContain("MAX(wg.", sql);
+        Assert.DoesNotContain("\nWHERE dos.status", sql);
+        Assert.Contains("total_runnable_tasks_count = sched.total_runnable_tasks_count", sql);
+        Assert.Contains("avg_runnable_tasks_count = sched.avg_runnable_tasks_count", sql);
     }
 
     /* #5656: the shared collector SQL and the Dashboard's install/17 script both counted the DAC node as

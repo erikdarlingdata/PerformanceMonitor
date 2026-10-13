@@ -489,6 +489,11 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
             stored = Convert.ToInt64(await command.ExecuteScalarAsync(ct) ?? 0L, CultureInfo.InvariantCulture);
         }
 
+        /* #5718: the bundle's host section stays on the stored store size (the get_store_host tool's own
+           read), not the live --check-settings one: a support bundle must not wait on a slow store, and the
+           live size walk is the read that measured 5.8 s mean / 30.7 s max. The section is the tool's whole
+           payload, so it carries size_as_of (when the sweep recorded the figure), size_age_seconds and
+           size_unavailable_reason / uncompressed_unavailable_reason, and says why a figure is missing. */
         var host = DiagnosticsBundle.ParseReader(
             await DarlingMcpStoreHostTools.GetStoreHost(postgres, config.Postgres, new StoreHostProfileCache(TimeSpan.FromMinutes(1)), ct));
         return new JsonObject

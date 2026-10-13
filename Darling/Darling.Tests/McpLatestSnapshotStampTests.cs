@@ -576,8 +576,10 @@ public sealed class McpLatestSnapshotStampTests
         var sql = DarlingPlanCacheSchedulerReader.CpuSchedulerPressureSql;
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        /* #5710: the newest collection_time in the window is found first and ALL of its rows are combined into one. */
+        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, collection_time", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
     }
 
     /// <summary>The two window reads: the peak's instant from a <c>DISTINCT ON</c> over the SAME windowed rows,
