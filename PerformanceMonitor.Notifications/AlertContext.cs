@@ -1067,12 +1067,15 @@ public static class AlertContextSerializer
 
             /* #5642: the fire-time sample age, null on every alert without a UTC sample instant and every row
                written before this member existed. */
-            context.External = dto.External is { } external && !string.IsNullOrWhiteSpace(external.Source)
-                ? new AlertExternalOrigin(external.Source, external.Key, external.PendingId)
-                : null;
             context.NewestSample = dto.NewestSample is { } newest && !string.IsNullOrWhiteSpace(newest.Source)
                 ? new AlertNewestSample(newest.Source, DateTime.SpecifyKind(newest.InstantUtc, DateTimeKind.Utc),
                     TimeSpan.FromSeconds(Math.Max(0, newest.AgeSeconds)))
+                : null;
+
+            /* #5654: the external source that raised this firing, null on every alert not raised through the store's
+               submission function and every row written before this member existed. */
+            context.External = dto.External is { } external && !string.IsNullOrWhiteSpace(external.Source)
+                ? new AlertExternalOrigin(external.Source, external.Key, external.PendingId)
                 : null;
 
             foreach (var d in dto.Details)

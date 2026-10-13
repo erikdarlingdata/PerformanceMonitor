@@ -61,6 +61,15 @@ internal static class ViewerGrantReplay
         return viewerStatements;
     }
 
+    /// <summary>The provisioning batch split into its statements, comment lines dropped first (the prose contains semicolons).</summary>
+    internal static List<string> BatchStatements()
+    {
+        var provisioning = DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+        var uncommented = string.Join('\n', provisioning.Split('\n').Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal)));
+        return uncommented.Split(';').Select(s => s.Trim()).ToList();
+    }
+
     /// <summary>
     /// The statements of the provisioning batch that cannot run on a scratch store: a GRANT of EXECUTE on a function the
     /// batch itself creates later (the scratch store holds the migrations only), and the one REVOKE of the external alert

@@ -58,10 +58,7 @@ public sealed class ProvisioningSerializationTests
     public void TheViewerReplay_SkipsOnlyTheSubmitFunctionRevoke_AndGradesEveryOtherFunctionStatementItCanRun()
     {
         /* The batch writes the submission function's REVOKE (#5654) as exactly this one statement, so the exact match skips it. */
-        var provisioning = DarlingManagedRoles.BuildProvisioningSql(
-            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
-        var uncommented = string.Join('\n', provisioning.Split('\n').Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal)));
-        Assert.Contains(uncommented.Split(';').Select(s => s.Trim()), s => s == ViewerGrantReplay.SubmitFunctionRevoke);
+        Assert.Contains(ViewerGrantReplay.BatchStatements(), s => s == ViewerGrantReplay.SubmitFunctionRevoke);
 
         var statements = ViewerGrantReplay.StatementsFor("replay_role_5654", "scratch_5654");
         Assert.DoesNotContain(statements, x => x.Contains("submit_external_alert", StringComparison.Ordinal));
