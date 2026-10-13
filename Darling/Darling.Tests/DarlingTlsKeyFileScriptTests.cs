@@ -106,10 +106,10 @@ public sealed class DarlingTlsKeyFileScriptTests
         Assert.True(create > 0 && protect > create && copy > protect, $"backup order: create {create}, protect {protect}, copy {copy}");
 
         var prune = upgrade.IndexOf("Remove-DarlingRollbackBackups $prunable", StringComparison.Ordinal);
-        var retained = upgrade.IndexOf("Protect-DarlingRollbackBackupFolder $retained.FullName -ResetChildren", StringComparison.Ordinal);
+        var retained = upgrade.IndexOf("\nProtect-DarlingKeptRollbackBackups $InstallRoot\n", StringComparison.Ordinal);
         var start = upgrade.IndexOf("\nStart-Service -Name $serviceName\n", StringComparison.Ordinal);
         Assert.True(prune > 0 && retained > prune && retained < start, $"retained order: prune {prune}, retained {retained}, start {start}");
-        Assert.Contains("foreach ($retained in @(Get-DarlingRollbackBackups $InstallRoot))", upgrade, StringComparison.Ordinal);
+        Assert.Contains("Protect-DarlingRollbackBackupFolder $retained.FullName -ResetChildren", upgrade, StringComparison.Ordinal);
 
         Assert.DoesNotContain("$tlsKeyNames", upgrade, StringComparison.Ordinal);
     }
