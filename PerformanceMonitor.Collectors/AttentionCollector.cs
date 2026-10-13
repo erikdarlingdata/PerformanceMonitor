@@ -137,8 +137,23 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
     };
 
     /// <summary>
-    /// The batch. <c>{0}</c> = the session name, <c>{1}</c> = the sessions DMV, <c>{2}</c> = the targets DMV. Server-scoped and
-    /// database-scoped sessions differ only in those two DMVs.
+    /// The event_counter read (#5754): the attention count as a bigint, from the <c>@target_data</c> xml of the batch. NULL when
+    /// <c>@target_data</c> is NULL (no counter target). An XQuery <c>sum()</c> over the untyped <c>@count</c> attributes returns
+    /// <c>xs:double</c>, and <c>value()</c> reaches <c>bigint</c> through that value's TEXT, so a <c>'bigint'</c> read fails with
+    /// "Error converting data type nvarchar to bigint" the moment the text is <c>0E0</c> or <c>1.2E1</c>: on every run, because
+    /// event_counter lists the event at count 0. So the sum is read as <c>float</c> and the
+    /// CONVERT to bigint is explicit. Measured on SQL Server 2016 to 2025: the read is exact through 15 significant digits
+    /// (999,999,999,999,999 reads back exactly; 9,007,199,254,740,991 reads back one low, because the engine hands the double
+    /// over at 15 digits). The counter counts client interrupts, and 10^15 of them is one per millisecond for over 30,000 years,
+    /// so the CONVERT never rounds a count that can occur.
+    /// The batch embeds this text; a test runs it alone against hand-written counter xml.
+    /// </summary>
+    public const string EventCountExpression =
+        "CONVERT(bigint, @target_data.value('sum(/CounterTarget/Packages/Package/Event[@name=\"attention\"]/@count)', 'float'))";
+
+    /// <summary>
+    /// The batch. <c>{0}</c> = the session name, <c>{1}</c> = the sessions DMV, <c>{2}</c> = the targets DMV, <c>{3}</c> =
+    /// <see cref="EventCountExpression"/>. Server-scoped and database-scoped sessions differ only in those two DMVs.
     /// </summary>
     private const string QueryTemplate = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -186,7 +201,7 @@ AND   xet.target_name = N'event_counter'
 OPTION(RECOMPILE);
 
 SELECT
-    @event_count = @target_data.value('sum(/CounterTarget/Packages/Package/Event[@name=""attention""]/@count)', 'bigint');
+    @event_count = {3};
 
 SET @shred_needed =
     CASE
@@ -260,7 +275,8 @@ SELECT
         QueryTemplate
             .Replace("{0}", sessionName.Replace("'", "''", StringComparison.Ordinal), StringComparison.Ordinal)
             .Replace("{1}", isAzureSqlDb ? "sys.dm_xe_database_sessions" : "sys.dm_xe_sessions", StringComparison.Ordinal)
-            .Replace("{2}", isAzureSqlDb ? "sys.dm_xe_database_session_targets" : "sys.dm_xe_session_targets", StringComparison.Ordinal);
+            .Replace("{2}", isAzureSqlDb ? "sys.dm_xe_database_session_targets" : "sys.dm_xe_session_targets", StringComparison.Ordinal)
+            .Replace("{3}", EventCountExpression, StringComparison.Ordinal);
 
     /// <summary>The stored prior event_counter count, or null on a first run, a restarted host or an unreadable value.</summary>
     public static long? ReadLastCount(IReadOnlyDictionary<string, string> state, string? databaseName) =>
