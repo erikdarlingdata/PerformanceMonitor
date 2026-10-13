@@ -593,6 +593,28 @@ internal sealed class DarlingSelfAlertEvaluator
     /// resolution suffix ("Recovered") so the shared <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
     internal const string CustomRuleHealthResolvedMetric = "Custom Alert Rules Recovered";
 
+    /// <summary>
+    /// #5654: the self-alert for external alerts the drain could not deliver (rows that expired, were interrupted by a
+    /// stopped run, or failed every send) inside <see cref="ExternalAlertsWindow"/>. A WEBHOOK AUTOMATION KEY like its
+    /// siblings, so it must stay stable across releases. The value is the number of such rows, a whole count.
+    /// </summary>
+    internal const string ExternalAlertsUndeliveredMetric = "External Alerts Undelivered";
+
+    /// <summary>The span the undelivered count looks back over, and so how long the alert stands after the last give-up.</summary>
+    internal static readonly TimeSpan ExternalAlertsWindow = TimeSpan.FromHours(1);
+
+    /// <summary>The fixed key of the fleet-level external-alert delivery edge (not a real server); non-numeric like <see cref="CustomRuleHealthKey"/>.</summary>
+    private const string ExternalAlertsKey = "externalalerts";
+
+    private readonly ConcurrentDictionary<string, bool> _activeExternalAlerts = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastExternalAlertsAlert = new();
+
+    /// <summary>How many sources the undelivered alert names before eliding the rest.</summary>
+    private const int MaxListedExternalSources = 20;
+
+    /// <summary>#5654: the resolution row of <see cref="ExternalAlertsUndeliveredMetric"/>, history only.</summary>
+    internal const string ExternalAlertsDeliveredAgainMetric = "External Alerts Delivered Again";
+
     /// <summary>How many unhealthy rules the aggregated alert lists by name before eliding the rest — a pg_*
     /// rename can break many rules at once, and the whole point is ONE bounded alert, not a wall of text.</summary>
     private const int MaxListedUnhealthyRules = 20;
@@ -5099,6 +5121,116 @@ internal sealed class DarlingSelfAlertEvaluator
         return (shortMessage, sb.ToString());
     }
 
+    /* ---------------- external alert delivery (fleet-level, polled — #5654) ---------------- */
+
+    /// <summary>
+    /// What the drain gave up on inside <see cref="ExternalAlertsWindow"/>: the store's counts per source and status. The
+    /// worker reads them with <c>ExternalAlertStore.CountUndeliveredAsync</c>; a failed read sends no report, so the
+    /// standing alert is held rather than resolved on uncertainty.
+    /// </summary>
+    internal sealed record ExternalAlertsReport(IReadOnlyList<PerformanceMonitor.Darling.Storage.ExternalAlertUndeliveredCount> Counts)
+    {
+        internal int Total => Counts.Sum(c => c.Count);
+
+        internal int Of(string status) => Counts.Where(c => c.Status == status).Sum(c => c.Count);
+    }
+
+    /// <summary>
+    /// Isolating wrapper for the external-alert delivery self-alert, mirroring <see cref="EvaluateCustomRuleHealthAsync"/>:
+    /// a throwing seam (a mute rule's <c>Matches()</c>) is contained here so it never stops the worker's fleet-global pass.
+    /// </summary>
+    public async Task EvaluateExternalAlertsAsync(ExternalAlertsReport report, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyExternalAlertsAsync(report, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the report arrives as a parameter and this method reads
+               nothing; the worker's read of the counts records its own failure. */
+            _logger?.LogError("External-alert delivery self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the "external alerts were not delivered" condition (#5654), the standing-condition shape of
+    /// <see cref="ApplyCustomRuleHealthAsync"/>: one alert on entry, a repeat only per <c>connection_refire_minutes</c>
+    /// (the current counts are rendered each time), and ONE resolution row, "External Alerts Delivered Again", when the
+    /// window holds no expired, interrupted or failed row. Gated on the master alerts switch. The detail names sources
+    /// and counts only: a source name is the registered <c>[a-z][a-z0-9_]</c> form, so it carries nothing a submitter chose
+    /// freely, and no submitted title, detail or key is repeated.
+    /// </summary>
+    internal async Task ApplyExternalAlertsAsync(ExternalAlertsReport report, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled || report is null)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        var total = report.Total;
+        if (total > 0)
+        {
+            _activeExternalAlerts[ExternalAlertsKey] = true;
+            var decision = DecideStateAlert(_lastExternalAlertsAlert, ExternalAlertsKey, ExternalAlertsUndeliveredMetric, ExternalAlertsKey, now, out var refire);
+            if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
+            {
+                _lastExternalAlertsAlert[ExternalAlertsKey] = now;
+                var (shortMessage, detail) = RenderExternalAlerts(report);
+                var delivery = await FireAsync(
+                    StoreKey(ExternalAlertsKey), _storeLabel, ExternalAlertsUndeliveredMetric,
+                    currentValue: total.ToString(CultureInfo.InvariantCulture),
+                    thresholdValue: "0",
+                    detail: StateRepeatNote(decision, refire) + detail,
+                    severity: AlertSeverityLevel.Warning,
+                    shortMessage: shortMessage,
+                    numericCurrentValue: total,
+                    numericThresholdValue: 0,
+                    cancellationToken);
+                NoteStateSend(ExternalAlertsUndeliveredMetric, ExternalAlertsKey, delivery);
+            }
+        }
+        else if (_activeExternalAlerts.TryRemove(ExternalAlertsKey, out var was) && was)
+        {
+            EndStateAlert(_lastExternalAlertsAlert, ExternalAlertsKey, ExternalAlertsUndeliveredMetric, ExternalAlertsKey);
+            await RecordResolutionAsync(new AlertResolution(
+                StoreKey(ExternalAlertsKey), _storeLabel, ExternalAlertsUndeliveredMetric,
+                ExternalAlertsDeliveredAgainMetric,
+                "No external alert has expired, been interrupted or failed to send in the last hour"), cancellationToken);
+        }
+    }
+
+    private static (string ShortMessage, string Detail) RenderExternalAlerts(ExternalAlertsReport report)
+    {
+        var shortMessage = string.Create(CultureInfo.InvariantCulture,
+            $"{report.Total} external alert(s) were not delivered in the last hour: {report.Of("expired")} expired, {report.Of("interrupted")} interrupted, {report.Of("failed")} failed to send");
+
+        var sb = new StringBuilder();
+        sb.Append(shortMessage).Append('.');
+
+        var perSource = report.Counts.GroupBy(c => c.SourceName, StringComparer.Ordinal).OrderBy(g => g.Key, StringComparer.Ordinal).ToList();
+        foreach (var group in perSource.Take(MaxListedExternalSources))
+        {
+            /* Leading "- Source" never matches a PopulateFromDetailText label. */
+            sb.Append("\n- Source ").Append(group.Key).Append(": ")
+              .Append(string.Join(", ", group.OrderBy(c => c.Status, StringComparer.Ordinal).Select(c =>
+                  string.Create(CultureInfo.InvariantCulture, $"{c.Count} {c.Status}"))));
+        }
+
+        if (perSource.Count > MaxListedExternalSources)
+        {
+            sb.Append("\n+ ").Append((perSource.Count - MaxListedExternalSources).ToString(CultureInfo.InvariantCulture)).Append(" more source(s).");
+        }
+
+        sb.Append("\nExpired: still queued when its deadline passed. Interrupted: a stopped service had claimed it and it is not sent again. Failed: every channel refused it and the retries ran out.");
+        return (shortMessage, sb.ToString());
+    }
+
     /* ---------------- stale mute rules (fleet-level, polled — #3306) ---------------- */
 
     /// <summary>
@@ -8229,6 +8361,13 @@ FROM
      AND   cl.collector_name = 'blocked_process_report'
      ORDER BY cl.collection_time DESC
      LIMIT 1)
+    UNION ALL
+    (SELECT cl.collector_name, cl.status
+     FROM collection_log AS cl
+     WHERE cl.server_id = $1
+     AND   cl.collector_name = 'attention'
+     ORDER BY cl.collection_time DESC
+     LIMIT 1)
 ) AS x
 WHERE x.status = 'SESSION_MISSING'
 ORDER BY x.collector_name";
@@ -8286,7 +8425,12 @@ ORDER BY x.collector_name";
         while (await reader.ReadAsync(cancellationToken))
         {
             var collectorName = reader.GetString(0);
-            missing.Add(collectorName == "deadlocks" ? "Deadlock" : "Blocking");
+            missing.Add(collectorName switch
+            {
+                "deadlocks" => "Deadlock",
+                "attention" => "Client timeouts",
+                _ => "Blocking",
+            });
         }
 
         return missing;

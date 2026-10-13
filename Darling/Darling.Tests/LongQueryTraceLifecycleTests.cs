@@ -1101,7 +1101,7 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
     public void TheAlwaysOnSessions_StillFollowTheInventory()
     {
         var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingXeSessions.cs");
-        var ensure = source.IndexOf("private static async Task EnsureDatabaseScopedAsync(", StringComparison.Ordinal);
+        var ensure = source.IndexOf("private static async Task<AttentionEnsureFault?> EnsureDatabaseScopedAsync(", StringComparison.Ordinal);
         Assert.True(ensure > 0, "the always-on database-scoped ensure is gone");
         var body = source[ensure..source.IndexOf("\n    }\n", ensure, StringComparison.Ordinal)];
 

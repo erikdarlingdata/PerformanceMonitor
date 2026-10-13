@@ -49,7 +49,10 @@ public sealed class RightSizingWindowTests
         var source = CSharpSourceWalker.StripCommentsAndStrings(storageRaw);
         var readerRaw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsRecommendationsReader.cs");
 
-        Assert.DoesNotContain("\"the last ", readerRaw, StringComparison.Ordinal);
+        // The one window the CPU row may name is the Utilization view's own last 24 hours (#5633); any other "the last N" would claim
+        // a span the samples did not cover.
+        Assert.Contains("var cpuWindow = \"the last 24 hours\";", readerRaw, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"the last ", readerRaw.Replace("\"the last 24 hours\"", ""), StringComparison.Ordinal);
         Assert.DoesNotContain("\"the last ", raw, StringComparison.Ordinal);
         Assert.DoesNotContain("\"the last ", storageRaw, StringComparison.Ordinal);
         Assert.Contains("From {cpuWindow}, P95 CPU utilization was", storageRaw, StringComparison.Ordinal);
@@ -72,7 +75,6 @@ public sealed class RightSizingWindowTests
     }
 
     [Theory]
-    [InlineData(nameof(ViewerDataService.RecommendationsCpuP95Sql))]
     [InlineData(nameof(ViewerDataService.RecommendationsMemoryP95Sql))]
     [InlineData(nameof(ViewerDataService.RecommendationsStorageTierSql))]
     public void WindowedReads_SelectTheSamplesOwnFirstAndLastTime(string sqlName)
@@ -84,13 +86,14 @@ public sealed class RightSizingWindowTests
     }
 
     [Fact]
-    public void Readers_TakeTheWindowFromThoseColumns_AndTheCpuFallbackStaysNeutral()
+    public void Readers_TakeTheWindowFromThoseColumns_AndTheCpuRowNamesTheUtilizationWindow()
     {
         var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsRecommendationsReader.cs");
 
         Assert.Matches(new Regex(@"reader\.IsDBNull\(4\)\s*\?\s*0L\s*:\s*Convert\.ToInt64\(reader\.GetValue\(4\),\s*CultureInfo\.InvariantCulture\),\s*reader\.IsDBNull\(2\)\s*\|\|\s*reader\.IsDBNull\(3\)\s*\?\s*TimeSpan\.Zero\s*:\s*reader\.GetDateTime\(3\)\s*-\s*reader\.GetDateTime\(2\)"), raw);
-        Assert.Matches(new Regex(@"cpuReader\.IsDBNull\(3\)\s*\?\s*0L\s*:\s*Convert\.ToInt64\(cpuReader\.GetValue\(3\),\s*CultureInfo\.InvariantCulture\),\s*cpuReader\.IsDBNull\(1\)\s*\|\|\s*cpuReader\.IsDBNull\(2\)\s*\?\s*TimeSpan\.Zero\s*:\s*cpuReader\.GetDateTime\(2\)\s*-\s*cpuReader\.GetDateTime\(1\)"), raw);
-        Assert.Contains("var cpuWindow = \"recent samples\"", raw, StringComparison.Ordinal);
+        Assert.Contains("var cpuWindow = \"the last 24 hours\"", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("recent samples", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("cpuReader", raw, StringComparison.Ordinal);
         Assert.Contains("reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)", raw, StringComparison.Ordinal);
         var storageRaw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs");
         Assert.Contains("storageSamples += row.WindowSamples", storageRaw, StringComparison.Ordinal);

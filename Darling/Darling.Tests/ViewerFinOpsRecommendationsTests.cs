@@ -380,7 +380,6 @@ public sealed class ViewerFinOpsRecommendationsTests
     [InlineData(nameof(ViewerDataService.RecommendationsEditionFactsSql))]
     [InlineData(nameof(ViewerDataService.RecommendationsEngineEditionSql))]
     [InlineData(nameof(ViewerDataService.RecommendationsMemoryP95Sql))]
-    [InlineData(nameof(ViewerDataService.RecommendationsCpuP95Sql))]
     [InlineData(nameof(ViewerDataService.RecommendationsMaintenanceWindowSql))]
     [InlineData(nameof(ViewerDataService.RecommendationsStorageTierSql))]
     [InlineData(nameof(ViewerDataService.RecommendationsReservedCapacitySql))]
@@ -472,9 +471,9 @@ public sealed class ViewerFinOpsRecommendationsTests
         Assert.Matches(
             new Regex(@"CpuRightSizingTargetCores\s*\(\s*util\s*\)\s*is\s*not\s*int\s*targetCores"),
             CpuRightSizingBuilderSource());
-        /* The no-sample guard lives in the target helper both CPU rows share (one rule, #5492). */
+        /* The no-sample guard lives in the verdict helper both CPU rows share (one rule, #5492): no sample, no verdict, no advice. */
         Assert.Matches(
-            new Regex(@"util\s*==\s*null\s*\|\|\s*!\s*FinOpsUtilizationFigures\s*\.\s*HasCpuSample\s*\(\s*util\s*\)\s*\|\|\s*util\s*\.\s*P95CpuPct\s*>=\s*30"),
+            new Regex(@"!\s*CpuVerdictAllowsDownsizing\s*\(\s*util\s*\)\s*\|\|\s*util\s*!\s*\.\s*P95CpuPct\s*>=\s*30"),
             RecommendationsMethodSource("int? CpuRightSizingTargetCores(", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs"));
         Assert.Matches(
             new Regex(@"FinOpsRecommendationFigures\s*\.\s*CpuRightSizing\s*\(\s*util\s*,\s*monthlyCost\s*\)"),

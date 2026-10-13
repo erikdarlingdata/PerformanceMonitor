@@ -159,7 +159,7 @@ public sealed class PgDatabaseSizeStatsAndHostMemoryRungTests
 
         /* One table, one collector: the censuses moved by exactly one; the CPU payload grew by six. */
         Assert.Equal(72, TimescaleSupport.HypertableCount);
-        Assert.Equal(71, CollectorCatalog.All.Count);
+        Assert.Equal(71, TimescaleSupport.HypertableTables.Count);
         Assert.Equal(5, PgDatabaseSizeStatsCollector.Instance.PayloadColumns.Count);
         Assert.Equal(11, PgCpuUtilizationCollector.Instance.PayloadColumns.Count);
     }

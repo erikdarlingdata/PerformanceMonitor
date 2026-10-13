@@ -7,9 +7,9 @@ param analyze_server.server_name 28
 tool audit_config 451
 param audit_config.server_name 28
 
-tool compare_analysis 611
+tool compare_analysis 606
 param compare_analysis.as_of 167
-param compare_analysis.baseline_hours_back 139
+param compare_analysis.baseline_hours_back 103
 param compare_analysis.hours_back 57
 param compare_analysis.server_name 28
 

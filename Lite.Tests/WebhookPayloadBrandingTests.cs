@@ -80,7 +80,9 @@ public class WebhookPayloadBrandingTests
             doc.RootElement.GetProperty("sections").EnumerateArray().ToList(),
             s => s.TryGetProperty("activityTitle", out var t) && t.GetString() == "Details");
 
-        Assert.Equal(Prose, section.GetProperty("text").GetString());
+        /* #5654: the card text is markdown, so the prose's square brackets are backslash-escaped (they could otherwise
+           open a link); the word-internal underscore of query_stats is left alone. */
+        Assert.Equal(Prose.Replace("[1072]", @"\[1072\]", StringComparison.Ordinal), section.GetProperty("text").GetString());
     }
 
     /// <summary>

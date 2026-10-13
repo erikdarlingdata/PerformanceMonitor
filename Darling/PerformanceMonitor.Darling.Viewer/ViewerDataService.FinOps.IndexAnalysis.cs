@@ -150,7 +150,7 @@ public sealed partial class ViewerDataService
     /// <summary>Reads the latest per-index snapshot for the server and maps each row to the analyzer input contract.</summary>
     public Task<List<IndexCleanupIndexInput>> GetIndexCleanupInputsAsync(int serverId, CancellationToken cancellationToken = default) =>
         DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(
-            _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken: cancellationToken);
 
     /// <summary>Reads the server's latest collected edition/version/start-time facts and derives the analyzer options.</summary>
     public Task<IndexCleanupOptions> GetIndexCleanupOptionsAsync(int serverId, CancellationToken cancellationToken = default) =>
@@ -163,7 +163,7 @@ public sealed partial class ViewerDataService
     /// </summary>
     public Task<IndexCleanupAnalysisResult> GetIndexAnalysisAsync(int serverId, CancellationToken cancellationToken = default) =>
         DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisAsync(
-            _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken: cancellationToken);
 
     /// <summary>
     /// The analysis plus when each database's snapshot was collected (naive UTC, keyed by database id). The times
@@ -171,7 +171,7 @@ public sealed partial class ViewerDataService
     /// </summary>
     public Task<IndexAnalysisWithSnapshotTimes> GetIndexAnalysisWithSnapshotTimesAsync(int serverId, CancellationToken cancellationToken = default) =>
         DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(
-            _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken: cancellationToken);
 
     /// <summary>Projects the analyzer recommendations into the detail-grid view-models; <paramref name="snapshotTimes"/> (when given) dates each row by its database's snapshot.</summary>
     public static List<IndexCleanupRecommendationRow> ProjectRecommendations(IndexCleanupAnalysisResult result, IReadOnlyDictionary<int, DateTime>? snapshotTimes = null)

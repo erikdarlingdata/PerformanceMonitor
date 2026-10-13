@@ -34,10 +34,13 @@ public partial class RemoteCollectorService
          rows, and the parquet archive sweeps it like any other aged row (the v_ views union hot +
          archive, so a deep-backfilled row reads identically wherever it currently lives). That is
          why Lite can safely dig ~30 days where Darling stops at its raw tier's 3.
-       - Tick: rides CollectionBackgroundService's IfDue ladder (Lite's idiom — archival, retention,
-         analysis all live there), one byte-budgeted slice per server per due-tick, sequentially:
-         sequence is the concurrency bound, and the slice's own SQL connection never touches the
-         collection paths.
+       - Tick: rides CollectionBackgroundService's IfDue idiom (archival, retention, analysis use it
+         too), one byte-budgeted slice per server per due-tick, sequentially within the tick. #5731: the
+         tick runs on its own housekeeping loop, beside the collection loop and not behind it, so a
+         slice no longer waits for sequence to stay out of a collector's way. The per-server
+         QueryStoreServerGate is the bound now: a slice for a server whose live Query Store collection
+         is running is deferred to the next tick (the Information line below), and the slice's own SQL
+         connection never touches the collection paths.
        - The live watermark is untouched by construction: MAX(last_execution_time) cannot see the
          OLDER rows backfill ships, so the two paths never race (the #1960 constraint). */
 

@@ -314,6 +314,72 @@ WITH NO DATA", ct);
         return (bool)(await command.ExecuteScalarAsync(ct))!;
     }
 
+    /// <summary>
+    /// <see cref="LiveCleanupBatch.RemoveRolesAsync"/> takes a role that owns an object and holds privileges out of the
+    /// cluster, and a role it cannot drop is reported by name, in the ledger entry and in the thrown exception (#5654).
+    /// The blocker here is a privilege in ANOTHER database (<c>postgres</c>, which every cluster has), which the cleanup's own database cannot revoke.
+    /// </summary>
+    [Fact]
+    public async Task RemovingRoles_TakesAnOwnerAway_AndNamesTheRoleItCannotDrop_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var goes = "rolegoes_" + suffix;
+        var stays = "rolestays_" + suffix;
+        const string OtherDatabase = "postgres";
+        var bodySucceeded = false;
+
+        await using var connection = await OpenAsync(connectionString!, ct);
+        try
+        {
+            /* The first role owns a table and holds a privilege in this database: both must go. */
+            await ExecAsync(connection, $"CREATE ROLE {goes} NOLOGIN; GRANT CREATE ON SCHEMA collect TO {goes}", ct);
+            await ExecAsync(connection, $"CREATE TABLE collect.owned_{suffix} (id integer); ALTER TABLE collect.owned_{suffix} OWNER TO {goes}", ct);
+            var batch = new LiveCleanupBatch(connection, publishResidue: false, maxAttempts: 2);
+            await batch.RemoveRolesAsync([goes], suffix, ct);
+            Assert.Empty(batch.Residue);
+            await ExecAsync(connection, $"DROP TABLE collect.owned_{suffix}", ct);
+
+            /* The second holds a privilege inside another database, where this connection's DROP OWNED cannot reach. */
+            await ExecAsync(connection, $"CREATE ROLE {stays} NOLOGIN", ct);
+            var other = new NpgsqlConnectionStringBuilder(connectionString!) { Database = OtherDatabase, Pooling = false }.ConnectionString;
+            await using (var inOther = await OpenAsync(other, ct))
+            {
+                await ExecAsync(inOther, $"GRANT CREATE ON SCHEMA public TO {stays}", ct);
+            }
+
+            var blocked = new LiveCleanupBatch(connection, publishResidue: false, maxAttempts: 2);
+            var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => blocked.RemoveRolesAsync([stays], suffix, ct));
+            Assert.Contains(stays, failure.Message, StringComparison.Ordinal);
+            Assert.Contains(stays, Assert.Single(blocked.Residue), StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                var other = new NpgsqlConnectionStringBuilder(connectionString!) { Database = OtherDatabase, Pooling = false }.ConnectionString;
+                await using (var inOther = await OpenAsync(other, cleanupCt))
+                {
+                    try
+                    {
+                        await ExecAsync(inOther, $"DROP OWNED BY {stays}", cleanupCt);
+                    }
+                    catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedObject)
+                    {
+                        /* The body never made the role. */
+                    }
+                }
+
+                await ExecAsync(cleanup, $"DROP TABLE IF EXISTS collect.owned_{suffix}", cleanupCt);
+                await new LiveCleanupBatch(cleanup).RemoveRolesAsync([goes, stays], suffix, cleanupCt);
+            });
+        }
+    }
+
     private static async Task<bool> ExistsAsync(NpgsqlConnection connection, string table, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(

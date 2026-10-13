@@ -51,13 +51,14 @@ public sealed class PgSchemaGeneratorTests
            pg_log_events (#3601, the classified server-log pipeline: the third reader of the same log the
            deadlock and plan collectors tail, and the first to carry more than one family) = 70, plus
            pg_database_size_stats (#3691 V136, the hourly per-database size series — the rung's other series, host
-           memory, is six columns on pg_cpu_utilization rather than a table) = 71. The catalog is
+           memory, is six columns on pg_cpu_utilization rather than a table) = 71, plus
+           attention (#5640 V179, client cancels and timeouts) = 72 — a plain table (StaysPlainTable), so the HYPERTABLE count stays 71. The catalog is
            deliberately
            engine-mixed: the schema generator walks it to
            create tables and one store can hold both engines' data, so splitting it per engine would
            fragment DDL generation. Dispatch is gated separately, by engine, in
            CollectorCatalog.AppliesTo(definition, target). */
-        Assert.Equal(71, CollectorCatalog.All.Count);
+        Assert.Equal(72, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
            had drifted to 45 while the real figure tracked the count, so the test that exists to catch a

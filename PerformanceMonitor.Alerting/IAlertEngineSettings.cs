@@ -74,6 +74,12 @@ public interface IAlertEngineSettings
     /// <see cref="RunnableQueueEvaluator.WindowMinutes"/> minutes. ON by default, like Poison Wait.
     /// </summary>
     bool RunnableQueueEnabled { get; }
+
+    /// <summary>
+    /// The Client Timeouts alert (#5640): client attentions (a client cancelled or timed out a query) per minute, from the
+    /// attention collector's <c>attention_events</c>. OFF by default: the bars are a guess until checked against captured data.
+    /// </summary>
+    bool ClientTimeoutsEnabled { get; }
     bool LongRunningQueryEnabled { get; }
     bool TempDbSpaceEnabled { get; }
     bool LowDiskEnabled { get; }
@@ -163,6 +169,19 @@ public interface IAlertEngineSettings
     /// <see cref="RunnableQueueEvaluator.DefaultCriticalPerScheduler"/> (16). Never below the Warning bar.
     /// </summary>
     int RunnableQueueCriticalPerScheduler { get; }
+
+    /// <summary>
+    /// Client Timeouts Warning bar (#5640): fire Warning when attentions (client cancels and timeouts) per minute, averaged over
+    /// the covered span, are at/above this. Shipped default <see cref="AttentionEvaluator.DefaultWarningPerMinute"/> (10).
+    /// Both stores apply <see cref="AttentionEvaluator.ClampBars"/> on read: at least 1, and never above the Critical bar.
+    /// </summary>
+    int ClientTimeoutsWarningPerMinute { get; }
+
+    /// <summary>
+    /// Client Timeouts Critical bar (#5640): Critical when the rate is at/above this. Shipped default
+    /// <see cref="AttentionEvaluator.DefaultCriticalPerMinute"/> (60). Never below the Warning bar.
+    /// </summary>
+    int ClientTimeoutsCriticalPerMinute { get; }
 
     /// <summary>Fire when a query's elapsed time is at/above this many minutes.</summary>
     int LongRunningQueryThresholdMinutes { get; }

@@ -240,8 +240,8 @@ public sealed class FinOpsRecommendationsCharacterizationTests
             var cores = ViewerDataService.BuildCpuRightSizingRecommendation(Util(10m, 16, 3), 1000m);
             Assert.NotNull(cores);
             AssertRow(cores!, "Compute", "High", "Medium",
-                "CPU over-provisioned (16 cores, P95 = 10.0%)",
-                "P95 CPU utilization is 10.0% (avg 5.5%, max 40%) across 16 cores. Consider reducing to ~4 cores.",
+                "CPU over-provisioned (16 logical CPUs, P95 = 10.0%)",
+                "P95 CPU utilization is 10.0% (avg 5.5%, max 40%) across 16 logical CPUs. Consider reducing to ~4 logical CPUs.",
                 "450.0000");
 
             var noBudget = ViewerDataService.BuildCpuRightSizingRecommendation(Util(10m, 16, 3), 0m);
@@ -256,8 +256,8 @@ public sealed class FinOpsRecommendationsCharacterizationTests
             /* 32 cores at P95 29%: (int)(32 * 29/70) = 13; Medium severity from 15% up. */
             var medium = ViewerDataService.BuildCpuRightSizingRecommendation(Util(29m, 32, 3), 1000m);
             Assert.Equal("Medium", medium!.Severity);
-            Assert.Equal("CPU over-provisioned (32 cores, P95 = 29.0%)", medium.Finding);
-            Assert.Contains("Consider reducing to ~13 cores.", medium.Detail, StringComparison.Ordinal);
+            Assert.Equal("CPU over-provisioned (32 logical CPUs, P95 = 29.0%)", medium.Finding);
+            Assert.Contains("Consider reducing to ~13 logical CPUs.", medium.Detail, StringComparison.Ordinal);
             Assert.Equal("356.2500000", medium.EstMonthlySavings?.ToString(CultureInfo.InvariantCulture));
 
             /* Edges: P95 of exactly 30 and a CPU count of exactly 4 say nothing; 14.9 is High and 15 is Medium. */

@@ -2722,6 +2722,13 @@ public class CrossAppGuardCiGateTests
     /// <summary>The quoted pattern entries of one dorny/paths-filter area block.</summary>
     private static List<string> FilterPatterns(string yaml, string filterName)
     {
+        /* #5669: the lite-tests job's *_shard sets live in .github/lite-paths-filter.yml (top-level keys, two-space
+           entries), the one file the shard legs, the lite-scope job and ci-select.py all read. */
+        if (filterName.EndsWith("_shard", StringComparison.Ordinal))
+        {
+            return LiteFilterFilePatterns(filterName);
+        }
+
         var at = yaml.IndexOf($"\n            {filterName}:\n", StringComparison.Ordinal);
         if (at < 0)
         {
@@ -2731,6 +2738,30 @@ public class CrossAppGuardCiGateTests
         var rest = yaml[(at + 1)..];
         var next = Regex.Match(rest, "\n            [a-z_]+:\n");
         var block = next.Success ? rest[..next.Index] : rest;
+
+        return Regex.Matches(block, @"^\s*-\s*'([^']+)'\s*$", RegexOptions.Multiline)
+            .Select(m => m.Groups[1].Value)
+            .ToList();
+    }
+
+    /// <summary>The Lite path gate, LF-normalised (#5669).</summary>
+    internal static string ReadLiteFilterFile(string repo) =>
+        File.ReadAllText(Path.Combine(repo, ".github", "lite-paths-filter.yml"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+
+    /// <summary>The quoted pattern entries of one top-level filter in <c>.github/lite-paths-filter.yml</c>.</summary>
+    internal static List<string> LiteFilterFilePatterns(string filterName)
+    {
+        var text = "\n" + ReadLiteFilterFile(RepoRoot());
+        var at = text.IndexOf($"\n{filterName}:\n", StringComparison.Ordinal);
+        if (at < 0)
+        {
+            return new List<string>();
+        }
+
+        var rest = text[(at + 1)..];
+        var next = Regex.Match(rest[1..], "\n[a-z_]+:\n");
+        var block = next.Success ? rest[..(next.Index + 1)] : rest;
 
         return Regex.Matches(block, @"^\s*-\s*'([^']+)'\s*$", RegexOptions.Multiline)
             .Select(m => m.Groups[1].Value)

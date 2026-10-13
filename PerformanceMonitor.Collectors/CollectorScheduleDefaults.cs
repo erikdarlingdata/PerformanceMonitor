@@ -71,6 +71,9 @@ public static class CollectorScheduleDefaults
         ["waiting_tasks"] = new(1, 7),
         ["dmv_blocking_snapshot"] = new(1, 30),
         ["blocked_process_report"] = new(1, 30),
+        /* #5640 client attentions (timeouts and cancels): one cheap counter read per minute, because the Client Timeouts alert
+           is the point. The ring buffer is shredded only when the session's counters moved. 30 days, like deadlocks. */
+        ["attention"] = new(1, 30),
         /* #1496 long-running query completion trace: seeded DISABLED (DefaultEnabled: false). A
            completion trace (rpc_completed/sql_batch_completed) fires per statement/batch even though
            the duration predicate discards most of them, so it is opt-in per fleet; enabling it creates

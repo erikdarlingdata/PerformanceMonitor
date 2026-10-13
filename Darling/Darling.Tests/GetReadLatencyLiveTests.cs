@@ -138,7 +138,8 @@ public sealed class GetReadLatencyLiveTests
             Assert.Equal(61_000, first.GetProperty("max_ms").GetInt64());
             Assert.Equal(150, first.GetProperty("p50_ms").GetInt64());
             Assert.Equal(2_000, first.GetProperty("p95_ms").GetInt64());
-            Assert.Equal(90_000, first.GetProperty("p99_ms").GetInt64());
+            /* #5633 item 23: the 90,000 ms bucket bound is capped to the slowest read seen (max_ms 61,000). */
+            Assert.Equal(61_000, first.GetProperty("p99_ms").GetInt64());
             Assert.False(first.GetProperty("p99_is_at_least").GetBoolean());
             Assert.Equal(2, first.GetProperty("timeouts").GetInt64());
 
@@ -147,8 +148,9 @@ public sealed class GetReadLatencyLiveTests
             Assert.Equal(70, second.GetProperty("mean_ms").GetInt64());
             Assert.Equal(90, second.GetProperty("max_ms").GetInt64());
             Assert.Equal(50, second.GetProperty("p50_ms").GetInt64());
-            Assert.Equal(100, second.GetProperty("p95_ms").GetInt64());
-            Assert.Equal(100, second.GetProperty("p99_ms").GetInt64());
+            /* The 100 ms bucket bound is capped to max_ms 90 (#5633 item 23). */
+            Assert.Equal(90, second.GetProperty("p95_ms").GetInt64());
+            Assert.Equal(90, second.GetProperty("p99_ms").GetInt64());
             Assert.Equal(0, second.GetProperty("timeouts").GetInt64());
 
             bodySucceeded = true;

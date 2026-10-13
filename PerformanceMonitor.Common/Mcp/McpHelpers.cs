@@ -165,6 +165,37 @@ internal static class McpHelpers
         && !(text[index - 1] == '\r' && text[index] == '\n');
 
     /// <summary>
+    /// compare_analysis's baseline window (#5633 item 12). The comparison window is the last <paramref name="hoursBack"/>
+    /// hours; the baseline window is the same length and ends <c>baselineHoursBack - hoursBack</c> hours before the
+    /// comparison's end, so the two are disjoint only when <c>baselineHoursBack &gt;= 2 x hoursBack</c>. An omitted
+    /// <paramref name="baselineHoursBack"/> defaults to <c>hoursBack + 24</c> (28 for the default 4; yesterday same time),
+    /// raised to 2 x hoursBack when that is larger (hours_back past 24). Returns null when valid, with the resolved value in
+    /// <paramref name="resolved"/>; otherwise the <see cref="Refusal"/> envelope, naming both windows.
+    /// </summary>
+    public static string? ValidateBaselineWindow(int hoursBack, int? baselineHoursBack, out int resolved)
+    {
+        resolved = baselineHoursBack ?? Math.Max(hoursBack + 24, 2 * hoursBack);
+
+        if (baselineHoursBack is null && resolved > MaxHoursBack)
+        {
+            return Refusal("baseline_hours_back", $"hours_back {hoursBack} leaves no room for a baseline window that does not overlap the comparison window inside the {MaxHoursBack}-hour limit (it needs {resolved} hours back). Use an hours_back of {MaxHoursBack / 2} or less.");
+        }
+
+        var validation = ValidateHoursBack(resolved);
+        if (validation != null)
+        {
+            return validation;
+        }
+
+        if (resolved < 2 * hoursBack)
+        {
+            return Refusal("baseline_hours_back", $"The comparison window (the last {hoursBack} hours) and the baseline window (hours {resolved} to {resolved - hoursBack} back) would overlap: baseline_hours_back {resolved} is below 2 x hours_back ({2 * hoursBack}). Pass a baseline_hours_back of at least {2 * hoursBack}, or a smaller hours_back.");
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Validates hours_back parameter. Returns null if valid, the <see cref="Refusal"/> envelope if invalid.
     ///
     /// <para><b>Every validator in this file returns the envelope, not the sentence (#3739).</b> The ~210
@@ -971,6 +1002,31 @@ internal static class McpHelpers
         }
 
         node["database_name"] = databaseName;
+        return node.ToJsonString(JsonOptions);
+    }
+
+    /// <summary>
+    /// #5633 review (finding D): <paramref name="statusJson"/> (an envelope another helper built) with the databases the read
+    /// left out beside it: <see cref="DatabasesLeftOut.NamesKey"/> (the names, capped) and
+    /// <see cref="DatabasesLeftOut.NoteKey"/>. Null in, null out; an envelope returned unchanged
+    /// when nothing was left out or when it already carries the key.
+    /// </summary>
+    public static string? WithDatabasesLeftOut(string? statusJson, IReadOnlyList<string>? leftOut)
+    {
+        if (statusJson is null || leftOut is null || leftOut.Count == 0)
+        {
+            return statusJson;
+        }
+
+        var node = System.Text.Json.Nodes.JsonNode.Parse(statusJson) as System.Text.Json.Nodes.JsonObject;
+        if (node is null || node.ContainsKey(DatabasesLeftOut.NamesKey))
+        {
+            return statusJson;
+        }
+
+        node[DatabasesLeftOut.NamesKey] =
+            JsonSerializer.SerializeToNode(DatabasesLeftOut.Named(leftOut), JsonOptions);
+        node[DatabasesLeftOut.NoteKey] = DatabasesLeftOut.Note(leftOut);
         return node.ToJsonString(JsonOptions);
     }
 

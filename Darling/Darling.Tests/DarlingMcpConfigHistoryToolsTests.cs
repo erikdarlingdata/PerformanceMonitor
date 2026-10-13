@@ -734,7 +734,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
     /// <paramref name="stepMinutes"/> minutes from <paramref name="runsFrom"/> to <paramref name="runsTo"/> (none when null), and one config snapshot
     /// at each of <paramref name="snapshots"/>, each differing from the one before it (so every snapshot after the first is a change).</summary>
     private static async Task SeedWindowServerAsync(
-        NpgsqlConnection connection, string tool, string name, DateTime created, DateTime? runsFrom, DateTime runsTo, int stepMinutes, DateTime[] snapshots, System.Threading.CancellationToken ct)
+        NpgsqlConnection connection, string tool, string name, DateTime created, DateTime? runsFrom, DateTime runsTo, int stepMinutes, DateTime[] snapshots, System.Threading.CancellationToken ct, int runRows = 0)
     {
         var serverId = ServerIdHelper.GetDeterministicHashCode(name);
         await DeleteWindowServerAsync(connection, name, ct);
@@ -745,9 +745,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
         {
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
-SELECT row_number() OVER (), $1, $2, $3, t, 12, 'SUCCESS', 0
+SELECT row_number() OVER (), $1, $2, $3, t, 12, 'SUCCESS', $7
 FROM generate_series($4::timestamp, $5::timestamp, make_interval(mins => $6)) AS t",
-                serverId, name, TableOf(tool), DarlingMcpTestData.Naive(from), DarlingMcpTestData.Naive(runsTo), stepMinutes);
+                serverId, name, TableOf(tool), DarlingMcpTestData.Naive(from), DarlingMcpTestData.Naive(runsTo), stepMinutes, runRows);
         }
 
         for (var i = 0; i < snapshots.Length; i++)
@@ -972,7 +972,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
 
             /* The same server with one run 35 minutes into the window. */
             var start = end.AddHours(-1);
-            await SeedWindowServerAsync(connection, tool, name, end.AddDays(-30), start.AddMinutes(35), start.AddMinutes(35), 600, [end.AddDays(-3)], ct);
+            await SeedWindowServerAsync(connection, tool, name, end.AddDays(-30), start.AddMinutes(35), start.AddMinutes(35), 600, [end.AddDays(-3)], ct,
+                /* #5633 item 19: a successful trace_flags run that stored ZERO rows is an empty snapshot, so it would turn the seeded flag
+                   off inside the window and answer with that change instead of the covered empty answer this case is about. The run here
+                   is one that stored a row; the other two collectors' runs do not read rows. */
+                runRows: 1);
 
             var covered = Parse(await CallAsync(postgres, tool, name, 1, end)).GetProperty("hints");
             Assert.False(covered.GetProperty("window_truncated").GetBoolean(), tool);

@@ -210,12 +210,21 @@ public sealed class CustomAlertEvaluator
 
         var builder = new StringBuilder(Math.Min(value.Length, maxLength));
         var pendingSpace = false;
-        foreach (var ch in value)
+        foreach (var rune in value.EnumerateRunes())
         {
-            var isBreakOrControl =
-                ch < ' ' || ch == (char)0x7F || ch == (char)0x85 || ch == '\u2028' || ch == '\u2029';
+            /* Characters that reorder or hide text are dropped outright: a right-to-left override or an invisible
+               character in a title would show a subject or card line other than the one stored (#5654). The test
+               runs on code points, so a character outside the Basic Multilingual Plane (the tag characters) is seen. */
+            if (IsInvisibleOrReordering(rune))
+            {
+                continue;
+            }
 
-            if (isBreakOrControl || ch == ' ')
+            var code = rune.Value;
+            var isBreakOrControl =
+                code < ' ' || code == 0x7F || code == 0x85 || code == 0x2028 || code == 0x2029;
+
+            if (isBreakOrControl || code == ' ')
             {
                 // Defer whitespace: emitted only before the next real char (drops leading + trailing runs).
                 pendingSpace = builder.Length > 0;
@@ -233,15 +242,37 @@ public sealed class CustomAlertEvaluator
                 pendingSpace = false;
             }
 
-            if (builder.Length >= maxLength)
+            /* A surrogate pair goes in whole or not at all, so the cap never leaves half of one. */
+            if (builder.Length + rune.Utf16SequenceLength > maxLength)
             {
                 break;
             }
 
-            builder.Append(ch);
+            builder.Append(rune.ToString());
         }
 
         return builder.ToString();
+    }
+
+    /// <summary>Every code point of the Unicode Format category (the bidirectional controls U+202A-202E and U+2066-2069,
+    /// the Arabic letter mark U+061C, the zero-width and mark characters U+200B-200F, U+2060-2064, U+FEFF, the tag
+    /// characters U+E0001 and U+E0020-E007F, and the rest), except the zero-width non-joiner U+200C and joiner U+200D,
+    /// which the spelling of Persian, Indic and emoji sequences needs; and the C1 controls (U+0080-009F except U+0085,
+    /// which the sanitizer already treats as a line break).</summary>
+    internal static bool IsInvisibleOrReordering(Rune rune)
+    {
+        var code = rune.Value;
+        if (code >= 0x80 && code <= 0x9F)
+        {
+            return code != 0x85;
+        }
+
+        if (code == 0x200C || code == 0x200D)
+        {
+            return false;
+        }
+
+        return Rune.GetUnicodeCategory(rune) == UnicodeCategory.Format;
     }
 
     /// <summary>Evaluates every enabled rule applicable to one server. Failure-isolated per rule.

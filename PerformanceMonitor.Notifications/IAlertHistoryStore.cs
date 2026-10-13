@@ -104,6 +104,38 @@ public interface IAlertHistoryStore
     /// balloon through the shared service's sink, so every page row there is a delivered page.</para>
     /// </summary>
     Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName);
+
+    /// <summary>
+    /// #5715 part B: the tier of the newest FIRE row for (<paramref name="serverId"/>, <paramref name="metricName"/>)
+    /// at or after <paramref name="sinceUtc"/>, or null. Seeds <c>TierEscalation</c> across a restart, so a Warning
+    /// delivered just before the restart still lets the Critical that follows inside the cooldown through at once.
+    /// <para>The tier is read from the row's context JSON as <c>AlertHistoryRowSeverity.FiredAt</c> reads it; a row with
+    /// none (Volume Free Space persists a tier only for a Critical fire) is <paramref name="tierWhenRowCarriesNone"/>,
+    /// which the engine sets to Warning for that one family and leaves null for every other, so a tierless row seeds
+    /// nothing there.</para>
+    /// <para>Null when no such row exists, when the newest one carries no tier and no fallback is given, or when a resolution row (<paramref name="resolutionMetricName"/>,
+    /// the resolution's title: "CPU Resolved", "Volume Free Space Resolved") is as new as the fire or newer. At an exact
+    /// tie the resolution wins (<see cref="AlertHistoryEscalationSeed.Resolve"/>).</para>
+    /// <para>Counted: a muted fire (the engine records its tier in process; pass <paramref name="countMuted"/> false for
+    /// the one family whose fire site does not), and a fire that was throttled, unconfigured or folded. Not counted: a fire
+    /// whose every attempted channel failed (<see cref="AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter"/>),
+    /// because in process that tier is put back.</para>
+    /// <para><paramref name="untilUtc"/> (round 1 of #5715) is an EXCLUSIVE upper bound on the fire row's time, null for
+    /// none: the engine passes its own start instant, because a row at or after it was written by this process, whose
+    /// in-memory tier already covers it. Both stores bound at microsecond precision
+    /// (<see cref="AlertHistoryEscalationSeed.TruncateToMicroseconds"/>), the precision they store, so a row written
+    /// in the same tick the engine started is not read back as history.</para>
+    /// <para>Server identity is scoped as <see cref="GetLastEmailSentUtcAsync"/> scopes it
+    /// (<see cref="AlertHistoryServerIdentity.SeedScope"/>): a key with no per-key rows answers null.</para>
+    /// <para>Unlike the cooldown seeds above, a failed read THROWS instead of degrading to null: the engine must be able
+    /// to tell "no history" from "could not read", so it logs the second and retries it on the next sweep. The default
+    /// body answers null for a store that keeps no tier history (a test double, the deprecated Dashboard store); both
+    /// real stores override it, and a test pins that.</para>
+    /// </summary>
+    Task<AlertSeverityLevel?> GetLastFiredTierAsync(
+        string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true,
+        AlertSeverityLevel? tierWhenRowCarriesNone = null, DateTime? untilUtc = null) =>
+        Task.FromResult<AlertSeverityLevel?>(null);
 }
 
 /// <summary>

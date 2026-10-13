@@ -496,6 +496,67 @@ public sealed class ManagedConfMigrationTests
         Assert.All(wals, l => Assert.Equal(ConfLineClassification.Ours, l.Classification));
     }
 
+    /// <summary>
+    /// A v2 block with a RAM-sized pair (N = clamp(16 x GB, floor, ceiling), M = N + 11; #5633 item 14) is Ours
+    /// because M = N + 11 is read from the SAME block; a mismatched M is a hand edit.
+    /// </summary>
+    [Fact]
+    public void ClassifyLines_CurrentFormulaV2Block_IsOurs_AndAMismatchedProcessCountIsAHandEdit()
+    {
+        var current = DarlingManagedPostgres.DeriveWorkerSettings(40, 8L * 1024 * 1024 * 1024);
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV2 + "\n" +
+            $"timescaledb.max_background_workers = {current.MaxBackgroundWorkers}\n" +
+            $"max_worker_processes = {current.MaxWorkerProcesses}\n";
+        Assert.All(ClassifyLines(conf).Where(l => l.Text.StartsWith("timescaledb.max_background_workers", StringComparison.Ordinal)
+            || l.Text.StartsWith("max_worker_processes", StringComparison.Ordinal)),
+            l => Assert.Equal(ConfLineClassification.Ours, l.Classification));
+
+        var mismatched = "\n" + DarlingManagedPostgres.ConfMarkerV2 + "\n" +
+            $"timescaledb.max_background_workers = {current.MaxBackgroundWorkers}\n" +
+            $"max_worker_processes = {current.MaxWorkerProcesses + 1}\n";
+        Assert.Equal(ConfLineClassification.HandEdit, FindByText(ClassifyLines(mismatched), "max_worker_processes").Classification);
+    }
+
+    private static string V8BlockWithWorkers(long ramBytes, int hypertables, int workers, int processes)
+    {
+        var current = DarlingManagedPostgres.DeriveWorkerSettings(hypertables, ramBytes);
+        return DarlingManagedPostgres.BuildHardwareSizingConfAppend(ramBytes, hypertables)
+            .Replace($"timescaledb.max_background_workers = {current.MaxBackgroundWorkers}", $"timescaledb.max_background_workers = {workers}", StringComparison.Ordinal)
+            .Replace($"max_worker_processes = {current.MaxWorkerProcesses}", $"max_worker_processes = {processes}", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A v8 block an earlier release wrote holds the legacy worker PAIR (hypertables + 2, + 13) and stays Ours
+    /// until the every-start heal rewrites it; at 8 GB the current pair differs (128 / 139), so only the legacy
+    /// fallback can make it Ours (#5633 item 14).
+    /// </summary>
+    [Fact]
+    public void ClassifyLines_V8Block_WithTheLegacyWorkerPair_IsOurs()
+    {
+        var conf = V8BlockWithWorkers(8L * 1024 * 1024 * 1024, 72, 74, 85);
+
+        var lines = ClassifyLines(conf);
+
+        Assert.Equal(ConfLineClassification.Ours, FindByText(lines, "timescaledb.max_background_workers").Classification);
+        Assert.Equal(ConfLineClassification.Ours, FindByText(lines, "max_worker_processes").Classification);
+    }
+
+    /// <summary>
+    /// 74 beside 171 is a pair no release ever wrote (an operator who lowered only the job slots, or two lines
+    /// that each pass alone): neither line may count as service-owned, or the operator's edit is dropped at the
+    /// next render. Each line is accepted only as part of the pair (#5633 item 14, review W2B-3).
+    /// </summary>
+    [Fact]
+    public void ClassifyLines_V8Block_With74And171_IsNotServiceOwned()
+    {
+        var conf = V8BlockWithWorkers(8L * 1024 * 1024 * 1024, 72, 74, 171);
+
+        var lines = ClassifyLines(conf);
+
+        Assert.Equal(ConfLineClassification.HandEdit, FindByText(lines, "timescaledb.max_background_workers").Classification);
+        Assert.Equal(ConfLineClassification.HandEdit, FindByText(lines, "max_worker_processes").Classification);
+    }
+
     /// <summary>v2's untouched block, at N = hypertableCount + 2 and M = N + 11, is Ours (#4336).</summary>
     [Fact]
     public void ClassifyLines_UntouchedV2Block_IsOurs()

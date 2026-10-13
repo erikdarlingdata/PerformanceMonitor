@@ -1093,6 +1093,494 @@ REVOKE UPDATE ON config.config_monitored_servers FROM mcp;
 GRANT UPDATE (server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password)
    ON config.config_monitored_servers TO mcp;
 
+-- 3h. External alert submit (#5654): another service raises an alert through Darling's channels, routes and mute rules by
+--     calling config.submit_external_alert as its OWN login (one login per source). This is the same function managed
+--     provisioning rebuilds on every start (DarlingManagedRoles section 10b), the same text, and the same grants (section
+--     10c). It looks the caller up by session_user in config.external_alert_source, so no argument names the source and
+--     no source can record an alert under another source's name. EXECUTE goes to the registered source logins only.
+--     The three tables (V180) are written only by the owner and by this function: the REVOKE below takes the
+--     INSERT/UPDATE/DELETE that step 3 and the default privileges gave admin. A source login is touched only when the registry names it
+--     and it carries the 'darling-alert-source' marker comment; each gets LOGIN, every widening attribute off, NOINHERIT,
+--     no role membership but darling_alert_sources (WITH INHERIT FALSE, SET FALSE from PostgreSQL 16), CONNECT on this
+--     database, USAGE on config and EXECUTE on the function, and nothing else. darling_alert_sources is a NOLOGIN group
+--     marked 'darling-alert-source-group' that holds nothing; it exists so the managed pg_hba line for
+--     postgres.network.role "sources" names one role. An unmarked role of that name stops the script (the step 1 rule), and
+--     every member that is not a registered, marked source login is revoked from it. On a
+--     store below V180 the block warns and skips the tables and the logins (the function itself is created either way);
+--     re-run the script once the service has migrated the store to V180, and again after each add-alert-source.
+CREATE OR REPLACE FUNCTION config.submit_external_alert(
+   p_kind text,
+   p_alert_key text,
+   p_severity text,
+   p_title text,
+   p_detail text,
+   p_server_name text,
+   p_value double precision)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_source_id integer;
+   v_max_per_minute integer;
+   v_max_pending integer;
+   v_severity text;
+   v_pending_id bigint;
+BEGIN
+   SELECT s.source_id, s.max_per_minute, s.max_pending
+   INTO v_source_id, v_max_per_minute, v_max_pending
+   FROM config.external_alert_source AS s
+   WHERE s.role_name = session_user::text
+     AND s.enabled
+   FOR NO KEY UPDATE OF s;
+
+   IF NOT FOUND THEN
+      RAISE EXCEPTION 'This login is not a registered external alert source.' USING ERRCODE = 'DL403';
+   END IF;
+
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'submit_external_alert needs the READ COMMITTED isolation level.' USING ERRCODE = 'DL400',
+         HINT = 'Run the call outside a REPEATABLE READ or SERIALIZABLE transaction.';
+   END IF;
+
+   v_severity := CASE WHEN p_severity IS NULL AND p_kind = 'clear' THEN 'warning' ELSE p_severity END;
+
+   IF p_kind IS NULL OR p_kind NOT IN ('fire', 'clear') THEN
+      RAISE EXCEPTION 'kind must be fire or clear.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_severity IS NULL OR v_severity NOT IN ('warning', 'critical') THEN
+      RAISE EXCEPTION 'severity must be warning or critical.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_alert_key IS NULL OR char_length(p_alert_key) NOT BETWEEN 1 AND 128 OR p_alert_key !~ '^[A-Za-z0-9._:-]+$' THEN
+      RAISE EXCEPTION 'alert_key must be 1 to 128 characters from A-Z a-z 0-9 . _ : -.' USING ERRCODE = 'DL400';
+   END IF;
+   IF char_length(p_title) > 200 THEN
+      RAISE EXCEPTION 'title is longer than 200 characters.' USING ERRCODE = 'DL400';
+   END IF;
+   IF char_length(p_detail) > 2000 THEN
+      RAISE EXCEPTION 'detail is longer than 2000 characters.' USING ERRCODE = 'DL400';
+   END IF;
+   IF char_length(p_server_name) > 128 THEN
+      RAISE EXCEPTION 'server_name is longer than 128 characters.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_value IN ('NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision) THEN
+      RAISE EXCEPTION 'value must be a finite number.' USING ERRCODE = 'DL400';
+   END IF;
+
+   IF (SELECT count(*) FROM config.external_alert_pending AS p
+       WHERE p.source_id = v_source_id AND p.submitted_at > clock_timestamp() - interval '1 minute') >= v_max_per_minute THEN
+      RAISE EXCEPTION 'This source has reached its limit of % alerts per minute.', v_max_per_minute
+         USING ERRCODE = 'DL429', HINT = 'Send fewer alerts, or ask the Darling operator to raise max_per_minute for this source.';
+   END IF;
+   IF (SELECT count(*) FROM config.external_alert_pending AS p
+       WHERE p.source_id = v_source_id AND p.status IN ('pending', 'claimed')) >= v_max_pending THEN
+      RAISE EXCEPTION 'This source already has % alerts waiting for delivery.', v_max_pending
+         USING ERRCODE = 'DL429', HINT = 'Darling has not delivered the earlier alerts yet. Retry later.';
+   END IF;
+
+   INSERT INTO config.external_alert_pending
+      (source_id, kind, alert_key, severity, title, detail, server_name, value, submitted_at, expires_at)
+   VALUES
+      (v_source_id, p_kind, p_alert_key, v_severity,
+       regexp_replace(p_title, '[\r\n]+', ' ', 'g'),
+       regexp_replace(p_detail, '[\r\n]+', ' ', 'g'),
+       regexp_replace(p_server_name, '[\r\n]+', ' ', 'g'),
+       p_value, clock_timestamp(), clock_timestamp() + interval '15 minutes')
+   RETURNING pending_id INTO v_pending_id;
+
+   RETURN v_pending_id;
+END;
+$fn$;
+REVOKE ALL ON FUNCTION config.submit_external_alert(text, text, text, text, text, text, double precision) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.submit_external_alert(text, text, text, text, text, text, double precision) FROM admin, viewer, mcp;
+-- The two trigger functions need no EXECUTE to fire, so PUBLIC (and with it a source login) gets none.
+REVOKE EXECUTE ON FUNCTION config.config_bump_version(), config.config_service_bump() FROM PUBLIC;
+-- pg_stat_statements gives PUBLIC its views and functions; Darling reads them through its own SECURITY DEFINER functions.
+-- pg_read_all_stats (part of pg_monitor) keeps them, so a monitoring login that watches this database as a PostgreSQL target
+-- still reads them, and so does each store owner that is not a superuser (the owner of config.config_monitored_servers and
+-- of the reader functions), which those functions run as. Only the owner of the extension or a superuser may revoke them:
+-- for any other role this block changes nothing. When PUBLIC still holds them afterwards (the extension belongs to a
+-- superuser and this script runs as the store owner), it raises a WARNING naming the owner of the extension and the
+-- statements that owner runs; the service logs the same text.
+DO $do$
+DECLARE
+   v_pass integer;
+   v_may_change boolean;
+   v_statements text;
+   v_warning text;
+BEGIN
+   -- The first pass revokes when this role may; the second reads the grants as they are now.
+   FOR v_pass IN 1..2 LOOP
+      SELECT q.may_change, q.sql_text, q.warning INTO v_may_change, v_statements, v_warning
+      FROM (
+      WITH ext AS
+      (
+          SELECT
+              n.nspname,
+              e.extowner,
+              e.extnamespace,
+              (
+                  SELECT c.oid
+                  FROM pg_catalog.pg_class AS c
+                  WHERE c.relnamespace = e.extnamespace
+                  AND   c.relname OPERATOR(pg_catalog.=) 'pg_stat_statements'
+              ) AS view_oid,
+              (
+                  SELECT c.oid
+                  FROM pg_catalog.pg_class AS c
+                  WHERE c.relnamespace = e.extnamespace
+                  AND   c.relname OPERATOR(pg_catalog.=) 'pg_stat_statements_info'
+              ) AS info_oid
+          FROM pg_catalog.pg_extension AS e
+          JOIN pg_catalog.pg_namespace AS n
+            ON n.oid = e.extnamespace
+          WHERE e.extname = 'pg_stat_statements'
+      ),
+      facts AS
+      (
+          SELECT
+              ext.*,
+              (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = ext.view_oid) AS view_owner,
+              (
+                  SELECT pg_catalog.string_agg(pg_catalog.quote_ident(r.rolname), ', ' ORDER BY r.rolname)
+                  FROM pg_catalog.pg_roles AS r
+                  WHERE NOT r.rolsuper
+                  AND   r.oid IS DISTINCT FROM (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = ext.view_oid)
+                  AND   r.oid IN
+                        (
+                            SELECT c.relowner
+                            FROM pg_catalog.pg_class AS c
+                            JOIN pg_catalog.pg_namespace AS cn
+                              ON cn.oid = c.relnamespace
+                            WHERE cn.nspname OPERATOR(pg_catalog.=) 'config'
+                            AND   c.relname OPERATOR(pg_catalog.=) 'config_monitored_servers'
+                            UNION ALL
+                            SELECT p.proowner
+                            FROM pg_catalog.pg_proc AS p
+                            JOIN pg_catalog.pg_namespace AS pn
+                              ON pn.oid = p.pronamespace
+                            WHERE pn.nspname OPERATOR(pg_catalog.=) 'config'
+                            AND   p.proname IN ('store_statement_stats', 'store_statement_stats_info')
+                        )
+              ) AS owners,
+              (
+                  EXISTS
+                  (
+                      SELECT 1
+                      FROM pg_catalog.pg_class AS c
+                      CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) AS a
+                      WHERE c.oid IN (ext.view_oid, ext.info_oid)
+                      AND   a.grantee = 0
+                      AND   a.privilege_type = 'SELECT'
+                  )
+                  OR EXISTS
+                  (
+                      SELECT 1
+                      FROM pg_catalog.pg_proc AS p
+                      CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) AS a
+                      WHERE p.pronamespace = ext.extnamespace
+                      AND   p.proname IN ('pg_stat_statements', 'pg_stat_statements_info')
+                      AND   a.grantee = 0
+                      AND   a.privilege_type = 'EXECUTE'
+                  )
+              ) AS public_reads
+          FROM ext
+      ),
+      built AS
+      (
+          SELECT
+              f.*,
+              'pg_read_all_stats' || COALESCE(', ' || f.owners, '') AS grantees
+          FROM facts AS f
+      ),
+      statements AS
+      (
+          SELECT
+              b.*,
+              pg_catalog.format('REVOKE SELECT ON %1$I.pg_stat_statements FROM PUBLIC; REVOKE EXECUTE ON FUNCTION %1$I.pg_stat_statements(boolean) FROM PUBLIC; GRANT SELECT ON %1$I.pg_stat_statements TO %2$s; GRANT EXECUTE ON FUNCTION %1$I.pg_stat_statements(boolean) TO %2$s;', b.nspname, b.grantees)
+              || CASE
+                     WHEN b.info_oid IS NULL THEN ''
+                     ELSE pg_catalog.format(' REVOKE SELECT ON %1$I.pg_stat_statements_info FROM PUBLIC; REVOKE EXECUTE ON FUNCTION %1$I.pg_stat_statements_info() FROM PUBLIC; GRANT SELECT ON %1$I.pg_stat_statements_info TO %2$s; GRANT EXECUTE ON FUNCTION %1$I.pg_stat_statements_info() TO %2$s;', b.nspname, b.grantees)
+                 END AS sql_text
+          FROM built AS b
+      )
+      SELECT
+          COALESCE((SELECT r.rolsuper FROM pg_catalog.pg_roles AS r WHERE r.rolname OPERATOR(pg_catalog.=) current_user), false)
+              OR (s.view_owner IS NOT NULL AND pg_catalog.pg_has_role(current_user, s.view_owner, 'USAGE')) AS may_change,
+          s.sql_text,
+          CASE
+              WHEN s.public_reads THEN pg_catalog.format(
+                  'Statement statistics: PUBLIC can still read %s.pg_stat_statements, so every login that may connect to this database reads the statement statistics of every role, the external alert source logins included. Only the owner of the extension, %s, or a superuser can revoke that. Have %s run, in this database: %s',
+                  pg_catalog.quote_ident(s.nspname),
+                  pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(s.extowner)),
+                  pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(s.extowner)),
+                  s.sql_text)
+          END AS warning
+      FROM statements AS s
+      WHERE s.view_oid IS NOT NULL
+      ) AS q;
+      IF v_pass = 1 AND v_may_change AND v_statements IS NOT NULL THEN
+         EXECUTE v_statements;
+      END IF;
+   END LOOP;
+   IF v_warning IS NOT NULL THEN
+      RAISE WARNING '%', v_warning;
+   END IF;
+END $do$;
+
+DO $do$
+DECLARE
+   as_superuser boolean := (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user);
+   source_login record;
+   membership record;
+   attribute text;
+   group_oid oid;
+   reset_failed boolean;
+BEGIN
+   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'darling_alert_sources') THEN
+      CREATE ROLE darling_alert_sources NOLOGIN NOINHERIT;
+      COMMENT ON ROLE darling_alert_sources IS 'darling-alert-source-group';
+   ELSIF pg_catalog.shobj_description((SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'darling_alert_sources'), 'pg_authid') IS DISTINCT FROM 'darling-alert-source-group' THEN
+      RAISE EXCEPTION 'The group role "darling_alert_sources" already exists and was not created by Darling (missing the ''darling-alert-source-group'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated role.';
+   END IF;
+
+   SELECT oid INTO group_oid FROM pg_catalog.pg_roles WHERE rolname = 'darling_alert_sources';
+   -- NOLOGIN and NOINHERIT alone, then only the attributes that are on: a role without SUPERUSER may not name SUPERUSER,
+   -- REPLICATION or BYPASSRLS in ALTER ROLE even to switch them off, so naming them all would always fail for it.
+   BEGIN
+      ALTER ROLE darling_alert_sources NOLOGIN NOINHERIT;
+   EXCEPTION WHEN insufficient_privilege THEN
+      RAISE WARNING 'Role "darling_alert_sources" could not be set to NOLOGIN NOINHERIT: this needs a superuser, or CREATEROLE and, from PostgreSQL 16, ADMIN OPTION on the role.';
+   END;
+   FOREACH attribute IN ARRAY (
+         SELECT pg_catalog.array_remove(ARRAY[
+            CASE WHEN r.rolsuper THEN 'SUPERUSER' END,
+            CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END,
+            CASE WHEN r.rolcreatedb THEN 'CREATEDB' END,
+            CASE WHEN r.rolreplication THEN 'REPLICATION' END,
+            CASE WHEN r.rolbypassrls THEN 'BYPASSRLS' END], NULL)
+         FROM pg_catalog.pg_roles AS r WHERE r.oid = group_oid)
+   LOOP
+      BEGIN
+         EXECUTE pg_catalog.format('ALTER ROLE darling_alert_sources NO%s', attribute);
+      EXCEPTION WHEN insufficient_privilege THEN
+         RAISE WARNING 'Role "darling_alert_sources" still has the % attribute: switching it off needs a superuser, or, from PostgreSQL 16, an owner that holds % itself.', attribute, attribute;
+      END;
+   END LOOP;
+   IF (SELECT r.rolcanlogin FROM pg_catalog.pg_roles AS r WHERE r.oid = group_oid) THEN
+      RAISE WARNING 'Role "darling_alert_sources" can still log in, and a pg_hba line for +darling_alert_sources admits it. Have a superuser run: ALTER ROLE darling_alert_sources NOLOGIN;';
+   END IF;
+
+   FOR membership IN
+      SELECT g.rolname AS granted, b.rolname AS grantor
+      FROM pg_catalog.pg_auth_members AS a
+      JOIN pg_catalog.pg_roles AS g ON g.oid = a.roleid
+      LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
+      WHERE a.member = group_oid
+   LOOP
+      BEGIN
+         EXECUTE pg_catalog.format('REVOKE %I FROM darling_alert_sources', membership.granted)
+            || CASE WHEN (as_superuser OR pg_catalog.current_setting('server_version_num')::int >= 160000) AND membership.grantor IS NOT NULL
+                    THEN pg_catalog.format(' GRANTED BY %I', membership.grantor) ELSE '' END
+            || ' CASCADE';
+      EXCEPTION WHEN insufficient_privilege THEN
+         RAISE WARNING 'Role "darling_alert_sources" is still a member of "%": revoking that needs a superuser, or ADMIN OPTION on it.', membership.granted;
+      END;
+   END LOOP;
+
+   EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM darling_alert_sources', pg_catalog.current_database());
+   REVOKE ALL ON SCHEMA config, collect FROM darling_alert_sources;
+   REVOKE ALL ON ALL TABLES IN SCHEMA config, collect FROM darling_alert_sources;
+   REVOKE ALL ON ALL SEQUENCES IN SCHEMA config, collect FROM darling_alert_sources;
+   REVOKE ALL ON FUNCTION config.submit_external_alert(text, text, text, text, text, text, double precision) FROM darling_alert_sources;
+
+   IF pg_catalog.to_regclass('config.external_alert_source') IS NULL
+      OR pg_catalog.to_regclass('config.external_alert_pending') IS NULL
+      OR pg_catalog.to_regclass('config.external_alert_state') IS NULL THEN
+      RAISE WARNING 'The external alert tables were not found, so their grants and the source logins were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.external_alert_source, config.external_alert_pending, config.external_alert_state
+      FROM PUBLIC, admin, viewer, mcp CASCADE;
+   GRANT SELECT ON config.external_alert_source, config.external_alert_pending, config.external_alert_state
+      TO admin, viewer;
+   GRANT SELECT ON config.external_alert_source, config.external_alert_pending, config.external_alert_state
+      TO mcp;
+
+   -- Every grant of the group to a role that is not a registered, marked source login, and every grant of a source login to
+   -- any role, found by walking down from the group through the source logins: pg_hba's +darling_alert_sources matches a
+   -- member at any depth, whatever its INHERIT and SET options. A grant this role may not revoke (from PostgreSQL 16, a role
+   -- that is not a superuser is recorded as a member of each role it creates, granted by the bootstrap superuser) is named
+   -- in a WARNING here, and again at the end of this block with the pg_hba line that keeps it out.
+   FOR membership IN
+      WITH RECURSIVE valid AS (
+         SELECT r.oid
+         FROM config.external_alert_source AS s
+         JOIN pg_catalog.pg_roles AS r ON r.rolname = s.role_name
+         WHERE pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM 'darling-alert-source'
+           AND r.rolname NOT IN ('admin', 'viewer', 'mcp')
+           AND r.rolname <> current_user
+           AND NOT r.rolsuper
+           AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())
+      ), walk (roleid, member) AS (
+         SELECT a.roleid, a.member FROM pg_catalog.pg_auth_members AS a WHERE a.roleid = group_oid
+         UNION
+         SELECT a.roleid, a.member
+         FROM pg_catalog.pg_auth_members AS a
+         JOIN walk AS w ON a.roleid = w.member
+         WHERE w.member IN (SELECT v.oid FROM valid AS v)
+      )
+      SELECT DISTINCT g.rolname AS granted, m.rolname AS member_name, b.rolname AS grantor
+      FROM walk AS w
+      JOIN pg_catalog.pg_auth_members AS a ON a.roleid = w.roleid AND a.member = w.member
+      JOIN pg_catalog.pg_roles AS g ON g.oid = a.roleid
+      JOIN pg_catalog.pg_roles AS m ON m.oid = a.member
+      LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
+      WHERE (w.roleid = group_oid AND w.member NOT IN (SELECT v.oid FROM valid AS v))
+         OR w.roleid IN (SELECT v.oid FROM valid AS v)
+   LOOP
+      BEGIN
+         EXECUTE pg_catalog.format('REVOKE %I FROM %I', membership.granted, membership.member_name)
+            || CASE WHEN (as_superuser OR pg_catalog.current_setting('server_version_num')::int >= 160000) AND membership.grantor IS NOT NULL
+                    THEN pg_catalog.format(' GRANTED BY %I', membership.grantor) ELSE '' END
+            || ' CASCADE';
+      EXCEPTION WHEN insufficient_privilege THEN
+         RAISE WARNING 'Role "%" is still a member of "%": revoking that needs a superuser, or ADMIN OPTION on it and the rights of the role that granted it.', membership.member_name, membership.granted;
+      END;
+   END LOOP;
+
+   FOR source_login IN
+      SELECT s.role_name, r.oid AS role_oid, r.rolsuper, r.rolcreaterole, r.rolcreatedb, r.rolreplication, r.rolbypassrls,
+             (pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM 'darling-alert-source') AS marked,
+             (r.rolname IN ('admin', 'viewer', 'mcp')
+              OR r.rolname = current_user
+              OR r.rolsuper
+              OR r.oid = (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())) AS reserved
+      FROM config.external_alert_source AS s
+      LEFT JOIN pg_catalog.pg_roles AS r ON r.rolname = s.role_name
+   LOOP
+      IF source_login.reserved IS TRUE THEN
+         RAISE WARNING 'External alert source login "%" was skipped: it is one of Darling''s own roles, the role running this step, a superuser or the database owner, and its limit, inheritance and memberships are left as they are.', source_login.role_name;
+         CONTINUE;
+      END IF;
+
+      IF source_login.role_oid IS NULL OR NOT source_login.marked THEN
+         RAISE WARNING 'External alert source login "%" was skipped: it does not exist or does not carry the ''darling-alert-source'' marker comment.', source_login.role_name;
+         IF source_login.role_oid IS NOT NULL THEN
+            EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION config.submit_external_alert(%s) FROM %I',
+               'text, text, text, text, text, text, double precision', source_login.role_name);
+         END IF;
+         CONTINUE;
+      END IF;
+
+      -- A login whose reset below does not complete (an attribute or a membership this role may not take back) gets no
+      -- grant and no membership in the group, as the service's add verb does: it is not admitted until a superuser runs
+      -- this script, or the add verb's statements, for it.
+      reset_failed := false;
+      BEGIN
+         EXECUTE pg_catalog.format('ALTER ROLE %I LOGIN NOINHERIT CONNECTION LIMIT 5', source_login.role_name);
+      EXCEPTION WHEN insufficient_privilege THEN
+         reset_failed := true;
+         RAISE WARNING 'Login "%" could not be set to LOGIN NOINHERIT CONNECTION LIMIT 5: this needs CREATEROLE, and from PostgreSQL 16 ADMIN OPTION on the role.', source_login.role_name;
+      END;
+      FOREACH attribute IN ARRAY pg_catalog.array_remove(ARRAY[
+            CASE WHEN source_login.rolsuper THEN 'SUPERUSER' END,
+            CASE WHEN source_login.rolcreaterole THEN 'CREATEROLE' END,
+            CASE WHEN source_login.rolcreatedb THEN 'CREATEDB' END,
+            CASE WHEN source_login.rolreplication THEN 'REPLICATION' END,
+            CASE WHEN source_login.rolbypassrls THEN 'BYPASSRLS' END], NULL)
+      LOOP
+         BEGIN
+            EXECUTE pg_catalog.format('ALTER ROLE %I NO%s', source_login.role_name, attribute);
+         EXCEPTION WHEN insufficient_privilege THEN
+            reset_failed := true;
+            RAISE WARNING 'Login "%" still has the % attribute: switching it off needs a superuser, or, from PostgreSQL 16, an owner that holds % itself.', source_login.role_name, attribute, attribute;
+         END;
+      END LOOP;
+
+      FOR membership IN
+         SELECT g.rolname AS granted, b.rolname AS grantor
+         FROM pg_catalog.pg_auth_members AS a
+         JOIN pg_catalog.pg_roles AS g ON g.oid = a.roleid
+         LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
+         WHERE a.member = source_login.role_oid
+      LOOP
+         BEGIN
+            EXECUTE pg_catalog.format('REVOKE %I FROM %I', membership.granted, source_login.role_name)
+               || CASE WHEN (as_superuser OR pg_catalog.current_setting('server_version_num')::int >= 160000) AND membership.grantor IS NOT NULL
+                       THEN pg_catalog.format(' GRANTED BY %I', membership.grantor) ELSE '' END
+               || ' CASCADE';
+         EXCEPTION WHEN insufficient_privilege THEN
+            reset_failed := true;
+            RAISE WARNING 'Login "%" is still a member of "%": revoking that needs a superuser, or ADMIN OPTION on it.', source_login.role_name, membership.granted;
+         END;
+      END LOOP;
+
+      EXECUTE pg_catalog.format('REVOKE ALL ON ALL TABLES IN SCHEMA config, collect FROM %I', source_login.role_name);
+      EXECUTE pg_catalog.format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA config, collect FROM %I', source_login.role_name);
+      IF reset_failed THEN
+         EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION config.submit_external_alert(%s) FROM %I',
+            'text, text, text, text, text, text, double precision', source_login.role_name);
+         BEGIN
+            EXECUTE pg_catalog.format('REVOKE darling_alert_sources FROM %I', source_login.role_name);
+         EXCEPTION WHEN insufficient_privilege THEN
+            NULL;
+         END;
+         RAISE WARNING 'External alert source login "%" is not admitted: this script could not finish its reset (see the warnings above), so it gets no grant and no membership in "darling_alert_sources". A superuser runs this script again, or the add verb''s statements, to admit it.', source_login.role_name;
+         CONTINUE;
+      END IF;
+      EXECUTE pg_catalog.format('GRANT CONNECT ON DATABASE %I TO %I', pg_catalog.current_database(), source_login.role_name);
+      EXECUTE pg_catalog.format('GRANT USAGE ON SCHEMA config TO %I', source_login.role_name);
+      EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION config.submit_external_alert(%s) TO %I',
+         'text, text, text, text, text, text, double precision', source_login.role_name);
+      BEGIN
+         IF pg_catalog.current_setting('server_version_num')::int >= 160000 THEN
+            EXECUTE pg_catalog.format('GRANT darling_alert_sources TO %I WITH INHERIT FALSE, SET FALSE', source_login.role_name);
+         ELSE
+            EXECUTE pg_catalog.format('GRANT darling_alert_sources TO %I', source_login.role_name);
+         END IF;
+      EXCEPTION WHEN insufficient_privilege THEN
+         RAISE WARNING 'Login "%" could not be made a member of "darling_alert_sources": this needs a superuser, or ADMIN OPTION on the group.', source_login.role_name;
+      END;
+   END LOOP;
+
+   -- What a pg_hba line for +darling_alert_sources admits besides the source logins: every member of the group at any depth
+   -- (through any role) that is not a registered, marked source login, after the revokes above. The role running this script
+   -- is one of them when it is not a superuser and created the group or a source login on PostgreSQL 16 or later.
+   FOR membership IN
+      WITH RECURSIVE closure (oid) AS (
+         SELECT a.member FROM pg_catalog.pg_auth_members AS a WHERE a.roleid = group_oid
+         UNION
+         SELECT a.member FROM pg_catalog.pg_auth_members AS a JOIN closure AS c ON a.roleid = c.oid
+      )
+      SELECT r.rolname AS member_name
+      FROM closure AS c
+      JOIN pg_catalog.pg_roles AS r ON r.oid = c.oid
+      WHERE NOT (EXISTS (SELECT 1 FROM config.external_alert_source AS s WHERE s.role_name = r.rolname)
+                 AND pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM 'darling-alert-source'
+                 AND r.rolname NOT IN ('admin', 'viewer', 'mcp')
+                 AND NOT r.rolsuper
+                 AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database()))
+      ORDER BY r.rolname
+   LOOP
+      RAISE WARNING 'Role "%" is a member of "darling_alert_sources" (directly or through a source login)%, so a pg_hba line for +darling_alert_sources admits it too. Put this line ABOVE that one: hostssl % % <range> reject',
+         membership.member_name,
+         CASE WHEN membership.member_name = current_user THEN ', and it is the role running this script' ELSE '' END,
+         -- pg_hba quoting: a name is bare only when it is plain lower-case letters, digits and underscores and not a
+         -- pg_hba keyword, so a role named all is that one role and never every role (the service quotes the same way).
+         CASE WHEN pg_catalog.current_database() ~ '^[a-z0-9_]+$'
+                   AND pg_catalog.current_database() NOT IN ('all', 'sameuser', 'samerole', 'samegroup', 'replication')
+              THEN pg_catalog.current_database()::text
+              ELSE '"' || pg_catalog.replace(pg_catalog.current_database(), '"', '""') || '"' END,
+         CASE WHEN membership.member_name ~ '^[a-z0-9_]+$'
+                   AND membership.member_name NOT IN ('all', 'sameuser', 'samerole', 'samegroup', 'replication')
+              THEN membership.member_name::text
+              ELSE '"' || pg_catalog.replace(membership.member_name, '"', '""') || '"' END;
+   END LOOP;
+END $do$;
+
 -- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
 --     and it comes after EVERY grant above, so none of them can put a privilege back. REVOKE ALL ... CASCADE takes every

@@ -2112,7 +2112,8 @@ internal static class DarlingDataReader
     /// <c>TopProceduresSql</c> (the columns Lite's get_top_procedures_by_cpu returns): group by
     /// (database, schema, object, type), sum the deltas + carry min/max spreads, rank by summed
     /// <c>delta_worker_time</c> (CPU — the tool's promise; #3523) descending, cap at top. Reads the base <c>procedure_stats</c> table
-    /// (no v_ view). $1 server_id, $2/$3 window (naive UTC), $4 top.
+    /// (no v_ view). $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database list (NULL = all), $6 databases to leave out (NULL = none;
+    /// #5633 review: the ones the server dropped, see CurrentDatabaseScope.NarrowAsync).
     /// </summary>
     public const string TopProceduresSql = $"""
         WITH winners AS MATERIALIZED (
@@ -2137,6 +2138,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
             /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
             GROUP BY database_name, schema_name, object_name, object_type
@@ -2187,6 +2189,7 @@ internal static class DarlingDataReader
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
         AND   {TimescaleSupport.IntervalHonestSourceFilter}
         GROUP BY database_name, schema_name, object_name, object_type
         ORDER BY MAX(w.rank_metric) DESC NULLS LAST, MAX(w.rank_cpu) DESC NULLS LAST, database_name, schema_name, object_name, object_type
@@ -2216,7 +2219,7 @@ internal static class DarlingDataReader
     /// <see cref="RollupCoverage.StitchedRelationSql"/> returns for this window at call time — never a literal
     /// relation name. $1 server_id, $2/$3 window (naive UTC; $3 is EXCLUSIVE — a bucket is stamped at its
     /// START, so the bucket that begins at $3 lies after the window and is not read), $4 top, $5 database
-    /// filter (NULL = all). <c>$IOSUMS$</c> (#5329) is the three reads/writes sums on <c>procedure_stats_io_hourly</c>
+    /// filter (NULL = all), $6 databases to leave out (NULL = none; #5633 review), then the ceiling when there is one at $7. <c>$IOSUMS$</c> (#5329) is the three reads/writes sums on <c>procedure_stats_io_hourly</c>
     /// and typed NULLs on the stitched relation.
     /// </summary>
     public const string TopProceduresHourlySql = """
@@ -2236,6 +2239,7 @@ internal static class DarlingDataReader
             AND   bucket >= $2
             AND   bucket < $3$CEIL$
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
             GROUP BY database_name, schema_name, object_name
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
             ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST, database_name, schema_name, object_name
@@ -2348,6 +2352,7 @@ internal static class DarlingDataReader
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddDatabases(command, databases);
+        command.Parameters.Add(databases.ExcludeParameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -2408,7 +2413,7 @@ internal static class DarlingDataReader
         var sql = TopRankings.Apply(TopProceduresHourlySql, ranking, hourly: true, io: io)
             .Replace(TopProceduresHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
             .Replace(TopProceduresHourlyIoSumsPlaceholder, io ? TopRankings.HourlyIoSums : TopRankings.HourlyNoIoSums, StringComparison.Ordinal)
-            .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(6), StringComparison.Ordinal);
+            .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(7), StringComparison.Ordinal);
 
         var firstBucketTask = coverage.GetHourlyFirstBucketAsync(
             postgres, io ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView,
@@ -2421,6 +2426,7 @@ internal static class DarlingDataReader
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddDatabases(command, databases);
+        command.Parameters.Add(databases.ExcludeParameter());
         if (ceiling is not null)
         {
             AddTimestamp(command, ceiling.Value);

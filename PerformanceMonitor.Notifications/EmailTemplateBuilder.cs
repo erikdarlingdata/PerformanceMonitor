@@ -65,7 +65,8 @@ internal static class EmailTemplateBuilder
         /* Severity/color map on the immutable metric name (AlertSeverity's key); a custom rule's human name
            only replaces the metric name in the VISIBLE heading, never in ForMetric. */
         var (accentColor, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
-        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
+        /* #5654: an alert another service submitted carries its source in the title, so it cannot pass as Darling's own. */
+        var titleName = WebhookAlertService.ExternalTitle(string.IsNullOrEmpty(displayName) ? metricName : displayName, context);
         var prose = AlertDetailText.ProseForDelivery(detailText, context);
 
         var html = BuildHtmlBody(titleName, serverName, currentValue,

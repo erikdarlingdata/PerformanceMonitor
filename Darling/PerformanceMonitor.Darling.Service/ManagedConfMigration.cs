@@ -278,7 +278,7 @@ internal static class ManagedConfMigration
             _ when span.Marker == DarlingManagedPostgres.ConfMarker => ClassifyV1Line(key, text, configuredPort),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV4 => ClassifyV4Line(key, text),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV6 => ClassifyV6Line(key, text),
-            _ when span.Marker == DarlingManagedPostgres.ConfMarkerV8 => ClassifyV8Line(key, text, span, rawLines),
+            _ when span.Marker == DarlingManagedPostgres.ConfMarkerV8 => ClassifyV8Line(key, text, span, rawLines, assignments),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV9 => ClassifyFixedLine(
                 key, text, "timezone", "timezone = 'UTC'"),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV10 => ClassifyFixedLine(
@@ -346,7 +346,7 @@ internal static class ManagedConfMigration
     /// hypertable counts, not RAM. <c>timescaledb.max_background_workers = N</c> is ours only if N is an integer
     /// &gt;= 2 (<c>hypertableCount + 2</c> for a non-negative hypertable count) read from the SAME block, and
     /// <c>max_worker_processes = M</c> is ours only if M == N + 11 (<see cref="DarlingManagedPostgres.DeriveWorkerSettings"/>
-    /// with N-2 hypertables reproduces the same M) AND M is read from the same block as its N. Anything else —
+    /// reproduces the same M) AND M is read from the same block as its N. Anything else —
     /// N &lt; 2, a non-integer, a mismatched M, or a value the builder's exact form never emits (a unit suffix,
     /// different spacing) — is a hand edit.
     /// </summary>
@@ -367,11 +367,9 @@ internal static class ManagedConfMigration
             return (false, HandEditReason.RebuildMismatch);
         }
 
-        var rebuilt = DarlingManagedPostgres.DeriveWorkerSettings(backgroundWorkers - 2);
-        if (rebuilt.MaxBackgroundWorkers != backgroundWorkers || rebuilt.MaxWorkerProcesses != workerProcesses)
-        {
-            return (false, HandEditReason.RebuildMismatch);
-        }
+        /* No further formula check: M == N + 11 above IS the 3 + N + 8 rebuild for every N >= 2 (the floor
+           N = hypertables + 2 is any N >= 2). v2 only ever wrote the floor, in every release (the RAM-bounded
+           sizing lives in the v8 block), so nothing here changed with #5633 item 14. */
 
         if (string.Equals(key, "timescaledb.max_background_workers", StringComparison.OrdinalIgnoreCase))
         {
@@ -600,7 +598,8 @@ internal static class ManagedConfMigration
     /// operator deleted it, or spliced in a hand-written block using the real marker) fails the rebuild outright.
     /// </summary>
     private static (bool IsOurs, HandEditReason Reason) ClassifyV8Line(
-        string key, string text, (int StartLine, int EndLine, string Marker) span, string[] rawLines)
+        string key, string text, (int StartLine, int EndLine, string Marker) span, string[] rawLines,
+        Dictionary<int, (string Key, string Value)> assignments)
     {
         if (!TryFindFingerprintLine(span, rawLines, DarlingManagedPostgres.ConfHardwareFingerprintPrefix, out var fingerprint) ||
             !TryParseHardwareFingerprint(fingerprint, out var ramMb, out var hypertables))
@@ -609,7 +608,32 @@ internal static class ManagedConfMigration
         }
 
         var rebuilt = DarlingManagedPostgres.BuildHardwareSizingConfAppend(ramMb * 1024L * 1024L, hypertables);
-        return ClassifyAgainstRebuiltBlock(key, text, rebuilt);
+        var verdict = ClassifyAgainstRebuiltBlock(key, text, rebuilt);
+        if (verdict.IsOurs)
+        {
+            return verdict;
+        }
+
+        /* #5633 item 14 made the worker pair RAM-dependent. A v8 block an earlier release wrote holds the
+           legacy PAIR for its recorded hypertable count (N = hypertables + 2, M = 3 + N + 8) and is still ours
+           until the every-start heal rewrites it, not a hand edit. The pair is accepted as a PAIR, read from
+           the same block, as v2 does: a worker line is ours only when BOTH assignments in the span equal the
+           pair some release wrote. A line checked on its own would accept 74 beside 171, which no release
+           ever wrote (an operator lowering only the job slots), and drop the operator's edit. */
+        var legacyWorkers = DarlingManagedPostgres.DeriveWorkerFloor(hypertables);
+        if ((string.Equals(key, "timescaledb.max_background_workers", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(key, "max_worker_processes", StringComparison.OrdinalIgnoreCase)) &&
+            TryFindAssignmentValue(span, assignments, "timescaledb.max_background_workers", out var workersText) &&
+            TryFindAssignmentValue(span, assignments, "max_worker_processes", out var processesText) &&
+            workersText == legacyWorkers.MaxBackgroundWorkers.ToString(CultureInfo.InvariantCulture) &&
+            processesText == legacyWorkers.MaxWorkerProcesses.ToString(CultureInfo.InvariantCulture))
+        {
+            return string.Equals(key, "timescaledb.max_background_workers", StringComparison.OrdinalIgnoreCase)
+                ? ClassifyFixedLine(key, text, key, FormattableString.Invariant($"{key} = {legacyWorkers.MaxBackgroundWorkers}"))
+                : ClassifyFixedLine(key, text, key, FormattableString.Invariant($"{key} = {legacyWorkers.MaxWorkerProcesses}"));
+        }
+
+        return verdict;
     }
 
     /// <summary>

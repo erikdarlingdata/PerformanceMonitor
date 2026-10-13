@@ -74,6 +74,16 @@ namespace PerformanceMonitor.Common
             if (string.IsNullOrEmpty(metricName))
                 return false;
 
+            /* #5654: an external alert's metric name is External:<source>:<key>, and the key is the other
+               service's own spelling, so a fire for a key like "backup_resolved" must not read as a resolution.
+               Only the row Darling writes when a clear arrives, "<name> Resolved", is one. The self-alert pair's
+               recovery, "External Alerts Delivered Again", has none of the words below and is named here. */
+            if (metricName.StartsWith("External:", StringComparison.Ordinal))
+                return metricName.EndsWith(" Resolved", StringComparison.Ordinal);
+
+            if (string.Equals(metricName, "External Alerts Delivered Again", StringComparison.Ordinal))
+                return true;
+
             return metricName.Contains("Cleared", StringComparison.Ordinal)
                 || metricName.Contains("Resolved", StringComparison.Ordinal)
                 || metricName.Contains("Restored", StringComparison.Ordinal)
@@ -192,6 +202,11 @@ namespace PerformanceMonitor.Common
 
             /* #5641: Runnable Queue carries the window's average runnable tasks per scheduler, and the bar it crossed. */
             "Runnable Queue" => $"{value:F1} per scheduler",
+
+            /* #5640: Client Timeouts carries the attentions (client cancels and timeouts) per minute over the covered span, and the
+               bar it crossed. This leaf assembly cannot see the constant (AlertFamily.ClientTimeoutsMetric), so the name is a
+               literal here and a test pins it. */
+            "Client Timeouts" => $"{value:F1} per minute",
             "Long-Running Query" => $"{value:F0} m",
 
             /* #5450: "Collection Gap At Start" carries the whole minutes the service was not collecting before
@@ -220,11 +235,12 @@ namespace PerformanceMonitor.Common
                count of sweeps the rollup covered, its threshold column the same 0 sentinel for the same
                stated reason. "Analysis Singles Digest" (#3712) is the third document of that shape: its value
                is the count of distinct uncorroborated findings the digest named. "Notification Channel
-               Failing" (#4750) counts a webhook channel's failures in a row. */
+               Failing" (#4750) counts a webhook channel's failures in a row. "External Alerts Undelivered" (#5654)
+               counts the external alerts the drain gave up on in the last hour. */
             "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job"
                 or "Custom Alert Rules Unhealthy" or "Stale Mute Rules" or "Store Settings Need Attention"
                 or "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest"
-                or "Notification Channel Failing" => $"{value:F0}",
+                or "Notification Channel Failing" or "External Alerts Undelivered" => $"{value:F0}",
 
             /* #1846: a state-only metric never had a number — its display value is a role, a connection
                state, a version or the literal "resolved", and the stored double is the 0 sentinel the
@@ -290,6 +306,14 @@ namespace PerformanceMonitor.Common
                 return false;
 
             if (IsResolution(metricName))
+                return true;
+
+            /* #5654, the External: family (a submitter's alert, named External:<source>:<key>, AlertFamily.ExternalMetricPrefix).
+               A submission may carry a measurement or none, and the drain stores the explicit 0 for one with none, so the
+               family joins here under the 0-gate below: a stored 0 reads as no value, any other number is the submitted
+               measurement. The cost is a submitted value of exactly 0, which also reads as a dash. The literal is the
+               prefix's twin: Common cannot see Notifications, and a Darling.Tests pin holds the two equal. */
+            if (metricName.StartsWith("External:", StringComparison.Ordinal))
                 return true;
 
             return metricName switch

@@ -89,7 +89,8 @@ VALUES ($1, $2, $3, 'wait_stats', $4, 100, 'ERROR', $5, 0)", connection);
 
             /* The bundle read: the whole text, so a name that straddles character 500 is whole for the alias pass. */
             Assert.Equal(error, uncutRow["last_error"]!.GetValue<string>());
-            Assert.False(uncutRow["last_error_truncated"]!.GetValue<bool>());
+            /* #5748: a partial row omits a false flag, so a missing last_error_truncated reads as false -- the text was not cut. */
+            Assert.False(uncutRow["last_error_truncated"]?.GetValue<bool>() ?? false);
 
             /* Everything else (the finding is a sentence built from the error text, so it moves with it) is the tool's output, row for row. */
             foreach (var row in new[] { toolRow, uncutRow })

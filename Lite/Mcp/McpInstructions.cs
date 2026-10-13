@@ -26,7 +26,7 @@ internal static class McpInstructions
 
         ## Tools
 
-        90 tools (88 by default; `mcp_allow_writes` adds the two write tools above): discovery/health, waits, CPU, contention, plan cache, query performance, blocking/deadlocks, memory, I/O, tempdb, storage/index, perfmon, alerts, jobs, configuration, system-health parse-on-read + Default Trace, server info, sessions/active queries, and execution-plan + diagnostic analysis. Each tool's own description names its parameters.
+        91 tools (89 by default; `mcp_allow_writes` adds the two write tools above): discovery/health, waits, CPU, contention, plan cache, query performance, blocking/deadlocks, memory, I/O, tempdb, storage/index, perfmon, alerts, jobs, configuration, system-health parse-on-read + Default Trace, server info, sessions/active queries, and execution-plan + diagnostic analysis. Each tool's own description names its parameters.
 
         ### Reading an empty result
 
@@ -56,7 +56,7 @@ internal static class McpInstructions
 
         ## Workflow
 
-        `list_servers` -> `get_collection_health` -> `analyze_server` (follow each finding's `next_tools`) -> `compare_analysis`/`audit_config` -> `mute_analysis_finding` to silence an accepted pattern.
+        `list_servers` -> `get_collection_health` -> `analyze_server` (follow each finding's `next_tools`) -> `compare_analysis`/`audit_config` -> `mute_analysis_finding` to silence an accepted pattern. `skipped_cycles`: late cycles (log: `collection_cycle`).
 
         ## Important Limitations
 

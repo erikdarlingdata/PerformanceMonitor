@@ -122,6 +122,29 @@ public interface IAlertReadAdapter
         string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// The Client Timeouts alert's read (#5640) over <c>attention_events</c> and the collection log, for the last
+    /// <paramref name="lookbackMinutes"/> minutes.
+    /// <para>
+    /// <b>What comes back.</b> (1) Every SUCCESSFUL attention collector run time, from the collection log
+    /// (<c>collector_name = 'attention'</c>, <c>status = 'SUCCESS'</c>), newest first: a quiet run writes no row to
+    /// <c>attention_events</c>, so the log is the only proof the collector ran. (2) The <c>count</c> rows with their own
+    /// <c>collection_time</c>: each holds the exact attentions since the prior count row. (3) The <c>sample</c> rows
+    /// counted per (collection_time, database_name, client_app_name): the ring buffer's kept events, detail and never the
+    /// total. (4) The top 5 statement fingerprints (with one sample text each), databases and client applications by
+    /// sampled events over the lookback.
+    /// </para>
+    /// <para>
+    /// <b>Dumb by contract.</b> No threshold, no covered span and no window rule is applied here: the engine grades with
+    /// <see cref="AttentionEvaluator.Read"/>. A server with no runs and no rows comes back as
+    /// <see cref="AttentionWindow.Empty"/>, never null. The floor is the same naive-UTC parameter style the other reads use;
+    /// both stores keep microseconds. <paramref name="lookbackMinutes"/> is passed so the read's cutoff and the evaluator's
+    /// fallback are one number by construction (<see cref="AttentionEvaluator.ReadLookbackMinutes"/>).
+    /// </para>
+    /// </summary>
+    Task<AttentionWindow> GetAttentionWindowAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Currently-running queries over <paramref name="thresholdMinutes"/> elapsed, longest first,
     /// from the LATEST collection snapshot only (and only if that snapshot is under 10 minutes
     /// old — a stale store must not alert). Mirrors Lite's read exactly: user sessions only

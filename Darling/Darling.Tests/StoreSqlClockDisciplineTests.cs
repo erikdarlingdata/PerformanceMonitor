@@ -23,6 +23,11 @@ namespace Darling.Tests;
 /// — measured, the stored tables had no <c>timestamptz</c> column at all until #5655 added exactly two, the
 /// <c>process_started_at</c> and <c>updated_at</c> of <c>config.service_version</c> (the only other
 /// <c>timestamp with time zone</c> in the schema is the <c>stats_reset</c> column of a function's result, never stored).
+/// #5654's <c>config.external_alert_pending</c> is the second exception: its time columns (<c>expires_at</c>,
+/// <c>claimed_at</c>, <c>completed_at</c>) are <c>timestamptz</c>, so a <c>now()</c> compare would be correct, but the
+/// scan is keyed on the column NAME (<c>claimed_at</c> and <c>completed_at</c> are naive on a table in the migrations), so
+/// <c>ExternalAlertStore</c> binds those windows as <c>Kind=Utc</c> parameters from <c>DateTime.UtcNow</c> instead of
+/// waiving them.
 /// Those two are the deliberate exception: they hold an absolute instant that the viewers render in a chosen zone, are
 /// written and read through <c>NpgsqlDbType.TimestampTz</c>, and no SQL compares them with <c>now()</c> in a window, so
 /// the hazard below cannot arise for them. The scan below keys on the NAIVE column names (its DDL scrape skips

@@ -415,7 +415,13 @@ LIMIT 1";
            through RunnableQueueEvaluator.ClampBars, the way the engine reads them. */
         bool RunnableQueueEnabled,
         int RunnableQueueWarningPerScheduler,
-        int RunnableQueueCriticalPerScheduler);
+        int RunnableQueueCriticalPerScheduler,
+        /* #5640 (V179): the Client Timeouts alert's switch (OFF by default) and its two bars (client attentions per minute over the
+           attention collector's last runs), NOT NULL in the store. APPENDED, same reason. Carried as stored: the payload reports the
+           bars through AttentionEvaluator.ClampBars, the way the engine reads them. */
+        bool ClientTimeoutsEnabled,
+        int ClientTimeoutsWarningPerMinute,
+        int ClientTimeoutsCriticalPerMinute);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -450,7 +456,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        self_disk_free_warn_gb,
        long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins,
        analysis_uncorroborated_route,
-       runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler
+       runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler,
+       client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -511,7 +518,9 @@ WHERE id = 1";
                has not had a route written, not a mid-migration guard. */
             reader.IsDBNull(69) ? null : reader.GetString(69),
             /* #5641 (V177): the Runnable Queue switch and bars at 70-72. */
-            reader.GetBoolean(70), reader.GetInt32(71), reader.GetInt32(72));
+            reader.GetBoolean(70), reader.GetInt32(71), reader.GetInt32(72),
+            /* #5640 (V179): the Client Timeouts switch and bars at 73-75. */
+            reader.GetBoolean(73), reader.GetInt32(74), reader.GetInt32(75));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

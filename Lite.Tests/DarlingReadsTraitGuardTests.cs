@@ -204,8 +204,8 @@ public sealed class DarlingReadsTraitGuardTests
     }
 
     /// <summary>
-    /// Every Darling.Tests file that Lite.Tests.csproj compiles into itself is named in build.yml's
-    /// <c>lite_linked_shard</c> filter, which sends a diff that edits one to the WHOLE Lite suite. Such a file
+    /// Every Darling.Tests file that Lite.Tests.csproj compiles into itself is named in
+    /// <c>.github/lite-paths-filter.yml</c>'s <c>lite_linked_shard</c> filter, which sends a diff that edits one to the WHOLE Lite suite. Such a file
     /// is code the Lite classes run, so the narrow Reads=Darling selection would miss what an edit breaks.
     /// </summary>
     [Fact]
@@ -213,25 +213,18 @@ public sealed class DarlingReadsTraitGuardTests
     {
         var root = ParitySource.RepoRoot();
         var project = File.ReadAllText(Path.Combine(root, "Lite.Tests", "Lite.Tests.csproj"));
-        var yaml = File.ReadAllText(Path.Combine(root, ".github", "workflows", "build.yml"))
-            .Replace("\r\n", "\n", StringComparison.Ordinal);
-
         var linked = Regex.Matches(project, @"<Compile\s+Include=""\.\.\\(?<path>Darling\\[^""]+)""")
             .Select(m => m.Groups["path"].Value.Replace('\\', '/'))
             .OrderBy(p => p, StringComparer.Ordinal)
             .ToList();
         Assert.NotEmpty(linked);
 
-        var at = yaml.IndexOf("\n            lite_linked_shard:\n", StringComparison.Ordinal);
-        Assert.True(at > 0, "build.yml's 'lite_linked_shard' path filter is gone");
-        var rest = yaml[(at + 1)..];
-        var next = Regex.Match(rest, "\n            [a-z_]+:\n|\n      - name: ");
-        var block = next.Success ? rest[..next.Index] : rest;
-
-        var named = Regex.Matches(block, @"^\s*-\s*'(?<p>[^']+)'\s*$", RegexOptions.Multiline)
-            .Select(m => m.Groups["p"].Value)
+        /* #5669: the set lives in .github/lite-paths-filter.yml, the one file the shard legs, lite-scope and
+           ci-select.py read. */
+        var named = CrossAppGuardCiGateTests.LiteFilterFilePatterns("lite_linked_shard")
             .OrderBy(p => p, StringComparer.Ordinal)
             .ToList();
+        Assert.True(named.Count > 0, ".github/lite-paths-filter.yml's 'lite_linked_shard' path filter is gone");
 
         Assert.Equal(linked, named);
     }

@@ -141,6 +141,8 @@ public sealed class ViewerAlertRow
             ServerId = ServerId != 0 ? ServerId : null,
             ServerName = StoredServerName.Length > 0 ? StoredServerName : ServerName,
             MetricName = MetricName,
+            /* An external alert's source rides its metric name (#5654), so a rule that names a source covers the toast too. */
+            ExternalSource = AlertMuteContext.ExternalSourceOf(MetricName),
         };
         context.PopulateFromDetailText(DetailText, MetricName);
         return context;

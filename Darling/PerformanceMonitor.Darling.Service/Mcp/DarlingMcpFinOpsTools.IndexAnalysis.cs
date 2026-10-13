@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage.FinOps;
@@ -203,12 +204,16 @@ public sealed partial class DarlingMcpFinOpsTools
     /// </summary>
     internal static string BuildIndexAnalysisPayload(
         string serverName, IndexCleanupAnalysisResult result, int limit, string? databaseName, bool fullText, string? emptyStatus,
-        IReadOnlyDictionary<int, DateTime>? snapshotTimes = null)
+        IReadOnlyDictionary<int, DateTime>? snapshotTimes = null, int databasesLeftOut = 0)
     {
         if (result.DatabaseRollups.Count == 0)
         {
+            /* #5633 review (finding D): the shared index read leaves out a database the server no longer lists, so "nothing was collected
+               yet" would deny rows the store holds for it. Say what was measured; the caller adds the names (databases_left_out). */
             return emptyStatus
-                ?? McpHelpers.Status("empty", "No index statistics were collected for this server yet, so there is no index analysis.");
+                ?? (databasesLeftOut > 0
+                    ? McpHelpers.Status("empty", $"No index statistics for a database this server still has in the latest snapshots. {databasesLeftOut} database(s) the server no longer lists were left out of this read (see databases_left_out).")
+                    : McpHelpers.Status("empty", "No index statistics were collected for this server yet, so there is no index analysis."));
         }
 
         databaseName = NormalizeOptionalText(databaseName);
@@ -273,14 +278,14 @@ public sealed partial class DarlingMcpFinOpsTools
 
     private static async Task<string> ReadIndexAnalysisAsync(
         NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit,
-        string? databaseName, bool fullText, CancellationToken ct)
+        string? databaseName, bool fullText, CancellationToken ct, ILogger? logger = null)
     {
         if (hoursBack != 24)
             return McpHelpers.Refusal("hours_back",
                 $"Invalid hours_back value '{hoursBack}': view {IndexAnalysisView} reads each database's newest collected index snapshot; hours_back does not apply. Omit it or pass 24.");
 
         var read = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(
-            postgres, resolved.ServerId, McpCommandDeadlines.ReadSeconds, ct);
+            postgres, resolved.ServerId, McpCommandDeadlines.ReadSeconds, logger, ct);
         var result = read.Result;
         string? notCollected = null;
         if (result.DatabaseRollups.Count == 0)
@@ -289,6 +294,9 @@ public sealed partial class DarlingMcpFinOpsTools
                 postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", ct);
         }
 
-        return BuildIndexAnalysisPayload(resolved.ServerName, result, limit, databaseName, fullText, notCollected, read.SnapshotTimes);
+        /* #5633 review (finding D): a page with rows or without names the databases the read left out, in the envelope. */
+        return McpHelpers.WithDatabasesLeftOut(
+            BuildIndexAnalysisPayload(resolved.ServerName, result, limit, databaseName, fullText, notCollected, read.SnapshotTimes, read.OmittedDatabases?.Count ?? 0),
+            read.OmittedDatabases)!;
     }
 }

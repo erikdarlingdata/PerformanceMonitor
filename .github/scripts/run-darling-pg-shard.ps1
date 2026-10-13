@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Runs one shard of the Darling.Tests suite: cuts the class list by hash, chunks it under the command-line
+  Runs one shard of the Darling.Tests suite: cuts the class list by recorded duration, chunks it under the command-line
   budget, and runs the test host once per chunk (#5616).
 
 .DESCRIPTION
@@ -51,10 +51,21 @@ if ($json.Count -ne 1) { throw "expected one JSON array line from the class list
 $classes = @($json[0] | ConvertFrom-Json)
 if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the shard would silently run nothing' }
 
-$sha = [System.Security.Cryptography.SHA256]::Create()
-$mine = @($classes | Where-Object {
-    ([System.BitConverter]::ToUInt32($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($_)), 0) % $ShardCount) -eq $Shard
-})
+# #5669: the cut balances the shards by recorded class duration (.github/scripts/darling-shard-pack.py, from the committed
+# table darling-shard-weights.json) instead of a class-name hash, which left one shard 4 to 6 minutes over the mean. Every
+# shard runs the same deterministic assignment over the same listing, and the packer proves each class lands in exactly one
+# shard before it prints. A packer failure stops this shard: falling back to the hash here would cut this shard differently
+# from the others and could run a class twice or never. A single-shard caller (the build job's Lite-reads pass) needs no cut.
+if ($ShardCount -le 1) {
+    $mine = $classes
+} else {
+    $classesFile = Join-Path ([System.IO.Path]::GetTempPath()) "darling-shard-classes-${Shard}.txt"
+    [System.IO.File]::WriteAllLines($classesFile, [string[]]$classes)
+    $packed = @(python .github/scripts/darling-shard-pack.py pack --classes $classesFile --shards $ShardCount --shard $Shard)
+    if ($LASTEXITCODE -ne 0) { throw "darling-shard-pack.py failed with exit code $LASTEXITCODE" }
+    Write-Host "shard ${Shard}: $($packed | Where-Object { $_ -like '#*' })"
+    $mine = @($packed | Where-Object { $_ -and $_ -notlike '#*' })
+}
 Write-Host "shard ${Shard}: $($mine.Count) of $($classes.Count) classes"
 if ($mine.Count -eq 0) { throw "shard ${Shard} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
 

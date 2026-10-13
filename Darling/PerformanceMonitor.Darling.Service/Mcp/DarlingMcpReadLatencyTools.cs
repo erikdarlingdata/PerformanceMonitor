@@ -42,7 +42,7 @@ public sealed class DarlingMcpReadLatencyTools
     /// </summary>
     internal const string BucketEstimateNote =
         "p50/p95/p99 are bucket UPPER-BOUND estimates from a fixed log-scale histogram, never an interpolation "
-        + "— the true duration could be anywhere at or below the reported bound. A value flagged with \"≥\" means "
+        + "— the true duration could be anywhere at or below the reported bound, and no percentile is reported above max_ms (a bound past the slowest read seen is capped to max_ms). A value flagged with \"≥\" means "
         + "the true duration only proven to exceed the last finite bucket bound, with no bound above it to report.";
 
     [McpServerTool(Name = "get_read_latency"), Description(
@@ -63,7 +63,7 @@ public sealed class DarlingMcpReadLatencyTools
         + "the SUMMED histogram. Every percentile here is a BUCKET UPPER BOUND, never an interpolated exact "
         + "value: the histogram only knows which bucket a duration landed in, so the honest answer is \"at most "
         + "this many ms\", flagged with \"≥ <bound>\" on the rare row whose true value only proven to exceed "
-        + "the last finite bucket. timeouts is the run_count of samples whose outcome was a caught statement "
+        + "the last finite bucket; a bound above max_ms is capped to max_ms, the slowest read seen. timeouts is the run_count of samples whose outcome was a caught statement "
         + "timeout (57014) for that route — a route that answers fast most of the time but times out on a heavy "
         + "case shows both figures side by side. Sorted by p95 descending, then by count, then surface and route, so the worst tail "
         + "leads. fallbacks is the run_count of reads whose interval-table path faulted, or whose hour ledger did not yet cover the window, "
@@ -114,9 +114,9 @@ public sealed class DarlingMcpReadLatencyTools
 
             var projected = rows.Select(r =>
             {
-                var p50 = ReadLatencyPercentiles.FromBuckets(r.BucketCounts, ReadLatencyAccumulator.BucketUpperBoundsMs, 0.50);
-                var p95 = ReadLatencyPercentiles.FromBuckets(r.BucketCounts, ReadLatencyAccumulator.BucketUpperBoundsMs, 0.95);
-                var p99 = ReadLatencyPercentiles.FromBuckets(r.BucketCounts, ReadLatencyAccumulator.BucketUpperBoundsMs, 0.99);
+                var p50 = ReadLatencyPercentiles.FromBuckets(r.BucketCounts, ReadLatencyAccumulator.BucketUpperBoundsMs, 0.50, r.MaxMs);
+                var p95 = ReadLatencyPercentiles.FromBuckets(r.BucketCounts, ReadLatencyAccumulator.BucketUpperBoundsMs, 0.95, r.MaxMs);
+                var p99 = ReadLatencyPercentiles.FromBuckets(r.BucketCounts, ReadLatencyAccumulator.BucketUpperBoundsMs, 0.99, r.MaxMs);
                 return new
                 {
                     Row = r,

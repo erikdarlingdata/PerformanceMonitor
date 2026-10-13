@@ -58,6 +58,13 @@ public sealed class ViewerCollectorCoverageTests
 
         // UNBUILT UI (parity board Tier 1) -- remove when the tab ships (#3691 object growth / disk-free)
         "pg_database_size_stats",
+
+        // STORE-ONLY BY DESIGN (#5640): attention_events (client timeouts) is read by the Client Timeouts alert
+        // (AttentionWindowSql through the alert read adapter) and by the get_client_timeouts MCP read, and by nothing
+        // else. Neither app has a client-timeouts grid: Lite has none and this viewer is a copy of Lite's front end,
+        // so there is no tab to build here and none is planned. Remove this entry the day a viewer read names the
+        // table (the ratchet above deletes it for you).
+        "attention_events",
     };
 
     [Fact]

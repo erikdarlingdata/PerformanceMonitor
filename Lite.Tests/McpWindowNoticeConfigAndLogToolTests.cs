@@ -184,8 +184,8 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     }
 
     /// <summary>The collector's runs, for every tool but the collection log (whose log rows ARE the data).</summary>
-    private Task SeedCoverageAsync(Tool tool, DateTime first, DateTime last) =>
-        tool == Tool.CollectionLog ? Task.CompletedTask : SeedLogRunsAsync(CollectorOf(tool), first, last, everyMinutes: 30);
+    private Task SeedCoverageAsync(Tool tool, DateTime first, DateTime last, int rowsCollected = 0) =>
+        tool == Tool.CollectionLog ? Task.CompletedTask : SeedLogRunsAsync(CollectorOf(tool), first, last, everyMinutes: 30, rowsCollected);
 
     /* ───────────────────────── a data answer ───────────────────────── */
 
@@ -517,7 +517,10 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
         await _duckDb.InitializeFromTemplateAsync();
         /* The collector ran for two days of a 7-day ask and stored nothing a change or a row would show: only the keys say the
            older five were never read. A config tool holds one snapshot, which is no change. */
-        await SeedCoverageAsync(tool, Anchor.AddDays(-2), Anchor);
+        /* #5633 item 19: a SUCCESS trace_flags run that stored zero rows is an empty snapshot, so after flag 1117 was seen, 28 h of
+           zero-row runs would be the flag turned off, a change. The runs here say what this test means: the collector kept running
+           and found the same flag each time, so it stored one row. */
+        await SeedCoverageAsync(tool, Anchor.AddDays(-2), Anchor, rowsCollected: tool is Tool.TraceFlags ? 1 : 0);
         if (tool is Tool.ServerConfig)
         {
             await SeedServerConfigAsync(Anchor.AddDays(-2), 0);
@@ -656,13 +659,13 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 1)",
         _nextId++, Naive(collectedAt), _serverId, ServerName, Naive(sampleTime));
 
     /// <summary>The collector's runs in collection_log, every <paramref name="everyMinutes"/> minutes, whether or not anything happened.</summary>
-    private async Task SeedLogRunsAsync(string collector, DateTime firstUtc, DateTime lastUtc, int everyMinutes)
+    private async Task SeedLogRunsAsync(string collector, DateTime firstUtc, DateTime lastUtc, int everyMinutes, int rowsCollected = 0)
     {
         await ExecuteAsync($@"
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
-SELECT $1 + row_number() OVER (), $2, $3, $4, g.t, 12, 'SUCCESS', 0
+SELECT $1 + row_number() OVER (), $2, $3, $4, g.t, 12, 'SUCCESS', $7
 FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUTE) AS g(t)",
-            _nextId, _serverId, ServerName, collector, Naive(firstUtc), Naive(lastUtc));
+            _nextId, _serverId, ServerName, collector, Naive(firstUtc), Naive(lastUtc), rowsCollected);
         _nextId += 100_000;
     }
 }

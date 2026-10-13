@@ -24,8 +24,20 @@ namespace Darling.Tests;
 internal static class RungRewindArtifacts
 {
     /// <summary>
+    /// V178 (#5684): the per-batch Query Store watermark table, the probe's newest sentinel until V179 (#5640) went on top, and the coverage table that goes
+    /// with it. Safe on a store that never had them.
+    /// </summary>
+    internal static async Task DropV178SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            "DROP TABLE IF EXISTS collect.query_store_watermarks, collect.query_store_watermarks_coverage",
+            connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
     /// V177 (#5641): the Runnable Queue settings columns of <c>config.config_alert_settings</c>, the probe's newest
-    /// sentinel. Safe on a store that never had them.
+    /// sentinel until V178 (#5684) went on top of it. Safe on a store that never had them.
     /// </summary>
     internal static async Task DropV177SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
@@ -34,6 +46,33 @@ internal static class RungRewindArtifacts
             + " DROP COLUMN IF EXISTS runnable_queue_enabled,"
             + " DROP COLUMN IF EXISTS runnable_queue_warning_per_scheduler,"
             + " DROP COLUMN IF EXISTS runnable_queue_critical_per_scheduler",
+            connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// V179 (#5640): the Client Timeouts settings columns of <c>config.config_alert_settings</c>, the probe's newest
+    /// sentinel until V180 (#5654) went on top of it. Safe on a store that never had them.
+    /// </summary>
+    internal static async Task DropV179SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            "ALTER TABLE IF EXISTS config.config_alert_settings"
+            + " DROP COLUMN IF EXISTS client_timeouts_enabled,"
+            + " DROP COLUMN IF EXISTS client_timeouts_warning_per_minute,"
+            + " DROP COLUMN IF EXISTS client_timeouts_critical_per_minute",
+            connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// V180 (#5654): the registry of the services that raise alerts through the store, the probe's newest sentinel,
+    /// and its two dependants (the pending queue and the firing state). Safe on a store that never had them.
+    /// </summary>
+    internal static async Task DropV180SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            "DROP TABLE IF EXISTS config.external_alert_state, config.external_alert_pending, config.external_alert_source",
             connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }

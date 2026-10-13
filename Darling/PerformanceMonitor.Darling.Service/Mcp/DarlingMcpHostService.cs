@@ -1231,6 +1231,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #1496 get_long_query_completions — the opt-in long-query completion trace (rpc/batch over
                the duration threshold + attentions), over Darling's Postgres store (STORED read). */
             .WithGeminiCompatibleTools<DarlingMcpLongQueryTools>()
+            .WithGeminiCompatibleTools<DarlingMcpClientTimeoutTools>()
             .WithGeminiCompatibleTools<DarlingMcpSessionTools>()
             .WithGeminiCompatibleTools<DarlingMcpConfigHistoryTools>()
             .WithGeminiCompatibleTools<DarlingMcpObjectStatsTools>()

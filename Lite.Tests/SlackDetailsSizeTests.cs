@@ -338,6 +338,9 @@ public class SlackDetailsSizeTests
     /// </summary>
     private static string LegacyDetailBlocksJson(AlertContext context)
     {
+        /* #5654: alert text goes into mrkdwn with &, < and > as entities; the oracle states it independently of the builder. */
+        static string E(string s) => s.Replace("&", "&amp;", StringComparison.Ordinal).Replace("<", "&lt;", StringComparison.Ordinal).Replace(">", "&gt;", StringComparison.Ordinal);
+
         var blocks = new List<object>();
         foreach (var detail in context.Details)
         {
@@ -350,24 +353,24 @@ public class SlackDetailsSizeTests
 
             if (!string.IsNullOrEmpty(detail.Body))
             {
-                blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{detail.Heading}*\n{detail.Body}" } });
+                blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{E(detail.Heading)}*\n{E(detail.Body)}" } });
                 continue;
             }
 
             if (detail.Records.Count > 0)
             {
-                var section = new StringBuilder($"*{detail.Heading}*");
+                var section = new StringBuilder($"*{E(detail.Heading)}*");
                 foreach (var record in detail.Records)
                 {
-                    var unit = new StringBuilder(string.Create(CultureInfo.InvariantCulture, $"*#{record.Ordinal} · {record.Summary}*"));
+                    var unit = new StringBuilder(string.Create(CultureInfo.InvariantCulture, $"*#{record.Ordinal} · {E(record.Summary)}*"));
                     foreach (var (label, text) in record.Texts)
                     {
                         if (record.Texts.Count > 1)
                         {
-                            unit.Append($"\n_{label}_");
+                            unit.Append($"\n_{E(label)}_");
                         }
 
-                        unit.Append($"\n```\n{text}\n```");
+                        unit.Append($"\n```\n{E(text)}\n```");
                     }
 
                     if (section.Length + 1 + unit.Length > TextObjectLimit)
@@ -385,10 +388,10 @@ public class SlackDetailsSizeTests
                 continue;
             }
 
-            var fields = new List<object> { new { type = "mrkdwn", text = $"*{detail.Heading}*" } };
+            var fields = new List<object> { new { type = "mrkdwn", text = $"*{E(detail.Heading)}*" } };
             foreach (var (label, value) in detail.Fields)
             {
-                fields.Add(new { type = "mrkdwn", text = $"*{label}:*\n{value}" });
+                fields.Add(new { type = "mrkdwn", text = $"*{E(label)}:*\n{E(value)}" });
             }
 
             for (var i = 0; i < fields.Count; i += FieldsPerSection)

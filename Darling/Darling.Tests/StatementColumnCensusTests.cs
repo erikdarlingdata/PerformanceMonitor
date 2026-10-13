@@ -99,6 +99,7 @@ public sealed class StatementColumnCensusTests
 
         /* Rows 16-18 and 21: the event and history collectors (R5). */
         ["long_query_completions.statement_text"] = Hooked("16", "R5", pending: false),
+        ["attention.statement_text"] = Hooked("16", "R5", pending: false),
         ["default_trace_events.text_data"] = Hooked("17", "R5", pending: false),
         ["system_health_events.event_xml"] = Hooked("18", "R5", pending: false),
         ["job_history.message"] = Hooked("21", "R5", pending: false),

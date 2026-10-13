@@ -58,7 +58,7 @@ public sealed class SelfManagedStoreRulesStartPinTests
         /* The managed branch, when its provisioning throws before its own rules section. */
         Assert.Matches(
             new Regex(
-                @"EnsureProvisionedAsync\(.*?ex\.Message\);\s*await DarlingManagedRoles\.EnsureServerPasswordRulesAsync\(postgres, _logger, stoppingToken\);\s*\}\s*\}\s*else if \(!config\.Postgres\.Managed && ",
+                @"EnsureProvisionedAsync\(.*?ex\.Message\);\s*await DarlingManagedRoles\.EnsureServerPasswordRulesAsync\(postgres, _logger, stoppingToken\);\s*\}\s*(?:if \(reconcileNetworkAfterRoleProvisioning is not null\)\s*\{\s*await reconcileNetworkAfterRoleProvisioning\(stoppingToken\);\s*\}\s*)?\}\s*else if \(!config\.Postgres\.Managed && ",
                 RegexOptions.Singleline),
             chain);
 
