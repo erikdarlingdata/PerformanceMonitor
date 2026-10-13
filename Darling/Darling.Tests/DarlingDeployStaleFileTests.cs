@@ -1070,22 +1070,7 @@ public sealed class DarlingDeployStaleFileTests
         File.WriteAllText(path, script);
         try
         {
-            var startInfo = new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-
-            /* A parent pwsh (the CI runner's default shell) leaves its own module directories in PSModulePath,
-               and Windows PowerShell 5.1 then fails to find Microsoft.PowerShell.Utility cmdlets such as
-               Get-FileHash. The machine-level value is what an operator's own 5.1 session starts with (#4745). */
-            var machineModulePath = Environment.GetEnvironmentVariable("PSModulePath", EnvironmentVariableTarget.Machine);
-            if (!string.IsNullOrEmpty(machineModulePath))
-            {
-                startInfo.Environment["PSModulePath"] = machineModulePath;
-            }
+            var startInfo = WindowsPowerShellStartInfo.ForScript(path);
 
             using var process = Process.Start(startInfo);
             Assert.NotNull(process);

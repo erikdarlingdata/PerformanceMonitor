@@ -172,6 +172,24 @@ public sealed class McpLatestSnapshotStampTests : IClassFixture<SharedDuckDbFixt
         Assert.Equal("unavailable", refused.GetProperty("status").GetString());
     }
 
+    /// <summary>
+    /// #5712 round 1: the tool builds <c>pressure_level</c> over the COMBINED row of a split collection. Two pieces of
+    /// one collection_time (30 and 25 runnable tasks) are each below the CRITICAL band alone (HIGH and MEDIUM); the
+    /// combined 55 is above it. Called through the tool, so the verdict text over a combined row is checked, not just the
+    /// reader under it.
+    /// </summary>
+    [Fact]
+    public async Task GetCpuSchedulerPressure_SplitCollection_VerdictIsOverTheCombinedRow()
+    {
+        var (@base, anchor) = Past();
+        var at = @base.AddMinutes(5).AddHours(-1);
+        await SeedSchedulerAsync(at, runnable: 30);
+        await SeedSchedulerAsync(at, runnable: 25);
+
+        var root = Parse(await McpPlanCacheSchedulerTools.GetCpuSchedulerPressure(_dataService, _serverManager, ServerName, 4, anchor));
+        Assert.Equal("CRITICAL - High runnable task queue", root.GetProperty("pressure_level").GetString());
+    }
+
     [Fact]
     public async Task GetLatchAndSpinlockStats_AreStampedAndAged()
     {

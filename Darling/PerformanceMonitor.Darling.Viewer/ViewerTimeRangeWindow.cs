@@ -42,6 +42,24 @@ internal static class ViewerTimeRangeWindow
         return (nowUtc - FallbackSpan, nowUtc, true);
     }
 
+    /// <summary>The clock the duration trends' tier decision measures against (#5725), or null to let the data service read the wall clock.
+    /// A live window ends at the very instant <see cref="Window"/> was given, so that end IS the clock
+    /// (<see cref="DurationTrendRouting.TierClock"/>): a second <c>DateTime.UtcNow</c> read a few milliseconds later let a window starting
+    /// exactly 95 h back fall past the raw boundary and read the hourly tier. A fixed or finished range ends in the past, so its end is never
+    /// the clock and it keeps the wall clock.</summary>
+    internal static DateTime? TierNowUtc(bool isLive, DateTime endUtc) =>
+        isLive ? DurationTrendRouting.TierClock(windowEndIsNow: true, endUtc) : null;
+
+    /// <summary>True when the window's START moves with now: a relative preset ("Past 24 hours"), and the 24-hour fallback a spec that
+    /// does not resolve gets. A calendar period (Today, Month to Date) or a "since X" window has a fixed start and, while live, an end
+    /// that is now; the Job History tab keys its choices cache on that difference (<see cref="PerformanceMonitor.Common.JobHistoryChoicesKey"/>).</summary>
+    internal static bool StartSlides(TimeRangeSpec spec, DateTime nowUtc, TimeZoneInfo zone)
+    {
+        ArgumentNullException.ThrowIfNull(spec);
+        ArgumentNullException.ThrowIfNull(zone);
+        return spec.Kind == TimeRangeKind.Relative || !spec.TryResolve(nowUtc, zone, out var range, out _) || range is null;
+    }
+
     /// <summary>The whole hours a reader that still takes "hours back" is given for a window: rounded up, at least one,
     /// so a 45-minute window reads as 1 hour rather than 0. A reader that can take the window's two instants should
     /// (the Overview lanes do); this is for the ones that cannot.</summary>

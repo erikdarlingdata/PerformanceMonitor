@@ -28,14 +28,16 @@ namespace PerformanceMonitor.Collectors;
 /// the smallest possible amount when it would collide with this same (server, collector) pair's last stamp
 /// costs nothing measurable against any collector's cadence (the smallest nudge is one tick = 100ns) and
 /// makes every row's <c>collection_time</c> unique BY CONSTRUCTION for the rest of this process's life,
-/// closing the ambiguity where it is created instead of leaving every reader to paper over it. Readers still
-/// break a tie on <c>collection_id</c> (#3936) for rows already stored before this existed, and for the one
-/// case this cannot see — a second case below.</para>
+/// closing the ambiguity where it is created instead of leaving every reader to paper over it. The CPU
+/// scheduler readers (#3936's symptom) no longer break a tie on <c>collection_id</c>: they combine all the rows of one
+/// <c>collection_time</c> into one (#5710), because stored collections can be split across same-instant rows.
+/// The one case this guard cannot see is a second case below.</para>
 ///
 /// <para><b>Per-process only, like <see cref="CollectionIdGenerator"/> beside it.</b> It cannot see another
 /// process's clock, so two hosts genuinely monitoring the same server independently (a misconfiguration, not
 /// a supported topology) can still collide across processes. That is an operational question outside this
-/// guard's scope; the reader-side tiebreak keeps even that case deterministic rather than flickering.</para>
+/// guard's scope. The CPU scheduler readers do not tie-break that case: they add the two snapshots together (doubled
+/// worker and runnable-task counts, and a recomputed warning flag that can be a false alarm).</para>
 ///
 /// <para>Never pruned: one <c>long</c> per (server, collector) pair ever run, bounded by fleet size times
 /// collector count — the same shape as <c>DarlingWorker</c>'s <c>_detachedCollectorGates</c> /

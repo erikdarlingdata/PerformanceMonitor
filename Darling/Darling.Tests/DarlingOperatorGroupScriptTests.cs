@@ -179,7 +179,7 @@ public sealed class DarlingOperatorGroupScriptTests
 
         var window = script.Substring(firstLock, serviceLock - firstLock);
         Assert.DoesNotContain(refusalText, window, StringComparison.Ordinal);
-        Assert.Equal(1, Regex.Matches(script, Regex.Escape(refusalText)).Count);
+        Assert.Single(Regex.Matches(script, Regex.Escape(refusalText)));
         Assert.Contains("Fail @\"", script.Substring(refusal - 40, 40), StringComparison.Ordinal);
     }
 
@@ -267,13 +267,7 @@ public sealed class DarlingOperatorGroupScriptTests
         File.WriteAllText(path, script);
         try
         {
-            using var process = Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            });
+            using var process = Process.Start(WindowsPowerShellStartInfo.ForScript(path));
             Assert.NotNull(process);
 
             /* Both streams are drained concurrently: reading one to the end before the other deadlocks when the

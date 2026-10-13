@@ -1057,11 +1057,12 @@ INSERT INTO config_alert_settings (
     pg_deadlock_count_threshold, pg_blocking_count_threshold,
     fleet_sweep_enabled, fleet_sweep_interval_minutes,
     self_disk_free_warn_gb,
-    long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins)
+    long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins,
+    runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
         $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63,
-        $64, $65, $66, $67, $68, $69, $70)
+        $64, $65, $66, $67, $68, $69, $70, $71, $72, $73)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1164,6 +1165,11 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
            AUTHORITY logins) — the same values the rung's column DEFAULT gives a pre-rung row. */
         AddTextArray(command, LongRunningQueryExclusions.Normalize(a.LongRunningQueryExcludedProgramNamePrefixes));
         AddTextArray(command, LongRunningQueryExclusions.Normalize(a.LongRunningQueryExcludedLogins));
+        /* #5641, bound in the same order the V177 columns were appended. Seeded RAW like every sibling: the clamp
+           (Warning at least 1, Critical never below Warning) lives on DarlingAlertSettings. */
+        command.Parameters.AddWithValue(a.RunnableQueueEnabled);
+        command.Parameters.AddWithValue(a.RunnableQueueWarningPerScheduler);
+        command.Parameters.AddWithValue(a.RunnableQueueCriticalPerScheduler);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1550,7 +1556,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        fleet_sweep_enabled, fleet_sweep_interval_minutes,
        self_disk_free_warn_gb,
        long_running_query_excluded_program_name_prefixes, long_running_query_excluded_logins,
-       analysis_uncorroborated_route
+       analysis_uncorroborated_route,
+       runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -1691,6 +1698,12 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
                operator excluded would page again while get_alert_settings still showed the list. */
             LongRunningQueryExcludedProgramNamePrefixes = ReadTextArray(reader, 67),
             LongRunningQueryExcludedLogins = ReadTextArray(reader, 68),
+            /* #5641 (V177): the Runnable Queue switch and its two bars, appended after the route knob at ordinals 70-72.
+               Same reachability rule as every appended knob: ApplyToConfig replaces config.Alerts wholesale, so a column
+               selected but not read here -- or read but not selected -- would reset the knob on every worker start. */
+            RunnableQueueEnabled = reader.GetBoolean(70),
+            RunnableQueueWarningPerScheduler = reader.GetInt32(71),
+            RunnableQueueCriticalPerScheduler = reader.GetInt32(72),
         };
         var analysis = new AnalysisConfig
         {

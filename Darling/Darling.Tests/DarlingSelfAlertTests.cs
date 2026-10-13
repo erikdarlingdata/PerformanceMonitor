@@ -51,6 +51,9 @@ public sealed class DarlingSelfAlertTests
         public bool BlockingEnabled { get; set; } = true;
         public bool DeadlockEnabled { get; set; } = true;
         public bool PoisonWaitEnabled { get; set; }
+        public bool RunnableQueueEnabled { get; set; }
+        public int RunnableQueueWarningPerScheduler { get; set; } = 8;
+        public int RunnableQueueCriticalPerScheduler { get; set; } = 16;
         public bool LongRunningQueryEnabled { get; set; }
         public bool TempDbSpaceEnabled { get; set; }
         public bool LowDiskEnabled { get; set; }
@@ -5583,10 +5586,12 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult(new List<DeadlockAlertRow>());
         public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<PoisonWaitAccumulation>());
+        public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<RunnableQueueSample>>(new List<RunnableQueueSample>());
         public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
             string serverKey, int thresholdMinutes, int maxResults,
             bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc,
-            IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, CancellationToken cancellationToken = default) =>
+            IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, bool orderByCpu = false, CancellationToken cancellationToken = default) =>
             Task.FromResult(LongRunningQueryReadResult.Empty);
         public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<VolumeFreeSpaceInfo>());

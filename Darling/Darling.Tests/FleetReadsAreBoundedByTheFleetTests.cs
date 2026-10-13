@@ -221,13 +221,13 @@ public sealed class FleetReadsAreBoundedByTheFleetTests
         return blocks;
     }
 
-    /// <summary>Every public SQL constant on the reader, by name — found by reflection so a statement added
+    /// <summary>Every public SQL constant (or static readonly string, as FleetThreadsSql is since #5710 composes the combine text) on the reader, by name — found by reflection so a statement added
     /// later is swept without anyone remembering to list it.</summary>
     private static Dictionary<string, string> FleetStatements() =>
         typeof(DarlingFleetReader)
             .GetFields(BindingFlags.Public | BindingFlags.Static)
-            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.EndsWith("Sql", StringComparison.Ordinal))
-            .ToDictionary(f => f.Name, f => (string)f.GetRawConstantValue()!, StringComparer.Ordinal);
+            .Where(f => (f.IsLiteral || f.IsInitOnly) && f.FieldType == typeof(string) && f.Name.EndsWith("Sql", StringComparison.Ordinal))
+            .ToDictionary(f => f.Name, f => (string)(f.IsLiteral ? f.GetRawConstantValue()! : f.GetValue(null)!), StringComparer.Ordinal);
 }
 
 /// <summary>

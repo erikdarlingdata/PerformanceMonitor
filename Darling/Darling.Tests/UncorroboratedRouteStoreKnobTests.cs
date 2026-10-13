@@ -53,7 +53,11 @@ public sealed class UncorroboratedRouteStoreKnobTests
 {
     private const string RouteColumn = "analysis_uncorroborated_route";
 
-    /// <summary>The column's ordinal on every settings-row SELECT — appended after V135's two lists (67, 68).</summary>
+    /// <summary>The column's FIXED ordinal on every settings-row SELECT — appended after V135's two lists (67, 68).
+    /// It was the last of 70 columns until V177 (#5641) appended the Runnable Queue switch and bars at 70-72, so this
+    /// file pins the position and no longer the count: the rung that appends owns the pin on its own columns
+    /// (<c>RunnableQueueSettingsSurfaceTests</c> holds 70-72 and the total of 73), the way
+    /// <c>LongRunningQueryExclusionKnobRungTests</c> stopped claiming the end when this column was appended after it.</summary>
     private const int Ordinal = 69;
 
     /* ---- the resolver -------------------------------------------------------------------------------- */
@@ -189,7 +193,6 @@ public sealed class UncorroboratedRouteStoreKnobTests
         serviceSelect = serviceSelect[(serviceSelect.IndexOf("SELECT", StringComparison.Ordinal) + 6)..serviceSelect.IndexOf("FROM config_alert_settings WHERE id = 1", StringComparison.Ordinal)];
         var serviceColumns = serviceSelect.Split(',').Select(c => c.Trim()).Where(c => c.Length > 0).ToList();
         Assert.Equal(RouteColumn, serviceColumns[Ordinal]);
-        Assert.Equal(Ordinal + 1, serviceColumns.Count);
         Assert.Contains($"StoreUncorroboratedRoute = reader.IsDBNull({Ordinal}) ? null : reader.GetString({Ordinal}),", service, StringComparison.Ordinal);
         /* The carry survived the column: the file half still crosses the swap from the held config. */
         Assert.Contains("analysis.UncorroboratedRoute = bootstrap.Analysis.UncorroboratedRoute;", service, StringComparison.Ordinal);
@@ -205,7 +208,7 @@ public sealed class UncorroboratedRouteStoreKnobTests
         Assert.DoesNotContain(RouteColumn, seed.Groups["cols"].Value, StringComparison.Ordinal);
         Assert.Contains("long_running_query_excluded_logins", seed.Groups["cols"].Value, StringComparison.Ordinal);
 
-        /* The MCP read names it LAST, its positional record's last member is the raw column, and the
+        /* The MCP read names it at the fixed ordinal, its positional record carries the raw column at that position, and the
            report/accept pair carries the wire key both ways — the payload through the resolver, the writer
            through the tri-state adder. */
         var mcpColumns = DarlingAlertReader.AlertSettingsSelectSql
@@ -216,13 +219,11 @@ public sealed class UncorroboratedRouteStoreKnobTests
             .Where(c => c.Length > 0)
             .ToList();
         Assert.Equal(RouteColumn, mcpColumns[Ordinal]);
-        Assert.Equal(Ordinal + 1, mcpColumns.Count);
         var parameters = typeof(DarlingAlertReader.AlertSettingsReadRow).GetConstructors().Single().GetParameters();
         Assert.Equal("AnalysisUncorroboratedRoute", parameters[Ordinal].Name);
         Assert.Equal(typeof(string), parameters[Ordinal].ParameterType);
-        Assert.Equal(Ordinal + 1, parameters.Length);
         var reader = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingAlertReader.cs");
-        Assert.Contains($"reader.IsDBNull({Ordinal}) ? null : reader.GetString({Ordinal}));", reader, StringComparison.Ordinal);
+        Assert.Contains($"reader.IsDBNull({Ordinal}) ? null : reader.GetString({Ordinal}),", reader, StringComparison.Ordinal);
 
         var tools = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs");
         Assert.Contains("uncorroborated_route = UncorroboratedRoute(s).RouteText,", tools, StringComparison.Ordinal);
@@ -230,7 +231,7 @@ public sealed class UncorroboratedRouteStoreKnobTests
         Assert.Contains("DarlingAlertSettings.ResolveUncorroboratedRoute(s.AnalysisUncorroboratedRoute, DarlingFileLevelAlertSettings.UncorroboratedRoute)", tools, StringComparison.Ordinal);
         Assert.Contains($"AddNullableRoute(\"{RouteColumn}\", n, \"analysis.uncorroborated_route\");", tools, StringComparison.Ordinal);
 
-        /* The viewer: its select reads it LAST, its upsert WRITES it (or Save silently drops the combo's
+        /* The viewer: its select reads it at the fixed ordinal, its upsert WRITES it (or Save silently drops the combo's
            choice), and its reader maps the appended ordinal. */
         var viewerColumns = ViewerDataService.AlertSettingsSelectSql
             .Replace("SELECT ", "", StringComparison.Ordinal)
@@ -239,14 +240,14 @@ public sealed class UncorroboratedRouteStoreKnobTests
             .Select(c => c.Trim())
             .ToList();
         Assert.Equal(RouteColumn, viewerColumns[Ordinal]);
-        Assert.Equal(Ordinal + 1, viewerColumns.Count);
         Assert.Contains($"{RouteColumn} = EXCLUDED.{RouteColumn}", ViewerDataService.AlertSettingsUpsertSql, StringComparison.Ordinal);
         var viewerSettings = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.AlertSettings.cs");
         Assert.Contains($"AnalysisUncorroboratedRoute = reader.IsDBNull({Ordinal}) ? null : reader.GetString({Ordinal}),", viewerSettings, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// The viewer row round-trips through the bind at the APPENDED (last) position — the four-parallel-sequences
+    /// The viewer row round-trips through the bind at the APPENDED position (parameter 70, index 69; the last until V177
+    /// appended three more) — the four-parallel-sequences
     /// trap (the column list, the upsert's $N placeholders, the bind order, and the reader ordinals), held for
     /// the one sequence no SQL text pin can see: the bind. And the bind NORMALISES to the tri-state the CHECK
     /// admits: a route in any case lands lower-case, null lands as a typed text NULL, and a value that is neither
@@ -267,17 +268,18 @@ public sealed class UncorroboratedRouteStoreKnobTests
         using var command = new NpgsqlCommand();
         bind.Invoke(null, new object[] { command, row });
 
-        /* The bind supplies exactly as many parameters as the upsert's highest placeholder, and the route is the
-           last of them — appended, the rule every knob rung on this table follows. */
+        /* The bind supplies exactly as many parameters as the upsert's highest placeholder, and the route rides at its
+           APPENDED position (the rule every knob rung on this table follows, so every earlier ordinal keeps its
+           column). It was the last parameter until V177's three; the later rung owns the total. */
         var highestPlaceholder = Regex.Matches(ViewerDataService.AlertSettingsUpsertSql, @"\$(\d+)")
             .Select(m => int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture))
             .Max();
         Assert.Equal(command.Parameters.Count, highestPlaceholder);
-        Assert.Equal(Ordinal + 1, highestPlaceholder);
+        Assert.True(highestPlaceholder > Ordinal, "the upsert must carry a placeholder for the route's ordinal");
 
-        var last = command.Parameters[^1];
-        Assert.Equal(NpgsqlTypes.NpgsqlDbType.Text, last.NpgsqlDbType);
-        Assert.Equal(stored is null ? DBNull.Value : stored, last.Value);
+        var route = command.Parameters[Ordinal];
+        Assert.Equal(NpgsqlTypes.NpgsqlDbType.Text, route.NpgsqlDbType);
+        Assert.Equal(stored is null ? DBNull.Value : stored, route.Value);
     }
 
     /// <summary>

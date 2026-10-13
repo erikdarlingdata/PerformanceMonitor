@@ -79,9 +79,11 @@ public sealed class ViewerOverviewSqlTests
         Assert.Contains("total_current_workers_count", sql, StringComparison.Ordinal);
         Assert.Contains("total_runnable_tasks_count", sql, StringComparison.Ordinal);
         Assert.Contains("total_work_queue_count", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
+        /* #5710: the newest collection's rows are combined (summed workers and runnable tasks), not one row picked. */
+        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id, collection_time", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
     }
 
     [Fact]

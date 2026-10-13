@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -332,7 +333,167 @@ public static class DarlingFileSecurity
     /// than one name is refused.</para>
     /// </summary>
     /// <returns>Null once the ACL is applied; otherwise why it was not, and nothing was changed.</returns>
-    public static string? HardenWithoutFollowingLinks(string path, bool isDirectory, bool allowInteractive, string anchorDirectory)
+    public static string? HardenWithoutFollowingLinks(string path, bool isDirectory, bool allowInteractive, string anchorDirectory) =>
+        ApplyWithoutFollowingLinks(
+            path, anchorDirectory,
+            () => isDirectory ? HardenedDirectorySecurity(allowInteractive) : HardenedFileSecurity(allowInteractive));
+
+    /// <summary>
+    /// The TLS key-file ACL (<see cref="HardenedKeyFileSecurity"/>) applied the way
+    /// <see cref="HardenWithoutFollowingLinks"/> applies one: through a handle to exactly the checked file, refused when
+    /// the leaf or a folder on its path up to <paramref name="anchorDirectory"/> is a junction or symbolic link, when the
+    /// handle's final path is not the path asked for, or when the file has more than one name (#5700). Before the key is
+    /// opened, every folder from the volume root down to its parent, the anchor included, is opened without following a
+    /// link and held until the ACL is set (<see cref="PinFolderChain"/>): one that is a junction or symbolic link refuses
+    /// the change, and none of them can be renamed, deleted or replaced while the change runs.
+    /// </summary>
+    /// <returns>Null once the ACL is applied; otherwise why it was not, and nothing was changed.</returns>
+    public static string? HardenKeyFileWithoutFollowingLinks(string path, string anchorDirectory, KeyFileKind kind) =>
+        ApplyWithoutFollowingLinks(path, anchorDirectory, HardenedKeyFileSecurity, kind);
+
+    /// <summary><see cref="HardenKeyFileWithoutFollowingLinks(string, string, KeyFileKind)"/> that calls
+    /// <paramref name="whilePinned"/> twice, so a test can try to rename a held folder at the moments that matter: with
+    /// <see cref="PinnedFolders"/> once every folder on the path is held and checked and the key is not yet open, and with
+    /// <see cref="PinnedKey"/> once the key is open and checked, just before the ACL is applied.</summary>
+    internal static string? HardenKeyFileWithoutFollowingLinks(string path, string anchorDirectory, KeyFileKind kind, Action<string> whilePinned) =>
+        ApplyWithoutFollowingLinks(path, anchorDirectory, HardenedKeyFileSecurity, kind, whilePinned);
+
+    /// <summary>The stage the hooked <see cref="HardenKeyFileWithoutFollowingLinks(string, string, KeyFileKind)"/> reports
+    /// once the folders on the key's path are held.</summary>
+    internal const string PinnedFolders = "folders";
+
+    /// <summary>The stage it reports once the key itself is open and checked.</summary>
+    internal const string PinnedKey = "key";
+
+    /// <summary>What a file darling.json names as a TLS secret has to be, checked on its first bytes before its ACL is
+    /// changed (#5700): a DER PKCS#12 bundle, a PEM private key, or a short text file holding a password.</summary>
+    public enum KeyFileKind
+    {
+        /// <summary>A PKCS#12 bundle: an ASN.1 SEQUENCE with a valid DER length.</summary>
+        Pfx,
+
+        /// <summary>A PEM file with a <c>-----BEGIN ... PRIVATE KEY-----</c> header.</summary>
+        PemKey,
+
+        /// <summary>A password file: at most 4 KB, and not one of the product's own file types.</summary>
+        PasswordFile,
+    }
+
+    /// <summary>The reason a file named as a certificate or key is not changed, when its content is neither.</summary>
+    public const string NotAKeyFileReason = "is not a certificate or key file";
+
+    /// <summary>The reason a file named as a password file is not changed, when it is not one.</summary>
+    public const string NotAPasswordFileReason = "is not a password file";
+
+    /// <summary>The largest password file <see cref="KeyFileKind.PasswordFile"/> accepts.</summary>
+    internal const int PasswordFileMaxBytes = 4096;
+
+    /// <summary>The most of a PEM file read to find its private-key header (a chain of certificates can come first).</summary>
+    private const int PemReadLimit = 1024 * 1024;
+
+    private static readonly string[] ProductFileExtensions = { ".exe", ".dll", ".json", ".ps1", ".pdb", ".config", ".xml" };
+
+    /// <summary>Why <paramref name="head"/>, the first bytes of a file <paramref name="length"/> bytes long, does not start
+    /// like a DER PKCS#12 bundle; null when it does. The first byte is the SEQUENCE tag (0x30) and the length that follows
+    /// is a definite DER length: short form below 0x80, otherwise one to four length bytes with no leading zero byte (and
+    /// at least 0x80 when there is only one), and the whole value has to fit in the file.</summary>
+    internal static string? PfxContentRefusal(ReadOnlySpan<byte> head, long length)
+    {
+        if (head.Length >= 2 && head[0] == 0x30)
+        {
+            var first = head[1];
+            long content;
+            var headerLength = 2;
+            if (first < 0x80)
+            {
+                content = first;
+            }
+            else
+            {
+                var count = first & 0x7F;
+                if (first == 0x80 || count > 4 || head.Length < 2 + count || head[2] == 0 || (count == 1 && head[2] < 0x80))
+                {
+                    return NotAKeyFileReason;
+                }
+
+                content = 0;
+                for (var i = 0; i < count; i++)
+                {
+                    content = (content << 8) | head[2 + i];
+                }
+
+                headerLength += count;
+            }
+
+            if (content > 0 && headerLength + content <= length)
+            {
+                return null;
+            }
+        }
+
+        return NotAKeyFileReason;
+    }
+
+    /// <summary>Why <paramref name="text"/>, the start of a file, is not a PEM private key; null when it holds a
+    /// <c>-----BEGIN ... PRIVATE KEY-----</c> line.</summary>
+    internal static string? PemContentRefusal(ReadOnlySpan<byte> text)
+    {
+        var decoded = System.Text.Encoding.Latin1.GetString(text);
+        return System.Text.RegularExpressions.Regex.IsMatch(decoded, "-----BEGIN [A-Z ]*PRIVATE KEY-----", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            ? null
+            : NotAKeyFileReason;
+    }
+
+    /// <summary>Why <paramref name="path"/>, <paramref name="length"/> bytes long, is not a password file; null when it
+    /// could be one.</summary>
+    internal static string? PasswordFileRefusal(string path, long length)
+    {
+        var extension = Path.GetExtension(path);
+        if (ProductFileExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+        {
+            return $"{NotAPasswordFileReason} (a {extension.ToLowerInvariant()} file)";
+        }
+
+        return length > PasswordFileMaxBytes
+            ? $"{NotAPasswordFileReason} (it is larger than 4 KB)"
+            : null;
+    }
+
+    /// <summary>Reads the first bytes of the file behind <paramref name="handle"/> (at most <paramref name="count"/>).</summary>
+    private static byte[] ReadHead(Microsoft.Win32.SafeHandles.SafeFileHandle handle, long length, int count)
+    {
+        var buffer = new byte[(int)Math.Min(length, count)];
+        var read = 0;
+        while (read < buffer.Length)
+        {
+            var got = RandomAccess.Read(handle, buffer.AsSpan(read), read);
+            if (got <= 0)
+            {
+                break;
+            }
+
+            read += got;
+        }
+
+        return read == buffer.Length ? buffer : buffer[..read];
+    }
+
+    private static string? KeyFileContentRefusal(Microsoft.Win32.SafeHandles.SafeFileHandle handle, string path, KeyFileKind kind)
+    {
+        var length = RandomAccess.GetLength(handle);
+        switch (kind)
+        {
+            case KeyFileKind.Pfx:
+                return PfxContentRefusal(ReadHead(handle, length, 16), length);
+            case KeyFileKind.PemKey:
+                return PemContentRefusal(ReadHead(handle, length, PemReadLimit));
+            default:
+                return PasswordFileRefusal(path, length);
+        }
+    }
+
+    private static string? ApplyWithoutFollowingLinks(
+        string path, string anchorDirectory, Func<NativeObjectSecurity> buildSecurity, KeyFileKind? keyKind = null, Action<string>? whilePinned = null)
     {
         var anchor = Path.TrimEndingDirectorySeparator(Path.GetFullPath(anchorDirectory));
         var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
@@ -341,13 +502,100 @@ public static class DarlingFileSecurity
             throw new ArgumentException($"{full} is not below {anchor}.", nameof(path));
         }
 
+        /* A key file is changed only with its whole folder chain held (#5700): the install folder is where a config lives
+           that ordinary users may be able to rename, and a name resolved after the check is not the name checked. */
+        var pinned = new List<Microsoft.Win32.SafeHandles.SafeFileHandle>();
+        try
+        {
+            if (keyKind is not null && PinFolderChain(Path.GetDirectoryName(full)!, pinned) is { } folderRefusal)
+            {
+                return folderRefusal;
+            }
+
+            whilePinned?.Invoke(PinnedFolders);
+            return ApplyToOpenedFile(full, anchor, buildSecurity, keyKind, whilePinned);
+        }
+        finally
+        {
+            foreach (var held in pinned)
+            {
+                held.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Opens every folder from the volume root down to <paramref name="folder"/> without following a link, adds each
+    /// handle to <paramref name="held"/> (the caller closes them after the change), and returns why the chain cannot be
+    /// trusted: the first folder that is a junction or symbolic link. Null when none is, and then none of the folders can be
+    /// renamed, deleted or turned into a link until the handles are closed: each is opened for traverse, which counts as
+    /// read access in a share check (the same open a process's current directory holds), with a share mode that does not
+    /// include delete, so the open that a rename or a delete needs is a sharing violation. The folders are opened from the
+    /// root down, each by a name that resolves through folders already held, so none can have been swapped after its check.
+    /// An open for attributes only would not do this: such an open takes no part in a share check.
+    /// </summary>
+    private static string? PinFolderChain(string folder, List<Microsoft.Win32.SafeHandles.SafeFileHandle> held)
+    {
+        var chain = new List<string>();
+        for (var current = folder; current is not null; current = Path.GetDirectoryName(current))
+        {
+            chain.Add(current);
+        }
+
+        chain.Reverse();
+        foreach (var directory in chain)
+        {
+            Microsoft.Win32.SafeHandles.SafeFileHandle handle;
+            try
+            {
+                handle = OpenForSecurity(directory, followLink: false, access: FileTraverse | FileReadAttributes);
+            }
+            catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == ErrorAccessDenied)
+            {
+                handle = OpenForSecurity(directory, followLink: false, access: FileReadData | FileReadAttributes);
+            }
+
+            held.Add(handle);
+            if ((File.GetAttributes(handle) & FileAttributes.ReparsePoint) != 0)
+            {
+                return $"{directory} is a junction or symbolic link";
+            }
+        }
+
+        return null;
+    }
+
+    private static string? ApplyToOpenedFile(
+        string full, string anchor, Func<NativeObjectSecurity> buildSecurity, KeyFileKind? keyKind, Action<string>? whilePinned)
+    {
         string anchorFinal;
         using (var anchorHandle = OpenForSecurity(anchor, followLink: true, access: FileReadAttributes))
         {
             anchorFinal = FinalPath(anchorHandle);
         }
 
-        using var handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | FileReadAttributes);
+        /* A key file is also read through this handle (its content is checked before anything is changed) and, when the
+           caller may, has its owner set to Administrators; a caller that cannot take the owner right still gets the rest. */
+        var ownerRight = false;
+        Microsoft.Win32.SafeHandles.SafeFileHandle handle;
+        if (keyKind is null)
+        {
+            handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | FileReadAttributes);
+        }
+        else
+        {
+            try
+            {
+                handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | WriteOwner | FileReadData | FileReadAttributes);
+                ownerRight = true;
+            }
+            catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == ErrorAccessDenied)
+            {
+                handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | FileReadData | FileReadAttributes);
+            }
+        }
+
+        using var handleScope = handle;
         if ((File.GetAttributes(handle) & FileAttributes.ReparsePoint) != 0)
         {
             return $"{full} is a junction or symbolic link";
@@ -360,7 +608,7 @@ public static class DarlingFileSecurity
 
         if (information.NumberOfLinks > 1)
         {
-            return $"{full} is a hard link: the file has {information.NumberOfLinks.ToString(System.Globalization.CultureInfo.InvariantCulture)} names, and its ACL is the same under every one of them";
+            return HardLinkRefusal(full, information.NumberOfLinks);
         }
 
         /* Joined rather than concatenated: a volume root keeps its separator (C:\), and its final path can come back
@@ -373,7 +621,13 @@ public static class DarlingFileSecurity
             return $"{full} resolves to {actual}, so a junction or symbolic link is on its path";
         }
 
-        NativeObjectSecurity security = isDirectory ? HardenedDirectorySecurity(allowInteractive) : HardenedFileSecurity(allowInteractive);
+        if (keyKind is { } kind && KeyFileContentRefusal(handle, full, kind) is { } contentRefusal)
+        {
+            return $"{full} {contentRefusal}";
+        }
+
+        whilePinned?.Invoke(PinnedKey);
+        var security = buildSecurity();
         var descriptor = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
         var dacl = new byte[descriptor.DiscretionaryAcl!.BinaryLength];
         descriptor.DiscretionaryAcl.GetBinaryForm(dacl, 0);
@@ -393,9 +647,30 @@ public static class DarlingFileSecurity
             pinned.Free();
         }
 
+        if (ownerRight)
+        {
+            /* The tree lock's rule for the same file: Administrators own it. A refusal (the process does not hold the
+               Administrators group) is not an error here: the owner is read back and judged by the caller. */
+            var owner = new byte[Administrators.BinaryLength];
+            Administrators.GetBinaryForm(owner, 0);
+            var ownerPin = System.Runtime.InteropServices.GCHandle.Alloc(owner, System.Runtime.InteropServices.GCHandleType.Pinned);
+            try
+            {
+                _ = SetSecurityInfo(handle, FileObject, OwnerSecurityInformation, ownerPin.AddrOfPinnedObject(), IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            }
+            finally
+            {
+                ownerPin.Free();
+            }
+        }
+
         return null;
     }
 
+    private const int ErrorAccessDenied = 5;
+    private const uint FileReadData = 0x00000001;
+    private const uint FileTraverse = 0x00000020;
+    private const uint WriteOwner = 0x00080000;
     private const uint GenericRead = 0x80000000;
     private const uint ReadControl = 0x00020000;
     private const uint WriteDac = 0x00040000;
@@ -418,7 +693,8 @@ public static class DarlingFileSecurity
         {
             var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
             handle.Dispose();
-            throw new System.ComponentModel.Win32Exception(error, $"{path} could not be opened");
+            /* The system's own words for the error go on the end, so a denied open reads as "Access is denied". */
+            throw new System.ComponentModel.Win32Exception(error, $"{path} could not be opened: {new System.ComponentModel.Win32Exception(error).Message}");
         }
 
         return handle;
@@ -445,6 +721,97 @@ public static class DarlingFileSecurity
             : path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..]
             : path;
     }
+
+    /// <summary>The refusal for a file with more than one name: how many, the other names (as many as can be listed), and
+    /// the command that lists them, because the ACL belongs to the file and is the same under every name.</summary>
+    internal static string HardLinkRefusal(string full, uint names)
+    {
+        const int Listed = 8;
+        var others = OtherNamesOf(full);
+        var text = $"{full} is a hard link: the file has {names.ToString(System.Globalization.CultureInfo.InvariantCulture)} names, and its ACL is the same under every one of them";
+        if (others.Count > 0)
+        {
+            text += $". Its other name(s): {string.Join("; ", others.Take(Listed))}" + (others.Count > Listed ? $"; and {others.Count - Listed} more" : string.Empty);
+        }
+
+        return text + $". To list every name, run: fsutil hardlink list \"{full}\"";
+    }
+
+    /// <summary>The other names of the file at <paramref name="full"/> on its volume (<c>FindFirstFileNameW</c> /
+    /// <c>FindNextFileNameW</c>), as full paths; empty when they cannot be listed.</summary>
+    internal static IReadOnlyList<string> OtherNamesOf(string full)
+    {
+        var names = new List<string>();
+        var volume = Path.GetPathRoot(full) ?? string.Empty;
+        var own = full[volume.Length..];
+        var buffer = new char[1024];
+        var length = (uint)buffer.Length;
+        var search = FindFirstFileNameW(full, 0, ref length, buffer);
+        if (search == InvalidHandle && System.Runtime.InteropServices.Marshal.GetLastPInvokeError() == ErrorMoreData)
+        {
+            buffer = new char[length];
+            length = (uint)buffer.Length;
+            search = FindFirstFileNameW(full, 0, ref length, buffer);
+        }
+
+        if (search == InvalidHandle)
+        {
+            return names;
+        }
+
+        try
+        {
+            while (true)
+            {
+                /* The count includes the terminating null; each name is volume-relative and starts with a backslash. */
+                var name = new string(buffer, 0, (int)Math.Max(length, 1u) - 1).TrimStart('\\');
+                if (!string.Equals(name, own, StringComparison.OrdinalIgnoreCase))
+                {
+                    names.Add(Path.Join(volume, name));
+                }
+
+                length = (uint)buffer.Length;
+                if (FindNextFileNameW(search, ref length, buffer))
+                {
+                    continue;
+                }
+
+                if (System.Runtime.InteropServices.Marshal.GetLastPInvokeError() != ErrorMoreData)
+                {
+                    break;
+                }
+
+                buffer = new char[length];
+                length = (uint)buffer.Length;
+                if (!FindNextFileNameW(search, ref length, buffer))
+                {
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            _ = FindClose(search);
+        }
+
+        return names;
+    }
+
+    private const int ErrorMoreData = 234;
+    private static readonly IntPtr InvalidHandle = new(-1);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindFirstFileNameW(
+        string lpFileName, uint dwFlags, ref uint stringLength, [System.Runtime.InteropServices.Out] char[] linkName);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool FindNextFileNameW(
+        IntPtr hFindStream, ref uint stringLength, [System.Runtime.InteropServices.Out] char[] linkName);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool FindClose(IntPtr hFindFile);
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
     private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(
@@ -496,6 +863,25 @@ public static class DarlingFileSecurity
     /// </summary>
     public static void HardenFile(string path, bool allowInteractiveRead) =>
         new FileInfo(path).SetAccessControl(HardenedFileSecurity(allowInteractiveRead));
+
+    /// <summary>
+    /// The ACL of a TLS private-key file (#5700): SYSTEM and Administrators full control, the service account read
+    /// only, the DACL protected so nothing is inherited, and no operator-group grant (only the service reads a key).
+    /// The service never writes the file, and a read-only grant carries none of the write bits the install tree lock
+    /// strips an untrusted account of, so that lock leaves the file as this ACL set it. Returned as the ACL, not
+    /// applied: <see cref="HardenKeyFileWithoutFollowingLinks"/> applies it.
+    /// </summary>
+    private static FileSecurity HardenedKeyFileSecurity()
+    {
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+
+        AddFile(security, LocalSystem, FileSystemRights.FullControl);
+        AddFile(security, Administrators, FileSystemRights.FullControl);
+        AddFile(security, ServiceAccount, FileSystemRights.Read | FileSystemRights.Synchronize);
+
+        return security;
+    }
 
     /// <summary>
     /// Creates <paramref name="path"/>, which must not exist yet, with <see cref="HardenFile"/>'s ACL applied AT

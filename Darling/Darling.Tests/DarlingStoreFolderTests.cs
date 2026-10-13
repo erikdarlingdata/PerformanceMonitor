@@ -593,17 +593,7 @@ public sealed class DarlingStoreFolderScriptTests
         File.WriteAllText(path, script);
         try
         {
-            var startInfo = new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-
-            /* A runner started from PowerShell 7 hands its module path down, and Windows PowerShell 5.1 then cannot load the
-               security module (Get-Acl). Dropped, 5.1 builds its own. */
-            startInfo.Environment.Remove("PSModulePath");
+            var startInfo = WindowsPowerShellStartInfo.ForScript(path);
             using var process = Process.Start(startInfo);
             Assert.NotNull(process);
             var stdoutTask = process!.StandardOutput.ReadToEndAsync();

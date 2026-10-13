@@ -808,6 +808,82 @@ ORDER BY accumulated_wait_ms DESC";
         return items;
     }
 
+    /* ---------------- runnable queue (#5641) ---------------- */
+
+    /// <summary>
+    /// The Runnable Queue alert's sample read (#5641) over <c>cpu_scheduler_stats</c>, the PostgreSQL-store twin of
+    /// <c>LocalDataService.RunnableQueueSamplesSql</c>. $1 server_id, $2 the parameterized naive-UTC floor (now minus
+    /// the engine's lookback; a bare <c>now()</c> is timestamptz and would compare in the server's time zone against
+    /// these naive-UTC columns, the Poison Wait read's reasoning). PostgreSQL keeps microseconds in
+    /// <c>collection_time</c>, so the floor is bound as a full-precision <see cref="DateTime"/>, never truncated.
+    ///
+    /// <para>One row per <c>collection_time</c>, newest first. The collector can write several rows for one
+    /// collection_time, each covering a subset of the schedulers while every row says the full
+    /// <c>scheduler_count</c> (#5710; old rows stay split), so rows are folded by the shared <see cref="CpuSchedulerCollectionSql"/> (one definition for every reader, #5641 review): a lone row uses its own
+    /// <c>avg_runnable_tasks_count</c> (the collector's <c>AVG(runnable_tasks_count)</c> over <c>VISIBLE ONLINE</c>
+    /// schedulers, runnable tasks per scheduler: the number the bars were measured on, never the node or offline-CPU
+    /// columns, #5656); several use <c>SUM(total_runnable_tasks_count) / MAX(scheduler_count)</c>. The shared fold
+    /// casts the sum to <c>numeric</c> first, so the division is never integer division. A row whose
+    /// average is NULL is not a row (the filter is on the stored rows, before the fold). No ORDER BY tiebreaker: after the GROUP BY there is no tie.</para>
+    ///
+    /// <para><b>Cost.</b> One server, a <c>collection_time</c> floor of the engine's 60-minute read
+    /// (<c>RunnableQueueEvaluator.ReadLookbackMinutes</c>, which the cadence is derived from): about 60 collections at the
+    /// 1-minute cadence, all in the newest chunk, the same predicate shape as the poison-wait read beside it.</para>
+    /// </summary>
+    public static readonly string RunnableQueueSql = $"""
+SELECT
+    collection_time,
+    CAST(avg_runnable_tasks_count AS double precision) AS per_scheduler,
+    CAST(total_runnable_tasks_count AS bigint) AS total_runnable_tasks_count,
+    CAST(scheduler_count AS integer) AS scheduler_count
+FROM
+(
+    {CpuSchedulerCollectionSql.PerCollection("cpu_scheduler_stats", "server_id = $1 AND collection_time >= $2 AND avg_runnable_tasks_count IS NOT NULL", newestOnly: false)}
+) AS collections
+ORDER BY collection_time DESC
+""";
+
+    public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
+    {
+        /* The one retry seam (#3848), under the name the engine's catch arm records a failure under. */
+        return ExecuteWithOneRetryAsync(
+            ct => GetRunnableQueueSamplesCoreAsync(serverKey, lookbackMinutes, ct),
+            serverKey,
+            "runnable queue",
+            cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesCoreAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken)
+    {
+        var serverId = ParseServerKey(serverKey);
+
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(RunnableQueueSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(NaiveUtcNow().AddMinutes(-lookbackMinutes));
+
+        var samples = new List<RunnableQueueSample>();
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            /* A split collection whose scheduler count is NULL has no per-scheduler value: not a sample. */
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
+            samples.Add(new RunnableQueueSample(
+                reader.GetDateTime(0),
+                reader.GetDouble(1),
+                reader.IsDBNull(2) ? null : reader.GetInt64(2),
+                reader.IsDBNull(3) ? null : reader.GetInt32(3)));
+        }
+
+        return samples;
+    }
+
     /* ---------------- long-running queries ---------------- */
 
     /// <summary>The characters of a statement the long-running-query alert prints (#5320: judged whole, then cut to this).</summary>
@@ -896,6 +972,13 @@ WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login OR r.excluded_by_
 ORDER BY r.total_elapsed_time_ms DESC
 LIMIT $3";
 
+    /// <summary>The template's long-running order, the one clause <see cref="CpuRankedOrderBy"/> replaces.</summary>
+    private const string LongRunningOrderBy = "ORDER BY r.total_elapsed_time_ms DESC";
+
+    /// <summary>#5641: the CPU-first order for a caller that wants the heaviest CPU consumers (the Runnable Queue
+    /// card). PostgreSQL sorts NULL first on DESC, so NULLS LAST is spelled; ties fall to elapsed, then session id.</summary>
+    private const string CpuRankedOrderBy = "ORDER BY r.cpu_time_ms DESC NULLS LAST, r.total_elapsed_time_ms DESC, r.session_id";
+
     /// <summary>The five opt-out noise filters — Lite's clauses with the N'' prefixes dropped.</summary>
     /* sp_server_diagnostics (the AG/FCI health-check session) usually sits in SP_SERVER_DIAGNOSTICS_SLEEP, but it
        also does Extended Events work, so it can be captured in a different wait (e.g. PREEMPTIVE_XE_GETTARGETSTATE)
@@ -919,6 +1002,7 @@ LIMIT $3";
         bool excludeCdc,
         IReadOnlyList<string> excludedDatabases,
         LongRunningQueryExclusions exclusions,
+        bool orderByCpu = false,
         CancellationToken cancellationToken = default)
     {
         /* #3848: every read in this type goes out through the one retry seam, which re-asks
@@ -928,7 +1012,7 @@ LIMIT $3";
            same one the engine's own catch arm records a failure under, so one read has one name
            across both counts. */
         return ExecuteWithOneRetryAsync(
-            ct => GetLongRunningQueriesCoreAsync(serverKey, thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits, excludeCdc, excludedDatabases, exclusions, ct),
+            ct => GetLongRunningQueriesCoreAsync(serverKey, thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits, excludeCdc, excludedDatabases, exclusions, orderByCpu, ct),
             serverKey,
             "long-running queries",
             cancellationToken);
@@ -945,6 +1029,7 @@ LIMIT $3";
         bool excludeCdc,
         IReadOnlyList<string> excludedDatabases,
         LongRunningQueryExclusions exclusions,
+        bool orderByCpu,
         CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
@@ -971,6 +1056,10 @@ LIMIT $3";
             .Replace("{1}", exclusionSql.ProgramPrefixPredicate)
             .Replace("{2}", exclusionSql.LoginPredicate)
             .Replace("{3}", exclusionSql.DatabasePredicate);
+        if (orderByCpu)
+        {
+            sql = sql.Replace(LongRunningOrderBy, CpuRankedOrderBy, StringComparison.Ordinal);
+        }
 
         var items = new List<LongRunningQueryInfo>();
         int excludedByProgramPrefix = 0;

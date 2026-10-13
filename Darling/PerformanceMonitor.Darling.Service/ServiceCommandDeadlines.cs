@@ -479,14 +479,17 @@ public static class ServiceCommandDeadlines
     /// own rather than joining one sized for the opposite kind of read.</para>
     ///
     /// <para><b>ABOVE the sum of what it wraps, not tied to any one query in it.</b>
-    /// <c>GatherAsync</c> runs, sequentially, the version/buffer/size/uncompressed-chunk reads
+    /// <c>GatherAsync</c> runs, sequentially, the version/buffer/stored-size/uncompressed-chunk reads
     /// (<c>GatherStoreFactsAsync</c>, each individually bounded at <see cref="CliStoreReadSeconds"/>) and
     /// then the <c>pg_settings</c> read (<c>GatherSettingProfilesAsync</c>, same per-statement bound) plus
-    /// eight local conf-file reads (sub-millisecond). Only two of those five statements are store-scaling
-    /// (<c>StoreSizeSql</c>, <c>UncompressedChunkSizeSql</c> — <c>SerialLoopStoreSizeSourceTests</c>'
-    /// regex), so the backstop clears TWO store-scaling statements at their own ceiling plus the same 5s
-    /// margin <see cref="StartupHostProfileSeconds"/> carries for everything outside the one query it
-    /// backstops.</para>
+    /// eight local conf-file reads (sub-millisecond). This surface asks for the hourly sweep's STORED size
+    /// (#5718), so the live <c>StoreSizeSql</c> walk is not on this path: the one statement that scales with
+    /// the store is <c>UncompressedChunkSizeSql</c> (<c>SerialLoopStoreSizeSourceTests</c>' regex), and the
+    /// stored-size read is a bounded backward index scan that still carries the same per-statement ceiling.
+    /// The bound clears TWO statements at their own ceiling (the uncompressed-chunk read and whichever other
+    /// read is the slow one) plus the same 5s margin <see cref="StartupHostProfileSeconds"/> carries for
+    /// everything outside the one query it backstops. It stays two ceilings deep rather than one so a slow
+    /// uncompressed-chunk read, which now fails alone, cannot also eat the budget the settings read needs.</para>
     /// </summary>
     public const int McpStoreHostProfileSeconds = (CliStoreReadSeconds * 2) + 5;
 

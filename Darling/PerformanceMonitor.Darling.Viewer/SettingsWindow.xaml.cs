@@ -766,6 +766,9 @@ public partial class SettingsWindow : Window
         AlertPgDeadlockThresholdBox.Text = r.PgDeadlockCountThreshold.ToString(CultureInfo.InvariantCulture);
         AlertPoisonWaitCheckBox.IsChecked = r.PoisonWaitEnabled;
         AlertPoisonWaitThresholdBox.Text = r.PoisonWaitThresholdMs.ToString(CultureInfo.InvariantCulture);
+        AlertRunnableQueueCheckBox.IsChecked = r.RunnableQueueEnabled;
+        AlertRunnableQueueWarningBox.Text = r.RunnableQueueWarningPerScheduler.ToString(CultureInfo.InvariantCulture);
+        AlertRunnableQueueCriticalBox.Text = r.RunnableQueueCriticalPerScheduler.ToString(CultureInfo.InvariantCulture);
         AlertLongRunningQueryCheckBox.IsChecked = r.LongRunningQueryEnabled;
         AlertLongRunningQueryThresholdBox.Text = r.LongRunningQueryThresholdMinutes.ToString(CultureInfo.InvariantCulture);
         /* V20: the long-running-query read shape (max-results + the five noise filters) is store-backed now. */
@@ -860,6 +863,7 @@ public partial class SettingsWindow : Window
             BlockingEnabled = AlertBlockingCheckBox.IsChecked == true,
             DeadlockEnabled = AlertDeadlockCheckBox.IsChecked == true,
             PoisonWaitEnabled = AlertPoisonWaitCheckBox.IsChecked == true,
+            RunnableQueueEnabled = AlertRunnableQueueCheckBox.IsChecked == true,
             LongRunningQueryEnabled = AlertLongRunningQueryCheckBox.IsChecked == true,
             /* V20 long-running-query read shape (the five noise-filter opt-outs; max-results parsed below). */
             LongRunningQueryExcludeSpServerDiagnostics = LrqExcludeSpServerDiagnosticsCheckBox.IsChecked == true,
@@ -913,6 +917,24 @@ public partial class SettingsWindow : Window
             row.PgBlockingCountThreshold = pgBlocking;
         if (int.TryParse(AlertPoisonWaitThresholdBox.Text, out var poisonWait) && poisonWait > 0)
             row.PoisonWaitThresholdMs = poisonWait;
+        /* #5641: the Runnable Queue bars, the engine's own rule (RunnableQueueEvaluator.ClampBars): Warning at least 1 and
+           Critical never below Warning. An invalid entry is reported here rather than silently clamped, so what is saved is
+           what the operator typed. A bad pair is refused whatever the checkbox says (as Lite does, round 1 of #5709): the row
+           is built fresh with the 8/16 defaults, so letting an unchecked alert skip the error would save 8/16 over the
+           operator's stored bars. */
+        var warningOk = int.TryParse(AlertRunnableQueueWarningBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rqWarning) && rqWarning >= 1;
+        var criticalOk = int.TryParse(AlertRunnableQueueCriticalBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rqCritical) && rqCritical >= 1;
+        if (warningOk && criticalOk && rqCritical >= rqWarning)
+        {
+            row.RunnableQueueWarningPerScheduler = rqWarning;
+            row.RunnableQueueCriticalPerScheduler = rqCritical;
+        }
+        else
+        {
+            errors.Add(!warningOk
+                ? "Runnable queue Warning must be a whole number of at least 1 runnable task per scheduler."
+                : "Runnable queue Critical must be a whole number no lower than the Warning bar.");
+        }
         if (int.TryParse(AlertLongRunningQueryThresholdBox.Text, out var lrq) && lrq > 0)
             row.LongRunningQueryThresholdMinutes = lrq;
         /* V20: max-results (the read adapter re-clamps 1–1000; a bad value keeps the default 5). */
@@ -1051,6 +1073,8 @@ public partial class SettingsWindow : Window
         AlertPgBlockingThresholdBox.Text =
             PostgresAlertEvaluator.BlockingCountThresholdDefault.ToString(CultureInfo.InvariantCulture);
         AlertPoisonWaitThresholdBox.Text = "500";
+        AlertRunnableQueueWarningBox.Text = RunnableQueueEvaluator.DefaultWarningPerScheduler.ToString(CultureInfo.InvariantCulture);
+        AlertRunnableQueueCriticalBox.Text = RunnableQueueEvaluator.DefaultCriticalPerScheduler.ToString(CultureInfo.InvariantCulture);
         AlertLongRunningQueryThresholdBox.Text = "30";
         /* V20: the long-running-query read shape resets to Lite's App defaults (5 rows, every filter on). */
         AlertLongRunningQueryMaxResultsBox.Text = "5";
@@ -1174,6 +1198,9 @@ public partial class SettingsWindow : Window
             /* #3539 A4: the live bar, from the shared constants — not the retired ms box, which nothing reads. */
             parts.Add(string.Create(CultureInfo.InvariantCulture,
                 $"poison waits >= {PoisonWaitEvaluator.WarningAvgWaiters * PoisonWaitEvaluator.WindowMinutes * 60:N0}s accumulated in {PoisonWaitEvaluator.WindowMinutes}min"));
+        if (AlertRunnableQueueCheckBox.IsChecked == true)
+            parts.Add(string.Create(CultureInfo.InvariantCulture,
+                $"runnable queue >= {AlertRunnableQueueWarningBox.Text}/{AlertRunnableQueueCriticalBox.Text} per scheduler (avg {RunnableQueueEvaluator.WindowMinutes}min)"));
         if (AlertLongRunningQueryCheckBox.IsChecked == true)
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
@@ -1251,6 +1278,9 @@ public partial class SettingsWindow : Window
            master switch — the XAML sets IsEnabled="False", and this loop must not re-enable it on load or
            on toggle, or the operator is back to tuning a number the engine ignores. */
         AlertPoisonWaitThresholdBox.IsEnabled = false;
+        AlertRunnableQueueCheckBox.IsEnabled = enabled;
+        AlertRunnableQueueWarningBox.IsEnabled = enabled;
+        AlertRunnableQueueCriticalBox.IsEnabled = enabled;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         /* V20 long-running-query read-shape controls follow the master switch like the rest of the engine. */

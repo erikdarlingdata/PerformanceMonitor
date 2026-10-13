@@ -993,6 +993,41 @@ END
 $$;";
 
     /// <summary>
+    /// V176 (#5638) - <c>collect.procedure_stats_totals</c>: the per-collection totals of <c>collect.procedure_stats</c> that the raw
+    /// procedure duration trend reads instead of every row of every collection (about 560 to 1,060 rows per collection since #5463).
+    /// The collector writes it on the COPY's own transaction (<c>ProcedureStatsTotalsWriter</c>); the grain, the measures, the
+    /// NULL database handling and the retention are on <see cref="ProcedureStatsTotals"/>, which the rung embeds.
+    ///
+    /// <para><b>Empty when created, no backfill</b> (the data-moving census therefore has nothing to declare): a collection written
+    /// before the rung has no totals row and the read keeps reading its rows. A plain table, not a collector, so no catalog, hypertable or
+    /// grant change; the <c>collect</c> schema's blanket SELECT and owner default privileges cover it. No Lite twin: Lite's store is
+    /// DuckDB with its own procedure trend.</para>
+    /// </summary>
+    private const string V176Sql = ProcedureStatsTotals.CreateSql;
+
+    /// <summary>
+    /// V177 (#5641) - the Runnable Queue alert's three settings on <c>config.config_alert_settings</c>:
+    /// <c>runnable_queue_enabled</c> (<c>boolean NOT NULL DEFAULT TRUE</c>, like <c>poison_wait_enabled</c>) and the two bars,
+    /// <c>runnable_queue_warning_per_scheduler</c> (default 8) and <c>runnable_queue_critical_per_scheduler</c> (default 16),
+    /// runnable tasks per visible online scheduler, averaged over the collections of the last 5 minutes when there are at least 3, otherwise over
+    /// the newest 3 if all fall in the last 10 minutes (the rule as shipped; the migration's SQL text says nothing of the window). The defaults are
+    /// <c>RunnableQueueEvaluator.DefaultWarningPerScheduler</c> / <c>DefaultCriticalPerScheduler</c>, written as literals here
+    /// because a migration's text is frozen at the version it ships in; the defaults pin in the rung's test holds them equal.
+    ///
+    /// <para>No CHECK enforcing the bounds, matching V119/V120/V122/V124/V126: the floor (Warning at least 1, Critical never
+    /// below Warning) is the <c>update_alert_settings</c> write bound and <c>DarlingAlertSettings</c>' read-side clamp, the
+    /// raw-in/clamped-out split every knob on this table uses. Catalog-only: a column with a constant default does not rewrite
+    /// the one-row table. No reload beacon of its own: V17's statement-level <c>trg_bump_alert_settings</c> already bumps
+    /// <c>config_service.config_version</c> on any write here. No GRANT: this table carries table-level grants with no column
+    /// carve. <b>No Lite twin:</b> Lite keeps these as settings-file keys. Sequenced after V176 (#5638, procedure_stats_totals).
+    /// </summary>
+    private const string V177Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS runnable_queue_enabled boolean NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS runnable_queue_warning_per_scheduler integer NOT NULL DEFAULT 8,
+    ADD COLUMN IF NOT EXISTS runnable_queue_critical_per_scheduler integer NOT NULL DEFAULT 16;";
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1279,6 +1314,8 @@ $rung$;";
         new Migration(173, "query-store-compose-stamp", V173Sql),
         new Migration(174, "service-version", V174Sql),
         new Migration(175, "plan-regression-daily-rowcount", V175Sql),
+        new Migration(176, "procedure-stats-totals", V176Sql),
+        new Migration(177, "runnable-queue-alert-settings", V177Sql),
     };
 
     /// <summary>

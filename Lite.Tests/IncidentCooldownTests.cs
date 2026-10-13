@@ -30,6 +30,29 @@ public class IncidentCooldownTests
         new(keyPrefix: "", seedLastSentUtc: (_, _, _) => Task.FromResult<DateTime?>(null));
 
     [Fact]
+    public async Task BypassCooldown_SendsInsideTheWindow_AndTheStampRestartsTheWindow()
+    {
+        // #5641: a Warning-to-Critical escalation of the opted-in alert is delivered at once.
+        var cd = NoSeed();
+
+        var warning = await cd.EvaluateAsync("1", "Runnable Queue", null, Window);
+        Assert.True(warning.ShouldSend);
+        Assert.False(warning.Bypassed);
+        cd.Stamp(warning);
+        Assert.False((await cd.EvaluateAsync("1", "Runnable Queue", null, Window)).ShouldSend);
+
+        var escalation = await cd.EvaluateAsync("1", "Runnable Queue", null, Window, bypassCooldown: true);
+        Assert.True(escalation.ShouldSend);
+        Assert.True(escalation.Bypassed);
+        Assert.False(escalation.AnyFirstNotice);
+        cd.Stamp(escalation);
+
+        Assert.False((await cd.EvaluateAsync("1", "Runnable Queue", null, Window)).ShouldSend);
+        // another metric's window is untouched by the flag
+        Assert.True((await cd.EvaluateAsync("1", "High CPU", null, Window)).ShouldSend);
+    }
+
+    [Fact]
     public async Task DistinctFingerprints_BothFresh_SendsWithOneKeyPerFingerprint()
     {
         var cd = NoSeed();
@@ -282,6 +305,42 @@ public class IncidentCooldownTests
         var reversed = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("B", "A"), Window);
         Assert.True(reversed.ShouldSend);
         Assert.Equal(new[] { "B" }, reversed.DeliverableDedupKeys);
+    }
+
+    /// <summary>
+    /// #5641 review: a bypassed (escalation) send delivers the whole alert, so the deliverable fingerprints
+    /// must cover every incident it carries. Before the fix they stayed the freshness-filtered list, so an
+    /// incident-carrying alert that escalated inside its window sent with an empty list and the delivery
+    /// filter cut every incident out of the card. The un-bypassed answer is unchanged.
+    /// </summary>
+    [Fact]
+    public async Task Decision_OnABypassedSend_NamesEveryFingerprintItDelivers()
+    {
+        var cd = NoSeed();
+
+        var first = await cd.EvaluateAsync("1", "Runnable Queue", Incidents("A", "B"), Window);
+        cd.Stamp(first);
+
+        // Inside the window, no bypass: nothing to send, nothing deliverable.
+        var held = await cd.EvaluateAsync("1", "Runnable Queue", Incidents("A", "B"), Window);
+        Assert.False(held.ShouldSend);
+        Assert.Empty(held.DeliverableDedupKeys!);
+
+        // The escalation: both incidents are still inside their windows, and both are delivered.
+        var escalation = await cd.EvaluateAsync("1", "Runnable Queue", Incidents("A", "B"), Window, bypassCooldown: true);
+        Assert.True(escalation.ShouldSend);
+        Assert.True(escalation.Bypassed);
+        Assert.Equal(new[] { "A", "B" }, escalation.DeliverableDedupKeys);
+        Assert.Equal(escalation.Keys.Count, escalation.DeliverableDedupKeys!.Count);
+
+        // A fresh sibling riding in with a bypass: still every fingerprint, not only the fresh one.
+        cd.Stamp(escalation);
+        var withSibling = await cd.EvaluateAsync("1", "Runnable Queue", Incidents("A", "C"), Window, bypassCooldown: true);
+        Assert.Equal(new[] { "A", "C" }, withSibling.DeliverableDedupKeys);
+
+        // Without the bypass the same shape still reports only the fresh one (#3313).
+        var plain = await cd.EvaluateAsync("1", "Runnable Queue", Incidents("A", "D"), Window);
+        Assert.Equal(new[] { "D" }, plain.DeliverableDedupKeys);
     }
 
     /// <summary>
