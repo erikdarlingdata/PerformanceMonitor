@@ -83,7 +83,7 @@ public partial class ViewerServerTab
         var queryDurationTask = _dataService.GetQueryDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc);
         var procDurationTask = _dataService.GetProcedureDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc);
         var queryStoreDurationTask = _dataService.GetQueryStoreDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
-        var executionCountTask = _dataService.GetExecutionCountTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var executionCountTask = _dataService.GetExecutionCountTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc);
 
         await Task.WhenAll(queryDurationTask, procDurationTask, queryStoreDurationTask, executionCountTask);
 

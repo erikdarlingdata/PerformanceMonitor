@@ -259,16 +259,18 @@ public sealed class ViewerTimeRangeWindowTests
         Assert.DoesNotContain("wallClock?.Invoke()", tools, StringComparison.Ordinal);
     }
 
-    /// <summary>Source pin: the Performance Trends load reads its window with the tier clock and hands it to both duration trends; the
+    /// <summary>Source pin: the Performance Trends load reads its window with the tier clock and hands it to every clock-routed trend (the two duration trends and the execution-count trend, which routes the same
+    /// raw/hourly ladder; the Query Store trend routes by its own watermark and takes no clock); the
     /// clock is the window's end only for a live range (<see cref="ViewerTimeRangeWindow.TierNowUtc"/> returns null for a fixed one).</summary>
     [Fact]
-    public void ThePerformanceTrendsLoad_PassesTheTierClock_ToBothDurationTrends()
+    public void ThePerformanceTrendsLoad_PassesTheTierClock_ToEveryClockRoutedTrend()
     {
         static string Read(string file) => RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", file).Replace("\r\n", "\n", StringComparison.Ordinal);
 
         var trends = Read("ViewerServerTab.QueryTrends.cs");
         Assert.Contains("GetQueryDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc)", trends, StringComparison.Ordinal);
         Assert.Contains("GetProcedureDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc)", trends, StringComparison.Ordinal);
+        Assert.Contains("GetExecutionCountTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc)", trends, StringComparison.Ordinal);
         Assert.Contains("LoadPerformanceTrendsAsync(DateTime startUtc, DateTime endUtc, DateTime? tierNowUtc)", trends, StringComparison.Ordinal);
 
         var queries = Read("ViewerServerTab.Queries.cs");
