@@ -271,6 +271,9 @@ public partial class SettingsWindow : Window
     /// </summary>
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
+        _credentialFailures.Clear();
+        _webhookValueHeld = false;
+
         /* An SMTP login that would go to the mail server unencrypted is confirmed before anything is applied:
            No cancels the whole save and leaves the window open to fix it. Not blocked - an internal relay on
            port 25 is a real setup. */
@@ -342,20 +345,29 @@ public partial class SettingsWindow : Window
             UpdateMcpStatus();
         }
 
-        switch (SettingsSaveReport.Classify(written, mcpChanged, alertsValid, mcpValid, webhooksValid, memoryLimitValid))
+        /* #5772: the password, webhook URL and routing key writes go to Credential Manager, not to
+           settings.json, and they happen inside the mutators above. Their failures are reported here, after
+           `written` is known, so the one dialog can say what happened to the rest of the page. */
+        var credentialText = SettingsSaveReport.CredentialFailureText(written, _credentialFailures, _webhookValueHeld);
+
+        switch (SettingsSaveReport.Classify(written, mcpChanged, alertsValid, mcpValid, webhooksValid, memoryLimitValid,
+                    credentialsSaved: _credentialFailures.Count == 0))
         {
             case SettingsSaveOutcome.NothingWritten:
                 MessageBox.Show(
-                    "Your settings could not be written to settings.json, so nothing was saved and the "
-                    + "changes on this page will be gone when the window closes. The application log says "
-                    + "why.",
+                    credentialText ?? SettingsSaveReport.NothingWrittenText,
                     "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
 
             case SettingsSaveOutcome.WrittenWithObjections:
-                /* The objecting writer has already raised its own dialog naming what it rejected, and the
+                /* A writer that objected has already raised its own dialog naming what it rejected, and the
                    rest of the document DID reach disk. Adding a second dialog here would either repeat it
-                   or contradict it. */
+                   or contradict it. The one thing no writer could say yet is that a value did not reach
+                   Credential Manager, so that is shown here. */
+                if (credentialText != null)
+                {
+                    MessageBox.Show(credentialText, "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
                 return;
 
             case SettingsSaveOutcome.SavedAndMcpNeedsRestart:
@@ -370,6 +382,12 @@ public partial class SettingsWindow : Window
                 return;
         }
     }
+
+    /* #5772: values the Save click could not store in Windows Credential Manager, one sentence each, and
+       whether one of them is a webhook value Lite keeps in memory for this run. Filled by the SMTP and
+       webhook mutators, reported by SaveButton_Click after the settings.json write is known. */
+    private readonly System.Collections.Generic.List<string> _credentialFailures = new();
+    private bool _webhookValueHeld;
 
     /* #5457: the DuckDB memory limit last saved on this page when it differs from the value the running
        process started with. memory_limit belongs to a DuckDB instance, so a change takes effect at the next
@@ -1198,7 +1216,10 @@ public partial class SettingsWindow : Window
         /* Save password securely */
         if (!string.IsNullOrEmpty(SmtpPasswordBox.Password))
         {
-            App.SaveSmtpPassword(SmtpPasswordBox.Password);
+            if (App.SaveSmtpPassword(SmtpPasswordBox.Password) is { } smtpFailure)
+            {
+                _credentialFailures.Add(smtpFailure);
+            }
         }
 
         root["smtp_enabled"] = App.SmtpEnabled;
@@ -1428,7 +1449,6 @@ public partial class SettingsWindow : Window
         /* Save webhook URLs to Credential Manager instead of settings.json. The generic channel's headers
            JSON goes there too — it carries the Authorization bearer token (#1506). The PagerDuty routing
            key is a bearer secret like the webhook URLs. */
-        var secretFailures = new System.Collections.Generic.List<string>();
         foreach (var failure in new[]
         {
             App.SaveWebhookUrl("TeamsWebhook", App.TeamsWebhookUrl),
@@ -1438,21 +1458,16 @@ public partial class SettingsWindow : Window
             App.SaveWebhookUrl("PagerDutyWebhook", App.PagerDutyRoutingKey)
         })
         {
-            if (failure != null) secretFailures.Add(failure);
+            if (failure != null)
+            {
+                _credentialFailures.Add(failure);
+                _webhookValueHeld = true;
+            }
         }
 
-        /* #5772: a refused Credential Manager write used to vanish. The value that did not save keeps its
-           old stored copy (or none), so the dialog says which one and that the rest of the page saved. The
-           window stays open and the toast is suppressed through the false return, like the generic-config
-           check below. */
-        if (secretFailures.Count > 0)
-        {
-            MessageBox.Show(
-                string.Join(Environment.NewLine + Environment.NewLine, secretFailures)
-                + Environment.NewLine + Environment.NewLine + "Your other settings were saved. Lite keeps using the value you typed until it restarts, "
-                + "then goes back to the value saved before, if there was one.",
-                "Webhook Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
+        /* #5772: a refused Credential Manager write used to vanish. The failures are collected here and
+           shown by SaveButton_Click once the settings.json write is known, so no dialog raised from this
+           method claims anything about the rest of the page. */
 
         root["teams_webhook_enabled"] = App.TeamsWebhookEnabled;
         root["teams_proxy_address"] = App.TeamsProxyAddress;
@@ -1492,7 +1507,7 @@ public partial class SettingsWindow : Window
             }
         }
 
-        return secretFailures.Count == 0;
+        return true;
     }
 
     private void TeamsWebhookEnabledCheckBox_Changed(object sender, RoutedEventArgs e)

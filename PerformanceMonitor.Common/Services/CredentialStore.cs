@@ -134,6 +134,16 @@ public class CredentialStore
             return CredentialSaveResult.Failed(tooLong);
         }
 
+        return WriteCredentialRaw(serverId, username, password);
+    }
+
+    /// <summary>
+    /// The CredWriteW call itself, with no length guard, so a test can ask Windows whether it accepts a
+    /// secret longer than <see cref="MaxSecretLength"/> instead of asking the guard (#5772). Production
+    /// callers go through <see cref="TrySaveCredential"/>.
+    /// </summary>
+    internal CredentialSaveResult WriteCredentialRaw(string serverId, string username, string password)
+    {
         IntPtr blob = IntPtr.Zero;
         try
         {
@@ -255,6 +265,44 @@ public class CredentialStore
     }
 
     /// <summary>
+    /// Deletes a credential through CredDeleteW and reports why it failed, so a caller can tell the user
+    /// when an entry could not be removed (#5772). An entry that is not there counts as success, because
+    /// there was nothing to delete (ERROR_NOT_FOUND); any other Windows error is a failure. Unlike
+    /// <see cref="DeleteCredential"/>, which keeps returning a bare bool, this never hides the reason.
+    /// </summary>
+    /// <param name="serverId">Unique key; the Credential Manager target is the prefix plus this.</param>
+    public CredentialSaveResult TryDeleteCredential(string serverId)
+    {
+        if (string.IsNullOrWhiteSpace(serverId))
+        {
+            throw new ArgumentException("Server ID cannot be null or empty", nameof(serverId));
+        }
+
+        try
+        {
+            if (NativeMethods.CredDelete(GetCredentialTarget(serverId), CredTypeGeneric, 0))
+            {
+                return CredentialSaveResult.Ok;
+            }
+
+            var error = Marshal.GetLastWin32Error();
+            if (error == ErrorNotFound)
+            {
+                return CredentialSaveResult.Ok;
+            }
+
+            var reason = $"Windows returned error {error} ({new Win32Exception(error).Message.TrimEnd('.', ' ', '\r', '\n')})";
+            _logger?.LogWarning("Failed to delete credential for server {ServerId}: {Error}", serverId, reason);
+            return CredentialSaveResult.Failed(reason);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to delete credential for server {ServerId}: {Error}", serverId, ex.Message);
+            return CredentialSaveResult.Failed(ex.Message);
+        }
+    }
+
+    /// <summary>
     /// Checks if credentials exist for a server.
     /// </summary>
     /// <param name="serverId">Unique server identifier</param>
@@ -336,14 +384,18 @@ public class CredentialStore
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool CredRead(string target, int type, int reservedFlag, out IntPtr credential);
 
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, EntryPoint = "CredDeleteW", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CredDelete(string target, int type, int flags);
+
         [DllImport("advapi32.dll", SetLastError = true)]
         internal static extern void CredFree(IntPtr buffer);
     }
 }
 
 /// <summary>
-/// The outcome of <see cref="CredentialStore.TrySaveCredential"/>. <see cref="Failure"/> is a short reason
-/// fit to put after "could not be saved because"; it never contains the secret.
+/// The outcome of <see cref="CredentialStore.TrySaveCredential"/> or <see cref="CredentialStore.TryDeleteCredential"/>. <see cref="Failure"/> is a short reason
+/// fit to put after "was not saved because" or "was not removed because"; it never contains the secret.
 /// </summary>
 public sealed class CredentialSaveResult
 {
@@ -353,7 +405,7 @@ public sealed class CredentialSaveResult
         Failure = failure;
     }
 
-    /// <summary>True when the credential reached Windows Credential Manager.</summary>
+    /// <summary>True when the credential reached Windows Credential Manager (or, for a delete, is gone).</summary>
     public bool Succeeded { get; }
 
     /// <summary>Why the save failed; null when it succeeded.</summary>

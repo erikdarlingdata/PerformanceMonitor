@@ -429,9 +429,9 @@ public partial class App : Application
     /// <summary>
     /// Saves a webhook URL (or header JSON, or routing key) to Windows Credential Manager, up to the
     /// <see cref="CredentialStore.MaxSecretLength"/> characters Windows allows. A blank value deletes the
-    /// entry. Returns null when the value was saved or deleted, otherwise a sentence saying which webhook was
-    /// not saved and why, fit to show the user (#5772). The log line and the sentence carry the key name and
-    /// the length, never the value.
+    /// entry; an entry that is already gone counts as deleted. Returns null when the value was saved or
+    /// deleted, otherwise a sentence saying which webhook was not saved or not removed and why, fit to show
+    /// the user (#5772). The log line and the sentence carry the key name and the length, never the value.
     /// </summary>
     public static string? SaveWebhookUrl(string credentialKey, string url)
     {
@@ -441,8 +441,17 @@ public partial class App : Application
             var credService = NewCredentialService();
             if (string.IsNullOrWhiteSpace(url))
             {
-                credService.DeleteCredential(credentialKey);
-                return null;
+                /* The blank box is the one way to stop a channel for good: the store is read first at every
+                   start, so an entry that could not be removed would come back. Say so instead of
+                   reporting a save. */
+                var removed = credService.TryDeleteCredential(credentialKey);
+                if (removed.Succeeded)
+                {
+                    return null;
+                }
+
+                AppLogger.Error("App", $"Failed to remove {credentialKey}: {removed.Failure}");
+                return $"The {name} was not removed because {removed.Failure}.";
             }
 
             var result = credService.TrySaveCredential(credentialKey, "webhook", url);
@@ -491,18 +500,42 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Saves the SMTP password to Windows Credential Manager.
+    /// Saves the SMTP password to Windows Credential Manager; a blank password removes the entry. Returns
+    /// null when it was saved or removed, otherwise a sentence saying why it was not, fit to show the user
+    /// (#5772). The log line and the sentence never carry the password.
     /// </summary>
-    public static void SaveSmtpPassword(string password)
+    public static string? SaveSmtpPassword(string password)
     {
+        const string name = "SMTP password";
         try
         {
             var credService = NewCredentialService();
-            credService.SaveCredential(SmtpCredentialKey, string.IsNullOrEmpty(SmtpUsername) ? "smtp" : SmtpUsername, password);
+            if (string.IsNullOrEmpty(password))
+            {
+                var removed = credService.TryDeleteCredential(SmtpCredentialKey);
+                if (removed.Succeeded)
+                {
+                    return null;
+                }
+
+                AppLogger.Error("App", $"Failed to remove the SMTP password: {removed.Failure}");
+                return $"The {name} was not removed because {removed.Failure}.";
+            }
+
+            var result = credService.TrySaveCredential(
+                SmtpCredentialKey, string.IsNullOrEmpty(SmtpUsername) ? "smtp" : SmtpUsername, password);
+            if (result.Succeeded)
+            {
+                return null;
+            }
+
+            AppLogger.Error("App", $"Failed to save the SMTP password ({password.Length} characters): {result.Failure}");
+            return $"The {name} was not saved because {result.Failure}.";
         }
         catch (Exception ex)
         {
             AppLogger.Error("App", $"Failed to save SMTP password: {ex.Message}");
+            return $"The {name} was not saved because {ex.Message.TrimEnd('.', ' ')}.";
         }
     }
 

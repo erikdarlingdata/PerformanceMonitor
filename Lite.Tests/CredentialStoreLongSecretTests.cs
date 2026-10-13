@@ -156,6 +156,93 @@ public class CredentialStoreLongSecretTests
         Assert.Contains("PagerDuty routing key", App.SaveWebhookUrl("PagerDutyWebhook", url));
     }
 
+    /// <summary>
+    /// The ceiling pinned against Windows, not against the constant: one character over the limit is written
+    /// through CredWriteW with the length guard bypassed, and Windows itself refuses it. If this test starts
+    /// failing, Windows accepts more than <see cref="CredentialStore.MaxSecretBytes"/> bytes here and the
+    /// constant is too low; if the 1,280-character round trip above fails, the constant is too high.
+    /// </summary>
+    [Fact]
+    public void Windows_RefusesABlobOneCharacterOverTheCeiling_WhenTheGuardIsBypassed()
+    {
+        var store = NewStore();
+        var key = NewKey();
+        try
+        {
+            var over = store.WriteCredentialRaw(key, "webhook", Url(CredentialStore.MaxSecretLength + 1));
+
+            Assert.False(over.Succeeded, "CredWriteW accepted a 2,562-byte blob.");
+            Assert.StartsWith("Windows returned error ", over.Failure); /* observed on Windows 11: 1783, RPC_X_BAD_STUB_DATA */
+            Assert.False(store.CredentialExists(key));
+
+            /* The same raw seam accepts the ceiling itself, so the refusal above is about the length. */
+            var atLimit = store.WriteCredentialRaw(key, "webhook", Url(CredentialStore.MaxSecretLength));
+            Assert.True(atLimit.Succeeded, atLimit.Failure);
+        }
+        finally
+        {
+            store.DeleteCredential(key);
+        }
+    }
+
+    [Fact]
+    public void TryDeleteCredential_AMissingEntry_CountsAsDeleted()
+    {
+        var store = NewStore();
+        var key = NewKey();
+
+        var result = store.TryDeleteCredential(key);
+
+        Assert.True(result.Succeeded, result.Failure);
+        Assert.Null(result.Failure);
+    }
+
+    [Fact]
+    public void TryDeleteCredential_AnExistingEntry_RemovesIt()
+    {
+        var store = NewStore();
+        var key = NewKey();
+        try
+        {
+            Assert.True(store.TrySaveCredential(key, "webhook", Url(1000)).Succeeded);
+            Assert.True(store.CredentialExists(key));
+
+            var result = store.TryDeleteCredential(key);
+
+            Assert.True(result.Succeeded, result.Failure);
+            Assert.False(store.CredentialExists(key));
+            Assert.Null(store.GetCredential(key));
+
+            /* A second delete finds nothing and is still a success. */
+            Assert.True(store.TryDeleteCredential(key).Succeeded);
+        }
+        finally
+        {
+            store.DeleteCredential(key);
+        }
+    }
+
+    [Fact]
+    public void TryDeleteCredential_WindowsRefusal_ReportsTheWindowsError()
+    {
+        /* A target name over Windows' 32,767-character ceiling is refused by CredDeleteW itself; that is a
+           real error, not "nothing to delete". */
+        var result = NewStore().TryDeleteCredential(new string('k', 33000));
+
+        Assert.False(result.Succeeded);
+        Assert.StartsWith("Windows returned error ", result.Failure);
+    }
+
+    [Fact]
+    public void AppSaveWebhookUrl_BlankOnAMissingEntry_IsNotAFailure()
+    {
+        var key = NewKey();
+
+        Assert.Null(App.SaveWebhookUrl(key, ""));
+        Assert.Null(App.SaveWebhookUrl(key, "   "));
+        Assert.False(NewStore().CredentialExists(key));
+    }
+
     [Fact]
     public void WindowsRefusal_ReportsTheWindowsError_NotAGenericFalse()
     {

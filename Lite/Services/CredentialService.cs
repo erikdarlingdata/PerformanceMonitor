@@ -50,6 +50,13 @@ public class CredentialService
         => _store.TrySaveCredential(serverId, username, password);
 
     /// <summary>
+    /// Deletes a credential and returns why it failed when it does (#5772). An entry that is not there counts
+    /// as deleted. <see cref="DeleteCredential"/> keeps returning a bare bool for its existing callers.
+    /// </summary>
+    public CredentialSaveResult TryDeleteCredential(string serverId)
+        => _store.TryDeleteCredential(serverId);
+
+    /// <summary>
     /// Retrieves SQL Server credentials from Windows Credential Manager.
     /// </summary>
     public (string Username, string Password)? GetCredential(string serverId)
