@@ -5,20 +5,20 @@
 .DESCRIPTION
     1. Builds the Darling service (Release) unless -NoBuild.
     2. Writes darling.json from darling.ui-smoke.json (ports filled in) into -WorkDir and starts the service on it, with
-       its output in -WorkDir. The store is a PostgreSQL the caller has started (CI does) or, with -StartPg, a throwaway
-       cluster this script makes in -WorkDir from -PgBin and stops again.
+       its output in -WorkDir. The store is a throwaway PostgreSQL the caller has started and made a database
+       "darling" in (CI does; tools/ui-smoke/README.md says how to do it by hand).
     3. Waits for /api/ping and for the config seed, applies seed.sql with psql, then runs smoke.mjs.
-    4. Stops what it started (the service by its own process id, the cluster with pg_ctl) and leaves logs and failure
-       screenshots in -WorkDir.
+    4. Stops the service it started (by its own process id) and leaves logs, failure screenshots and traces in -WorkDir.
+       The caller stops the cluster.
 
-    Locally:  tools/ui-smoke/run-ui-smoke.ps1 -PgBin <...>\pgsql\bin -StartPg -Channel msedge
+    Locally:  start a throwaway cluster by hand (README.md), then
+              tools/ui-smoke/run-ui-smoke.ps1 -PgBin <...>\pgsql\bin -PgPort <port> -Channel msedge
     In CI:    the workflow starts the cluster on 5541 first, then runs this with -PgBin only.
 
-.PARAMETER PgBin       Folder holding psql.exe (and, with -StartPg, initdb.exe and pg_ctl.exe) - the pgsql\bin of pg-runtime.
+.PARAMETER PgBin       Folder holding psql.exe - the pgsql\bin of pg-runtime.
 .PARAMETER PgPort      Port of the store (CI: 5541).
 .PARAMETER WebPort     Port of the web host.
 .PARAMETER WorkDir     Scratch folder for the config, logs, cluster and screenshots. Made if missing.
-.PARAMETER StartPg     Make and start a throwaway cluster in WorkDir\pgdata, and stop it at the end.
 .PARAMETER NoBuild     Skip dotnet build (the caller already built the Release service).
 .PARAMETER Channel     Browser channel for playwright-core: chrome (the runner's) or msedge.
 #>
@@ -28,7 +28,6 @@ param(
     [int] $PgPort = 5541,
     [int] $WebPort = 5153,
     [string] $WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) 'darling-ui-smoke'),
-    [switch] $StartPg,
     [switch] $NoBuild,
     [string] $Channel = 'chrome'
 )
@@ -40,7 +39,6 @@ $csproj = Join-Path $repo 'Darling\PerformanceMonitor.Darling.Service\Performanc
 $psql = Join-Path $PgBin 'psql.exe'
 New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
 $serviceProc = $null
-$startedPg = $false
 
 function Invoke-Psql([string[]] $PsqlArgs) {
     & $psql -h 127.0.0.1 -p $PgPort -U darling -d darling -v ON_ERROR_STOP=1 -X -q -t -A @PsqlArgs
@@ -48,23 +46,6 @@ function Invoke-Psql([string[]] $PsqlArgs) {
 }
 
 try {
-    if ($StartPg) {
-        $data = Join-Path $WorkDir 'pgdata'
-        if (Test-Path $data) { Remove-Item -Recurse -Force $data }
-        & (Join-Path $PgBin 'initdb.exe') -D $data -U darling -A trust --encoding=UTF8 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "initdb failed ($LASTEXITCODE)" }
-        # The same numbers build.yml's darling-pg job writes (CiClusterWorkerSizingTests pins them there).
-        foreach ($line in @("shared_preload_libraries = 'timescaledb,pg_stat_statements'", "port = $PgPort", "listen_addresses = '127.0.0.1'",
-                "timescaledb.max_background_workers = 74", "max_worker_processes = 85", "timezone = 'UTC'", "log_timezone = 'UTC'")) {
-            Add-Content -Path (Join-Path $data 'postgresql.conf') -Value $line
-        }
-        & (Join-Path $PgBin 'pg_ctl.exe') -D $data -l (Join-Path $WorkDir 'pg.log') -w start | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "pg_ctl start failed ($LASTEXITCODE)" }
-        $startedPg = $true
-        & (Join-Path $PgBin 'createdb.exe') -h 127.0.0.1 -p $PgPort -U darling darling
-        if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
-    }
-
     if (-not $NoBuild) {
         & dotnet build $csproj -c Release --nologo -v q
         if ($LASTEXITCODE -ne 0) { throw "dotnet build failed ($LASTEXITCODE)" }
@@ -123,8 +104,5 @@ finally {
     if ($serviceProc -and -not $serviceProc.HasExited) {
         # Only the process this script started, with its children.
         & taskkill /PID $serviceProc.Id /T /F | Out-Null
-    }
-    if ($startedPg) {
-        & (Join-Path $PgBin 'pg_ctl.exe') -D (Join-Path $WorkDir 'pgdata') -m fast stop | Out-Null
     }
 }
