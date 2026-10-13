@@ -126,7 +126,9 @@ public sealed class AlertNotebookRenderClientTests
         Assert.Contains("a.detail_text", views, StringComparison.Ordinal);
 
         // The detail_text line must go through el()'s { text: ... } prop (textContent), never innerHTML.
-        Assert.Contains("el(\"pre\", { class: \"code\", text: a.detail_text })", views, StringComparison.Ordinal);
+        // W20 (#5644) shows the stored text with its UTC lines converted to the viewer's zone (localizeAlertDetail returns
+        // a string), so the text prop now holds that call; it is still el()'s text path, not markup.
+        Assert.Contains("el(\"pre\", { class: \"code\", text: localizeAlertDetail(a.detail_text, a.newest_sample) })", views, StringComparison.Ordinal);
 
         // Scope the innerHTML ban to renderAlertHeaderCell's own body — the file's header comment (R4)
         // says "never innerHTML" in prose, which the whole-file assertion this replaces was tripping on.
