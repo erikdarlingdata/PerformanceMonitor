@@ -373,14 +373,19 @@ public sealed class DarlingConfig
 
     private HeartbeatConfig _heartbeat = new();
 
-    public static string ResolveConfigPath(string? explicitPath = null)
+    public static string ResolveConfigPath(string? explicitPath = null) =>
+        ResolveConfigPath(explicitPath, Environment.GetEnvironmentVariable);
+
+    /// <summary><see cref="ResolveConfigPath(string?)"/> reading the environment through <paramref name="environment"/>, so a
+    /// test can supply <c>DARLING_CONFIG</c> without setting it for the whole process.</summary>
+    internal static string ResolveConfigPath(string? explicitPath, Func<string, string?> environment)
     {
         if (!string.IsNullOrWhiteSpace(explicitPath))
         {
             return explicitPath;
         }
 
-        var fromEnvironment = Environment.GetEnvironmentVariable("DARLING_CONFIG");
+        var fromEnvironment = environment("DARLING_CONFIG");
         if (!string.IsNullOrWhiteSpace(fromEnvironment))
         {
             return fromEnvironment;
@@ -410,9 +415,19 @@ public sealed class DarlingConfig
                 $"Configuration file not found: {path}. Copy darling.sample.json to darling.json and edit it.", path);
         }
 
-        var loaded = Parse(File.ReadAllText(path));
-        DarlingOwnedSecrets.Set(DarlingOwnedSecrets.Compute(loaded, path));
-        return loaded;
+        try
+        {
+            var loaded = Parse(File.ReadAllText(path));
+            DarlingOwnedSecrets.Set(DarlingOwnedSecrets.Compute(loaded, path));
+            return loaded;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            /* The file is restricted on purpose (it holds every stored secret), so a refusal is the expected
+               first experience of a new operator: say which group to join instead of a bare access error. */
+            throw new UnauthorizedAccessException($"{DarlingOperatorGroup.AccessDeniedAdvice(path)} ({ex.Message})", ex);
+        }
+
     }
 
     public static DarlingConfig Parse(string json)
@@ -781,6 +796,23 @@ public sealed class AlertsConfig
     /// store's control-plane row keep round-tripping.</summary>
     [JsonPropertyName("poisonWaitThresholdMs")]
     public int PoisonWaitThresholdMs { get; set; } = 500;
+
+    /// <summary>The Runnable Queue alert (#5641) switch: runnable tasks per visible online scheduler, averaged over
+    /// <see cref="RunnableQueueEvaluator.WindowMinutes"/> minutes. ON by default, like Poison Wait. Persisted as the
+    /// store column <c>runnable_queue_enabled</c> (V177).</summary>
+    [JsonPropertyName("runnableQueueEnabled")]
+    public bool RunnableQueueEnabled { get; set; } = true;
+
+    /// <summary>Runnable Queue Warning bar (#5641), runnable tasks per scheduler, window average. Shipped 8 (the
+    /// measurement is on <see cref="RunnableQueueEvaluator"/>). Read through <see cref="RunnableQueueEvaluator.ClampBars"/>.
+    /// Store column <c>runnable_queue_warning_per_scheduler</c> (V177).</summary>
+    [JsonPropertyName("runnableQueueWarningPerScheduler")]
+    public int RunnableQueueWarningPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultWarningPerScheduler;
+
+    /// <summary>Runnable Queue Critical bar (#5641). Shipped 16. Never read below the Warning bar. Store column
+    /// <c>runnable_queue_critical_per_scheduler</c> (V177).</summary>
+    [JsonPropertyName("runnableQueueCriticalPerScheduler")]
+    public int RunnableQueueCriticalPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultCriticalPerScheduler;
 
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;
@@ -1305,6 +1337,35 @@ public sealed class McpConfig
     public int Port { get; set; } = 5152;
 
     /// <summary>
+    /// Default OFF. Offers the MCP tools that change monitoring configuration (alert settings and routes, mute
+    /// rules, custom alert rules, Custom Views, the analysis mute). File-only and restart-only, like
+    /// <see cref="Network"/>: no store equivalent. Writes are only offered when a bearer token also resolves
+    /// (<see cref="McpNetworkConfig.EncryptedToken"/> or <see cref="McpNetworkConfig.Token"/>), and every
+    /// request must then present it, loopback included. See <c>DarlingMcpWritePolicy</c>.
+    /// </summary>
+    [JsonPropertyName("allowWrites")]
+    public bool AllowWrites { get; set; }
+
+    /// <summary>
+    /// Default OFF. Additionally offers <c>add_servers</c> and <c>remove_server</c>, which change the servers
+    /// this service connects to as its own account. Has no effect unless <see cref="AllowWrites"/> is on.
+    /// </summary>
+    [JsonPropertyName("allowServerAdmin")]
+    public bool AllowServerAdmin { get; set; }
+
+    /// <summary>
+    /// Default OFF. <c>add_servers</c> defaults to Windows authentication, where this service presents its own
+    /// computer account to the host the caller names. Off, it refuses a Windows-authentication entry that also
+    /// sets <c>trust_server_certificate</c> or an <c>encrypt_mode</c> other than Mandatory or Strict, because the
+    /// service could not confirm which server it reached. On, it accepts them. SQL authentication and the Entra
+    /// modes are not affected. Applies to the MCP tool only: the <c>--add-server</c> command is the operator's own
+    /// and is not gated. File-only and restart-only, like <see cref="AllowWrites"/>. Has no effect unless
+    /// <see cref="AllowServerAdmin"/> is on, since <c>add_servers</c> is not served otherwise.
+    /// </summary>
+    [JsonPropertyName("allowWindowsAuthOverUnverifiedTls")]
+    public bool AllowWindowsAuthOverUnverifiedTls { get; set; }
+
+    /// <summary>
     /// Opt-in network exposure for the MCP server (darling-network-endpoints). Omit for the secure
     /// default = loopback-only, tokenless HTTP (today's behavior). Managed-mode only; ignored in BYO
     /// with a caller warning. Any missing precondition (token / valid allowFrom / managed, and a usable
@@ -1673,7 +1734,7 @@ public sealed class WebConfig
 /// Omit the whole <c>network</c> object for the secure default = loopback-only HTTP. When present with a
 /// non-loopback <see cref="Listen"/> AND managed mode AND a token AND a valid <see cref="AllowFrom"/>, the web
 /// host binds the network interface behind an in-app CIDR check and a token gate: a browser presents the token
-/// once via <c>?token=</c>, which is exchanged for an HMAC-signed session cookie. While exposed EVERY request
+/// once in the sign-in form, which is exchanged for an HMAC-signed session cookie. While exposed EVERY request
 /// authenticates, loopback included — loopback is exempt from the CIDR test only, never from the credential
 /// (#1649). Any missing precondition keeps the dashboard loopback-only + LogCritical (fail-closed, enforced in
 /// the web host).
@@ -1741,6 +1802,28 @@ public sealed class WebNetworkConfig
     public WebOidcConfig? Oidc { get; set; }
 
     /// <summary>
+    /// The reverse proxies in front of the dashboard whose <c>X-Forwarded-For</c> / <c>X-Forwarded-Proto</c> /
+    /// <c>X-Forwarded-Host</c> headers the host honors — each entry an IP or a CIDR. Omit (the default) and
+    /// the headers are ignored from every source. Needed behind a TLS-terminating proxy: the connection to
+    /// this host is plain HTTP there, so without it the session cookie is not marked Secure and the OIDC
+    /// redirect URI is built as <c>http://</c>. With it, <see cref="AllowFrom"/> is checked against the
+    /// forwarded client address rather than the proxy's, so it has to cover the clients. Parsed by
+    /// <c>DarlingHostBinding.TryParseTrustedProxies</c>; an entry that does not parse keeps the dashboard
+    /// loopback-only with a Critical line.
+    /// </summary>
+    [JsonPropertyName("trustedProxies")]
+    public string[]? TrustedProxies { get; set; }
+
+    /// <summary>
+    /// True to send <c>Strict-Transport-Security</c> (one year, no subdomains) on every response to an HTTPS
+    /// request. Off by default: a browser that has seen it uses HTTPS for every port of this host name for a
+    /// year and cannot be told otherwise, including for other services on that name that speak plain HTTP.
+    /// Turn it on once the dashboard is reached over HTTPS only.
+    /// </summary>
+    [JsonPropertyName("hsts")]
+    public bool Hsts { get; set; }
+
+    /// <summary>
     /// True when any field is set — used only for the BYO "network.* is ignored" caller warning (D-BYO);
     /// NOT the same as "exposed".
     /// </summary>
@@ -1751,7 +1834,8 @@ public sealed class WebNetworkConfig
         || !string.IsNullOrWhiteSpace(EncryptedToken)
         || !string.IsNullOrWhiteSpace(Token)
         || (Tls?.IsConfigured ?? false)
-        || (Oidc?.IsConfigured ?? false);
+        || (Oidc?.IsConfigured ?? false)
+        || (TrustedProxies?.Length ?? 0) > 0;
 
     /// <summary>
     /// The access token, preferring <see cref="EncryptedToken"/> (DPAPI-decrypted; Windows-only) over the

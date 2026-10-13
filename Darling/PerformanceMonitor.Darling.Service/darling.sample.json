@@ -217,7 +217,7 @@
   "procedureStatsDeferredPlanFetch": "on",
 
   // The alert engine (optional section). Every default mirrors Performance Monitor Lite's:
-  // cpu 80% (total mode), blocking 1, deadlock 1, poison wait 500 ms, long-running query
+  // cpu 80% (total mode), blocking 1, deadlock 1, poison wait 500 ms, runnable queue 8 / 16 per scheduler, long-running query
   // 30 min, tempdb 80%, low disk 10% / 5 GB, job multiplier 3x, failed-job lookback 60 min,
   // cooldown 5 min. Omit the whole section (or any key) for those defaults.
   "alerts": {
@@ -431,8 +431,8 @@
   //
   // OPT-IN NETWORK EXPOSURE for the dashboard (managed mode only) -- omit "network" for the secure default
   // (loopback-only HTTP, today's behavior). When present with a non-loopback "listen", the web host binds the
-  // LAN interface behind an in-app CIDR check and a token gate: a browser presents the token ONCE via
-  // ?token=, which is exchanged for an HMAC-signed session cookie (then the token is stripped from the URL).
+  // LAN interface behind an in-app CIDR check and a token gate: a browser pastes the token ONCE into the sign-in form,
+  // which is exchanged for an HMAC-signed session cookie.
   // LOOPBACK is exempt from the CIDR check ONLY -- while exposed it presents the token like anyone else
   // (#1649: the Custom Views composer is a write path, so a tokenless local process could mutate views).
   // A dashboard with NO token configured registers no auth middleware at all and stays tokenless. A "token" or
@@ -465,8 +465,7 @@
     // dashboard is loopback-only, and when this names a host other than "network.listen" -- this exact host
     // is admitted to the Host-header allowlist as one extra name for that reason (#4220), so a DNS name (or
     // a proxied/NATed address) works end to end instead of every request to it getting a 400. A value that
-    // includes a query string, a fragment, or user:pass@ -- e.g. this dashboard's own sign-in link,
-    // "http://host:port/?token=..." -- is sent as configured, not refused; the service logs a warning once
+    // includes a query string, a fragment, or user:pass@ -- is sent as configured, not refused; the service logs a warning once
     // at startup so that stays a deliberate choice.
     //
     // OIDC sign-in (see "oidc" below): register "{this value}/auth/oidc/callback" at the IdP too, beside

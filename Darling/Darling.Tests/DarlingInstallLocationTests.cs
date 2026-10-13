@@ -136,29 +136,56 @@ public class DarlingInstallLocationTests
     /// <summary>
     /// #2187 weighed fixing the tree's ACLs against refusing, and rejected the fix: it would mean the
     /// product starts silently ACLing directories inside somebody's profile. This pins that decision where
-    /// it can actually be broken — the installer's only <c>Set-Acl</c> targets are the credential files it
-    /// has always hardened, never the install tree.
+    /// it can actually be broken — the installer's only <c>Set-Acl</c> targets are the credential file it
+    /// has always hardened and the store folder it creates before the service does, never the install tree.
+    ///
+    /// <para>The store folder is the parent of <c>postgres.dataDirectory</c>
+    /// (<c>%ProgramData%\PerformanceMonitorDarling</c> unless <c>darling.json</c> says otherwise), not a
+    /// directory of the install tree. It holds the PostgreSQL data directory and every role credential. An
+    /// ordinary user can create a folder under <c>C:\ProgramData</c> and would then own it, so the installer
+    /// makes Administrators its owner and locks it before the service's first start. Its one <c>Set-Acl</c> is
+    /// pinned as tightly as the credential file's two: it sits in the function that locks the store folder,
+    /// and that function's only caller passes the folder <c>Get-DarlingStoreFolder</c> reads out of
+    /// <c>darling.json</c>. Where that setting points is an operator's choice, which no source pin can see.</para>
     /// </summary>
     [Fact]
-    public void TheInstaller_NeverAclsTheInstallTree_OnlyTheCredentialFiles()
+    public void TheInstaller_NeverAclsTheInstallTree_OnlyTheCredentialFilesAndTheStoreFolder()
     {
         var script = InstallScript;
 
         /* The script names every path with -LiteralPath since #4745, so this looks for that spelling: a loop over
-           "Set-Acl -Path " would find no call and check nothing. The window holds the whole 32-character
-           "Set-Acl -LiteralPath $secretFile", which the old 30-character one could not. */
-        var applications = 0;
-        for (var at = script.IndexOf("Set-Acl -LiteralPath ", StringComparison.Ordinal); at >= 0; at = script.IndexOf("Set-Acl -LiteralPath ", at + 1, StringComparison.Ordinal))
+           "Set-Acl -Path " would find no call and check nothing. Each call is read for the path it names, so a
+           call on anything else fails here instead of being counted. */
+        var targets = new List<string>();
+        foreach (Match call in Regex.Matches(script, @"Set-Acl -LiteralPath (\S+)"))
         {
-            applications++;
-            Assert.Contains("Set-Acl -LiteralPath $secretFile", script.Substring(at, Math.Min(40, script.Length - at)), StringComparison.Ordinal);
+            targets.Add(call.Groups[1].Value);
         }
 
-        Assert.True(applications == 2, $"expected exactly 2 Set-Acl calls (the hardened DACL and the owner), found {applications}");
+        targets.Sort(StringComparer.Ordinal);
+        var found = string.Join(", ", targets);
+        Assert.True(
+            found == "$secretFile, $secretFile",
+            $"expected Set-Acl on the credential file twice (the hardened DACL and the owner) and nowhere else, found: {found}");
 
-        /* And the install root is never granted anything, by either route. The icacls lines the script does
-           contain are remediation instructions PRINTED for the operator, which is a different thing from the
-           product reaching into a profile and changing permissions itself. */
+        /* The store folder's DACL is written through the handle the function opened on the folder itself (never by
+           name, so a link put at the name cannot redirect it), inside the function that locks the store folder.
+           That function has one caller, and the caller passes $storeFolder, which is assigned once, from
+           Get-DarlingStoreFolder. Neither the install root nor the script's own folder reaches it. */
+        var storeFolderFunction = ExtractFunction(script, "Initialize-DarlingStoreFolder");
+        Assert.Contains("$lock.WriteDacl(", storeFolderFunction, StringComparison.Ordinal);
+        Assert.DoesNotContain("Set-Acl", storeFolderFunction, StringComparison.Ordinal);
+
+        var callers = Regex.Matches(script, @"(?<!function )Initialize-DarlingStoreFolder (\S+)");
+        Assert.True(
+            callers.Count == 1 && callers[0].Groups[1].Value == "$storeFolder",
+            "Initialize-DarlingStoreFolder must have one caller, and it must pass $storeFolder");
+        Assert.Single(Regex.Matches(script, @"\$storeFolder\s*="));
+        Assert.Contains("$storeFolder = Get-DarlingStoreFolder $configPath", script, StringComparison.Ordinal);
+
+        /* And the install root is never the target of Set-Acl, and the script never runs a bare "icacls $root".
+           That is all these three say: Lock-DarlingInstallTree does run icacls.exe on the root, on purpose
+           (#4034), and the icacls lines the script prints for the operator quote the path, so neither matches. */
         Assert.DoesNotContain("Set-Acl -Path $root", script, StringComparison.Ordinal);
         Assert.DoesNotContain("Set-Acl -LiteralPath $root", script, StringComparison.Ordinal);
         Assert.DoesNotContain("icacls $root", script, StringComparison.Ordinal);
@@ -2103,6 +2130,78 @@ function Get-CimInstance {
         else
         {
             AssertAnswer(answers, a => a.StartsWith("open:", StringComparison.Ordinal) && a.Contains("SeTakeOwnershipPrivilege and SeBackupPrivilege (see whoami /priv)", StringComparison.Ordinal), "that starts with 'open:' and names SeTakeOwnershipPrivilege and SeBackupPrivilege");
+        }
+    }
+
+    /// <summary>
+    /// #5700: a TLS key file the exe's verb has already secured (a protected DACL of SYSTEM and Administrators in full plus Read for
+    /// the service account, owned by Administrators) is left exactly as it is by the tree lock that runs on its folder afterwards.
+    /// The key is made with icacls to the same shape, in a folder that inherits Users read the way an install folder does, and the
+    /// real lock function runs over the folder with that service account. The key's access descriptor is the same text before and
+    /// after, it is still protected from inheritance, no Users entry has appeared on it, and (with an elevated token, which sets the owner) the lock does not list it as open.
+    /// Both scripts' copies of the lock.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1")]
+    [InlineData("upgrade-darling.ps1")]
+    public void TheInstallTreeLock_LeavesAKeyFileTheVerbAlreadySecured_AsItWas(string scriptName)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        AppendServiceWrittenList(probe, script);
+        probe.AppendLine(ExtractFunction(script, "Lock-DarlingInstallTree"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path $env:TEMP ('pm5700-lock-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $sidType = [System.Security.Principal.SecurityIdentifier]
+            function Get-KeyDescriptor([string]$p) {
+                $acl = Get-Acl -LiteralPath $p
+                return $acl.GetSecurityDescriptorSddlForm('Access') + ' protected=' + $acl.AreAccessRulesProtected
+            }
+            try {
+                New-Item -ItemType Directory -Path $root -Force | Out-Null
+                $root = Get-DarlingCanonicalPath $root
+                $users = '*S-1-5-32-545'
+                & icacls.exe $root /grant "${users}:(OI)(CI)RX" /Q | Out-Null
+                $key = Join-Path $root 'web.pfx'
+                Set-Content -LiteralPath $key -Value 'not a real key'
+                & icacls.exe $key /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' '*S-1-5-19:(R)' /Q | Out-Null
+                # The owner change needs an elevated token (CI's runner is one); a filtered token leaves the owner as it was.
+                $ErrorActionPreference = 'Continue'
+                & icacls.exe $key /setowner '*S-1-5-32-544' /Q 2>&1 | Out-Null
+                $ErrorActionPreference = 'Stop'
+                $before = Get-KeyDescriptor $key
+                'setup.keyIsProtected=' + ($before -match 'protected=True')
+                'setup.keyHasNoUsersEntry=' + (-not ($before -match 'BU'))
+                'elevated=' + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+                $open = @(Lock-DarlingInstallTree $root 'NT AUTHORITY\LOCAL SERVICE')
+                $after = Get-KeyDescriptor $key
+                'keyDescriptorSame=' + ($before -eq $after)
+                'keyStillProtected=' + ($after -match 'protected=True')
+                'keyHasNoUsersEntry=' + (-not ($after -match 'BU'))
+                'keyListedOpen=' + @($open | Where-Object { $_ -like '*web.pfx*' }).Count
+                'before=' + $before
+                'after=' + $after
+            }
+            finally {
+                if (Test-Path -LiteralPath $root) {
+                    & icacls.exe $root /reset /T /C /Q 2>&1 | Out-Null
+                    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        AssertProbeSetupTook(answers);
+        AssertAnswer(answers, "keyDescriptorSame=True");
+        AssertAnswer(answers, "keyStillProtected=True");
+        AssertAnswer(answers, "keyHasNoUsersEntry=True");
+        if (answers.Contains("elevated=True"))
+        {
+            // With an Administrators owner (set only by an elevated token) the key matches no write or owner check of the lock.
+            AssertAnswer(answers, "keyListedOpen=0");
         }
     }
 
@@ -4638,19 +4737,7 @@ function Get-CimInstance {
         File.WriteAllText(path, script);
         try
         {
-            var startInfo = new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            /* A test host started from PowerShell 7 (CI's step shell) hands down a PSModulePath that points
-               Windows PowerShell 5.1 at PowerShell 7's modules, and 5.1 then cannot autoload the ones it ships:
-               Get-Acl and Set-Acl, in Microsoft.PowerShell.Security, fail with "the module could not be loaded"
-               (#4038's first CI run). Without the variable, 5.1 builds its own default, as an operator's console
-               does. */
-            startInfo.Environment.Remove("PSModulePath");
+            var startInfo = WindowsPowerShellStartInfo.ForScript(path);
             using var process = Process.Start(startInfo);
             Assert.NotNull(process);
 

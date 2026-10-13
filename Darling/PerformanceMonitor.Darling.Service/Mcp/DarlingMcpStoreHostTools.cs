@@ -69,7 +69,15 @@ public sealed class DarlingMcpStoreHostTools
         + "any_stale is true when one or more settings verdict is stale_after_hardware_change, so a caller can "
         + "act on the summary without walking the whole table. gathered_at (UTC) is when this snapshot was "
         + "taken; the store/settings facts are cached for up to 5 minutes and shared across callers, so a burst "
-        + "of calls costs one live read. This tool never writes a setting or a conf file.")]
+        + "of calls costs one live read. store.size_bytes is the hourly sweep's recorded figure, not a live read: "
+        + "size_as_of is when the sweep recorded it and size_age_seconds how old it is as of this response. Before "
+        + "the first sweep, or when the stored figure cannot be read, size_bytes, size_as_of and size_age_seconds "
+        + "are null and size_unavailable_reason says why. The uncompressed_chunk_* figures are read live on every "
+        + "call; if that read times out or the role is refused it (any error but TimescaleDB being absent) they are "
+        + "null, uncompressed_chunk_percent_of_ram is null with them, and uncompressed_unavailable_reason says why "
+        + "(the SQLSTATE for a refusal); a store without TimescaleDB reports 0 chunks. The rest of the profile still "
+        + "returns (a slow fact fails alone). --check-settings reads the size live. This "
+        + "tool never writes a setting or a conf file.")]
     public static async Task<string> GetStoreHost(
         NpgsqlDataSource postgres, PostgresConfig? postgresConfig, StoreHostProfileCache cache,
         CancellationToken cancellationToken = default)
@@ -103,14 +111,25 @@ public sealed class DarlingMcpStoreHostTools
                 async token =>
                 {
                     await using var connection = await postgres.OpenConnectionAsync(token);
-                    return await DarlingStoreHostProfile.GatherAsync(postgresConfig, connection, token);
+                    /* #5718: this tool (and the web card, which calls it on each first paint, hashchange and span
+                       change) takes the store size from the hourly sweep's stored figure and reports its age,
+                       rather than paying the live whole-store size walk on every call, which measured 5.8 s mean /
+                       30.7 s max on a slow store and failed at the 10 s bound. --check-settings keeps the live read. */
+                    return await DarlingStoreHostProfile.GatherAsync(
+                        postgresConfig, connection, token, useStoredStoreSize: true);
                 },
                 cts.Token);
 
             var anyStale = profile.Settings.Any(s => s.Verdict == HostSettingVerdict.StaleAfterHardwareChange);
-            var ramPercent = profile.Memory.EffectiveBytes > 0
-                ? Math.Round(100.0 * profile.Store.UncompressedChunkBytes / profile.Memory.EffectiveBytes, 1)
+            var ramPercent = profile.Memory.EffectiveBytes > 0 && profile.Store.UncompressedChunkBytes is { } uncompressedBytes
+                ? Math.Round(100.0 * uncompressedBytes / profile.Memory.EffectiveBytes, 1)
                 : (double?)null;
+
+            /* #5718: how old the stored size figure is, as of THIS response (the profile can be up to 5 minutes
+               old out of the cache, and the figure was already up to an hour old when it was gathered). */
+            var sizeAgeSeconds = profile.Store.StoreSizeAsOfUtc is { } sizeAsOf
+                ? Math.Max(0L, (long)Math.Round((DateTime.UtcNow - sizeAsOf).TotalSeconds))
+                : (long?)null;
 
             /* Round-1 review, Medium 1: resolved once, reused for every settings row below rather than
                re-resolved per row — same managed data directory GatherSettingProfilesAsync itself resolved
@@ -158,11 +177,18 @@ public sealed class DarlingMcpStoreHostTools
                     postgres_version = profile.Store.PostgresVersion,
                     timescale_version = profile.Store.TimescaleVersion,
                     size_bytes = profile.Store.StoreSizeBytes,
+                    /* #5718: the hourly sweep's metric_time (naive UTC) the size above was recorded at, and its age
+                       in seconds as of this response; both null, with size_unavailable_reason set, when there is
+                       no stored figure or the read failed. */
+                    size_as_of = profile.Store.StoreSizeAsOfUtc,
+                    size_age_seconds = sizeAgeSeconds,
+                    size_unavailable_reason = profile.Store.StoreSizeUnavailableReason,
                     buffer_hit_ratio_percent = profile.Store.BufferHitRatioPercent is { } hit ? Math.Round(hit, 1) : (double?)null,
                     temp_bytes = profile.Store.TempBytes,
                     uncompressed_chunk_bytes = profile.Store.UncompressedChunkBytes,
                     uncompressed_chunk_count = profile.Store.UncompressedChunkCount,
                     uncompressed_chunk_percent_of_ram = ramPercent,
+                    uncompressed_unavailable_reason = profile.Store.UncompressedUnavailableReason,
                 },
                 settings = profile.Settings.Select(s => new
                 {
@@ -182,7 +208,21 @@ public sealed class DarlingMcpStoreHostTools
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return McpHelpers.FormatError("get_store_host", ex);
+            return McpHelpers.FormatError("get_store_host", FailureFor(ex));
         }
     }
+
+    /// <summary>
+    /// The exception whose message the error envelope carries for a failure that escaped the gather (#5718).
+    /// The two slow size facts fail alone and never get here; what can still arrive is a timeout in one of the
+    /// cheap reads (version, buffer hit, <c>pg_settings</c>). Npgsql words that "Exception while reading from
+    /// stream", which reads as a dropped connection; this says it timed out and after how long. Anything else
+    /// keeps its own message. The envelope itself is still built by <c>McpHelpers.FormatError</c> at the catch.
+    /// </summary>
+    internal static Exception FailureFor(Exception ex) =>
+        DarlingStoreHostProfile.IsReadTimeout(ex)
+            ? new TimeoutException(
+                $"a store read {DarlingStoreHostProfile.DescribeReadTimeout(ServiceCommandDeadlines.CliStoreReadSeconds)} "
+                + "(the store was slow to answer); retry in a moment", ex)
+            : ex;
 }

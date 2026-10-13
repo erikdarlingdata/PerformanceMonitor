@@ -123,6 +123,69 @@ public static class DarlingCliCommands
     public static bool IsHardenFilesVerb(string arg) =>
         string.Equals(arg, "--harden-files", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The flag that makes <see cref="IsHardenFilesVerb"/>'s verb run only <see cref="HardenTlsKeyFilesOnly(string?, TextWriter, TextWriter)"/>
+    /// (#5700); the scripts pass it, and it is not in the help text.</summary>
+    public static bool IsTlsKeyFilesOnlyFlag(string arg) =>
+        string.Equals(arg, "--tls-key-files-only", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The arguments after <c>--harden-files</c>: <c>[--tls-key-files-only] [--config &lt;path to darling.json&gt;]</c>. The
+    /// config path may also be given as the one bare argument (the verb's long-standing form), but not both. Returns false
+    /// with a ready-to-print <paramref name="errorMessage"/> on anything else.
+    /// </summary>
+    public static bool TryParseHardenFilesArgs(string[] rest, out string? configPath, out bool tlsKeyFilesOnly, out string? errorMessage)
+    {
+        configPath = null;
+        tlsKeyFilesOnly = false;
+        errorMessage = null;
+        const string Usage = "Usage: --harden-files [--config <path to darling.json>]";
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (IsTlsKeyFilesOnlyFlag(arg))
+            {
+                tlsKeyFilesOnly = true;
+                continue;
+            }
+
+            if (string.Equals(arg, "--config", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-') || configPath is not null)
+                {
+                    errorMessage = (configPath is not null ? "--config was given twice, or with a path argument too." : "--config needs a path.") + Environment.NewLine + Usage;
+                    return false;
+                }
+
+                configPath = rest[++i];
+                continue;
+            }
+
+            if (arg.StartsWith('-') || configPath is not null)
+            {
+                errorMessage = $"Unknown or unexpected argument for --harden-files: {arg}" + Environment.NewLine + Usage;
+                return false;
+            }
+
+            configPath = arg;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The first lines <c>--harden-files</c> prints (#5700): the config file it checks, and, when no path was passed and
+    /// <c>DARLING_CONFIG</c> is set, that the path came from that variable. The service does not read the variable, so an
+    /// administrator whose session has it set can be checking a different file from the service's.
+    /// </summary>
+    internal static void WriteConfigSource(TextWriter output, string? passedPath, string resolvedConfig, Func<string, string?> environment)
+    {
+        output.WriteLine($"Config file: {resolvedConfig}");
+        if (string.IsNullOrWhiteSpace(passedPath) && !string.IsNullOrWhiteSpace(environment("DARLING_CONFIG")))
+        {
+            output.WriteLine("  (taken from the DARLING_CONFIG environment variable, because no --config was passed. Pass --config <path> to check another file.)");
+        }
+    }
+
     /// <summary>The verb <see cref="EnableMcpAsync"/> handles — enable the MCP endpoint in the store (+ firewall).</summary>
     public static bool IsEnableMcpVerb(string arg) =>
         string.Equals(arg, "--enable-mcp", StringComparison.OrdinalIgnoreCase);
@@ -370,7 +433,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --export-viewer-config [dir] [--config <path>]  Write a ready-to-copy viewer folder (darling.json + server.crt + README.txt)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json, the store credentials and the log-hash key (run elevated)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json, the store credentials, the log-hash key and the TLS key files darling.json names (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
@@ -650,10 +713,14 @@ public static class DarlingCliCommands
             /* A managed store has no connection string setting to blame: what failed is its stored credential (#4744),
                and a DPAPI failure gets the store credential's own explanation instead of the raw
                CryptographicException text. The IsWindows call repeats what readingCredential already implies, for the
-               platform analyzer, which cannot follow a bool. */
+               platform analyzer, which cannot follow a bool.
+
+               Anything else is the connection string failing to parse, and Npgsql's message for that can quote part of
+               the string (a password with an unquoted ';' makes the text after it the "keyword"), so the text printed
+               is DarlingStoreConnection.DescribeParseFailure's and never the exception's own message. */
             unusable = readingCredential && OperatingSystem.IsWindows()
                 ? "The stored store credential could not be read: " + StoreCredentialFailureDetail(ex)
-                : "postgres.connectionString could not be used: " + ex.Message;
+                : "postgres.connectionString could not be used: " + DarlingStoreConnection.DescribeParseFailure(ex);
             return false;
         }
     }
@@ -836,7 +903,7 @@ public static class DarlingCliCommands
                 var lines = new List<string> { DiagnosticsBundle.AliasMapWarning };
                 lines.AddRange(outcome.Aliaser.AliasMapLines());
                 /* The same writer as the bundle: a random temp name created with CreateNew, then moved, so a planted link is replaced and never written through. */
-                var mapProblem2 = DiagnosticsBundle.WriteAtomically(options.AliasMapPath, string.Join(Environment.NewLine, lines) + Environment.NewLine, options.Force);
+                var mapProblem2 = DiagnosticsBundle.WriteAtomically(options.AliasMapPath, string.Join(Environment.NewLine, lines) + Environment.NewLine, options.Force, restricted: true);
                 if (mapProblem2 is null)
                 {
                     output.WriteLine("Alias map written (DO NOT ATTACH it): " + options.AliasMapPath);
@@ -1194,7 +1261,7 @@ public static class DarlingCliCommands
             "web",
             "web dashboard access",
             "--print-web-token",
-            "A remote browser presents it once via ?token=... and gets a session cookie back.",
+            "A remote browser pastes it into the sign-in form once and gets a session cookie back.",
             IsElevated(),
             network is not null && network.IsConfigured,
             () => network!.ResolveToken(out _),
@@ -1230,12 +1297,13 @@ public static class DarlingCliCommands
             error.WriteLine("It reprints a live credential, so it is a deliberate act rather than something a script or a");
             error.WriteLine("shared shell picks up in passing.");
             error.WriteLine();
-            error.WriteLine("Be clear about what this gate is NOT, though: darling.json grants INTERACTIVE read on purpose");
-            error.WriteLine("(the Viewer and these CLI verbs are run by the interactive operator), and the token is DPAPI-");
-            error.WriteLine("protected at LocalMachine scope with an entropy constant published in this project's source.");
-            error.WriteLine("Anyone who can log on to this box interactively can already decrypt it without this verb. The");
-            error.WriteLine("token's protection is the FILE'S ACL - keep darling.json restricted, and run --harden-files if");
-            error.WriteLine("you are not sure it still is.");
+            error.WriteLine("Be clear about what this gate is NOT, though: darling.json grants read to the local group");
+            error.WriteLine($"'{DarlingOperatorGroup.Name}' on purpose (the Viewer and these CLI verbs run as");
+            error.WriteLine("its members), and the token is DPAPI-protected at LocalMachine scope with an entropy constant");
+            error.WriteLine("published in this project's source. Any member of that group can already decrypt it without");
+            error.WriteLine("this verb. The token's protection is the FILE'S ACL and the group's membership - keep");
+            error.WriteLine("darling.json restricted, keep the group to the people who run the Viewer or the CLI, and run");
+            error.WriteLine("--harden-files if you are not sure it still is.");
             return 1;
         }
 
@@ -1650,18 +1718,20 @@ public static class DarlingCliCommands
                     BuildViewerConnectionString(
                         handoff.Host, handoff.Port, handoff.Role, handoff.Password, ViewerClientCertificateFileName),
                     generatedUtc),
+                restrictToOperators: true,
                 cancellationToken);
 
-            /* Only this file gets an ACL: it is the only one carrying a secret. The certificate is public by
-               construction and the README has nothing in it — but all three go through the same
-               replace-safely path above, because the ownership and symlink problems are about the PATH, not
-               about what the file contains. */
-            secretProtected = TryHardenExportedSecret(configFile, error);
+            /* Only this file gets an ACL: it is the only one carrying a secret, and it is created with that ACL
+               already in place. The certificate is public by construction and the README has nothing in it — but
+               all three go through the same replace-safely path above, because the ownership and symlink
+               problems are about the PATH, not about what the file contains. */
+            secretProtected = ConfirmExportedSecretIsProtected(configFile, error);
 
-            await WriteExportFileAsync(certificateFile, certificate + Environment.NewLine, cancellationToken);
+            await WriteExportFileAsync(certificateFile, certificate + Environment.NewLine, restrictToOperators: false, cancellationToken);
             await WriteExportFileAsync(
                 readmeFile,
                 BuildViewerConfigReadme(handoff.Host, handoff.Port, handoff.Role, generatedUtc),
+                restrictToOperators: false,
                 cancellationToken);
         }
         catch (Exception ex)
@@ -2079,13 +2149,19 @@ public static class DarlingCliCommands
     /// keeps <c>WRITE_DAC</c> — so writing over a file someone else created would leave them able to undo the
     /// ACL applied afterwards. <c>CreateNew</c> also closes the gap between
     /// <see cref="TryCheckExportTarget"/> and this write: anything that reappears at the path in between
-    /// makes the create FAIL rather than be written through.
+    /// makes the create FAIL rather than be written through. With <paramref name="restrictToOperators"/> (the file
+    /// that carries the live password) the file is created with <see cref="DarlingFileSecurity.CreateHardenedFile"/>'s
+    /// ACL already applied, so no inherited entry from the target folder ever covers it.
     /// </summary>
-    private static async Task WriteExportFileAsync(string path, string content, CancellationToken cancellationToken)
+    [SupportedOSPlatform("windows")]
+    private static async Task WriteExportFileAsync(
+        string path, string content, bool restrictToOperators, CancellationToken cancellationToken)
     {
         File.Delete(path);
 
-        var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        var stream = restrictToOperators
+            ? DarlingFileSecurity.CreateHardenedFile(path, allowInteractiveRead: true)
+            : new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
         await using (stream.ConfigureAwait(false))
         {
             var writer = new StreamWriter(stream);
@@ -2097,30 +2173,17 @@ public static class DarlingCliCommands
     }
 
     /// <summary>
-    /// ACLs the exported darling.json down to SYSTEM + Administrators + this account + INTERACTIVE (the
-    /// admin/viewer-credential posture — the Viewer reads it interactively), so it does not sit in a folder
-    /// that inherited BUILTIN\Users read, then CONFIRMS the result. Returns whether the file is protected —
+    /// Confirms the exported viewer config, which was created restricted to SYSTEM + Administrators + the service
+    /// account + the operator group (the admin/viewer-credential posture — the Viewer reads it as an operator), is
+    /// not readable by ordinary users. Returns whether the file is protected —
     /// "we tried" is not the same claim as "the secret is not readable", which is why the credential-writing
     /// harden sites pair the call with <see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/> and why
     /// the caller's exit code depends on this answer. Never throws: the export's value is the file, so a
     /// failure is reported with the icacls that fixes it rather than throwing the folder away.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static bool TryHardenExportedSecret(string path, TextWriter error)
+    private static bool ConfirmExportedSecretIsProtected(string path, TextWriter error)
     {
-        try
-        {
-            DarlingFileSecurity.HardenFile(path, allowInteractiveRead: true);
-        }
-        catch (Exception ex)
-        {
-            error.WriteLine(
-                $"WARNING: could not restrict the ACL on {path} ({ex.Message}){DarlingFileSecurity.DescribeOwnerAndExposure(path)}. " +
-                "It holds a LIVE password in cleartext. Delete it, or restrict it by hand before leaving this machine: " +
-                $"icacls \"{path}\" /inheritance:r /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}\":F");
-            return false;
-        }
-
         try
         {
             if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
@@ -2516,7 +2579,7 @@ public static class DarlingCliCommands
         {
             error.WriteLine();
             error.WriteLine("SAVE THIS NOW — your new web dashboard access token is shown ONCE (darling.json stores only its DPAPI blob).");
-            error.WriteLine("A remote browser presents it once via ?token=... and gets a session cookie back.");
+            error.WriteLine("A remote browser pastes it into the sign-in form once and gets a session cookie back.");
             output.WriteLine(web.Value.GeneratedPlain);
         }
 
@@ -3101,7 +3164,7 @@ public static class DarlingCliCommands
             output.WriteLine("   --configure-firewall ELEVATED instead and it resolves the effective port and moves the rule.)");
 
             /* The one login step a human does differently for Web: a remote browser presents the access token
-               once via ?token= and is 302'd back with a session cookie. BuildWebLoginHint decides the scheme
+               into the sign-in form and is 302'd back with a session cookie. BuildWebLoginHint decides the scheme
                and the host, so a test can pin them. */
             foreach (var line in BuildWebLoginHint(webListen, webPort, webTls))
             {
@@ -3166,8 +3229,8 @@ public static class DarlingCliCommands
         return
         [
             "  Remote browser login (after the service restarts):",
-            $"    {scheme}://{WebLoginHost(listen)}:{port}/?token=<your-access-token>",
-            "  (the token is exchanged for a session cookie and stripped from the URL; loopback presents the token too)",
+            $"    {scheme}://{WebLoginHost(listen)}:{port}/",
+            "  (open the address and paste the access token into the sign-in form; loopback presents the token too)",
         ];
     }
 
@@ -3222,10 +3285,14 @@ public static class DarlingCliCommands
                 backupPath = DarlingConfigBackup.BackupPath(resolvedPath, stamp, suffix);
             }
 
-            File.Copy(resolvedPath, backupPath, overwrite: false);
             if (OperatingSystem.IsWindows())
             {
-                HardenConfigBackup(backupPath, error);
+                CopyToHardenedBackup(resolvedPath, backupPath);
+                VerifyConfigBackup(backupPath, error);
+            }
+            else
+            {
+                File.Copy(resolvedPath, backupPath, overwrite: false);
             }
 
             /* WriteAllText TRUNCATES an existing file rather than recreating it, so darling.json keeps
@@ -3261,28 +3328,23 @@ public static class DarlingCliCommands
     /// writing <c>darling.json</c> does — INTERACTIVE only ever had Read here, never Write. So the grant
     /// bought nothing and cost a second copy of every secret, readable by any interactively-logged-on user.</para>
     ///
-    /// <para>Never fatal — the edit that produced the backup has already been decided on and refusing to
-    /// finish it over a permissions problem would leave the operator worse off. But it is reported LOUDLY
-    /// and names the file, because a silent best-effort ACL failure is exactly how #1721 persisted
-    /// unnoticed across months of service starts: the failure was logged once per start and read by nobody
-    /// until a deploy check happened to look. An operator who just ran a command is the one person
-    /// guaranteed to be watching, so tell them while they are there.</para>
+    /// <para>The backup is CREATED with that ACL, not copied and hardened after: the install folder grants Users
+    /// read, and a plain copy carried that for the moment between the copy and the harden. A failure here fails
+    /// the write the way a failed copy always did (the caller reports it and leaves darling.json untouched): an
+    /// unprotected copy of every secret is not an acceptable side effect of an edit.</para>
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static void HardenConfigBackup(string backupPath, TextWriter error)
+    private static void CopyToHardenedBackup(string sourcePath, string backupPath)
     {
-        try
-        {
-            DarlingFileSecurity.HardenFile(backupPath, allowInteractiveRead: false);
-        }
-        catch (Exception ex)
-        {
-            error.WriteLine($"WARNING: could not restrict permissions on the backup {backupPath} ({ex.Message}).");
-            error.WriteLine("         It is a full copy of your encrypted passwords and access tokens. Delete it, or");
-            error.WriteLine("         restrict it by hand, before leaving this machine.");
-            return;
-        }
+        using var source = File.OpenRead(sourcePath);
+        using var backup = DarlingFileSecurity.CreateHardenedFile(backupPath, allowInteractiveRead: false);
+        source.CopyTo(backup);
+    }
 
+    /// <summary>The check the backup's creation is verified by: it must not be readable by ordinary users.</summary>
+    [SupportedOSPlatform("windows")]
+    private static void VerifyConfigBackup(string backupPath, TextWriter error)
+    {
         if (DarlingFileSecurity.IsReadableByOrdinaryUsers(backupPath))
         {
             error.WriteLine($"WARNING: {backupPath} is still readable by ordinary local users after hardening.");
@@ -4068,58 +4130,424 @@ public static class DarlingCliCommands
     /// </summary>
     private readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
 
+    /// <summary>One file <see cref="TlsKeyFilesNamed"/> lists: the path as written, the setting that names it, and what
+    /// its content has to be.</summary>
+    [SupportedOSPlatform("windows")]
+    internal readonly record struct TlsKeyFileEntry(string Path, string Setting, DarlingFileSecurity.KeyFileKind Kind)
+    {
+        /// <summary>What the report calls the file.</summary>
+        internal string What => Kind == DarlingFileSecurity.KeyFileKind.PasswordFile
+            ? $"the TLS key password file, {Setting}"
+            : $"the TLS key file, {Setting}";
+    }
+
     /// <summary>
-    /// Re-applies the secret-file ACLs, elevated (#2352).
-    ///
-    /// <para><b>Why this exists as a verb.</b> The service already computes the correct DACL
-    /// (<see cref="DarlingFileSecurity.HardenFile"/>) and already detects when the real one is wrong
-    /// (<see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/>). What it lacks is authority: re-ACLing a
-    /// file it does not own needs WRITE_DAC, and taking ownership needs a privilege a virtual service account is
-    /// not granted, so it can only log the remedy and continue. Until now the only thing that ever APPLIED the
-    /// rule to an existing install was <c>install-darling.ps1</c>, which leaves anyone who registered the exe by
-    /// hand — the README's own <c>sc create</c> path — typing three <c>icacls</c> lines out of a log message.</para>
-    ///
-    /// <para><b>It verifies rather than claims.</b> Every target is re-read after the attempt and reported as
-    /// SECURED or STILL READABLE, and the exit code is 1 if anything is still exposed. "We tried" is not the
-    /// same statement as "the secret is not readable" — a distinction <see cref="TryHardenExportedSecret"/>'s own
-    /// contract already makes, and the reason a permissions call that silently did nothing was able to hide.</para>
-    ///
-    /// <para>Idempotent, so it is safe on a healthy box and can simply live in a runbook. Missing targets are
-    /// skipped quietly: a BYO-Postgres install has no managed credential files, and their absence is not a
-    /// fault.</para>
+    /// The TLS secret files darling.json names (#5700): the PKCS#12 bundle (<c>pfxPath</c>) and the PEM key
+    /// (<c>keyPath</c>) of <c>web.network.tls</c> and <c>mcp.network.tls</c>, and the file a <c>pfxPassword</c> points at
+    /// when it is a <c>file:</c> reference, trimmed as the loader trims them and listed once each. A <c>certPath</c> is a
+    /// public certificate and is not listed. Each entry is the path as written, the setting that names it, and the kind
+    /// of content the file has to hold.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    public static int HardenFiles(string? configPath, TextWriter output, TextWriter error)
+    internal static IReadOnlyList<TlsKeyFileEntry> TlsKeyFilesNamed(DarlingConfig config)
     {
-        var resolvedConfig = DarlingConfig.ResolveConfigPath(configPath);
+        var found = new List<TlsKeyFileEntry>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Add(string? path, string setting, DarlingFileSecurity.KeyFileKind kind)
+        {
+            var trimmed = path?.Trim();
+            if (!string.IsNullOrEmpty(trimmed) && seen.Add(trimmed))
+            {
+                found.Add(new TlsKeyFileEntry(trimmed, setting, kind));
+            }
+        }
 
-        /* The managed store's directory is derived from config when it loads, but this verb has to work when
-           darling.json is exactly what is unreadable — that is the failure it exists to repair. So a config that
-           will not load is a warning, not a stop: the config file itself is still hardened, and the store
-           targets fall back to the documented default location. */
-        string? dataDirectory = null;
-        string? keyDirectory = null;
+        foreach (var (section, tls) in new[] { ("web", config.Web?.Network?.Tls), ("mcp", config.Mcp?.Network?.Tls) })
+        {
+            Add(tls?.PfxPath, $"{section}.network.tls.pfxPath", DarlingFileSecurity.KeyFileKind.Pfx);
+            Add(tls?.KeyPath, $"{section}.network.tls.keyPath", DarlingFileSecurity.KeyFileKind.PemKey);
+            if (tls?.PfxPassword is { } password && password.StartsWith("file:", StringComparison.Ordinal))
+            {
+                Add(password["file:".Length..], $"{section}.network.tls.pfxPassword", DarlingFileSecurity.KeyFileKind.PasswordFile);
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// The <c>icacls</c> line that leaves a TLS key file to SYSTEM and Administrators with full control and the
+    /// service account with read only, nothing inherited: the ACL <see cref="HardenTlsKeyFiles"/> applies to a key
+    /// inside the install folder, and the line an administrator runs for one outside it. The read grant is the same
+    /// shape the service logs when it finds such a file readable by ordinary users.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string TlsKeyFileIcaclsLine(string path) =>
+        $"icacls \"{path}\" /inheritance:r /grant:r \"*S-1-5-18:F\" \"*S-1-5-32-544:F\" \"{DarlingFileSecurity.ServiceAccountDisplayName}:(R)\"";
+
+    /// <summary>
+    /// Why a TLS key path from darling.json is not changed, or null when it is a fully qualified path on a drive
+    /// letter (#5700). A UNC path would rewrite a remote file's ACL (and the service reads it as the machine account,
+    /// not as itself); a path from the root of the current drive, a path relative to a drive's current directory
+    /// and a relative path all resolve against a directory this verb cannot know, so it never resolves them against
+    /// its own.
+    /// </summary>
+    internal static string? TlsKeyPathProblem(string keyFile)
+    {
+        var driveLetter = keyFile.Length >= 2 && char.IsAsciiLetter(keyFile[0]) && keyFile[1] == ':';
+        if (driveLetter && keyFile.Length >= 3 && keyFile[2] is '\\' or '/' && Path.IsPathFullyQualified(keyFile))
+        {
+            return null;
+        }
+
+        const string Advice = " Use a full path that starts with a drive letter in darling.json, then re-run.";
+        if (keyFile.StartsWith('\\') || keyFile.StartsWith('/'))
+        {
+            return "a network path or a path from the root of the current drive, which this verb does not change." + Advice;
+        }
+
+        if (driveLetter)
+        {
+            return "a path relative to a drive's current directory, which the service resolves from its own working directory, so this verb did not guess." + Advice;
+        }
+
+        return "a relative path, which the service resolves from its own working directory, so this verb did not guess." + Advice;
+    }
+
+    /// <summary>The tally <see cref="HardenTlsKeyFiles"/> hands <see cref="HardenFiles"/>: files that exist and were
+    /// examined; files readable by ordinary users, or whose ACL could not be applied or leaves the service locked out
+    /// (<c>Exposed</c>); files that accounts other than SYSTEM, Administrators and the service account are allowed to
+    /// (<c>OtherAccess</c>); files whose owner is not one of the three (<c>UntrustedOwner</c>); files refused; and files
+    /// named but not found. A file that ordinary users can read is counted only as readable, not also as open to other accounts; it can still be in the owner count. Each needs an administrator's action.</summary>
+    internal readonly record struct TlsKeyFileResult(int Examined, int Exposed, int Refused, int Missing, int OtherAccess = 0, int UntrustedOwner = 0);
+
+    /// <summary>The closing lines for the other-access and untrusted-owner counts of <paramref name="tls"/>, each in its
+    /// own words, shared by <see cref="HardenFiles"/> and <see cref="HardenTlsKeyFilesOnly(string?, TextWriter, TextWriter)"/>.</summary>
+    internal static IEnumerable<string> TlsKeyFileAccessCountLines(TlsKeyFileResult tls)
+    {
+        if (tls.OtherAccess > 0)
+        {
+            yield return $"{tls.OtherAccess} of {tls.Examined} TLS key file(s) are open to accounts other than SYSTEM, Administrators and the service account (see the lines above for who).";
+        }
+
+        if (tls.UntrustedOwner > 0)
+        {
+            yield return $"{tls.UntrustedOwner} of {tls.Examined} TLS key file(s) have an owner who is not SYSTEM, Administrators or the service account, so the owner can change who may read them.";
+        }
+    }
+
+    /// <summary>
+    /// The TLS key-file step of <see cref="HardenFiles"/> (#5700): each private-key file darling.json names, one
+    /// report line each. A key inside the install folder (<paramref name="installRoot"/>) is changed through a handle
+    /// to exactly the checked file (<see cref="DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks"/>): SYSTEM and
+    /// Administrators full control, the service account read only, nothing inherited. A key outside it is never
+    /// changed (an ACL set by path follows every junction a user-writable folder can hold): it is reported with
+    /// whether ordinary users can read it and the <c>icacls</c> line for an administrator to run. A path that is
+    /// not fully qualified on a drive letter is skipped with the reason, and a named file that is not there is
+    /// reported, because the service fails to load a certificate it cannot find. A line that is not SECURED goes to
+    /// <paramref name="problems"/>.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static TlsKeyFileResult HardenTlsKeyFiles(DarlingConfig config, string installRoot, TextWriter output, TextWriter problems, string? configFile = null)
+    {
+        var examined = 0;
+        var exposed = 0;
+        var otherAccess = 0;
+        var untrustedOwner = 0;
+        var refused = 0;
+        var missing = 0;
+        var notKeyFiles = configFile is null ? new List<NotKeyTarget>() : NotKeyTargets(config, configFile);
+        foreach (var entry in TlsKeyFilesNamed(config))
+        {
+            var (keyFile, _, kind) = entry;
+            var what = entry.What;
+            if (TlsKeyPathProblem(keyFile) is { } problem)
+            {
+                problems.WriteLine($"  SKIPPED  {keyFile} ({what}): {problem}");
+                continue;
+            }
+
+            /* A colon after the drive letter's names an alternate data stream: a handle to one answers for its host file,
+               so the ACL would land on a file the setting does not name. */
+            if (keyFile.IndexOf(':', 2) >= 0)
+            {
+                problems.WriteLine($"  REFUSED  {keyFile} ({what}): names an alternate data stream, not a file, so nothing was changed. Name the key file itself in darling.json and re-run.");
+                examined++;
+                refused++;
+                continue;
+            }
+
+            string full;
+            try
+            {
+                full = Path.GetFullPath(keyFile);
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                problems.WriteLine($"  SKIPPED  {keyFile} ({what}): not a valid path ({OneLine(ex.Message)}).");
+                continue;
+            }
+
+            if (notKeyFiles.FirstOrDefault(target => target.Names(full)) is { Path: not null } notKey)
+            {
+                problems.WriteLine($"  REFUSED  {full} ({what}): it is {notKey.What}, which has its own access rule and is not a key file, so nothing was changed. Name the key file in darling.json and re-run.");
+                examined++;
+                refused++;
+                continue;
+            }
+
+            if (!File.Exists(full))
+            {
+                problems.WriteLine($"  MISSING  {full} ({what}): not found, so no ACL was applied. Once it is in place, run: {TlsKeyFileIcaclsLine(full)}");
+                missing++;
+                continue;
+            }
+
+            examined++;
+            if (!IsBelow(installRoot, full))
+            {
+                var readable = DarlingFileSecurity.IsReadableByOrdinaryUsers(full);
+                var others = DarlingFileSecurity.AccessBeyondTrusted(full);
+                var ownerTrusted = DarlingFileSecurity.IsTrustedOwner(full);
+                var note = readable ? "ordinary users can read it" : "ordinary users cannot read it";
+                if (others is not null)
+                {
+                    note += $"; other accounts are allowed access to it: {others}";
+                }
+
+                if (!ownerTrusted)
+                {
+                    note += $"; its owner is not SYSTEM, Administrators or the service account{DarlingFileSecurity.DescribeOwnerAndExposure(full)}";
+                }
+
+                problems.WriteLine(
+                    $"  NOT CHANGED (outside the install folder)  {full} ({what}): {note}" +
+                    $". To restrict it to SYSTEM, Administrators and the service account, run from an elevated prompt: {TlsKeyFileIcaclsLine(full)}" +
+                    (ownerTrusted ? string.Empty : $" and then make Administrators the owner: takeown /a /f \"{full}\""));
+                if (readable)
+                {
+                    exposed++;
+                }
+
+                if (others is not null && !readable)
+                {
+                    otherAccess++;
+                }
+
+                if (!ownerTrusted)
+                {
+                    untrustedOwner++;
+                }
+
+                continue;
+            }
+
+            try
+            {
+                /* The leaf and every folder on the path up to the install folder are checked for a junction or symbolic
+                   link, and the change itself checks the handle again (final path, reparse bit, one name). */
+                var refusal = ReparsePointOnPath(installRoot, full)
+                    ?? DarlingFileSecurity.HardenKeyFileWithoutFollowingLinks(full, installRoot, kind);
+                if (refusal is not null)
+                {
+                    /* A file that is not what its setting says is refused by what it holds, not by a link on its path. */
+                    var byContent = refusal.Contains(DarlingFileSecurity.NotAKeyFileReason, StringComparison.Ordinal)
+                        || refusal.Contains(DarlingFileSecurity.NotAPasswordFileReason, StringComparison.Ordinal);
+                    var hardLink = refusal.Contains(" is a hard link: ", StringComparison.Ordinal);
+                    problems.WriteLine(byContent
+                        ? $"  REFUSED  {full} ({what}): {OneLine(refusal)}, so nothing was changed. Name the right file in darling.json and re-run."
+                        : hardLink
+                            ? $"  REFUSED  {full} ({what}): {OneLine(refusal)}. Nothing was changed. Remove the other name(s) and re-run."
+                            : $"  REFUSED  {full} ({what}): {OneLine(refusal)}, so nothing was changed through it. Remove it and re-run.");
+                    refused++;
+                    continue;
+                }
+            }
+            catch (Exception ex)
+            {
+                problems.WriteLine($"  FAILED   {full} ({what}): {OneLine(ex.Message)}");
+                exposed++;
+                continue;
+            }
+
+            /* The claim is the re-read, not the call that returned without throwing. */
+            if (TlsKeyFileUnsecured(full, what) is { } unsecured)
+            {
+                problems.WriteLine(unsecured);
+                if (unsecured.StartsWith("  OTHER ACCESS", StringComparison.Ordinal))
+                {
+                    otherAccess++;
+                }
+                else if (unsecured.StartsWith("  UNTRUSTED OWNER", StringComparison.Ordinal))
+                {
+                    untrustedOwner++;
+                }
+                else
+                {
+                    exposed++;
+                }
+            }
+            else
+            {
+                output.WriteLine($"  SECURED  {full} ({what})");
+            }
+        }
+
+        return new TlsKeyFileResult(examined, exposed, refused, missing, otherAccess, untrustedOwner);
+    }
+
+    /// <summary>A file or folder <see cref="HardenFiles"/> hardens under a rule of its own, which a TLS key setting must not
+    /// be pointed at: <see cref="Names"/> is true for the path itself and, for a folder, for anything below it.</summary>
+    internal readonly record struct NotKeyTarget(string Path, bool IsFolder, string What)
+    {
+        internal bool Names(string full) =>
+            string.Equals(System.IO.Path.TrimEndingDirectorySeparator(Path), System.IO.Path.TrimEndingDirectorySeparator(full), StringComparison.OrdinalIgnoreCase)
+            || (IsFolder && IsBelow(Path, full));
+    }
+
+    /// <summary>
+    /// What a TLS key setting may not name (#5700): the config file the verb loaded, its backups, the store's files
+    /// (its credentials and TLS key), the log-hash key and the folder it lives in. The store's own folder is not listed:
+    /// only files, and the log-hash key folder, are kept from the targets <see cref="HardenFiles"/> hardens under their
+    /// own rules, so a setting that named one would give it the key ACL instead.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static List<NotKeyTarget> NotKeyTargets(DarlingConfig config, string configFile)
+    {
+        string dataDirectory;
+        string? keyDirectory;
         try
         {
-            var config = DarlingConfig.Load(configPath);
             dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
-            keyDirectory = DarlingLogHashKeyFile.DirectoryFor(config, resolvedConfig);
+            keyDirectory = DarlingLogHashKeyFile.DirectoryFor(config, configFile);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or NotSupportedException or IOException)
+        {
+            dataDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "PerformanceMonitorDarling", "pg");
+            keyDirectory = null;
+        }
+
+        return HardenTargets(configFile, dataDirectory, keyDirectory)
+            .Where(target => !target.IsDirectory || target.What == "the log-hash key directory")
+            .Select(target => new NotKeyTarget(Path.GetFullPath(target.Path), target.IsDirectory, target.What))
+            .ToList();
+    }
+
+    /// <summary>
+    /// The report line for a TLS key file that is not in the state <see cref="HardenTlsKeyFiles"/> leaves, or null when it
+    /// is (SECURED): not readable by ordinary users, the service account can read it, every Allow entry is SYSTEM,
+    /// Administrators or the service account (an allowlist, so a named user or a domain group does not pass), and the
+    /// owner is one of the three (an owner can always change who may read the file).
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string? TlsKeyFileUnsecured(string full, string what)
+    {
+        if (DarlingFileSecurity.IsReadableByOrdinaryUsers(full))
+        {
+            return $"  STILL READABLE  {full} ({what})";
+        }
+
+        if (!DarlingFileSecurity.GrantsHardenedAccount(full))
+        {
+            return $"  LOCKED OUT  {full} ({what}): secured, but {DarlingFileSecurity.ServiceAccountDisplayName} cannot read it, so the service would fail on its next start. Grant that account read and re-run.";
+        }
+
+        if (DarlingFileSecurity.AccessBeyondTrusted(full) is { } others)
+        {
+            return $"  OTHER ACCESS  {full} ({what}): other accounts are allowed access to it: {others}. Run from an elevated prompt: {TlsKeyFileIcaclsLine(full)}";
+        }
+
+        if (!DarlingFileSecurity.IsTrustedOwner(full))
+        {
+            return $"  UNTRUSTED OWNER  {full} ({what}): its owner is not SYSTEM, Administrators or the service account{DarlingFileSecurity.DescribeOwnerAndExposure(full)}, so the owner can change who may read it. Run from an elevated prompt: takeown /a /f \"{full}\"";
+        }
+
+        return null;
+    }
+
+    private static string OneLine(string text) => text.ReplaceLineEndings(" ");
+
+    /// <summary>
+    /// Only the TLS key-file step of <see cref="HardenFiles"/>, for the install and upgrade scripts
+    /// (<c>--harden-files --tls-key-files-only</c>; not in the help text). One line per file on standard output; the
+    /// exit code is 0 whenever the step ran, whatever it reported for each file, and 2 only when it could not run:
+    /// not elevated, no darling.json that loads, or no registered service account to grant the read to.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static int HardenTlsKeyFilesOnly(string? configPath, TextWriter output, TextWriter error) =>
+        HardenTlsKeyFilesOnly(configPath, output, error, IsElevated(), DarlingFileSecurity.RegisteredServiceAccount(ServiceName));
+
+    [SupportedOSPlatform("windows")]
+    internal static int HardenTlsKeyFilesOnly(
+        string? configPath, TextWriter output, TextWriter error, bool elevated, SecurityIdentifier? serviceAccount, Func<string, string?>? environment = null)
+    {
+        if (!elevated)
+        {
+            error.WriteLine("The TLS key file step needs an elevated prompt (Run as administrator).");
+            return 2;
+        }
+
+        environment ??= Environment.GetEnvironmentVariable;
+        var resolvedConfig = DarlingConfig.ResolveConfigPath(configPath, environment);
+        WriteConfigSource(output, configPath, resolvedConfig, environment);
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(resolvedConfig);
         }
         catch (Exception ex)
         {
-            output.WriteLine($"NOTE: could not load {resolvedConfig} ({ex.Message}).");
-            output.WriteLine("      Continuing with the documented default store location — hardening darling.json");
-            output.WriteLine("      is very often what makes it loadable again.");
-            dataDirectory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "PerformanceMonitorDarling", "pg");
+            error.WriteLine($"The TLS key file step could not load {resolvedConfig}: {OneLine(ex.Message)}");
+            return 2;
         }
 
+        if (serviceAccount is null)
+        {
+            error.WriteLine($"The TLS key file step needs the '{ServiceName}' service to be registered, so it knows which account reads the key. Install the service first.");
+            return 2;
+        }
+
+        DarlingFileSecurity.HardenForAccount(serviceAccount);
+        if (TlsKeyFilesNamed(config).Count == 0)
+        {
+            output.WriteLine("No TLS key files are named in darling.json.");
+            return 0;
+        }
+
+        var installRoot = Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory;
+        var tls = HardenTlsKeyFiles(config, installRoot, output, output, resolvedConfig);
+
+        /* The exit code is 0 whenever the step ran (the scripts read a nonzero code as "could not run"); the counts that
+           need an administrator are in the closing lines. */
+        if (tls.Exposed > 0)
+        {
+            output.WriteLine($"{tls.Exposed} of {tls.Examined} TLS key file(s) are STILL readable by ordinary users or could not be secured.");
+        }
+
+        foreach (var line in TlsKeyFileAccessCountLines(tls))
+        {
+            output.WriteLine(line);
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// The files and folders <see cref="HardenFiles"/> hardens that are not TLS key files (#5700 keeps them apart from the
+    /// key files darling.json names): the live config, its backups, the store's folder and credentials, the store's own TLS
+    /// key and the log-hash key. Built from the loaded config's data and key folders, or the documented default store
+    /// location when the config did not load.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static List<HardenTarget> HardenTargets(string resolvedConfig, string dataDirectory, string? keyDirectory)
+    {
         var storeRoot = Path.GetDirectoryName(Path.GetFullPath(dataDirectory));
         var targets = new List<HardenTarget>
         {
-            /* INTERACTIVE read, the only file in this list that keeps it: the Viewer (ViewerSettings.ResolveConfigPath)
-               and the CLI verbs run as the operator and must still read the live config. Nothing reads a backup (#1769). */
+            /* Operator-group read (the local group DarlingFileSecurity.OperatorGroupName, when it exists): the Viewer
+               (ViewerSettings.ResolveConfigPath) and the CLI verbs run as the operator and must still read the live
+               config. Nothing reads a backup (#1769). */
             new(resolvedConfig, AllowInteractive: true, IsDirectory: false, "the live config"),
         };
 
@@ -4130,12 +4558,19 @@ public static class DarlingCliCommands
 
         if (!string.IsNullOrEmpty(storeRoot))
         {
-            /* INTERACTIVE traverse, never read: the operator walks through it to the config, never to the credential
-               blobs in it. Mirrors DarlingManagedPostgres' own call. */
+            /* Operator-group traverse, never list: the operator walks through it to the admin and viewer credentials,
+               never to the rest. Mirrors DarlingManagedPostgres' own call. */
             targets.Add(new(storeRoot, AllowInteractive: true, IsDirectory: true, "the store directory"));
             targets.Add(new(Path.Combine(storeRoot, "pg-credential.dpapi"), false, false, "the store credential"));
-            targets.Add(new(Path.Combine(storeRoot, "pg-admin-credential.dpapi"), false, false, "the admin credential"));
+            /* The same posture the service applies on every start (DarlingManagedRoles.EnsureProvisionedAsync): the
+               admin and viewer credentials are read by the operator's Viewer, the mcp credential only by the service. */
+            targets.Add(new(Path.Combine(storeRoot, "pg-admin-credential.dpapi"), AllowInteractive: true, IsDirectory: false, "the admin credential"));
+            targets.Add(new(Path.Combine(storeRoot, "pg-viewer-credential.dpapi"), AllowInteractive: true, IsDirectory: false, "the viewer credential"));
+            targets.Add(new(Path.Combine(storeRoot, "pg-mcp-credential.dpapi"), AllowInteractive: false, IsDirectory: false, "the mcp credential"));
             targets.Add(new(Path.Combine(storeRoot, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
+            /* #5700: the store's own TLS key, read only by the service like the mcp credential. Absent until the store
+               has TLS on, and then skipped like every other store file that is not there. */
+            targets.Add(new(Path.Combine(storeRoot, DarlingManagedPostgres.ServerKeyFileName), AllowInteractive: false, IsDirectory: false, "the store's TLS key"));
             /* #4253/#4280 Low 2: the last major upgrade's pre-upgrade postgresql.auto.conf, which File.Copy does
                not ACL on its own. Kept until the NEXT major upgrade replaces it (DarlingStoreUpgrade.CarryAutoConfAsync). */
             targets.Add(new(Path.Combine(storeRoot, DarlingStoreUpgrade.PreUpgradeAutoConfFileName), false, false, "the pre-upgrade postgresql.auto.conf"));
@@ -4157,6 +4592,63 @@ public static class DarlingCliCommands
             targets.Add(new(keyDirectory, AllowInteractive: false, IsDirectory: true, "the log-hash key directory"));
             targets.Add(new(Path.Combine(keyDirectory, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
         }
+
+        return targets;
+    }
+
+    /// <summary>
+    /// Re-applies the secret-file ACLs, elevated (#2352).
+    ///
+    /// <para><b>Why this exists as a verb.</b> The service already computes the correct DACL
+    /// (<see cref="DarlingFileSecurity.HardenFile"/>) and already detects when the real one is wrong
+    /// (<see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/>). What it lacks is authority: re-ACLing a
+    /// file it does not own needs WRITE_DAC, and taking ownership needs a privilege a virtual service account is
+    /// not granted, so it can only log the remedy and continue. Until now the only thing that ever APPLIED the
+    /// rule to an existing install was <c>install-darling.ps1</c>, which leaves anyone who registered the exe by
+    /// hand — the README's own <c>sc create</c> path — typing three <c>icacls</c> lines out of a log message.</para>
+    ///
+    /// <para><b>It verifies rather than claims.</b> Every target is re-read after the attempt and reported as
+    /// SECURED or STILL READABLE, and the exit code is 1 if anything is still exposed. "We tried" is not the
+    /// same statement as "the secret is not readable" — a distinction <see cref="ConfirmExportedSecretIsProtected"/>'s own
+    /// contract already makes, and the reason a permissions call that silently did nothing was able to hide.</para>
+    ///
+    /// <para>Idempotent, so it is safe on a healthy box and can simply live in a runbook. Missing targets are
+    /// skipped quietly: a BYO-Postgres install has no managed credential files, and their absence is not a
+    /// fault.</para>
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static int HardenFiles(string? configPath, TextWriter output, TextWriter error, Func<string, string?>? environment = null)
+    {
+        environment ??= Environment.GetEnvironmentVariable;
+        var resolvedConfig = DarlingConfig.ResolveConfigPath(configPath, environment);
+        WriteConfigSource(output, configPath, resolvedConfig, environment);
+
+        /* The managed store's directory is derived from config when it loads, but this verb has to work when
+           darling.json is exactly what is unreadable — that is the failure it exists to repair. So a config that
+           will not load is a warning, not a stop: the config file itself is still hardened, and the store
+           targets fall back to the documented default location. */
+        string? dataDirectory = null;
+        string? keyDirectory = null;
+        DarlingConfig? loadedConfig = null;
+        try
+        {
+            var config = DarlingConfig.Load(resolvedConfig);
+            loadedConfig = config;
+            dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
+            keyDirectory = DarlingLogHashKeyFile.DirectoryFor(config, resolvedConfig);
+        }
+        catch (Exception ex)
+        {
+            output.WriteLine($"NOTE: could not load {resolvedConfig} ({ex.Message}).");
+            output.WriteLine("      Continuing with the documented default store location — hardening darling.json");
+            output.WriteLine("      is very often what makes it loadable again.");
+            dataDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "PerformanceMonitorDarling", "pg");
+        }
+
+        var targets = HardenTargets(resolvedConfig, dataDirectory, keyDirectory);
+        var configDirectory = Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory;
 
         /* #2371: harden for the account the SERVICE runs as, not for whoever is running THIS. The verb is
            documented to be run elevated and exists because the service cannot re-ACL a file it does not own,
@@ -4259,6 +4751,27 @@ public static class DarlingCliCommands
             }
         }
 
+        /* #5700: the TLS private-key files darling.json names. */
+        var tlsExamined = 0;
+        var tlsResult = default(TlsKeyFileResult);
+        if (loadedConfig is null)
+        {
+            error.WriteLine("The TLS key files named in darling.json were not checked, because darling.json did not load. Fix it and re-run --harden-files.");
+        }
+        else
+        {
+            var tls = HardenTlsKeyFiles(loadedConfig, configDirectory, output, error, resolvedConfig);
+            tlsExamined = tls.Examined;
+            touched += tls.Examined;
+            exposed += tls.Exposed;
+            tlsResult = tls;
+            refused += tls.Refused;
+            if (tls.Missing > 0)
+            {
+                error.WriteLine($"{tls.Missing} TLS key file(s) named in darling.json were not found.");
+            }
+        }
+
         output.WriteLine();
 
         if (touched == 0)
@@ -4278,15 +4791,26 @@ public static class DarlingCliCommands
             error.WriteLine($"{exposed} of {touched} item(s) are STILL readable by ordinary users.");
             error.WriteLine("Run this from an ELEVATED prompt. If it was already elevated, the owner is the");
             error.WriteLine("problem: ownership carries WRITE_DAC, so take ownership first, then re-run.");
-            return 1;
         }
 
-        if (refused > 0)
+        /* Each count needs an administrator's action, so each ends the run with exit 1. */
+        foreach (var line in TlsKeyFileAccessCountLines(tlsResult))
+        {
+            error.WriteLine(line);
+        }
+
+        if (exposed > 0 || tlsResult.OtherAccess > 0 || tlsResult.UntrustedOwner > 0 || refused > 0)
         {
             return 1;
         }
 
-        output.WriteLine($"All {touched} item(s) secured. The service re-asserts these ACLs at every start.");
+        /* The service re-asserts the store and config ACLs at every start; it only warns about a TLS key file, and a
+           renewed certificate arrives with the folder's ACL. */
+        output.WriteLine(tlsExamined == 0
+            ? $"All {touched} item(s) secured. The service re-asserts these ACLs at every start."
+            : touched == tlsExamined
+                ? $"All {touched} item(s) secured. Re-run --harden-files after replacing a TLS key file."
+                : $"All {touched} item(s) secured. The service re-asserts the ACLs of the {touched - tlsExamined} item(s) that are not TLS key files at every start. Re-run --harden-files after replacing a TLS key file.");
         return 0;
     }
 

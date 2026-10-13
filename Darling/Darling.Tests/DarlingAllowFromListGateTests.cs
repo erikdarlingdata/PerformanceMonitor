@@ -250,17 +250,12 @@ public sealed class DarlingAllowFromListGateTests
         return app.GetTestServer();
     }
 
-    /// <summary>A <c>GET /?token=</c> with the RIGHT token from <paramref name="remote"/>: 302 means the gate
+    /// <summary>A sign-in form POST with the RIGHT token from <paramref name="remote"/>: 302 means the gate
     /// exchanged the token for a session cookie (past every gate), 403 means the CIDR gate refused it first.</summary>
     private static async Task<int> WebTokenRequestAsync(TestServer server, IPAddress remote, string? forwardedFor = null)
     {
-        var ctx = await server.SendAsync(c =>
+        var ctx = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, remote, WebToken, configure: c =>
         {
-            c.Request.Method = "GET";
-            c.Request.Path = "/";
-            c.Request.QueryString = new QueryString("?token=" + Uri.EscapeDataString(WebToken));
-            c.Request.Headers.Host = ListenIp;
-            c.Connection.RemoteIpAddress = remote;
             if (forwardedFor is not null)
             {
                 c.Request.Headers["X-Forwarded-For"] = forwardedFor;

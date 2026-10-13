@@ -915,7 +915,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 16, 6),
         /* 14th exempt since #4215: EvaluateStoreSettingsAsync's wrapper catch — the store-settings
            self-alert's report is a parameter, exactly like its StaleMute/WebTls siblings. 15th exempt
            since #4299: EvaluateRawPurgeOverHorizonAsync's wrapper catch — the raw-purge-over-horizon
@@ -968,7 +968,8 @@ public sealed class AlertReadFailureSurfaceTests
     /* 11th since #4215: ReadRejectedManagedConfSettingNamesAsync's catch — COUNTED,
        not exempt, because a RejectedValue row is judgeable evidence for the alert, not context for its text. */
     private const int WorkerCountedSites = 11;
-    private const int WorkerExemptSites = 12;
+    /* 13th: the deadlock text repair pass's catch in SweepStoreSelfMetricsAsync, exempt like the re-mask pass beside it. */
+    private const int WorkerExemptSites = 13;
 
     /// <summary>
     /// Counted sites tree-wide. ONE numeral with several readers rather than the same number written out at
@@ -1013,9 +1014,14 @@ public sealed class AlertReadFailureSurfaceTests
     /// the three conditions the alert fires on — losing it leaves that condition unjudgeable, and the original
     /// exempt classification would let one failed read write a false "Store Settings Resolved". And a
     /// THIRTY-EIGHTH since #5450: the daily retained-history audit's per-rollup read, counted because a swallowed
-    /// read skips that rollup for the day, and the audit is the only place the day's thin hours are ever named.</para>
+    /// read skips that rollup for the day, and the audit is the only place the day's thin hours are ever named.
+    /// And a THIRTY-NINTH since #5641: the Runnable Queue window read ("runnable queue"), counted because a swallowed
+    /// read neither fires nor clears the alert, so a population of them would leave a saturated scheduler queue
+    /// unreported for as long as the store stayed unreadable. And a FORTIETH since #5641: the Runnable Queue card's top-request
+    /// read ("runnable queue top requests"), counted because it IS a store read the alert pass swallowed, though only
+    /// the card's request items go missing and the fire does not.</para>
     /// </summary>
-    private const int CountedSites = 38;
+    private const int CountedSites = 40;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -1054,6 +1060,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store log capture failed"] = "a telemetry write sweep (#3021); no alert is judged on its result, and the capture gap it leaves is reported by get_store_log's own denominator",
         ["Store log: re-masking rows captured before this build failed"] = "a maintenance rewrite of stored store-log text (#3915); no alert is judged on it, it is idempotent and resumes next hour, and until it finishes the store-log reader masks every row on the way out",
         ["PostgreSQL deadlocks: re-masking alerts, reports and findings stored before this build failed"] = "a maintenance rewrite of stored deadlock reports, deadlock-alert history and analysis findings (#4012); no alert is judged on it, it rewrites only rows still raw and resumes next hour (each stage counts and caps its own failures, #4012's review), and until it finishes every deadlock read normalizes the rows on the way out",
+        ["PostgreSQL deadlocks: repairing stored deadlock text failed"] = "a maintenance rewrite of stored deadlock text to the current masking rules; no alert is judged on it, its marker is written only after a complete pass so it resumes next hour, and until it finishes every deadlock read masks the rows on the way out",
         ["Recently-failed-job check errored"] = "reads the monitored server's msdb on its own connection and timeout",
         ["Skipping recently-failed-job check"] = "the same msdb read, permission-denied arm; not a store read",
         ["Failed to check failed jobs"] = "the fetcher reads the monitored server's msdb; the block's only store op is a write both stores swallow",
@@ -1249,8 +1256,9 @@ public sealed class AlertReadFailureSurfaceTests
            self-alert's wrapper catch, whose counts come from the worker's in-memory gate statistics. 35th since
            #5097: the store statement history snapshot's catch, a telemetry write sweep whose loss costs an hour's
            capture and never an alert. 36th since #5450: the Collection Gap At Start self-alert's catch, handed
-           its evidence as a parameter. */
-        Assert.Equal(36, totalExempt);
+           its evidence as a parameter. 37th: the deadlock text repair pass, the second stage beside the re-mask pass (the same
+           maintenance rewrite, marker-gated, resumed next hour). */
+        Assert.Equal(37, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

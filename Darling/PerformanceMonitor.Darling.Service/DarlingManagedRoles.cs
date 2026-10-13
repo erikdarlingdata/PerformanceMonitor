@@ -250,7 +250,15 @@ public static class DarlingManagedRoles
     /// INSERT grants name <c>collect.analysis_findings</c> / <c>config.analysis_muted</c> by qualified
     /// name, which the one-shot batch requires to already exist (they do — the worker migrates before it
     /// calls this). Throws on a hard failure; the caller degrades (the Viewer/MCP cannot connect as their
-    /// roles until a later start succeeds) but keeps collecting.
+    /// roles until a later attempt succeeds) but keeps collecting.
+    ///
+    /// <para><b>A credential file is written only after the batch that sets its password has committed.</b> A
+    /// trusted file is read as it stands; a missing one, or one an untrusted account owns (removed here, before
+    /// anything is sent), gets a password generated in memory. The web and MCP hosts connect with whatever
+    /// these files hold, so a file written first and a batch that then failed would leave them holding a
+    /// password the store does not have. A failed attempt therefore leaves no new file and no untrusted one, and
+    /// the hosts keep waiting for the file rather than logging in with a wrong password. The caller retries a
+    /// failed attempt: nothing was recorded anywhere, so the retry generates its passwords again.</para>
     /// </summary>
     /// <returns>
     /// The compose <c>statement_timeout</c> in seconds that was actually WRITTEN onto the roles — which is
@@ -263,8 +271,19 @@ public static class DarlingManagedRoles
     /// corrected.
     /// </returns>
     [SupportedOSPlatform("windows")]
-    public static async Task<int> EnsureProvisionedAsync(
-        NpgsqlDataSource dataSource, string dataDirectory, ILogger logger, CancellationToken cancellationToken = default)
+    public static Task<int> EnsureProvisionedAsync(
+        NpgsqlDataSource dataSource, string dataDirectory, ILogger logger, CancellationToken cancellationToken = default) =>
+        ProvisionManagedRolesAsync(dataSource, dataDirectory, logger, DarlingFileSecurity.IsTrustedOwner, cancellationToken);
+
+    /// <summary>
+    /// <see cref="EnsureProvisionedAsync"/> with the owner check on an existing credential file passed in, so a
+    /// test can present a file an untrusted account owns (a real one cannot be made without elevation). The
+    /// public entry point always passes <see cref="DarlingFileSecurity.IsTrustedOwner"/>.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static async Task<int> ProvisionManagedRolesAsync(
+        NpgsqlDataSource dataSource, string dataDirectory, ILogger logger, Func<string, bool> isTrustedOwner,
+        CancellationToken cancellationToken)
     {
         if (dataSource is null)
         {
@@ -276,21 +295,26 @@ public static class DarlingManagedRoles
             throw new ArgumentException("Data directory is required.", nameof(dataDirectory));
         }
 
-        /* admin/viewer credentials are read by the interactive Viewer -> INTERACTIVE-readable ACL. */
-        var adminPassword = EnsureRoleCredential(
+        /* admin/viewer credentials are read by the operator's Viewer -> readable by the operator group. */
+        var admin = ReadOrGenerateRoleCredential(
             DarlingManagedPostgres.AdminCredentialPathFor(dataDirectory), DarlingManagedPostgres.AdminRoleName,
-            allowInteractiveRead: true, logger);
-        var viewerPassword = EnsureRoleCredential(
+            allowInteractiveRead: true, logger, isTrustedOwner);
+        var viewer = ReadOrGenerateRoleCredential(
             DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory), DarlingManagedPostgres.ViewerRoleName,
-            allowInteractiveRead: true, logger);
+            allowInteractiveRead: true, logger, isTrustedOwner);
         /* The mcp credential is consumed only by the in-service MCP host, never an interactive Viewer, so it
            is hardened NON-interactive (mirrors the superuser posture, not admin/viewer's) — Round 4 #4. */
-        var mcpPassword = EnsureRoleCredential(
+        var mcp = ReadOrGenerateRoleCredential(
             DarlingManagedPostgres.McpCredentialPathFor(dataDirectory), DarlingManagedPostgres.McpRoleName,
-            allowInteractiveRead: false, logger);
+            allowInteractiveRead: false, logger, isTrustedOwner);
 
-        return await ProvisionRolesAsync(
-            dataSource, adminPassword, viewerPassword, mcpPassword, ProvisioningTarget.Managed, logger, cancellationToken);
+        var applied = await ProvisionRolesAsync(
+            dataSource, admin.Password, viewer.Password, mcp.Password, ProvisioningTarget.Managed, logger, cancellationToken);
+
+        /* Only now: each generated password is one its role has accepted, so a file on disk is always a login the
+           store honours. A throw above leaves every generated password unwritten. */
+        PersistGeneratedRoleCredentials(new[] { admin, viewer, mcp }, logger);
+        return applied;
     }
 
     /// <summary>
@@ -909,43 +933,152 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
     }
 
     /// <summary>
-    /// Reads a TRUSTED existing role credential, or generates + DPAPI-persists a fresh one (self-heal),
-    /// then restricts its ACL. Same 32-char alnum <see cref="DarlingManagedPostgres.GeneratePassword"/>
-    /// and DPAPI-LocalMachine posture as the owner credential; unlike the owner's, a role password can
-    /// always be re-asserted (<c>ALTER ROLE … PASSWORD</c>), so an untrusted-owned (possibly pre-planted)
-    /// file is discarded and regenerated rather than trusted.
+    /// Reads a TRUSTED existing role credential, or generates a fresh password IN MEMORY (self-heal): nothing
+    /// new is written here (<see cref="PersistGeneratedRoleCredentials"/> writes it once the batch has
+    /// committed). Same 32-char alnum <see cref="DarlingManagedPostgres.GeneratePassword"/> and
+    /// DPAPI-LocalMachine posture as the owner credential; unlike the owner's, a role password can always be
+    /// re-asserted (<c>ALTER ROLE … PASSWORD</c>), so an untrusted-owned file is removed
+    /// here, before the batch, and replaced by a generated password rather than trusted. A trusted file has its
+    /// ACL restored on every start whatever the batch does next.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static string EnsureRoleCredential(string credentialPath, string roleName, bool allowInteractiveRead, ILogger logger)
+    internal static RoleCredential ReadOrGenerateRoleCredential(
+        string credentialPath, string roleName, bool allowInteractiveRead, ILogger logger, Func<string, bool> isTrustedOwner)
     {
-        string password;
-        if (File.Exists(credentialPath) && DarlingFileSecurity.IsTrustedOwner(credentialPath))
+        if (File.Exists(credentialPath) && isTrustedOwner(credentialPath))
         {
-            password = DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim());
+            var existing = DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim());
+
+            /* Re-harden every start (self-healing): admin/viewer are additionally readable by the operator group
+               (whose members' Viewer reads them); mcp is NOT (SYSTEM + Administrators + service account only —
+               the in-service MCP host reads it, never an interactive user). */
+            TryHardenRoleCredential(credentialPath, allowInteractiveRead, logger);
+            return new RoleCredential(credentialPath, roleName, existing, allowInteractiveRead, generated: false);
         }
-        else
+
+        if (File.Exists(credentialPath))
         {
-            if (File.Exists(credentialPath))
+            /* A role credential owned by an arbitrary local user would feed the
+               caller's ALTER ROLE … PASSWORD re-assert a password that account chose. Discard it, and do it
+               now: if the batch then fails, the hosts must find no file, not this one. */
+            logger.LogWarning(
+                "The managed '{Role}' credential {File} is not owned by a trusted principal — discarding and regenerating it.",
+                roleName, Path.GetFileName(credentialPath));
+            TryDelete(credentialPath, logger);
+        }
+
+        return new RoleCredential(
+            credentialPath, roleName, DarlingManagedPostgres.GeneratePassword(), allowInteractiveRead, generated: true);
+    }
+
+    /// <summary>
+    /// Writes each credential that <see cref="ReadOrGenerateRoleCredential"/> generated, after the batch that
+    /// gave its role that password has committed. Every file is attempted, so one that cannot be written does
+    /// not keep the others off the disk; when any failed, one exception names them all, so the caller logs the
+    /// failure once and retries. A role whose file is missing gets a new password on that retry, which the
+    /// stored-secret check re-asserts.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static void PersistGeneratedRoleCredentials(IReadOnlyList<RoleCredential> credentials, ILogger logger)
+    {
+        List<string>? failures = null;
+        foreach (var credential in credentials)
+        {
+            if (!credential.Generated)
             {
-                /* Pre-plant defense: a role credential owned by an arbitrary local user would feed the
-                   caller's ALTER ROLE … PASSWORD re-assert a password the attacker chose. Discard it. */
-                logger.LogWarning(
-                    "The managed '{Role}' credential {File} is not owned by a trusted principal — discarding and regenerating it (possible pre-plant).",
-                    roleName, Path.GetFileName(credentialPath));
-                TryDelete(credentialPath, logger);
+                continue;
             }
 
-            password = DarlingManagedPostgres.GeneratePassword();
-            File.WriteAllText(credentialPath, DarlingSecrets.Protect(password));
+            try
+            {
+                PersistRoleCredential(credential);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                (failures ??= new List<string>()).Add($"{credential.Role} ({Path.GetFileName(credential.FilePath)}: {ex.Message})");
+                continue;
+            }
+
             logger.LogInformation(
-                "Generated the managed '{Role}' role credential ({File})", roleName, Path.GetFileName(credentialPath));
+                "Generated the managed '{Role}' role credential ({File})", credential.Role, Path.GetFileName(credential.FilePath));
+
+            /* Verified after the write, as for every role credential: attempting a harden is not evidence. */
+            TryHardenRoleCredential(credential.FilePath, credential.AllowInteractiveRead, logger);
         }
 
-        /* Re-harden every start (self-healing): admin/viewer are additionally readable by the interactive
-           operator (whose Viewer reads them); mcp is NOT (SYSTEM + Administrators + service account only —
-           the in-service MCP host reads it, never an interactive user). */
-        TryHardenRoleCredential(credentialPath, allowInteractiveRead, logger);
-        return password;
+        if (failures is not null)
+        {
+            throw new IOException(
+                "The role passwords were set, but a credential file could not be written, so the web and MCP hosts "
+                + "cannot use that role until a later attempt writes it: " + string.Join("; ", failures));
+        }
+    }
+
+    /// <summary>
+    /// Writes one role credential the way <see cref="PersistComposeCredential"/> does: created with its ACL
+    /// already applied (<see cref="DarlingFileSecurity.CreateHardenedFile"/>, so the folder's inherited entries
+    /// never reach it, not even between a create and a harden), put on the disk, and only then renamed over the
+    /// real name. A host polling for the file therefore sees either no file or the whole one, and a failed
+    /// write leaves nothing at the real name that a later attempt would trust and fail to read.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static void PersistRoleCredential(RoleCredential credential)
+    {
+        var temporary = credential.FilePath + ".tmp";
+        var moved = false;
+        try
+        {
+            /* A leftover from an attempt that died mid-write: the create refuses an existing file. */
+            File.Delete(temporary);
+            using (var stream = DarlingFileSecurity.CreateHardenedFile(temporary, credential.AllowInteractiveRead))
+            using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+            {
+                writer.Write(DarlingSecrets.Protect(credential.Password));
+                FlushToDisk(writer, stream);
+            }
+
+            File.Move(temporary, credential.FilePath, overwrite: true);
+            moved = true;
+        }
+        finally
+        {
+            if (!moved)
+            {
+                try
+                {
+                    File.Delete(temporary);
+                }
+                catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
+                {
+                    /* Best effort: the next attempt deletes it first. */
+                }
+            }
+        }
+    }
+
+    /// <summary>One managed role's credential for this start: the password, where its file is (or will be), and
+    /// whether the password was generated here and still has to be written. A class, not a record, so no generated
+    /// <c>ToString</c> can put the password in a log line.</summary>
+    internal sealed class RoleCredential
+    {
+        public RoleCredential(string filePath, string role, string password, bool allowInteractiveRead, bool generated)
+        {
+            FilePath = filePath;
+            Role = role;
+            Password = password;
+            AllowInteractiveRead = allowInteractiveRead;
+            Generated = generated;
+        }
+
+        public string FilePath { get; }
+
+        public string Role { get; }
+
+        public string Password { get; }
+
+        public bool AllowInteractiveRead { get; }
+
+        public bool Generated { get; }
     }
 
     /// <summary>Best-effort restrictive ACL on a role credential; a failure is logged loud, not fatal — and the
@@ -2333,7 +2466,7 @@ WHERE u.rolname = current_user";
     /// <summary>
     /// The compose store's credential for <paramref name="role"/>: the trusted file's password, or a freshly
     /// generated one that <see cref="PersistComposeCredential"/> writes once the batch has committed (#3914).
-    /// An untrusted file is discarded rather than read — the Unix equivalent of <see cref="EnsureRoleCredential"/>'s
+    /// An untrusted file is discarded rather than read — the Unix equivalent of <see cref="ReadOrGenerateRoleCredential"/>'s
     /// pre-plant check (<see cref="UntrustedComposeCredentialReason"/>): a password someone else could have written
     /// would be re-asserted on the role, and a new password costs only its re-assert. With
     /// <paramref name="readFile"/> false (a directory that cannot be trusted) the file is not looked at.

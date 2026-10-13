@@ -13,6 +13,7 @@ using System.Linq;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -57,17 +58,25 @@ public partial class LocalDataService
     /// </summary>
     public async Task<List<JobHistoryRow>> GetJobHistoryAsync(
         DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null,
-        DateTime? windowEndUtc = null) =>
-        (await GetJobHistoryWithClocksAsync(windowStartUtc, limit, serverId, openTabClocks, windowEndUtc)).Rows;
+        DateTime? windowEndUtc = null, int? runStatus = null, string? category = null) =>
+        (await GetJobHistoryWithClocksAsync(windowStartUtc, limit, serverId, openTabClocks, windowEndUtc, runStatus, category)).Rows;
 
     /// <summary>
     /// <see cref="GetJobHistoryAsync(DateTime, int, int?, IReadOnlyDictionary{int, ServerClock}?, DateTime?)"/> that also returns the clock it
     /// windowed each server on, by server id (#4966). The tab words the note for one server from <c>Clocks[serverId]</c>, so the note
     /// and the read share one clock read and cannot disagree on a clock that changed between two reads.
+    /// <para>
+    /// <paramref name="runStatus"/> (a <c>sysjobhistory</c> code, 0 Failed to 3 Canceled) and <paramref name="category"/> (exact, ignoring
+    /// case) are applied in the SQL, ahead of each server's row cap and of the merged cap (#5703). The cap keeps the newest runs of the
+    /// whole fleet, so one busy server fills it with its latest runs; a filter applied to those rows afterwards never saw an older
+    /// failure on a quieter server, and the All Servers grid lost runs the single-server grid showed. They do not reach
+    /// <c>job_stats</c>: the long-running flag and the last success come from the job's successful outcomes, whatever the grid is
+    /// filtered to.
+    /// </para>
     /// </summary>
     internal async Task<(List<JobHistoryRow> Rows, IReadOnlyDictionary<int, ServerClock> Clocks)> GetJobHistoryWithClocksAsync(
         DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null,
-        DateTime? windowEndUtc = null)
+        DateTime? windowEndUtc = null, int? runStatus = null, string? category = null)
     {
         var serverIds = serverId.HasValue
             ? new List<int> { serverId.Value }
@@ -79,7 +88,7 @@ public partial class LocalDataService
         {
             var clock = await ReadJobHistoryClockAsync(id, openTabClocks is not null && openTabClocks.TryGetValue(id, out var tabClock) ? tabClock : null);
             clocks[id] = clock;
-            rows.AddRange(await ReadJobHistoryForServerAsync(id, clock, windowStartUtc, limit, windowEndUtc));
+            rows.AddRange(await ReadJobHistoryForServerAsync(id, clock, windowStartUtc, limit, windowEndUtc, runStatus, category));
         }
 
         return (ApplyJobHistoryWindow(rows, windowStartUtc, limit, windowEndUtc), clocks);
@@ -112,6 +121,77 @@ ORDER BY server_id";
             ids.Add((int)ToInt64(reader.GetValue(0)));
 
         return ids;
+    }
+
+    /// <summary>
+    /// The Job History tab's known Server choices (#5703): the configured servers the job history collector runs on, by the name the
+    /// grid's Server column speaks (the same <see cref="ServerConnection.DisplayNameWithIntent"/> the tab's display-name map holds),
+    /// keyed by the server id the collector stores its rows under. The collector's own rule decides
+    /// (<see cref="PerformanceMonitor.Collectors.JobHistoryCollector.CollectsOn"/>): a disabled server is not collected and an Azure SQL
+    /// Database has no SQL Agent, so neither can have job history; Amazon RDS and Azure SQL Managed Instance run SQL Agent and stay. A
+    /// server with runs in the window is still offered, from the rows. Lite monitors SQL Server only, so there is no engine kind.
+    /// </summary>
+    /// <param name="servers">The configured servers.</param>
+    /// <param name="engineEditionOf">A server's engine edition (the live status, else the remembered one), or unknown (0).</param>
+    internal static Dictionary<int, string> BuildJobHistoryChoiceMap(IEnumerable<ServerConnection> servers, Func<ServerConnection, int> engineEditionOf)
+    {
+        var map = new Dictionary<int, string>();
+        foreach (var server in servers)
+        {
+            if (PerformanceMonitor.Collectors.JobHistoryCollector.CollectsOn(server.IsEnabled, null, engineEditionOf(server)))
+            {
+                map[RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server))] = server.DisplayNameWithIntent;
+            }
+        }
+
+        return map;
+    }
+
+    /// <summary>
+    /// Every distinct job category with a run in the window (#5703): the Job History tab's Category drop-down choices. A read of its
+    /// own, with no row cap and no Status or Category filter, because the grid's read keeps the newest runs of the whole fleet and a
+    /// busy server fills that cap, so a quieter server's categories would otherwise reach the drop-down only after a Status filter
+    /// surfaced them. The bounds are the pre-filter's zone slack, the one <see cref="ReadJobHistoryServerIdsAsync"/> uses: the stored
+    /// <c>run_datetime</c> is a server's wall clock, UTC-12 to UTC+14 from the UTC window, plus the hour the per-server read widens by.
+    /// A category whose only run sits in that margin can be offered, which costs an empty grid and never a missing choice. With
+    /// <paramref name="serverId"/> the read is that server's, so the drop-down is not offered a category only another server has (a pick
+    /// that would give an empty grid); without it the read is fleet-wide.
+    /// </summary>
+    /// <param name="windowStartUtc">The window's start: the instant the grid's read takes.</param>
+    /// <param name="windowEndUtc">The window's end for a range that ended in the past, else null.</param>
+    /// <param name="serverId">The one server to read, or null for every server.</param>
+    public async Task<List<string>> GetJobHistoryCategoriesAsync(DateTime windowStartUtc, DateTime? windowEndUtc = null, int? serverId = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var endClause = windowEndUtc.HasValue ? "\nAND   run_datetime <= $2" : string.Empty;
+        var serverClause = serverId.HasValue ? $"\nAND   server_id = ${(windowEndUtc.HasValue ? 3 : 2)}" : string.Empty;
+        command.CommandText = $@"
+SELECT DISTINCT category_name
+FROM v_job_history
+WHERE run_datetime >= $1{endClause}{serverClause}
+AND   category_name IS NOT NULL
+AND   category_name <> ''
+ORDER BY category_name";
+        command.Parameters.Add(new DuckDBParameter { Value = windowStartUtc.AddHours(-13) });
+        if (windowEndUtc is { } end)
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = end.AddHours(15) });
+        }
+
+        if (serverId is { } server)
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = server });
+        }
+
+        var categories = new List<string>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            categories.Add(reader.GetString(0));
+        }
+
+        return categories;
     }
 
     /// <summary>
@@ -242,10 +322,10 @@ ORDER BY server_id";
 
     /// <summary>One server's runs: the newest <paramref name="limit"/> at or after the server-local start of the window,
     /// each with its run time converted to UTC through <paramref name="clock"/>. Not yet held to the exact window.</summary>
-    private async Task<List<JobHistoryRow>> ReadJobHistoryForServerAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit, DateTime? windowEndUtc)
+    private async Task<List<JobHistoryRow>> ReadJobHistoryForServerAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit, DateTime? windowEndUtc, int? runStatus, string? category)
     {
         var readLimit = limit;
-        var items = await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, readLimit, windowEndUtc);
+        var items = await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, readLimit, windowEndUtc, runStatus, category);
         if (windowEndUtc is not { } end || limit <= 0)
         {
             return items;
@@ -265,13 +345,13 @@ ORDER BY server_id";
             }
 
             readLimit += limit - inside;
-            items = await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, readLimit, windowEndUtc);
+            items = await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, readLimit, windowEndUtc, runStatus, category);
         }
 
         return items;
     }
 
-    private async Task<List<JobHistoryRow>> ReadJobHistoryForServerOnceAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit, DateTime? windowEndUtc)
+    private async Task<List<JobHistoryRow>> ReadJobHistoryForServerOnceAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit, DateTime? windowEndUtc, int? runStatus, string? category)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -286,6 +366,11 @@ ORDER BY server_id";
            counts the runs inside the window, not the newer ones after it. The bound is exclusive, on the server-local wall
            clock, widened an hour like the start; the exact instant check and the margin re-read are ReadJobHistoryForServerAsync's. */
         var endClause = windowEndUtc.HasValue ? "AND   run_datetime < $5" : string.Empty;
+
+        /* #5703: Status and Category filter base (the rows the cap counts) and never job_stats. Their parameters follow the end bound's. */
+        var nextParameter = windowEndUtc.HasValue ? 6 : 5;
+        var statusClause = runStatus.HasValue ? $"AND   run_status = ${nextParameter++}" : string.Empty;
+        var categoryClause = string.IsNullOrWhiteSpace(category) ? string.Empty : $"AND   lower(category_name) = lower(${nextParameter++})";
 
         /* #4229 (Darling parity): the per-job average/max used to run as a window function OVER every step
            row the window matched, forcing a full sort/aggregate of the whole set before ORDER BY/LIMIT could
@@ -330,6 +415,8 @@ base AS (
     FROM v_job_history
     WHERE run_datetime >= $1
     {endClause}
+    {statusClause}
+    {categoryClause}
     AND   server_id = $2
     ORDER BY run_datetime DESC, instance_id DESC
     LIMIT $4
@@ -374,6 +461,16 @@ ORDER BY base.run_datetime DESC, base.instance_id DESC";
         if (windowEndUtc.HasValue)
         {
             command.Parameters.Add(new DuckDBParameter { Value = clock.ToServerLocal(windowEndUtc.Value).AddHours(1) });
+        }
+
+        if (runStatus.HasValue)
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = runStatus.Value });
+        }
+
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = category });
         }
 
         var items = new List<JobHistoryRow>();

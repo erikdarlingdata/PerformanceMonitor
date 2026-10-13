@@ -320,9 +320,21 @@ public sealed class CaggGroupIndexDropLiveTests
     {
         if (simulatedVersion < QueryStoreWatermarks.RungVersion)
         {
-            /* V178 (#5684) - the per-batch Query Store watermark table is the probe's sentinel; the coverage table goes with it. */
-            await using var dropWatermarks = new NpgsqlCommand("DROP TABLE IF EXISTS collect.query_store_watermarks, collect.query_store_watermarks_coverage", connection);
-            await dropWatermarks.ExecuteNonQueryAsync(ct);
+            /* V178 (#5684) - the per-batch Query Store watermark table is the probe's newest sentinel; the coverage table goes with it. The shared helper owns the removal. */
+            await RungRewindArtifacts.DropV178SentinelAsync(connection, ct);
+        }
+
+        if (simulatedVersion < 177)
+        {
+            /* V177 (#5641) - the Runnable Queue settings columns are the probe's newest sentinel. The shared helper owns the removal. */
+            await RungRewindArtifacts.DropV177SentinelAsync(connection, ct);
+        }
+
+        if (simulatedVersion < ProcedureStatsTotals.RungVersion)
+        {
+            /* V176 (#5638) - the per-collection procedure totals table is the probe's sentinel. */
+            await using var dropTotals = new NpgsqlCommand("DROP TABLE IF EXISTS collect.procedure_stats_totals", connection);
+            await dropTotals.ExecuteNonQueryAsync(ct);
         }
 
         if (simulatedVersion < 175)

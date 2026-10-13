@@ -25,14 +25,14 @@ namespace Darling.Tests;
 /// <summary>
 /// Pins the rung that adds the Query Store watermark side tables (V178, #5684): its place at the top of the ladder, the shape of its
 /// script (guarded creates, the one coverage insert, nothing moved or dropped), the schema-version probe's sentinel and its mapping arm.
-/// The ladder is deliberately NOT asserted dense here: V176 and V177 are separate open changes, and the dense-ladder pins elsewhere stay
-/// red until they merge. The probe ordinal below counts the probe's columns; it moves up by one for each rung that lands below this one.
+/// V176 (#5638) and V177 (#5641) are on dev below this rung, so V176-V178 are contiguous and the dense-ladder pins hold. The probe
+/// ordinal below counts the probe's columns; it moves up by one for each rung that lands below this one.
 /// </summary>
 public sealed class QueryStoreWatermarksRungTests
 {
     public const string RungName = "query-store-watermarks";
 
-    private const int ProbeOrdinal = 151;
+    private const int ProbeOrdinal = 153;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -51,6 +51,7 @@ public sealed class QueryStoreWatermarksRungTests
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Equal(StorageVersion.SchemaVersion, versions[^1]);
+        Assert.Equal(new[] { 176, 177, 178 }, versions.TakeLast(3).ToArray());
         Assert.Equal(QueryStoreWatermarks.CreateSql, Rung.Sql);
     }
 
@@ -95,7 +96,7 @@ public sealed class QueryStoreWatermarksRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         Assert.Equal("hasQueryStoreWatermarks", parameters[ProbeOrdinal].Name);
-        Assert.Equal("hasPlanRegressionDailyRowcount", parameters[ProbeOrdinal - 1].Name);
+        Assert.Equal("hasRunnableQueueSettings", parameters[ProbeOrdinal - 1].Name);
         Assert.Equal(ProbeOrdinal, parameters.Length - 1);
 
         /* Every sentinel present maps to exactly this build's version; this sentinel absent maps one rung back. */
@@ -105,12 +106,12 @@ public sealed class QueryStoreWatermarksRungTests
 
         var behind = (object[])all.Clone();
         behind[ProbeOrdinal] = false;
-        Assert.Equal(175, (int)method.Invoke(null, behind)!);
+        Assert.Equal(177, (int)method.Invoke(null, behind)!);
 
-        /* In the source the arm sits ABOVE V175's and returns this rung's version. */
+        /* In the source the arm sits ABOVE V177's and returns this rung's version. */
         var thisArm = viewer.IndexOf("if (hasQueryStoreWatermarks)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasPlanRegressionDailyRowcount)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0 && previousArm > thisArm, "the V178 arm sits above V175's");
+        var previousArm = viewer.IndexOf("if (hasRunnableQueueSettings)", StringComparison.Ordinal);
+        Assert.True(thisArm >= 0 && previousArm > thisArm, "the V178 arm sits above V177's");
         Assert.Contains("return " + QueryStoreWatermarks.RungVersion + ";", viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 
@@ -132,7 +133,7 @@ public sealed class QueryStoreWatermarksRungTests
             Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct));
 
             await ExecAsync(connection, "DROP TABLE collect.query_store_watermarks, collect.query_store_watermarks_coverage", ct);
-            Assert.Equal(175, await ProbedVersionAsync(connection, ct));
+            Assert.Equal(177, await ProbedVersionAsync(connection, ct));
 
             bodySucceeded = true;
         }

@@ -59,20 +59,24 @@ public static class ServerTrendSql
         ORDER BY 1
         """;
 
-    /// <summary>The CPU scheduler pressure trend: the runnable / blocked / queued task counts, point-in-time gauges averaged per bucket.</summary>
+    /// <summary>The CPU scheduler pressure trend: the runnable / blocked / queued task counts of each collection (its rows combined, #5710), point-in-time gauges averaged per bucket.</summary>
     public const string CpuScheduler = $"""
         WITH raw AS
         (
+            /* #5710: ONE row per collection_time. A collection written before the collector fix can be split across
+               several rows that each cover some of the schedulers: the runnable total is their SUM; the blocked and
+               queued counts are workload-group sums every piece repeats, so one deterministic value is their MAX. */
             SELECT
+                server_id,
                 collection_time,
-                collection_id,
-                total_runnable_tasks_count,
-                total_blocked_task_count,
-                total_queued_request_count
+                SUM(total_runnable_tasks_count) AS total_runnable_tasks_count,
+                MAX(total_blocked_task_count) AS total_blocked_task_count,
+                MAX(total_queued_request_count) AS total_queued_request_count
             FROM v_cpu_scheduler_stats
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
+            GROUP BY server_id, collection_time
         )
         SELECT
             GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,

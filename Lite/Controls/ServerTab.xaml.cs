@@ -496,7 +496,7 @@ public partial class ServerTab : UserControl
             try
             {
                 var (ok, xml) = await ClipboardText.TryReadAsync();
-                if (ok && !string.IsNullOrWhiteSpace(xml))
+                if (ok && !string.IsNullOrWhiteSpace(xml) && !CallerPlanXmlPrompt.Refuse(xml))
                 {
                     // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
                     await OpenPlanTab(xml, "Pasted Plan");

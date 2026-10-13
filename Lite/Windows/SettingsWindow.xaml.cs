@@ -271,6 +271,14 @@ public partial class SettingsWindow : Window
     /// </summary>
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
+        /* An SMTP login that would go to the mail server unencrypted is confirmed before anything is applied:
+           No cancels the whole save and leaves the window open to fix it. Not blocked - an internal relay on
+           port 25 is a real setup. */
+        if (!ConfirmCleartextSmtp("Save"))
+        {
+            return;
+        }
+
         JsonNode root;
         bool mcpChanged, mcpValid, alertsValid, webhooksValid, memoryLimitValid;
 
@@ -701,6 +709,9 @@ public partial class SettingsWindow : Window
         AlertDeadlockCheckBox.IsChecked = App.AlertDeadlockEnabled;
         AlertDeadlockThresholdBox.Text = App.AlertDeadlockThreshold.ToString();
         AlertPoisonWaitCheckBox.IsChecked = App.AlertPoisonWaitEnabled;
+        AlertRunnableQueueCheckBox.IsChecked = App.AlertRunnableQueueEnabled;
+        AlertRunnableQueueWarningBox.Text = App.AlertRunnableQueueWarningPerScheduler.ToString();
+        AlertRunnableQueueCriticalBox.Text = App.AlertRunnableQueueCriticalPerScheduler.ToString();
         AlertLongRunningQueryCheckBox.IsChecked = App.AlertLongRunningQueryEnabled;
         AlertLongRunningQueryThresholdBox.Text = App.AlertLongRunningQueryThresholdMinutes.ToString();
         AlertLongRunningQueryMaxResultsBox.Text = App.AlertLongRunningQueryMaxResults.ToString();
@@ -759,6 +770,7 @@ public partial class SettingsWindow : Window
     /// </summary>
     private bool SaveAlertSettings(JsonNode root)
     {
+        var validationErrors = new List<string>();
         App.MinimizeToTray = MinimizeToTrayCheckBox.IsChecked == true;
         App.AlertsEnabled = AlertsEnabledCheckBox.IsChecked == true;
         App.NotifyConnectionChanges = NotifyConnectionCheckBox.IsChecked == true;
@@ -790,6 +802,21 @@ public partial class SettingsWindow : Window
         if (int.TryParse(AlertDeadlockThresholdBox.Text, out var deadlock) && deadlock > 0)
             App.AlertDeadlockThreshold = deadlock;
         App.AlertPoisonWaitEnabled = AlertPoisonWaitCheckBox.IsChecked == true;
+        App.AlertRunnableQueueEnabled = AlertRunnableQueueCheckBox.IsChecked == true;
+        /* #5641: the pair is checked together (RunnableQueueBarsInput): the engine's ClampBars rules, refused with a
+           message instead of clamped silently, and applied both-or-neither. */
+        var queueErrors = new List<string>();
+        var (queueWarning, queueCritical) = RunnableQueueBarsInput.Validate(
+            AlertRunnableQueueWarningBox.Text, AlertRunnableQueueCriticalBox.Text, queueErrors);
+        if (queueErrors.Count == 0)
+        {
+            App.AlertRunnableQueueWarningPerScheduler = queueWarning;
+            App.AlertRunnableQueueCriticalPerScheduler = queueCritical;
+        }
+        else
+        {
+            validationErrors.AddRange(queueErrors);
+        }
         App.AlertLongRunningQueryEnabled = AlertLongRunningQueryCheckBox.IsChecked == true;
         if (int.TryParse(AlertLongRunningQueryThresholdBox.Text, out var lrq) && lrq > 0)
             App.AlertLongRunningQueryThresholdMinutes = lrq;
@@ -838,7 +865,6 @@ public partial class SettingsWindow : Window
         if (int.TryParse(AlertFailedJobLookbackBox.Text, out var failedJobLookback) && failedJobLookback >= 1 && failedJobLookback <= 1440)
             App.AlertFailedJobLookbackMinutes = failedJobLookback;
         App.AlertDatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true;
-        var validationErrors = new List<string>();
         if (int.TryParse(AlertCooldownBox.Text, out var alertCooldown) && alertCooldown >= 1 && alertCooldown <= 120)
             App.AlertCooldownMinutes = alertCooldown;
         else
@@ -898,6 +924,9 @@ public partial class SettingsWindow : Window
         root["alert_database_state_enabled"] = App.AlertDatabaseStateEnabled;
         root["alert_poison_wait_enabled"] = App.AlertPoisonWaitEnabled;
         root["alert_poison_wait_threshold_ms"] = App.AlertPoisonWaitThresholdMs;
+        root["alert_runnable_queue_enabled"] = App.AlertRunnableQueueEnabled;
+        root["alert_runnable_queue_warning_per_scheduler"] = App.AlertRunnableQueueWarningPerScheduler;
+        root["alert_runnable_queue_critical_per_scheduler"] = App.AlertRunnableQueueCriticalPerScheduler;
         root["alert_long_running_query_enabled"] = App.AlertLongRunningQueryEnabled;
         root["alert_long_running_query_threshold_minutes"] = App.AlertLongRunningQueryThresholdMinutes;
         root["alert_long_running_query_max_results"] = App.AlertLongRunningQueryMaxResults;
@@ -972,6 +1001,8 @@ public partial class SettingsWindow : Window
         AlertBlockingThresholdBox.Text = "1";
         AlertBlockingWaitSecondsBox.Text = "0";
         AlertDeadlockThresholdBox.Text = "1";
+        AlertRunnableQueueWarningBox.Text = RunnableQueueEvaluator.DefaultWarningPerScheduler.ToString(CultureInfo.InvariantCulture);
+        AlertRunnableQueueCriticalBox.Text = RunnableQueueEvaluator.DefaultCriticalPerScheduler.ToString(CultureInfo.InvariantCulture);
         AlertLongRunningQueryThresholdBox.Text = "30";
         AlertLongRunningQueryMaxResultsBox.Text = "5";
         AlertTempDbSpaceThresholdBox.Text = "80";
@@ -1035,6 +1066,8 @@ public partial class SettingsWindow : Window
             /* #3539 A4: the live bar, from the shared constants — not the retired ms box, which nothing reads. */
             parts.Add(string.Create(CultureInfo.InvariantCulture,
                 $"poison waits >= {PoisonWaitEvaluator.WarningAvgWaiters * PoisonWaitEvaluator.WindowMinutes * 60:N0}s accumulated in {PoisonWaitEvaluator.WindowMinutes}min"));
+        if (AlertRunnableQueueCheckBox.IsChecked == true)
+            parts.Add($"runnable tasks per scheduler >= {AlertRunnableQueueWarningBox.Text} (critical {AlertRunnableQueueCriticalBox.Text}) over {RunnableQueueEvaluator.WindowMinutes}min");
         if (AlertLongRunningQueryCheckBox.IsChecked == true)
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
@@ -1071,6 +1104,9 @@ public partial class SettingsWindow : Window
         AlertDeadlockCheckBox.IsEnabled = enabled;
         AlertDeadlockThresholdBox.IsEnabled = enabled;
         AlertPoisonWaitCheckBox.IsEnabled = enabled;
+        AlertRunnableQueueCheckBox.IsEnabled = enabled;
+        AlertRunnableQueueWarningBox.IsEnabled = enabled;
+        AlertRunnableQueueCriticalBox.IsEnabled = enabled;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         AlertLongRunningQueryMaxResultsBox.IsEnabled = enabled;
@@ -1183,7 +1219,8 @@ public partial class SettingsWindow : Window
 
         if (errors.Count == 0)
         {
-            SmtpStatusText.Text = "Settings look good. Use 'Send Test Email' to verify delivery.";
+            SmtpStatusText.Text = CleartextSmtpWarning()
+                ?? "Settings look good. Use 'Send Test Email' to verify delivery.";
         }
         else
         {
@@ -1194,8 +1231,50 @@ public partial class SettingsWindow : Window
         }
     }
 
+    /// <summary>
+    /// Whether a password will be sent with the login: the one typed here, or the one already in the
+    /// credential store (Save never clears the stored password when the box is empty).
+    /// </summary>
+    private bool SmtpPasswordIsSet() =>
+        !string.IsNullOrEmpty(SmtpPasswordBox.Password) || !string.IsNullOrEmpty(App.GetSmtpPassword());
+
+    /// <summary>The unencrypted-login warning for the SMTP settings as they stand in the boxes, or null.</summary>
+    private string? CleartextSmtpWarning() =>
+        EmailSendCore.CleartextCredentialsWarning(
+            SmtpSslCheckBox.IsChecked == true, SmtpUsernameBox.Text?.Trim(), SmtpPasswordIsSet());
+
+    /// <summary>
+    /// Non-blocking confirm shown at Save and Send Test when SSL is off and a login is set, so the username
+    /// and password would go to the mail server unencrypted. Yes proceeds; No cancels the action.
+    /// <paramref name="action"/> is the verb ("Save" / "Send"). Not blocked outright: an internal relay on
+    /// port 25 is a real setup.
+    /// </summary>
+    private bool ConfirmCleartextSmtp(string action)
+    {
+        if (SmtpEnabledCheckBox.IsChecked != true)
+        {
+            return true;
+        }
+
+        var warning = CleartextSmtpWarning();
+        if (warning == null)
+        {
+            return true;
+        }
+
+        var result = MessageBox.Show(
+            $"{warning}\n\n{action} anyway?",
+            "Unencrypted SMTP Login", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+        return result == MessageBoxResult.Yes;
+    }
+
     private async void TestEmailButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!ConfirmCleartextSmtp("Send"))
+        {
+            return;
+        }
+
         /* Save current App values so we can restore after the test */
         var origServer = App.SmtpServer;
         var origPort = App.SmtpPort;

@@ -77,8 +77,10 @@ VALUES ($1, 'lock_timeout', 'ERROR', 1, 'noted', $2)"))
 
         var invalid = Assert.Single(retained, e => e.GetProperty("event_class").GetString() == StoreLogClassifier.UnclassifiedClass);
         Assert.Equal(3, invalid.GetProperty("occurrences").GetInt64());
-        Assert.Equal("invalid input syntax for type integer: \"ghi\"", invalid.GetProperty("message_text").GetString());
-        Assert.Equal(Prefix + "ERROR:  invalid input syntax for type integer: \"ghi\"", invalid.GetProperty("sample_line").GetString());
+        /* The quoted input value is one of PostgreSQL's own value-bearing forms: the tool shows the sample's message
+           and line with that slot masked, and the type name kept. */
+        Assert.Equal("invalid input syntax for type integer: \"?\"", invalid.GetProperty("message_text").GetString());
+        Assert.Equal(Prefix + "ERROR:  invalid input syntax for type integer: \"?\"", invalid.GetProperty("sample_line").GetString());
 
         var timeout = Assert.Single(retained, e => e.GetProperty("event_class").GetString() == "statement_timeout");
         Assert.Equal("canceling statement due to statement timeout", timeout.GetProperty("message_text").GetString());

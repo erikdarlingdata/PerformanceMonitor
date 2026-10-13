@@ -295,9 +295,9 @@ public sealed class LongRunningQueryExclusionsTests
 
         /* Lite's adapter forwards the list INTO the DuckDB read (the data service's new trailing parameter), and the
            data service is where the predicate lives. */
-        Assert.Contains("excludeBackups, excludeMiscWaits, excludeCdc, exclusions, excludedDatabases), cancellationToken);", liteAdapter, StringComparison.Ordinal);
+        Assert.Contains("excludeBackups, excludeMiscWaits, excludeCdc, exclusions, excludedDatabases, orderByCpu), cancellationToken);", liteAdapter, StringComparison.Ordinal);
         var liteRead = ReadRepoFile("Lite", "Services", "LocalDataService.WaitStats.cs");
-        Assert.Contains("IReadOnlyList<string>? excludedDatabases = null)", liteRead, StringComparison.Ordinal);
+        Assert.Contains("IReadOnlyList<string>? excludedDatabases = null,", liteRead, StringComparison.Ordinal);
         Assert.Contains("{exclusionSql.DatabasePredicate} AS excluded_by_database", liteRead, StringComparison.Ordinal);
 
         /* Darling's template carries the third placeholder and the adapter splices it. */

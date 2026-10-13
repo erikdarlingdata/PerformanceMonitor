@@ -223,7 +223,7 @@ if (args.Length > 0 && DarlingCliCommands.IsConfigureFirewallVerb(args[0]))
    taking ownership needs a privilege a virtual service account is not granted — so it logs the remedy and carries
    on. This is the actor with the authority. Verifies every target after the attempt and exits non-zero if
    anything is still readable, so it is usable in a provisioning script. Windows-only: ACLs.
-   Optional second arg = an explicit config path. */
+   Optional: --config <path> (or the path as the one bare argument) = an explicit config path. */
 if (args.Length > 0 && DarlingCliCommands.IsHardenFilesVerb(args[0]))
 {
     if (!OperatingSystem.IsWindows())
@@ -232,8 +232,17 @@ if (args.Length > 0 && DarlingCliCommands.IsHardenFilesVerb(args[0]))
         return 1;
     }
 
-    var configPath = args.Length > 1 ? args[1] : null;
-    return DarlingCliCommands.HardenFiles(configPath, Console.Out, Console.Error);
+    /* #5700: --tls-key-files-only runs just the TLS key-file step, for the install and upgrade scripts (not in the
+       help text). The other argument, if any, is the config path. */
+    if (!DarlingCliCommands.TryParseHardenFilesArgs(args.Skip(1).ToArray(), out var configPath, out var tlsKeyFilesOnly, out var hardenFilesUsage))
+    {
+        Console.Error.WriteLine(hardenFilesUsage);
+        return 1;
+    }
+
+    return tlsKeyFilesOnly
+        ? DarlingCliCommands.HardenTlsKeyFilesOnly(configPath, Console.Out, Console.Error)
+        : DarlingCliCommands.HardenFiles(configPath, Console.Out, Console.Error);
 }
 
 /* CLI verbs: enable/disable the embedded MCP + web-dashboard endpoints on a HEADLESS managed deployment. Each
@@ -466,7 +475,8 @@ builder.Services.AddWindowsService(options =>
 /* The rolling file log under %ProgramData%\PerformanceMonitorDarling\logs — the service's PRIMARY
    diagnostic surface (see DarlingFileLoggerProvider remarks). Registered unconditionally: console
    runs get the same file, which is exactly what an operator collecting a bug report wants. */
-builder.Logging.AddProvider(new DarlingFileLoggerProvider());
+var fileLoggerProvider = new DarlingFileLoggerProvider();
+builder.Logging.AddProvider(fileLoggerProvider);
 
 if (OperatingSystem.IsWindows())
 {
@@ -553,6 +563,14 @@ builder.Services.AddHostedService<DarlingMcpHostService>();
 builder.Services.AddHostedService<DarlingWebHostService>();
 
 var host = builder.Build();
+
+/* The file log is the primary surface, and it is off when its folder could not be created, trusted or locked. The
+   warning that went to the Event Log reaches nobody on a hand install with no registered event source, and the
+   file provider drops everything while it is off, so the console logger is where this one lands. */
+if (fileLoggerProvider.StartupFailure is { } fileLogFailure)
+{
+    host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("DarlingFileLog").LogWarning("{Warning}", fileLogFailure);
+}
 
 /* #1581 single-instance guard: acquire a system-wide named mutex BEFORE running the host (Build() only
    constructs the DI graph; Run() is what starts the worker and touches Postgres). If another instance

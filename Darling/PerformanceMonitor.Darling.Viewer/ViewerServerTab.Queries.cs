@@ -133,12 +133,12 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadQueriesAsync(ViewerLoadTimer? timer = null)
     {
-        var (startUtc, endUtc) = GetWindowUtc();
+        var (startUtc, endUtc, tierNowUtc) = GetWindowUtcWithTierClock();
 
         switch (QueriesSubTabControl.SelectedIndex)
         {
             case PerformanceTrendsSubTabIndex:
-                await LoadPerformanceTrendsAsync(startUtc, endUtc);
+                await LoadPerformanceTrendsAsync(startUtc, endUtc, tierNowUtc);
                 break;
             case ActiveQueriesSubTabIndex:
                 await LoadActiveQueriesAsync(startUtc, endUtc);

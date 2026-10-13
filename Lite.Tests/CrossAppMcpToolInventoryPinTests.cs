@@ -53,6 +53,18 @@ public sealed class CrossAppMcpToolInventoryPinTests
         ("get_blocked_process_reports", "get_blocking"),
     };
 
+    /* Lite tools Darling deliberately does not have, held to the exact set: a NEW Lite tool with no Darling twin
+       still fails the pin, and an entry that stops being Lite-only (Darling gained the twin, or Lite dropped it)
+       fails LiteOnlyMcpTools_MatchTheAllowList until it is removed. */
+    private static readonly HashSet<string> KnownDarlingMissingMcpTools = new(StringComparer.Ordinal)
+    {
+        /* The undo of the analysis mute; mute_analysis_finding itself exists on both. Darling serves no MCP unmute
+           on purpose: its MCP role holds an INSERT-only grant on analysis_muted, so removing a mute is a viewer
+           or admin action there. Lite has no roles and no such viewer action, its only writer of that registry is
+           the MCP mute tool, and the mcp_allow_writes setting that serves the mute serves its undo with it. */
+        "unmute_analysis_finding",
+    };
+
     // Lite-missing MCP tools -- parity board Tier 2; the ratchet only shrinks. All 18 formerly-Darling-only
     // tools were ported to Lite (latch/spinlock, plan-cache bloat + cpu-scheduler pressure, resource
     // semaphore, default-trace events, daily summary, the three config-change tools, and the eight
@@ -409,13 +421,14 @@ public sealed class CrossAppMcpToolInventoryPinTests
 
         /* Every Lite tool (minus the registered naming-drift Lite names) must exist in Darling. */
         var missingFromDarling = lite
-            .Where(t => !driftLite.Contains(t) && !darling.Contains(t))
+            .Where(t => !driftLite.Contains(t) && !KnownDarlingMissingMcpTools.Contains(t) && !darling.Contains(t))
             .OrderBy(t => t, StringComparer.Ordinal)
             .ToList();
         Assert.True(missingFromDarling.Count == 0,
             "Darling is missing Lite MCP tool(s) with no registered naming-drift twin: [" +
             string.Join(", ", missingFromDarling) +
-            "]. Add the tool to Darling, or register a KnownNamingDrift pair.");
+            "]. Add the tool to Darling, register a KnownNamingDrift pair, or (for a tool Darling deliberately lacks) " +
+            "add it to KnownDarlingMissingMcpTools with the reason.");
 
         /* The naming-drift allow-list must still describe reality — both names present, and it really is a
            rename (not a resolved duplicate) — so a fix or a fresh collision forces this list to be updated. */
@@ -428,6 +441,23 @@ public sealed class CrossAppMcpToolInventoryPinTests
             Assert.False(darling.Contains(liteName),
                 $"Darling now also exposes '{liteName}', so the naming drift is resolved — remove the pair.");
         }
+    }
+
+    [Fact]
+    public void LiteOnlyMcpTools_MatchTheAllowList()
+    {
+        var lite = ExtractToolNames(LiteMcpDir);
+        var darling = ExtractToolNames(DarlingMcpDir);
+
+        var driftLite = KnownNamingDrift.Select(d => d.Lite).ToHashSet(StringComparer.Ordinal);
+        var liteOnly = lite
+            .Where(t => !darling.Contains(t) && !driftLite.Contains(t))
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.True(KnownDarlingMissingMcpTools.SetEquals(liteOnly),
+            "Lite-only MCP tools drifted from the allow-list.\n" +
+            $"  In Lite but NOT in Darling and NOT in the allow-list: [{Format(liteOnly.Except(KnownDarlingMissingMcpTools))}]\n" +
+            $"  Listed but no longer Lite-only:                        [{Format(KnownDarlingMissingMcpTools.Except(liteOnly))}]");
     }
 
     [Fact]

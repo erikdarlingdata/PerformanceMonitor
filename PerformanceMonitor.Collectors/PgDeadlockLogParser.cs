@@ -497,8 +497,7 @@ public static class PgDeadlockLogParser
             .Distinct(StringComparer.Ordinal)
             .Count();
 
-        var statements = ParseStatements(graph);
-        statements.TryGetValue(entry.Pid, out var victimStatement);
+        var victimStatement = VictimStatementOf(graph, entry.Pid);
 
         return new ParsedDeadlock(
             OccurredAtUtc: entry.OccurredAtUtc,
@@ -719,4 +718,21 @@ public static class PgDeadlockLogParser
     /// </summary>
     public static string? NormalizeStatement(string? statement) =>
         string.IsNullOrEmpty(statement) ? statement : PgLogTextRedactor.MaskQuery(statement);
+
+    /// <summary>
+    /// The victim's statement as a normalized graph carries it (#4005): what the collector stores for a report it
+    /// reads live (<see cref="FromEntry"/>), and what a read shows for a row stored before then. Never the stored
+    /// statement normalized on its own: read alone, a statement cut inside a literal that holds a line shaped like
+    /// the victim's own <c>Process N:</c> head keeps words of that literal, where the graph, read the fail-closed
+    /// way, withholds the statement. Null when there is no pid, or the graph carries no statement under it.
+    /// </summary>
+    public static string? VictimStatementOf(string? normalizedGraph, int? victimPid)
+    {
+        if (normalizedGraph is null || victimPid is not { } pid)
+        {
+            return null;
+        }
+
+        return ParseStatements(normalizedGraph).TryGetValue(pid, out var statement) ? statement : null;
+    }
 }

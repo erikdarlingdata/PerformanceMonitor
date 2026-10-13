@@ -65,6 +65,27 @@ public sealed class McpToolGuideHeadsPlatformTests
     }
 
     /// <summary>
+    /// #5718: get_store_host's size now comes from the hourly sweep, its uncompressed-chunk figures can be null
+    /// on a timeout, and a slow fact fails alone. The reading rules ride the tail (get_tool_guide), not the
+    /// served description, because that part is held to the tools/list byte budget.
+    /// </summary>
+    [Fact]
+    public void StoreHost_GuideTail_ExplainsTheStoredSizeAndTheAloneFailingFacts_OffTheServedHead()
+    {
+        var served = McpToolGuideTests.Served("get_store_host");
+        Assert.NotNull(served.Tail);
+        foreach (var phrase in new[]
+        {
+            "size_as_of", "size_age_seconds", "size_unavailable_reason", "uncompressed_unavailable_reason",
+            "hourly sweep", "--check-settings reads the size live",
+        })
+        {
+            Assert.Contains(phrase, served.Tail!, StringComparison.Ordinal);
+            Assert.DoesNotContain(phrase, served.Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
     /// get_store_metrics' TOAST and checkpointer blocks are two of its many facts and would blow the 620-char
     /// head budget on their own; they stay off the shared head and ride the tail instead, verbatim (D3/D9: a
     /// model reading only the head still gets the scope, navigation, daily-point, job_history, retention and

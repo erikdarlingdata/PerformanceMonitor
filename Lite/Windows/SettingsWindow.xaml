@@ -276,6 +276,17 @@
                               ToolTip="The Poison Wait alert fires when a poison wait type accumulates 600 s of wait inside 10 minutes (WARNING) or 6,000 s (CRITICAL)."/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <!-- #5641: Runnable Queue grades the AVERAGE runnable tasks per scheduler over the collections of the last 5 minutes
+                         (at least 3; otherwise the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates)). The two bars are whole numbers; Critical never below Warning. -->
+                    <CheckBox x:Name="AlertRunnableQueueCheckBox" Content="Runnable queue (tasks per scheduler) warn at" VerticalAlignment="Center"
+                              Foreground="{DynamicResource ForegroundBrush}"
+                              ToolTip="The Runnable Queue alert averages runnable tasks per scheduler over the collections in the last 5 minutes when there are at least 3, otherwise over the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates). It fires WARNING at the first bar and CRITICAL at the second; a Warning that worsens to Critical is delivered at once."/>
+                    <TextBox x:Name="AlertRunnableQueueWarningBox" Width="45" Text="8" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="critical at" VerticalAlignment="Center" Margin="6,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertRunnableQueueCriticalBox" Width="45" Text="16" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertLongRunningQueryCheckBox" Content="Long-running queries over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertLongRunningQueryThresholdBox" Width="45" Text="30" Margin="6,0,0,0" VerticalAlignment="Center"/>
@@ -767,10 +778,10 @@
                 <TextBlock Text="Alert Severity Colors" FontWeight="SemiBold" FontSize="12"
                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,16,0,4"/>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                    <Run Foreground="#DC2626" FontWeight="Bold" Text="&#x25A0; Red" /> — Critical (Deadlocks, Poison Waits, Server Unreachable)
+                    <Run Foreground="#DC2626" FontWeight="Bold" Text="&#x25A0; Red" /> — Critical (Deadlocks, Poison Waits, Runnable Queue at the Critical bar, Server Unreachable)
                 </TextBlock>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                    <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" /> — Alert / Warning (Blocking, Long-Running Queries, tempdb, Jobs)
+                    <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" /> — Alert / Warning (Blocking, Long-Running Queries, Runnable Queue, tempdb, Jobs)
                 </TextBlock>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
                     <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" /> — Warning (High CPU)

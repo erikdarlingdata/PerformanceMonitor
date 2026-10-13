@@ -80,6 +80,7 @@ public static class AlertFamily
         ["Blocking Wait Time"] = Performance,
         ["Deadlocks Detected"] = Performance,
         ["Poison Wait"] = Performance,
+        ["Runnable Queue"] = Performance,
         ["Long-Running Query"] = Performance,
         ["tempdb Space"] = Performance,
         ["Volume Free Space"] = Performance,

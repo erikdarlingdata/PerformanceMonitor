@@ -97,8 +97,11 @@ public static class StoreConnectionSelfTest
         }
         catch (Exception ex)
         {
+            /* The formatter's text, never the exception's own message: Npgsql's message for a parse failure can
+               quote part of the string (a password with an unquoted ';' makes the text after it the "keyword"),
+               and this detail goes into the failure overlay and the viewer log. */
             results.Add(new LayerResult(ConfigLayer, LayerOutcome.Failed,
-                $"connection string did not parse: {ex.Message}", stopwatch.Elapsed));
+                $"connection string did not parse: {DarlingStoreConnection.DescribeParseFailure(ex)}", stopwatch.Elapsed));
             AddNotReached(results, DnsLayer, TcpLayer, TlsLayer, AuthLayer, SchemaLayer);
             return results;
         }
@@ -109,6 +112,23 @@ public static class StoreConnectionSelfTest
         {
             results.Add(new LayerResult(ConfigLayer, LayerOutcome.Failed,
                 "connection string parsed but names no Host", stopwatch.Elapsed));
+            AddNotReached(results, DnsLayer, TcpLayer, TlsLayer, AuthLayer, SchemaLayer);
+            return results;
+        }
+
+        /* The string parses and names a Host, but Npgsql's construction step still validates it (it splits a Host value
+           on its last ':' and range-checks the port, and it rejects setting conflicts), and the exception for that
+           can quote part of the string: a password whose unquoted ';' is followed by "host=x:y" makes y the bad port.
+           The guard runs that step (it builds and disposes a data source and opens nothing) and gives the formatter's
+           text, so the exception's message does not reach this detail, and neither does a host built out of a password
+           tail that has a ':' in it. A tail without one is a different case: a password with an unquoted ';' followed by
+           "Host=x" parses and constructs cleanly, so x is then the Host, and the layers below print it as the endpoint and
+           name it in their own results. The string cannot tell that apart from a Host the operator wrote; a password that
+           contains ';' or '=' has to be quoted. */
+        if (DarlingStoreConnection.TryDescribeParseFailure(connectionString) is { } unusable)
+        {
+            results.Add(new LayerResult(ConfigLayer, LayerOutcome.Failed,
+                $"connection string parsed but cannot be used: {unusable}", stopwatch.Elapsed));
             AddNotReached(results, DnsLayer, TcpLayer, TlsLayer, AuthLayer, SchemaLayer);
             return results;
         }

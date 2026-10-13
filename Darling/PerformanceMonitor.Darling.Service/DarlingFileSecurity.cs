@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -31,34 +32,129 @@ namespace PerformanceMonitor.Darling.Service;
 /// file are readable ONLY by <c>SYSTEM</c>, <c>Administrators</c>, and the service account — never an
 /// interactive user. Post-split the Viewer no longer needs the superuser credential (it connects as
 /// admin/viewer), so the RCE vector is locked hardest.</item>
-/// <item>The <b>admin/viewer</b> credentials additionally grant read to <c>NT AUTHORITY\INTERACTIVE</c>.
-/// The Viewer runs as the interactive operator, whose identity is unknown at provisioning time;
-/// INTERACTIVE is the concrete principal that lets that Viewer read the credential with zero config
-/// while excluding exactly the non-interactive local attack primitives the design's threat model
-/// calls out (services, SSRF/sandboxed socket code, scheduled tasks — none hold an interactive token).</item>
+/// <item>The <b>admin/viewer</b> credentials, and <c>darling.json</c>, additionally grant read to the local
+/// group <see cref="OperatorGroupName"/>. The Viewer and the CLI run as the interactive operator, whose identity
+/// is unknown at provisioning time; the group is the concrete principal an administrator fills with exactly the
+/// people who run them. It replaced <c>NT AUTHORITY\INTERACTIVE</c>, which every account that logs on to the
+/// machine holds: on a jump host or a terminal server that grant handed every user the admin store credential,
+/// and with it the whole store.</item>
 /// </list>
-/// On the design's default single-operator VM, INTERACTIVE == the operator, so this is tight. On a
-/// shared machine where untrusted users can log on interactively they could read the admin/viewer
-/// credentials (never the superuser one); the tightening path there is a configured operator account
-/// ACL'd specifically — a future knob, not built for the Phase 1 single-operator default.</para>
+/// The installer creates the group (empty) and the service grants it on every start. When the group does not exist
+/// (a hand install) nothing replaces it: the files stay readable by SYSTEM, Administrators and the service account
+/// only, and the Viewer and the CLI fail to read them until the group is created and the service restarted.</para>
 /// </summary>
 [SupportedOSPlatform("windows")]
 public static class DarlingFileSecurity
 {
     private static SecurityIdentifier LocalSystem => new(WellKnownSidType.LocalSystemSid, null);
     private static SecurityIdentifier Administrators => new(WellKnownSidType.BuiltinAdministratorsSid, null);
-    private static SecurityIdentifier Interactive => new(WellKnownSidType.InteractiveSid, null);
 
-    /// <summary>The three "anyone on this box" groups a secret-bearing file must never grant read to
+    /// <summary>
+    /// The local group whose members may read <c>darling.json</c> and the admin and viewer store credentials:
+    /// the people who run the Viewer or the CLI without elevation. Named after the service's own account
+    /// (<c>NT SERVICE\PerformanceMonitor Darling</c>) plus a role, the way Windows names <c>Performance Log
+    /// Users</c>, so it sorts beside the service in Local Users and Groups. The Viewer carries a copy of this
+    /// string, because it does not reference this assembly.
+    /// </summary>
+    public const string OperatorGroupName = DarlingOperatorGroup.Name;
+
+    /// <summary>The four "anyone on this box" groups a secret-bearing file must never grant read to
     /// (<see cref="IsReadableByOrdinaryUsers"/>). <c>BUILTIN\Users</c> is the one that actually bites: a folder
     /// created directly under <c>C:\</c> — the documented install location — inherits Read &amp; Execute for it
-    /// from the root DACL.</summary>
+    /// from the root DACL. <c>INTERACTIVE</c> is here because every account that logs on holds it: an install
+    /// hardened before the operator group existed granted it, and a file that still does is as readable as one
+    /// that grants Users.</summary>
     private static SecurityIdentifier[] OrdinaryUserGroups =>
     [
         new(WellKnownSidType.BuiltinUsersSid, null),
         new(WellKnownSidType.AuthenticatedUserSid, null),
         new(WellKnownSidType.WorldSid, null),
+        new(WellKnownSidType.InteractiveSid, null),
     ];
+
+    /// <summary>
+    /// The <c>icacls</c> argument that removes every explicit grant <see cref="IsReadableByOrdinaryUsers"/> flags
+    /// (Users, Authenticated Users, Everyone and INTERACTIVE), by SID so it works on any display language. Built from
+    /// the same list as the check, so a fix text that uses it names everything the check can flag.
+    /// </summary>
+    public static string RemoveOrdinaryUserGrantsArgument =>
+        "/remove:g " + string.Join(" ", Array.ConvertAll(OrdinaryUserGroups, group => "*" + group.Value));
+
+    /* A test cannot create a local group on the build machine, so it substitutes a SID that exists (or null for
+       "no group"). Null everywhere else, so the service resolves the real group. */
+    private static Func<SecurityIdentifier?>? _operatorGroupOverride;
+
+    /// <summary>Substitutes <paramref name="resolver"/> for the real group lookup; null restores it.</summary>
+    internal static void UseOperatorGroupForTests(Func<SecurityIdentifier?>? resolver) => _operatorGroupOverride = resolver;
+
+    /// <summary>
+    /// The SID of <see cref="OperatorGroupName"/>, or null when no such group exists on this machine. Looked up on
+    /// every call, never cached: the service runs as a virtual account and cannot create the group, so an
+    /// administrator creates it after the fact and the next harden (the next service start) picks it up.
+    /// </summary>
+    public static SecurityIdentifier? OperatorGroup
+    {
+        get
+        {
+            if (_operatorGroupOverride is not null)
+            {
+                return _operatorGroupOverride();
+            }
+
+            try
+            {
+                /* Machine-qualified: an unqualified name is also looked up in the domain and in trusted domains, and
+                   a group of that name made there must never be the one that is granted access. */
+                var sid = (SecurityIdentifier)new NTAccount(Environment.MachineName, OperatorGroupName)
+                    .Translate(typeof(SecurityIdentifier));
+                return IsLocalGroup(sid, DomainOf) ? sid : null;
+            }
+            catch (Exception ex) when (ex is IdentityNotMappedException or SystemException)
+            {
+                return null;
+            }
+        }
+    }
+
+    private static string? DomainOf(SecurityIdentifier sid)
+    {
+        var name = ((NTAccount)sid.Translate(typeof(NTAccount))).Value;
+        var slash = name.IndexOf('\\', StringComparison.Ordinal);
+        return slash < 0 ? null : name[..slash];
+    }
+
+    /// <summary>
+    /// Is <paramref name="sid"/> a group of this machine's own account database: its domain part is the machine
+    /// name or BUILTIN? The qualified lookup already asks only that database, and this checks the answer as well, so
+    /// a name that resolves to a domain group is refused rather than granted.
+    /// </summary>
+    internal static bool IsLocalGroup(SecurityIdentifier sid, Func<SecurityIdentifier, string?> domainOf)
+    {
+        string? domain;
+        try
+        {
+            domain = domainOf(sid);
+        }
+        catch (Exception ex) when (ex is IdentityNotMappedException or SystemException)
+        {
+            return false;
+        }
+
+        return string.Equals(domain, Environment.MachineName, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(domain, "BUILTIN", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The warning a harden caller logs when <see cref="OperatorGroup"/> is null: what stays locked out, which
+    /// install step creates the group, and what to do on a hand install. One line, so the log reads the same from
+    /// every caller.
+    /// </summary>
+    public static string OperatorGroupMissingWarning =>
+        $"The local group '{OperatorGroupName}' does not exist on this machine (a group of that name in a domain is never used), so darling.json and the store's admin " +
+        "and viewer credentials are readable by SYSTEM, Administrators and the service account only, and the Viewer " +
+        "and the CLI cannot read them unless run elevated. install-darling.ps1 step 4b creates the group; on a hand " +
+        $"install create it from an elevated prompt (net localgroup \"{OperatorGroupName}\" /add), add the people who " +
+        "run the Viewer or the CLI, and restart this service so it grants the group.";
 
     /* #2371: set by --harden-files to the account the SERVICE is registered under, because that verb is the
        one caller that is deliberately NOT the service. Null everywhere else, so the in-service callers keep
@@ -182,10 +278,11 @@ public static class DarlingFileSecurity
 
     /// <summary>
     /// Locks a directory to SYSTEM + Administrators + the service account (full control, inherited by
-    /// children), removing ALL inherited access so no Users / Authenticated Users read survives. When
-    /// <paramref name="allowInteractiveTraverse"/> is set, INTERACTIVE gets traverse (not list) on THIS
-    /// folder only — so the operator's Viewer can reach the admin/viewer credential files beside the
-    /// data directory without that access flowing into the data-directory subtree.
+    /// children), removing ALL inherited access so no Users / Authenticated Users / INTERACTIVE read survives.
+    /// When <paramref name="allowInteractiveTraverse"/> is set and the operator group exists, the group gets
+    /// traverse (not list) on THIS folder only — so the operator's Viewer can reach the admin/viewer credential
+    /// files beside the data directory without that access flowing into the data-directory subtree. (The
+    /// parameter keeps its old name: the grant is still "the interactive operator's", only the principal changed.)
     /// </summary>
     public static void HardenDirectory(string path, bool allowInteractiveTraverse) =>
         new DirectoryInfo(path).SetAccessControl(HardenedDirectorySecurity(allowInteractiveTraverse));
@@ -205,13 +302,13 @@ public static class DarlingFileSecurity
         AddFull(security, Administrators, subtree);
         AddFull(security, ServiceAccount, subtree);
 
-        if (allowInteractiveTraverse)
+        if (allowInteractiveTraverse && OperatorGroup is { } operators)
         {
             /* Traverse + synchronize, THIS FOLDER ONLY (no inheritance) — the operator can open a
                known credential path here but cannot enumerate the folder or descend into the PG data
                directory. */
             security.AddAccessRule(new FileSystemAccessRule(
-                Interactive,
+                operators,
                 FileSystemRights.Traverse | FileSystemRights.Synchronize,
                 InheritanceFlags.None,
                 PropagationFlags.None,
@@ -236,7 +333,167 @@ public static class DarlingFileSecurity
     /// than one name is refused.</para>
     /// </summary>
     /// <returns>Null once the ACL is applied; otherwise why it was not, and nothing was changed.</returns>
-    public static string? HardenWithoutFollowingLinks(string path, bool isDirectory, bool allowInteractive, string anchorDirectory)
+    public static string? HardenWithoutFollowingLinks(string path, bool isDirectory, bool allowInteractive, string anchorDirectory) =>
+        ApplyWithoutFollowingLinks(
+            path, anchorDirectory,
+            () => isDirectory ? HardenedDirectorySecurity(allowInteractive) : HardenedFileSecurity(allowInteractive));
+
+    /// <summary>
+    /// The TLS key-file ACL (<see cref="HardenedKeyFileSecurity"/>) applied the way
+    /// <see cref="HardenWithoutFollowingLinks"/> applies one: through a handle to exactly the checked file, refused when
+    /// the leaf or a folder on its path up to <paramref name="anchorDirectory"/> is a junction or symbolic link, when the
+    /// handle's final path is not the path asked for, or when the file has more than one name (#5700). Before the key is
+    /// opened, every folder from the volume root down to its parent, the anchor included, is opened without following a
+    /// link and held until the ACL is set (<see cref="PinFolderChain"/>): one that is a junction or symbolic link refuses
+    /// the change, and none of them can be renamed, deleted or replaced while the change runs.
+    /// </summary>
+    /// <returns>Null once the ACL is applied; otherwise why it was not, and nothing was changed.</returns>
+    public static string? HardenKeyFileWithoutFollowingLinks(string path, string anchorDirectory, KeyFileKind kind) =>
+        ApplyWithoutFollowingLinks(path, anchorDirectory, HardenedKeyFileSecurity, kind);
+
+    /// <summary><see cref="HardenKeyFileWithoutFollowingLinks(string, string, KeyFileKind)"/> that calls
+    /// <paramref name="whilePinned"/> twice, so a test can try to rename a held folder at the moments that matter: with
+    /// <see cref="PinnedFolders"/> once every folder on the path is held and checked and the key is not yet open, and with
+    /// <see cref="PinnedKey"/> once the key is open and checked, just before the ACL is applied.</summary>
+    internal static string? HardenKeyFileWithoutFollowingLinks(string path, string anchorDirectory, KeyFileKind kind, Action<string> whilePinned) =>
+        ApplyWithoutFollowingLinks(path, anchorDirectory, HardenedKeyFileSecurity, kind, whilePinned);
+
+    /// <summary>The stage the hooked <see cref="HardenKeyFileWithoutFollowingLinks(string, string, KeyFileKind)"/> reports
+    /// once the folders on the key's path are held.</summary>
+    internal const string PinnedFolders = "folders";
+
+    /// <summary>The stage it reports once the key itself is open and checked.</summary>
+    internal const string PinnedKey = "key";
+
+    /// <summary>What a file darling.json names as a TLS secret has to be, checked on its first bytes before its ACL is
+    /// changed (#5700): a DER PKCS#12 bundle, a PEM private key, or a short text file holding a password.</summary>
+    public enum KeyFileKind
+    {
+        /// <summary>A PKCS#12 bundle: an ASN.1 SEQUENCE with a valid DER length.</summary>
+        Pfx,
+
+        /// <summary>A PEM file with a <c>-----BEGIN ... PRIVATE KEY-----</c> header.</summary>
+        PemKey,
+
+        /// <summary>A password file: at most 4 KB, and not one of the product's own file types.</summary>
+        PasswordFile,
+    }
+
+    /// <summary>The reason a file named as a certificate or key is not changed, when its content is neither.</summary>
+    public const string NotAKeyFileReason = "is not a certificate or key file";
+
+    /// <summary>The reason a file named as a password file is not changed, when it is not one.</summary>
+    public const string NotAPasswordFileReason = "is not a password file";
+
+    /// <summary>The largest password file <see cref="KeyFileKind.PasswordFile"/> accepts.</summary>
+    internal const int PasswordFileMaxBytes = 4096;
+
+    /// <summary>The most of a PEM file read to find its private-key header (a chain of certificates can come first).</summary>
+    private const int PemReadLimit = 1024 * 1024;
+
+    private static readonly string[] ProductFileExtensions = { ".exe", ".dll", ".json", ".ps1", ".pdb", ".config", ".xml" };
+
+    /// <summary>Why <paramref name="head"/>, the first bytes of a file <paramref name="length"/> bytes long, does not start
+    /// like a DER PKCS#12 bundle; null when it does. The first byte is the SEQUENCE tag (0x30) and the length that follows
+    /// is a definite DER length: short form below 0x80, otherwise one to four length bytes with no leading zero byte (and
+    /// at least 0x80 when there is only one), and the whole value has to fit in the file.</summary>
+    internal static string? PfxContentRefusal(ReadOnlySpan<byte> head, long length)
+    {
+        if (head.Length >= 2 && head[0] == 0x30)
+        {
+            var first = head[1];
+            long content;
+            var headerLength = 2;
+            if (first < 0x80)
+            {
+                content = first;
+            }
+            else
+            {
+                var count = first & 0x7F;
+                if (first == 0x80 || count > 4 || head.Length < 2 + count || head[2] == 0 || (count == 1 && head[2] < 0x80))
+                {
+                    return NotAKeyFileReason;
+                }
+
+                content = 0;
+                for (var i = 0; i < count; i++)
+                {
+                    content = (content << 8) | head[2 + i];
+                }
+
+                headerLength += count;
+            }
+
+            if (content > 0 && headerLength + content <= length)
+            {
+                return null;
+            }
+        }
+
+        return NotAKeyFileReason;
+    }
+
+    /// <summary>Why <paramref name="text"/>, the start of a file, is not a PEM private key; null when it holds a
+    /// <c>-----BEGIN ... PRIVATE KEY-----</c> line.</summary>
+    internal static string? PemContentRefusal(ReadOnlySpan<byte> text)
+    {
+        var decoded = System.Text.Encoding.Latin1.GetString(text);
+        return System.Text.RegularExpressions.Regex.IsMatch(decoded, "-----BEGIN [A-Z ]*PRIVATE KEY-----", System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            ? null
+            : NotAKeyFileReason;
+    }
+
+    /// <summary>Why <paramref name="path"/>, <paramref name="length"/> bytes long, is not a password file; null when it
+    /// could be one.</summary>
+    internal static string? PasswordFileRefusal(string path, long length)
+    {
+        var extension = Path.GetExtension(path);
+        if (ProductFileExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+        {
+            return $"{NotAPasswordFileReason} (a {extension.ToLowerInvariant()} file)";
+        }
+
+        return length > PasswordFileMaxBytes
+            ? $"{NotAPasswordFileReason} (it is larger than 4 KB)"
+            : null;
+    }
+
+    /// <summary>Reads the first bytes of the file behind <paramref name="handle"/> (at most <paramref name="count"/>).</summary>
+    private static byte[] ReadHead(Microsoft.Win32.SafeHandles.SafeFileHandle handle, long length, int count)
+    {
+        var buffer = new byte[(int)Math.Min(length, count)];
+        var read = 0;
+        while (read < buffer.Length)
+        {
+            var got = RandomAccess.Read(handle, buffer.AsSpan(read), read);
+            if (got <= 0)
+            {
+                break;
+            }
+
+            read += got;
+        }
+
+        return read == buffer.Length ? buffer : buffer[..read];
+    }
+
+    private static string? KeyFileContentRefusal(Microsoft.Win32.SafeHandles.SafeFileHandle handle, string path, KeyFileKind kind)
+    {
+        var length = RandomAccess.GetLength(handle);
+        switch (kind)
+        {
+            case KeyFileKind.Pfx:
+                return PfxContentRefusal(ReadHead(handle, length, 16), length);
+            case KeyFileKind.PemKey:
+                return PemContentRefusal(ReadHead(handle, length, PemReadLimit));
+            default:
+                return PasswordFileRefusal(path, length);
+        }
+    }
+
+    private static string? ApplyWithoutFollowingLinks(
+        string path, string anchorDirectory, Func<NativeObjectSecurity> buildSecurity, KeyFileKind? keyKind = null, Action<string>? whilePinned = null)
     {
         var anchor = Path.TrimEndingDirectorySeparator(Path.GetFullPath(anchorDirectory));
         var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
@@ -245,13 +502,100 @@ public static class DarlingFileSecurity
             throw new ArgumentException($"{full} is not below {anchor}.", nameof(path));
         }
 
+        /* A key file is changed only with its whole folder chain held (#5700): the install folder is where a config lives
+           that ordinary users may be able to rename, and a name resolved after the check is not the name checked. */
+        var pinned = new List<Microsoft.Win32.SafeHandles.SafeFileHandle>();
+        try
+        {
+            if (keyKind is not null && PinFolderChain(Path.GetDirectoryName(full)!, pinned) is { } folderRefusal)
+            {
+                return folderRefusal;
+            }
+
+            whilePinned?.Invoke(PinnedFolders);
+            return ApplyToOpenedFile(full, anchor, buildSecurity, keyKind, whilePinned);
+        }
+        finally
+        {
+            foreach (var held in pinned)
+            {
+                held.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Opens every folder from the volume root down to <paramref name="folder"/> without following a link, adds each
+    /// handle to <paramref name="held"/> (the caller closes them after the change), and returns why the chain cannot be
+    /// trusted: the first folder that is a junction or symbolic link. Null when none is, and then none of the folders can be
+    /// renamed, deleted or turned into a link until the handles are closed: each is opened for traverse, which counts as
+    /// read access in a share check (the same open a process's current directory holds), with a share mode that does not
+    /// include delete, so the open that a rename or a delete needs is a sharing violation. The folders are opened from the
+    /// root down, each by a name that resolves through folders already held, so none can have been swapped after its check.
+    /// An open for attributes only would not do this: such an open takes no part in a share check.
+    /// </summary>
+    private static string? PinFolderChain(string folder, List<Microsoft.Win32.SafeHandles.SafeFileHandle> held)
+    {
+        var chain = new List<string>();
+        for (var current = folder; current is not null; current = Path.GetDirectoryName(current))
+        {
+            chain.Add(current);
+        }
+
+        chain.Reverse();
+        foreach (var directory in chain)
+        {
+            Microsoft.Win32.SafeHandles.SafeFileHandle handle;
+            try
+            {
+                handle = OpenForSecurity(directory, followLink: false, access: FileTraverse | FileReadAttributes);
+            }
+            catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == ErrorAccessDenied)
+            {
+                handle = OpenForSecurity(directory, followLink: false, access: FileReadData | FileReadAttributes);
+            }
+
+            held.Add(handle);
+            if ((File.GetAttributes(handle) & FileAttributes.ReparsePoint) != 0)
+            {
+                return $"{directory} is a junction or symbolic link";
+            }
+        }
+
+        return null;
+    }
+
+    private static string? ApplyToOpenedFile(
+        string full, string anchor, Func<NativeObjectSecurity> buildSecurity, KeyFileKind? keyKind, Action<string>? whilePinned)
+    {
         string anchorFinal;
         using (var anchorHandle = OpenForSecurity(anchor, followLink: true, access: FileReadAttributes))
         {
             anchorFinal = FinalPath(anchorHandle);
         }
 
-        using var handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | FileReadAttributes);
+        /* A key file is also read through this handle (its content is checked before anything is changed) and, when the
+           caller may, has its owner set to Administrators; a caller that cannot take the owner right still gets the rest. */
+        var ownerRight = false;
+        Microsoft.Win32.SafeHandles.SafeFileHandle handle;
+        if (keyKind is null)
+        {
+            handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | FileReadAttributes);
+        }
+        else
+        {
+            try
+            {
+                handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | WriteOwner | FileReadData | FileReadAttributes);
+                ownerRight = true;
+            }
+            catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == ErrorAccessDenied)
+            {
+                handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | FileReadData | FileReadAttributes);
+            }
+        }
+
+        using var handleScope = handle;
         if ((File.GetAttributes(handle) & FileAttributes.ReparsePoint) != 0)
         {
             return $"{full} is a junction or symbolic link";
@@ -264,7 +608,7 @@ public static class DarlingFileSecurity
 
         if (information.NumberOfLinks > 1)
         {
-            return $"{full} is a hard link: the file has {information.NumberOfLinks.ToString(System.Globalization.CultureInfo.InvariantCulture)} names, and its ACL is the same under every one of them";
+            return HardLinkRefusal(full, information.NumberOfLinks);
         }
 
         /* Joined rather than concatenated: a volume root keeps its separator (C:\), and its final path can come back
@@ -277,7 +621,13 @@ public static class DarlingFileSecurity
             return $"{full} resolves to {actual}, so a junction or symbolic link is on its path";
         }
 
-        NativeObjectSecurity security = isDirectory ? HardenedDirectorySecurity(allowInteractive) : HardenedFileSecurity(allowInteractive);
+        if (keyKind is { } kind && KeyFileContentRefusal(handle, full, kind) is { } contentRefusal)
+        {
+            return $"{full} {contentRefusal}";
+        }
+
+        whilePinned?.Invoke(PinnedKey);
+        var security = buildSecurity();
         var descriptor = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
         var dacl = new byte[descriptor.DiscretionaryAcl!.BinaryLength];
         descriptor.DiscretionaryAcl.GetBinaryForm(dacl, 0);
@@ -297,9 +647,30 @@ public static class DarlingFileSecurity
             pinned.Free();
         }
 
+        if (ownerRight)
+        {
+            /* The tree lock's rule for the same file: Administrators own it. A refusal (the process does not hold the
+               Administrators group) is not an error here: the owner is read back and judged by the caller. */
+            var owner = new byte[Administrators.BinaryLength];
+            Administrators.GetBinaryForm(owner, 0);
+            var ownerPin = System.Runtime.InteropServices.GCHandle.Alloc(owner, System.Runtime.InteropServices.GCHandleType.Pinned);
+            try
+            {
+                _ = SetSecurityInfo(handle, FileObject, OwnerSecurityInformation, ownerPin.AddrOfPinnedObject(), IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            }
+            finally
+            {
+                ownerPin.Free();
+            }
+        }
+
         return null;
     }
 
+    private const int ErrorAccessDenied = 5;
+    private const uint FileReadData = 0x00000001;
+    private const uint FileTraverse = 0x00000020;
+    private const uint WriteOwner = 0x00080000;
     private const uint GenericRead = 0x80000000;
     private const uint ReadControl = 0x00020000;
     private const uint WriteDac = 0x00040000;
@@ -310,8 +681,9 @@ public static class DarlingFileSecurity
     private const uint DaclSecurityInformation = 0x00000004;
     private const uint ProtectedDaclSecurityInformation = 0x80000000;
 
-    /// <summary>Opens a file or directory (backup semantics) for its security, sharing everything but delete, so it
-    /// cannot be renamed or removed while it is held.</summary>
+    /// <summary>Opens a file or directory (backup semantics) for its security. Holding the handle does not keep the
+    /// name where it is: what protects the write is that the checks and the ACL change all go through this one
+    /// handle, so they apply to the object that was opened, whatever the name points at afterwards.</summary>
     private static Microsoft.Win32.SafeHandles.SafeFileHandle OpenForSecurity(string path, bool followLink, uint access)
     {
         var handle = CreateFileW(
@@ -321,7 +693,8 @@ public static class DarlingFileSecurity
         {
             var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
             handle.Dispose();
-            throw new System.ComponentModel.Win32Exception(error, $"{path} could not be opened");
+            /* The system's own words for the error go on the end, so a denied open reads as "Access is denied". */
+            throw new System.ComponentModel.Win32Exception(error, $"{path} could not be opened: {new System.ComponentModel.Win32Exception(error).Message}");
         }
 
         return handle;
@@ -348,6 +721,97 @@ public static class DarlingFileSecurity
             : path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..]
             : path;
     }
+
+    /// <summary>The refusal for a file with more than one name: how many, the other names (as many as can be listed), and
+    /// the command that lists them, because the ACL belongs to the file and is the same under every name.</summary>
+    internal static string HardLinkRefusal(string full, uint names)
+    {
+        const int Listed = 8;
+        var others = OtherNamesOf(full);
+        var text = $"{full} is a hard link: the file has {names.ToString(System.Globalization.CultureInfo.InvariantCulture)} names, and its ACL is the same under every one of them";
+        if (others.Count > 0)
+        {
+            text += $". Its other name(s): {string.Join("; ", others.Take(Listed))}" + (others.Count > Listed ? $"; and {others.Count - Listed} more" : string.Empty);
+        }
+
+        return text + $". To list every name, run: fsutil hardlink list \"{full}\"";
+    }
+
+    /// <summary>The other names of the file at <paramref name="full"/> on its volume (<c>FindFirstFileNameW</c> /
+    /// <c>FindNextFileNameW</c>), as full paths; empty when they cannot be listed.</summary>
+    internal static IReadOnlyList<string> OtherNamesOf(string full)
+    {
+        var names = new List<string>();
+        var volume = Path.GetPathRoot(full) ?? string.Empty;
+        var own = full[volume.Length..];
+        var buffer = new char[1024];
+        var length = (uint)buffer.Length;
+        var search = FindFirstFileNameW(full, 0, ref length, buffer);
+        if (search == InvalidHandle && System.Runtime.InteropServices.Marshal.GetLastPInvokeError() == ErrorMoreData)
+        {
+            buffer = new char[length];
+            length = (uint)buffer.Length;
+            search = FindFirstFileNameW(full, 0, ref length, buffer);
+        }
+
+        if (search == InvalidHandle)
+        {
+            return names;
+        }
+
+        try
+        {
+            while (true)
+            {
+                /* The count includes the terminating null; each name is volume-relative and starts with a backslash. */
+                var name = new string(buffer, 0, (int)Math.Max(length, 1u) - 1).TrimStart('\\');
+                if (!string.Equals(name, own, StringComparison.OrdinalIgnoreCase))
+                {
+                    names.Add(Path.Join(volume, name));
+                }
+
+                length = (uint)buffer.Length;
+                if (FindNextFileNameW(search, ref length, buffer))
+                {
+                    continue;
+                }
+
+                if (System.Runtime.InteropServices.Marshal.GetLastPInvokeError() != ErrorMoreData)
+                {
+                    break;
+                }
+
+                buffer = new char[length];
+                length = (uint)buffer.Length;
+                if (!FindNextFileNameW(search, ref length, buffer))
+                {
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            _ = FindClose(search);
+        }
+
+        return names;
+    }
+
+    private const int ErrorMoreData = 234;
+    private static readonly IntPtr InvalidHandle = new(-1);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindFirstFileNameW(
+        string lpFileName, uint dwFlags, ref uint stringLength, [System.Runtime.InteropServices.Out] char[] linkName);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool FindNextFileNameW(
+        IntPtr hFindStream, ref uint stringLength, [System.Runtime.InteropServices.Out] char[] linkName);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool FindClose(IntPtr hFindFile);
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
     private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(
@@ -390,12 +854,34 @@ public static class DarlingFileSecurity
 
 
     /// <summary>
-    /// Locks a file to SYSTEM + Administrators + the service account, dropping inherited access. When
-    /// <paramref name="allowInteractiveRead"/> is set (the admin/viewer credentials the Viewer reads),
-    /// INTERACTIVE gets read. The superuser credential and the transient init pwfile pass false.
+    /// Locks a file to SYSTEM + Administrators + the service account, dropping inherited access, and with it any
+    /// INTERACTIVE entry an earlier version granted. When <paramref name="allowInteractiveRead"/> is set (the
+    /// admin/viewer credentials and the config the Viewer and the CLI read) and the operator group exists, the
+    /// group gets read; with no group, nothing else does. The superuser credential and the transient init pwfile
+    /// pass false. (The parameter keeps its old name: the grant is still "the interactive operator's", only the
+    /// principal changed.)
     /// </summary>
     public static void HardenFile(string path, bool allowInteractiveRead) =>
         new FileInfo(path).SetAccessControl(HardenedFileSecurity(allowInteractiveRead));
+
+    /// <summary>
+    /// The ACL of a TLS private-key file (#5700): SYSTEM and Administrators full control, the service account read
+    /// only, the DACL protected so nothing is inherited, and no operator-group grant (only the service reads a key).
+    /// The service never writes the file, and a read-only grant carries none of the write bits the install tree lock
+    /// strips an untrusted account of, so that lock leaves the file as this ACL set it. Returned as the ACL, not
+    /// applied: <see cref="HardenKeyFileWithoutFollowingLinks"/> applies it.
+    /// </summary>
+    private static FileSecurity HardenedKeyFileSecurity()
+    {
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+
+        AddFile(security, LocalSystem, FileSystemRights.FullControl);
+        AddFile(security, Administrators, FileSystemRights.FullControl);
+        AddFile(security, ServiceAccount, FileSystemRights.Read | FileSystemRights.Synchronize);
+
+        return security;
+    }
 
     /// <summary>
     /// Creates <paramref name="path"/>, which must not exist yet, with <see cref="HardenFile"/>'s ACL applied AT
@@ -419,9 +905,9 @@ public static class DarlingFileSecurity
         AddFile(security, Administrators, FileSystemRights.FullControl);
         AddFile(security, ServiceAccount, FileSystemRights.FullControl);
 
-        if (allowInteractiveRead)
+        if (allowInteractiveRead && OperatorGroup is { } operators)
         {
-            AddFile(security, Interactive, FileSystemRights.Read | FileSystemRights.Synchronize);
+            AddFile(security, operators, FileSystemRights.Read | FileSystemRights.Synchronize);
         }
 
         return security;
@@ -432,13 +918,15 @@ public static class DarlingFileSecurity
     /// service account)? A file owned by anyone else may have been PRE-PLANTED — for a role credential,
     /// by an attacker who wrote a password they know so the service's <c>ALTER ROLE … PASSWORD</c>
     /// re-assert would hand them that login; for the owner credential, a tamper signal. Callers must not
-    /// trust an untrusted-owned file. Returns false (untrusted) on any error reading the owner.
+    /// trust an untrusted-owned file. Returns false (untrusted) on any error reading the owner. Works on a
+    /// directory too: the store folder is judged the same way before the first initdb, because an ordinary user
+    /// can create and own a folder under ProgramData before the service does.
     /// </summary>
     public static bool IsTrustedOwner(string path)
     {
         try
         {
-            var owner = new FileInfo(path).GetAccessControl().GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+            var owner = SecurityOf(path).GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
             return owner is not null
                 && (owner.Equals(LocalSystem) || owner.Equals(Administrators) || owner.Equals(ServiceAccount));
         }
@@ -451,8 +939,8 @@ public static class DarlingFileSecurity
     /// <summary>
     /// The accounts beyond SYSTEM, Administrators and the service account that hold ANY Allow entry on
     /// <paramref name="path"/>, as one line for a refusal, or null when there are none (#4028). An ALLOWLIST, where
-    /// <see cref="IsReadableByOrdinaryUsers"/> is a denylist of the three broad groups, which INTERACTIVE, Domain
-    /// Users or one named user all pass. For the log-hash key, which nothing but the service reads; the credential
+    /// <see cref="IsReadableByOrdinaryUsers"/> is a denylist of the four broad groups, which Domain Users, the
+    /// operator group or one named user all pass. For the log-hash key, which nothing but the service reads; the credential
     /// files keep the denylist their existing DACLs were built against, so this cannot newly refuse an install's
     /// credentials. Unlike the denylist, a DACL that cannot be read is reported, not passed: this is the check a key
     /// is trusted on.
@@ -503,10 +991,12 @@ public static class DarlingFileSecurity
         | FileSystemRights.WriteAttributes | FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles
         | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
 
-    private static string? AccessBeyondTrusted(FileSystemSecurity security, FileSystemRights? onlyRights = null, bool includeOwner = false)
+    private static string? AccessBeyondTrusted(
+        FileSystemSecurity security, FileSystemRights? onlyRights = null, bool includeOwner = false, Func<SecurityIdentifier, bool>? isTrusted = null)
     {
+        isTrusted ??= IsTrusted;
         var accounts = new List<string>();
-        if (includeOwner && security.GetOwner(typeof(SecurityIdentifier)) is SecurityIdentifier owner && !IsTrusted(owner))
+        if (includeOwner && security.GetOwner(typeof(SecurityIdentifier)) is SecurityIdentifier owner && !isTrusted(owner))
         {
             accounts.Add(AccountName(owner) + " (the owner)");
         }
@@ -515,7 +1005,7 @@ public static class DarlingFileSecurity
         {
             if (rule.AccessControlType != AccessControlType.Allow
                 || rule.IdentityReference is not SecurityIdentifier sid
-                || IsTrusted(sid)
+                || isTrusted(sid)
                 || (onlyRights is { } mask && (rule.FileSystemRights & mask) == 0)
                 || (onlyRights is not null && rule.PropagationFlags.HasFlag(PropagationFlags.InheritOnly)))
             {
@@ -546,6 +1036,211 @@ public static class DarlingFileSecurity
 
     private static bool IsTrusted(SecurityIdentifier sid) =>
         sid.Equals(LocalSystem) || sid.Equals(Administrators) || sid.Equals(ServiceAccount);
+
+    /* The store folder and what the service writes into it are judged against a wider owner list than the
+       credential files: an install whose Log On account was changed after the service first ran still has them
+       owned by the account Windows derives from the service's name. */
+    private static SecurityIdentifier? _ownServiceSidOverride;
+
+    /// <summary>Substitutes the running account and the service-name account in the store checks; null for both
+    /// restores the real ones. A test cannot make a file owned by the real service-name account.</summary>
+    internal static void UseStoreTrustForTests(
+        SecurityIdentifier? runningAccount, SecurityIdentifier? ownServiceSid, Func<string, SecurityIdentifier?>? linkOwner = null)
+    {
+        _serviceAccountOverride = runningAccount;
+        _ownServiceSidOverride = ownServiceSid;
+        _linkOwnerOverride = linkOwner;
+    }
+
+    private static Func<string, SecurityIdentifier?>? _linkOwnerOverride;
+
+    /// <summary>
+    /// <see cref="IsTrustedStoreOwner"/> for a junction or symbolic link, judged by the link's own owner: it is opened
+    /// without following it, so the folder it points to is never asked. A link that cannot be opened or read is not
+    /// trusted.
+    /// </summary>
+    public static bool IsTrustedStoreLinkOwner(string path)
+    {
+        if (_linkOwnerOverride?.Invoke(path) is { } stoodIn)
+        {
+            return IsTrustedStoreSid(stoodIn);
+        }
+
+        try
+        {
+            using var handle = OpenForSecurity(path, followLink: false, access: ReadControl);
+            var result = GetSecurityInfo(handle, FileObject, OwnerSecurityInformation, out var owner, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out var descriptor);
+            if (result != 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                return owner != IntPtr.Zero && IsTrustedStoreSid(new SecurityIdentifier(owner));
+            }
+            finally
+            {
+                LocalFree(descriptor);
+            }
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private const uint OwnerSecurityInformation = 0x00000001;
+
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint GetSecurityInfo(
+        Microsoft.Win32.SafeHandles.SafeFileHandle handle, int objectType, uint securityInfo,
+        out IntPtr ownerSid, IntPtr group, IntPtr dacl, IntPtr sacl, out IntPtr securityDescriptor);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
+    /// <summary>
+    /// The SID Windows derives from a service name (what <c>sc.exe showsid</c> prints): the SHA-1 of the upper-cased
+    /// name in UTF-16LE, its first 20 bytes read as five little-endian integers under <c>S-1-5-80</c>. Computed rather
+    /// than looked up, because Windows answers for <c>NT SERVICE\&lt;name&gt;</c> only while a service of that name is
+    /// registered, and the SID that owns files outlives the registration. install-darling.ps1 derives it the same way.
+    /// </summary>
+    internal static SecurityIdentifier ServiceSidFor(string serviceName)
+    {
+        /* SHA-1 because Windows derives the account from the name with it: this finds the account, it protects nothing. */
+#pragma warning disable CA5350
+        var hash = System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.Unicode.GetBytes(serviceName.ToUpperInvariant()));
+#pragma warning restore CA5350
+        var parts = new string[5];
+        for (var i = 0; i < parts.Length; i++)
+        {
+            parts[i] = BitConverter.ToUInt32(hash, i * 4).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return new SecurityIdentifier("S-1-5-80-" + string.Join('-', parts));
+    }
+
+    /// <summary>This service's own account, <c>NT SERVICE\&lt;service name&gt;</c>, from the name it is registered under.</summary>
+    private static SecurityIdentifier OwnServiceSid => _ownServiceSidOverride ?? ServiceSidFor(DarlingCliCommands.ServiceName);
+
+    /// <summary>
+    /// Who may own, or hold access on, the store folder and what the service writes into it: SYSTEM,
+    /// Administrators, TrustedInstaller, the account the service runs as, and this service's own service SID
+    /// (<c>NT SERVICE\&lt;service name&gt;</c>). The last is what the files belong to on an install whose Log On account
+    /// was changed after the service first ran. Only that service's own process (or a holder of the restore
+    /// privilege) can make an object owned by it, so an ordinary user cannot become it. install-darling.ps1 trusts
+    /// the same list.
+    /// </summary>
+    private static bool IsTrustedStoreSid(SecurityIdentifier sid) =>
+        IsTrusted(sid) || sid.Equals(OwnServiceSid) || sid.Equals(ServiceSidFor("TrustedInstaller"));
+
+    /// <summary><see cref="IsTrustedOwner"/> against the wider list the store checks use (<see cref="IsTrustedStoreSid"/>).</summary>
+    public static bool IsTrustedStoreOwner(string path)
+    {
+        try
+        {
+            return SecurityOf(path).GetOwner(typeof(SecurityIdentifier)) is SecurityIdentifier owner && IsTrustedStoreSid(owner);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary><see cref="WriteAccessBeyondTrusted(string)"/> against the store checks' owner list.</summary>
+    public static string? StoreWriteAccessBeyondTrusted(string directory)
+    {
+        try
+        {
+            return AccessBeyondTrusted(new DirectoryInfo(directory).GetAccessControl(), DirectoryChangeRights, includeOwner: true, IsTrustedStoreSid);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
+        {
+            return $"its permissions could not be read ({ex.Message})";
+        }
+    }
+
+    private const FileSystemRights EntrySwapRights =
+        FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles
+        | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
+
+    /// <summary>
+    /// Which of Users, Everyone and Authenticated Users may remove or replace an entry of <paramref name="directory"/>,
+    /// or change who may: a Delete, delete-child, change-permissions or take-ownership grant that applies to the folder
+    /// itself, comma-separated; null when none do. Rights that only add new entries (create files, create folders) are
+    /// not counted: %ProgramData% hands them to Users, and they cannot rename or remove an entry that is already there.
+    /// A DACL that cannot be read is reported, not passed.
+    /// </summary>
+    public static string? EntryChangeByOrdinaryUsers(string directory)
+    {
+        try
+        {
+            var groups = new[]
+            {
+                new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null),
+                new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+            };
+            var names = new List<string>();
+            foreach (FileSystemAccessRule rule in new DirectoryInfo(directory).GetAccessControl().GetAccessRules(true, true, typeof(SecurityIdentifier)))
+            {
+                if (rule.AccessControlType == AccessControlType.Allow
+                    && (rule.FileSystemRights & EntrySwapRights) != 0
+                    && !rule.PropagationFlags.HasFlag(PropagationFlags.InheritOnly)
+                    && rule.IdentityReference is SecurityIdentifier sid
+                    && Array.Exists(groups, group => group.Equals(sid)))
+                {
+                    var name = AccountName(sid);
+                    if (!names.Contains(name))
+                    {
+                        names.Add(name);
+                    }
+                }
+            }
+
+            return names.Count == 0 ? null : string.Join(", ", names);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
+        {
+            return $"its permissions could not be read ({ex.Message})";
+        }
+    }
+
+    /// <summary>
+    /// Why the service must not write its log files into <paramref name="folder"/>, or null when it may: the folder
+    /// or the folder above it is a junction or symbolic link, or the folder is owned by anyone outside the store
+    /// owner list. A folder the service locks by path is locked wherever a link on that path leads, and its owner
+    /// can always give itself access again.
+    /// </summary>
+    public static string? LogFolderProblem(string folder)
+    {
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder));
+        var parent = Path.GetDirectoryName(full);
+        foreach (var candidate in new[] { full, parent })
+        {
+            if (candidate is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                if ((File.GetAttributes(candidate) & FileAttributes.ReparsePoint) != 0)
+                {
+                    return $"{candidate} is a junction or symbolic link";
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                return $"{candidate} could not be read ({ex.Message})";
+            }
+        }
+
+        return IsTrustedStoreOwner(full)
+            ? null
+            : $"{full} is not owned by SYSTEM, Administrators, TrustedInstaller, the service account or the service's own account{DescribeOwnerAndExposure(full)}";
+    }
 
     /// <summary>
     /// Opens <paramref name="path"/>, a file only the service reads, and judges it through that one handle (#4044
@@ -649,8 +1344,8 @@ public static class DarlingFileSecurity
     {
         try
         {
-            var rules = new FileInfo(path)
-                .GetAccessControl()
+            /* On a directory the same bit is ListDirectory, and everything created in it inherits the grant. */
+            var rules = SecurityOf(path)
                 .GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier));
 
             var ordinary = OrdinaryUserGroups;
@@ -701,7 +1396,7 @@ public static class DarlingFileSecurity
 
         try
         {
-            var security = new FileInfo(path).GetAccessControl();
+            var security = SecurityOf(path);
             owner = security.GetOwner(typeof(NTAccount))?.Value;
 
             foreach (FileSystemAccessRule rule in security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier)))
@@ -766,12 +1461,33 @@ public static class DarlingFileSecurity
         }
     }
 
+    /// <summary>The DACL and owner of a file or a directory, whichever <paramref name="path"/> is.</summary>
+    private static FileSystemSecurity SecurityOf(string path) =>
+        Directory.Exists(path)
+            ? new DirectoryInfo(path).GetAccessControl()
+            : new FileInfo(path).GetAccessControl();
+
     private static void AddFull(DirectorySecurity security, SecurityIdentifier sid, InheritanceFlags inheritance) =>
         security.AddAccessRule(new FileSystemAccessRule(
             sid, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
 
     private static void AddFile(FileSecurity security, SecurityIdentifier sid, FileSystemRights rights) =>
         security.AddAccessRule(new FileSystemAccessRule(sid, rights, AccessControlType.Allow));
+}
+
+/// <summary>The operator group's name, reachable from code that is not Windows-only (the config loader's error text,
+/// the CLI help): the class above is annotated Windows-only, so a reference to it from unguarded code is a build
+/// warning.</summary>
+public static class DarlingOperatorGroup
+{
+    /// <summary>See <see cref="DarlingFileSecurity.OperatorGroupName"/>.</summary>
+    public const string Name = "PerformanceMonitor Darling Operators";
+
+    /// <summary>What a reader that was refused the config or a credential file tells the person running it.</summary>
+    public static string AccessDeniedAdvice(string path) =>
+        $"{path} is restricted to SYSTEM, Administrators, the service account and members of the local group " +
+        $"'{Name}'. Ask an administrator to add your account to that group (install-darling.ps1 creates it), then " +
+        "sign out and back in so the membership takes effect, or run this from an elevated prompt.";
 }
 
 /// <summary>Path containment for the file-security checks, on every platform (the class above is Windows-only).</summary>

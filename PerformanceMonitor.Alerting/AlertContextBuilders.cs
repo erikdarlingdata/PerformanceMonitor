@@ -262,9 +262,14 @@ public static class AlertContextBuilders
     {
         if (queries is null || queries.Count == 0) return Array.Empty<AlertIncident>();
 
-        /* #1140: dedup key = query_hash (stable across literals/plans). Null hash -> no incident. */
+        /* #1140: dedup key = query_hash (stable across literals/plans). Null hash -> no incident.
+           #5711: an all-zero hash is "the engine did not say" (BACKUP, DBCC and some maintenance requests carry
+           0x0000000000000000), not a query, and keyed on as-is it folded every such request in one database into
+           one incident. The original rule extends to it: a query whose hash is unknown (NULL, empty or all-zero,
+           QueryHashIdentity.IsUnknown) emits no incident, whatever its text. A known hash keys exactly as before. */
         return queries
-            .Select(q => AlertFingerprint.ForKey(serverName, AlertFingerprint.Query, q.QueryHash ?? "",
+            .Where(q => !QueryHashIdentity.IsUnknown(q.QueryHash))
+            .Select(q => AlertFingerprint.ForKey(serverName, AlertFingerprint.Query, q.QueryHash!,
                 string.IsNullOrEmpty(q.DatabaseName) ? Array.Empty<string>() : new[] { q.DatabaseName },
                 database: q.DatabaseName))
             .Where(i => i is not null).Select(i => i!).ToList();
@@ -619,6 +624,143 @@ public static class AlertContextBuilders
             });
         }
         return context;
+    }
+
+    /// <summary>Requests shown on a Runnable Queue card (#5641): the same render budget as the Long-Running Query
+    /// card, so one card never lists more sessions than the other.</summary>
+    public const int RunnableQueueRequestDisplayCap = LongRunningQueryDisplayCap;
+
+    /// <summary>How far back the CPU samples on the engine's snapshot reach, in minutes: Lite's
+    /// <c>LocalDataService.AlertCpuSampleLookback</c> and Darling's <c>DarlingWorker.RecentCpuLookback</c>, both 15. The
+    /// Runnable Queue card's CPU window never claims more (a test pins the three to each other).</summary>
+    public const int RunnableQueueCpuSampleLookbackMinutes = 15;
+
+    /// <summary>
+    /// The Runnable Queue card's CPU item (#5641): CPU percent for the same minutes the queue average covers.
+    /// A queue of runnable tasks is a CPU symptom, so the first question on the page is whether the cores are
+    /// actually pinned. Built from the CPU samples the engine already holds on its snapshot (no read of its own):
+    /// the samples at or after <c>nowUtc - windowMinutes</c> and not after <c>nowUtc</c>, reported as an average and
+    /// a peak with the sample count. When the window holds no sample the item falls back to the snapshot's single
+    /// newest reading and says so in its heading, because a number from another minute must not read as this
+    /// window's. Returns null when there is no CPU reading at all (the card then simply has no CPU item).
+    /// <para>Round 2 of #5709: the window is clamped to <see cref="RunnableQueueCpuSampleLookbackMinutes"/> (15), the
+    /// lookback both stores read the CPU samples with, because the queue's span reaches 20 minutes at the Low-Impact
+    /// preset and up to 60 at a slower cadence while the samples never reach back that far. The heading names the
+    /// window the samples actually cover, so a longer queue span cannot claim a longer CPU window than the data
+    /// holds.</para>
+    /// </summary>
+    public static AlertDetailItem? BuildRunnableQueueCpuItem(
+        IReadOnlyList<AlertCpuSample>? recentSamples,
+        double? latestSqlCpuPercent,
+        double? latestTotalCpuPercent,
+        DateTime nowUtc,
+        int windowMinutes)
+    {
+        windowMinutes = Math.Min(windowMinutes, RunnableQueueCpuSampleLookbackMinutes);
+        var floor = nowUtc - TimeSpan.FromMinutes(windowMinutes);
+        var inWindow = (recentSamples ?? Array.Empty<AlertCpuSample>())
+            .Where(s => s.SampleTimeUtc >= floor && s.SampleTimeUtc <= nowUtc)
+            .ToList();
+
+        var sql = inWindow.Where(s => s.SqlCpuPercent.HasValue).Select(s => s.SqlCpuPercent!.Value).ToList();
+        var total = inWindow.Where(s => s.TotalCpuPercent.HasValue).Select(s => s.TotalCpuPercent!.Value).ToList();
+
+        if (sql.Count > 0 || total.Count > 0)
+        {
+            var fields = new List<(string Label, string Value)>();
+            if (sql.Count > 0)
+            {
+                fields.Add(("SQL Server CPU", string.Create(CultureInfo.InvariantCulture,
+                    $"{sql.Average():F0}% average, {sql.Max():F0}% peak")));
+            }
+            if (total.Count > 0)
+            {
+                fields.Add(("Total CPU", string.Create(CultureInfo.InvariantCulture,
+                    $"{total.Average():F0}% average, {total.Max():F0}% peak")));
+            }
+            fields.Add(("CPU samples", string.Create(CultureInfo.InvariantCulture, $"{inWindow.Count}")));
+            return new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"CPU over the last {windowMinutes} minutes"),
+                Fields = fields
+            };
+        }
+
+        if (latestSqlCpuPercent.HasValue || latestTotalCpuPercent.HasValue)
+        {
+            var fields = new List<(string Label, string Value)>();
+            if (latestSqlCpuPercent.HasValue)
+            {
+                fields.Add(("SQL Server CPU", string.Create(CultureInfo.InvariantCulture, $"{latestSqlCpuPercent.Value:F0}%")));
+            }
+            if (latestTotalCpuPercent.HasValue)
+            {
+                fields.Add(("Total CPU", string.Create(CultureInfo.InvariantCulture, $"{latestTotalCpuPercent.Value:F0}%")));
+            }
+            return new AlertDetailItem { Heading = "CPU (newest sample, none in the window)", Fields = fields };
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The Runnable Queue card's top-request items (#5641): the heaviest requests in the newest query snapshot,
+    /// ranked by CPU time (then elapsed time) because the alert is about CPU queueing. Takes the rows an
+    /// unfiltered, threshold-zero <c>GetLongRunningQueriesAsync</c> read returned, which is exactly the surface the
+    /// High CPU card's maintenance probe reads; shows at most <see cref="RunnableQueueRequestDisplayCap"/> and
+    /// states the omission as a final item rather than cutting silently. Fields are the Long-Running Query
+    /// card's session fields, so a reader sees the same facts under both alerts. Returns an empty list when the
+    /// snapshot holds no request. <paramref name="readHitCap"/> says the read returned a full page, so the count of
+    /// omitted requests is a floor and the trailer reads "at least N more request(s)".
+    /// </summary>
+    public static IReadOnlyList<AlertDetailItem> BuildRunnableQueueRequestItems(IReadOnlyList<LongRunningQueryInfo> sessions, bool readHitCap = false)
+    {
+        if (sessions.Count == 0) return Array.Empty<AlertDetailItem>();
+
+        var ranked = sessions
+            .OrderByDescending(q => q.CpuTimeMs)
+            .ThenByDescending(q => q.ElapsedSeconds)
+            .ThenBy(q => q.SessionId)
+            .ToList();
+        var items = new List<AlertDetailItem>();
+        foreach (var q in ranked.Take(RunnableQueueRequestDisplayCap))
+        {
+            var item = new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture,
+                    $"Top request: session #{q.SessionId} - {q.CpuTimeMs:N0} ms CPU"),
+                Fields = new()
+            };
+            if (!string.IsNullOrEmpty(q.DatabaseName))
+                item.Fields.Add(("Database", q.DatabaseName));
+            if (!string.IsNullOrEmpty(q.ProgramName))
+                item.Fields.Add(("Program", q.ProgramName));
+            if (!string.IsNullOrEmpty(q.QueryText))
+                item.Fields.Add(("Query", TruncateStatement(q.QueryText)));
+            item.Fields.Add(("Elapsed", FormatDuration(q.ElapsedSeconds)));
+            item.Fields.Add(("CPU Time", $"{q.CpuTimeMs:N0} ms"));
+            item.Fields.Add(("Reads", $"{q.Reads:N0}"));
+            item.Fields.Add(("Writes", $"{q.Writes:N0}"));
+            if (!string.IsNullOrEmpty(q.WaitType))
+                item.Fields.Add(("Wait Type", q.WaitType));
+            if (q.BlockingSessionId.HasValue && q.BlockingSessionId.Value > 0)
+                item.Fields.Add(("Blocked By", $"Session #{q.BlockingSessionId.Value}"));
+            items.Add(item);
+        }
+
+        if (ranked.Count > RunnableQueueRequestDisplayCap)
+        {
+            items.Add(new AlertDetailItem
+            {
+                Heading = "More requests",
+                Fields = new()
+                {
+                    ("Not shown", string.Create(CultureInfo.InvariantCulture,
+                        $"{(readHitCap ? "at least " : "")}{ranked.Count - RunnableQueueRequestDisplayCap} more request(s) in the newest query snapshot"))
+                }
+            });
+        }
+        return items;
     }
 
     /// <summary>

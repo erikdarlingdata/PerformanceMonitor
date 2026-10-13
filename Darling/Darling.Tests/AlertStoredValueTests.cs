@@ -64,6 +64,9 @@ public sealed class AlertStoredValueTests
         public bool BlockingEnabled { get; set; } = true;
         public bool DeadlockEnabled { get; set; } = true;
         public bool PoisonWaitEnabled { get; set; }
+        public bool RunnableQueueEnabled { get; set; }
+        public int RunnableQueueWarningPerScheduler { get; set; } = 8;
+        public int RunnableQueueCriticalPerScheduler { get; set; } = 16;
         public bool LongRunningQueryEnabled { get; set; }
         public bool TempDbSpaceEnabled { get; set; }
         public bool LowDiskEnabled { get; set; }
