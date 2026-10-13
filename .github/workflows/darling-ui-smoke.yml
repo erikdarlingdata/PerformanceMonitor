@@ -6,7 +6,7 @@ name: Darling UI smoke
 # the entry, locally and here).
 #
 # Triggers: a pull request touching the web files, the harness or this workflow (a draft pull request is skipped
-# until it is marked ready), and a manual dispatch. `pull_request`, never `pull_request_target`: the job runs the
+# until it is marked ready), the nightly (workflow_call), and a manual dispatch. `pull_request`, never `pull_request_target`: the job runs the
 # pull request's own code, so it runs with the pull request's read-only token and no secrets.
 #
 # Not a required check. A workflow that is skipped by its path filter never reports, so it cannot be one; the job
@@ -18,7 +18,12 @@ on:
       - 'Darling/PerformanceMonitor.Darling.Service/wwwroot/**'
       - 'tools/ui-smoke/**'
       - '.github/workflows/darling-ui-smoke.yml'
+  # The nightly runs it as a reusable workflow (nightly.yml, outside publish's needs).
+  workflow_call:
   workflow_dispatch:
+  # TEMPORARY (lane B proof): removed in the last commit of this branch.
+  push:
+    branches: ['fix/5701-ui-smoke']
 
 permissions:
   contents: read
@@ -114,7 +119,7 @@ jobs:
           }
           if (Test-Path "$env:RUNNER_TEMP\darling-pg.log") { "== PostgreSQL log (last 20 lines)"; Get-Content "$env:RUNNER_TEMP\darling-pg.log" -Tail 20 }
 
-      - name: Upload logs and failure screenshots
+      - name: Upload logs, failure screenshots and traces
         if: always()
         uses: actions/upload-artifact@v6
         with:

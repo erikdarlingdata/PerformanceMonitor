@@ -5,7 +5,10 @@
     "allowList: a console or request message that is known and harmless. Each entry needs an 'issue' number and a 'match' substring. It starts empty."
   ],
   "allowList": [],
-  "servers": ["ui-sql"],
+  "servers": [
+    "ui-sql",
+    "ui-pg"
+  ],
   "pages": [
     {
       "name": "fleet",
@@ -19,10 +22,22 @@
       "server": "ui-sql",
       "expect": {
         "panels": [
-          { "title": "CPU Utilization", "state": "data" },
-          { "title": "Memory", "state": "data" },
-          { "title": "Server Properties", "state": "data" },
-          { "title": "Analysis Findings", "state": "empty" }
+          {
+            "title": "CPU Utilization",
+            "state": "data"
+          },
+          {
+            "title": "Memory",
+            "state": "data"
+          },
+          {
+            "title": "Server Properties",
+            "state": "data"
+          },
+          {
+            "title": "Analysis Findings",
+            "state": "data"
+          }
         ]
       }
     },
@@ -30,7 +45,15 @@
       "name": "ui-sql-waits",
       "hash": "#/server/ui-sql/waits",
       "server": "ui-sql",
-      "expect": { "panels": [{ "title": "Wait Stats", "state": "data", "minRows": 4 }] }
+      "expect": {
+        "panels": [
+          {
+            "title": "Wait Stats",
+            "state": "data",
+            "minRows": 4
+          }
+        ]
+      }
     },
     {
       "name": "ui-sql-cpu",
@@ -54,13 +77,172 @@
       "name": "ui-sql-queries",
       "hash": "#/server/ui-sql/queries",
       "server": "ui-sql",
-      "expect": { "panels": [{ "panel": "get_top_queries_by_cpu", "state": "data", "minRows": 12 }] }
+      "expect": {
+        "panels": [
+          {
+            "panel": "get_top_queries_by_cpu",
+            "state": "data",
+            "minRows": 12
+          }
+        ]
+      }
     },
     {
       "name": "admin-servers",
       "hash": "#/admin/servers",
       "nav": "admin",
-      "expect": { "grids": [{ "index": 0, "exactRows": 1 }] }
+      "expect": {
+        "grids": [
+          {
+            "index": 0,
+            "exactRows": 2
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-sql-blocking",
+      "hash": "#/server/ui-sql/blocking",
+      "server": "ui-sql",
+      "expect": {}
+    },
+    {
+      "name": "ui-sql-config",
+      "hash": "#/server/ui-sql/config",
+      "server": "ui-sql",
+      "expect": {}
+    },
+    {
+      "name": "ui-sql-changes",
+      "hash": "#/server/ui-sql/changes",
+      "server": "ui-sql",
+      "expect": {}
+    },
+    {
+      "name": "ui-sql-activity",
+      "hash": "#/server/ui-sql/activity",
+      "server": "ui-sql",
+      "expect": {}
+    },
+    {
+      "name": "ui-sql-events",
+      "hash": "#/server/ui-sql/events",
+      "server": "ui-sql",
+      "expect": {}
+    },
+    {
+      "name": "ui-sql-health",
+      "hash": "#/server/ui-sql/health",
+      "server": "ui-sql",
+      "expect": {}
+    },
+    {
+      "name": "ui-pg-overview",
+      "hash": "#/server/ui-pg",
+      "server": "ui-pg",
+      "expect": {}
+    },
+    {
+      "name": "ui-pg-activity",
+      "hash": "#/server/ui-pg/activity",
+      "server": "ui-pg",
+      "expect": {}
+    },
+    {
+      "name": "ui-pg-vacuum",
+      "hash": "#/server/ui-pg/vacuum",
+      "server": "ui-pg",
+      "expect": {}
+    },
+    {
+      "name": "ui-pg-waits",
+      "hash": "#/server/ui-pg/waits",
+      "server": "ui-pg",
+      "expect": {}
+    },
+    {
+      "name": "ui-pg-io",
+      "hash": "#/server/ui-pg/io",
+      "server": "ui-pg",
+      "expect": {}
+    },
+    {
+      "name": "ui-pg-replication",
+      "hash": "#/server/ui-pg/replication",
+      "server": "ui-pg",
+      "expect": {}
+    },
+    {
+      "name": "ui-pg-storage",
+      "hash": "#/server/ui-pg/storage",
+      "server": "ui-pg",
+      "expect": {}
+    },
+    {
+      "name": "ui-pg-config",
+      "hash": "#/server/ui-pg/config",
+      "server": "ui-pg",
+      "expect": {}
+    },
+    {
+      "name": "alerts",
+      "hash": "#/alerts",
+      "nav": "alerts",
+      "expect": {}
+    },
+    {
+      "name": "alert-rules",
+      "hash": "#/alert-rules",
+      "nav": "alert-rules",
+      "expect": {}
+    },
+    {
+      "name": "admin-routes",
+      "hash": "#/admin/routes",
+      "nav": "admin",
+      "expect": {}
+    },
+    {
+      "name": "admin-settings",
+      "hash": "#/admin/settings",
+      "nav": "admin",
+      "expect": {}
+    },
+    {
+      "name": "finops",
+      "hash": "#/finops",
+      "nav": "finops",
+      "expect": {}
+    },
+    {
+      "name": "sweeps",
+      "hash": "#/sweeps",
+      "nav": "sweeps",
+      "expect": {}
+    },
+    {
+      "name": "views",
+      "hash": "#/views",
+      "nav": "views",
+      "expect": {}
+    },
+    {
+      "name": "mute-rules",
+      "hash": "#/mute-rules",
+      "nav": "mute-rules",
+      "expect": {}
+    },
+    {
+      "name": "manage-tags",
+      "hash": "#/manage-tags",
+      "nav": "manage-tags",
+      "expect": {}
+    },
+    {
+      "name": "job-history",
+      "hash": "#/job-history",
+      "nav": "job-history",
+      "expect": {}
     }
   ]
 }

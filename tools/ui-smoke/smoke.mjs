@@ -88,6 +88,8 @@ async function settle(page) {
 async function checkPage(browser, spec) {
   const problems = [];
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  /* A trace of every page load; kept only for a page that fails (out/<page>.trace.zip, open with `npx playwright show-trace`). */
+  await context.tracing.start({ screenshots: true, snapshots: true });
   const page = await context.newPage();
   let recording = true;
   const note = (text) => {
@@ -100,7 +102,8 @@ async function checkPage(browser, spec) {
   page.on("requestfailed", (r) => note("request failed: " + r.url().replace(baseUrl, "") + " " + (r.failure()?.errorText || "")));
   page.on("response", (r) => {
     const url = new URL(r.url());
-    if (r.status() >= 400) note((url.pathname.startsWith("/api/") ? "api " : "asset ") + r.status() + ": " + url.pathname);
+    /* Every answer >= 400, /api/* or not, named by method and path, so a console line that carries no URL can still be traced. */
+    if (r.status() >= 400) note((url.pathname.startsWith("/api/") ? "api " : "asset ") + r.status() + ": " + r.request().method() + " " + url.pathname + url.search);
   });
 
   let panels = [];
@@ -168,6 +171,11 @@ async function checkPage(browser, spec) {
     } catch {
       /* a page that never drew has nothing to photograph */
     }
+  }
+  try {
+    await context.tracing.stop(problems.length ? { path: join(outDir, `${spec.name}.trace.zip`) } : {});
+  } catch {
+    /* a trace that cannot be written must not hide the page's own result */
   }
   await context.close();
   return { problems, panels };
