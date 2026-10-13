@@ -558,7 +558,10 @@ try {
       { route_id: 11, metric_match: "reports", match_kind: "family", family: "reports", configured_channels: ["email"], smtp_recipients: [], enabled: true, modified_at_utc: "2026-01-01T00:00:00Z",
         scope_server_id: null, scope_server_name: null, scope_tag_id: 5, scope_tag_name: "East", expanded_server_count: null, orphaned: false, scope_unreadable: true },
       { route_id: 12, metric_match: "external", match_kind: "family", family: "external", configured_channels: ["generic"], smtp_recipients: [], enabled: false, modified_at_utc: "2026-01-01T00:00:00Z",
-        scope_server_id: null, scope_server_name: null, scope_tag_id: 6, scope_tag_name: null, expanded_server_count: null, orphaned: true, scope_unreadable: false }],
+        scope_server_id: null, scope_server_name: null, scope_tag_id: 6, scope_tag_name: null, expanded_server_count: null, orphaned: true, scope_unreadable: false },
+      /* A server-scoped route whose scope inputs could not be read: the desktop viewer says "scope data unreadable" (not "tag"). */
+      { route_id: 13, metric_match: "billing", match_kind: "exact_metric", family: null, configured_channels: ["email"], smtp_recipients: [], enabled: true, modified_at_utc: "2026-01-01T00:00:00Z",
+        scope_server_id: 3, scope_server_name: "Alpha", scope_tag_id: null, scope_tag_name: null, expanded_server_count: null, orphaned: false, scope_unreadable: true }],
     },
     settings: {
       alerts_enabled: true, cooldown_minutes: 15,

@@ -147,6 +147,8 @@ public sealed class AdminPageBehaviourTests
         Assert.Contains(ViewerNotificationRouteScope.OrphanedServerStatus, texts);
         Assert.Contains(ViewerNotificationRouteScope.OrphanedTagStatus, texts);
         Assert.Contains(ViewerNotificationRouteScope.TagDataUnreadableStatus, texts);
+        // A server-scoped route whose inputs could not be read says "scope data unreadable", as the desktop viewer does; the tag route above keeps "tag data unreadable".
+        Assert.Contains(ViewerNotificationRouteScope.ScopeDataUnreadableStatus, texts);
         Assert.Contains(ViewerNotificationRouteScope.OkStatus, texts);
         Assert.Equal(3, texts.Count(t => t == ViewerNotificationRouteScope.OkStatus));
         // The wildcard route reports no family.

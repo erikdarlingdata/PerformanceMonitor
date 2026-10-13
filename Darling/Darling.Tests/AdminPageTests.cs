@@ -67,6 +67,7 @@ public sealed class AdminPageTests
             ("ROUTE_STATUS_ORPHANED_SERVER", ViewerNotificationRouteScope.OrphanedServerStatus),
             ("ROUTE_STATUS_ORPHANED_TAG", ViewerNotificationRouteScope.OrphanedTagStatus),
             ("ROUTE_STATUS_TAG_UNREADABLE", ViewerNotificationRouteScope.TagDataUnreadableStatus),
+            ("ROUTE_STATUS_SCOPE_UNREADABLE", ViewerNotificationRouteScope.ScopeDataUnreadableStatus),
         })
         {
             Assert.Contains("export const " + name + " = \"" + word + "\";", page, StringComparison.Ordinal);

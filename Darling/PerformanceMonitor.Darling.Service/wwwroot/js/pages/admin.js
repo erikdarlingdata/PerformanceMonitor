@@ -239,6 +239,7 @@ export const ROUTE_STATUS_DISABLED = "Disabled";
 export const ROUTE_STATUS_ORPHANED_SERVER = "Orphaned: server removed";
 export const ROUTE_STATUS_ORPHANED_TAG = "Orphaned: tag deleted";
 export const ROUTE_STATUS_TAG_UNREADABLE = "Not active: tag data unreadable";
+export const ROUTE_STATUS_SCOPE_UNREADABLE = "Not active: scope data unreadable";
 
 /** Where a route applies, from get_notification_routes' scope fields. A scope whose server or tag is gone shows the id it still names. */
 export function routeScopeText(r) {
@@ -249,7 +250,7 @@ export function routeScopeText(r) {
 
 /** A route's status: a scope that cannot be read or no longer exists matches NOTHING, so it never reads as OK. */
 export function routeStatusText(r) {
-  if (r.scope_unreadable === true) return ROUTE_STATUS_TAG_UNREADABLE;
+  if (r.scope_unreadable === true) return r.scope_tag_id != null ? ROUTE_STATUS_TAG_UNREADABLE : ROUTE_STATUS_SCOPE_UNREADABLE;
   if (r.orphaned === true) return r.scope_server_id != null ? ROUTE_STATUS_ORPHANED_SERVER : ROUTE_STATUS_ORPHANED_TAG;
   return r.enabled === false ? ROUTE_STATUS_DISABLED : ROUTE_STATUS_OK;
 }
