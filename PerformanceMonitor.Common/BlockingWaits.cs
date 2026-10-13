@@ -26,9 +26,18 @@ namespace PerformanceMonitor.Common;
 /// being read, so two reports of one (blocked, blocker) pair belong to the same wait when their derived starts are
 /// within <see cref="WaitStartToleranceMs"/> of the previous one (reports sorted by derived start). A different
 /// wait of the same pair that was reported at all lasted at least the threshold (5 s) before its first report,
-/// so its start is at least that far from the previous wait's start; the tolerance sits well below it. That
-/// holds for blocked-process reports only. A DMV blocking snapshot catches a wait of any length, so two separate
-/// short waits of one pair can start less than 2 s apart and count as one wait; issue #5743 tracks the fix.</para>
+/// so its start is at least that far from the previous wait's start; the tolerance sits well below it.</para>
+///
+/// <para><b>Why that is not enough for DMV snapshots (#5743).</b> A DMV blocking snapshot catches a wait of any
+/// length, so two separate short waits of one pair can start less than 2 s apart (wait A seen at T with wait
+/// 1,500 ms, the pair blocks again 200 ms later and is seen at T + 10 s with wait 9,800 ms: starts 1.7 s apart).
+/// A blocked session waits on one thing at a time, so a new wait of a pair cannot start before the previous wait
+/// was last seen alive, and a row's event time is a moment its wait was observed alive. So a row also starts a
+/// new wait when its derived start is more than <see cref="WaitStartJitterMs"/> after the LATEST event time of all
+/// the pair's preceding rows (same start order). One rule for every source: for blocked-process reports the
+/// first report comes at least the threshold after the wait began, so every report of one wait derives a start at
+/// least 5 s BEFORE any earlier report's event time and the second condition never splits a wait there (waits of
+/// different starts are already split by the first condition).</para>
 ///
 /// <para>The same rule is written twice because the counts live in two places: <see cref="Collapse"/> for rows
 /// already in memory (the alert engine's read), and <see cref="WaitsCteSql"/> for the counts that run in the
@@ -37,10 +46,25 @@ namespace PerformanceMonitor.Common;
 public static class BlockingWaits
 {
     /// <summary>How far apart (milliseconds) two reports' derived wait starts may be and still be one wait. The
-    /// threshold is at least 5 s, so 2 s cannot merge two waits and is far above the few milliseconds of
-    /// timestamp jitter between reports of one wait (and the whole-second rounding of a store that keeps only
-    /// seconds).</summary>
+    /// threshold is at least 5 s, so 2 s cannot merge two blocked-process-report waits and is far above the few
+    /// milliseconds of timestamp jitter between reports of one wait (and the whole-second rounding of a store
+    /// that keeps only seconds). It alone is not enough for DMV snapshots: see <see cref="WaitStartJitterMs"/>.</summary>
     public const long WaitStartToleranceMs = 2000;
+
+    /// <summary>
+    /// #5743: how far (milliseconds) a row's derived wait start may sit after the latest event time of the pair's
+    /// preceding rows and still be the same wait. It is the timestamp jitter between a row's event time and its
+    /// wait time. Evidence: a DMV snapshot's <c>event_time</c> is the collector's own stamp
+    /// (<c>CollectionTimeClock.NextStrictlyAfter(..., DateTime.UtcNow)</c>), taken at the start of the run, before
+    /// the store connection and the SQL Server connection open and before the query reads
+    /// <c>wait_duration_ms</c>; the derived start is therefore the true start minus that run's lead time, tens of
+    /// milliseconds on a pooled connection and varying from run to run. PostgreSQL and DuckDB keep microseconds, so
+    /// the store adds none. 150 ms covers that spread and stays under the 200 ms re-block gap #5743 reports (the
+    /// ceiling: a larger value would merge that case again). A continuing wait first seen with a
+    /// <c>wait_time_ms</c> below this value can still split, when its next row's lead time is longer by more than
+    /// the first row's wait time plus this value.
+    /// </summary>
+    public const long WaitStartJitterMs = 150;
 
     /// <summary>The wait start of one report in epoch milliseconds: event time minus its wait time.</summary>
     public static double WaitStartEpochMs(DateTime eventTime, long waitTimeMs) =>
@@ -81,10 +105,16 @@ public static class BlockingWaits
             var ordered = pair.OrderBy(p => p.Start).ThenBy(p => p.Time).ToList();
             var best = ordered[0];
             var previousStart = ordered[0].Start;
+            var latestTime = ordered[0].Time;
             for (var i = 1; i < ordered.Count; i++)
             {
                 var current = ordered[i];
-                if (current.Start - previousStart > WaitStartToleranceMs)
+                /* #5743: a new wait cannot start before the previous one was last seen alive. latestTime is the
+                   latest event time over ALL preceding rows of the pair (not only the current group), in the
+                   same start order the SQL form's window uses. */
+                var latestEpochMs = (latestTime - DateTime.UnixEpoch).TotalMilliseconds;
+                if (current.Start - previousStart > WaitStartToleranceMs
+                    || current.Start - latestEpochMs > WaitStartJitterMs)
                 {
                     result.Add(best.Row);
                     best = current;
@@ -95,6 +125,10 @@ public static class BlockingWaits
                 }
 
                 previousStart = current.Start;
+                if (current.Time > latestTime)
+                {
+                    latestTime = current.Time;
+                }
             }
 
             result.Add(best.Row);
@@ -142,7 +176,9 @@ public static class BlockingWaits
         var epochMs = dialect == SqlDialect.DuckDb
             ? "(CAST(epoch_us(s.event_time) AS DOUBLE) / 1000.0)"
             : "(date_part('epoch', s.event_time) * 1000.0)";
+        var epochMsM = epochMs.Replace("s.event_time", "m.event_time", StringComparison.Ordinal);
         var tolerance = WaitStartToleranceMs.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var jitter = WaitStartJitterMs.ToString(System.Globalization.CultureInfo.InvariantCulture);
         return $@"
 {name}_marked AS (
     SELECT s.*, {epochMs} - s.wait_time_ms AS wait_start_ms
@@ -154,6 +190,9 @@ public static class BlockingWaits
             WHEN m.wait_start_ms IS NULL THEN 1
             WHEN LAG(m.wait_start_ms) OVER (PARTITION BY {partition} ORDER BY m.wait_start_ms NULLS LAST, m.event_time NULLS LAST) IS NULL
               OR m.wait_start_ms - LAG(m.wait_start_ms) OVER (PARTITION BY {partition} ORDER BY m.wait_start_ms NULLS LAST, m.event_time NULLS LAST) > {tolerance}
+              /* #5743: a new wait cannot start before the previous one was last seen alive. The latest event
+                 time over ALL preceding rows of the pair; NULL (no preceding row) puts no constraint. */
+              OR m.wait_start_ms - MAX({epochMsM}) OVER (PARTITION BY {partition} ORDER BY m.wait_start_ms NULLS LAST, m.event_time NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) > {jitter}
             THEN 1 ELSE 0
         END AS starts_wait
     FROM {name}_marked AS m
