@@ -10,8 +10,6 @@ using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -24,11 +22,14 @@ namespace PerformanceMonitor.Collectors;
 /// what it is good at:
 ///
 /// <para><b>event_counter is the count, and only the count.</b> It is exact however many events the session saw. Each run
-/// reads it and writes ONE <c>count</c> row: <c>collection_time</c> is this run's time, <c>attention_count</c> is the
-/// counter's delta from the prior count (staged in the collector state, so a restart does not lose it, and landed only
-/// once the rows of the same run are written). A count BELOW the prior means the session restarted, so the whole current
-/// count is the delta. An unreadable counter writes no count row and keeps the prior, so the next delta spans both runs;
-/// the first run after a start has no prior and only stages one. The alert and any rate read <c>count</c> rows and
+/// reads it and writes a <c>count</c> row ONLY when the delta is above zero: <c>collection_time</c> is this run's time,
+/// <c>attention_count</c> is the counter's delta from the prior count (staged in the collector state, so a restart does not
+/// lose it, and landed only once the rows of the same run are written). A count BELOW the prior means the session
+/// restarted, so the whole current count is the delta. A quiet run (delta 0) writes no count row: that is one row per run
+/// per server (per database on Azure SQL Database) of nothing, which is not what a plain, low-volume table is for, and
+/// freshness is judged from collection_log, not from zero rows. An unreadable counter writes no count row and keeps the
+/// prior, so the next delta spans both runs; the first run after a start has no prior and only stages one. In every
+/// case the counter read is staged for the next run. The alert and any rate read <c>count</c> rows and
 /// nothing else, so the sum of <c>attention_count</c> equals what the session counted (#5640).</para>
 ///
 /// <para><b>ring_buffer is the samples, and only the samples.</b> It keeps at most max_events_limit events (1,000 by
@@ -47,7 +48,8 @@ namespace PerformanceMonitor.Collectors;
 /// plan_handle were 0 on every attention, and the only data fields are <c>duration</c> of the interrupt and
 /// <c>request_id</c>), so a row carries the client application, host, database, session and statement text. The text
 /// goes through the statement filter (#4348) and is truncated to <see cref="MaxStatementTextLength"/> characters; the
-/// fingerprint is a hash of the filtered text (before truncation), NULL when the filter withheld the text.</para>
+/// fingerprint is <see cref="QueryHashIdentity.StatementFingerprint"/> of the filtered text (before truncation), the one
+/// definition the long-query pileup detector groups by, NULL when the filter withheld the text.</para>
 /// </summary>
 public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollector.Row>
 {
@@ -60,7 +62,7 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
     /// <summary>The app-managed session. The ensure (AlwaysOnXeSessions) creates it; this read names it.</summary>
     public const string XeSessionName = "PerformanceMonitor_Attention";
 
-    /// <summary>The run's one counter row: collection_time is the run's time, attention_count the counter delta, event_time NULL.</summary>
+    /// <summary>A run's counter row, written only when the delta is above zero: collection_time is the run's time, attention_count the counter delta, event_time NULL.</summary>
     public const string KindCount = "count";
 
     /// <summary>One kept ring-buffer event: the detail of an attention, attention_count 0, never summed into a count.</summary>
@@ -279,18 +281,6 @@ SELECT
         return current.Value >= prior.Value ? current.Value - prior.Value : current.Value;
     }
 
-    /// <summary>40 hex characters of a hash of the filtered statement text; null for no text or the filter's withheld marker.</summary>
-    public static string? Fingerprint(string? filteredText)
-    {
-        if (string.IsNullOrEmpty(filteredText) || string.Equals(filteredText, SensitiveStatements.PlaceholderText, StringComparison.Ordinal))
-        {
-            return null;
-        }
-
-        /* SHA-256 cut to 160 bits: the width of the SHA-1 the plan named, without a weak-algorithm primitive in the tree. */
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(filteredText)), 0, 20).ToLowerInvariant();
-    }
-
     public static string? Truncate(string? text) =>
         text is not null && text.Length > MaxStatementTextLength ? text[..MaxStatementTextLength] : text;
 
@@ -314,7 +304,7 @@ SELECT
                 SessionId = reader.IsDBNull(4) ? null : reader.GetInt32(4),
                 RequestId = reader.IsDBNull(5) ? null : reader.GetInt32(5),
                 InterruptDurationUs = reader.IsDBNull(6) ? null : reader.GetInt64(6),
-                StatementFingerprint = Fingerprint(filtered),
+                StatementFingerprint = QueryHashIdentity.StatementFingerprint(filtered),
                 StatementText = Truncate(filtered),
             });
         }
@@ -325,9 +315,10 @@ SELECT
             var executionCount = reader.IsDBNull(0) ? (long?)null : reader.GetInt64(0);
             var eventCount = reader.IsDBNull(1) ? (long?)null : reader.GetInt64(1);
 
-            /* The one count row of the run. event_time stays NULL so it never moves the samples' watermark; collection_time is
-               stamped by the writer from the run's time, never from a watermark. No row when the delta is unknown. */
-            if (CountDelta(eventCount, ReadLastCount(context.State, context.CurrentDatabaseName)) is { } delta)
+            /* A count row only when the delta is above zero: a quiet run, an unreadable counter and the first run (no prior) write
+               none, and the prior is still staged below. event_time stays NULL so it never moves the samples' watermark;
+               collection_time is stamped by the writer from the run's time, never from a watermark. */
+            if (CountDelta(eventCount, ReadLastCount(context.State, context.CurrentDatabaseName)) is { } delta and > 0)
             {
                 rows.Add(new Row
                 {

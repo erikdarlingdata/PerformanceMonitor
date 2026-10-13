@@ -21,7 +21,7 @@ namespace Lite.Tests;
 /// <summary>
 /// #5640: the shared client-attention collector. Pins the batch text (a missing session THROWs 50000 so the host records
 /// SESSION_MISSING, never zero rows and SUCCESS; the counter read and the execution_count gate come before the cast), the
-/// counter-delta and restart arithmetic, the count row and the samples, the statement fingerprint and truncation, and the state it stages.
+/// counter-delta and restart arithmetic, the count row (only for a delta above zero) and the samples, the shared statement fingerprint and truncation, and the state it stages.
 /// </summary>
 public sealed class AttentionCollectorDefinitionTests
 {
@@ -161,15 +161,39 @@ public sealed class AttentionCollectorDefinitionTests
     }
 
     [Fact]
-    public void Fingerprint_Is40LowerHexCharacters_Stable_AndNullForNoTextOrWithheldText()
+    public async Task TheStoredFingerprint_IsTheSharedQueryHashIdentityFingerprint_NotACollectorOwnHash()
     {
-        var a = AttentionCollector.Fingerprint("SELECT 1");
-        Assert.Matches(new Regex("^[0-9a-f]{40}$"), a);
-        Assert.Equal(a, AttentionCollector.Fingerprint("SELECT 1"));
-        Assert.NotEqual(a, AttentionCollector.Fingerprint("SELECT 2"));
-        Assert.Null(AttentionCollector.Fingerprint(null));
-        Assert.Null(AttentionCollector.Fingerprint(""));
-        Assert.Null(AttentionCollector.Fingerprint(PerformanceMonitor.Common.SensitiveStatements.PlaceholderText));
+        /* #5640: the fingerprint is a stored grouping key, and the long-query pileup detector groups by the same definition
+           (QueryHashIdentity.StatementFingerprint: "text:" plus 16 hex, lower-cased and whitespace-collapsed). One text in two
+           spellings must land on the shared helper's output, and a different text on a different one. */
+        var context = MakeContext(state: Prior(100));
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { Event(Now.AddSeconds(-30), "SELECT 1"), Event(Now.AddSeconds(-20), "select   1\r\n"), Event(Now.AddSeconds(-10), "SELECT 2") },
+            Trailer(77, 100));
+
+        var rows = await AttentionCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        var samples = rows.Where(r => r.EventKind == AttentionCollector.KindSample).ToArray();
+        Assert.Equal(3, samples.Length);
+        Assert.Matches(new Regex("^text:[0-9a-f]{16}$"), samples[0].StatementFingerprint);
+        Assert.Equal(PerformanceMonitor.Common.QueryHashIdentity.StatementFingerprint("SELECT 1"), samples[0].StatementFingerprint);
+        Assert.Equal(samples[0].StatementFingerprint, samples[1].StatementFingerprint);
+        Assert.Equal(PerformanceMonitor.Common.QueryHashIdentity.StatementFingerprint("SELECT 2"), samples[2].StatementFingerprint);
+        Assert.NotEqual(samples[0].StatementFingerprint, samples[2].StatementFingerprint);
+    }
+
+    [Fact]
+    public async Task TheStoredFingerprint_IsNullForNoTextAndForTheWithheldMarker()
+    {
+        var context = MakeContext(state: Prior(100));
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { Event(Now.AddSeconds(-30), null), Event(Now.AddSeconds(-20), PerformanceMonitor.Common.SensitiveStatements.PlaceholderText) },
+            Trailer(77, 100));
+
+        var rows = await AttentionCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.All(rows.Where(r => r.EventKind == AttentionCollector.KindSample), r => Assert.Null(r.StatementFingerprint));
+        Assert.Null(PerformanceMonitor.Common.QueryHashIdentity.StatementFingerprint(PerformanceMonitor.Common.SensitiveStatements.PlaceholderText));
     }
 
     [Fact]
@@ -183,7 +207,7 @@ public sealed class AttentionCollectorDefinitionTests
     }
 
     [Fact]
-    public async Task ReadAsync_WithAPrior_WritesOneSamplePerEvent_AndOneCountRowWithTheCounterDelta()
+    public async Task ReadAsync_WithAPrior_WritesOneSamplePerEvent_AndACountRowWithTheCounterDelta()
     {
         var context = MakeContext(state: Prior(100));
         var t1 = Now.AddSeconds(-30);
@@ -358,6 +382,30 @@ public sealed class AttentionCollectorDefinitionTests
     }
 
     [Fact]
+    public async Task QuietRuns_WriteNoCountRows_AndAReset_OrAnAttention_WritesItsRow()
+    {
+        var sim = new Sim();
+        await sim.RunAsync(Array.Empty<DateTime>(), 40);                         // first run: staging only
+        Assert.Equal(0, sim.CountRows);
+
+        await sim.RunAsync(Array.Empty<DateTime>(), 40);
+        await sim.RunAsync(Array.Empty<DateTime>(), 40);
+        Assert.Equal(0, sim.CountRows);                                          // zero deltas write nothing...
+        Assert.Equal("40", sim.State[AttentionCollector.CountStateKey]);         // ...and the prior is still staged
+
+        await sim.RunAsync(Array.Empty<DateTime>(), 42);
+        Assert.Equal(1, sim.CountRows);
+        Assert.Equal(2, sim.CountedTotal);
+
+        await sim.RunAsync(Array.Empty<DateTime>(), 42);
+        Assert.Equal(1, sim.CountRows);
+
+        await sim.RunAsync(Array.Empty<DateTime>(), 3);                          // a session restart: the whole current count
+        Assert.Equal(2, sim.CountRows);
+        Assert.Equal(5, sim.CountedTotal);
+    }
+
+    [Fact]
     public async Task ACounterReset_CountsTheCurrentValueAsTheDelta_ThenResumesDifferencing()
     {
         var sim = new Sim();
@@ -385,16 +433,15 @@ public sealed class AttentionCollectorDefinitionTests
     }
 
     [Fact]
-    public async Task ReadAsync_QuietCycle_WritesOneZeroCountRow_StagesTheCounts_AndMeasuresGated()
+    public async Task ReadAsync_QuietCycle_WritesNoCountRow_StagesTheCounts_AndMeasuresGated()
     {
         var context = MakeContext(state: Prior(25));
         using var reader = FakeCollectorDataReader.WithResultSets(Array.Empty<object[]>(), Trailer(4, 25, gated: true));
 
         var rows = await AttentionCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
-        var count = Assert.Single(rows);
-        Assert.Equal(AttentionCollector.KindCount, count.EventKind);
-        Assert.Equal(0, count.AttentionCount);
+        /* A delta of zero is a quiet run: no row (#5640), but the counter read is still staged as the next run's prior. */
+        Assert.Empty(rows);
         Assert.Equal("25", context.StagedItemState[AttentionCollector.CountStateKey]);
         Assert.Contains(context.Measurements, m => m.Label == AttentionCollector.ShredGatedMeasurement && m.Value == 1);
     }

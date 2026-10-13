@@ -128,7 +128,9 @@ public sealed class PlanRegressionRowcountRungTests
         var parameters = method.GetParameters();
         Assert.Equal("hasPlanRegressionDailyRowcount", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasServiceVersion", parameters[ProbeOrdinal - 1].Name);
-        Assert.Equal(ProbeOrdinal + 1, parameters.Length - 1);
+        Assert.Equal("hasProcedureStatsTotals", parameters[ProbeOrdinal + 1].Name);
+        Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal + 2].Name);
+        Assert.Equal(ProbeOrdinal + 2, parameters.Length - 1);
 
         /* Every sentinel present maps to exactly this build's version; this sentinel absent maps one rung back. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
@@ -140,7 +142,7 @@ public sealed class PlanRegressionRowcountRungTests
         topAbsent[ProbeOrdinal + 2] = false;
         Assert.Equal(RungVersion, (int)method.Invoke(null, topAbsent)!);
 
-        var behind = (object[])withoutLater.Clone();
+        var behind = (object[])topAbsent.Clone();
         behind[ProbeOrdinal] = false;
         behind[ProbeOrdinal + 1] = false;
         Assert.Equal(RungVersion - 1, (int)method.Invoke(null, behind)!);

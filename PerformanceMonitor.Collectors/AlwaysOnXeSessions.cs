@@ -740,17 +740,23 @@ SELECT /* " + appTag + @" */
     /// trace to turn off. A registration that points straight at such a database, as at an Azure geo-secondary, lands there
     /// without read-only intent.
     /// </summary>
-    public static string ReadOnlyDatabaseMessage(AlwaysOnXeSessionKind kind) =>
-        "The " + kind switch
+    public static string ReadOnlyDatabaseMessage(AlwaysOnXeSessionKind kind)
+    {
+        /* A block body with the switch in a local, not one expression-bodied concatenation: the member scan closes an
+           expression-bodied member that opens with a braced switch at the switch's own brace and strands the literals after it. */
+        var sessionLabel = kind switch
         {
             AlwaysOnXeSessionKind.Deadlock => "deadlock",
             AlwaysOnXeSessionKind.BlockedProcess => "blocked process",
             AlwaysOnXeSessionKind.Attention => "client timeout",
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
-        } + " Extended Events session could not be created: "
-        + "the database this registration reaches is read-only (error "
-        + LongQueryTraceDatabases.ReadOnlyDatabaseErrorNumber.ToString(CultureInfo.InvariantCulture) + "), "
-        + "as an Azure geo-secondary is, and a read-only database cannot hold a session. Register the primary database instead.";
+        };
+
+        return "The " + sessionLabel + " Extended Events session could not be created: "
+            + "the database this registration reaches is read-only (error "
+            + LongQueryTraceDatabases.ReadOnlyDatabaseErrorNumber.ToString(CultureInfo.InvariantCulture) + "), "
+            + "as an Azure geo-secondary is, and a read-only database cannot hold a session. Register the primary database instead.";
+    }
 
     /// <summary>
     /// Marks a failure of a create or start on Azure SQL Database, so <see cref="DescribeFailure"/> adds the caps sentence.

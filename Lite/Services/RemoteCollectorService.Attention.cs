@@ -15,7 +15,7 @@ public partial class RemoteCollectorService
 {
     /// <summary>
     /// Collects client attentions (#5640) via the shared <see cref="AttentionCollector"/> definition: the event_counter
-    /// delta (the one count row per run), the ring-buffer samples and the statement filter all live there, the same cross-SKU
+    /// delta (a count row per run with a non-zero delta), the ring-buffer samples and the statement filter all live there, the same cross-SKU
     /// parity contract as <see cref="CollectBlockedProcessReportsAsync"/>. A missing or inaccessible session is NOT
     /// tolerated as zero rows: the definition's batch raises "XE session ... is not running", and
     /// <see cref="ReadXeSessionAsync"/> turns that into <see cref="XeSessionEnsureException"/>, so the run never records a

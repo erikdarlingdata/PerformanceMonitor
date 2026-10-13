@@ -1435,7 +1435,6 @@ public sealed class TsqlConventionGuardTests
     /// </summary>
     private static readonly string[] KnownTruncatedRanges =
     [
-        "PerformanceMonitor.Collectors/AlwaysOnXeSessions.cs ReadOnlyDatabaseMessage",
         "PerformanceMonitor.Collectors/CollectorRuntimePrecondition.cs DescribeObserved",
         "PerformanceMonitor.Collectors/PgColumnStatsCoverage.cs Figure",
         /* #3278: the same expression-bodied formatter shape as the Figure line above, in the classifier
