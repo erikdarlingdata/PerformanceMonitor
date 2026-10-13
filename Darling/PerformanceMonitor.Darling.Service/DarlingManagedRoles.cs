@@ -1633,6 +1633,24 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLeg
 {BuildExternalAlertSubmitFunctionSql(config)}
 REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {admin}, {viewer}, {mcp};
 
+-- 10c. External alert tables and source logins (#5654). The three tables (V180) are written only by the store owner and
+--     by the section 10b function. The blanket grants above gave admin INSERT/UPDATE/DELETE on every config table (section
+--     3 and its default privileges), and with that admin could insert a pending row under any source, so the same
+--     REVOKE ALL ... CASCADE as 10a takes every privilege from PUBLIC and the three roles, and SELECT is granted back
+--     to the three roles (an operator reads the queue and the registry). It runs after every blanket grant above, and before 10a so that the password key tables' revoke stays the last
+--     grant-side statement of the batch.
+--     Then, for each registered source login that carries the '{AlertSourceRoleMarker}' marker: every attribute that widens
+--     a role off, NOINHERIT, every role membership revoked (a source holds none), and exactly three grants -- CONNECT on this
+--     database, USAGE on the {config} schema, EXECUTE on the 10b function. A registry row naming a role with no
+--     marker, or no role at all, is skipped with a WARNING.
+REVOKE ALL ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
+   FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+GRANT SELECT ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
+   TO {admin}, {viewer};
+GRANT SELECT ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
+   TO {mcp};
+{BuildExternalAlertSourceRolesSql(config)}
+
 -- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
 --     and it runs after EVERY blanket grant above (the schema-wide SELECT and write grants and the mcp column ACL), so
@@ -1685,21 +1703,6 @@ BEGIN
    END IF;
 END
 $do$;
-
--- 10c. External alert tables and source logins (#5654). The three tables (V180) are written only by the store owner and
---     by the section 10b function. The blanket grants above gave admin INSERT/UPDATE/DELETE on every config table (section
---     3 and its default privileges), and with that admin could insert a pending row under any source, so the same
---     REVOKE ALL ... CASCADE as 10a takes every privilege from PUBLIC and the three roles, and SELECT is granted back
---     to the three roles (an operator reads the queue and the registry). It runs after every blanket grant above.
---     Then, for each registered source login that carries the '{AlertSourceRoleMarker}' marker: every attribute that widens
---     a role off, NOINHERIT, every role membership revoked (a source holds none), and exactly three grants -- CONNECT on this
---     database, USAGE on the {config} schema, EXECUTE on the 10b function. A registry row naming a role with no
---     marker, or no role at all, is skipped with a WARNING.
-REVOKE ALL ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
-   FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
-GRANT SELECT ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
-   TO {admin}, {viewer}, {mcp};
-{BuildExternalAlertSourceRolesSql(config)}
 
 -- 11. Role memberships (#3914): the three roles hold none. Nothing above grants one, so every membership in which
 --     admin, viewer or mcp is the MEMBER was given by someone else, and each outranks the grants above -- a
@@ -1868,8 +1871,8 @@ BEGIN
             || ' CASCADE';
       END LOOP;
 
-      EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA {config}, {PgSchemaGenerator.CollectSchema} FROM %I', source_login.role_name);
-      EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA {config}, {PgSchemaGenerator.CollectSchema} FROM %I', source_login.role_name);
+      EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I, %I FROM %I', '{config}', '{PgSchemaGenerator.CollectSchema}', source_login.role_name);
+      EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I, %I FROM %I', '{config}', '{PgSchemaGenerator.CollectSchema}', source_login.role_name);
       EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), source_login.role_name);
       EXECUTE format('GRANT USAGE ON SCHEMA {config} TO %I', source_login.role_name);
       EXECUTE format('GRANT EXECUTE ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) TO %I', source_login.role_name);

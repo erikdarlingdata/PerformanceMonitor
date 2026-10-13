@@ -563,9 +563,9 @@ SET search_path = pg_temp, config, public", ct);
             Assert.Contains("GRANT CONNECT ON DATABASE %I TO %I", sql, StringComparison.Ordinal);
         }
 
-        /* The managed batch's table revoke runs after the password key tables' revoke and every blanket write grant, and before the membership pass. */
+        /* The managed batch's table revoke runs after every blanket write grant, and before the password key tables' revoke (which stays the last of its kind) and the membership pass. */
         var tableRevokeAt = batch.IndexOf("REVOKE ALL ON config.external_alert_source", StringComparison.Ordinal);
-        Assert.True(tableRevokeAt > batch.IndexOf("REVOKE ALL ON config.legacy_secret_pin_candidate", StringComparison.Ordinal));
+        Assert.True(tableRevokeAt < batch.IndexOf("REVOKE ALL ON config.legacy_secret_pin_candidate", StringComparison.Ordinal));
         Assert.True(tableRevokeAt > batch.IndexOf("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config", StringComparison.Ordinal));
         Assert.True(tableRevokeAt < batch.IndexOf("-- 11. Role memberships", StringComparison.Ordinal));
     }
