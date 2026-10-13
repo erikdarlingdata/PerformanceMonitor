@@ -214,22 +214,8 @@ public sealed class DuckDbNotificationRouteStore
     /// <summary>Expands the routes with the given inputs. When the tag tables were unreadable, a tag-scoped route is returned
     /// unexpanded (it matches nothing and is not marked orphaned, since the tag may still exist); server-scoped routes expand
     /// from the server list. The same rule as Darling's <c>StoreConfigProvider.ExpandRoutes</c> (#5750).</summary>
-    public static IReadOnlyList<NotificationRoute> ExpandRoutes(IReadOnlyList<NotificationRoute> routes, NotificationRouteScopeInputs inputs)
-    {
-        var expanded = NotificationRouteScopeExpander.Expand(routes, inputs.KnownServerIds, inputs.TagParents, inputs.ServerTags);
-        if (inputs.TagsReadable)
-        {
-            return expanded;
-        }
-
-        var result = new List<NotificationRoute>(expanded.Count);
-        for (var i = 0; i < expanded.Count; i++)
-        {
-            result.Add(routes[i].ScopeTagId.HasValue ? routes[i] : expanded[i]);
-        }
-
-        return result;
-    }
+    public static IReadOnlyList<NotificationRoute> ExpandRoutes(IReadOnlyList<NotificationRoute> routes, NotificationRouteScopeInputs inputs) =>
+        NotificationRouteScopeExpander.Expand(routes, inputs.KnownServerIds, inputs.TagParents, inputs.ServerTags, inputs.TagsReadable);
 
     /// <summary>One route (secrets and expansion included), or null.</summary>
     public async Task<NotificationRoute?> GetAsync(int routeId, CancellationToken cancellationToken = default) =>
@@ -810,7 +796,7 @@ public sealed class DuckDbNotificationRouteStore
 }
 
 
-/// <summary>Windows Credential Manager would not store (or remove) a route destination, so the route was not saved (#5750). The
+/// <summary>Windows Credential Manager would not store a route destination, so the route was not saved (#5750). The
 /// message names the channel and never the value. The edit dialog shows it inline.</summary>
 public sealed class RouteSecretException : InvalidOperationException
 {
@@ -820,11 +806,6 @@ public sealed class RouteSecretException : InvalidOperationException
     public RouteSecretException(string channel, int length)
         : base($"The {channel} destination could not be saved to Windows Credential Manager, so the route was not changed."
                + (length > StorableLength ? $" It may be longer than Lite can store today ({StorableLength} characters)." : ""))
-    {
-    }
-
-    public RouteSecretException(string channel, bool removing)
-        : base($"The saved {channel} destination could not be removed from Windows Credential Manager, so the route was not changed.")
     {
     }
 }
