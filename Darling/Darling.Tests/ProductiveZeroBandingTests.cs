@@ -398,11 +398,13 @@ public sealed class ProductiveZeroBandingTests
             }
         }
 
+        /* #5644 W11: the column's long text now clips to one line (clamp) and prints its ISO times local
+           (localizeText) instead of wrapping, so the pin follows that spec; the column itself must still exist. */
         /* And the web table has a column for it: the viewer reads the full shape (full_detail: true), which
            always carried the sentence, but no column rendered it, so a regressed row read WARNING with every
            cell beside it blank. */
         Assert.Contains(
-            "{ key: \"regression_finding\", label: \"Regression\", wrap: true, plain: true }",
+            "{ key: \"regression_finding\", label: \"Regression\", clamp: true, localizeText: true, plain: true }",
             ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/server-tabs.js"),
             StringComparison.Ordinal);
 
