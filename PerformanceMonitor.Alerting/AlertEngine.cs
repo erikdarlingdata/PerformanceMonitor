@@ -629,7 +629,7 @@ public sealed class AlertEngine
                 continue;
             }
 
-            var readClock = System.Diagnostics.Stopwatch.StartNew();
+            var readClock = Stopwatch.StartNew();
             try
             {
                 var tier = await _escalationSeedReader(new EscalationSeedQuery(key, metric, resolutionTitle, sinceUtc, countMuted), ct);

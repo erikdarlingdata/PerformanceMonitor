@@ -7355,11 +7355,11 @@ LIMIT 1";
                 await historyStore.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(resolution));
             },
             logger: _logger,
+            /* #5715 part B: a Warning delivered before a restart still lets the Critical through at once. */
+            escalationSeedReader: EscalationSeed.ReaderFor(historyStore),
             /* #3013: the process counter every swallowed condition read is tallied on. Passed explicitly
                rather than defaulted inside the engine so a test constructs its own and cannot pollute it. */
-            readFailures: AlertReadFailureCounter.Shared,
-            /* #5715 part B: a Warning delivered before a restart still lets the Critical through at once. */
-            escalationSeedReader: EscalationSeed.ReaderFor(historyStore));
+            readFailures: AlertReadFailureCounter.Shared);
     }
 
     /// <summary>

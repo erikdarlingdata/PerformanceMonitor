@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// cooldowns (seeded from the same history) through. The stores' own rules are pinned in
 /// <c>EscalationSeedHistoryStoreTests</c> (Lite) and <c>EscalationSeedLiveStoreTests</c> (Darling).
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class EscalationRestartSeedTests
 {
     private static readonly DateTime T0 = new(2026, 10, 13, 10, 0, 0, DateTimeKind.Utc);
@@ -327,6 +328,18 @@ public sealed class EscalationRestartSeedTests
             Assert.True(index >= 0);
             Assert.Equal(type, map.TargetMethods[index].DeclaringType);
         }
+    }
+
+    [Fact]
+    public void BothHostsWireTheSeedReaderToTheirHistoryStore_WhereTheEngineIsBuilt()
+    {
+        /* Lite builds the engine in MainWindow, Darling in DarlingWorker; deprecated/ is not wired and not touched. */
+        Assert.Contains(
+            "escalationSeedReader: PerformanceMonitor.Alerting.EscalationSeed.ReaderFor(_alertHistoryStore)",
+            System.IO.File.ReadAllText(RepoFile("Lite/MainWindow.xaml.cs")), StringComparison.Ordinal);
+        Assert.Contains(
+            "escalationSeedReader: EscalationSeed.ReaderFor(historyStore)",
+            System.IO.File.ReadAllText(RepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs")), StringComparison.Ordinal);
     }
 
     private static string RepoFile(string relative, [System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")

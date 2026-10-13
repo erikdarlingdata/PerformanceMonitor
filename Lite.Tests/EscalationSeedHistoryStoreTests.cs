@@ -66,6 +66,14 @@ VALUES ($1, $2, 'Srv', $3, 0, 0, $4, $5, $6, $7, $8)";
         _store.GetLastFiredTierAsync(serverId, Fire, Resolution, Now - (window ?? TimeSpan.FromMinutes(15)), countMuted);
 
     [Fact]
+    public void TheStoreOverridesTheInterfaceDefault()
+    {
+        var map = typeof(DuckDbAlertHistoryStore).GetInterfaceMap(typeof(IAlertHistoryStore));
+        var method = typeof(IAlertHistoryStore).GetMethod(nameof(IAlertHistoryStore.GetLastFiredTierAsync))!;
+        Assert.Equal(typeof(DuckDbAlertHistoryStore), map.TargetMethods[Array.IndexOf(map.InterfaceMethods, method)].DeclaringType);
+    }
+
+    [Fact]
     public async Task NewestFireWins()
     {
         await InsertAsync(Now.AddMinutes(-5), Fire, Warning);

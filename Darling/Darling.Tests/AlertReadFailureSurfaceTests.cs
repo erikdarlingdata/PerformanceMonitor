@@ -915,7 +915,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 17, 6),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 18, 6),
         /* 14th exempt since #4215: EvaluateStoreSettingsAsync's wrapper catch — the store-settings
            self-alert's report is a parameter, exactly like its StaleMute/WebTls siblings. 15th exempt
            since #4299: EvaluateRawPurgeOverHorizonAsync's wrapper catch — the raw-purge-over-horizon
@@ -1020,8 +1020,9 @@ public sealed class AlertReadFailureSurfaceTests
     /// unreported for as long as the store stayed unreadable. And a FORTIETH since #5641: the Runnable Queue card's top-request
     /// read ("runnable queue top requests"), counted because it IS a store read the alert pass swallowed, though only
     /// the card's request items go missing and the fire does not. And a FORTY-FIRST since #5640: the Client Timeouts window read ("client timeouts"), counted because a swallowed read neither fires nor clears the alert.</para>
+    /// And a FORTY-SECOND since #5715 part B: the escalation-tier seed read ("escalation tier seed"), counted because a swallowed read leaves a Warning delivered before a restart unknown to the engine, so the Critical that follows waits out the cooldown instead of escalating; it seeds nothing, never blocks a fire, and is retried on the next sweep.
     /// </summary>
-    private const int CountedSites = 41;
+    private const int CountedSites = 42;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
