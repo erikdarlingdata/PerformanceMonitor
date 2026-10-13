@@ -175,6 +175,90 @@ public sealed class DroppedDatabaseScopeLiveTests
     }
 
     /// <summary>
+    /// #5633 review (finding D), the bot's exact store: GoneDb has <c>procedure_stats</c> rows, LiveDb has none, and the newest
+    /// <c>database_states</c> snapshot names only LiveDb. With no <c>database_name</c> the ranking leaves GoneDb out, and the empty page
+    /// used to say "the procedure_stats collector ran ... and recorded nothing for it", which is false: it recorded a procedure in
+    /// GoneDb. The page now claims only the databases the server still has, and names what it left out, on an empty page and on a
+    /// page with rows alike. Naming the dropped database reads it as asked and leaves nothing out.
+    /// </summary>
+    [Fact]
+    public async Task TopProcedures_SaysWhichDatabasesItLeftOut_AndDoesNotClaimTheCollectorRecordedNothing()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), BaseSkip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        const string serverName = "dropped-scope-left-out";
+        var serverId = ServerIdHelper.GetDeterministicHashCode(serverName);
+        await DarlingMcpTestData.RegisterServerAsync(connection, serverId, serverName, ct);
+        var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
+                                           delta_worker_time, delta_elapsed_time, delta_execution_count, delta_spills, sample_interval_seconds)
+              VALUES ($1,$2,$3,$4,'GoneDb','dbo','usp_Work','0xHGoneDb',900000,1800000,900,0,60)",
+            CollectionIdGenerator.Next(), now.AddHours(-2), serverId, serverName);
+        /* The collector has run twice and looked at the window, so the empty page takes the "ran, found nothing" branch. */
+        foreach (var minutes in new[] { 30, 90 })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collection_log
+    (log_id, server_id, server_name, collector_name, collection_time,
+     duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
+VALUES ($1, $2, $3, 'procedure_stats', $4, 100, 'SUCCESS', NULL, 1, 80, 20)",
+                CollectionIdGenerator.Next(), serverId, serverName, now.AddMinutes(-minutes));
+        }
+
+        await SnapshotAsync(connection, serverId, serverName, TimeSpan.FromHours(1), ct, "GoneDb", "LiveDb");
+        await SnapshotAsync(connection, serverId, serverName, TimeSpan.FromMinutes(5), ct, "LiveDb");
+
+        static string[] LeftOut(JsonElement root) =>
+            root.TryGetProperty("databases_left_out", out var names) && names.ValueKind == JsonValueKind.Array
+                ? names.EnumerateArray().Select(n => n.GetString()!).ToArray()
+                : Array.Empty<string>();
+
+        /* Empty page: it names GoneDb and does not say the collector recorded nothing. */
+        using var empty = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 20));
+        Assert.Equal("empty", empty.RootElement.GetProperty("status").GetString());
+        var message = empty.RootElement.GetProperty("message").GetString()!;
+        Assert.DoesNotContain("recorded nothing for it", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("matches this request", message, StringComparison.Ordinal);
+        Assert.Contains("a database this server still has", message, StringComparison.Ordinal);
+        Assert.Contains("1 database(s) the server no longer lists", message, StringComparison.Ordinal);
+        Assert.Equal(new[] { "GoneDb" }, LeftOut(empty.RootElement));
+        Assert.Contains("no longer lists them", empty.RootElement.GetProperty("databases_left_out_note").GetString(), StringComparison.Ordinal);
+
+        /* The Query Store clutter read leaves GoneDb out the same way, and its empty page must not say Query Store is off everywhere. */
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode)
+              VALUES ($1,$2,$3,$4,'GoneDb','READ_WRITE','READ_WRITE',0,10,8192,'AUTO',21,200,60,'AUTO')",
+            CollectionIdGenerator.Next(), now.AddHours(-1), serverId, serverName);
+        using var clutter = JsonDocument.Parse(await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(dataSource, serverName, 24, 20, false, null, null, cancellationToken: ct));
+        Assert.Equal("empty", clutter.RootElement.GetProperty("status").GetString());
+        Assert.DoesNotContain("OFF everywhere", clutter.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(new[] { "GoneDb" }, LeftOut(clutter.RootElement));
+
+        /* Named, the dropped database is read as asked: rows come back and nothing is disclosed as left out. */
+        using var named = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 20, database_name: "GoneDb"));
+        Assert.Single(named.RootElement.GetProperty("procedures").EnumerateArray());
+        Assert.Empty(LeftOut(named.RootElement));
+
+        /* A page with rows carries the same disclosure. */
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
+                                           delta_worker_time, delta_elapsed_time, delta_execution_count, delta_spills, sample_interval_seconds)
+              VALUES ($1,$2,$3,$4,'LiveDb','dbo','usp_Work','0xHLiveDb',100000,200000,100,0,60)",
+            CollectionIdGenerator.Next(), now.AddHours(-2), serverId, serverName);
+        using var page = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(dataSource, serverName, hours_back: 168, top: 20));
+        Assert.Equal(new[] { "LiveDb" }, page.RootElement.GetProperty("procedures").EnumerateArray().Select(p => p.GetProperty("database_name").GetString()!).ToArray());
+        Assert.Equal(new[] { "GoneDb" }, LeftOut(page.RootElement));
+    }
+
+    /// <summary>
     /// Review M2: a read with an as_of uses the newest snapshot AT OR BEFORE it (horizon from it), so a database dropped after the
     /// window still ranks in a window it existed in. Review M2 (second half): a row stamped after the newest snapshot is a database
     /// created since it, and is kept (the snapshot is up to 30 minutes old).
@@ -313,7 +397,7 @@ public sealed class DroppedDatabaseScopeLiveTests
         await SnapshotAsync(connection, serverId, serverName, TimeSpan.FromMinutes(5), ct, "LiveDb");
 
         var asOf = windowTime.AddHours(2).ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
-        var historical = await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(dataSource, serverName, 6, 20, false, asOf, null, ct);
+        var historical = await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(dataSource, serverName, 6, 20, false, asOf, null, cancellationToken: ct);
         Assert.Contains("GoneDb", historical, StringComparison.Ordinal);
         Assert.Contains("LiveDb", historical, StringComparison.Ordinal);
 

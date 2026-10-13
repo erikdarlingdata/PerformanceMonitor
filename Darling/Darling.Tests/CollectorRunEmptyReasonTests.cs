@@ -8,6 +8,7 @@
 
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -72,6 +73,40 @@ public sealed class CollectorRunEmptyReasonTests
         var message = Field(json, "message");
         Assert.Contains("No procedure executed in the last 24h", message, StringComparison.Ordinal);
         Assert.DoesNotContain("two collection cycles", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5633 review (finding D): a read that left databases out claims only the ones the server still has, and never says the
+    /// collector "recorded nothing for it". The gap and new-collector branches are unchanged by the count.</summary>
+    [Fact]
+    public void ProcedureStats_AfterALeftOutDatabase_ClaimsOnlyTheDatabasesTheServerStillHas()
+    {
+        var json = DarlingMcpDataTools.EmptyProcedureStatsStatus(new CollectorRunFacts(2, 30, Last, 0), 24, databasesLeftOut: 3);
+
+        Assert.Equal("empty", Field(json, "status"));
+        var message = Field(json, "message");
+        Assert.DoesNotContain("recorded nothing for it", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("matches this request", message, StringComparison.Ordinal);
+        Assert.Contains("No procedure ran in the last 24h in a database this server still has", message, StringComparison.Ordinal);
+        Assert.Contains("3 database(s) the server no longer lists", message, StringComparison.Ordinal);
+        Assert.Equal(new CollectorRunFacts(2, 0, Last, 0).ProcedureStatsEmpty(24).Message, new CollectorRunFacts(2, 0, Last, 0).ProcedureStatsEmpty(24, 3).Message);
+        Assert.Equal(new CollectorRunFacts(1, 1, Last, 0).ProcedureStatsEmpty(24).Message, new CollectorRunFacts(1, 1, Last, 0).ProcedureStatsEmpty(24, 3).Message);
+    }
+
+    [Fact]
+    public void DatabasesLeftOut_ListsTheFirstTwentyNames_AndTheNoteCarriesTheFullCount()
+    {
+        var all = DatabasesLeftOut.Distinct(Enumerable.Range(0, 25).Select(i => $"Db{i:D2}").Concat(new[] { "Db00", " " }));
+
+        Assert.Equal(25, all!.Count);
+        Assert.Equal(20, DatabasesLeftOut.Named(all)!.Count);
+        Assert.Contains("25 in all", DatabasesLeftOut.Note(all), StringComparison.Ordinal);
+        Assert.Null(DatabasesLeftOut.Distinct(new string?[] { null, "" }));
+        Assert.Null(DatabasesLeftOut.Note(null));
+
+        var wrapped = McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", "m"), all)!;
+        using var doc = JsonDocument.Parse(wrapped);
+        Assert.Equal(20, doc.RootElement.GetProperty("databases_left_out").GetArrayLength());
+        Assert.Equal(McpHelpers.Status("empty", "m"), McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", "m"), null));
     }
 
     [Fact]

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -242,7 +243,7 @@ public static class DarlingQueryStoreClutterReader
     /// unchanged); <see cref="DatabaseFilter.All"/>, the default, is every database.</param>
     public static async Task<List<ReadCostRow>> GetReadCostAsync(
         NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default, DateTime? asOfUtc = null,
-        CancellationToken cancellationToken = default)
+        ICollection<string>? omittedDatabases = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var rows = new List<ReadCostRow>();
         await using var command = postgres.CreateCommand(ReadCostSql);
@@ -271,7 +272,7 @@ public static class DarlingQueryStoreClutterReader
 
         /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
            database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
-        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.LastSlowestAt, asOfUtc, cancellationToken);
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.LastSlowestAt, asOfUtc, omittedDatabases, logger, cancellationToken);
     }
 
     /* ─────────────────────────── (b) plan churn ─────────────────────────── */
@@ -383,7 +384,7 @@ public static class DarlingQueryStoreClutterReader
     /// <param name="databases">#5244: the chosen databases (optional, so the Viewer's calls compile unchanged).</param>
     public static async Task<List<PlanChurnRow>> GetPlanChurnAsync(
         NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default, DateTime? asOfUtc = null,
-        CancellationToken cancellationToken = default)
+        ICollection<string>? omittedDatabases = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var rows = new List<PlanChurnRow>();
         await using var command = postgres.CreateCommand(PlanChurnSql);
@@ -411,7 +412,7 @@ public static class DarlingQueryStoreClutterReader
 
         /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
            database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
-        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.LastCollection, asOfUtc, cancellationToken);
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.LastCollection, asOfUtc, omittedDatabases, logger, cancellationToken);
     }
 
     /* ─────────────────────────── (c) configuration ─────────────────────────── */
@@ -458,7 +459,7 @@ public static class DarlingQueryStoreClutterReader
     /// <param name="databases">#5244: the chosen databases (optional, so the Viewer's calls compile unchanged).</param>
     public static async Task<List<ConfigRow>> GetConfigAsync(
         NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default, DateTime? asOfUtc = null,
-        CancellationToken cancellationToken = default)
+        ICollection<string>? omittedDatabases = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var rows = new List<ConfigRow>();
         await using var command = postgres.CreateCommand(ConfigSql);
@@ -492,7 +493,7 @@ public static class DarlingQueryStoreClutterReader
 
         /* #5633 item 4: a database the server no longer has (absent from the newest database_states snapshot) is left out when no
            database was chosen, so it cannot carry a verdict, a count or a recommendation. See CurrentDatabaseScope. */
-        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.CapturedAt, asOfUtc, cancellationToken);
+        return await CurrentDatabaseScope.OmitDroppedAsync(postgres, rows, r => r.ServerId, r => r.DatabaseName, databases, r => r.CapturedAt, asOfUtc, omittedDatabases, logger, cancellationToken);
     }
 
     /* ─────────────────────────── (d) QDS waits + the clerk ─────────────────────────── */

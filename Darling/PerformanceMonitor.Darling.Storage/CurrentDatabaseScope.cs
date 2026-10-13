@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 
@@ -57,15 +58,17 @@ public static class CurrentDatabaseScope
     /// horizon measured from it, so a database dropped after the window is still in the set for a window it existed in.
     /// </summary>
     public static async Task<IReadOnlySet<string>?> ReadAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime? nowUtc = null, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
-        => (await ReadSnapshotAsync(postgres, serverId, nowUtc, asOfUtc, cancellationToken))?.Databases;
+        NpgsqlDataSource postgres, int serverId, DateTime? nowUtc = null, DateTime? asOfUtc = null, ILogger? logger = null,
+        CancellationToken cancellationToken = default)
+        => (await ReadSnapshotAsync(postgres, serverId, nowUtc, asOfUtc, logger, cancellationToken))?.Databases;
 
     /// <summary>
     /// <see cref="ReadAsync"/> with the snapshot's own collection time (#5633 review M2): the time lets a caller keep a row stamped
     /// after the snapshot (a database created since it) instead of treating it as dropped. Same unknown rules and same read.
     /// </summary>
     public static async Task<Snapshot?> ReadSnapshotAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime? nowUtc = null, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime? nowUtc = null, DateTime? asOfUtc = null, ILogger? logger = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -96,6 +99,7 @@ public static class CurrentDatabaseScope
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            WarnFailOpen(logger, "newest database_states snapshot", serverId, ex);
             return null;
         }
     }
@@ -123,7 +127,7 @@ public static class CurrentDatabaseScope
     /// </summary>
     public static async Task<IReadOnlySet<string>?> ReadDroppedAsync(
         NpgsqlDataSource postgres, int serverId, DateTime? nowUtc = null, DateTime? asOfUtc = null, DateTime? windowStartUtc = null,
-        CancellationToken cancellationToken = default)
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -152,9 +156,20 @@ public static class CurrentDatabaseScope
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            WarnFailOpen(logger, "last-seen database_states read", serverId, ex);
             return null;
         }
     }
+
+    /// <summary>
+    /// #5633 review: the fail-open is kept (a monitoring read never fails on this lookup), but a SQL or ordinal mistake in it
+    /// turns all of item 4 off, so each failure is logged once per occurrence at Warning, the way the rest of this assembly logs a
+    /// best-effort step that gave up (<c>logger?.LogWarning</c> with the exception message; a caller with no logger passes none).
+    /// </summary>
+    private static void WarnFailOpen(ILogger? logger, string what, int serverId, Exception ex)
+        => logger?.LogWarning(
+            "CurrentDatabaseScope: the {What} for server {ServerId} failed, so no dropped database is left out of the read that asked: {Message}",
+            what, serverId, ex.Message);
 
     /// <summary>The oldest snapshot stamp <see cref="ReadDroppedAsync"/> reads: the window's start when it is given, never nearer than
     /// <see cref="SnapshotHorizon"/> before the anchor and never further than <see cref="DropLookBack"/>.</summary>
@@ -201,8 +216,8 @@ public static class CurrentDatabaseScope
     /// (<see cref="ReadDroppedAsync"/>). The reader the filter goes to must apply <see cref="DatabaseFilter.ExcludeClause"/>.</summary>
     public static async Task<DatabaseFilter> NarrowAsync(
         NpgsqlDataSource postgres, int serverId, DatabaseFilter filter, DateTime? nowUtc = null, DateTime? asOfUtc = null,
-        DateTime? windowStartUtc = null, CancellationToken cancellationToken = default)
-        => filter.IsAll ? Narrow(filter, await ReadDroppedAsync(postgres, serverId, nowUtc, asOfUtc, windowStartUtc, cancellationToken)) : filter;
+        DateTime? windowStartUtc = null, ILogger? logger = null, CancellationToken cancellationToken = default)
+        => filter.IsAll ? Narrow(filter, await ReadDroppedAsync(postgres, serverId, nowUtc, asOfUtc, windowStartUtc, logger, cancellationToken)) : filter;
 
     /// <summary>
     /// <paramref name="rows"/> without the rows of a database its server no longer has, for a read that lists per-database
@@ -211,12 +226,15 @@ public static class CurrentDatabaseScope
     /// One <see cref="ReadSnapshotAsync"/> per distinct server in the rows; a server whose set is unknown keeps its rows.
     /// <para><paramref name="asOfUtc"/> (#5633 review M3) is a historical read's anchor, passed to <see cref="ReadSnapshotAsync"/>: the
     /// newest snapshot at or before it, so a database dropped after the window is kept for a window it existed in.</para>
+    /// <para><paramref name="omittedDatabases"/> (#5633 review, finding D) receives the name of every database whose rows were left out, so
+    /// the page a human reads can say what it left out instead of reading as "nothing there". Null collects nothing.</para>
     /// <para><paramref name="timeOf"/> (#5633 review M2): a row stamped AFTER the snapshot was taken is kept, because its database
     /// may have been created since (the snapshot is up to 30 minutes old). It costs no extra query. Null keeps no such row.</para>
     /// </summary>
     public static async Task<List<T>> OmitDroppedAsync<T>(
         NpgsqlDataSource postgres, List<T> rows, Func<T, int> serverOf, Func<T, string?> databaseOf, DatabaseFilter filter,
-        Func<T, DateTime?>? timeOf = null, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
+        Func<T, DateTime?>? timeOf = null, DateTime? asOfUtc = null, ICollection<string>? omittedDatabases = null, ILogger? logger = null,
+        CancellationToken cancellationToken = default)
     {
         if (!filter.IsAll || rows.Count == 0)
         {
@@ -229,7 +247,7 @@ public static class CurrentDatabaseScope
             var serverId = serverOf(row);
             if (!sets.ContainsKey(serverId))
             {
-                sets[serverId] = await ReadSnapshotAsync(postgres, serverId, asOfUtc: asOfUtc, cancellationToken: cancellationToken);
+                sets[serverId] = await ReadSnapshotAsync(postgres, serverId, asOfUtc: asOfUtc, logger: logger, cancellationToken: cancellationToken);
             }
         }
 
@@ -241,7 +259,13 @@ public static class CurrentDatabaseScope
                 return true;
             }
 
-            return snapshot is not null && timeOf?.Invoke(row) is { } rowTime && rowTime > snapshot.TakenAt;
+            if (snapshot is not null && timeOf?.Invoke(row) is { } rowTime && rowTime > snapshot.TakenAt)
+            {
+                return true;
+            }
+
+            omittedDatabases?.Add(databaseOf(row)!);
+            return false;
         });
     }
 }

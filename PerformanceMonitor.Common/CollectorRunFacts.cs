@@ -60,13 +60,24 @@ public sealed record CollectorRunFacts(
     /// <item>Two or more runs, none inside the window: <c>unavailable</c>. The collector is not new, but it did not look at
     /// this window, so "nothing ran" would be a claim nobody measured.</item>
     /// </list>
+    /// <paramref name="databasesLeftOut"/> (#5633 review, finding D) is how many dropped databases the read left out; in the
+    /// <c>empty</c> case a positive count changes the words so they claim only the databases the server still has.
     /// </summary>
-    public (string Status, string Message) ProcedureStatsEmpty(int hoursBack)
+    public (string Status, string Message) ProcedureStatsEmpty(int hoursBack, int databasesLeftOut = 0)
     {
         if (!HasDeltaBaseline)
         {
             return ("unavailable",
                 "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values, and the procedure_stats collector has not yet completed two successful runs for this server.");
+        }
+
+        if (SuccessfulRunsInWindow is > 0 && databasesLeftOut > 0)
+        {
+            /* #5633 review (finding D): the read left out databases the server no longer lists, so "recorded nothing for it" would
+               deny rows the collector did record there. Say what was measured: nothing in the databases it still has. */
+            return ("empty",
+                string.Create(CultureInfo.InvariantCulture,
+                    $"No procedure ran in the last {hoursBack}h in a database this server still has: the procedure_stats collector ran successfully {SuccessfulRunsInWindow} time(s) in the window and recorded nothing for them. {databasesLeftOut} database(s) the server no longer lists were left out of this read (see databases_left_out)."));
         }
 
         if (SuccessfulRunsInWindow is > 0)

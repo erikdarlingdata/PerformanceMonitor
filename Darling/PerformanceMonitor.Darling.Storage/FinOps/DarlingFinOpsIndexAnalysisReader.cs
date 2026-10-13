@@ -25,7 +25,8 @@ namespace PerformanceMonitor.Darling.Storage.FinOps;
  */
 
 /// <summary>An index analysis and, per database name (case-insensitive), the naive-UTC instant its snapshot was collected.</summary>
-public sealed record IndexAnalysisWithSnapshotTimes(IndexCleanupAnalysisResult Result, IReadOnlyDictionary<int, DateTime> SnapshotTimes);
+public sealed record IndexAnalysisWithSnapshotTimes(
+    IndexCleanupAnalysisResult Result, IReadOnlyDictionary<int, DateTime> SnapshotTimes, IReadOnlyList<string>? OmittedDatabases = null);
 
 public static class DarlingFinOpsIndexAnalysisReader
 {
@@ -357,7 +358,7 @@ LIMIT 1";
     }
 
     /// <summary>Runs <see cref="IndexObjectStatsLatestSql"/> and returns its rows with their snapshot stamps.</summary>
-    private static async Task<List<IndexObjectStatsDto>> ReadIndexObjectStatsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    private static async Task<List<IndexObjectStatsDto>> ReadIndexObjectStatsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken, ICollection<string>? omittedDatabases = null)
     {
         var inputs = new List<IndexObjectStatsDto>();
 
@@ -375,7 +376,7 @@ LIMIT 1";
            index snapshot in the store, and listed in the analysis, the compression recommendation and the rollups as if it
            were current. Its rows are left out here, at the one read every consumer shares. Unknown (no snapshot) keeps all. */
         return await CurrentDatabaseScope.OmitDroppedAsync(
-            dataSource, inputs, r => serverId, r => r.DatabaseName, DatabaseFilter.All, r => r.CollectionTime, cancellationToken: cancellationToken);
+            dataSource, inputs, r => serverId, r => r.DatabaseName, DatabaseFilter.All, r => r.CollectionTime, omittedDatabases: omittedDatabases, cancellationToken: cancellationToken);
     }
 
     /// <summary>
@@ -428,7 +429,8 @@ LIMIT 1";
     /// </summary>
     public static async Task<IndexAnalysisWithSnapshotTimes> GetIndexAnalysisWithSnapshotTimesAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
-        var rows = await ReadIndexObjectStatsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+        var omitted = new HashSet<string>(StringComparer.Ordinal);
+        var rows = await ReadIndexObjectStatsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken, omitted);
         var options = await GetIndexCleanupOptionsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken: cancellationToken);
         var times = new Dictionary<int, DateTime>();
         foreach (var row in rows)
@@ -438,7 +440,7 @@ LIMIT 1";
 
         var inputs = rows.ConvertAll(MapToIndexInput);
         var result = await Task.Run(() => IndexCleanupAnalyzer.Analyze(inputs, options), cancellationToken);
-        return new IndexAnalysisWithSnapshotTimes(result, times);
+        return new IndexAnalysisWithSnapshotTimes(result, times, DatabasesLeftOut.Distinct(omitted));
     }
 
     /// <summary>The single filterable operation label mirroring sp_IndexCleanup's script buckets: MAKE UNIQUE wins over its MERGE bucket; otherwise the result kind names the bucket.</summary>

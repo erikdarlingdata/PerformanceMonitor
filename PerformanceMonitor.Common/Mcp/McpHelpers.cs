@@ -1006,6 +1006,31 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// #5633 review (finding D): <paramref name="statusJson"/> (an envelope another helper built) with the databases the read
+    /// left out beside it: <see cref="DatabasesLeftOut.NamesKey"/> (the names, capped) and
+    /// <see cref="DatabasesLeftOut.NoteKey"/>. Null in, null out; an envelope returned unchanged
+    /// when nothing was left out or when it already carries the key.
+    /// </summary>
+    public static string? WithDatabasesLeftOut(string? statusJson, IReadOnlyList<string>? leftOut)
+    {
+        if (statusJson is null || leftOut is null || leftOut.Count == 0)
+        {
+            return statusJson;
+        }
+
+        var node = System.Text.Json.Nodes.JsonNode.Parse(statusJson) as System.Text.Json.Nodes.JsonObject;
+        if (node is null || node.ContainsKey(DatabasesLeftOut.NamesKey))
+        {
+            return statusJson;
+        }
+
+        node[DatabasesLeftOut.NamesKey] =
+            JsonSerializer.SerializeToNode(DatabasesLeftOut.Named(leftOut), JsonOptions);
+        node[DatabasesLeftOut.NoteKey] = DatabasesLeftOut.Note(leftOut);
+        return node.ToJsonString(JsonOptions);
+    }
+
+    /// <summary>
     /// #4966: the claim an empty answer carries INSTEAD of its "quiet" or "all-clear" clause when its window notice says the
     /// window is cut (<c>hints.window_truncated</c> true) and names where the store's data starts
     /// (<c>hints.effective_start</c> set). Both apps use this one constant, so a client reads the same words from either;

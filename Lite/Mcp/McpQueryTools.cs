@@ -176,9 +176,9 @@ public sealed class McpQueryTools
     /// <summary>#5633 item 3: the empty-page envelope of get_top_procedures_by_cpu, from the collector's own run history. Two cycles only while
     /// the collector is new; <c>empty</c> once it has run and found no procedure in the window. Words in <see cref="CollectorRunFacts"/>,
     /// shared with Darling's twin.</summary>
-    internal static string EmptyProcedureStatsStatus(CollectorRunFacts facts, int hoursBack)
+    internal static string EmptyProcedureStatsStatus(CollectorRunFacts facts, int hoursBack, int databasesLeftOut = 0)
     {
-        var (status, message) = facts.ProcedureStatsEmpty(hoursBack);
+        var (status, message) = facts.ProcedureStatsEmpty(hoursBack, databasesLeftOut);
         return McpHelpers.Status(status, message);
     }
 
@@ -216,12 +216,17 @@ public sealed class McpQueryTools
                 ? await dataService.GetDroppedDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : nowUtc, windowStartUtc: requestedStart)
                 : null;
             var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, excludeDatabaseNames: droppedDatabases);
+            /* #5633 review (finding D): the narrowing is disclosed, never silent (Darling's twin does the same, in the same words). The names
+               it left out ride the envelope of an empty page and of a page with rows, and an empty page's sentence claims only the databases
+               the server still has, so "the collector recorded nothing" is never said over a window with rows in a dropped database. */
+            var leftOut = DatabasesLeftOut.Distinct(droppedDatabases);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats")
+                return McpHelpers.WithDatabasesLeftOut(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats")
                     ?? EmptyProcedureStatsStatus(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "procedure_stats", hours_back, asOfUtc: windowEnd),
-                        hours_back);
+                        hours_back, leftOut?.Count ?? 0), leftOut)!;
             }
 
             /* #4231: what the window ACTUALLY reached, from the SAME relation (v_procedure_stats) the ranking
@@ -292,6 +297,9 @@ public sealed class McpQueryTools
                     attributed_cpu_ratio = attribution.AttributedCpuRatio,
                     note = attribution.Note
                 },
+                /* #5633 review (finding D): null when the read left no database out. */
+                databases_left_out = DatabasesLeftOut.Named(leftOut),
+                databases_left_out_note = DatabasesLeftOut.Note(leftOut),
                 procedures = result
             }, McpHelpers.JsonOptions);
         }

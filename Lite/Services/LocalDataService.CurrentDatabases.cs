@@ -66,8 +66,11 @@ public partial class LocalDataService
 
             return names.Count == 0 ? null : names;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            /* #5633 review: keep the fail-open (a monitoring read never fails on this lookup), but a SQL or ordinal mistake here turns all of
+               item 4 off, so say so, once per occurrence (Darling's CurrentDatabaseScope logs the same failure at Warning). */
+            AppLogger.Warn("CurrentDatabases", $"The newest database_states snapshot for server {serverId} failed, so no dropped database is left out of the read that asked: {ex.Message}");
             return null;
         }
     }
@@ -144,8 +147,11 @@ public partial class LocalDataService
 
             return DroppedFrom(lastSeen, anchor);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            /* #5633 review: keep the fail-open (a monitoring read never fails on this lookup), but a SQL or ordinal mistake here turns all of
+               item 4 off, so say so, once per occurrence (Darling's CurrentDatabaseScope logs the same failure at Warning). */
+            AppLogger.Warn("CurrentDatabases", $"The last-seen database_states read for server {serverId} failed, so no dropped database is left out of the read that asked: {ex.Message}");
             return null;
         }
     }

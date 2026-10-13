@@ -344,9 +344,9 @@ public sealed class DarlingMcpDataTools
 
     /// <summary>#5633 item 3: the empty-page envelope of the procedure tools, from the collector's own run history. Two cycles only while
     /// the collector is new; <c>empty</c> once it has run and found no procedure in the window. Words in <see cref="CollectorRunFacts"/>.</summary>
-    internal static string EmptyProcedureStatsStatus(CollectorRunFacts facts, int hoursBack)
+    internal static string EmptyProcedureStatsStatus(CollectorRunFacts facts, int hoursBack, int databasesLeftOut = 0)
     {
-        var (status, message) = facts.ProcedureStatsEmpty(hoursBack);
+        var (status, message) = facts.ProcedureStatsEmpty(hoursBack, databasesLeftOut);
         return McpHelpers.Status(status, message);
     }
 
@@ -1046,8 +1046,9 @@ public sealed class DarlingMcpDataTools
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("'summary' (default) or 'full': full adds the remaining desktop columns (times, read/write/spill extremes), omitting nulls.")] string detail = "summary",
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
-        => GetTopProceduresRanked(postgres, server_name, hours_back, top, database_name, as_of, detail, order_by: null, cancellationToken);
+        => GetTopProceduresRanked(postgres, server_name, hours_back, top, database_name, as_of, detail, order_by: null, cancellationToken, logger);
 
     /// <summary>
     /// #5226: the body of <see cref="GetTopProceduresByCpu"/> with the ranking choice the web page offers; the MCP
@@ -1055,9 +1056,9 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     internal static Task<string> GetTopProceduresRanked(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, string? as_of, string detail,
-        string? order_by, CancellationToken cancellationToken) =>
+        string? order_by, CancellationToken cancellationToken, ILogger? logger = null) =>
         GetTopProceduresRanked(
-            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, detail, order_by, cancellationToken);
+            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, detail, order_by, cancellationToken, logger);
 
     /// <summary>
     /// #5245: <see cref="GetTopProceduresRanked(NpgsqlDataSource,string,int,int,string,string,string,string,CancellationToken)"/>
@@ -1065,7 +1066,7 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     internal static async Task<string> GetTopProceduresRanked(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, string? as_of, string detail,
-        string? order_by, CancellationToken cancellationToken)
+        string? order_by, CancellationToken cancellationToken, ILogger? logger = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -1098,7 +1099,11 @@ public sealed class DarlingMcpDataTools
                caller names is read as asked. Unknown (no snapshot) leaves out nothing. */
             /* Review M2: an as_of read takes the newest snapshot at or before the anchor, so a database dropped since the window still ranks. */
             databases = await CurrentDatabaseScope.NarrowAsync(postgres, resolved.ServerId, databases,
-                asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: requestedStart, cancellationToken: cancellationToken);
+                asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: requestedStart, cancellationToken: cancellationToken, logger: logger);
+            /* #5633 review (finding D): the narrowing is disclosed, never silent. The names it left out ride the envelope of an empty page
+               and of a page with rows (databases_left_out + a note), and an empty page's sentence claims only the databases the server
+               still has, so "the collector recorded nothing" is never said over a window where it recorded rows in a dropped database. */
+            var leftOut = DatabasesLeftOut.Distinct(databases.ExcludedNames);
             var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, ranking, cancellationToken);
             var rows = routed.Rows;
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
@@ -1108,7 +1113,7 @@ public sealed class DarlingMcpDataTools
             string? precisionNote = null;
 
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
+                return McpHelpers.WithDatabasesLeftOut(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
                     ?? (routed.RawForced
                         /* #5226: a reads ranking that read raw (the io rollup, procedure_stats_io_hourly, did not reach back further
                            than raw), so an empty page here means raw holds nothing in the window while the stitched hourly rollups
@@ -1121,7 +1126,7 @@ public sealed class DarlingMcpDataTools
                            empty page means the collector looked and no procedure ran, so say that (shared words, Lite says the same). */
                         : EmptyProcedureStatsStatus(
                             await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "procedure_stats", requestedStart, now, cancellationToken),
-                            hours_back));
+                            hours_back, leftOut?.Count ?? 0)), leftOut)!;
 
             /* #4231: what the raw tier actually held, beside what was asked for — same probe and disclosure as
                get_top_queries_by_cpu and get_query_store_top (#2364), over procedure_stats.
@@ -1234,6 +1239,9 @@ public sealed class DarlingMcpDataTools
                           + "server has been monitored for less time than that), so the older part of it was not read.",
                 /* #5226: as on get_top_queries_by_cpu: the raw route's retention notice for a reads ranking past raw's reach. */
                 retention_notice = routed.RetentionNotice,
+                /* #5633 review (finding D): null when the read left no database out. */
+                databases_left_out = DatabasesLeftOut.Named(leftOut),
+                databases_left_out_note = DatabasesLeftOut.Note(leftOut),
                 procedures = result
             }, McpHelpers.JsonOptions);
         }
