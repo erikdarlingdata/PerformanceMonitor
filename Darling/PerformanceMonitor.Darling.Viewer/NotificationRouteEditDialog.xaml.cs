@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Notifications;
@@ -18,11 +19,19 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// one "Exact metric name…" entry, so the family list on screen IS the closed taxonomy the resolver matches
 /// against and cannot drift from it. Validation is the store's own
 /// (<see cref="ViewerDataService.ValidateNotificationRoute"/>), so a route this dialog accepts is one the
-/// store accepts.
+/// store accepts. Since #5750 the dialog also picks the route's scope (all servers, one server, or a tag) and offers the
+/// every-metric match only while a scope is chosen.
 /// </summary>
 public partial class NotificationRouteEditDialog : Window
 {
     private const string ExactMetricChoice = "Exact metric name…";
+
+    /// <summary>The "Every metric (*)" entry of the Matches list. It is in the list only while a server or a tag is chosen
+    /// (the V181 CHECK refuses a fleet-wide <c>*</c>); its Tag is the stored match text.</summary>
+    private readonly ComboBoxItem _wildcardItem =
+        new() { Content = ViewerNotificationRouteScope.WildcardChoiceLabel, Tag = NotificationRoute.WildcardMatch };
+
+    private readonly bool _built;
 
     /// <summary>The route as edited — the caller persists it.</summary>
     public NotificationRouteRow Route { get; private set; }
@@ -30,7 +39,10 @@ public partial class NotificationRouteEditDialog : Window
     /// <summary>The route as stored, for the sealed values a blank box keeps (#5366).</summary>
     private readonly NotificationRouteRow? _stored;
 
-    public NotificationRouteEditDialog(NotificationRouteRow? existing = null)
+    /// <param name="scopeInputs">The servers and tags to offer; null when they could not be read (the picker then offers All servers
+    /// and the route's own scope).</param>
+    /// <param name="existing">The route to edit, or null for a new one.</param>
+    public NotificationRouteEditDialog(ViewerRouteScopeInputs? scopeInputs, NotificationRouteRow? existing = null)
     {
         InitializeComponent();
         _stored = existing;
@@ -41,6 +53,13 @@ public partial class NotificationRouteEditDialog : Window
         }
 
         FamilyCombo.Items.Add(new ComboBoxItem { Content = ExactMetricChoice, Tag = null });
+
+        var scopeOptions = ViewerNotificationRouteScope.ScopeOptions(scopeInputs);
+        var picked = existing is null ? scopeOptions[0] : ViewerNotificationRouteScope.OptionFor(existing, scopeOptions);
+        ScopeCombo.ItemsSource = scopeOptions;
+        ScopeCombo.SelectedItem = picked;
+        _built = true;
+        UpdateWildcardOffer();
 
         if (existing is null)
         {
@@ -54,9 +73,13 @@ public partial class NotificationRouteEditDialog : Window
         HeaderText.Text = "Edit Notification Route";
 
         var family = Route.Family;
-        if (family is null)
+        if (Route.MetricMatch.Trim() == NotificationRoute.WildcardMatch && FamilyCombo.Items.Contains(_wildcardItem))
         {
-            FamilyCombo.SelectedIndex = FamilyCombo.Items.Count - 1;
+            FamilyCombo.SelectedItem = _wildcardItem;
+        }
+        else if (family is null)
+        {
+            FamilyCombo.SelectedIndex = FamilyCombo.Items.IndexOf(FamilyCombo.Items.Cast<ComboBoxItem>().First(i => i.Tag is null));
             ExactMetricBox.Text = Route.MetricMatch;
         }
         else
@@ -78,10 +101,11 @@ public partial class NotificationRouteEditDialog : Window
 
     private void FamilyCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        var isExact = SelectedFamily() is null;
+        var isExact = SelectedMatch() is null;
         ExactMetricBox.IsEnabled = isExact;
-        FamilyDescriptionText.Text = SelectedFamily() switch
+        FamilyDescriptionText.Text = SelectedMatch() switch
         {
+            NotificationRoute.WildcardMatch => "Every alert for this scope that no more specific route of the same scope matches. Offered only with a server or a tag.",
             AlertFamily.SelfMonitor => "Alerts about the monitoring tool itself: its store, collectors, jobs and certificates (Compression Job Stuck, Collection Stopped, Store Disk Pressure, Retention Held, …).",
             AlertFamily.Reports => "Scheduled prose — the Collector Cost Digest, the Fleet Sweep Rollup and the Analysis Singles Digest. Reports to read, not pages.",
             AlertFamily.AgentJobs => "SQL Server Agent: Failed Agent Job, Long-Running Job, Agent Not Running.",
@@ -103,11 +127,44 @@ public partial class NotificationRouteEditDialog : Window
         return 0;
     }
 
-    private string? SelectedFamily() => (FamilyCombo.SelectedItem as ComboBoxItem)?.Tag as string;
+    /// <summary>The chosen family, the wildcard <c>*</c>, or null for "Exact metric name…".</summary>
+    private string? SelectedMatch() => (FamilyCombo.SelectedItem as ComboBoxItem)?.Tag as string;
+
+    private RouteScopeOption? SelectedScope() => ScopeCombo.SelectedItem as RouteScopeOption;
+
+    private void ScopeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_built)
+        {
+            UpdateWildcardOffer();
+        }
+    }
+
+    /// <summary>Adds "Every metric (*)" while a server or a tag is chosen and removes it on All servers; a selection that was
+    /// on it moves to the Performance family.</summary>
+    private void UpdateWildcardOffer()
+    {
+        var offered = ViewerNotificationRouteScope.WildcardOffered(SelectedScope());
+        var present = FamilyCombo.Items.Contains(_wildcardItem);
+        if (offered && !present)
+        {
+            FamilyCombo.Items.Add(_wildcardItem);
+        }
+        else if (!offered && present)
+        {
+            var wasSelected = ReferenceEquals(FamilyCombo.SelectedItem, _wildcardItem);
+            FamilyCombo.Items.Remove(_wildcardItem);
+            if (wasSelected)
+            {
+                FamilyCombo.SelectedIndex = FamilyIndex(AlertFamily.Performance);
+            }
+        }
+    }
 
     private void Save_Click(object sender, RoutedEventArgs e)
     {
-        Route.MetricMatch = SelectedFamily() ?? ExactMetricBox.Text.Trim();
+        Route.MetricMatch = SelectedMatch() ?? ExactMetricBox.Text.Trim();
+        (Route.ScopeServerId, Route.ScopeTagId) = ViewerNotificationRouteScope.ScopeIds(SelectedScope());
         /* A blank box keeps the sealed value stored for it; the data service seals anything typed (#5366). */
         Route.TeamsUrl = ViewerWebhookSealing.CarryKept(TeamsUrlBox.Text, _stored?.TeamsUrl);
         Route.SlackUrl = ViewerWebhookSealing.CarryKept(SlackUrlBox.Text, _stored?.SlackUrl);
@@ -119,9 +176,12 @@ public partial class NotificationRouteEditDialog : Window
         var error = ViewerDataService.ValidateNotificationRoute(Route);
         if (error is not null)
         {
-            MessageBox.Show(error, "Notification Route", MessageBoxButton.OK, MessageBoxImage.Warning);
+            ValidationText.Text = error;
+            ValidationText.Visibility = Visibility.Visible;
             return;
         }
+
+        ValidationText.Visibility = Visibility.Collapsed;
 
         /* An exact name that is really a family spelled by hand is normalised to the family, so the grid and
            the resolver agree about what kind of route this is. */

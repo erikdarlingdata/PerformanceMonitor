@@ -8,7 +8,8 @@
         ResizeMode="NoResize"
         Background="{DynamicResource BackgroundLightBrush}"
         Foreground="{DynamicResource ForegroundBrush}">
-    <!-- #3598: one route — what it matches, and a destination per channel type. MuteRuleEditDialog's shape. -->
+    <!-- #3598: one route — what it matches, and a destination per channel type. MuteRuleEditDialog's shape.
+         #5750: a scope (all servers, one server, or a tag and its sub-tags) ahead of the match. -->
     <Window.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
@@ -29,6 +30,10 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Add Notification Route" FontSize="18" FontWeight="Bold"
@@ -37,27 +42,34 @@
                    Text="Alerts that match go to the destinations below. Leave a channel empty to inherit the Notifications section's setting for it; fill it to send this family there instead (or to enable a channel the parent does not have). An exact metric name wins over its family."
                    Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,15"/>
 
-        <TextBlock Grid.Row="2" Text="Matches" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-        <Grid Grid.Row="3" Margin="0,0,0,12">
+        <TextBlock Grid.Row="2" Text="Applies to" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+        <ComboBox Grid.Row="3" x:Name="ScopeCombo" Margin="0,0,0,4" SelectionChanged="ScopeCombo_SelectionChanged"
+                  ToolTip="All servers, one server, or a tag (the route covers every server with that tag or any sub-tag). A server route beats a tag route, and a tag route beats an all-servers route. A route whose server or tag is deleted later matches nothing."/>
+        <TextBlock Grid.Row="4" x:Name="ScopeNoteText" Foreground="{DynamicResource ForegroundMutedBrush}"
+                   TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12"
+                   Text="Generic webhook headers and the body template stay app-wide: set them in Notifications. A route changes only where the post goes."/>
+
+        <TextBlock Grid.Row="5" Text="Matches" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+        <Grid Grid.Row="6" Margin="0,0,0,12">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="220"/>
                 <ColumnDefinition Width="8"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <ComboBox Grid.Column="0" x:Name="FamilyCombo" SelectedIndex="0" SelectionChanged="FamilyCombo_SelectionChanged"
-                      ToolTip="A family routes every alert in it. Choose 'Exact metric name…' to route one alert by its metric_name (as shown in Alert History); an exact route also catches that alert's recovery.">
+                      ToolTip="A family routes every alert in it. Choose 'Exact metric name…' to route one alert by its metric_name (as shown in Alert History); an exact route also catches that alert's recovery. 'Every metric (*)' appears once a server or a tag is chosen, and catches whatever no other route for that scope matches.">
                 <!-- Items are filled in code from AlertFamily.All so the list is the closed taxonomy, never a copy. -->
             </ComboBox>
             <TextBox Grid.Column="2" x:Name="ExactMetricBox" IsEnabled="False"
                      ToolTip="The exact metric_name, e.g. Deadlocks Detected or Compression Job Stuck. Case-insensitive."/>
         </Grid>
-        <TextBlock Grid.Row="4" x:Name="FamilyDescriptionText" Foreground="{DynamicResource ForegroundMutedBrush}"
+        <TextBlock Grid.Row="7" x:Name="FamilyDescriptionText" Foreground="{DynamicResource ForegroundMutedBrush}"
                    TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12"/>
 
-        <Border Grid.Row="5" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
+        <Border Grid.Row="8" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
 
-        <TextBlock Grid.Row="6" Text="Destinations (empty = inherit)" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Left" Margin="0,0,0,8"/>
-        <Grid Grid.Row="7" Margin="0,0,0,8">
+        <TextBlock Grid.Row="9" Text="Destinations (empty = inherit)" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+        <Grid Grid.Row="10" Margin="0,0,0,8">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="170"/>
                 <ColumnDefinition Width="*"/>
@@ -89,10 +101,14 @@
                      ToolTip="Comma-separated. Redirects email only: the SMTP host, from-address and credentials come from the Notifications section, so email is delivered only where those are set."/>
         </Grid>
 
-        <CheckBox Grid.Row="8" x:Name="EnabledCheckBox" Content="Enabled" IsChecked="True" Margin="0,4,0,12"
+        <CheckBox Grid.Row="11" x:Name="EnabledCheckBox" Content="Enabled" IsChecked="True" Margin="0,4,0,8"
                   ToolTip="A disabled route is skipped as if it did not exist; the alerts it matched fall to the next level."/>
 
-        <StackPanel Grid.Row="9" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,4,0,0">
+        <!-- The validation message, inline (#5750): the dialog stays open on a refusal and says why here. -->
+        <TextBlock Grid.Row="12" x:Name="ValidationText" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap"
+                   HorizontalAlignment="Left" Margin="0,0,0,8" Visibility="Collapsed"/>
+
+        <StackPanel Grid.Row="13" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,4,0,0">
             <!-- No IsDefault: a multi-field form, where Enter-to-submit is a surprise (#1828/#1859). -->
             <Button Content="Save" Width="90" Height="28" Margin="0,0,8,0" Click="Save_Click"/>
             <Button Content="Cancel" Width="90" Height="28" IsCancel="True" Click="Cancel_Click"/>
