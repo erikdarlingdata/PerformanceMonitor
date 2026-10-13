@@ -118,6 +118,9 @@ public class CredentialStoreLongSecretTests
             /* The package reads the 2,560-byte blob back whole too. */
             Assert.Equal(atLimit, OldRead(LitePrefix, key)!.Value.Secret);
 
+            /* This refusal comes from the store's own length guard, before CredWriteW is called, so it pins
+               the guard and the constant together. Windows' side of the ceiling is
+               Windows_RefusesABlobOneCharacterOverTheCeiling_WhenTheGuardIsBypassed. */
             var over = store.TrySaveCredential(key, "webhook", atLimit + "b");
             Assert.False(over.Succeeded);
 
