@@ -185,7 +185,7 @@ public sealed class McpConfigHistoryTools
             if (rows.Count == 0)
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "trace_flags")
                     ?? McpHelpers.Status("empty",
-                        NoTraceFlagChangesMessage(await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "trace_flags"), hours_back),
+                        NoTraceFlagChangesMessage(await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "trace_flags", asOfUtc: windowEnd), hours_back),
                         (await WindowNoticeAsync(dataService, QueryWindowRelation.TraceFlags, resolved.ServerId, hours_back, windowEnd, "trace_flags", emptyAnswer: true)).AsHints());
 
             var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.TraceFlags, resolved.ServerId, hours_back, windowEnd, "trace_flags");

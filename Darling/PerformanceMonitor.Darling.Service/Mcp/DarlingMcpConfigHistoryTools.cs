@@ -237,7 +237,7 @@ public sealed class DarlingMcpConfigHistoryTools
                 var emptyNotice = await ReadNoticeAsync(postgres, "trace_flags", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
                 /* #5633 item 19: a successful run that stored zero rows IS the collector saying no flag is on; only a collector that has not
                    run (or stored rows) really has "fewer than two snapshots". */
-                var runFacts = await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "trace_flags", null, null, cancellationToken);
+                var runFacts = await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "trace_flags", null, windowEndNaive, cancellationToken);
                 return NoTraceFlagChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, runFacts);
             }
 
