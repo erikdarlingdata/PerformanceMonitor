@@ -983,6 +983,28 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* collect.query_store_watermarks (#5684, V178): the per-batch watermark side table of the Query Store per-database
+               watermark read. NOT in CollectorCatalog.All (the collector runner's COPY transaction writes it), so the loop above skips it.
+               A FIXED two days (QueryStoreWatermarks.RetentionDays), NOT Query Store's retention: the read never looks back more than
+               three hours, so the table only has to clear that. A plain table and a plain DELETE served by its collection_time index;
+               about one row per database per collection, so one execution IS the whole purge and dispatches single-shot, like the hour
+               ledger above. The one-row coverage table beside it is never purged. Failure-isolated like every sibling. */
+            var queryStoreWatermarksDeleted = await PurgeOneAsync(
+                postgres, QueryStoreWatermarks.Table,
+                QueryStoreWatermarks.PruneSql,
+                utcNow.AddDays(-QueryStoreWatermarks.RetentionDays), logger, cancellationToken,
+                batchSize: SingleShotStatement,
+                pacer: walPacer);
+            if (queryStoreWatermarksDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += queryStoreWatermarksDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* collect.pg_io_stats_hourly (#5495, V170): the hourly rollup of pg_io_stats. NOT in CollectorCatalog.All (the hourly
                tick's builder writes it), so the loop above skips it. It keeps exactly the raw collector's retention (the same
                resolved days, so a per-collector override moves both): a rollup hour whose raw rows are gone makes the read's count guard

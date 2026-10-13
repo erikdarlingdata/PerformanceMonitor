@@ -324,6 +324,12 @@ public sealed class CaggGroupIndexDropLiveTests
             await RungRewindArtifacts.DropV179SentinelAsync(connection, ct);
         }
 
+        if (simulatedVersion < QueryStoreWatermarks.RungVersion)
+        {
+            /* V178 (#5684) - the per-batch Query Store watermark table is the probe's newest sentinel; the coverage table goes with it. The shared helper owns the removal. */
+            await RungRewindArtifacts.DropV178SentinelAsync(connection, ct);
+        }
+
         if (simulatedVersion < 177)
         {
             /* V177 (#5641) - the Runnable Queue settings columns are the next sentinel down. The shared helper owns the removal. */

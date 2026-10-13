@@ -110,7 +110,8 @@ public sealed class AwsPerServerRoleRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 9})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 10})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 11})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
@@ -118,7 +119,7 @@ public sealed class AwsPerServerRoleRungTests
         var arity = method.GetParameters().Length;
 
         /* A newer rung's sentinel (V179's, #5640) is the last argument. */
-        Assert.Equal(ProbeOrdinal + 9, arity - 1);
+        Assert.Equal(ProbeOrdinal + 10, arity - 1);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
