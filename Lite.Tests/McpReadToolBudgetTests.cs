@@ -67,6 +67,7 @@ namespace PerformanceMonitorLite.Tests;
 /// this bucket, matching Darling's twin's own gaps for the same tables; each run's GAPS output (and the PR
 /// body) names exactly which.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const string ServerName = "mcp-read-tool-budget-4198";

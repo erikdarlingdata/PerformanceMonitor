@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// system_health_event_id / config_id+capture_time / running_jobs' no-id), and the index shapes
 /// mirror Lite's columns.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgSchemaGeneratorTests
 {
     [Fact]

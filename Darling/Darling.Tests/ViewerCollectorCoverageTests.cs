@@ -37,6 +37,7 @@ namespace Darling.Tests;
 /// Text-scans the reader source (no Postgres / WPF needed) and locates the viewer via
 /// <see cref="CallerFilePathAttribute"/>, exactly like <c>ThemeCompletenessTests</c>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerCollectorCoverageTests
 {
     /// <summary>

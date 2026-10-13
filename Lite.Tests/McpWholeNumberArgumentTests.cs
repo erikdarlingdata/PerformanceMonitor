@@ -26,6 +26,7 @@ namespace Lite.Tests;
 /// "An error occurred invoking ...". Lite registers the same shared call-tool guard as Darling, and these run
 /// Lite's own tools through the same in-process server and client (<see cref="McpInProcessHost"/>).
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class McpWholeNumberArgumentTests
 {
     internal static List<Type> LiteToolTypes() =>

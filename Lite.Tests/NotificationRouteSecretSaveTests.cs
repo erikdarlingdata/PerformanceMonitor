@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Helpers;
@@ -34,7 +35,7 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
 {
     private const string OldTeams = "https://teams.old-secret.test/hook/aaa111";
     private const string OldSlack = "https://hooks.slack.old-secret.test/T0/B0/xyz";
-    private const int StorableLength = 512;
+    private const int StorableLength = CredentialStore.MaxSecretLength;
 
     private readonly string _tempDir;
     private readonly string _dbPath;
@@ -91,7 +92,7 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
             _store.UpdateAsync(saved with { ScopeServerId = 7102, TeamsUrl = longUrl }));
 
         Assert.Contains("Teams", ex.Message);
-        Assert.Contains("512 characters", ex.Message);
+        Assert.Contains("at most 1,280", ex.Message);
         Assert.DoesNotContain("new-secret", ex.Message);
         Assert.DoesNotContain(longUrl, ex.Message);
         var after = (await _store.GetAsync(id))!;
@@ -157,7 +158,7 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
         var ex = await Assert.ThrowsAsync<RouteSecretException>(() =>
             _store.InsertAsync(Route("High CPU", server: 7101, slack: OldSlack, teams: longUrl)));
 
-        Assert.Contains("512 characters", ex.Message);
+        Assert.Contains("at most 1,280", ex.Message);
         Assert.Empty(await _store.ListAsync());
         Assert.Equal(0, _secrets.Count);
     }

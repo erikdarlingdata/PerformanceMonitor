@@ -35,6 +35,7 @@ namespace Darling.Tests;
 /// <para>The rule the columns exist for - the reading and the pressure judgement - is pinned where the reader lives,
 /// in <c>StoreToastAndCheckpointerTests</c>. This file is the RUNG: the ladder, the DDL, and the probe.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CheckpointLongestSyncRungTests
 {
     /// <summary>The rung's registered name - how every test here (and the live schema-drop helper) finds it.</summary>

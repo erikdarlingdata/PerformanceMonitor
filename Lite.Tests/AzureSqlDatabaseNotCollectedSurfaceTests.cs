@@ -30,6 +30,7 @@ namespace PerformanceMonitorLite.Tests;
 /// <para>The coverage pin is driven by the collector catalog, so a collector that later stops running on Azure SQL Database
 /// fails here until someone gives it a surface or a reason, and a stale entry fails too.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
 {
     private const string ServerName = "LiteAzureNotCollected";

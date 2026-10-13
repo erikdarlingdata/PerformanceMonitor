@@ -42,6 +42,7 @@ namespace Darling.Tests;
 /// <c>Lite.Tests.PgWriteStatsCollectorDefinitionTests</c>. This file is the RUNG: the ladder, the DDL, the V88
 /// restatement, the probe, and the live climb with both writers.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PostmasterStartTimeRungTests
 {
     private const int RungVersion = 139;

@@ -37,6 +37,7 @@ namespace Darling.Tests;
 /// browser that disagreed with the desktop viewer about which queries regressed would be worse than one that
 /// showed nothing.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
 {
     private static readonly string[] ToolSurface =

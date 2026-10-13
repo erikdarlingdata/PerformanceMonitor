@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// body ran, and the SDK answered every one of them with the same generic error. The shared call-tool guard now
 /// checks each integer parameter's value before dispatch, as it already checks the argument names.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class McpWholeNumberArgumentTests
 {
     internal static List<Type> RegisteredToolTypes()

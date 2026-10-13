@@ -103,7 +103,7 @@ public sealed class DuckDbNotificationRouteStore
     /// <param name="dbInitializer">The Lite database.</param>
     /// <param name="knownServerIds">The configured servers' hash ids (the ids the alert path and server_tag_map use).</param>
     /// <param name="secrets">Where the destinations live: <see cref="RouteSecretAccess.CredentialManager"/> in the app. Required,
-    /// so nothing falls back to a path that ignores a failed save (that path and the 512-character limit are #5772).</param>
+    /// so nothing falls back to a path that ignores a failed save. A value of up to <see cref="PerformanceMonitor.Common.CredentialStore.MaxSecretLength"/> characters is stored (#5772).</param>
     public DuckDbNotificationRouteStore(
         DuckDbInitializer dbInitializer,
         Func<IReadOnlyCollection<int>> knownServerIds,
@@ -651,21 +651,26 @@ public sealed class DuckDbNotificationRouteStore
         {
             var key = SecretKey(routeId, plan.Channel, plan.Gen!);
             written.Add((plan.Channel, key));
-            bool ok;
+            /* The reason is Credential Manager's own (CredentialSaveResult.Failure), which never carries the value; the two
+               reasons built here do not either. */
+            string? failure;
             try
             {
-                ok = _secrets.Write(key, plan.Value)
-                    && string.Equals(_secrets.Read(key), plan.Value, StringComparison.Ordinal);
+                failure = _secrets.Write(key, plan.Value);
+                if (failure is null && !string.Equals(_secrets.Read(key), plan.Value, StringComparison.Ordinal))
+                {
+                    failure = "it did not read back the same as it was written";
+                }
             }
             catch (Exception)
             {
-                ok = false;
+                failure = "Windows Credential Manager could not be reached";
             }
 
-            if (!ok)
+            if (failure is not null)
             {
                 DeleteKeysLeniently(routeId, written, "new");
-                throw new RouteSecretException(plan.Channel, plan.Value.Length);
+                throw new RouteSecretException(plan.Channel, failure);
             }
         }
 
@@ -800,12 +805,12 @@ public sealed class DuckDbNotificationRouteStore
 /// message names the channel and never the value. The edit dialog shows it inline.</summary>
 public sealed class RouteSecretException : InvalidOperationException
 {
-    /// <summary>The longest value Lite's Credential Manager wrapper stores today (#5772 is the app-wide fix).</summary>
-    public const int StorableLength = 512;
-
-    public RouteSecretException(string channel, int length)
-        : base($"The {channel} destination could not be saved to Windows Credential Manager, so the route was not changed."
-               + (length > StorableLength ? $" It may be longer than Lite can store today ({StorableLength} characters)." : ""))
+    /// <param name="channel">The channel whose destination was refused.</param>
+    /// <param name="reason">Why, as <see cref="PerformanceMonitor.Common.CredentialSaveResult.Failure"/> words it (for a value over
+    /// <see cref="PerformanceMonitor.Common.CredentialStore.MaxSecretLength"/> characters it says how long it is and what the limit is).
+    /// Never the value.</param>
+    public RouteSecretException(string channel, string reason)
+        : base($"The {channel} destination was not saved to Windows Credential Manager because {reason}, so the route was not changed.")
     {
     }
 }

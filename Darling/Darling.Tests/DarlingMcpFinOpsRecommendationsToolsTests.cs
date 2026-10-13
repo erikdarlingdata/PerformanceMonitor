@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// Pins for <c>get_finops_recommendations</c> that need no store: the tool surface, the row and envelope shape on
 /// hand-built records, and the culture pin.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpFinOpsRecommendationsToolsTests
 {
     private static FinOpsRecommendation Rec(decimal? savings, string category = "Hardware") =>

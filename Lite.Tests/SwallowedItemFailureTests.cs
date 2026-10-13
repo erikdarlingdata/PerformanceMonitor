@@ -38,6 +38,7 @@ namespace Lite.Tests;
 /// note; it now takes both.</para>
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class SwallowedItemFailureTests
 {
     /* ── the runners consume the driver's account, both of them ── */

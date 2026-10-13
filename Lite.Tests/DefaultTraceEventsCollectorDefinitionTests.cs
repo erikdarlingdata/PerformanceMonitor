@@ -28,6 +28,7 @@ namespace Lite.Tests;
 /// splice, the 21-column payload, and the null-tolerant ReadAsync/WritePayload. An intentional change to any
 /// of these must consciously update this test.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DefaultTraceEventsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

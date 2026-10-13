@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// positional-param, reads the config passthrough view via <c>MAX(capture_time)</c>; and the advertised
 /// tools/list schema is Gemini-clean.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpConfigToolsSurfaceAndSqlTests
 {
     private static readonly string[] ConfigToolSurface =

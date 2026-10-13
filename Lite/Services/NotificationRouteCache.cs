@@ -80,7 +80,8 @@ internal sealed class NotificationRouteCacheCore
     private readonly object _gate = new();
     private readonly TimeSpan _retryAfterFailure = TimeSpan.FromSeconds(30);
     private readonly Func<bool> _isUiThread;
-    private TaskCompletionSource<bool> _firstLoad = NewFirstLoad();
+    /* Read without the gate (WaitForFirstLoadAsync): the gate is held across a load, so a read under it would block behind the load. */
+    private volatile TaskCompletionSource<bool> _firstLoad = NewFirstLoad();
 
     private Func<IReadOnlyList<NotificationRoute>>? _loader;
     private IReadOnlyList<NotificationRoute> _routes = Array.Empty<NotificationRoute>();
@@ -127,11 +128,10 @@ internal sealed class NotificationRouteCacheCore
             return;
         }
 
-        TaskCompletionSource<bool> first;
-        lock (_gate)
-        {
-            first = _firstLoad;
-        }
+        /* Not under _gate: a load holds the gate for as long as the loader takes (it can wait on the DuckDB write lock with no
+           timeout), and this method promises to hold no thread. Reading the field under the gate blocked the caller behind
+           the very load it was about to wait for. Configure (called once, at start) swaps the field; a caller still holding the old one waits out its bound at most. */
+        var first = _firstLoad;
 
         if (first.Task.IsCompleted)
         {

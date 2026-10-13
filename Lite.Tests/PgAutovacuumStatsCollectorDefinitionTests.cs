@@ -20,6 +20,7 @@ namespace Lite.Tests;
 /// mean something, the reloptions overrides it honours, the version gating that keeps the row shape
 /// constant, and the activity filter — including the append-only case the filter must NOT drop.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class PgAutovacuumStatsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// shape assertions live with the QUALIFY-rewrite tests; these check the relationships that make the swap
 /// legitimate and that a later change cannot quietly break.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public class BaselineSupplyTests
 {
     /// <summary>

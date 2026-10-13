@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// the wire) and assert each fetch + analysis round-trips, the optional keys refine, and an absent
 /// key returns the #1224 "unavailable" envelope.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
 {
     /* ---------------- ungated: tool-surface pin ---------------- */
