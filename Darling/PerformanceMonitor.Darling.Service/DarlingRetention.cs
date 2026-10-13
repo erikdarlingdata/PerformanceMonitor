@@ -217,6 +217,23 @@ public static class DarlingRetention
     internal const string TerminalCommandStatuses = "status IN ('succeeded', 'failed')";
 
     /// <summary>
+    /// config.external_alert_pending (the queue of alerts other services submit, #5654) keeps its FINISHED rows this long.
+    /// Like the command queue it is not an audit surface: the alert history row is the record of an alert, and the queue
+    /// row only says what the drain did with the submission, which is worth as long as the metric data it sits beside
+    /// (<see cref="DataRetentionBaseDays"/>). It is the only thing that bounds the table, because a source may submit up to
+    /// its per-minute cap for as long as it runs.
+    /// </summary>
+    internal const int ExternalAlertRetentionDays = DataRetentionBaseDays;
+
+    /// <summary>
+    /// The finished-row filter for the external alert queue purge: every status except the two a live row holds. A
+    /// <c>pending</c> row is never purged however old, because it has not been delivered or expired yet, and a
+    /// <c>claimed</c> row belongs to a run that may still be sending (the reaper marks a dead run's claims
+    /// <c>interrupted</c>, which makes them finished). Compile-time constant, never user input.
+    /// </summary>
+    internal const string FinishedExternalAlertStatuses = "status NOT IN ('pending', 'claimed')";
+
+    /// <summary>
     /// The row cap for <see cref="QueryStorePlanMap"/>'s and <see cref="QueryStoreTextStore"/>'s prune
     /// (#4250 item 3), shared by both tables rather than sized per table, because both clear it in ONE
     /// batch at every measured rate and a single named constant is easier to keep correct than two.
@@ -909,6 +926,30 @@ public static class DarlingRetention
             {
                 tablesPurged++;
                 totalRowsDeleted += commandsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            /* config.external_alert_pending (#5654): the queue of alerts other services submit. Finished rows go at
+               ExternalAlertRetentionDays; pending and claimed rows are never touched, however old (expiry and the
+               reaper finish them, retention does not). SCHEMA-QUALIFIED like config.config_command: a bare name would
+               resolve to nothing in `collect`. Keyed on submitted_at (NOT NULL, defaulted), so no row can slip past the
+               horizon by never being stamped. The cutoff is bound as an unspecified-kind DateTime and the store's
+               sessions are pinned to UTC (DarlingStoreConnection), so it compares against the timestamptz column as UTC.
+               The other two external tables are not purged here: external_alert_state is one row per subject (bounded by
+               the keys a source uses, cleared by removing the source), and external_alert_source is the registry.
+               Failure-isolated like every sibling. */
+            var externalAlertsDeleted = await PurgeOneAsync(
+                postgres, "config.external_alert_pending",
+                TimeSlicedDeleteSql("config.external_alert_pending", "submitted_at", FinishedExternalAlertStatuses),
+                utcNow.AddDays(-ExternalAlertRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            if (externalAlertsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += externalAlertsDeleted.Value;
             }
             else
             {
