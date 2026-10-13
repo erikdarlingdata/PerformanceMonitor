@@ -76,6 +76,50 @@ public sealed class AttentionWindowReadTests : IClassFixture<SharedDuckDbFixture
     }
 
     [Fact]
+    public async Task TheTopLists_CoverTheSpansSamples_NotTheWholeLookback()
+    {
+        var now = DateTime.UtcNow;
+        long id = 200;
+        for (var i = 0; i < 6; i++)
+        {
+            await LogAsync(id++, ServerId + 100, now.AddSeconds(-30).AddMinutes(-i), "SUCCESS");
+        }
+
+        /* The span is the newest three minutes (runs a minute apart, the boundary about three minutes back). The old samples sit
+           four and a half minutes back, outside it (round 2 of #5714, L6). */
+        await RowAsync(id++, ServerId + 100, now.AddSeconds(-28), "sample", 0, "dbNew", "appNew", "fp-new", "SELECT new");
+        await RowAsync(id++, ServerId + 100, now.AddMinutes(-4).AddSeconds(-28), "sample", 0, "dbOld", "appOld", "fp-old", "SELECT old");
+        await RowAsync(id++, ServerId + 100, now.AddMinutes(-4).AddSeconds(-28), "sample", 0, "dbOld", "appOld", "fp-old", "SELECT old");
+
+        var window = await new LocalDataService(_duckDb).GetAttentionWindowAsync(ServerId + 100, Lookback);
+
+        Assert.False(window.TopsFromLookback);
+        Assert.Equal(new[] { "fp-new" }, window.TopStatements.Select(t => t.Name).ToArray());
+        Assert.Equal(new[] { "dbNew" }, window.TopDatabases.Select(t => t.Name).ToArray());
+        Assert.Equal(new[] { "appNew" }, window.TopApplications.Select(t => t.Name).ToArray());
+    }
+
+    [Fact]
+    public async Task ASpanThatKeptNoSamples_FallsBackToTheLookbackLists_AndSaysSo()
+    {
+        var now = DateTime.UtcNow;
+        long id = 300;
+        for (var i = 0; i < 6; i++)
+        {
+            await LogAsync(id++, ServerId + 200, now.AddSeconds(-30).AddMinutes(-i), "SUCCESS");
+        }
+
+        await RowAsync(id++, ServerId + 200, now.AddMinutes(-4).AddSeconds(-28), "sample", 0, "dbOld", "appOld", "fp-old", "SELECT old");
+
+        var window = await new LocalDataService(_duckDb).GetAttentionWindowAsync(ServerId + 200, Lookback);
+
+        Assert.True(window.TopsFromLookback);
+        Assert.Equal(new[] { "fp-old" }, window.TopStatements.Select(t => t.Name).ToArray());
+        Assert.Equal(new[] { "dbOld" }, window.TopDatabases.Select(t => t.Name).ToArray());
+        Assert.Equal(new[] { "appOld" }, window.TopApplications.Select(t => t.Name).ToArray());
+    }
+
+    [Fact]
     public async Task AQuietServer_HasRuns_ButNoCountOrSampleRows()
     {
         var now = DateTime.UtcNow;

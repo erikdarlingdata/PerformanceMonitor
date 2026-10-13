@@ -186,15 +186,46 @@ public sealed class AttentionAlertTests
     }
 
     [Fact]
-    public void Mute_WithNoSamplesInTheSpan_JudgesTheFullCount()
+    public void Mute_WithNoSamplesInTheSpan_ServerWideMuteStillMutesAtTheFullCountsGrade()
     {
         var runs = Runs(T0.AddSeconds(-5), 6);
         var window = Window(runs, new[] { Count(runs[0], 300) });
 
+        /* Round 2 of #5714 (M1): the full count is judged, and a rule on the server and metric alone (the callback asked
+           with a null database and app) still mutes it. */
         var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(window, T0), 10, 60, (_, _) => true);
+
+        Assert.True(finding!.Muted);
+        Assert.False(finding.Estimated);
+        Assert.Equal(AlertSeverityLevel.Critical, finding.Severity);
+        Assert.Equal(100.0, finding.RatePerMinute);
+    }
+
+    [Fact]
+    public void Mute_WithNoSamplesInTheSpan_RuleWithADatabaseOrAppPatternDoesNotMute()
+    {
+        var runs = Runs(T0.AddSeconds(-5), 6);
+        var window = Window(runs, new[] { Count(runs[0], 300) });
+
+        /* A rule with a database or app pattern never matches a null database and app, which is how the engine's callback
+           answers it (MuteRule.Matches); only the server-wide rule above applies to a span with no samples. */
+        var finding = AttentionEvaluator.Evaluate(
+            AttentionEvaluator.Read(window, T0), 10, 60, (database, app) => database is not null || app is not null);
 
         Assert.False(finding!.Muted);
         Assert.False(finding.Estimated);
+        Assert.Equal(100.0, finding.RatePerMinute);
+    }
+
+    [Fact]
+    public void Mute_WithNoSamplesInTheSpan_NoMuteJudgesTheFullCount()
+    {
+        var runs = Runs(T0.AddSeconds(-5), 6);
+        var window = Window(runs, new[] { Count(runs[0], 300) });
+
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(window, T0), 10, 60, (_, _) => false);
+
+        Assert.False(finding!.Muted);
         Assert.Equal(100.0, finding.RatePerMinute);
     }
 
@@ -232,6 +263,46 @@ public sealed class AttentionAlertTests
         Assert.Equal(AlertFamily.ClientTimeoutsMetric, AttentionEvaluator.MetricName);
         Assert.Equal((5, 5), AttentionEvaluator.ClampBars(5, 3));
         Assert.Equal("1.5 per minute", AlertMetricClassifier.FormatHistoryValue(AttentionEvaluator.MetricName, 1.5));
+    }
+
+    /* ---------------- the card's top-list floor (round 2 of #5714, L6) ---------------- */
+
+    [Fact]
+    public void TopListFloor_SpanWithSamples_StartsAtTheSpansBoundary()
+    {
+        var runs = Runs(T0.AddSeconds(-5), 8);
+        var lookbackFloor = T0.AddMinutes(-60);
+        var samples = new[] { Sample(runs[0], "db1", "etl", 4) };
+
+        var (floor, fromLookback) = AttentionEvaluator.TopListFloor(runs, samples, lookbackFloor);
+
+        /* Runs a minute apart: the span takes the newest 3 minutes, the base run is runs[3], and the boundary is the midpoint between it and runs[2]. */
+        Assert.False(fromLookback);
+        Assert.Equal(runs[3].AddSeconds(30), floor);
+        Assert.Equal(floor, AttentionEvaluator.SpanBoundary(runs));
+    }
+
+    [Fact]
+    public void TopListFloor_SamplesOnlyBeforeTheSpan_FallsBackToTheLookback()
+    {
+        var runs = Runs(T0.AddSeconds(-5), 8);
+        var lookbackFloor = T0.AddMinutes(-60);
+        var old = new[] { Sample(runs[6], "db1", "etl", 4) };
+
+        var (floor, fromLookback) = AttentionEvaluator.TopListFloor(runs, old, lookbackFloor);
+
+        Assert.True(fromLookback);
+        Assert.Equal(lookbackFloor, floor);
+    }
+
+    [Fact]
+    public void TopListFloor_NoSamplesAndNoSpan_FallBackToTheLookback()
+    {
+        var lookbackFloor = T0.AddMinutes(-60);
+
+        Assert.True(AttentionEvaluator.TopListFloor(Runs(T0, 1), new[] { Sample(T0, "db", "app", 1) }, lookbackFloor).FromLookback);
+        Assert.True(AttentionEvaluator.TopListFloor(Runs(T0, 8), Array.Empty<AttentionSampleGroup>(), lookbackFloor).FromLookback);
+        Assert.Null(AttentionEvaluator.SpanBoundary(Runs(T0, 1)));
     }
 
     /* ---------------- through the engine ---------------- */
@@ -322,6 +393,90 @@ public sealed class AttentionAlertTests
         Assert.True(outcome.Muted);
         Assert.Contains(asked, c => c.MetricName == AttentionEvaluator.MetricName && c.ClientAppName == "etl" && c.DatabaseName == "db1");
         Assert.Contains(asked, c => c.ClientAppName == "web" && c.DatabaseName == "db2");
+    }
+
+    /* ---------------- round 2 of #5714 (H1): a Muted fire is not a delivery ---------------- */
+
+    private static AttentionWindow SampledWindow(DateTime now, long count, string app)
+    {
+        var runs = Runs(now.AddSeconds(-5), 8);
+        return Window(runs, new[] { Count(runs[0], count) }, new[] { Sample(runs[0], "db1", app, 10) });
+    }
+
+    private static List<AlertOutcome> Fires(AlertEngineTests.Harness h) =>
+        h.Deliverer.Outcomes.Where(o => o.MetricName == AttentionEvaluator.MetricName).ToList();
+
+    [Fact]
+    public async Task Engine_MutedCritical_DoesNotHoldBackTheNextUnmutedCritical()
+    {
+        var h = Armed();
+        h.IsMuted = ctx => ctx.ClientAppName == "backup";
+        var engine = h.Build();
+
+        /* A muted backup app: 120 per minute exact, every sample muted, so the unmuted share is zero and the fire is a Muted Critical. */
+        h.Adapter.Attention = SampledWindow(h.Now, 360, "backup");
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        /* A minute later another application times out at 70 per minute, unmuted: delivered at once, not held by the cooldown. */
+        h.Now = h.Now.AddMinutes(1);
+        h.Adapter.Attention = SampledWindow(h.Now, 210, "web");
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        var fires = Fires(h);
+        Assert.Equal(2, fires.Count);
+        Assert.True(fires[0].Muted);
+        Assert.Equal(AlertSeverityLevel.Critical, fires[0].Severity);
+        Assert.False(fires[1].Muted);
+        Assert.Equal(AlertSeverityLevel.Critical, fires[1].Severity);
+        Assert.False(fires[1].Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
+    public async Task Engine_MutedCritical_ThenUnmutedWarning_ThenCritical_KeepsTheEscalationBypass()
+    {
+        var h = Armed();
+        h.IsMuted = ctx => ctx.ClientAppName == "backup";
+        var engine = h.Build();
+
+        h.Adapter.Attention = SampledWindow(h.Now, 360, "backup");
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        h.Now = h.Now.AddMinutes(1);
+        h.Adapter.Attention = SampledWindow(h.Now, 90, "web");
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        h.Now = h.Now.AddMinutes(1);
+        h.Adapter.Attention = SampledWindow(h.Now, 210, "web");
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        var fires = Fires(h);
+        Assert.Equal(3, fires.Count);
+        Assert.True(fires[0].Muted);
+        Assert.Equal(AlertSeverityLevel.Warning, fires[1].Severity);
+        Assert.False(fires[1].Muted);
+        Assert.Equal(AlertSeverityLevel.Critical, fires[2].Severity);
+        Assert.False(fires[2].Muted);
+        Assert.True(fires[2].Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
+    public async Task Engine_MutedStorm_WritesOneMutedRowPerCooldown_NotOneAMinute()
+    {
+        var h = Armed();
+        h.IsMuted = ctx => ctx.ClientAppName == "backup";
+        var engine = h.Build();
+
+        /* Eleven minutes of a muted storm, a fresh collector run every minute; the default cooldown is five minutes. */
+        for (var minute = 0; minute <= 10; minute++)
+        {
+            h.Adapter.Attention = SampledWindow(h.Now, 360, "backup");
+            await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+            h.Now = h.Now.AddMinutes(1);
+        }
+
+        var fires = Fires(h);
+        Assert.All(fires, f => Assert.True(f.Muted));
+        Assert.Equal(3, fires.Count);
     }
 
     [Fact]

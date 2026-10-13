@@ -98,6 +98,56 @@ public sealed class AttentionWindowReadLiveTests
     }
 
     [Fact]
+    public async Task TheTopLists_CoverTheSpansSamples_NotTheWholeLookback()
+    {
+        await RunAsync(async (adapter, connection, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            long id = 200;
+            for (var i = 0; i < 6; i++)
+            {
+                await LogAsync(connection, id++, ServerId, now.AddSeconds(-30).AddMinutes(-i), "SUCCESS", ct);
+            }
+
+            /* Round 2 of #5714 (L6): the span is the newest three minutes (the boundary about three minutes back); the old samples
+               sit four and a half minutes back, outside it. */
+            await RowAsync(connection, id++, ServerId, now.AddSeconds(-28), "sample", 0, "dbNew", "appNew", "fp-new", "SELECT new", ct);
+            await RowAsync(connection, id++, ServerId, now.AddMinutes(-4).AddSeconds(-28), "sample", 0, "dbOld", "appOld", "fp-old", "SELECT old", ct);
+            await RowAsync(connection, id++, ServerId, now.AddMinutes(-4).AddSeconds(-28), "sample", 0, "dbOld", "appOld", "fp-old", "SELECT old", ct);
+
+            var window = await adapter.GetAttentionWindowAsync(ServerId.ToString(CultureInfo.InvariantCulture), Lookback, ct);
+
+            Assert.False(window.TopsFromLookback);
+            Assert.Equal(new[] { "fp-new" }, window.TopStatements.Select(t => t.Name).ToArray());
+            Assert.Equal(new[] { "dbNew" }, window.TopDatabases.Select(t => t.Name).ToArray());
+            Assert.Equal(new[] { "appNew" }, window.TopApplications.Select(t => t.Name).ToArray());
+        });
+    }
+
+    [Fact]
+    public async Task ASpanThatKeptNoSamples_FallsBackToTheLookbackLists_AndSaysSo()
+    {
+        await RunAsync(async (adapter, connection, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            long id = 300;
+            for (var i = 0; i < 6; i++)
+            {
+                await LogAsync(connection, id++, OtherServerId, now.AddSeconds(-30).AddMinutes(-i), "SUCCESS", ct);
+            }
+
+            await RowAsync(connection, id++, OtherServerId, now.AddMinutes(-4).AddSeconds(-28), "sample", 0, "dbOld", "appOld", "fp-old", "SELECT old", ct);
+
+            var window = await adapter.GetAttentionWindowAsync(OtherServerId.ToString(CultureInfo.InvariantCulture), Lookback, ct);
+
+            Assert.True(window.TopsFromLookback);
+            Assert.Equal(new[] { "fp-old" }, window.TopStatements.Select(t => t.Name).ToArray());
+            Assert.Equal(new[] { "dbOld" }, window.TopDatabases.Select(t => t.Name).ToArray());
+            Assert.Equal(new[] { "appOld" }, window.TopApplications.Select(t => t.Name).ToArray());
+        });
+    }
+
+    [Fact]
     public async Task AQuietServer_HasRuns_ButNoCountOrSampleRows()
     {
         await RunAsync(async (adapter, connection, ct) =>
