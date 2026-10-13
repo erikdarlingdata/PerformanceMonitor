@@ -165,6 +165,52 @@ public sealed class QueryStoreWatermarkReaderLiveTests
         return (null, null);
     }
 
+    private const string VerifyIndexName = "idx_query_store_stats_server_db_query_plan_time";
+
+    /// <summary>
+    /// True when <paramref name="scanned"/> is the verify index: its full name, or a hypertable chunk's copy, _hyper_N_M_chunk_ plus the
+    /// full name cut to PostgreSQL's 63-byte identifier limit. The cut is built from the prefix found on the scanned name, not a length.
+    /// </summary>
+    internal static bool IsVerifyIndexName(string scanned)
+    {
+        if (string.Equals(scanned, VerifyIndexName, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var prefix = Regex.Match(scanned, @"^_hyper_\d+_\d+_chunk_");
+        if (!prefix.Success)
+        {
+            return false;
+        }
+
+        var expected = prefix.Value + VerifyIndexName;
+        if (expected.Length > 63)
+        {
+            expected = expected[..63];
+        }
+
+        return string.Equals(scanned, expected, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The chunk-index name check holds for chunk prefixes of 18, 19 and 20 characters (chunk ids 2 and 10, and a three-digit
+    /// hypertable id), and still rejects another index, a name cut shorter than PostgreSQL's limit, and one with a different tail.
+    /// </summary>
+    [Theory]
+    [InlineData("_hyper_31_2_chunk_")]
+    [InlineData("_hyper_31_10_chunk_")]
+    [InlineData("_hyper_131_10_chunk_")]
+    public void TheChunkIndexNameCheck_FollowsThePrefixLength(string prefix)
+    {
+        var cut = (prefix + VerifyIndexName)[..63];
+        Assert.True(IsVerifyIndexName(cut), cut);
+        Assert.False(IsVerifyIndexName(cut[..^1]), "a name shorter than the 63-byte cut is not the cut");
+        Assert.False(IsVerifyIndexName(prefix + "idx_query_store_stats_other_index"));
+        Assert.True(IsVerifyIndexName(VerifyIndexName));
+        Assert.False(IsVerifyIndexName(VerifyIndexName + "x"));
+    }
+
     private static string Show((DateTime? Value, DateTime? Witness) r) =>
         (r.Value?.ToString("o", CultureInfo.InvariantCulture) ?? "null") + " @ " + (r.Witness?.ToString("o", CultureInfo.InvariantCulture) ?? "null");
 
@@ -304,6 +350,50 @@ public sealed class QueryStoreWatermarkReaderLiveTests
 
             /* An hour later the pair logs again. */
             now = now.AddHours(1).AddSeconds(1);
+            Assert.Equal(expected, await reader.ReadAsync(rig.Connection, serverId, "dbA", floor, RawSql, 60, ct));
+            Assert.Equal(2, logger.Warnings.Count);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// The per-pair fallback warning also fires when the clock has moved backwards past the last warning (#5707): a clock that
+    /// steps back would otherwise silence it until the clock caught up.
+    /// </summary>
+    [Fact]
+    public async Task TheFallbackWarning_FiresAgain_WhenTheClockMovesBackwards()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -568481;
+
+        await using var rig = await Rig.OpenAsync(serverId, "qswm-5684-r9", ct);
+        var bodySucceeded = false;
+        try
+        {
+            await rig.WriteAsync(T0.AddMinutes(10), [Row("dbA", 1, 11, T0.AddMinutes(5)), Row("dbA", 2, 22, T0.AddMinutes(6))]);
+            await rig.WriteAsync(T0.AddMinutes(20), [Row("dbA", 3, 33, T0.AddMinutes(50))]);
+            await SetCoverageAsync(rig.Connection, T0, ct);
+            var floor = T0.AddMinutes(-60);
+            var now = new DateTime(2026, 6, 1, 12, 0, 0, DateTimeKind.Utc);
+            var logger = new CapturingLogger();
+            var reader = new QueryStoreWatermarkReader(logger, () => now);
+
+            await ExecAsync(rig.Connection, "DELETE FROM collect.query_store_stats WHERE server_id = " + serverId.ToString(CultureInfo.InvariantCulture) + " AND query_id = 3", ct);
+            var expected = await RawAsync(rig.Connection, serverId, "dbA", floor, ct);
+            Assert.Equal(expected, await reader.ReadAsync(rig.Connection, serverId, "dbA", floor, RawSql, 60, ct));
+            Assert.Single(logger.Warnings);
+
+            now = now.AddMinutes(10);
+            Assert.Equal(expected, await reader.ReadAsync(rig.Connection, serverId, "dbA", floor, RawSql, 60, ct));
+            Assert.Single(logger.Warnings);
+
+            /* The clock steps back an hour: the next fallback warns instead of waiting for the clock to catch up. */
+            now = now.AddHours(-1);
             Assert.Equal(expected, await reader.ReadAsync(rig.Connection, serverId, "dbA", floor, RawSql, 60, ct));
             Assert.Equal(2, logger.Warnings.Count);
             bodySucceeded = true;
@@ -719,13 +809,15 @@ public sealed class QueryStoreWatermarkReaderLiveTests
 
             Assert.DoesNotContain("query_store_stats", sidePlan, StringComparison.Ordinal);
             Assert.Contains("query_store_watermarks", sidePlan, StringComparison.Ordinal);
-            /* The index's name up to "_ti": a hypertable chunk's index is _hyper_N_M_chunk_ + the name, cut to PostgreSQL's 63 bytes, which
-               loses the tail of "_time" (#5707). The prefix is unique to this index and matches both the plain and the chunk name. */
-            const string IndexPrefix = "idx_query_store_stats_server_db_query_plan_ti";
-            Assert.True(verifyPlan.Contains(IndexPrefix, StringComparison.Ordinal), verifyPlan);
+            /* The verify read uses the (server, database, query, plan, time) index. A hypertable chunk's copy is named
+               _hyper_N_M_chunk_ + the name, cut to PostgreSQL's 63 bytes, so the visible tail of the name shrinks by one character for
+               each digit the chunk ids gain (#5707). The name is captured from the plan and checked against the cut built from its own prefix. */
             Assert.DoesNotContain("Seq Scan", verifyPlan, StringComparison.Ordinal);
             Assert.DoesNotContain("Bitmap", verifyPlan, StringComparison.Ordinal);
-            Assert.Single(Regex.Matches(verifyPlan, @"Index (Only )?Scan using \S*" + IndexPrefix));
+            var scans = Regex.Matches(verifyPlan, @"Index (?:Only )?Scan using (?<name>\S+)");
+            Assert.Single(scans);
+            var scannedIndex = scans[0].Groups["name"].Value;
+            Assert.True(IsVerifyIndexName(scannedIndex), scannedIndex + "\n" + verifyPlan);
             Assert.Matches(@"rows=1\b", verifyPlan);
 
             var rawBuffers = TopBuffers(rawPlan);

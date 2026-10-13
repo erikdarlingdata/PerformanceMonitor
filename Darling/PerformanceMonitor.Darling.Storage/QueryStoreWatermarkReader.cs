@@ -269,7 +269,8 @@ public sealed class QueryStoreWatermarkReader
     {
         var now = _utcNow();
         var key = (serverId, database);
-        var due = !_fallbackLoggedAt.TryGetValue(key, out var last) || now - last >= FallbackLogInterval;
+        /* now < last: the clock stepped back, and waiting for it to catch up would silence the warning for the size of the step. */
+        var due = !_fallbackLoggedAt.TryGetValue(key, out var last) || now < last || now - last >= FallbackLogInterval;
         if (due)
         {
             _fallbackLoggedAt[key] = now;

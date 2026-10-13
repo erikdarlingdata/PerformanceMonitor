@@ -267,7 +267,8 @@ WHERE collection_time < $1::timestamp;
             /* A persistent fault (a timeout, a missing grant) hits every batch of every database every cycle: the Warning is
                once per server per hour, the rest go to Debug. The reader throttles its fallback log the same way. */
             var now = (utcNow ?? (static () => DateTime.UtcNow))();
-            var due = !FaultLoggedAt.TryGetValue(serverId, out var last) || now - last >= FaultLogInterval;
+            /* now < last: the clock stepped back, and waiting for it to catch up would silence the warning for the size of the step. */
+            var due = !FaultLoggedAt.TryGetValue(serverId, out var last) || now < last || now - last >= FaultLogInterval;
             if (due)
             {
                 FaultLoggedAt[serverId] = now;

@@ -674,6 +674,57 @@ public sealed class QueryStoreWatermarksWriterLiveTests
     }
 
     /// <summary>
+    /// The side-write fault warning also fires when the clock has moved backwards past the last warning (#5707): a clock that steps
+    /// back would otherwise silence it until the clock caught up.
+    /// </summary>
+    [Fact]
+    public async Task ASideWriteFaultWarning_FiresAgain_WhenTheClockMovesBackwards()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -568413;
+
+        await using var rig = await Rig.OpenAsync(serverId, "qswm-5684-kb", ct);
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(
+                rig.Connection,
+                "CREATE FUNCTION collect.qswm_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'side write refused' USING ERRCODE = 'P0001'; END $$;"
+                + "CREATE TRIGGER trg_qswm_refuse BEFORE INSERT OR UPDATE ON collect.query_store_watermarks FOR EACH ROW EXECUTE FUNCTION collect.qswm_refuse();",
+                ct);
+
+            var logger = new CapturingTestLogger();
+            var clock = new DateTime(2026, 3, 1, 12, 0, 0, DateTimeKind.Utc);
+            var rows = new[] { new QueryStoreWatermarks.BatchRow("dbA", 1, 11, T0) };
+
+            async Task<bool> WriteOneAsync()
+            {
+                await using var transaction = await rig.Connection.BeginTransactionAsync(ct);
+                var ran = await QueryStoreWatermarks.TryUpsertBatchAsync(
+                    rig.Connection, transaction, serverId, T0.AddMinutes(1), rows, 30, logger, ct, () => clock);
+                await transaction.CommitAsync(ct);
+                return ran;
+            }
+
+            Assert.False(await WriteOneAsync());
+            clock = clock.AddMinutes(10);
+            Assert.False(await WriteOneAsync());
+            Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+
+            clock = clock.AddHours(-1);
+            Assert.False(await WriteOneAsync());
+            Assert.Equal(2, logger.CountAtLevel(LogLevel.Warning));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
     /// Summarize is the whole of the write's arithmetic now, so it is pinned without a database: the highest value per database
     /// (floored to the microsecond), the lowest (query_id, plan_id) among rows at it, a NULL never beating a value, an all-NULL
     /// database kept with NULL ids, a NULL database dropped, and the result in database order.
