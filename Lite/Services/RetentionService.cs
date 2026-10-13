@@ -154,11 +154,25 @@ public class RetentionService
     /// multi-part month, or its last single-file month while part files remain) left every read of that table's
     /// <c>v_</c> view failing until the next archival refresh, up to an hour later. Both steps run under the
     /// write lock, so a reader that respects it never sees the gap between the delete and the rebuild.
-    /// Returns the number of files deleted.
+    /// Returns the number of files deleted, or null when the write lock was not free within
+    /// <see cref="WriteLockBudget"/> (#5731): nothing ran, and the caller must not count the cleanup as done.
+    /// A waiting writer holds every new reader (every collector's log append) off the store, so the wait is
+    /// bounded like every other housekeeping write; the next housekeeping tick retries.
     /// </summary>
-    public async Task<int> CleanupOldArchivesAndRefreshViewsAsync(DuckDbInitializer duckDb, int retentionMonths = ArchiveRetentionMonths)
+    public async Task<int?> CleanupOldArchivesAndRefreshViewsAsync(DuckDbInitializer duckDb, int retentionMonths = ArchiveRetentionMonths)
     {
-        using (duckDb.AcquireWriteLock())
+        IDisposable writeLock;
+        try
+        {
+            writeLock = duckDb.AcquireWriteLock(timeout: WriteLockBudget);
+        }
+        catch (StoreLockTimeoutException ex)
+        {
+            AppLogger.Info("Retention", $"Archive retention cleanup skipped: {ex.Message} The next housekeeping tick retries.");
+            return null;
+        }
+
+        using (writeLock)
         {
             var deleted = CleanupOldArchives(retentionMonths);
             if (deleted > 0)
@@ -170,4 +184,10 @@ public class RetentionService
             return deleted;
         }
     }
+
+    /// <summary>
+    /// How long <see cref="CleanupOldArchivesAndRefreshViewsAsync"/> waits for the write lock: the same budget every
+    /// other bounded store write uses (#5371), not a second number. A property so a test can shorten the wait.
+    /// </summary>
+    internal TimeSpan WriteLockBudget { get; set; } = LocalDataService.WriteLockBudget;
 }
