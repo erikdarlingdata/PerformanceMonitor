@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -134,7 +135,7 @@ public sealed class ExternalAlertSourceVerbTests
         Assert.True(ExternalAlertSourceAdmin.IsValidName(name.TrimEnd('\n', '\r', '\0')));
     }
 
-    private static PostgresConfig ManagedWithRole(string role) => new()
+    private static PostgresConfig ManagedWithRole(string? role) => new()
     {
         Managed = true,
         Port = 5641,
@@ -169,11 +170,107 @@ public sealed class ExternalAlertSourceVerbTests
     [Theory]
     [InlineData("viewer")]
     [InlineData("admin,viewer")]
-    public void TheRemoteSourceString_IsPrintedOnlyWhenSourcesAreAdmitted(string role)
+    [InlineData("")]
+    public void TheRemoteSourceString_OfAManagedStore_VerifiesTheServer_WhetherOrNotSourcesAreListed(string role)
     {
-        Assert.Null(DarlingCliCommands.BuildRemoteAlertSourceConnectionString(ManagedWithRole(role), "darling_src_orders", "pw"));
+        var remote = DarlingCliCommands.BuildRemoteAlertSourceConnectionString(ManagedWithRole(role), "darling_src_orders", "pw");
+        Assert.NotNull(remote);
+        Assert.False(remote!.SourcesListed);
+        var builder = new NpgsqlConnectionStringBuilder(remote.ConnectionString);
+        Assert.Equal(SslMode.VerifyFull, builder.SslMode);
+        Assert.EndsWith("server.crt", builder.RootCertificate, StringComparison.Ordinal);
+        Assert.True(DarlingCliCommands.BuildRemoteAlertSourceConnectionString(ManagedWithRole("viewer,sources"), "darling_src_orders", "pw")!.SourcesListed);
+    }
+
+    [Fact]
+    public void TheRemoteSourceString_OfAStoreDarlingDoesNotManage_IsLeftToTheBringYourOwnBuilder()
+    {
         Assert.Null(DarlingCliCommands.BuildRemoteAlertSourceConnectionString(new PostgresConfig { Managed = false }, "darling_src_orders", "pw"));
         Assert.Null(DarlingCliCommands.BuildRemoteAlertSourceConnectionString(null, "darling_src_orders", "pw"));
+    }
+
+    /// <summary>#5654: the string for a source on another machine, on a store Darling does not manage, verifies the server and names where
+    /// the CA certificate goes; nothing of the owner's string but where the store is comes along.</summary>
+    [Theory]
+    [InlineData("Host=db.example;Port=5433;Database=darling;Username=darling;Password=OwnerSecretValue;Search Path=collect,config;SSL Mode=Disable")]
+    [InlineData("Host=db.example;Port=5433;Database=darling;Username=darling;Password=OwnerSecretValue")]
+    [InlineData("Host=db.example;Port=5433;Database=darling;Username=darling;Password=OwnerSecretValue;SSL Mode=VerifyFull;Root Certificate=/etc/ssl/ca.pem")]
+    public void TheRemoteSourceString_OfABringYourOwnStore_IsVerifyFull_WithARootCertificatePlaceholder(string owner)
+    {
+        var text = ExternalAlertSourceAdmin.BuildRemoteSourceConnectionString(owner, "darling_src_orders", "SourcePassword123");
+        var builder = new NpgsqlConnectionStringBuilder(text);
+        Assert.Equal(SslMode.VerifyFull, builder.SslMode);
+        Assert.Equal(ExternalAlertSourceAdmin.RootCertificatePlaceholder, builder.RootCertificate);
+        Assert.Contains("CA certificate that signed the store server certificate", builder.RootCertificate, StringComparison.Ordinal);
+        Assert.Equal("db.example", builder.Host);
+        Assert.Equal(5433, builder.Port);
+        Assert.Equal("darling", builder.Database);
+        Assert.Equal("darling_src_orders", builder.Username);
+        Assert.Equal("SourcePassword123", builder.Password);
+        Assert.DoesNotContain("OwnerSecretValue", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Search Path", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ca.pem", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>The password-bearing lines the verb prints, in order: the local string first, then the one for another machine.</summary>
+    private static List<string> PrintedConnectionStrings(string verb, ExternalAlertSourceAdmin.Outcome outcome, PostgresConfig? postgres, out string text)
+    {
+        var output = new StringWriter();
+        var exit = DarlingCliCommands.PrintAlertSourceResult(
+            verb,
+            new ExternalAlertSourceAdmin.Result(outcome, "darling_src_orders", "PwForTheTest0123456789abcdefgh", outcome == ExternalAlertSourceAdmin.Outcome.NeedsDbaSql ? "SELECT 1;" : null),
+            "orders", "Host=db.example;Port=5641;Database=darling;Username=darling;Password=ownerpw", output, new StringWriter(), postgres);
+        Assert.Equal(0, exit);
+        text = output.ToString();
+        return text.Split('\n').Select(l => l.Trim()).Where(l => l.Contains("Password=PwForTheTest0123456789abcdefgh", StringComparison.Ordinal)).ToList();
+    }
+
+    public static IEnumerable<object?[]> EachStoreKind() => new[]
+    {
+        new object?[] { "managed, sources listed", ManagedWithRole("viewer,sources") },
+        new object?[] { "managed, sources not listed", ManagedWithRole("viewer") },
+        new object?[] { "managed, no roles", ManagedWithRole(null) },
+        new object?[] { "bring your own", new PostgresConfig { Managed = false } },
+        new object?[] { "no config", null },
+    };
+
+    /// <summary>#5654: on every kind of store, add and rotate print the local string and then one for another machine that is
+    /// SSL Mode=VerifyFull with a root certificate (the managed store's server.crt, or the placeholder), so the string they print for
+    /// another machine is never less strict than the remote viewer's.</summary>
+    [Theory]
+    [MemberData(nameof(EachStoreKind))]
+    public void AddAndRotate_PrintAVerifyingStringForAnotherMachine_OnEveryKindOfStore(string kind, PostgresConfig? postgres)
+    {
+        var viewer = new NpgsqlConnectionStringBuilder(DarlingCliCommands.BuildViewerConnectionString("h", 5432, "viewer", "pw", "/c/server.crt"));
+        foreach (var verb in new[] { "--add-alert-source", "--rotate-alert-source" })
+        foreach (var outcome in new[] { ExternalAlertSourceAdmin.Outcome.Done, ExternalAlertSourceAdmin.Outcome.NeedsDbaSql })
+        {
+            var strings = PrintedConnectionStrings(verb, outcome, postgres, out var text);
+            Assert.True(strings.Count == 2, kind + ": " + verb + " printed " + strings.Count + " strings");
+
+            var remote = new NpgsqlConnectionStringBuilder(strings[1]);
+            Assert.Equal(viewer.SslMode, remote.SslMode);
+            Assert.Equal(SslMode.VerifyFull, remote.SslMode);
+            Assert.False(string.IsNullOrWhiteSpace(remote.RootCertificate), kind);
+            Assert.Equal("darling_src_orders", remote.Username);
+
+            var managed = postgres is { Managed: true };
+            Assert.Equal(managed, remote.RootCertificate!.EndsWith("server.crt", StringComparison.Ordinal));
+            Assert.Equal(!managed, remote.RootCertificate == ExternalAlertSourceAdmin.RootCertificatePlaceholder);
+            Assert.DoesNotContain("ownerpw", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("uses the address it reaches the store at", text, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>#5654: a managed store whose network roles do not list <c>sources</c> still gets the verifying string, with one line
+    /// saying it works once <c>sources</c> is listed; a store that lists it gets no such line.</summary>
+    [Theory]
+    [InlineData("viewer", true)]
+    [InlineData("viewer,sources", false)]
+    public void TheManagedStore_WithoutSources_SaysTheStringWorksOnceSourcesIsListed(string role, bool line)
+    {
+        PrintedConnectionStrings("--add-alert-source", ExternalAlertSourceAdmin.Outcome.Done, ManagedWithRole(role), out var text);
+        Assert.Equal(line, text.Contains("It works once \"sources\" is listed in the store's network roles", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -615,7 +712,7 @@ public sealed class ExternalAlertSourceVerbTests
     }
 
     [Fact]
-    public void TheResultText_ShowsThePasswordOnlyInsideTheConnectionString_AndOnce()
+    public void TheResultText_ShowsThePasswordOnlyInsideTheConnectionStrings_AndOnceEach()
     {
         var output = new StringWriter();
         var error = new StringWriter();
@@ -625,7 +722,9 @@ public sealed class ExternalAlertSourceVerbTests
             "orders", "Host=127.0.0.1;Port=5432;Database=darling;Username=darling;Password=ownerpw", output, error);
 
         Assert.Equal(0, exit);
-        Assert.Single(Regex.Matches(output.ToString(), "PwForTheTest0123456789abcdefgh"));
+        /* #5654: the local string and the one for another machine, each with the password once. */
+        Assert.Equal(2, Regex.Matches(output.ToString(), "PwForTheTest0123456789abcdefgh").Count);
+        Assert.Equal(2, Regex.Matches(output.ToString(), "Password=PwForTheTest0123456789abcdefgh").Count);
         Assert.DoesNotContain("ownerpw", output.ToString());
         Assert.Contains("shown ONCE", output.ToString());
         Assert.Equal(string.Empty, error.ToString());

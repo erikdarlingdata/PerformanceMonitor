@@ -211,7 +211,7 @@ END $do$", ["admin", "viewer", "mcp", GroupName], cleanupCt));
             var firstString = ConnectionStringFrom(add.Output);
             var firstPassword = new NpgsqlConnectionStringBuilder(firstString).Password!;
             Assert.Equal(RoleName, new NpgsqlConnectionStringBuilder(firstString).Username);
-            Assert.Single(Regex.Matches(add.Output, Regex.Escape(firstPassword)));
+            Assert.Equal(2, Regex.Matches(add.Output, Regex.Escape(firstPassword)).Count); /* #5654: the local string and the one for another machine */
             Assert.True(await ScalarAsync<bool>(owner, $"SELECT EXISTS (SELECT 1 FROM config.external_alert_source WHERE source_name = '{SourceName}' AND role_name = '{RoleName}')", ct));
             Assert.Equal(DarlingManagedRoles.AlertSourceRoleMarker,
                 await ScalarAsync<string>(owner, $"SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = '{RoleName}'", ct));
@@ -305,7 +305,7 @@ END $do$", ["admin", "viewer", "mcp", GroupName], cleanupCt));
             var secondString = ConnectionStringFrom(rotate.Output);
             var secondPassword = new NpgsqlConnectionStringBuilder(secondString).Password!;
             Assert.NotEqual(firstPassword, secondPassword);
-            Assert.Single(Regex.Matches(rotate.Output, Regex.Escape(secondPassword)));
+            Assert.Equal(2, Regex.Matches(rotate.Output, Regex.Escape(secondPassword)).Count);
             var secondVerifier = await VerifierOfAsync(owner, ct);
             Assert.Equal(firstVerifier is null, secondVerifier is null);
             if (secondVerifier is not null)

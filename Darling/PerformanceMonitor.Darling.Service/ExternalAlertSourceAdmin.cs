@@ -126,6 +126,31 @@ internal static class ExternalAlertSourceAdmin
         return source.ConnectionString;
     }
 
+    /// <summary>What goes after <c>Root Certificate=</c> in the remote string of a store Darling does not manage: the file that holds the CA certificate which signed the store server's certificate.</summary>
+    public const string RootCertificatePlaceholder = "<path to the CA certificate that signed the store server certificate>";
+
+    /// <summary>
+    /// The connection string for a source on another machine, for a store Darling does not manage (#5654): where the store is (from the
+    /// owner's string), the source's login and password, and <c>SSL Mode=VerifyFull</c> with a <c>Root Certificate</c> placeholder for the
+    /// CA certificate that signed the store server's certificate. Nothing else of the owner's string is carried.
+    /// </summary>
+    public static string BuildRemoteSourceConnectionString(string ownerConnectionString, string roleName, string password)
+    {
+        var owner = new NpgsqlConnectionStringBuilder(ownerConnectionString);
+        var source = new NpgsqlConnectionStringBuilder
+        {
+            Host = owner.Host,
+            Port = owner.Port,
+            Database = owner.Database,
+            Username = roleName,
+            Password = password,
+            SslMode = SslMode.VerifyFull,
+            RootCertificate = RootCertificatePlaceholder,
+        };
+
+        return source.ConnectionString;
+    }
+
     /// <summary>Creates a source: its login, its registry row and its grants. The password is in the result, once.</summary>
     public static async Task<Result> AddAsync(NpgsqlConnection owner, string name, CancellationToken ct)
     {

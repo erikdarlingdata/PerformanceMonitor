@@ -6601,21 +6601,29 @@ public static class DarlingCliCommands
             output.WriteLine("  " + ExternalAlertSourceAdmin.BuildSourceConnectionString(storeConnectionString, result.RoleName, result.Password!));
             output.WriteLine();
 
-            /* #5654: a source on another machine gets the remote viewer's string shape (VerifyFull against the store's own
+            /* #5654: a source on another machine always gets a string that verifies the server (SSL Mode=VerifyFull with a root
                certificate), never the local string with only the host changed. */
             var remote = BuildRemoteAlertSourceConnectionString(postgres, result.RoleName, result.Password!);
+            output.WriteLine("The string above is for a source on this machine. A source on another machine uses this one (also shown ONCE):");
+            output.WriteLine();
             if (remote is null)
             {
-                output.WriteLine("The host above is the address this service uses for its store. A source on another machine uses the address it reaches the store at.");
+                output.WriteLine("  " + ExternalAlertSourceAdmin.BuildRemoteSourceConnectionString(storeConnectionString, result.RoleName, result.Password!));
+                output.WriteLine();
+                output.WriteLine("It verifies the store's certificate (SSL Mode=VerifyFull). Replace the Root Certificate placeholder with the path, on the source");
+                output.WriteLine("machine, of the CA certificate that signed the store server's certificate. Host must be a name or address the store is reached at");
+                output.WriteLine("and that the server certificate carries.");
             }
             else
             {
-                output.WriteLine("The string above is for a source on this machine. A source on another machine uses this one (also shown ONCE):");
-                output.WriteLine();
                 output.WriteLine("  " + remote.ConnectionString);
                 output.WriteLine();
                 output.WriteLine($"It verifies the store's certificate (SSL Mode=VerifyFull). Copy {remote.CertificatePath} to the source machine and point");
                 output.WriteLine("\"Root Certificate\" at the copy. Host must be a name or address the certificate carries.");
+                if (!remote.SourcesListed)
+                {
+                    output.WriteLine("It works once \"sources\" is listed in the store's network roles (postgres.network.role); until then the store admits no alert source from the network.");
+                }
             }
 
             foreach (var line in BuildAlertSourceNetworkNote(postgres, groupExtras, lineDropFailure))
@@ -6673,14 +6681,15 @@ public static class DarlingCliCommands
         }
     }
 
-    /// <summary>A source's connection string for another machine, and the certificate file it names.</summary>
-    internal sealed record RemoteAlertSourceString(string ConnectionString, string CertificatePath);
+    /// <summary>A source's connection string for another machine, the certificate file it names, and whether the store's network roles list <c>sources</c> now.</summary>
+    internal sealed record RemoteAlertSourceString(string ConnectionString, string CertificatePath, bool SourcesListed);
 
     /// <summary>
     /// The connection string for a source on another machine (#5654), built exactly as the remote viewer's is
     /// (<see cref="BuildViewerConnectionString"/>: the host <see cref="ResolveViewerHost"/> picks, SSL Mode=VerifyFull and the store's
-    /// own certificate as the root), with the source's login and password. Only for a managed store whose
-    /// <c>postgres.network.role</c> lists <c>sources</c>; null otherwise. Pure: nothing is written or kept.
+    /// own certificate as the root), with the source's login and password. For a managed store, whether or not
+    /// <c>postgres.network.role</c> lists <c>sources</c> yet (<see cref="RemoteAlertSourceString.SourcesListed"/>); null for a store
+    /// Darling does not manage, which gets <see cref="ExternalAlertSourceAdmin.BuildRemoteSourceConnectionString"/>. Pure: nothing is written or kept.
     /// </summary>
     internal static RemoteAlertSourceString? BuildRemoteAlertSourceConnectionString(PostgresConfig? postgres, string roleName, string password)
     {
@@ -6690,15 +6699,12 @@ public static class DarlingCliCommands
         }
 
         var roles = DarlingNetwork.NormalizeNetworkRoles(postgres.Network?.Role);
-        if (roles is null || !roles.Contains(DarlingManagedPostgres.AlertSourcesNetworkToken, StringComparer.Ordinal))
-        {
-            return null;
-        }
-
+        var sourcesListed = roles is not null && roles.Contains(DarlingManagedPostgres.AlertSourcesNetworkToken, StringComparer.Ordinal);
         var certificatePath = ManagedStoreCertificatePath(DarlingManagedPostgres.ResolveDataDirectory(postgres));
         return new RemoteAlertSourceString(
             BuildViewerConnectionString(ResolveViewerHost(postgres.Network?.Listen), postgres.Port, roleName, password, certificatePath),
-            certificatePath);
+            certificatePath,
+            sourcesListed);
     }
 
     /// <summary>
