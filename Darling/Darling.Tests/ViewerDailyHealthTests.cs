@@ -574,7 +574,7 @@ public sealed class ViewerDailyHealthLivePostgresTests
             Assert.Equal(2, summary!.BlockingEvents);
             Assert.Equal(0, summary.DeadlockCount);
             Assert.Equal("Healthy", summary.OverallHealth);
-            Assert.Contains("2 blocking events (0.1/hr)", summary.SignalsTooltip, StringComparison.Ordinal);
+            Assert.Contains("2 blocking events (0.1 reports/hr)", summary.SignalsTooltip, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

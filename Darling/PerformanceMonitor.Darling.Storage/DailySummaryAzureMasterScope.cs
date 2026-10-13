@@ -49,6 +49,10 @@ public static class DailySummaryAzureMasterScope
     private const string DeadlockSelectLine = "SELECT date_trunc('day', deadlock_time) AS d, COUNT(*) AS c";
     private const string BprSelectLine = "SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms";
 
+    // #5644: the report count the health band reads, the bpr CTE's next select line. It takes the same scope filter
+    // as the wait count beside it, or a scoped day would band on reports of waits it no longer counts.
+    private const string BprReportsLine = "SUM(wait_reports)::bigint AS reports";
+
     /// <summary>The graphs the every-process rule still has to decide, one row per stored deadlock: the row's
     /// database is unknown, is master, or is a listed one. $1 server_id, $2/$3 the half-open window as
     /// <see cref="DailySummarySql.RangeSql"/> reads it, $4 the event-window floor for $2, $5 the list.</summary>
@@ -74,7 +78,23 @@ AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(databas
         scoped = ReplaceOnce(scoped, BprSelectLine,
             "SELECT date_trunc('day', event_time) AS d, COUNT(*) FILTER (WHERE " + BprKeepPredicate + ") AS c, "
             + "MAX(wait_time_ms) FILTER (WHERE " + BprKeepPredicate + ") AS max_wait_ms");
+        /* The line after it is the bpr CTE's own (the dmv CTE's reports column is the same text, so the bpr select line
+           comes first): replace the FIRST occurrence only, which is the bpr one. */
+        scoped = ReplaceFirst(scoped, BprReportsLine,
+            "SUM(wait_reports) FILTER (WHERE " + BprKeepPredicate + ")::bigint AS reports");
         return scoped;
+    }
+
+    private static string ReplaceFirst(string sql, string fragment, string replacement)
+    {
+        var at = sql.IndexOf(fragment, StringComparison.Ordinal);
+        if (at < 0)
+        {
+            throw new InvalidOperationException(
+                "Daily-summary master scoping found no '" + fragment + "' to replace: DailySummarySql.RangeSql has drifted from DailySummaryAzureMasterScope (#5644).");
+        }
+
+        return sql.Remove(at, fragment.Length).Insert(at, replacement);
     }
 
     private static string ReplaceOnce(string sql, string fragment, string replacement)

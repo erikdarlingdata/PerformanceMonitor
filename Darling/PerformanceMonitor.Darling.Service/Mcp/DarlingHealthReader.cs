@@ -303,6 +303,12 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
         /// from a day the purge has not reached.</summary>
         public int SignalSourcesPresent { get; init; }
 
+        /// <summary>The blocked-process report rows behind <see cref="BlockingEvents"/> (#5644), from the aggregate's
+        /// trailing <c>blocking_reports</c> column. <see cref="BlockingEvents"/> counts WAITS and is what every
+        /// payload shows; the band's count tiers were measured in reports, so the band reads this. <c>null</c> on a
+        /// hand-built row, which bands its <see cref="BlockingEvents"/>.</summary>
+        public long? BlockingReports { get; init; }
+
         public DailyHealthSignals ToSignals() => new()
         {
             /* #3541 A9: a purged or past-horizon day is a NoData day to the band, whatever the spine still
@@ -316,6 +322,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
             CollectionRuns = CollectionRuns,
             HighCpuEvents = HighCpuEvents,
             BlockingEvents = BlockingEvents,
+            BlockingReports = BlockingReports,
             /* #3539 A2: the day bands blocking through the card's BlockingSeverity, whose wait arm reads the
                longest block — so the peak travels in the signals rather than only into the reasons line. */
             PeakBlockWaitMs = MaxBlockDurationMs,
@@ -731,5 +738,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
         CollectionRuns = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
         /* #3541 A9: the signal-presence count, after collection_runs. */
         SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
+        /* #5644: the report count the band reads, after signal_sources_present. */
+        BlockingReports = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
     };
 }

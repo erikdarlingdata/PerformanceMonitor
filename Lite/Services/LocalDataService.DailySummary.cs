@@ -55,20 +55,22 @@ deadlocks AS (
 " + BlockingWaits.WaitsCteSql(
     BlockingWaits.SqlDialect.DuckDb, "bpr_waits",
     @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3/*scope*/") + @" AS ev") + "," + BlockingWaits.WaitsCteSql(
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3/*scope*/") + @" AS ev", reportCount: true) + "," + BlockingWaits.WaitsCteSql(
     BlockingWaits.SqlDialect.DuckDb, "dmv_waits",
     @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3/*scope*/") + @",
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3/*scope*/", reportCount: true) + @",
 bpr AS (
     /* #5644: counts WAITS, not report rows (BlockingWaits.WaitsCteSql, the definition the alert, the Overview tile
        and the analysis fact share), bucketed on the day of the wait's longest report. */
-    SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
+    SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms,
+           CAST(SUM(wait_reports) AS BIGINT) AS reports
     FROM bpr_waits
     GROUP BY 1
 ),
 dmv AS (
-    SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
+    SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms,
+           CAST(SUM(wait_reports) AS BIGINT) AS reports
     FROM dmv_waits
     GROUP BY 1
 ),
@@ -162,7 +164,11 @@ SELECT
       + (CASE WHEN b.d IS NULL THEN 0 ELSE 1 END)
       + (CASE WHEN dm.d IS NULL THEN 0 ELSE 1 END)
       + (CASE WHEN cp.d IS NULL THEN 0 ELSE 1 END)
-      + (CASE WHEN m.d IS NULL THEN 0 ELSE 1 END) AS signal_sources_present
+      + (CASE WHEN m.d IS NULL THEN 0 ELSE 1 END) AS signal_sources_present,
+    /* #5644: the day's blocked-process REPORT rows (DMV snapshot rows on the fallback), from the SAME source and day
+       bucket as blocking_events, which counts WAITS. The health band's count tiers were measured in reports per
+       server-hour, so the band reads this column; every displayed count stays blocking_events. Appended LAST. */
+    CASE WHEN COALESCE(b.c, 0) > 0 THEN b.reports ELSE COALESCE(dm.reports, 0) END AS blocking_reports
 FROM day_spine s
 LEFT JOIN waits w ON w.d = s.d
 LEFT JOIN queries q ON q.d = s.d
@@ -289,6 +295,8 @@ ORDER BY s.d";
             CollectionRuns = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
             /* #3541 A9: the signal-presence count, after collection_runs. */
             SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
+            /* #5644: the report count the band reads (blocking_events counts WAITS), after signal_sources_present. */
+            BlockingReports = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
             HasData = true,
         };
         if (scopedDeadlocks != null)
@@ -317,6 +325,12 @@ public class DailySummaryRow
     public long UniqueQueries { get; set; }
     public long DeadlockCount { get; set; }
     public long BlockingEvents { get; set; }
+
+    /// <summary>The blocked-process report rows behind <see cref="BlockingEvents"/> (#5644). The band's count tiers were
+    /// measured in reports, so <see cref="ToSignals"/> carries this for the band while every display keeps
+    /// <see cref="BlockingEvents"/>, the count of WAITS. <c>null</c> on a hand-built row, which bands its
+    /// <see cref="BlockingEvents"/>.</summary>
+    public long? BlockingReports { get; set; }
     public long HighCpuEvents { get; set; }
     public long MemoryPressureEvents { get; set; }
     public long MemoryCriticalEvents { get; set; }
@@ -378,6 +392,7 @@ public class DailySummaryRow
         CollectionRuns = CollectionRuns,
         HighCpuEvents = HighCpuEvents,
         BlockingEvents = BlockingEvents,
+        BlockingReports = BlockingReports,
         /* #3539 A2: the blocking band's wait arm reads the longest block, so the peak rides in the signals. */
         PeakBlockWaitMs = MaxBlockDurationMs,
         MemoryPressureEvents = MemoryPressureEvents,

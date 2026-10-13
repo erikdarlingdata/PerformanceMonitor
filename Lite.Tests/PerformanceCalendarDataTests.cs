@@ -236,14 +236,14 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
 
         Assert.Equal(DailyHealthBand.Warning, byDate[Day(9)].HealthBand);
         Assert.Equal(15_000, byDate[Day(9)].MaxBlockDurationMs);
-        Assert.Contains("1 blocking event (0.0/hr, peak block 15.0 s)", byDate[Day(9)].SignalsTooltip, StringComparison.Ordinal);
+        Assert.Contains("1 blocking event (0.0 reports/hr, peak block 15.0 s)", byDate[Day(9)].SignalsTooltip, StringComparison.Ordinal);
 
         Assert.Equal(DailyHealthBand.Warning, byDate[Day(10)].HealthBand);
         Assert.Equal(1, byDate[Day(10)].AlertCount);       // dismissed + resolution excluded
 
         Assert.Equal(DailyHealthBand.Warning, byDate[Day(11)].HealthBand);
         Assert.Equal(120, byDate[Day(11)].BlockingEvents);
-        Assert.Contains("120 blocking events (5.0/hr, peak block 6.0 s)", byDate[Day(11)].SignalsTooltip, StringComparison.Ordinal);
+        Assert.Contains("120 blocking events (5.0 reports/hr, peak block 6.0 s)", byDate[Day(11)].SignalsTooltip, StringComparison.Ordinal);
 
         Assert.Equal(DailyHealthBand.Healthy, byDate[Day(12)].HealthBand);
         Assert.True(byDate[Day(12)].HasData);

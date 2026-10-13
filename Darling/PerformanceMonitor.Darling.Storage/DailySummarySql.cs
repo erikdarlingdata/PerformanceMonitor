@@ -92,12 +92,14 @@ public static class DailySummarySql
         bpr AS (
             /* #5644: counts WAITS, not report rows (BlockingWaits.WaitsCteSql, the one definition the alert, the
                fleet tile and the MCP counts share), bucketed on the day of the wait's longest report. */
-            SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
+            SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms,
+                   SUM(wait_reports)::bigint AS reports
             FROM bpr_waits
             GROUP BY 1
         ),
         dmv AS (
-            SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
+            SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms,
+                   SUM(wait_reports)::bigint AS reports
             FROM dmv_waits
             GROUP BY 1
         ),
@@ -208,7 +210,13 @@ public static class DailySummarySql
               + (CASE WHEN b.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN dm.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN cp.d IS NULL THEN 0 ELSE 1 END)
-              + (CASE WHEN m.d IS NULL THEN 0 ELSE 1 END) AS signal_sources_present
+              + (CASE WHEN m.d IS NULL THEN 0 ELSE 1 END) AS signal_sources_present,
+            /* #5644: the day's blocked-process REPORT rows (DMV snapshot rows on the fallback), from the SAME source
+               and day bucket as blocking_events, which counts WAITS. The health band's count tiers
+               (ServerHealthThresholds.BlockingWarnPerHour/CriticalPerHour) were measured in reports per server-hour,
+               so the band reads this column; every displayed count stays blocking_events. Appended LAST, after
+               signal_sources_present, so every existing ordinal read stays where it was. */
+            CASE WHEN COALESCE(b.c, 0) > 0 THEN b.reports ELSE COALESCE(dm.reports, 0) END AS blocking_reports
         FROM day_spine s
         LEFT JOIN waits w ON w.d = s.d
         LEFT JOIN queries q ON q.d = s.d
@@ -234,10 +242,10 @@ public static class DailySummarySql
         BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.Postgres, "bpr_waits",
             @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms, database_name FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4") + "," + BlockingWaits.WaitsCteSql(
+    WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4", reportCount: true) + "," + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.Postgres, "dmv_waits",
             @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3") + ",",
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3", reportCount: true) + ",",
         StringComparison.Ordinal);
 
     /// <summary>

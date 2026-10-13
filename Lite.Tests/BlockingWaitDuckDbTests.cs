@@ -73,12 +73,13 @@ public class BlockingWaitDuckDbTests : IClassFixture<SharedDuckDbFixture>, IDisp
     /// moves each report's wait time off the exact value, alternately up and down, so consecutive derived starts differ by twice that.
     /// </summary>
     private async Task SeedWaitAsync(
-        int blocked, int blocker, DateTime start, int reports, int intervalSeconds = 5, int jitterMs = 0, bool dmv = false)
+        int blocked, int blocker, DateTime start, int reports, int intervalSeconds = 5, int jitterMs = 0, bool dmv = false, int intervalMs = 0)
     {
         for (var k = 0; k < reports; k++)
         {
-            var waitMs = ((k + 1) * intervalSeconds * 1000L) + (k % 2 == 0 ? jitterMs : -jitterMs);
-            var eventTime = start.AddSeconds((k + 1) * intervalSeconds);
+            var step = intervalMs > 0 ? intervalMs : intervalSeconds * 1000;
+            var waitMs = ((k + 1) * step * 1L) + (k % 2 == 0 ? jitterMs : -jitterMs);
+            var eventTime = start.AddMilliseconds((k + 1) * step);
             _seeded.Add(new Report(blocked, blocker, eventTime, waitMs));
             if (dmv)
                 await ExecAsync(
@@ -217,6 +218,41 @@ public class BlockingWaitDuckDbTests : IClassFixture<SharedDuckDbFixture>, IDisp
 
         Assert.Equal(2, await BadgeBlockingCountAsync());
         Assert.Equal(2, await DailySummaryBlockingEventsAsync());
+    }
+
+    /// <summary>#5644 review: one long wait written as 130 reports (a report every 50 ms, so the longest block is 6.5 s and
+    /// the wait arm stays out of it) is ONE blocking event, which the overview card, the badge and the MCP counts show,
+    /// but the band's count tiers (5 and 20 per server-hour) were measured in reports, so the day bands Warning on
+    /// 130 / 24 h = 5.4 per hour. On the waits-banded head the day read 1 event over 24 h and came out Healthy. The
+    /// overview card's last-hour count stays one wait, and that card does not band by the tiers at all (it is elevated
+    /// on any blocking).</summary>
+    [Fact]
+    public async Task TheDailyBand_ReadsTheReportCount_WhileTheDisplayedCountsStayWaits()
+    {
+        var yesterday = DateTime.UtcNow.Date.AddDays(-1);
+        await SeedWaitAsync(52, 51, yesterday.AddHours(2), reports: 130, intervalMs: 50);
+
+        var row = Assert.Single(await new LocalDataService(_duckDb).GetDailySummaryRangeAsync(ServerId, yesterday, yesterday.AddDays(1)));
+
+        Assert.Equal(1, row.BlockingEvents);
+        Assert.Equal(130, row.BlockingReports);
+        Assert.Equal(6_500, row.MaxBlockDurationMs);
+        Assert.Equal(DailyHealthBand.Warning, row.HealthBand);
+        Assert.Equal(1, CSharpWaitCount());
+    }
+
+    /// <summary>The report count follows the DMV snapshot fallback too (snapshot rows are what the band counted before waits).</summary>
+    [Fact]
+    public async Task TheDailyReportCount_FollowsTheDmvFallback()
+    {
+        var yesterday = DateTime.UtcNow.Date.AddDays(-1);
+        await SeedWaitAsync(52, 51, yesterday.AddHours(2), reports: 11, dmv: true);
+        await SeedWaitAsync(53, 51, yesterday.AddHours(3), reports: 6, dmv: true);
+
+        var row = Assert.Single(await new LocalDataService(_duckDb).GetDailySummaryRangeAsync(ServerId, yesterday, yesterday.AddDays(1)));
+
+        Assert.Equal(2, row.BlockingEvents);
+        Assert.Equal(17, row.BlockingReports);
     }
 
     /* ── #5644 wave-1 review: sub-millisecond starts and NULL times ── */
