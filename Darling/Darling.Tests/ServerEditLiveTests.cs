@@ -74,7 +74,7 @@ public sealed class ServerEditLiveTests : IDisposable
 
             var marker = isGrant ? " TO " : " FROM ";
             var at = statement.LastIndexOf(marker, StringComparison.Ordinal);
-            if (at < 0 || statement.Contains("ON FUNCTION", StringComparison.Ordinal))
+            if (at < 0 || ViewerGrantReplay.CannotReplayOnScratchStore(statement))
             {
                 continue;
             }

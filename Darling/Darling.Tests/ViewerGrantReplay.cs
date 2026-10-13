@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -43,7 +44,7 @@ internal static class ViewerGrantReplay
 
             var marker = isGrant ? " TO " : " FROM ";
             var at = statement.LastIndexOf(marker, StringComparison.Ordinal);
-            if (at < 0 || statement.Contains("ON FUNCTION", StringComparison.Ordinal))
+            if (at < 0 || CannotReplayOnScratchStore(statement))
             {
                 continue;
             }
@@ -59,6 +60,22 @@ internal static class ViewerGrantReplay
 
         return viewerStatements;
     }
+
+    /// <summary>
+    /// The statements of the provisioning batch that cannot run on a scratch store: a GRANT of EXECUTE on a function the
+    /// batch itself creates later (the scratch store holds the migrations only), and the one REVOKE of the external alert
+    /// submission function from the three roles (#5654; the function is created by the batch too), matched as the whole
+    /// statement. Every other function statement (any REVOKE, and a GRANT of anything but EXECUTE) is replayed, so one
+    /// that is added to the batch is exercised by every live test that replays the grants.
+    /// </summary>
+    internal static bool CannotReplayOnScratchStore(string statement) =>
+        statement.Contains("EXECUTE ON FUNCTION", StringComparison.Ordinal)
+        || string.Equals(statement, SubmitFunctionRevoke, StringComparison.Ordinal);
+
+    /// <summary>The batch's REVOKE of the submission function from admin, viewer and mcp, as the batch writes it.</summary>
+    internal static readonly string SubmitFunctionRevoke =
+        $"REVOKE ALL ON FUNCTION {PgSchemaGenerator.ConfigSchema}.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) FROM "
+        + string.Join(", ", DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.McpRoleName);
 
     /// <summary>
     /// A replayed GRANT / REVOKE head (everything before <c>TO</c> / <c>FROM</c>), with the managed store's database

@@ -320,9 +320,8 @@ public sealed class CaggGroupIndexDropLiveTests
     {
         if (simulatedVersion < ExternalAlertTables.RungVersion)
         {
-            /* V180 (#5654) - the registry of the services that raise alerts through the store is the probe's sentinel; its two dependants go with it. */
-            await using var dropExternalAlerts = new NpgsqlCommand("DROP TABLE IF EXISTS config.external_alert_state, config.external_alert_pending, config.external_alert_source", connection);
-            await dropExternalAlerts.ExecuteNonQueryAsync(ct);
+            /* V180 (#5654) - the registry of the services that raise alerts through the store is the probe's sentinel; its two dependants go with it. The shared helper owns the removal. */
+            await RungRewindArtifacts.DropV180SentinelAsync(connection, ct);
         }
 
         if (simulatedVersion < 179)

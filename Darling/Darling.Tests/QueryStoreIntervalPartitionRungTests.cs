@@ -653,7 +653,7 @@ CROSS JOIN LATERAL (SELECT date_trunc('day', now() AT TIME ZONE 'UTC') - interva
 
         /* V173 (#5582): the stamp-grain rollup and its triggers are above V170 too; RewindTableAsync dropped the triggers, the tables go here. */
         /* V180 (#5654): the registry of the services that raise alerts is above V170 too (the probe's newest sentinel); its two dependants go with it. */
-        await ExecAsync(connection, "DROP TABLE IF EXISTS config.external_alert_state, config.external_alert_pending, config.external_alert_source", ct);
+        await RungRewindArtifacts.DropV180SentinelAsync(connection, ct);
         /* V179 (#5640): the Client Timeouts settings columns are above V170 too. */
         await RungRewindArtifacts.DropV179SentinelAsync(connection, ct);
         /* V178 (#5684): the Query Store watermark side tables are above V170 too. */
