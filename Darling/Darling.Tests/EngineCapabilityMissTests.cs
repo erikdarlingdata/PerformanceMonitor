@@ -210,21 +210,13 @@ public sealed class CollectorEngineCapabilityTests
     }
 
     /// <summary>
-    /// Collectors whose entry ships ahead of the read that asks about them. <c>attention</c> (#5640) gets its
-    /// <c>get_client_timeouts</c> read in a later part of the same change; until then no gate and no read reaches
-    /// the prose. The exemption cannot outlive that: <see cref="AReadsPendingWiringEntry_IsDroppedOnceTheReadIsWired"/>
-    /// fails the day a read asks, so the line is removed rather than left behind.
+    /// The exemption that once held <c>attention</c> (#5640) ahead of its read is gone: <c>get_client_timeouts</c> asks the
+    /// capability question about it in both SKUs, so the prose table is reached by a shipped read.
     /// </summary>
-    private static readonly HashSet<string> ReadsPendingWiring = new(StringComparer.Ordinal) { "attention" };
-
     [Fact]
-    public void AReadsPendingWiringEntry_IsDroppedOnceTheReadIsWired()
+    public void TheAttentionCapturePathEntry_IsReachedByAShippedRead()
     {
-        var wired = EngineCapabilityReadWiringTests.AllWiredCollectors();
-        foreach (var name in ReadsPendingWiring)
-        {
-            Assert.DoesNotContain(name, wired);
-        }
+        Assert.Contains("attention", EngineCapabilityReadWiringTests.AllWiredCollectors());
     }
 
     /// <summary>
@@ -277,7 +269,7 @@ public sealed class CollectorEngineCapabilityTests
         {
             Assert.True(catalog.ContainsKey(name), $"CapturePathByCollector names '{name}', which is not a CollectorCatalog collector");
             Assert.True(
-                ExcludedByItsOwnGateSomewhere(catalog[name]) || wired.Contains(name) || ReadsPendingWiring.Contains(name),
+                ExcludedByItsOwnGateSomewhere(catalog[name]) || wired.Contains(name),
                 $"CapturePathByCollector describes '{name}', but its AppliesTo gate now lets it run on every target " +
                 "of its own engine AND no shipped read asks the capability question about it — so the prose is " +
                 "unreachable. Drop the entry, re-check the gate, or wire the read that wanted it");

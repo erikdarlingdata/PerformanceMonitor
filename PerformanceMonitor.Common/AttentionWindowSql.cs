@@ -40,32 +40,36 @@ public static class AttentionWindowSql
     /// <summary>How many entries each top list holds.</summary>
     public const int TopCount = 5;
 
+    /// <summary>The read-surface ceiling (#5640, get_client_timeouts): <c>$3</c> = the naive-UTC end of the window, so an <c>as_of</c> read
+    /// does not count what happened after it. The alert's own reads pass <c>bounded: false</c> and keep the text they always had.</summary>
+    public static string Ceiling(bool bounded) => bounded ? "\nAND   collection_time <= $3" : "";
+
     /// <summary>Successful run times, newest first. Column 0 = collection_time. DISTINCT: an Azure SQL Database server logs one run per monitored database.</summary>
-    public static string Runs(string logRelation) => $"""
+    public static string Runs(string logRelation, bool bounded = false) => $"""
 SELECT DISTINCT collection_time
 FROM {logRelation}
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time >= $2{Ceiling(bounded)}
 AND   collector_name = '{CollectorName}'
 AND   status = '{SuccessStatus}'
 ORDER BY collection_time DESC
 """;
 
     /// <summary>The count rows, summed per collection_time. Column 0 = collection_time, 1 = attentions (bigint).</summary>
-    public static string Counts(string eventsRelation) => $"""
+    public static string Counts(string eventsRelation, bool bounded = false) => $"""
 SELECT
     collection_time,
     CAST(SUM(attention_count) AS BIGINT) AS attentions
 FROM {eventsRelation}
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time >= $2{Ceiling(bounded)}
 AND   event_kind = '{KindCount}'
 GROUP BY collection_time
 ORDER BY collection_time DESC
 """;
 
     /// <summary>The sample rows counted per (run, database, application). Columns: collection_time, database_name, client_app_name, samples (bigint).</summary>
-    public static string SampleGroups(string eventsRelation) => $"""
+    public static string SampleGroups(string eventsRelation, bool bounded = false) => $"""
 SELECT
     collection_time,
     database_name,
@@ -73,7 +77,7 @@ SELECT
     CAST(COUNT(*) AS BIGINT) AS samples
 FROM {eventsRelation}
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time >= $2{Ceiling(bounded)}
 AND   event_kind = '{KindSample}'
 GROUP BY collection_time, database_name, client_app_name
 ORDER BY collection_time DESC, database_name, client_app_name
@@ -82,14 +86,14 @@ ORDER BY collection_time DESC, database_name, client_app_name
     /// <summary>The top <see cref="TopCount"/> statement fingerprints by sampled events, each with the newest non-NULL sample
     /// text. Columns: fingerprint, samples (bigint), sample_text. Rows without a fingerprint (the statement filter withheld the
     /// text) are not a statement.</summary>
-    public static string TopStatements(string eventsRelation) => $"""
+    public static string TopStatements(string eventsRelation, bool bounded = false) => $"""
 SELECT
     statement_fingerprint,
     CAST(COUNT(*) AS BIGINT) AS samples,
     (array_agg(statement_text ORDER BY collection_time DESC) FILTER (WHERE statement_text IS NOT NULL))[1] AS sample_text
 FROM {eventsRelation}
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time >= $2{Ceiling(bounded)}
 AND   event_kind = '{KindSample}'
 AND   statement_fingerprint IS NOT NULL
 GROUP BY statement_fingerprint
@@ -99,17 +103,42 @@ LIMIT {TopCount}
 
     /// <summary>The top <see cref="TopCount"/> values of <paramref name="column"/> (database_name or client_app_name) by
     /// sampled events. Columns: name, samples (bigint). NULL names are not listed.</summary>
-    public static string TopBy(string eventsRelation, string column) => $"""
+    public static string TopBy(string eventsRelation, string column, bool bounded = false) => $"""
 SELECT
     {column},
     CAST(COUNT(*) AS BIGINT) AS samples
 FROM {eventsRelation}
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time >= $2{Ceiling(bounded)}
 AND   event_kind = '{KindSample}'
 AND   {column} IS NOT NULL
 GROUP BY {column}
 ORDER BY COUNT(*) DESC, {column}
 LIMIT {TopCount}
+""";
+
+    /// <summary>
+    /// The newest kept ring-buffer events, for the read surface only (get_client_timeouts): one row per <c>sample</c>, newest first.
+    /// Columns: event_time, collection_time, database_name, client_app_name, client_hostname, session_id, interrupt_duration_us,
+    /// statement_fingerprint, statement_text. Always bounded ($3). <paramref name="limit"/> is a validated integer, never caller text.
+    /// </summary>
+    public static string Samples(string eventsRelation, int limit) => $"""
+SELECT
+    event_time,
+    collection_time,
+    database_name,
+    client_app_name,
+    client_hostname,
+    session_id,
+    interrupt_duration_us,
+    statement_fingerprint,
+    statement_text
+FROM {eventsRelation}
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+AND   event_kind = '{KindSample}'
+ORDER BY collection_time DESC, event_time DESC NULLS LAST
+LIMIT {limit}
 """;
 }
