@@ -1,0 +1,100 @@
+name: WPF smoke
+
+# #5745 part 1: starts the real Performance Monitor Lite exe on a seeded data folder (tools/ui-smoke-wpf, FlaUI over UI
+# Automation) and checks the named controls show data: the server picker and the Overview card for the seeded server, the
+# Wait Stats type list and the Top Queries grid of its server tab. A screenshot of the runner's desktop is taken when the
+# main window shows (the probe: proof that the runner gives an interactive desktop) and again on any failure. No
+# screenshots are compared.
+#
+# Triggers: a pull request touching Lite, the harness or this workflow (a draft pull request is skipped until it is
+# marked ready), the nightly (workflow_call), and a manual dispatch. `pull_request`, never `pull_request_target`: the job
+# runs the pull request's own code, so it runs with the pull request's read-only token and no secrets.
+#
+# Not a required check. A workflow that is skipped by its path filter never reports, so it cannot be one; the job name is
+# left free of the names build.yml's ruleset uses.
+on:
+  push:
+    branches: ['fix/5745-wpf-smoke']
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'Lite/**'
+      - 'tools/ui-smoke-wpf/**'
+      - 'Lite.Tests/TestDataSeeder.cs'
+      - '.github/workflows/wpf-smoke.yml'
+  # The nightly runs it as a reusable workflow (nightly.yml, outside publish's needs).
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wpf-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: WPF smoke (Lite)
+    # Skip a draft pull request; a dispatch has no pull request and always runs.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: windows-latest
+    # Expected 6 to 8 minutes (restore and build of Lite 3 to 4, the walk 1 to 2).
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      # The desktop probe: a screenshot of the runner's primary screen before anything of ours is running.
+      - name: Desktop probe
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP\wpf-smoke"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          "virtual screen: $($b.Width)x$($b.Height); user interactive: $([Environment]::UserInteractive)"
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$out\desktop-probe.png")
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Restore the harness (locked)
+        shell: pwsh
+        run: dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --locked-mode
+
+      - name: Build the harness and Lite
+        shell: pwsh
+        run: dotnet build tools/ui-smoke-wpf/UiSmokeWpf.csproj -c Release --no-restore --nologo -v q
+
+      - name: Run the Lite walk
+        shell: pwsh
+        env:
+          UI_SMOKE_OUT: ${{ runner.temp }}\wpf-smoke
+        run: |
+          & "tools/ui-smoke-wpf/bin/Release/net10.0-windows/UiSmokeWpf.exe"
+          if ($LASTEXITCODE -ne 0) { throw "the Lite walk failed ($LASTEXITCODE); screenshots are in the wpf-smoke artifact" }
+
+      - name: Lite log tail
+        if: always()
+        shell: pwsh
+        run: |
+          $d = "$env:LOCALAPPDATA\PerformanceMonitorLite-Data"
+          if (Test-Path $d) {
+            Get-ChildItem -Path $d -Recurse -Filter '*.log' -ErrorAction SilentlyContinue | Select-Object -First 3 | ForEach-Object { "== $($_.FullName) (last 40 lines)"; Get-Content $_.FullName -Tail 40 }
+          }
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: wpf-smoke
+          path: ${{ runner.temp }}\wpf-smoke\*
+          retention-days: 7
+          if-no-files-found: ignore

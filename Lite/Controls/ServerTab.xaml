@@ -277,7 +277,7 @@
                             </StackPanel>
                             <TextBox Grid.Row="2" x:Name="WaitTypeSearchBox" TextChanged="WaitTypeSearch_TextChanged"
                                      Margin="0,0,0,4" Padding="4,2"/>
-                            <ListBox Grid.Row="3" x:Name="WaitTypesList" Background="Transparent" BorderThickness="0">
+                            <ListBox Grid.Row="3" x:Name="WaitTypesList" AutomationProperties.AutomationId="WaitStatsTypeList" Background="Transparent" BorderThickness="0">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
@@ -489,7 +489,7 @@
                                         </ScrollViewer>
                                     </Expander>
                                 </StackPanel>
-                            <DataGrid Grid.Row="2" x:Name="QueryStatsGrid"
+                            <DataGrid Grid.Row="2" x:Name="QueryStatsGrid" AutomationProperties.AutomationId="QueryStatsGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridPlanRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
