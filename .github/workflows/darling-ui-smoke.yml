@@ -44,7 +44,8 @@ jobs:
     # Skip a draft pull request; a dispatch has no pull request and always runs.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: windows-latest
-    # Expected 8 to 10 minutes warm (service build 2, PostgreSQL 1, browser walk 2 to 3); 3 more on a cold pg-runtime cache.
+    # Measured (#5744, green runs with both caches warm): 3.5 to 4.5 minutes in all (checkout and .NET 0.5, service build 1 to 1.2,
+    # PostgreSQL 0.2, browser walk and the stale wait 1.7, four screenshots 0.1); 3 more on a cold pg-runtime cache. The 20 stays: 4 times the run.
     timeout-minutes: 20
     # One explicit home for Playwright's Chromium. The `env` context holds only variables declared in an env: map (never the runner's
     # own LOCALAPPDATA), so the cache step and the install in run-ui-smoke.ps1 both use this path, not Playwright's default.
