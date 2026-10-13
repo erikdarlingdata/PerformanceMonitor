@@ -3493,6 +3493,7 @@ LIMIT 1";
            name stays a label in the server_id 0 bucket. */
         var externalAlertDrain = new ExternalAlertDrain(
             new ExternalAlertStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds),
+            alertsEnabled: () => alertSettings.AlertsEnabled,
             (outcome, token) => deliverer.DeliverAndReportAsync(outcome, token),
             (metric, serverName, serverKey, detail, token) => deliverer.TryResolvePagerDutyAsync(metric, serverName, serverKey, detail, token),
             historyStore,
@@ -4014,13 +4015,13 @@ LIMIT 1";
 
             /* #5654: external alerts, every pass, beside the custom-alert work above. Expiry always runs, so rows that
                waited out a pause or a disabled master switch still age out and the self-monitor can count them (they
-               expire as usual, not on resume); the claim and the sends run only while alerts are enabled. The first pass
+               expire as usual, not on resume); the claim and the sends run only while the drain's master switch reads on. The first pass
                of a run also takes back what a stopped run left claimed: delivered if the history has its row, else
                interrupted, never sent again. Failure-isolated so a throw never stops the fleet loop. */
             try
             {
                 var externalPass = await externalAlertDrain.RunPassAsync(
-                    reapFirst: !externalAlertReapDone, deliver: alertSettings.AlertsEnabled, stoppingToken);
+                    reapFirst: !externalAlertReapDone, stoppingToken);
                 externalAlertReapDone = true;
                 if (externalPass.Claimed > 0 || externalPass.Expired > 0)
                 {

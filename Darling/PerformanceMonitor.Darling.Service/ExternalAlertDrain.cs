@@ -61,6 +61,7 @@ public sealed class ExternalAlertDrain
     private const int MaxServerLength = 128;
 
     private readonly ExternalAlertStore _store;
+    private readonly Func<bool> _alertsEnabled;
     private readonly Func<AlertOutcome, CancellationToken, Task<AlertDelivery?>> _deliver;
     private readonly Func<string, string, string, string?, CancellationToken, Task<AlertChannelOutcome>> _resolvePagerDuty;
     private readonly IAlertHistoryStore _history;
@@ -70,6 +71,7 @@ public sealed class ExternalAlertDrain
     private readonly ILogger _logger;
     private readonly Func<DateTime> _utcNow;
 
+    /// <param name="alertsEnabled">The live master switch every alert family consults (#3464). Off, a pass only expires rows.</param>
     /// <param name="deliver">The record-and-send seam: <see cref="DarlingAlertDeliverer.DeliverAndReportAsync"/>.</param>
     /// <param name="resolvePagerDuty">(firing metric, server name, server key, detail, token): closes the PagerDuty incident
     /// of a fire, and only with auto-resolve on: <see cref="DarlingAlertDeliverer.TryResolvePagerDutyAsync"/>.</param>
@@ -78,6 +80,7 @@ public sealed class ExternalAlertDrain
     /// an unregistered name is kept as a label in the server_id 0 bucket.</param>
     public ExternalAlertDrain(
         ExternalAlertStore store,
+        Func<bool> alertsEnabled,
         Func<AlertOutcome, CancellationToken, Task<AlertDelivery?>> deliver,
         Func<string, string, string, string?, CancellationToken, Task<AlertChannelOutcome>> resolvePagerDuty,
         IAlertHistoryStore history,
@@ -88,6 +91,7 @@ public sealed class ExternalAlertDrain
         Func<DateTime>? utcNow = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
+        _alertsEnabled = alertsEnabled ?? throw new ArgumentNullException(nameof(alertsEnabled));
         _deliver = deliver ?? throw new ArgumentNullException(nameof(deliver));
         _resolvePagerDuty = resolvePagerDuty ?? throw new ArgumentNullException(nameof(resolvePagerDuty));
         _history = history ?? throw new ArgumentNullException(nameof(history));
@@ -108,10 +112,9 @@ public sealed class ExternalAlertDrain
     /// <summary>
     /// One 15-second pass: expire what nobody took in time, on the first pass of a run take back what a dead run left
     /// claimed, then claim a batch and handle each row. Expiry always runs, so rows left while alerts were off or the
-    /// service was paused still age out and are counted; the claim and the sends run only when
-    /// <paramref name="deliver"/> is true.
+    /// service was paused still age out and are counted; the claim and the sends run only while the master switch is on.
     /// </summary>
-    public async Task<ExternalAlertDrainResult> RunPassAsync(bool reapFirst, bool deliver, CancellationToken cancellationToken)
+    public async Task<ExternalAlertDrainResult> RunPassAsync(bool reapFirst, CancellationToken cancellationToken)
     {
         var expired = await _store.ExpireAsync(cancellationToken);
 
@@ -128,7 +131,7 @@ public sealed class ExternalAlertDrain
             }
         }
 
-        if (!deliver)
+        if (!_alertsEnabled())
         {
             return new ExternalAlertDrainResult(expired, reapedDelivered, reapedInterrupted, 0, 0, 0, 0, 0, 0, 0, 0);
         }
