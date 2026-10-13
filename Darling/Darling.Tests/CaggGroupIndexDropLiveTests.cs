@@ -318,6 +318,13 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < ExternalAlertTables.RungVersion)
+        {
+            /* V180 (#5654) - the registry of the services that raise alerts through the store is the probe's sentinel; its two dependants go with it. */
+            await using var dropExternalAlerts = new NpgsqlCommand("DROP TABLE IF EXISTS config.external_alert_state, config.external_alert_pending, config.external_alert_source", connection);
+            await dropExternalAlerts.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < 175)
         {
             /* V175 (#5631) - the rows-per-call column of the daily plan regression totals is the probe's sentinel. */

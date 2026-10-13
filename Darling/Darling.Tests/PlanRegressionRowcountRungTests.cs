@@ -120,17 +120,19 @@ public sealed class PlanRegressionRowcountRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        /* V180's sentinel (#5654) sits above this one; the probe's last ordinal is the newest rung's. */
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         Assert.Equal("hasPlanRegressionDailyRowcount", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasServiceVersion", parameters[ProbeOrdinal - 1].Name);
-        Assert.Equal(ProbeOrdinal, parameters.Length - 1);
+        /* V180 (#5654) adds one more sentinel above this one. */
+        Assert.Equal(ProbeOrdinal + 1, parameters.Length - 1);
 
-        /* Every sentinel present maps to exactly this build's version; this sentinel absent maps one rung back. */
-        var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        /* Every sentinel up to this rung's present, none of a newer rung's: maps to this rung; this sentinel absent maps one rung back. */
+        var all = Enumerable.Range(0, parameters.Length).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, all)!);
 
         var behind = (object[])all.Clone();
