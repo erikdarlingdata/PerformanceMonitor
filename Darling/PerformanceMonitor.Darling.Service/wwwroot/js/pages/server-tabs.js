@@ -1112,7 +1112,8 @@ export const SERVER_TABS = [
         subtitle: ctx.label,
         format: "int",
         atTimeItem: "deadlocks",
-        emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
+        emptyText: DEADLOCKS_EMPTY_TEXT,
+        emptyWins: true,
       }),
       fileIoPanel(server, ctx),
       table(
