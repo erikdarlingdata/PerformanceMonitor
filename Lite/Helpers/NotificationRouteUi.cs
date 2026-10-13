@@ -40,6 +40,16 @@ internal static class NotificationRouteUi
     internal const string OrphanedServerStatus = "Orphaned: server removed";
     internal const string OrphanedTagStatus = "Orphaned: tag deleted";
     internal const string UnreadableStatus = "Saved, unreadable";
+
+    /// <summary>The status of a tag-scoped route the loader could not expand because the tag tables could not be read (#5750):
+    /// the route matches nothing until a reload succeeds, so it is never shown as "OK". The text is the Darling viewer's
+    /// (<c>ViewerNotificationRouteScope.TagDataUnreadableStatus</c>), word for word.</summary>
+    internal const string TagsUnreadableStatus = "Not active: tag data unreadable";
+
+    /// <summary>The same for a server-scoped route. Lite's loader gives up on the whole expansion when the tag read fails, so a
+    /// server-scoped route is unexpanded too, though it names no tag (Darling still expands it). Darling viewer's
+    /// <c>ScopeDataUnreadableStatus</c> text.</summary>
+    internal const string ScopeUnreadableStatus = "Not active: scope data unreadable";
     internal const string SetMarker = "Set";
     internal const string NotSetMarker = "Not set";
     internal const string UnreadableMarker = "Unreadable";
@@ -142,7 +152,7 @@ internal static class NotificationRouteUi
         return AllServersLabel;
     }
 
-    /// <summary>The list's Status column. An orphaned route matches nothing; a channel in <see cref="NotificationRoute.OffChannels"/>
+    /// <summary>The list's Status column. An orphaned route matches nothing, and so does a scoped route the loader could not expand (<see cref="NotificationRoute.ScopeUnexpanded"/>); a channel in <see cref="NotificationRoute.OffChannels"/>
     /// has a saved destination that Credential Manager could not give back, so it is off for the route (#5366).</summary>
     internal static string StatusText(NotificationRoute route)
     {
@@ -150,6 +160,11 @@ internal static class NotificationRouteUi
         if (route.Orphaned)
         {
             parts.Add(route.ScopeServerId.HasValue ? OrphanedServerStatus : OrphanedTagStatus);
+        }
+
+        if (route.ScopeUnexpanded)
+        {
+            parts.Add(route.ScopeTagId.HasValue ? TagsUnreadableStatus : ScopeUnreadableStatus);
         }
 
         if (route.OffChannels is { Count: > 0 } off)

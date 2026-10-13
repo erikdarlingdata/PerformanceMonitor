@@ -151,8 +151,9 @@ public partial class MainWindow : Window
             new DuckDbMuteRuleStore(_databaseInitializer),
             new AppLoggerAdapter<MuteRuleService>());
         _serverManager = new ServerManager(App.SharedConfigDirectory, logger: new AppLoggerAdapter<ServerManager>());
-        /* #5750: the scoped notification routes. The cache reloads lazily after any route, tag or server edit invalidates it
-           (see NotificationRouteCache); Task.Run keeps the reload off the UI thread's synchronization context. */
+        /* #5750: the scoped notification routes. Any route, tag or server edit invalidates the cache, which starts one
+           background reload (see NotificationRouteCache); a read that still finds it stale reloads on the calling thread.
+           Task.Run keeps that reload off the UI thread's synchronization context. */
         NotificationRouteStore = new DuckDbNotificationRouteStore(_databaseInitializer, _serverManager.GetKnownServerIds);
         var routeStore = NotificationRouteStore;
         NotificationRouteCache.Configure(() => Task.Run(() => routeStore.ListAsync()).GetAwaiter().GetResult());

@@ -63,6 +63,10 @@
     <Compile Include="..\..\Lite.Tests\DefaultTraceEventSequenceWatermarkTests.cs" Link="Linked\DefaultTraceEventSequenceWatermarkTests.cs" />
     <!-- #5641: the severity legend of both Settings windows, pinned to AlertSeverity.ForMetric. -->
     <Compile Include="..\..\Lite.Tests\AlertLegendParityTests.cs" Link="Linked\AlertLegendParityTests.cs" />
+    <!-- #5750: the scoped-route parity fixture (one fleet, one expected-result table). Lite.Tests asserts it against DuckDB and
+         NotificationRouteScopeParityLiveTests against PostgreSQL; neither project can open both stores, so they share the table.
+         BCL only. -->
+    <Compile Include="..\..\Lite.Tests\NotificationRouteParityFixture.cs" Link="Linked\NotificationRouteParityFixture.cs" />
   </ItemGroup>
 
   <ItemGroup>
