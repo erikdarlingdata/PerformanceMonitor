@@ -268,7 +268,7 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Grid.Column="0" x:Name="SidebarHeaderText">
                         <TextBlock Text="Servers" Style="{StaticResource SectionHeader}" Margin="0,0,0,2"/>
-                        <TextBlock Text="Double-click to open a server tab" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,0,0,6"/>
+                        <TextBlock Text="Double-click or press Enter to open a server tab" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,0,0,6"/>
                     </StackPanel>
                     <Button Grid.Column="1" x:Name="SidebarToggleButton" Content="«" Click="ToggleSidebar_Click"
                             Style="{StaticResource DarkButton}"
@@ -442,7 +442,8 @@
                          BorderThickness="1"
                          Foreground="{DynamicResource ForegroundBrush}"
                          SelectionChanged="ServerList_SelectionChanged"
-                         MouseDoubleClick="ServerList_MouseDoubleClick">
+                         MouseDoubleClick="ServerList_MouseDoubleClick"
+                         KeyDown="ServerList_KeyDown">
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
                             <Setter Property="AutomationProperties.Name" Value="{Binding AutomationName, Mode=OneTime}"/>

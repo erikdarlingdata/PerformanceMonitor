@@ -8,7 +8,9 @@ using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Capturing;
 using FlaUI.Core.Definitions;
+using FlaUI.Core.Input;
 using FlaUI.Core.Tools;
+using FlaUI.Core.WindowsAPI;
 using FlaUI.UIA3;
 using Xunit;
 
@@ -81,10 +83,8 @@ public abstract class WalkBase : IAsyncLifetime
         Shot("00-main-window");
 
         // The named server picker lists the seeded server.
-        var picker = Step("server picker", () => Find(main, "ServerPicker"));
-        var pickerItem = Step("server picker item", () => WaitFor(() =>
-            picker.FindAllDescendants(cf => cf.ByControlType(ControlType.ListItem))
-                .FirstOrDefault(i => i.Name == ServerName), "a ServerPicker item named " + ServerName));
+        Step("server picker", () => Find(main, "ServerPicker"));
+        Step("server picker item", () => WaitFor(() => FindPickerItem(main), "a ServerPicker item named " + ServerName));
 
         // Overview: the fleet card for the seeded server, read through its server-name text.
         Step("Overview tab", () => SelectTab(main, "Overview"));
@@ -92,8 +92,11 @@ public abstract class WalkBase : IAsyncLifetime
             main.FindAllDescendants(cf => cf.ByAutomationId("OverviewServerCardName"))
                 .FirstOrDefault(c => c.Name == ServerName), "an OverviewServerCardName reading " + ServerName));
 
-        // Open the server (double-click the picker row), then walk its tabs.
-        Step("open the server", () => { pickerItem.DoubleClick(); return true; });
+        // Open the server (select the picker row, press Enter on the list), then walk its tabs. The row and the list are
+        // looked up again at the action: the viewer rebinds the picker's items on each refresh, so an element found
+        // earlier can belong to a row that has been replaced (#5761). Enter is the keyboard path #5763 added; a mouse
+        // double-click is unreliable to drive from automation.
+        Step("open the server", () => OpenServer(main));
 
         Step("Wait Stats tab", () => SelectTab(main, "Wait Stats"));
         Step("wait types", () => WaitForRows(main, "WaitStatsTypeList", ControlType.ListItem));
@@ -102,6 +105,33 @@ public abstract class WalkBase : IAsyncLifetime
         Step("Top Queries by Duration", () => SelectTab(main, "Top Queries by Duration"));
         Step("query stats rows", () => WaitForRows(main, "QueryStatsGrid", ControlType.DataItem));
         Shot("99-after-walk");
+    }
+
+    private AutomationElement? FindPickerItem(AutomationElement main) =>
+        main.FindFirstDescendant(cf => cf.ByAutomationId("ServerPicker"))
+            ?.FindAllDescendants(cf => cf.ByControlType(ControlType.ListItem))
+            .FirstOrDefault(i => i.Name == ServerName);
+
+    /// <summary>Selects the seeded server's picker row, then presses Enter with the picker focused. Every attempt looks
+    /// the list and the row up afresh, and presses Enter only once the row reports itself selected.</summary>
+    private bool OpenServer(AutomationElement main)
+    {
+        var r = Retry.WhileFalse(() =>
+        {
+            var picker = main.FindFirstDescendant(cf => cf.ByAutomationId("ServerPicker"));
+            var item = picker is null ? null : FindPickerItem(main);
+            if (picker is null || item is null) return false;
+
+            var selection = item.Patterns.SelectionItem.Pattern;
+            selection.Select();
+            if (!selection.IsSelected.ValueOrDefault) return false;
+
+            picker.Focus();
+            Keyboard.Type(VirtualKeyShort.RETURN);
+            return true;
+        }, s_wait, TimeSpan.FromMilliseconds(500), ignoreException: true);
+        Assert.True(r.Result, "could not select the " + ServerName + " picker row and press Enter within " + s_wait);
+        return true;
     }
 
     private T Step<T>(string name, Func<T> action)
