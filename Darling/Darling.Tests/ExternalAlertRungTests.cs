@@ -110,12 +110,13 @@ public sealed class ExternalAlertRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        /* This rung's sentinel is the probe's last ordinal. */
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        /* V181's sentinel (#5750) sits above this one and is the probe's last ordinal. */
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 1, parameters.Length - 1);
         Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal - 1].Name);
 
@@ -123,11 +124,15 @@ public sealed class ExternalAlertRungTests
         var previousArm = viewer.IndexOf("if (hasClientTimeoutSettings)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0 && previousArm > thisArm, "the V180 arm sits above the next rung down");
 
-        /* Every sentinel present: maps to this rung. This sentinel absent: a rung back, never this one. */
+        /* Every sentinel present: maps to the ladder's top. V181's (#5750) absent: this rung. This sentinel absent too: a rung back. */
         var allPresent = Enumerable.Range(0, parameters.Length).Select(_ => (object)true).ToArray();
-        Assert.Equal(ExternalAlertTables.RungVersion, (int)method.Invoke(null, allPresent)!);
+        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, allPresent)!);
 
-        var behind = (object[])allPresent.Clone();
+        var withoutV181 = (object[])allPresent.Clone();
+        withoutV181[ProbeOrdinal + 1] = false;
+        Assert.Equal(ExternalAlertTables.RungVersion, (int)method.Invoke(null, withoutV181)!);
+
+        var behind = (object[])withoutV181.Clone();
         behind[ProbeOrdinal] = false;
         Assert.True((int)method.Invoke(null, behind)! < ExternalAlertTables.RungVersion);
     }
@@ -209,6 +214,7 @@ public sealed class ExternalAlertRungTests
             /* An upgraded store: one rung behind (no tables, no column, no version row), then migrated, gets all of it. */
             await ExecAsync(connection, "DROP TABLE config.external_alert_state; DROP TABLE config.external_alert_pending; DROP TABLE config.external_alert_source; ALTER TABLE config.config_mute_rules DROP COLUMN external_source", ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + ExternalAlertTables.RungVersion, ct);
+            await RungRewindArtifacts.DropV181SentinelAsync(connection, ct);
             Assert.True(await ProbedVersionAsync(connection, ct) < ExternalAlertTables.RungVersion);
             await PgMigrations.MigrateAsync(connection, ct);
             Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct));

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -50,15 +51,40 @@ public sealed class PgNotificationRouteStore
         IReadOnlyList<string> ConfiguredChannels,
         string EmailRecipients,
         bool Enabled,
-        DateTime ModifiedAtUtc);
+        DateTime ModifiedAtUtc,
+        int? ScopeServerId = null,
+        int? ScopeTagId = null)
+    {
+        /// <summary>The scoped server's registry name, or null when the route is not server-scoped or the server no longer exists (#5750).</summary>
+        public string? ScopeServerName { get; init; }
+
+        /// <summary>The scope tag's name, or null when the route is not tag-scoped or the tag no longer exists (#5750).</summary>
+        public string? ScopeTagName { get; init; }
+
+        /// <summary>How many servers the scope covers right now: the one server, or the tag's whole subtree; null for a fleet-wide route (#5750).</summary>
+        public int? ExpandedServerCount { get; init; }
+
+        /// <summary>True when the scoped server or tag no longer exists: the route stays as written and matches nothing (#5750).</summary>
+        public bool Orphaned { get; init; }
+    }
 
     /// <summary>The non-secret projection. Public-const so the ACL pin can assert every column named here is
     /// in the <c>mcp</c>/<c>viewer</c> carve's non-secret list — the read that would 42501 in production is
     /// the one a superuser-run test never notices.</summary>
     public const string SelectSummariesSql = @"
-SELECT route_id, metric_match, configured_channels, smtp_recipients, enabled, modified_at
+SELECT route_id, metric_match, configured_channels, smtp_recipients, enabled, modified_at, scope_server_id, scope_tag_id
 FROM config_notification_routes
 ORDER BY route_id";
+
+    /// <summary>The registry's server ids and names, for the scope labels of <see cref="LoadSummariesAsync"/> (#5750). Both columns are in the
+    /// <c>mcp</c> role's non-secret carve of <c>config_monitored_servers</c>.</summary>
+    public const string ScopeServersSql = "SELECT server_id, name FROM config_monitored_servers";
+
+    /// <summary>The tag tree with names (#5750).</summary>
+    public const string ScopeTagsSql = "SELECT id, name, parent_id FROM server_tags";
+
+    /// <summary>The server-to-tag assignments (#5750).</summary>
+    public const string ScopeTagMapSql = "SELECT server_id, tag_id FROM server_tag_map";
 
     /// <summary>The enabled-flag write: the flag and its stamp, nothing else, so the column-level grant is
     /// exactly these two.</summary>
@@ -86,10 +112,88 @@ UPDATE config_notification_routes
                 reader.IsDBNull(2) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(2),
                 reader.GetString(3),
                 reader.GetBoolean(4),
-                DateTime.SpecifyKind(reader.GetDateTime(5), DateTimeKind.Utc)));
+                DateTime.SpecifyKind(reader.GetDateTime(5), DateTimeKind.Utc),
+                reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                reader.IsDBNull(7) ? null : reader.GetInt32(7)));
         }
 
-        return routes;
+        return routes.Exists(r => r.ScopeServerId.HasValue || r.ScopeTagId.HasValue)
+            ? await DescribeScopesAsync(routes, cancellationToken)
+            : routes;
+    }
+
+    /// <summary>
+    /// Names each scope and expands it with the shared <see cref="NotificationRouteScopeExpander"/>, the same code the service's loader
+    /// uses, so the count and the orphan flag the tool reports are the ones delivery acts on (#5750). Only run when a route is scoped.
+    /// </summary>
+    private async Task<List<RouteSummary>> DescribeScopesAsync(List<RouteSummary> routes, CancellationToken cancellationToken)
+    {
+        var serverNames = new Dictionary<int, string>();
+        var tagNames = new Dictionary<int, string>();
+        var tagParents = new Dictionary<int, int?>();
+        var serverTags = new Dictionary<int, HashSet<int>>();
+
+        await using (var command = _dataSource.CreateCommand(ScopeServersSql))
+        {
+            command.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                serverNames[reader.GetInt32(0)] = reader.GetString(1);
+            }
+        }
+
+        await using (var command = _dataSource.CreateCommand(ScopeTagsSql))
+        {
+            command.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                tagNames[reader.GetInt32(0)] = reader.GetString(1);
+                tagParents[reader.GetInt32(0)] = reader.IsDBNull(2) ? null : reader.GetInt32(2);
+            }
+        }
+
+        await using (var command = _dataSource.CreateCommand(ScopeTagMapSql))
+        {
+            command.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var serverId = reader.GetInt32(0);
+                if (!serverTags.TryGetValue(serverId, out var tags))
+                {
+                    serverTags[serverId] = tags = new HashSet<int>();
+                }
+
+                tags.Add(reader.GetInt32(1));
+            }
+        }
+
+        var scopeOnly = routes
+            .Select(r => new NotificationRoute(r.RouteId, r.MetricMatch, "", "", "", "", "", r.Enabled) { ScopeServerId = r.ScopeServerId, ScopeTagId = r.ScopeTagId })
+            .ToList();
+        var expanded = NotificationRouteScopeExpander.Expand(
+            scopeOnly,
+            serverNames.Keys.ToHashSet(),
+            tagParents,
+            serverTags.ToDictionary(p => p.Key, p => (IReadOnlyCollection<int>)p.Value));
+
+        var described = new List<RouteSummary>(routes.Count);
+        for (var i = 0; i < routes.Count; i++)
+        {
+            var r = routes[i];
+            var e = expanded[i];
+            described.Add(r with
+            {
+                ScopeServerName = r.ScopeServerId is { } sid && serverNames.TryGetValue(sid, out var sn) ? sn : null,
+                ScopeTagName = r.ScopeTagId is { } tid && tagNames.TryGetValue(tid, out var tn) ? tn : null,
+                ExpandedServerCount = e.IsScoped ? e.ExpandedServerIds?.Count ?? 0 : null,
+                Orphaned = e.Orphaned,
+            });
+        }
+
+        return described;
     }
 
     /// <summary>Sets the flag; returns the number of rows updated (0 = no such route).</summary>

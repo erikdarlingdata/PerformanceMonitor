@@ -210,7 +210,7 @@ public sealed class ProvisionRolesAclDriftTests
                 StringComparison.Ordinal);
 
             var pair = code[at..code.IndexOf("$v131$;", at, StringComparison.Ordinal)];
-            Assert.Matches($@"^{Regex.Escape(revoke)}\s+GRANT SELECT \(route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at\)\s+ON {ConfigSchema}\.config_notification_routes TO {role};\s*$", pair);
+            Assert.Matches($@"^{Regex.Escape(revoke)}\s+GRANT SELECT \(route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at, scope_server_id, scope_tag_id\)\s+ON {ConfigSchema}\.config_notification_routes TO {role};\s*$", pair);
         }
     }
 

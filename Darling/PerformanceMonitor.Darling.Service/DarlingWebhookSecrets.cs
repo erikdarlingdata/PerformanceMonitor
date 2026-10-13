@@ -204,6 +204,14 @@ internal static class DarlingWebhookSecrets
             Add(r.PagerDutyRoutingKey);
             Add(r.SmtpRecipients);
             Add(r.Enabled ? "1" : "0");
+
+            /* #5750: the scope and what the loader expanded it to. A tag edit changes the expanded set while every stored column
+               stays the same, and the opened result carries the routes, so without these a tag edit would keep the old server set. */
+            Add(r.ScopeServerId?.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Add(r.ScopeTagId?.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Add(r.Orphaned ? "1" : "0");
+            Add(r.ScopeTagDepth.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Add(r.ExpandedServerIds is null ? "-" : string.Join(",", r.ExpandedServerIds.OrderBy(id => id)));
         }
 
         return text.ToString();

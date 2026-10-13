@@ -227,6 +227,13 @@ public sealed class MigrationDataMovingRungCensusPins
             + "store, and every aws_* value NULL at this rung), so each is instant and neither touches data an earlier "
             + "rung created beyond that table. It does not move the lock-wait floor."),
         new(
+            181,
+            SetsTheFloor: false,
+            "ADD CONSTRAINT ... CHECK on config.config_notification_routes (#5750, created V131): the one-scope CHECK is "
+            + "validated against every stored route, and the metric-match CHECK is NOT VALID so it scans nothing. The "
+            + "routes table holds a handful of operator-written rows (zero is the ordinary state), so the scan is "
+            + "instant and touches no data an earlier rung created beyond that table. It does not move the lock-wait floor."),
+        new(
             175,
             SetsTheFloor: false,
             "an UPDATE of late_seq on every row of collect.plan_regression_daily_built (created V168), in the same "

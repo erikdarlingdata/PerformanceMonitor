@@ -76,4 +76,18 @@ internal static class RungRewindArtifacts
             connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
+
+    /// <summary>
+    /// V181 (#5750): the route scope columns of <c>config.config_notification_routes</c>, the probe's newest sentinel. The two
+    /// CHECK constraints name the columns, so dropping the columns drops them. Safe on a store that never had them.
+    /// </summary>
+    internal static async Task DropV181SentinelAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            "ALTER TABLE IF EXISTS config.config_notification_routes"
+            + " DROP COLUMN IF EXISTS scope_server_id,"
+            + " DROP COLUMN IF EXISTS scope_tag_id",
+            connection);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
 }

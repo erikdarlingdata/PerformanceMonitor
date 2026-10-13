@@ -89,15 +89,18 @@ public sealed class RunnableQueueSettingsRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
+        /* V181's sentinel (#5750) is the probe's last ordinal. */
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         Assert.Equal("hasQueryStoreWatermarks", parameters[ProbeOrdinal + 1].Name);
         Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal + 2].Name);
-        Assert.Equal("hasExternalAlerts", parameters[^1].Name);
+        Assert.Equal("hasNotificationRouteScope", parameters[^1].Name);
+        Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal + 3].Name);
         Assert.Equal("hasRunnableQueueSettings", parameters[ProbeOrdinal].Name);
-        Assert.Equal(ProbeOrdinal + 3, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 4, parameters.Length - 1);
         Assert.Equal("hasProcedureStatsTotals", parameters[ProbeOrdinal - 1].Name);
 
         /* Every sentinel present answers this build's version (V180's). With the later sentinels absent this rung is the answer, 177; with
@@ -108,7 +111,11 @@ public sealed class RunnableQueueSettingsRungTests
 
         /* With V180's sentinel (the top) absent the answer is V179's, 179; with V179's absent too, V178's, 178; with V178's absent
            too, this rung is the answer. */
-        var withoutV180 = (object[])all.Clone();
+        var withoutV181 = (object[])all.Clone();
+        withoutV181[ProbeOrdinal + 4] = false;
+        Assert.Equal(180, (int)method.Invoke(null, withoutV181)!);
+
+        var withoutV180 = (object[])withoutV181.Clone();
         withoutV180[ProbeOrdinal + 3] = false;
         Assert.Equal(179, (int)method.Invoke(null, withoutV180)!);
 

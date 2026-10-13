@@ -594,16 +594,19 @@ public sealed class DarlingMcpAlertTools
     };
 
     [McpServerTool(Name = "get_notification_routes"), Description(
-        "Gets the alert family taxonomy, and where each family's posts go. Zero routes is the ordinary state: every alert goes to every parent channel configured in Settings. Darling: sparse routes layered over that parent set; an EMPTY channel on a route INHERITS the parent's rather than silencing it; resolution is exact metric, then family, then parent. Lite: routes_supported is false, so no routes exist to edit. Routing decides WHERE a post lands, never WHETHER it is sent.<<GUIDE>>Gets WHERE each alert family is delivered: the closed family taxonomy — which metric names belong to " +
+        "Gets the alert family taxonomy, and where each family's posts go. Zero routes is the ordinary state: every alert goes to every parent channel configured in Settings. Darling: sparse routes layered over that parent set; an EMPTY channel on a route INHERITS the parent's rather than silencing it; resolution is scope first (server, tag, fleet-wide), then exact metric, then family, then parent; routes report scope and orphaned. Lite: routes_supported is false, so no routes exist to edit. Routing decides WHERE a post lands, never WHETHER it is sent.<<GUIDE>>Gets WHERE each alert family is delivered: the closed family taxonomy — which metric names belong to " +
         "self-monitor, reports, agent-jobs and performance — and the sparse notification routes layered over the " +
         "parent channel set. Every store starts with ZERO routes, which means every alert goes to every channel " +
         "configured in the Viewer's Settings > Notifications (the parent). A route names a family (or one exact metric " +
         "name) and a destination per channel type; an EMPTY channel on a route INHERITS the parent's, so a route " +
         "can redirect Slack for one family and leave PagerDuty as the parent has it, or ENABLE a channel the parent " +
         "does not have (a paging key on the performance route alone is how 'only pages page' is spelled). A route " +
-        "cannot silence a channel the parent has: empty means inherit, not off. Resolution order per channel: an " +
-        "enabled route matching the metric EXACTLY, then one matching its FAMILY, then the parent; within a level the " +
-        "lowest route_id with a non-empty column wins. A recovery routes as its firing (Server Restored as Server " +
+        "cannot silence a channel the parent has: empty means inherit, not off. A route may be scoped to one server " +
+        "(scope_server_id) or to a tag and every tag under it (scope_tag_id); a route whose server or tag was deleted " +
+        "stays, is orphaned = true, and matches nothing. Resolution order per channel: scope first (a route for the " +
+        "alert's server, then one for a tag it is under, the deeper tag first, then a fleet-wide route), and inside a " +
+        "scope an enabled route matching the metric EXACTLY, then its FAMILY, then * (scoped routes only), then the parent; " +
+        "within a level the lowest route_id with a non-empty column wins.A recovery routes as its firing (Server Restored as Server " +
         "Unreachable), so a channel that saw the fire sees the clear. Routing sits AFTER the cooldown: it changes " +
         "where a post lands, never whether it is sent. Destination values (webhook URLs, the PagerDuty routing key) " +
         "are bearer secrets and are NOT reported — configured_channels lists which channels each route sets by " +
@@ -638,7 +641,8 @@ public sealed class DarlingMcpAlertTools
                 }),
                 recoveries_route_as_their_firing = AlertFamily.RecoveryPairs.Select(kv => new { recovery = kv.Key, firing = kv.Value }),
                 unclassified_metrics_route_as = AlertFamily.Performance,
-                resolution_order = new[] { "exact metric route", "family route", "parent channel (Settings > Notifications)" },
+                resolution_order = new[] { "server-scoped route", "tag-scoped route (deeper tag first)", "fleet-wide route", "parent channel (Settings > Notifications)" },
+                resolution_within_a_scope = new[] { "exact metric", "family", "* (scoped routes only)" },
                 route_count = routes.Count,
                 enabled_route_count = routes.Count(r => r.Enabled),
                 /* Zero routes is the ordinary state and the caller must be able to tell it from a failed read: an
@@ -653,6 +657,13 @@ public sealed class DarlingMcpAlertTools
                     smtp_recipients = r.EmailRecipients,
                     enabled = r.Enabled,
                     modified_at_utc = r.ModifiedAtUtc,
+                    /* #5750: the scope, labelled, and what it covers now. Null ids = fleet-wide. Orphaned = the server or tag is gone: the row stays, matching nothing. */
+                    scope_server_id = r.ScopeServerId,
+                    scope_server_name = r.ScopeServerName,
+                    scope_tag_id = r.ScopeTagId,
+                    scope_tag_name = r.ScopeTagName,
+                    expanded_server_count = r.ExpandedServerCount,
+                    orphaned = r.Orphaned,
                 }),
             }, McpHelpers.JsonOptions);
         }

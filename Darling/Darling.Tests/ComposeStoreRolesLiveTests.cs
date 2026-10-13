@@ -1342,9 +1342,14 @@ ALTER ROLE byo SET pg_stat_statements.track_utility = on;", ct);
                     $"{role} can read config.{acl.Table}.{secret} after the script ran.");
             }
 
-            Assert.True(await OwnerScalarAsync<bool>(owner,
-                $"SELECT pg_catalog.has_column_privilege('{role}', 'config.{acl.Table}', '{acl.NonSecretColumns[0]}', 'SELECT')", ct),
-                $"{role} cannot read config.{acl.Table}.{acl.NonSecretColumns[0]}: the carve was not applied.");
+            /* #5750: EVERY non-secret column, not the first, so a column a later rung adds (the route scope columns, V181) is
+               proven readable by the viewer and mcp roles after the migration pass and the provisioning that follows it. */
+            foreach (var column in acl.NonSecretColumns)
+            {
+                Assert.True(await OwnerScalarAsync<bool>(owner,
+                    $"SELECT pg_catalog.has_column_privilege('{role}', 'config.{acl.Table}', '{column}', 'SELECT')", ct),
+                    $"{role} cannot read config.{acl.Table}.{column}: the carve was not applied.");
+            }
         }
     }
 

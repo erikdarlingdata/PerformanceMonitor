@@ -1102,6 +1102,65 @@ ALTER TABLE config.config_alert_settings
     private static readonly string V180Sql = ExternalAlertTables.CreateSql;
 
     /// <summary>
+    /// V181 (#5750) — a notification route can be scoped to one server or to a tag and its whole subtree.
+    /// <c>config.config_notification_routes</c> gains the nullable <c>scope_server_id</c> (a registry server id) and
+    /// <c>scope_tag_id</c> (a <c>config.server_tags</c> id), a CHECK that at most one is set, and a CHECK that the match <c>*</c>
+    /// (the lowest metric level, ruling 4) appears only on a scoped route. A stored row keeps its effect: both columns are NULL on it,
+    /// so it stays fleet-wide.
+    ///
+    /// <para><b>No foreign key and no ON DELETE action, deliberately.</b> A route whose server or tag was removed must stay as it was
+    /// written and show as orphaned; a cascade would delete it, and <c>ON DELETE SET NULL</c> would silently widen it to fleet-wide.
+    /// The service marks it orphaned at load and the router matches it to nothing.</para>
+    ///
+    /// <para><b>The <c>*</c> CHECK is NOT VALID</b>: it is enforced for every insert and update from now on, and it is not checked
+    /// against rows already stored, so a store that holds an unscoped <c>*</c> row (a literal metric name before this rung, which
+    /// matched nothing real) still migrates instead of refusing to start. The router never matches such a row.</para>
+    ///
+    /// <para><b>Reload.</b> The reload beacon (<c>config.config_bump_version</c>) already fires on a write to the routes table and to
+    /// <c>config_monitored_servers</c>, but V32 deliberately gave the two tag tables none. A scoped route's server set depends on both, so
+    /// this rung adds V117's trigger shape to <c>config.server_tags</c> and <c>config.server_tag_map</c>: a tag edit, a mapping change or
+    /// a cascade from a tag delete bumps <c>config_service.config_version</c> and the running service re-reads the routes.</para>
+    ///
+    /// <para>Catalog-only: two nullable columns, two constraints, two triggers. Every statement is idempotent. No GRANT here: the
+    /// viewer and mcp roles' column-level SELECT on the routes table is a provisioning statement (<c>DarlingManagedRoles</c>,
+    /// re-asserted on every managed start after migration, and mirrored in <c>Darling/tools/provision-roles.sql</c>); both new columns are on its
+    /// non-secret list. <b>Lite twin:</b> the DuckDB step at schema 69 (separate store, separate lane).</para>
+    /// </summary>
+    private const string V181Sql = @"
+ALTER TABLE config.config_notification_routes
+    ADD COLUMN IF NOT EXISTS scope_server_id integer,
+    ADD COLUMN IF NOT EXISTS scope_tag_id integer;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_config_notification_routes_one_scope'
+                     AND conrelid = 'config.config_notification_routes'::regclass) THEN
+        ALTER TABLE config.config_notification_routes
+            ADD CONSTRAINT ck_config_notification_routes_one_scope
+            CHECK (scope_server_id IS NULL OR scope_tag_id IS NULL);
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_config_notification_routes_wildcard_scoped'
+                     AND conrelid = 'config.config_notification_routes'::regclass) THEN
+        ALTER TABLE config.config_notification_routes
+            ADD CONSTRAINT ck_config_notification_routes_wildcard_scoped
+            CHECK (btrim(metric_match) <> '*' OR scope_server_id IS NOT NULL OR scope_tag_id IS NOT NULL) NOT VALID;
+    END IF;
+END $$;
+
+DROP TRIGGER IF EXISTS trg_bump_server_tags ON config.server_tags;
+CREATE TRIGGER trg_bump_server_tags
+    AFTER INSERT OR UPDATE OR DELETE ON config.server_tags
+    FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();
+
+DROP TRIGGER IF EXISTS trg_bump_server_tag_map ON config.server_tag_map;
+CREATE TRIGGER trg_bump_server_tag_map
+    AFTER INSERT OR UPDATE OR DELETE ON config.server_tag_map
+    FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1393,6 +1452,7 @@ $rung$;";
         new Migration(178, "query-store-watermarks", V178Sql),
         new Migration(179, "client-timeouts-alert", V179Sql),
         new Migration(180, "external-alerts", V180Sql),
+        new Migration(181, "notification-route-scope", V181Sql),
     };
 
     /// <summary>

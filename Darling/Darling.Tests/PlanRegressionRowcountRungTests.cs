@@ -126,7 +126,9 @@ public sealed class PlanRegressionRowcountRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
+        /* V181's sentinel (#5750) is the probe's last ordinal. */
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
@@ -137,7 +139,8 @@ public sealed class PlanRegressionRowcountRungTests
         Assert.Equal("hasQueryStoreWatermarks", parameters[ProbeOrdinal + 3].Name);
         Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal + 4].Name);
         Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal + 5].Name);
-        Assert.Equal(ProbeOrdinal + 5, parameters.Length - 1);
+        Assert.Equal("hasNotificationRouteScope", parameters[ProbeOrdinal + 6].Name);
+        Assert.Equal(ProbeOrdinal + 6, parameters.Length - 1);
 
         /* Every sentinel present maps to exactly this build's version. With the later sentinels absent this rung is the
            answer; with this one absent too, one rung back. */
@@ -152,6 +155,8 @@ public sealed class PlanRegressionRowcountRungTests
         withoutLater[ProbeOrdinal + 4] = false;
         /* V180 (#5654) sits above V179 and goes absent too. */
         withoutLater[ProbeOrdinal + 5] = false;
+        /* V181 (#5750) sits above V180 and goes absent too. */
+        withoutLater[ProbeOrdinal + 6] = false;
         Assert.Equal(RungVersion, (int)method.Invoke(null, withoutLater)!);
 
         var behind = (object[])withoutLater.Clone();

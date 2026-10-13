@@ -156,7 +156,7 @@ public sealed class NotificationRoutesRungTests
         var parent = DarlingManagedRoles.ViewerRestrictedConfigTables.Single(a => a.Table == "config_notification");
 
         Assert.Equal(new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key" }, acl.SecretColumns);
-        Assert.Equal(new[] { "route_id", "metric_match", "smtp_recipients", "configured_channels", "enabled", "modified_at" }, acl.NonSecretColumns);
+        Assert.Equal(new[] { "route_id", "metric_match", "smtp_recipients", "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }, acl.NonSecretColumns);
 
         foreach (var column in DestinationColumns)
         {
@@ -166,7 +166,7 @@ public sealed class NotificationRoutesRungTests
         }
 
         /* Every column in the DDL is in exactly one list. */
-        var ddlColumns = new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "configured_channels", "enabled", "modified_at" }).ToList();
+        var ddlColumns = new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }).ToList();
         var classified = acl.SecretColumns.Concat(acl.NonSecretColumns).ToList();
         Assert.Equal(ddlColumns.OrderBy(c => c, StringComparer.Ordinal), classified.OrderBy(c => c, StringComparer.Ordinal));
         Assert.Equal(classified.Count, classified.Distinct(StringComparer.Ordinal).Count());
@@ -236,7 +236,8 @@ public sealed class NotificationRoutesRungTests
     public void TheServiceReader_TheViewerWriter_AndTheDdl_NameTheSameColumnsInTheSameOrder()
     {
         var serviceSelect = ColumnsOf(StoreConfigProvider.NotificationRoutesSelectSql, "SELECT", "FROM");
-        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled" }), serviceSelect);
+        /* The scope columns (V181, #5750) follow, set by init so the constructor below is unchanged. */
+        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }), serviceSelect);
         Assert.EndsWith("ORDER BY route_id", StoreConfigProvider.NotificationRoutesSelectSql, StringComparison.Ordinal);
 
         /* The constructor's parameter order IS the SELECT's order, so a reader ordinal cannot re-map a column. */
@@ -358,7 +359,10 @@ public sealed class NotificationRoutesRungTests
         var readDescription = source[read..enabled];
         Assert.Contains("EMPTY channel on a route INHERITS the parent's", readDescription, StringComparison.Ordinal);
         Assert.Contains("cannot silence a channel the parent has", readDescription, StringComparison.Ordinal);
-        Assert.Contains("matching the metric EXACTLY, then one matching its FAMILY, then the parent", readDescription, StringComparison.Ordinal);
+        /* #5750: scope first, then the metric levels inside a scope. */
+        Assert.Contains("Resolution order per channel: scope first", readDescription, StringComparison.Ordinal);
+        Assert.Contains("matching the metric EXACTLY, then its FAMILY, then * (scoped routes only), then the parent", readDescription, StringComparison.Ordinal);
+        Assert.Contains("orphaned = true, and matches nothing", readDescription, StringComparison.Ordinal);
         Assert.Contains("Routing sits AFTER the cooldown", readDescription, StringComparison.Ordinal);
         Assert.Contains("are NOT reported", readDescription, StringComparison.Ordinal);
 

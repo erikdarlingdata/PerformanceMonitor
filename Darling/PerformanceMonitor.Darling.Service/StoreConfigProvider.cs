@@ -1383,7 +1383,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
             /* #3598 (V131): the routes layered over that row, read on the same privileged connection for the
                same reason — four of its five destination columns are the same bearer secrets. Zero rows is the
                ordinary state and resolves to the parent row exactly. */
-            var routes = await ReadNotificationRoutesAsync(connection, cancellationToken);
+            var routes = await ReadNotificationRoutesAsync(connection, _logger, cancellationToken);
 
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken, pins);
 
@@ -2069,30 +2069,141 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// <summary>The routes SELECT, public-const so the viewer's writer and the tests can pin column parity
     /// against it the way <c>NotificationColumns</c> is pinned against <see cref="ReadNotificationAsync"/>.
     /// Ordered by <c>route_id</c> so "first matching route wins" in the resolver is a statement about the
-    /// table rather than about row order.</summary>
+    /// table rather than about row order. The scope columns (V181, #5750) come last: they are stored as written and
+    /// expanded to a server set by <see cref="ReadNotificationRoutesAsync"/>, never by SQL.</summary>
     public const string NotificationRoutesSelectSql =
-        "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled "
+        "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, scope_server_id, scope_tag_id "
         + "FROM config_notification_routes ORDER BY route_id";
 
-    private static async Task<IReadOnlyList<NotificationRoute>> ReadNotificationRoutesAsync(NpgsqlConnection connection, CancellationToken ct)
+    /// <summary>The registry's server ids: every server a route's scope can name (#5750). The desired-state table, whose
+    /// <c>server_id</c> is the key an alert carries as <c>AlertOutcome.ServerKey</c>.</summary>
+    public const string RouteScopeServersSql = "SELECT server_id FROM config_monitored_servers";
+
+    /// <summary>The tag tree (#5750): every tag and its parent (NULL for a root).</summary>
+    public const string RouteScopeTagsSql = "SELECT id, parent_id FROM server_tags";
+
+    /// <summary>The server-to-tag assignments (#5750).</summary>
+    public const string RouteScopeTagMapSql = "SELECT server_id, tag_id FROM server_tag_map";
+
+    /// <summary>
+    /// The three inputs <see cref="NotificationRouteScopeExpander.Expand"/> needs, read from the store (#5750): the known server ids,
+    /// the tag parent map and the server-to-tags map. <see cref="ReadRouteScopeInputsAsync"/> is the single read of them, so a parity
+    /// pin can call it directly. <see cref="TagsReadable"/> is false when the tag tables could not be read: the tag maps are then
+    /// empty and <see cref="ExpandRoutes"/> leaves a tag-scoped route unexpanded (it matches nothing).
+    /// </summary>
+    public sealed record RouteScopeInputs(
+        IReadOnlyCollection<int> KnownServerIds,
+        IReadOnlyDictionary<int, int?> TagParents,
+        IReadOnlyDictionary<int, IReadOnlyCollection<int>> ServerTags,
+        bool TagsReadable);
+
+    /// <summary>
+    /// Reads <see cref="RouteScopeInputs"/>. A failed server read propagates (the whole view load already shares that failure
+    /// handling). A failed tag read is caught and logged and reported through <see cref="RouteScopeInputs.TagsReadable"/>:
+    /// the tag tables are a side read, and a transient failure there must narrow what a route matches, never widen it.
+    /// </summary>
+    public static async Task<RouteScopeInputs> ReadRouteScopeInputsAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken ct)
     {
-        var routes = new List<NotificationRoute>();
-        using var command = new NpgsqlCommand(NotificationRoutesSelectSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
-        using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
+        var known = new HashSet<int>();
+        using (var command = new NpgsqlCommand(RouteScopeServersSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
+        using (var reader = await command.ExecuteReaderAsync(ct))
         {
-            routes.Add(new NotificationRoute(
-                reader.GetInt32(0),
-                reader.GetString(1),
-                reader.GetString(2),
-                reader.GetString(3),
-                reader.GetString(4),
-                reader.GetString(5),
-                reader.GetString(6),
-                reader.GetBoolean(7)));
+            while (await reader.ReadAsync(ct))
+            {
+                known.Add(reader.GetInt32(0));
+            }
         }
 
-        return routes;
+        var parents = new Dictionary<int, int?>();
+        var serverTags = new Dictionary<int, HashSet<int>>();
+        try
+        {
+            using (var command = new NpgsqlCommand(RouteScopeTagsSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
+            using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    parents[reader.GetInt32(0)] = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+                }
+            }
+
+            using (var command = new NpgsqlCommand(RouteScopeTagMapSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
+            using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    var serverId = reader.GetInt32(0);
+                    if (!serverTags.TryGetValue(serverId, out var tags))
+                    {
+                        serverTags[serverId] = tags = new HashSet<int>();
+                    }
+
+                    tags.Add(reader.GetInt32(1));
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning("Could not read the server tags — tag-scoped notification routes match nothing until the next config reload: {Message}", ex.Message);
+            return new RouteScopeInputs(known, new Dictionary<int, int?>(), new Dictionary<int, IReadOnlyCollection<int>>(), false);
+        }
+
+        return new RouteScopeInputs(known, parents, serverTags.ToDictionary(p => p.Key, p => (IReadOnlyCollection<int>)p.Value), true);
+    }
+
+    /// <summary>
+    /// Expands the stored routes with the given inputs (#5750). When the tag tables were unreadable, a tag-scoped route is returned
+    /// unexpanded (so it matches nothing: fail closed, and not marked orphaned, since the tag may still exist).
+    /// </summary>
+    public static IReadOnlyList<NotificationRoute> ExpandRoutes(IReadOnlyList<NotificationRoute> routes, RouteScopeInputs inputs)
+    {
+        var expanded = NotificationRouteScopeExpander.Expand(routes, inputs.KnownServerIds, inputs.TagParents, inputs.ServerTags);
+        if (inputs.TagsReadable)
+        {
+            return expanded;
+        }
+
+        var result = new List<NotificationRoute>(expanded.Count);
+        for (var i = 0; i < expanded.Count; i++)
+        {
+            result.Add(routes[i].ScopeTagId.HasValue ? routes[i] : expanded[i]);
+        }
+
+        return result;
+    }
+
+    private static async Task<IReadOnlyList<NotificationRoute>> ReadNotificationRoutesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken ct)
+    {
+        var routes = new List<NotificationRoute>();
+        using (var command = new NpgsqlCommand(NotificationRoutesSelectSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
+        using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                routes.Add(new NotificationRoute(
+                    reader.GetInt32(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.GetString(3),
+                    reader.GetString(4),
+                    reader.GetString(5),
+                    reader.GetString(6),
+                    reader.GetBoolean(7))
+                {
+                    ScopeServerId = reader.IsDBNull(8) ? null : reader.GetInt32(8),
+                    ScopeTagId = reader.IsDBNull(9) ? null : reader.GetInt32(9),
+                });
+            }
+        }
+
+        /* #5750: a scoped route that is never expanded matches nothing, so every route this loader returns goes through the
+           expander. A store with no scoped route skips the three extra reads: the fleet-wide routes come back as they are. */
+        if (!routes.Exists(r => r.IsScoped))
+        {
+            return routes;
+        }
+
+        return ExpandRoutes(routes, await ReadRouteScopeInputsAsync(connection, logger, ct));
     }
 
     /// <summary>
