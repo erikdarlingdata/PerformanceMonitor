@@ -173,8 +173,8 @@ census, one of them introduced by that night's own wave).
   `-class "*Name*"` or `-method "*Name*"`. `dotnet test` does not work.
 - For a lone failure in a class you didn't touch, re-run that class alone before calling it yours.
 - **Run the classes that name what you changed** (#5776). Run `python .github/scripts/ci-select.py local-classes
-  --base origin/dev`, then run its `-class` lines, plus `-class "*Census*"`, `-class "*Ratchet*"` and
-  `-trait Stage=Guard`. It lists the test classes whose source names a symbol your change declares or edits, most
+  --base origin/dev`, then run its `-class` lines, plus `-class "*Census*"`, `-class "*Ratchet*"`,
+  `-trait Stage=Guard` and `-trait Stage=Census` (the classes that reflect a whole catalog, which name no symbol). It lists the test classes whose source names a symbol your change declares or edits, most
   specific first; a class marked `needs rig` runs only with `DARLING_TEST_PG` set. On three pull requests, twelve
   classes that went red in CI named a changed symbol and no lane had run them.
 - **Filter by every class in every test file you touch**, not by the file's name. One file can hold several classes

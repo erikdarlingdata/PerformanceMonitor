@@ -396,8 +396,10 @@ def scan_classes(root: str = ROOT) -> dict[str, dict[str, set[str]]]:
 def class_selected(suite: str, traits: set[str], d: dict) -> bool:
     """Would today's rules run this class for this decision?"""
     guard = "Stage=Guard" in traits
+    # #5776: the guard job runs Stage=Census beside Stage=Guard; the no-store pass's guard scope does not.
+    always = guard or "Stage=Census" in traits
     if suite == "darling":
-        if guard and d["guard_run"]:
+        if always and d["guard_run"]:
             return True
         # The build job's no-store pass runs the whole suite (full) or only the Guard stage; the shards run every class.
         reads_lite = "Reads=Lite" in traits
@@ -406,7 +408,7 @@ def class_selected(suite: str, traits: set[str], d: dict) -> bool:
             or (d["darling_scope"] == "guard" and guard) \
             or (d["darling_scope"] == "reads-lite" and (guard or reads_lite))
     if suite == "lite":
-        if guard and d["guard_run"]:
+        if always and d["guard_run"]:
             return True
         if d["lite_mode"] in ("full", "release"):
             return True
@@ -850,7 +852,7 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         for cls, traits in found.items():
             if cls not in mapped:
                 reasons[cls] = "new class"
-            elif "Stage=Guard" in traits:
+            elif "Stage=Guard" in traits or "Stage=Census" in traits:
                 reasons.setdefault(cls, "guard stage")
             if GATE_TRAIT in traits:
                 reasons.setdefault(cls, "gated on an environment the map shards lack")
@@ -1112,7 +1114,7 @@ def shadow_row(selection: "dict | None", failed: "dict[str, set[str]]", seen: "d
 # too little to choose by: it is dropped and printed as NOISY. A class declared in a changed test file is listed too.
 #
 # What it cannot see: a class that names no changed symbol at all (it reflects over the whole tool catalog or the
-# collector set); those carry Stage=Guard and run in the guard stage. Matching is per test FILE and case-sensitive on
+# collector set); those carry Stage=Census (GuardStageScanner rule R4) and run in the guard stage. Matching is per test FILE and case-sensitive on
 # whole words, so every class of a file that names the token is listed.
 
 SYMBOL_EXTENSIONS = (".cs", ".sql", ".js", ".xaml")
