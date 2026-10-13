@@ -13,8 +13,6 @@ name: WPF smoke
 # Not a required check. A workflow that is skipped by its path filter never reports, so it cannot be one; the job name is
 # left free of the names build.yml's ruleset uses.
 on:
-  push:
-    branches: ['fix/5745-wpf-smoke']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
