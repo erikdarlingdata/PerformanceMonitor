@@ -1,7 +1,7 @@
 {
   "_comment": [
     "Pages the web UI smoke check loads (#5701). Every page gets the same checks (smoke.mjs): no console error, page error, failed request or /api/* answer >= 400; #main fills; the sidebar lists the seeded servers; the nav link for the route is active; no .strip.error or [role=alert]; no panel still loading or in error.",
-    "Per page, 'expect' adds what the seed guarantees. A panel is found by its data-panel (the read name) or its data-title; 'state' is data (draws rows, a chart or tiles) or empty (shows its documented empty text); 'minRows' counts the rows of the first [data-grid] inside it. 'grids' does the same for the whole page (an Admin tab has no panel cards): 'minRows' or 'exactRows' on the Nth [data-grid] in #main.",
+    "Per page, 'expect' adds what the seed guarantees. A panel is found by its data-panel (the read name) or its data-title; data-panel is unambiguous only for a read that feeds one card, so key a fanout panel (several cards sharing one read) by title; 'state' is data (draws rows, a chart or tiles) or empty (shows its documented empty text); 'minRows' counts the rows of the first [data-grid] inside it. 'grids' does the same for the whole page (an Admin tab has no panel cards): 'minRows' or 'exactRows' on the Nth [data-grid] in #main.",
     "allowList: a console or request message that is known and harmless. Each entry needs an 'issue' number and a 'match' substring. It starts empty."
   ],
   "allowList": [],

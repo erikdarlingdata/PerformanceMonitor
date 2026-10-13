@@ -76,13 +76,18 @@ try {
         Start-Sleep -Seconds 1
     }
     if (-not $up) { throw "the service did not answer $base/api/ping in 90 s" }
+    # Its own budget, not what the ping wait left over: the registry row is written only after the migrations have walked the
+    # whole ladder against an empty store, which is the slower of the two waits. Probes at least once, and stops at once if the
+    # service dies during the migrations rather than spending the budget and blaming registration.
     $registered = $false
-    while ((Get-Date) -lt $deadline) {
+    $regDeadline = (Get-Date).AddSeconds(120)
+    do {
+        if ($serviceProc.HasExited) { throw "the service exited early (code $($serviceProc.ExitCode)); see service.out.log" }
         $n = & $psql -h 127.0.0.1 -p $PgPort -U darling -d darling -X -q -t -A -c "SELECT count(*) FROM config.config_monitored_servers WHERE name = 'ui-sql'" 2>$null
         if ($n -eq '1') { $registered = $true; break }
         Start-Sleep -Seconds 1
-    }
-    if (-not $registered) { throw "the service did not register ui-sql in the store in time" }
+    } while ((Get-Date) -lt $regDeadline)
+    if (-not $registered) { throw "the service did not register ui-sql in the store in 120 s (migrations still running? see service.out.log)" }
 
     Invoke-Psql @('-f', (Join-Path $here 'seed.sql'))
 
