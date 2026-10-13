@@ -125,6 +125,16 @@ public sealed class FailedSendBackoff
     /// </summary>
     public void RecordDelivered(string family, string key) => _streaks.TryRemove((family, key), out _);
 
+    /// <summary>
+    /// True when (<paramref name="family"/>, <paramref name="key"/>) has a failure streak that is still open at
+    /// <paramref name="nowUtc"/> (#5715): the last failure was no more than twice its cap ago. A streak older than
+    /// that is already the same as none (<see cref="RecordFailure"/> would restart it), so it does not count.
+    /// Read-only: it neither extends nor ends a streak.
+    /// </summary>
+    public bool HasOpenStreak(string family, string key, DateTime nowUtc) =>
+        _streaks.TryGetValue((family, key), out var streak)
+        && nowUtc - streak.LastFailureUtc <= streak.Cap + streak.Cap;
+
     /// <summary>How many (family, key) pairs are in a failure streak right now.</summary>
     public int TrackedCount => _streaks.Count;
 
