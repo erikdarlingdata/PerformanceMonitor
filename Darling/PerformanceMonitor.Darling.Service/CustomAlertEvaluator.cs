@@ -212,6 +212,13 @@ public sealed class CustomAlertEvaluator
         var pendingSpace = false;
         foreach (var ch in value)
         {
+            /* Characters that reorder or hide text are dropped outright: a right-to-left override or an invisible
+               character in a title would show a subject or card line other than the one stored (#5654). */
+            if (IsInvisibleOrReordering(ch))
+            {
+                continue;
+            }
+
             var isBreakOrControl =
                 ch < ' ' || ch == (char)0x7F || ch == (char)0x85 || ch == '\u2028' || ch == '\u2029';
 
@@ -243,6 +250,17 @@ public sealed class CustomAlertEvaluator
 
         return builder.ToString();
     }
+
+    /// <summary>The bidirectional controls (U+202A-202E, U+2066-2069), the zero-width and mark characters
+    /// (U+200B-200F, U+2060, U+FEFF) and the C1 controls (U+0080-009F except U+0085, which the sanitizer already
+    /// treats as a line break).</summary>
+    internal static bool IsInvisibleOrReordering(char ch) =>
+        (ch >= '\u202A' && ch <= '\u202E')
+        || (ch >= '\u2066' && ch <= '\u2069')
+        || (ch >= '\u200B' && ch <= '\u200F')
+        || ch == '\u2060'
+        || ch == '\uFEFF'
+        || (ch >= '\u0080' && ch <= '\u009F' && ch != '\u0085');
 
     /// <summary>Evaluates every enabled rule applicable to one server. Failure-isolated per rule.
     /// Gated on the master alerts switch, like the engine sweep it is the user-authored twin of (#3464).</summary>

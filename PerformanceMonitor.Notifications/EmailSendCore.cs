@@ -180,7 +180,7 @@ public sealed class EmailSendCore
                     context, detailText, decision.DeliverableDedupKeys, budget.Roster);
 
                 var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
-                var subject = $"[SQL Monitor Alert] {titleName} on {serverName}";
+                var subject = $"[SQL Monitor Alert] {WebhookAlertService.ExternalTitle(titleName, context)} on {serverName}";
 
                 /* #4220: the same triage-page link the webhook channels carry (WebhookAlertService's own
                    #2710 comment explains the key) — email was the one channel without it. The dedup key

@@ -174,6 +174,7 @@ public static class IncidentDeliveryFilter
             AttachmentXml = attachment?.Xml,
             AttachmentFileName = attachment?.FileName,
             AgReplicaIdentity = context.AgReplicaIdentity,
+            External = context.External,
             NewestSample = context.NewestSample,
             Incidents = kept
         };
@@ -247,6 +248,7 @@ public static class IncidentDeliveryFilter
             AttachmentXml = context?.AttachmentXml,
             AttachmentFileName = context?.AttachmentFileName,
             AgReplicaIdentity = context?.AgReplicaIdentity,
+            External = context?.External,
             NewestSample = context?.NewestSample,
             Incidents = context?.Incidents
         };

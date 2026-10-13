@@ -172,12 +172,14 @@ public class AlertIncidentRenderTests
             new[]
             {
                 "AgReplicaIdentity", "AttachmentFileName", "AttachmentXml", "CollectorName", "Details",
-                "Incidents", "NewestSample", "Route", "Routing", "SeverityOverride", "WaitType"
+                "External", "Incidents", "NewestSample", "Route", "Routing", "SeverityOverride", "WaitType"
             },
             census);
 
         var context = AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A");
         context.SeverityOverride = AlertSeverityLevel.Critical;
+        /* #5654: the external origin rides every copy, so a delivered card keeps its title mark. */
+        context.External = new AlertExternalOrigin("billing", "queue-depth", 1);
         context.AttachmentXml = "<graph/>";
         context.AttachmentFileName = "deadlock_graph.xml";
         /* #5642: the fire-time sample age rides every copy, so the delivered body prints the age line. */
@@ -207,6 +209,7 @@ public class AlertIncidentRenderTests
         {
             Assert.Equal(AlertSeverityLevel.Critical, copy.SeverityOverride);
             Assert.Equal("OrdersAG:REPLICA-A", copy.AgReplicaIdentity);
+            Assert.Equal(context.External, copy.External);
             Assert.Equal(context.NewestSample, copy.NewestSample);
         }
 

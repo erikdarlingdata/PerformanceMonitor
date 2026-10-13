@@ -82,6 +82,28 @@ public class CustomAlertDisplayNameTests
         Assert.Equal("Signal wait % high", CustomAlertEvaluator.SanitizeDisplayText("Signal wait % high", 200));
     }
 
+    /// <summary>#5654: bidirectional controls, zero-width characters and C1 controls are dropped, one class per case; U+0085
+    /// stays a line break (a space), and ordinary non-ASCII text is kept.</summary>
+    [Theory]
+    [InlineData("a‮b", "ab")]       // right-to-left override
+    [InlineData("a‪b‫c‬d‭e", "abcde")]
+    [InlineData("a⁦b⁧c⁨d⁩e", "abcde")] // isolates
+    [InlineData("a​b‌c‍d‎e‏f", "abcdef")] // zero-width and direction marks
+    [InlineData("a⁠b﻿c", "abc")] // word joiner, byte-order mark
+    [InlineData("a\u0080b\u009Fc\u0090d", "abcd")] // C1 controls
+    [InlineData("a\u0085b", "a b")]      // NEL stays a break
+    [InlineData("café 中文", "café 中文")]
+    public void Sanitize_DropsReorderingAndInvisibleCharacters(string input, string expected)
+    {
+        Assert.Equal(expected, CustomAlertEvaluator.SanitizeDisplayText(input, 200));
+    }
+
+    [Fact]
+    public void Sanitize_AnInvisibleOnlyValue_IsEmpty()
+    {
+        Assert.Equal(string.Empty, CustomAlertEvaluator.SanitizeDisplayText("​‮﻿", 200));
+    }
+
     // ─────────────────────── the mute-pre-fill spoof guard ───────────────────────
 
     /// <summary>
