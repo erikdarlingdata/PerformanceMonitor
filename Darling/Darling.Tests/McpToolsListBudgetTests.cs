@@ -258,7 +258,7 @@ public sealed class McpToolsListBudgetTests
        byte-identical to Lite's): 394 -> 422 bytes, the measured total went to 198,632 bytes. */
     /* #5654 D2: create_mute_rule also gains external_source (a 117-character description, +162 bytes). */
     /* #5750: get_notification_routes' head names the scope tier in its resolution order and says routes report scope and orphaned
-       (the tool's line 502 -> 580 bytes); the per-route scope fields are in the guide after the marker. The measured total went
+       (the tool's line 502 -> 555 bytes); the per-route scope fields are in the guide after the marker. The measured total went
        198,817 -> 198,869 bytes. */
     private const int TotalCeilingBytes = 198_869;
 
