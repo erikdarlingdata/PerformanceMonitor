@@ -44,7 +44,7 @@ LIMIT $3";
     /// The successful trace_flags runs that stored ZERO rows (#5633 item 19), the empty snapshots the trace-flag change diff needs: a run
     /// that finds no flag stores nothing, so without these the last flag being turned off never shows. Bounded like the change read: the
     /// runs inside the window plus the newest one before it (the baseline for a change on the window's first capture). SUCCESS only, and
-    /// <c>rows_collected = 0</c> only (NULL is not recorded). Twin of <c>DarlingCollectorRunFactsReader.EmptyTraceFlagRunsSql</c>.
+    /// <c>rows_collected = 0</c> only (NULL is not recorded). Twin of <c>DarlingRetentionHorizons.EmptyTraceFlagRunsSql</c>.
     /// The baseline run is bounded below at $4, <see cref="EmptyTraceFlagRunsFloor"/>: an empty run older than the oldest trace_flags rows
     /// Lite still holds would pair with a later capture as a flag turned on, and the bound also lets DuckDB prune the collection log's
     /// archive instead of scanning all of it.

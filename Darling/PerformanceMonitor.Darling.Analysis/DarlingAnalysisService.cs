@@ -1178,6 +1178,10 @@ ORDER BY database_name, capture_time";
     /// that one no older than the window start minus the trace_flags retention (<see cref="DarlingRetentionHorizons.TraceFlagsBaselineFloorSql"/>).
     /// SUCCESS only and <c>rows_collected = 0</c> only (NULL is not recorded). <c>$1</c> server_id, <c>$2</c> window start,
     /// <c>$3</c> window end.
+    /// <para>This is NOT <see cref="DarlingRetentionHorizons.EmptyTraceFlagRunsSql"/> on purpose (#5633 review): that one reads
+    /// <c>v_collection_log</c> (hot rows plus the archive) for the MCP tool and the viewer, while the analysis engine reads the base
+    /// <c>collection_log</c> like every other attribution read here, so the two cannot share text. Only the shape and the retention
+    /// floor are the same, and <c>TraceFlagEmptyRunLivePostgresTests</c> runs both against one seed.</para>
     /// </summary>
     public static readonly string EmptyTraceFlagRunsForAttributionSql = $@"
 (SELECT collection_time

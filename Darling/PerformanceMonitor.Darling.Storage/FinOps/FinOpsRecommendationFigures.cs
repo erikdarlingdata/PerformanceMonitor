@@ -148,13 +148,13 @@ public static class FinOpsRecommendationFigures
     }
 
     /// <summary>The cores the prescriptive CPU row (<see cref="VmRightSizing"/>) advises, or null when it advises nothing.</summary>
-    public static int? VmCpuTargetCores(decimal p95Cpu7d, int cpuCount)
+    public static int? VmCpuTargetCores(decimal p95Cpu24h, int cpuCount)
     {
         if (cpuCount < 4) return null;
         int targetCores = 0;
-        if (p95Cpu7d < 15)
+        if (p95Cpu24h < 15)
             targetCores = Math.Max(2, cpuCount / 4);
-        else if (p95Cpu7d < 30)
+        else if (p95Cpu24h < 30)
             targetCores = Math.Max(2, cpuCount / 2);
         return targetCores > 0 && targetCores < cpuCount ? targetCores : null;
     }
@@ -389,20 +389,20 @@ public static class FinOpsRecommendationFigures
     }
 
     /// <summary>The VM right-sizing advice: up to two rows, one for the cores and one for the memory, each only when its own prescription qualifies.</summary>
-    public static List<FinOpsRecommendation> VmRightSizing(decimal p95Cpu7d, string cpuWindow, int cpuCount, int physMb,
+    public static List<FinOpsRecommendation> VmRightSizing(decimal p95Cpu24h, string cpuWindow, int cpuCount, int physMb,
         int p95MemMb, long memSampleCount, string memWindow, decimal monthlyCost, bool includeCpuRow = true)
     {
         var recommendations = new List<FinOpsRecommendation>();
         // CPU prescription: only if >= 4 cores. includeCpuRow is false when the compute row (or too short a window) already settled the CPU advice.
-        if (includeCpuRow && VmCpuTargetCores(p95Cpu7d, cpuCount) is int targetCores)
+        if (includeCpuRow && VmCpuTargetCores(p95Cpu24h, cpuCount) is int targetCores)
         {
             recommendations.Add(new FinOpsRecommendation
             {
                 Category = "Hardware",
                 Severity = "Medium",
                 Confidence = "Medium",
-                Finding = $"CPU: reduce from {cpuCount} to {targetCores} logical CPUs (P95 CPU {p95Cpu7d:N1}%)",
-                Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
+                Finding = $"CPU: reduce from {cpuCount} to {targetCores} logical CPUs (P95 CPU {p95Cpu24h:N1}%)",
+                Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu24h:N1}%. " +
                          $"Current allocation of {cpuCount} logical CPUs can safely be reduced to {targetCores} logical CPUs.",
                 EstMonthlySavings = monthlyCost > 0
                     ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
