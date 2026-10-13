@@ -248,8 +248,8 @@ public sealed class ExternalAlertSourceVerbTests
         }
 
         var source = File.ReadAllText(Path.Combine(dir!.FullName, "Darling", "PerformanceMonitor.Darling.Service", "ExternalAlertSourceAdmin.cs"));
-        var code = string.Join("\n", source.Split('\n').Where(l => !l.TrimStart().StartsWith("///", StringComparison.Ordinal)
-            && !l.TrimStart().StartsWith("/*", StringComparison.Ordinal) && !l.TrimStart().StartsWith("*", StringComparison.Ordinal)));
+        /* The whole file, comments included: no comment in it writes a catalog function as a call, so nothing is filtered out. */
+        var code = source;
 
         var unqualified = Regex.Matches(code,
                 @"(?<![\w.])(count|max|min|shobj_description|current_database|current_setting|to_regclass|format|lower|pg_terminate_backend|has_\w+_privilege)\s*\(")
