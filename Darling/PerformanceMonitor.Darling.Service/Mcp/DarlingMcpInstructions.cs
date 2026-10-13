@@ -57,7 +57,7 @@ internal static class DarlingMcpInstructions
 
         ## Tools
 
-        This server exposes 182 tools. 89 are the same names Lite exposes. The remaining 93 are unique to Darling: thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server-tag and onboarding tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — `get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`. Default 159; +19 `mcp.allowWrites` with a token, +3 `mcp.allowServerAdmin`.
+        This server exposes 182 tools. 89 are the same names Lite exposes. The remaining 93 are unique to Darling: thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server-tag and onboarding tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — `get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`. Default 160; +19 `mcp.allowWrites` with a token, +3 `mcp.allowServerAdmin`.
 
         ### Reading an empty result
 
