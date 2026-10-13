@@ -156,12 +156,8 @@ public class DarlingInstallLocationTests
         /* The script names every path with -LiteralPath since #4745, so this looks for that spelling: a loop over
            "Set-Acl -Path " would find no call and check nothing. Each call is read for the path it names, so a
            call on anything else fails here instead of being counted. */
-        /* The one other Set-Acl is Protect-DarlingTlsKeyFiles' (#5700), on a TLS key file darling.json names: it is read
-           for the path it names too, so it can name nothing but $path, the key file the loop is on. */
-        var tlsKeyLock = ExtractFunction(script, "Protect-DarlingTlsKeyFiles");
-        Assert.Equal(new[] { "$path" }, Regex.Matches(tlsKeyLock, @"Set-Acl -LiteralPath (\S+)").Select(call => call.Groups[1].Value).ToArray());
         var targets = new List<string>();
-        foreach (Match call in Regex.Matches(script.Replace(tlsKeyLock, string.Empty, StringComparison.Ordinal), @"Set-Acl -LiteralPath (\S+)"))
+        foreach (Match call in Regex.Matches(script, @"Set-Acl -LiteralPath (\S+)"))
         {
             targets.Add(call.Groups[1].Value);
         }
@@ -629,7 +625,7 @@ function Get-CimInstance {
         foreach (var name in new[]
         {
             "Get-DarlingServiceSids", "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName",
-            "Get-DarlingFileNameCount", "Initialize-DarlingNativeOwner", "Get-DarlingCanonicalPath", "Get-DarlingSegmentsBelowRoot", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles", "Test-PathIsAtOrUnder", "Get-DarlingConfiguredPathEntries", "Get-DarlingConfiguredPathsUnder", "Get-DarlingTlsKeyFiles", "Protect-DarlingTlsKeyFiles",
+            "Get-DarlingFileNameCount", "Initialize-DarlingNativeOwner", "Get-DarlingCanonicalPath", "Get-DarlingSegmentsBelowRoot", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles", "Test-PathIsAtOrUnder", "Get-DarlingConfiguredPathsUnder",
             "Get-DarlingNewFolderPhrase", "Get-DarlingExistingInstallSteps", "Get-DarlingFreshFolderAdvice",
             "Get-DarlingRefusalAdvice", "Get-DarlingBackupFileFindingNames", "Get-DarlingBackupFileAdvice", "Test-DarlingSamePath", "Get-DarlingInstallRootFromService",
         })
@@ -2601,7 +2597,7 @@ function Get-CimInstance {
 
     private static void AppendStepFunctions(StringBuilder probe, string? script = null)
     {
-        foreach (var name in new[] { "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName", "Get-DarlingBackupFileFindingNames", "Get-DarlingBackupFileAdvice", "Test-PathIsAtOrUnder", "Test-DarlingSamePath", "Get-DarlingConfiguredPathEntries", "Get-DarlingConfiguredPathsUnder", "Get-DarlingNewFolderPhrase", "Get-DarlingExistingInstallSteps", "Get-DarlingFreshFolderAdvice", "Get-DarlingRefusalAdvice" })
+        foreach (var name in new[] { "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName", "Get-DarlingBackupFileFindingNames", "Get-DarlingBackupFileAdvice", "Test-PathIsAtOrUnder", "Test-DarlingSamePath", "Get-DarlingConfiguredPathsUnder", "Get-DarlingNewFolderPhrase", "Get-DarlingExistingInstallSteps", "Get-DarlingFreshFolderAdvice", "Get-DarlingRefusalAdvice" })
         {
             probe.AppendLine(ExtractFunction(script ?? InstallScript, name));
         }
@@ -4179,7 +4175,6 @@ function Get-CimInstance {
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
         probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
-        probe.AppendLine(ExtractFunction(script, "Get-DarlingConfiguredPathEntries"));
         probe.AppendLine(ExtractFunction(script, "Get-DarlingConfiguredPathsUnder"));
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'

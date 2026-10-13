@@ -12,31 +12,35 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
 /// <summary>
-/// #5700: the install and upgrade scripts give the TLS private-key files that darling.json names (each pfxPath and
-/// keyPath) the protection darling.json gets: SYSTEM, Administrators and the service account only. The functions are
-/// lifted out of each script and run under Windows PowerShell 5.1 against a sample darling.json in a scratch folder,
-/// and the copies in the two scripts are compared byte for byte.
+/// #5700: the install and upgrade scripts leave the TLS private-key files that darling.json names to the service exe's
+/// own verb (<c>--harden-files --tls-key-files-only</c>), which is the only code that reads those paths and sets their
+/// permissions. The scripts call it after the last tree lock and before the service starts, echo its lines and warn
+/// (never fail) when it could not run. The upgrade script also creates each rollback backup folder with a protected
+/// SYSTEM and Administrators DACL before the copy, and applies the same DACL to every retained backup. The functions
+/// are lifted out of each script and run under Windows PowerShell 5.1 in a scratch folder, and the copies in the two
+/// scripts are compared byte for byte.
 /// </summary>
 public sealed class DarlingTlsKeyFileScriptTests
 {
     private static readonly string[] s_sharedFunctions =
     {
-        "Get-DarlingConfiguredPathEntries", "Get-DarlingConfiguredPathsUnder", "Get-DarlingTlsKeyFiles", "Protect-DarlingTlsKeyFiles",
+        "Get-DarlingConfiguredPathsUnder", "Invoke-DarlingTlsKeyFileHardening",
     };
 
     private static string Script(string scriptName) =>
         ReadRepoFile("Darling", "tools", scriptName).Replace("\r\n", "\n", StringComparison.Ordinal);
 
-    /// <summary>The four functions ship in both scripts, which cannot import each other, so a fix to one that misses the
-    /// other would leave half the installs with a readable key file.</summary>
+    /// <summary>The functions ship in both scripts, which cannot import each other, so a fix to one that misses the
+    /// other would leave half the installs behind.</summary>
     [Fact]
-    public void TheTlsKeyFileFunctions_ShipIdenticallyInTheInstallAndUpgradeScripts()
+    public void TheSharedFunctions_ShipIdenticallyInTheInstallAndUpgradeScripts()
     {
         var install = Script("install-darling.ps1");
         var upgrade = Script("upgrade-darling.ps1");
@@ -47,45 +51,137 @@ public sealed class DarlingTlsKeyFileScriptTests
         }
     }
 
-    /// <summary>The install script runs the lock right after the step that locks darling.json; the upgrade script runs it
-    /// after the operator group and before it starts the service. A key file in the rollback backup gets the restriction
-    /// the config copy gets. None of it can fail the run.</summary>
+    /// <summary>The scripts hold no key-file parse and no key-file ACL code of their own: the exe's verb is the one
+    /// implementation.</summary>
+    [Theory]
+    [InlineData("install-darling.ps1")]
+    [InlineData("upgrade-darling.ps1")]
+    public void TheScripts_HoldNoTlsKeyParseOrAclCodeOfTheirOwn(string scriptName)
+    {
+        var script = Script(scriptName);
+
+        foreach (var gone in new[] { "Get-DarlingTlsKeyFiles", "Protect-DarlingTlsKeyFiles", "Get-DarlingConfiguredPathEntries" })
+        {
+            Assert.DoesNotContain(gone, script, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("--harden-files --tls-key-files-only", ExtractFunction(script, "Invoke-DarlingTlsKeyFileHardening", scriptName), StringComparison.Ordinal);
+    }
+
+    /// <summary>The verb runs after the last tree lock (the lock resets any extra write grant on a file it walks) and before
+    /// the service starts, in both scripts. A failure to run it is a warning, never a stop.</summary>
     [Fact]
-    public void TheScripts_RunTheTlsKeyFileLock_AtTheRightStep_AndNeverFailOverIt()
+    public void TheScripts_CallTheVerb_AfterTheLastTreeLock_AndBeforeTheServiceStarts_AndNeverFailOverIt()
     {
         var install = Script("install-darling.ps1");
         var upgrade = Script("upgrade-darling.ps1");
 
-        var installCall = install.IndexOf("Protect-DarlingTlsKeyFiles $root $serviceAccount", StringComparison.Ordinal);
-        Assert.True(installCall > install.IndexOf("SECURITY WARNING: these files still are not restricted", StringComparison.Ordinal));
-        Assert.True(installCall < install.IndexOf("Local group '$operatorGroupName' is in place", StringComparison.Ordinal));
+        var installLock = install.LastIndexOf("\nInvoke-InstallTreeLock $serviceAccount\n", StringComparison.Ordinal);
+        var installCall = install.IndexOf("\n$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening $serviceExe\n", StringComparison.Ordinal);
+        var installStart = install.IndexOf("\nStart-Service -Name $serviceName\n", StringComparison.Ordinal);
+        Assert.True(installLock > 0 && installCall > installLock && installCall < installStart, $"install order: lock {installLock}, call {installCall}, start {installStart}");
+        Assert.Matches(@"\$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening \$serviceExe\nif \(\$tlsKeyWarning\) \{ Write-Host ""WARNING: \$tlsKeyWarning"" -ForegroundColor Yellow \}\n", install);
 
-        var upgradeCall = upgrade.IndexOf("Protect-DarlingTlsKeyFiles $InstallRoot $logonAccount", StringComparison.Ordinal);
-        Assert.True(upgradeCall > upgrade.IndexOf("# ============================ the operator group", StringComparison.Ordinal));
-        Assert.True(upgradeCall < upgrade.IndexOf("Start-Service -Name $serviceName", StringComparison.Ordinal));
+        var upgradeLock = upgrade.LastIndexOf("\nInvoke-UpgradeTreeLock 'after the copy'\n", StringComparison.Ordinal);
+        var upgradeCall = upgrade.IndexOf("\n$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening (Join-Path $InstallRoot $serviceExeName)\n", StringComparison.Ordinal);
+        var upgradeStart = upgrade.IndexOf("\nStart-Service -Name $serviceName\n", StringComparison.Ordinal);
+        Assert.True(upgradeLock > 0 && upgradeCall > upgradeLock && upgradeCall < upgradeStart, $"upgrade order: lock {upgradeLock}, call {upgradeCall}, start {upgradeStart}");
+        Assert.Matches(@"Invoke-DarlingTlsKeyFileHardening \(Join-Path \$InstallRoot \$serviceExeName\)\nif \(\$tlsKeyWarning\) \{ Warn \$tlsKeyWarning \}\n", upgrade);
 
-        Assert.Contains("-contains $_.Name", upgrade, StringComparison.Ordinal);
-        Assert.Contains("(Get-DarlingTlsKeyFiles $InstallRoot).Paths", upgrade, StringComparison.Ordinal);
-
-        foreach (var name in new[] { "Get-DarlingTlsKeyFiles", "Protect-DarlingTlsKeyFiles" })
-        {
-            var body = ExtractFunction(install, name, "install-darling.ps1");
-            Assert.DoesNotContain("Fail ", body, StringComparison.Ordinal);
-            Assert.DoesNotContain("throw", body, StringComparison.Ordinal);
-            Assert.DoesNotContain("Write-Host", body, StringComparison.Ordinal);
-        }
+        var body = ExtractFunction(install, "Invoke-DarlingTlsKeyFileHardening", "install-darling.ps1");
+        Assert.DoesNotContain("Fail ", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("throw", body, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// The lock, run on a sample darling.json (with a comment, as the scripts must read) that names a pfx in the install
-    /// folder, a PEM key and a certificate outside it, a key that is not there and a relative pfx. The pfx and the key lose
-    /// the Users read they were given and keep the service account; the folder the key sits in keeps its ACL; the
-    /// certificate keeps its ACL; the missing and relative ones come back as problems, the missing one with its icacls line.
-    /// </summary>
+    /// <summary>The upgrade makes the backup folder protected before the first file is copied into it, and restricts every
+    /// retained backup after the prune and before the service starts. The per-key name matching after the copy is gone.</summary>
+    [Fact]
+    public void TheUpgradeScript_RestrictsTheBackupFolderBeforeTheCopy_AndTheRetainedBackupsAfterThePrune()
+    {
+        var upgrade = Script("upgrade-darling.ps1");
+
+        var create = upgrade.IndexOf("New-Item -ItemType Directory -Path $backupPath -Force", StringComparison.Ordinal);
+        var protect = upgrade.IndexOf("Protect-DarlingRollbackBackupFolder $backupPath\n", StringComparison.Ordinal);
+        var copy = upgrade.IndexOf("Copy-Item -Destination $backupPath -Force", StringComparison.Ordinal);
+        Assert.True(create > 0 && protect > create && copy > protect, $"backup order: create {create}, protect {protect}, copy {copy}");
+
+        var prune = upgrade.IndexOf("Remove-DarlingRollbackBackups $prunable", StringComparison.Ordinal);
+        var retained = upgrade.IndexOf("Protect-DarlingRollbackBackupFolder $retained.FullName -ResetChildren", StringComparison.Ordinal);
+        var start = upgrade.IndexOf("\nStart-Service -Name $serviceName\n", StringComparison.Ordinal);
+        Assert.True(prune > 0 && retained > prune && retained < start, $"retained order: prune {prune}, retained {retained}, start {start}");
+        Assert.Contains("foreach ($retained in @(Get-DarlingRollbackBackups $InstallRoot))", upgrade, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("$tlsKeyNames", upgrade, StringComparison.Ordinal);
+    }
+
+    /// <summary>The call, with a stub in place of the exe: the arguments reach it, its lines are echoed, a nonzero exit and an
+    /// exe that is not there each give a warning that names the verb, and a zero exit gives none. Nothing throws.</summary>
     [Theory]
     [InlineData("install-darling.ps1")]
     [InlineData("upgrade-darling.ps1")]
-    public void TheLock_SecuresAPfxAndAKeyNamedInDarlingJson_AndReportsTheRest(string scriptName)
+    public void TheVerbCall_WarnsWithTheCommandOnANonzeroExit_AndNeverThrows(string scriptName)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Windows PowerShell and .cmd stubs are Windows'.");
+            return;
+        }
+
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(Script(scriptName), "Invoke-DarlingTlsKeyFileHardening", scriptName));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $dir = Join-Path $env:TEMP ('pm5700-stub-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            try {
+                $bad = Join-Path $dir 'bad.cmd'
+                Set-Content -LiteralPath $bad -Value @('@echo off', 'echo stub-line args=%*', 'exit /b 3') -Encoding ASCII
+                $good = Join-Path $dir 'good.cmd'
+                Set-Content -LiteralPath $good -Value @('@echo off', 'echo stub-line args=%*', 'exit /b 0') -Encoding ASCII
+                $w = Invoke-DarlingTlsKeyFileHardening $bad
+                'nonzero=' + $w
+                $w = Invoke-DarlingTlsKeyFileHardening $good
+                'zero=' + $(if ($null -eq $w) { 'null' } else { $w })
+                $w = Invoke-DarlingTlsKeyFileHardening (Join-Path $dir 'missing.exe')
+                'missing=' + $(if ($null -eq $w) { 'null' } else { $w })
+            }
+            finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+            """);
+
+        var all = string.Join("\n", RunWindowsPowerShell(probe.ToString()));
+
+        Assert.Equal(2, Regex.Matches(all, "stub-line args=--harden-files --tls-key-files-only").Count);
+        Assert.Matches(@"nonzero=The service could not check the TLS key files darling\.json names \(exit code 3\).*--harden-files --tls-key-files-only", all);
+        Assert.Contains("zero=null", all, StringComparison.Ordinal);
+        Assert.Matches(@"missing=The service could not check the TLS key files darling\.json names \(.+\).*--harden-files --tls-key-files-only", all);
+    }
+
+    // A scratch folder whose DACL grants Users read, inherited by everything made under it (the install root's shape),
+    // plus the helpers the two backup probes share.
+    private const string FixturePreamble = """
+        $ErrorActionPreference = 'Stop'
+        $wk = [System.Security.Principal.WellKnownSidType]
+        $users = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $base = Join-Path $env:TEMP ('pm5700-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $base -Force | Out-Null
+        $parentAcl = Get-Acl -LiteralPath $base
+        $parentAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($users, 'ReadAndExecute', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+        Set-Acl -LiteralPath $base -AclObject $parentAcl
+        function Get-AccessSection($f) { (New-Object System.IO.DirectoryInfo($f)).GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access) }
+        function Get-AceSids($f) { @((Get-AccessSection $f).Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique) }
+        function Test-UsersAce($f) { (Get-AceSids $f) -contains $users.Value }
+        function Add-MeToFolder($folder) { & icacls.exe $folder /grant ('*' + $me.Value + ':(OI)(CI)F') | Out-Null }
+        """;
+
+    /// <summary>
+    /// A backup folder made under a parent that grants Users read: a copy made into an ordinary folder inherits that Users
+    /// read (the control), and a copy made into a folder that Protect-DarlingRollbackBackupFolder had already restricted
+    /// does not. The test account is given write access on the new folder (an administrator has it through Administrators),
+    /// so a copy can be made; it adds only that account.
+    /// </summary>
+    [Fact]
+    public void TheBackupFolder_IsProtectedBeforeTheCopy_SoACopiedFileIsNotReadableByUsers()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -93,120 +189,135 @@ public sealed class DarlingTlsKeyFileScriptTests
             return;
         }
 
-        var script = Script(scriptName);
+        var script = Script("upgrade-darling.ps1");
         var probe = new StringBuilder();
-        foreach (var name in new[]
+        foreach (var name in new[] { "Get-DarlingFileNameCount", "Protect-DarlingRollbackBackupFolder" })
         {
-            "Get-DarlingSegmentsBelowRoot", "Get-DarlingCanonicalPath", "Test-PathIsAtOrUnder", "Get-DarlingFileNameCount",
-            "Get-DarlingConfiguredPathEntries", "Get-DarlingTlsKeyFiles", "Protect-DarlingTlsKeyFiles",
-        })
-        {
-            probe.AppendLine(ExtractFunction(script, name, scriptName));
+            probe.AppendLine(ExtractFunction(script, name, "upgrade-darling.ps1"));
         }
 
+        probe.AppendLine(FixturePreamble);
         probe.AppendLine("""
-            $ErrorActionPreference = 'Stop'
-            $base = Join-Path $env:TEMP ('pm5700-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-            $install = Join-Path $base 'install'
-            $outside = Join-Path $base 'outside'
-            New-Item -ItemType Directory -Path $install, $outside -Force | Out-Null
             try {
-                $pfx = Join-Path $install 'web.pfx'
-                $key = Join-Path $outside 'mcp.key'
-                $cert = Join-Path $outside 'mcp.crt'
-                $gone = Join-Path $install 'gone.key'
-                $users = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
-                foreach ($file in @($pfx, $key, $cert)) {
-                    Set-Content -LiteralPath $file -Value 'placeholder'
-                    $acl = Get-Acl -LiteralPath $file
-                    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($users, 'ReadAndExecute', 'Allow')))
-                    Set-Acl -LiteralPath $file -AclObject $acl
-                }
-                $hasUsers = { param($f) @((Get-Acl -LiteralPath $f).Access | Where-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).IsWellKnown([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid) }).Count -gt 0 }
-                $folderBefore = (Get-Acl -LiteralPath $outside).Sddl
-                $certBefore = (Get-Acl -LiteralPath $cert).Sddl
-                $j = { param($p) $p -replace '\\', '\\' }
-                Set-Content -LiteralPath (Join-Path $install 'darling.json') -Value (@(
-                    '{',
-                    '  // the web listener',
-                    ('  "web": { "network": { "tls": { "pfxPath": "' + (& $j $pfx) + '" } } },'),
-                    ('  "mcp": { "network": { "tls": { "certPath": "' + (& $j $cert) + '", "keyPath": "' + (& $j $key) + '" } } },'),
-                    ('  "other": { "tls": { "keyPath": "' + (& $j $gone) + '", "pfxPath": "relative.pfx" } }'),
-                    '}') -join "`n")
-                $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-                'usersBefore=' + (& $hasUsers $pfx) + '/' + (& $hasUsers $key)
-                $r = Protect-DarlingTlsKeyFiles $install $me
-                foreach ($line in $r.Secured) { 'secured=' + $line.Replace($base, '<base>') }
-                foreach ($line in $r.Problems) { 'problem=' + $line.Replace($base, '<base>') }
-                'usersAfter=' + (& $hasUsers $pfx) + '/' + (& $hasUsers $key)
-                'protected=' + (Get-Acl -LiteralPath $pfx).AreAccessRulesProtected + '/' + (Get-Acl -LiteralPath $key).AreAccessRulesProtected
-                'folderSame=' + ((Get-Acl -LiteralPath $outside).Sddl -eq $folderBefore)
-                'certSame=' + ((Get-Acl -LiteralPath $cert).Sddl -eq $certBefore)
+                $src = Join-Path $base 'src'
+                New-Item -ItemType Directory -Path $src | Out-Null
+                Set-Content -LiteralPath (Join-Path $src 'web.pfx') -Value 'placeholder'
+                $plain = Join-Path $base 'plain'
+                New-Item -ItemType Directory -Path $plain | Out-Null
+                Copy-Item -LiteralPath (Join-Path $src 'web.pfx') -Destination $plain
+                'controlUsers=' + (Test-UsersAce (Join-Path $plain 'web.pfx'))
+
+                $backup = Join-Path $base '_rollback_new'
+                New-Item -ItemType Directory -Path $backup | Out-Null
+                $problem = Protect-DarlingRollbackBackupFolder $backup
+                'problem=' + $(if ($problem) { $problem } else { 'none' })
+                'protected=' + (Get-AccessSection $backup).AreAccessRulesProtected
+                Add-MeToFolder $backup
+                Copy-Item -LiteralPath (Join-Path $src 'web.pfx') -Destination $backup
+                $copy = Join-Path $backup 'web.pfx'
+                'copyUsers=' + (Test-UsersAce $copy)
+                'copySids=' + ((Get-AceSids $copy) -join ',')
+                'me=' + $me.Value
             }
             finally {
-                Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            """);
-
-        var answers = RunWindowsPowerShell(probe.ToString());
-        var all = string.Join("\n", answers);
-
-        Assert.Contains("usersBefore=True/True", all, StringComparison.Ordinal);
-        Assert.Contains(@"secured=<base>\install\web.pfx (in the install folder)", all, StringComparison.Ordinal);
-        Assert.Contains(@"secured=<base>\outside\mcp.key (outside the install folder; only the file was changed, not its folder)", all, StringComparison.Ordinal);
-        Assert.Contains("usersAfter=False/False", all, StringComparison.Ordinal);
-        Assert.Contains("protected=True/True", all, StringComparison.Ordinal);
-        Assert.Contains("folderSame=True", all, StringComparison.Ordinal);
-        Assert.Contains("certSame=True", all, StringComparison.Ordinal);
-        Assert.Contains(@"problem=The TLS key file '<base>\install\gone.key' that darling.json names was not found", all, StringComparison.Ordinal);
-        Assert.Contains(@"icacls ""<base>\install\gone.key"" /inheritance:r /grant:r", all, StringComparison.Ordinal);
-        Assert.Contains("problem=The TLS key file 'relative.pfx' is a relative path", all, StringComparison.Ordinal);
-        Assert.DoesNotContain("mcp.crt", all.Replace("certSame", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
-    }
-
-    /// <summary>A darling.json that is missing or names no key file gives an empty result and no problem.</summary>
-    [Theory]
-    [InlineData("install-darling.ps1")]
-    [InlineData("upgrade-darling.ps1")]
-    public void TheLock_HasNothingToSayWhenNoKeyFileIsNamed(string scriptName)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            Assert.Skip("Windows PowerShell is Windows'.");
-            return;
-        }
-
-        var script = Script(scriptName);
-        var probe = new StringBuilder();
-        foreach (var name in new[]
-        {
-            "Get-DarlingSegmentsBelowRoot", "Get-DarlingCanonicalPath", "Test-PathIsAtOrUnder", "Get-DarlingFileNameCount",
-            "Get-DarlingConfiguredPathEntries", "Get-DarlingTlsKeyFiles", "Protect-DarlingTlsKeyFiles",
-        })
-        {
-            probe.AppendLine(ExtractFunction(script, name, scriptName));
-        }
-
-        probe.AppendLine("""
-            $base = Join-Path $env:TEMP ('pm5700-none-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-            New-Item -ItemType Directory -Path $base -Force | Out-Null
-            try {
-                $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-                $r = Protect-DarlingTlsKeyFiles $base $me
-                'missingConfig=' + @($r.Secured).Count + '/' + @($r.Problems).Count
-                Set-Content -LiteralPath (Join-Path $base 'darling.json') -Value '{ "web": { "network": { "tls": { "certPath": "C:\\certs\\a.pem" } } } }'
-                $r = Protect-DarlingTlsKeyFiles $base $me
-                'certOnly=' + @($r.Secured).Count + '/' + @($r.Problems).Count
-            }
-            finally {
+                $cleanup = Join-Path $base '_rollback_new'
+                if (Test-Path -LiteralPath $cleanup) { Add-MeToFolder $cleanup }
                 Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
             }
             """);
 
         var all = string.Join("\n", RunWindowsPowerShell(probe.ToString()));
 
-        Assert.Contains("missingConfig=0/0", all, StringComparison.Ordinal);
-        Assert.Contains("certOnly=0/0", all, StringComparison.Ordinal);
+        Assert.Contains("controlUsers=True", all, StringComparison.Ordinal);
+        Assert.Contains("problem=none", all, StringComparison.Ordinal);
+        Assert.Contains("protected=True", all, StringComparison.Ordinal);
+        Assert.Contains("copyUsers=False", all, StringComparison.Ordinal);
+
+        var me = Regex.Match(all, @"me=(\S+)").Groups[1].Value;
+        var copySids = Regex.Match(all, @"copySids=(\S+)").Groups[1].Value.Split(',');
+        Assert.All(copySids, sid => Assert.Contains(sid, new[] { "S-1-5-18", "S-1-5-32-544", me }));
+    }
+
+    /// <summary>
+    /// Older retained backups, made under a parent that grants Users read: the folder and the files in it end limited to SYSTEM
+    /// and Administrators (an explicit entry the file had is cleared too); a file with a second name is left alone and named in
+    /// the warning; a backup folder that is a junction is not followed, so what it points at keeps its permissions.
+    /// </summary>
+    [Fact]
+    public void TheRetainedBackups_AreRestricted_ALinkIsNotFollowed_AndAHardLinkedFileIsNamed()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("DACLs and Windows PowerShell are Windows'.");
+            return;
+        }
+
+        var script = Script("upgrade-darling.ps1");
+        var probe = new StringBuilder();
+        foreach (var name in new[] { "Get-DarlingFileNameCount", "Protect-DarlingRollbackBackupFolder" })
+        {
+            probe.AppendLine(ExtractFunction(script, name, "upgrade-darling.ps1"));
+        }
+
+        probe.AppendLine(FixturePreamble);
+        probe.AppendLine("""
+            $junction = Join-Path $base '_rollback_link'
+            try {
+                $old = Join-Path $base '_rollback_old'
+                New-Item -ItemType Directory -Path $old | Out-Null
+                Set-Content -LiteralPath (Join-Path $old 'web.pfx') -Value 'placeholder'
+                Set-Content -LiteralPath (Join-Path $old 'darling.json') -Value '{}'
+                $explicit = New-Object System.Security.AccessControl.FileSecurity
+                $explicit.SetAccessRuleProtection($true, $false)
+                foreach ($sid in @($me, (New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)))) {
+                    $explicit.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'Allow')))
+                }
+                Set-Acl -LiteralPath (Join-Path $old 'darling.json') -AclObject $explicit
+                $outsideFile = Join-Path $base 'outside.txt'
+                Set-Content -LiteralPath $outsideFile -Value 'placeholder'
+                New-Item -ItemType HardLink -Path (Join-Path $old 'linked.txt') -Value $outsideFile | Out-Null
+                'beforePfxUsers=' + (Test-UsersAce (Join-Path $old 'web.pfx'))
+
+                $problem = Protect-DarlingRollbackBackupFolder $old -ResetChildren
+                'oldProblem=' + $(if ($problem) { $problem } else { 'none' })
+                'oldProtected=' + (Get-AccessSection $old).AreAccessRulesProtected
+                'oldFolderSids=' + ((Get-AceSids $old) -join ',')
+                'pfxUsers=' + (Test-UsersAce (Join-Path $old 'web.pfx'))
+                'pfxSids=' + ((Get-AceSids (Join-Path $old 'web.pfx')) -join ',')
+                'jsonSids=' + ((Get-AceSids (Join-Path $old 'darling.json')) -join ',')
+
+                $target = Join-Path $base 'target'
+                New-Item -ItemType Directory -Path $target | Out-Null
+                Set-Content -LiteralPath (Join-Path $target 'secret.txt') -Value 'placeholder'
+                $targetBefore = (Get-Acl -LiteralPath $target).Sddl
+                $secretBefore = (Get-Acl -LiteralPath (Join-Path $target 'secret.txt')).Sddl
+                New-Item -ItemType Junction -Path $junction -Value $target | Out-Null
+                $linkProblem = Protect-DarlingRollbackBackupFolder $junction -ResetChildren
+                'linkProblem=' + $(if ($linkProblem) { $linkProblem } else { 'none' })
+                'targetSame=' + ((Get-Acl -LiteralPath $target).Sddl -eq $targetBefore)
+                'secretSame=' + ((Get-Acl -LiteralPath (Join-Path $target 'secret.txt')).Sddl -eq $secretBefore)
+            }
+            finally {
+                if (Test-Path -LiteralPath $junction) { [System.IO.Directory]::Delete($junction) }
+                $cleanup = Join-Path $base '_rollback_old'
+                if (Test-Path -LiteralPath $cleanup) { Add-MeToFolder $cleanup }
+                Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        var all = string.Join("\n", RunWindowsPowerShell(probe.ToString()));
+
+        Assert.Contains("beforePfxUsers=True", all, StringComparison.Ordinal);
+        Assert.True(Regex.IsMatch(all, @"oldProblem=.*linked\.txt"), all);
+        Assert.DoesNotMatch(@"oldProblem=.*(web\.pfx|darling\.json)", all);
+        Assert.Contains("oldProtected=True", all, StringComparison.Ordinal);
+        Assert.Contains("oldFolderSids=S-1-5-18,S-1-5-32-544", all, StringComparison.Ordinal);
+        Assert.Contains("pfxUsers=False", all, StringComparison.Ordinal);
+        Assert.Contains("pfxSids=S-1-5-18,S-1-5-32-544", all, StringComparison.Ordinal);
+        Assert.Contains("jsonSids=S-1-5-18,S-1-5-32-544", all, StringComparison.Ordinal);
+        Assert.Matches(@"linkProblem=The rollback backup .* is a link", all);
+        Assert.Contains("targetSame=True", all, StringComparison.Ordinal);
+        Assert.Contains("secretSame=True", all, StringComparison.Ordinal);
     }
 
     private static string ExtractFunction(string script, string name, string scriptName)
