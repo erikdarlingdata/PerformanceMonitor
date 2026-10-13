@@ -283,6 +283,13 @@ public class AlertMuteContext
                 FlushQuery(ref queryBuilder);
                 JobName = trimmed.Substring("Job Name: ".Length).Trim();
             }
+            else if (ClientAppName == null && trimmed.StartsWith("Client Application: ", StringComparison.Ordinal))
+            {
+                /* #5640: the Client Timeouts alert lists its client applications top first, and the FIRST line is the one a
+                   mute dialog pre-fills (the same first-wins rule as Database). */
+                FlushQuery(ref queryBuilder);
+                ClientAppName = trimmed.Substring("Client Application: ".Length).Trim();
+            }
             else if (QueryText == null && queryBuilder == null && TryExtractQueryValue(trimmed, out var qv))
             {
                 queryBuilder = new System.Text.StringBuilder(qv);

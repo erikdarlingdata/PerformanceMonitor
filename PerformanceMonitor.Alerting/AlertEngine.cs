@@ -2248,6 +2248,11 @@ public sealed class AlertEngine
                     _attentionEscalation.Record(key, finding.Severity);
                     AlertSampleAge.Stamp(attentionContext, "attention collector runs", finding.NewestRunTime, now);
 
+                    foreach (var item in AlertContextBuilders.BuildClientTimeoutItems(finding, window))
+                    {
+                        attentionContext.Details.Add(item);
+                    }
+
                     var detailText = AlertContextBuilders.ContextToDetailText(attentionContext);
 
                     var delivery = await FireAsync(new AlertOutcome(
