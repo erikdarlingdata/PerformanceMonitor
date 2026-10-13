@@ -34,7 +34,7 @@ public sealed class DarlingMcpClientTimeoutTools
 {
     private const string Collector = "attention";
 
-    [McpServerTool(Name = "get_client_timeouts"), Description("Gets client timeouts (queries a client cancelled or timed out) for one server over a time range: the exact count and rate per minute, plus sampled top statements, databases, client apps and recent events. Samples are a subset, never the total. empty = collector ran, none counted; unavailable = no recent collector run; not_collected = PostgreSQL target; precondition = capture session missing.")]
+    [McpServerTool(Name = "get_client_timeouts"), Description("Gets client timeouts (queries a client cancelled or timed out) for one server over a time range: exact count and rate per minute, plus sampled top statements, databases, client apps and recent events. Samples are a subset, never the total. empty = collector ran, none counted; unavailable = no recent run; not_collected = engine without the collector; precondition = capture session missing. <<GUIDE>> Reading guide for get_client_timeouts. count is exact: it is the sum of the attention collector's event_counter deltas, one per run, so it holds every client cancel or timeout the capture session counted, however many events the ring buffer kept. top_statements, top_databases, top_client_apps and sampled_events come from the ring buffer, which keeps at most 1,000 events and can miss some: they are a subset, they show what the timeouts looked like and never how many there were (samples_note says so on every answer). limit cuts only sampled_events (sampled_events_truncated says it did), never count or the top lists. rate_per_minute is count divided by minutes_covered, the minutes between the oldest and newest collector run the read used, not the whole hours_back window, so minutes the collector did not cover do not dilute the rate. Status words: empty means the collector ran across the window and its counter did not move, a true zero; unavailable means no recent successful run (the newest is outside the freshness window, or fewer than two runs), so no count is claimed, because an absent row is not a zero, and get_collection_health shows why; not_collected means the collector does not run on this server's engine, which is permanent and needs no fix; precondition means the collector's latest run recorded a missing or denied capture session, and the message names the fix. An attention is a client cancel or timeout, so a high rate is a client-side symptom (the client gave up waiting), not proof the server failed: look at top_statements and their waits next (get_wait_stats, get_waiting_tasks, get_active_queries).")]
     public static async Task<string> GetClientTimeouts(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -108,12 +108,12 @@ public sealed class DarlingMcpClientTimeoutTools
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
 
-        async Task<List<T>> Query<T>(string sql, Func<NpgsqlDataReader, T> map, bool rows = true)
+        async Task<List<T>> Query<T>(string sql, Func<NpgsqlDataReader, T> map, bool skewed = true)
         {
             await using var command = new NpgsqlCommand(sql, connection);
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, floor);
-            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, rows ? rowCeiling : ceiling);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, skewed ? rowCeiling : ceiling);
 
             var rows = new List<T>();
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -125,7 +125,7 @@ public sealed class DarlingMcpClientTimeoutTools
             return rows;
         }
 
-        var runs = await Query(AttentionWindowSql.Runs("collection_log", bounded: true), r => r.GetDateTime(0), rows: false);
+        var runs = await Query(AttentionWindowSql.Runs("collection_log", bounded: true), r => r.GetDateTime(0), skewed: false);
         var counts = await Query(AttentionWindowSql.Counts("attention_events", bounded: true),
             r => new AttentionCountRow(r.GetDateTime(0), r.GetInt64(1)));
         var groups = await Query(AttentionWindowSql.SampleGroups("attention_events", bounded: true),

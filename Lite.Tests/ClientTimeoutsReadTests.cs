@@ -76,6 +76,54 @@ public sealed class ClientTimeoutsReadTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
+    public async Task TheSampleLimit_TruncatesAtTheBoundary_AndTheReturnedCountNeverExceedsIt()
+    {
+        var now = DateTime.UtcNow;
+        for (var i = 0; i < 4; i++)
+        {
+            await LogAsync(500 + i, StormServer, now.AddSeconds(-30).AddMinutes(-i));
+            await RowAsync(510 + i, StormServer, now.AddSeconds(-28).AddMinutes(-i), "count", 2, null, null, null, null);
+        }
+
+        for (var i = 0; i < 3; i++)
+        {
+            await RowAsync(520 + i, StormServer, now.AddSeconds(-28).AddMinutes(-i), "sample", 0, "sales", "etl-job", "fp-a", "SELECT 1");
+        }
+
+        foreach (var (limit, truncated, returned) in new[] { (3, false, 3), (2, true, 2), (1, true, 1) })
+        {
+            var (window, samples) = await new LocalDataService(_duckDb).GetAttentionRangeAsync(StormServer, now.AddHours(-1), now, limit);
+            var (_, reading) = ClientTimeoutsRead.Classify(window, now);
+            using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ClientTimeoutsRead.Payload(reading!, window, samples, limit, 2000)));
+            Assert.Equal(truncated, doc.RootElement.GetProperty("sampled_events_truncated").GetBoolean());
+            Assert.Equal(returned, doc.RootElement.GetProperty("sampled_events_returned").GetInt32());
+            Assert.Equal(returned, doc.RootElement.GetProperty("sampled_events").GetArrayLength());
+            Assert.Equal(6, doc.RootElement.GetProperty("count").GetInt64());
+        }
+    }
+
+    [Fact]
+    public async Task AnAsOfJustAfterARun_StillCountsThatRunsRows_LikeTheAlertDoes()
+    {
+        /* A run is stamped when it starts; its rows carry the time the runner took a moment later. A range ending between the two
+           must count the row, the allowance ReadSpan itself makes. */
+        var newest = DateTime.UtcNow.AddMinutes(-5);
+        newest = new DateTime(newest.Ticks - (newest.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        for (var i = 0; i < 5; i++)
+        {
+            await LogAsync(600 + i, StormServer, newest.AddMinutes(-i));
+            await RowAsync(610 + i, StormServer, newest.AddMinutes(-i).AddSeconds(3), "count", 4, null, null, null, null);
+        }
+
+        var asOf = newest.AddSeconds(1);
+        var (window, _) = await new LocalDataService(_duckDb).GetAttentionRangeAsync(StormServer, asOf.AddHours(-1), asOf, 20);
+        var (kind, reading) = ClientTimeoutsRead.Classify(window, asOf);
+
+        Assert.Equal(ClientTimeoutsKind.Data, kind);
+        Assert.Equal(16, reading!.TotalCount);
+    }
+
+    [Fact]
     public async Task AQuietWindow_WhoseCollectorRan_IsEmptyNotUnavailable()
     {
         var now = DateTime.UtcNow;

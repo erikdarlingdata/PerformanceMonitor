@@ -164,7 +164,9 @@ public sealed class McpToolsListBudgetTests
     // description plus its schema and wrapper): 94,429 + 793 = 95,222, the total the test measures on this tree. It is served only when mcp_allow_writes is on, so a default
     // install's tools/list does not grow by it.
     /* #5640 Lane E2: get_client_timeouts (a 359-byte head, four parameters): the measured total went to 96,170 bytes. */
-    private const int TotalCeilingBytes = 96_170;
+    /* #5640 Lane F: get_client_timeouts gains its reading guide (the 31-byte guide pointer) and names not_collected, byte-identical to Darling's head:
+       359 -> 422 bytes, the measured total went to 96,233 bytes. */
+    private const int TotalCeilingBytes = 96_233;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

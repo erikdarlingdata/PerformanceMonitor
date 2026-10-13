@@ -117,6 +117,16 @@ public sealed class ClientTimeoutsToolLiveTests
             Assert.Equal(2, body.GetProperty("sampled_events").GetArrayLength());
             Assert.Equal(2, body.GetProperty("sampled_events_returned").GetInt32());
             Assert.Equal(2, statements.GetArrayLength());
+
+            /* The boundary pair: a limit equal to the four sampled events is not truncated, one below is. */
+            foreach (var (limitValue, truncated) in new[] { (4, false), (3, true) })
+            {
+                using var page = JsonDocument.Parse(await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(BusyId), 1, limit: limitValue, cancellationToken: ct));
+                var pageBody = page.RootElement.GetProperty("client_timeouts");
+                Assert.Equal(truncated, pageBody.GetProperty("sampled_events_truncated").GetBoolean());
+                Assert.Equal(limitValue, pageBody.GetProperty("sampled_events_returned").GetInt32());
+                Assert.Equal(55, pageBody.GetProperty("count").GetInt64());
+            }
         });
     }
 
