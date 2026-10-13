@@ -172,7 +172,7 @@ public interface ICollectorSchemaInfo
     /// the worker sizing and the refresh watch lines all derive from it (#3035, #3044, #3107). An exception to the
     /// rule therefore has to be explicit, named in one place and counted by a census test, so it cannot spread
     /// silently. The one holder is the attention collector, whose rows are low volume (the ring buffer caps the
-    /// detail at about 1,800 events per read, and a healthy server reads near zero).</para>
+    /// detail at 1,000 events per read, the ring_buffer MAX_EVENTS_LIMIT default, and a healthy server reads near zero).</para>
     ///
     /// <para>A default interface implementation, the choice <see cref="RequiredPgExtensions"/> made, so the existing
     /// definitions and the test doubles need no change.</para>

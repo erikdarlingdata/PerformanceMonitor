@@ -63,7 +63,7 @@ public sealed class AttentionPlainTableTests
         Assert.True(((ICollectorSchemaInfo)AttentionCollector.Instance).StaysPlainTable);
 
         var source = RepoFile.ReadRepoFileLf("PerformanceMonitor.Collectors", "AttentionCollector.cs");
-        foreach (var phrase in new[] { "#3035", "#3044", "#3107", "about 1,800 events per read", "AttentionPlainTableTests" })
+        foreach (var phrase in new[] { "#3035", "#3044", "#3107", "1,000 events per read", "AttentionPlainTableTests" })
         {
             Assert.Contains(phrase, source, StringComparison.Ordinal);
         }
