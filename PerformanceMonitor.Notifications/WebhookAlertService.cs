@@ -14,6 +14,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -734,9 +735,12 @@ public class WebhookAlertService
 
     /// <summary>
     /// A MessageCard text and fact value render markdown, so alert text is placed in them with the characters that form
-    /// links, images, emphasis and mentions backslash-escaped: <c>[ ] &lt; &gt; * `</c>, a <c>_</c> that is not inside a
+    /// links, images, emphasis and mentions backslash-escaped: <c>[ ] * `</c>, a <c>_</c> that is not inside a
     /// word (markdown reads <c>query_stats</c> literally), a <c>~</c> in a <c>~~</c> pair, and a backslash that precedes
     /// punctuation (markdown reads that pair as an escape, so a path such as <c>C:\temp</c> is left as it is).
+    /// <c>&amp;</c>, <c>&lt;</c> and <c>&gt;</c> become the entities <c>&amp;amp;</c>, <c>&amp;lt;</c> and <c>&amp;gt;</c>
+    /// (the ampersand first, so no entity is escaped twice): an entity shows as the character under a markdown
+    /// reader and under a reader of the card's limited inline HTML alike.
     /// A MessageCard has no plain-text field, so the escape is the smaller change. Darling's own formatting (the
     /// <c>_label_</c> and backtick spans of a record) is written outside this call.
     /// </summary>
@@ -754,9 +758,22 @@ public class WebhookAlertService
         for (var i = 0; i < text.Length; i++)
         {
             var ch = text[i];
+            switch (ch)
+            {
+                case '&':
+                    builder.Append("&amp;");
+                    continue;
+                case '<':
+                    builder.Append("&lt;");
+                    continue;
+                case '>':
+                    builder.Append("&gt;");
+                    continue;
+            }
+
             var escape = ch switch
             {
-                '[' or ']' or '<' or '>' or '*' or '`' => true,
+                '[' or ']' or '*' or '`' => true,
                 '_' => !(IsWordChar(text, i - 1) && IsWordChar(text, i + 1)),
                 '~' => (i > 0 && text[i - 1] == '~') || (i + 1 < text.Length && text[i + 1] == '~'),
                 '\\' => i + 1 < text.Length && IsAsciiPunctuation(text[i + 1]),
@@ -772,6 +789,19 @@ public class WebhookAlertService
 
         return builder.ToString();
     }
+
+    /// <summary>
+    /// A record text as the inside of a single-backtick code span: a backtick becomes a straight quote (it would
+    /// end the span), and each run of line breaks (CR, LF, CR LF, NEL, and the line and paragraph separators) becomes one
+    /// space. A markdown reader ends a paragraph, and with it an open span, at a blank line, so the text stays on one
+    /// line and the span closes where the card closes it.
+    /// </summary>
+    internal static string TeamsCodeSpanText(string? text) =>
+        string.IsNullOrEmpty(text)
+            ? string.Empty
+            : TeamsLineBreakRun.Replace(text.Replace('`', '\''), " ");
+
+    private static readonly Regex TeamsLineBreakRun = new(@"[\r\n\u0085\p{Zl}\p{Zp}]+", RegexOptions.CultureInvariant);
 
     /// <summary>
     /// The title an alert shows in a header or subject. An alert another service submitted (#5654) is marked
@@ -914,7 +944,7 @@ public class WebhookAlertService
                                 value.Append('_').Append(TeamsEscape(label)).Append("_  \n");
                             }
 
-                            value.Append('`').Append(text.Replace('`', '\'')).Append('`');
+                            value.Append('`').Append(TeamsCodeSpanText(text)).Append('`');
                         }
 
                         itemFacts.Add(new { name = string.Create(CultureInfo.InvariantCulture, $"#{record.Ordinal}"), value = value.ToString() });
@@ -1144,6 +1174,9 @@ public class WebhookAlertService
     /// leave it no capacity at all.
     /// </summary>
     private const int SlackDetailHeadingLimit = 500;
+
+    /// <summary>Slack's cap on a <c>header</c> block's text, in characters.</summary>
+    internal const int SlackHeaderTextLimit = 150;
 
     /// <summary>
     /// The most one record of a record-shaped detail (<see cref="AlertDetailItem.Records"/>, #3644) may
@@ -1534,13 +1567,10 @@ public class WebhookAlertService
                 list.Append("; ");
             }
 
-            list.Append(SlackEscape(details[i].Heading));
+            list.Append(details[i].Heading);
         }
 
-        var listed = list.ToString();
-        var headings = listed.Length <= SlackOmittedHeadingsLimit
-            ? listed
-            : listed[..SlackCutLength(listed, SlackOmittedHeadingsLimit)] + "...";
+        var headings = SlackEscapedBounded(list.ToString(), SlackOmittedHeadingsLimit);
 
         var noun = dropped == 1 ? "detail" : "details";
         var omission = string.Create(CultureInfo.InvariantCulture,
@@ -1566,7 +1596,7 @@ public class WebhookAlertService
     private static List<object> RenderSlackDetail(AlertDetailItem detail, int bodyBlockBudget)
     {
         var run = new List<object> { new { type = "divider" } };
-        var heading = SlackEscape(SlackHeading(detail.Heading));
+        var heading = SlackEscapedHeading(detail.Heading);
 
         if (detail.IsCodeBlock)
         {
@@ -1672,10 +1702,7 @@ public class WebhookAlertService
     /// <see cref="SlackRecordLimit"/>.</summary>
     private static string SlackRecordText(AlertDetailRecord record)
     {
-        var escapedSummary = SlackEscape(record.Summary);
-        var summary = escapedSummary.Length <= SlackRecordSummaryLimit
-            ? escapedSummary
-            : escapedSummary[..SlackCutLength(escapedSummary, SlackRecordSummaryLimit)] + "...";
+        var summary = SlackEscapedBounded(record.Summary, SlackRecordSummaryLimit);
         var unit = new StringBuilder();
         unit.Append("*#").Append(record.Ordinal.ToString(CultureInfo.InvariantCulture));
         if (summary.Length > 0)
@@ -1707,7 +1734,7 @@ public class WebhookAlertService
                 unit.Append("\n_").Append(SlackEscape(label)).Append('_');
             }
 
-            unit.Append("\n```\n").Append(SlackBoundedText(string.Empty, SlackEscape(text), share)).Append("\n```");
+            unit.Append("\n```\n").Append(SlackBoundedText(string.Empty, text, share)).Append("\n```");
         }
 
         return unit.ToString();
@@ -1719,6 +1746,55 @@ public class WebhookAlertService
     /// different thing.</summary>
     private static string SlackHeading(string heading) =>
         heading.Length <= SlackDetailHeadingLimit ? heading : heading[..SlackCutLength(heading, SlackDetailHeadingLimit)] + "...";
+
+    /// <summary>
+    /// A heading as mrkdwn: cut as raw text (<see cref="SlackHeading"/>), then escaped, then held to what a
+    /// field's <c>*heading*</c> may carry (<see cref="SlackFieldTextLimit"/> less the two asterisks) at the last
+    /// whole entity, because a heading made of <c>&amp;</c> grows fivefold when it is escaped.
+    /// </summary>
+    private static string SlackEscapedHeading(string heading) =>
+        SlackEscapedBounded(SlackHeading(heading), SlackFieldTextLimit - 2);
+
+    /// <summary>
+    /// <paramref name="raw"/> escaped for mrkdwn and inside <paramref name="limit"/> characters of escaped text.
+    /// The text is cut BEFORE it is escaped, on a whole character, so a cut never lands inside an entity; one that
+    /// still has to be cut ends in <c>...</c>.
+    /// </summary>
+    private static string SlackEscapedBounded(string? raw, int limit)
+    {
+        if (string.IsNullOrEmpty(raw))
+        {
+            return string.Empty;
+        }
+
+        var escaped = SlackEscape(raw);
+        return escaped.Length <= limit
+            ? escaped
+            : SlackEscape(raw[..SlackEscapedFit(raw, limit)]) + "...";
+    }
+
+    /// <summary>
+    /// The length of the longest leading stretch of <paramref name="raw"/>, ending on a whole character, whose
+    /// escaped form (<see cref="SlackEscape"/>) is at most <paramref name="limit"/> characters.
+    /// </summary>
+    private static int SlackEscapedFit(string raw, int limit)
+    {
+        var cost = 0;
+        var fit = 0;
+        while (fit < raw.Length)
+        {
+            var next = raw[fit] switch { '&' => 5, '<' or '>' => 4, _ => 1 };
+            if (cost + next > limit)
+            {
+                break;
+            }
+
+            cost += next;
+            fit++;
+        }
+
+        return SlackCutLength(raw, fit);
+    }
 
     /// <summary>
     /// One detail field's text object, <c>*label:*</c> over its value, inside
@@ -1737,7 +1813,7 @@ public class WebhookAlertService
     /// narrower than the room held for it, and the field stays inside its limit.</para>
     /// </summary>
     private static string SlackFieldText(string label, string value) =>
-        SlackBoundedText($"*{SlackEscape(label)}:*\n", SlackEscape(value), SlackFieldTextLimit);
+        SlackBoundedText($"*{SlackEscape(label)}:*\n", value, SlackFieldTextLimit);
 
     /// <summary>
     /// <paramref name="prefix"/> over <paramref name="value"/> inside <paramref name="limit"/>, the cut
@@ -1746,11 +1822,14 @@ public class WebhookAlertService
     /// code-blocked text (<see cref="SlackRecordText"/>, empty prefix, the record's share) states its cut in
     /// exactly the words and the characters a cut field does. One note, one arithmetic, two sites.
     /// </summary>
-    private static string SlackBoundedText(string prefix, string value, int limit)
+    private static string SlackBoundedText(string prefix, string rawValue, int limit)
     {
-        if (prefix.Length + value.Length <= limit)
+        /* The value arrives raw and is escaped after it is cut (see SlackEscapedBounded), so the cut never
+           lands inside an entity and the omitted count is in the characters the reader would count. */
+        var escapedValue = SlackEscape(rawValue);
+        if (prefix.Length + escapedValue.Length <= limit)
         {
-            return prefix + value;
+            return prefix + escapedValue;
         }
 
         static string Note(int omitted) => string.Create(CultureInfo.InvariantCulture,
@@ -1763,14 +1842,14 @@ public class WebhookAlertService
             prefix = prefix[..SlackCutLength(prefix, limit / 2)];
         }
 
-        var keep = SlackCutLength(value, Math.Max(0, limit - prefix.Length - Note(value.Length).Length));
+        var keep = SlackEscapedFit(rawValue, Math.Max(0, limit - prefix.Length - Note(rawValue.Length).Length));
         /* Counting the omitted characters IS a walk of the omitted tail — the pre-#3622 subtraction counted
            units, which is the thing that was wrong — so this costs the tail's length, once, on the
            truncation path only. Every producer bounds its values upstream (the analysis formatter cuts
            drill-down text at 300 characters; the longest measured field is 318), so the tail is short in
            practice and the cost is the value's own length in the worst case (review note on #3625). */
-        var note = Note(new StringInfo(value[keep..]).LengthInTextElements);
-        return prefix + value[..keep] + note;
+        var note = Note(new StringInfo(rawValue[keep..]).LengthInTextElements);
+        return prefix + SlackEscape(rawValue[..keep]) + note;
     }
 
     /// <summary>
@@ -1845,11 +1924,38 @@ public class WebhookAlertService
 
         if (cut > 0)
         {
-            return cut;
+            return SlackBeforeEntity(text, cut);
         }
 
         /* No whole element fits: a code-point boundary keeps the payload valid and the caller moving. */
         return char.IsHighSurrogate(text[limit - 1]) && char.IsLowSurrogate(text[limit]) ? limit - 1 : limit;
+    }
+
+    /// <summary>
+    /// <paramref name="cut"/>, moved back to the start of the entity (<c>&amp;amp;</c>, <c>&amp;lt;</c>, <c>&amp;gt;</c>) it
+    /// would otherwise fall inside, so escaped text is never cut into half an entity. Unchanged when it falls
+    /// on no entity, or when backing off would leave nothing.
+    /// </summary>
+    private static int SlackBeforeEntity(ReadOnlySpan<char> text, int cut)
+    {
+        for (var back = 1; back <= 4 && back <= cut; back++)
+        {
+            var start = cut - back;
+            if (text[start] != '&')
+            {
+                continue;
+            }
+
+            var tail = text[start..];
+            if ((tail.StartsWith("&amp;", StringComparison.Ordinal) && back < 5)
+                || (tail.StartsWith("&lt;", StringComparison.Ordinal) && back < 4)
+                || (tail.StartsWith("&gt;", StringComparison.Ordinal) && back < 4))
+            {
+                return start > 0 ? start : cut;
+            }
+        }
+
+        return cut;
     }
 
     /// <summary>
@@ -1893,6 +1999,13 @@ public class WebhookAlertService
         var title = isTest
             ? $"{emoji} TEST — {metricName}"
             : $"{emoji} {badgeText} — {titleName}";
+
+        /* A header's text is capped by Slack at 150 characters; a longer one is cut on a whole character and
+           ends in an ellipsis. */
+        if (title.Length > SlackHeaderTextLimit)
+        {
+            title = title[..SlackCutLength(title, SlackHeaderTextLimit - 3)] + "...";
+        }
 
         var blocks = new List<object>
         {

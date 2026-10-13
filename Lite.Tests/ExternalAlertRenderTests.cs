@@ -144,7 +144,7 @@ public class ExternalAlertRenderTests
 
         Assert.Contains(strings, text => text.Contains(@"\[Acknowledge\](https://example.invalid)", StringComparison.Ordinal));
         Assert.DoesNotContain(strings, text => text.Contains("[Acknowledge](", StringComparison.Ordinal) && !text.Contains(@"\[Acknowledge\](", StringComparison.Ordinal));
-        Assert.Contains(strings, text => text.Contains(@"\<at\>everyone\</at\>", StringComparison.Ordinal));
+        Assert.Contains(strings, text => text.Contains("&lt;at&gt;everyone&lt;/at&gt;", StringComparison.Ordinal));
         Assert.DoesNotContain(strings, text => text.Contains("<at>", StringComparison.Ordinal));
     }
 
@@ -247,7 +247,10 @@ public class ExternalAlertRenderTests
         Assert.Equal(expected, WebhookAlertService.SlackEscape(input));
 
     [Theory]
-    [InlineData(@"[a](b) <at> *x* _y_ `c`", @"\[a\](b) \<at\> \*x\* \_y\_ \`c\`")]
+    [InlineData(@"[a](b) <at> *x* _y_ `c`", @"\[a\](b) &lt;at&gt; \*x\* \_y\_ \`c\`")]
+    [InlineData("a & b < c > d", "a &amp; b &lt; c &gt; d")]
+    [InlineData("&lt;", "&amp;lt;")]
+    [InlineData(@"\<", @"\\&lt;")]
     [InlineData("~~z~~ ~5 ms", @"\~\~z\~\~ ~5 ms")]
     [InlineData("query_stats PAGEIOLATCH_SH", "query_stats PAGEIOLATCH_SH")]
     [InlineData(@"C:\temp\file.mdf", @"C:\temp\file.mdf")]
@@ -255,4 +258,140 @@ public class ExternalAlertRenderTests
     [InlineData("", "")]
     public void TeamsEscape_EscapesLinkEmphasisAndMentionCharacters_AndLeavesOrdinaryTextAlone(string input, string expected) =>
         Assert.Equal(expected, WebhookAlertService.TeamsEscape(input));
+
+    /* ---------------- Header length, record code spans and escaped cuts ---------------- */
+
+    private const string LongestSource = "abcdefghijklmnopqrstuvwxyz01234";
+
+    private static string SlackHeaderText(string payload) => JsonDocument.Parse(payload).RootElement
+        .GetProperty("attachments")[0].GetProperty("blocks")[0].GetProperty("text").GetProperty("text").GetString()!;
+
+    [Theory]
+    [InlineData("T")]
+    [InlineData("\U0001F600")]
+    public void Slack_AHeaderIsHeldToSlacksLimit_OnAWholeCharacter_WithAnEllipsis(string unit)
+    {
+        Assert.Equal(31, LongestSource.Length);
+        var title = string.Concat(Enumerable.Repeat(unit, 200 / unit.Length));
+        Assert.Equal(200, title.Length);
+
+        var header = SlackHeaderText(WebhookAlertService.BuildSlackPayload(
+            "External:" + LongestSource + ":queue-depth", "SRV1", "warning", "", Branding,
+            context: External(LongestSource), displayName: title));
+
+        Assert.True(header.Length <= 150, $"{header.Length} characters");
+        Assert.EndsWith("...", header, StringComparison.Ordinal);
+        Assert.Contains("[External: " + LongestSource + "] ", header, StringComparison.Ordinal);
+        for (var i = 0; i < header.Length; i++)
+        {
+            Assert.True(!char.IsSurrogate(header[i]) || (char.IsHighSurrogate(header[i]) && i + 1 < header.Length && char.IsLowSurrogate(header[i + 1]))
+                || (char.IsLowSurrogate(header[i]) && i > 0 && char.IsHighSurrogate(header[i - 1])), $"split pair at {i}");
+        }
+    }
+
+    [Fact]
+    public void Slack_AHeaderInsideTheLimit_IsUnchanged()
+    {
+        var header = SlackHeaderText(WebhookAlertService.BuildSlackPayload(
+            "External:billing:queue-depth", "SRV1", "warning", "", Branding,
+            context: External(), displayName: "Queue depth"));
+
+        Assert.EndsWith("[External: billing] Queue depth", header, StringComparison.Ordinal);
+        Assert.DoesNotContain("...", header, StringComparison.Ordinal);
+    }
+
+    private static AlertContext WithRecord(string summary, params string[] texts)
+    {
+        var context = External();
+        var item = new AlertDetailItem { Heading = "Top Queries" };
+        item.Records.Add(new AlertDetailRecord(1, summary, texts.Select(t => ("Query Text", t)).ToList()));
+        context.Details.Add(item);
+        return context;
+    }
+
+    private static string TeamsRecordValue(AlertContext context)
+    {
+        using var doc = JsonDocument.Parse(WebhookAlertService.BuildTeamsPayload(
+            "External:billing:queue-depth", "SRV1", "warning", "", Branding, context: context));
+        var section = Assert.Single(doc.RootElement.GetProperty("sections").EnumerateArray(),
+            s => s.TryGetProperty("activityTitle", out var t) && t.GetString() == "Top Queries");
+        return Assert.Single(section.GetProperty("facts").EnumerateArray()).GetProperty("value").GetString()!;
+    }
+
+    [Fact]
+    public void Teams_ARecordTextWithABlankLine_StaysInOneCodeSpan()
+    {
+        var text = "SELECT 1 /*\n\n[Open the runbook](https://example.invalid)\r\n\r\n*/ `x`\r- y\u0085z";
+
+        var value = TeamsRecordValue(WithRecord("", text));
+
+        Assert.Equal("`SELECT 1 /* [Open the runbook](https://example.invalid) */ 'x' - y z`", value);
+        Assert.DoesNotContain('\n', value);
+        Assert.DoesNotContain('\r', value);
+        Assert.Equal(2, value.Count(c => c == '`'));
+    }
+
+    [Fact]
+    public void Teams_ARecordWithTwoTexts_KeepsEachInItsOwnOneLineSpan()
+    {
+        var value = TeamsRecordValue(WithRecord("", "a\n\nb", "c`d\n"));
+
+        Assert.Equal("_Query Text_  \n`a b`  \n_Query Text_  \n`c'd `", value);
+    }
+
+    private static bool HasHalfEntity(string text) =>
+        System.Text.RegularExpressions.Regex.IsMatch(text, "&(?!(amp|lt|gt);)");
+
+    [Fact]
+    public void Slack_ARecordSummary_IsCutBeforeItIsEscaped()
+    {
+        var summary = new string('&', 1200);
+        var strings = AllStrings(WebhookAlertService.BuildSlackPayload(
+            "External:billing:queue-depth", "SRV1", "warning", "", Branding, context: WithRecord(summary, "q")));
+
+        var section = Assert.Single(strings, s => s.Contains("*#1 · ", StringComparison.Ordinal));
+        Assert.Contains("*#1 · " + string.Concat(Enumerable.Repeat("&amp;", 200)) + "...*", section, StringComparison.Ordinal);
+        Assert.False(HasHalfEntity(section));
+        Assert.True(section.Length <= 3000);
+    }
+
+    [Fact]
+    public void Slack_AFieldValueAndARecordText_AreCutBeforeTheyAreEscaped_AndCountRawCharacters()
+    {
+        var value = new string('&', 1500);
+        var context = External();
+        context.Details.Add(new AlertDetailItem { Heading = "Fields", Fields = { ("Label", value) } });
+        context.Details.Add(WithRecord("", value).Details[0]);
+
+        var strings = AllStrings(WebhookAlertService.BuildSlackPayload(
+            "External:billing:queue-depth", "SRV1", "warning", "", Branding, context: context));
+
+        var field = Assert.Single(strings, s => s.StartsWith("*Label:*", StringComparison.Ordinal));
+        var recordText = Assert.Single(strings, s => s.Contains("*#1", StringComparison.Ordinal));
+        foreach (var text in new[] { field, recordText })
+        {
+            Assert.False(HasHalfEntity(text), text);
+            var match = System.Text.RegularExpressions.Regex.Match(text, @"\.\.\. \((\d[\d,]*) more characters");
+            Assert.True(match.Success, text);
+            var omitted = int.Parse(match.Groups[1].Value.Replace(",", ""), System.Globalization.CultureInfo.InvariantCulture);
+            var kept = System.Text.RegularExpressions.Regex.Matches(text, "&amp;").Count;
+            Assert.Equal(1500, kept + omitted);
+        }
+
+        Assert.True(field.Length <= 2000, $"{field.Length} characters");
+    }
+
+    [Fact]
+    public void Slack_AnAmpersandHeavyHeading_StaysInsideTheFieldLimit()
+    {
+        var context = External();
+        context.Details.Add(new AlertDetailItem { Heading = new string('&', 450), Fields = { ("Label", "v") } });
+
+        var strings = AllStrings(WebhookAlertService.BuildSlackPayload(
+            "External:billing:queue-depth", "SRV1", "warning", "", Branding, context: context));
+
+        var heading = Assert.Single(strings, s => s.StartsWith("*&amp;&amp;", StringComparison.Ordinal));
+        Assert.True(heading.Length <= 2000, $"{heading.Length} characters");
+        Assert.False(HasHalfEntity(heading));
+    }
 }
