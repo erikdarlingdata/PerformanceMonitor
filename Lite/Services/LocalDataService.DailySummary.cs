@@ -59,7 +59,7 @@ deadlocks AS (
     BlockingWaits.SqlDialect.DuckDb, "dmv_waits",
     @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3/*scope*/", reportCount: true) + @",
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3/*scope*/", reportCount: true) + $@",
 bpr AS (
     /* #5644: counts WAITS, not report rows (BlockingWaits.WaitsCteSql, the definition the alert, the Overview tile
        and the analysis fact share), bucketed on the day of the wait's longest report. */
@@ -96,6 +96,7 @@ coll AS (
            COUNT(*) FILTER (WHERE status = 'ERROR') AS errs
     FROM v_collection_log
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
     GROUP BY 1
 ),
 mem AS (

@@ -806,6 +806,10 @@ public partial class RemoteCollectorService
             {
                 await EnsureDeadlockXeSessionAsync(server, engineEdition, cancellationToken);
             }
+            else if (collectorName == "attention")
+            {
+                await EnsureAttentionXeSessionAsync(server, engineEdition, cancellationToken);
+            }
 
             rowsCollected = collectorName switch
             {
@@ -833,6 +837,7 @@ public partial class RemoteCollectorService
                 "waiting_tasks" => await CollectWaitingTasksAsync(server, cancellationToken),
                 "dmv_blocking_snapshot" => await CollectDmvBlockingSnapshotAsync(server, cancellationToken),
                 "blocked_process_report" => await CollectBlockedProcessReportsAsync(server, cancellationToken),
+                "attention" => await CollectAttentionAsync(server, cancellationToken),
                 "long_query_completions" => await CollectLongQueryCompletionsAsync(server, cancellationToken),
                 "database_scoped_config" => await CollectDatabaseScopedConfigAsync(server, cancellationToken),
                 "query_store_health" => await CollectQueryStoreHealthAsync(server, cancellationToken),
@@ -1073,12 +1078,54 @@ public partial class RemoteCollectorService
     /// <summary>
     /// Logs a collection attempt to the collection_log table.
     /// </summary>
-    private async Task LogCollectionAsync(int serverId, string serverName, string collectorName, DateTime startTime, string status, string? errorMessage, int rowsCollected, long sqlMs = 0, long duckDbMs = 0, FanoutCost? fanout = null)
+    private Task LogCollectionAsync(int serverId, string serverName, string collectorName, DateTime startTime, string status, string? errorMessage, int rowsCollected, long sqlMs = 0, long duckDbMs = 0, FanoutCost? fanout = null)
+        => WriteCollectionLogRowAsync(serverId, serverName, collectorName, startTime,
+            (int)(DateTime.UtcNow - startTime).TotalMilliseconds, status, errorMessage, rowsCollected,
+            (int)sqlMs, (int)duckDbMs, fanout);
+
+    /// <summary>
+    /// #5643: records that the collection loop skipped slots, one <c>collection_log</c> row per enabled server, through
+    /// the same writer every collector row uses. The row is not a collector run: <c>collector_name</c> is
+    /// <see cref="CollectionCycleSkip.CollectorName"/>, <c>status</c> is <see cref="CollectionCycleSkip.Status"/>,
+    /// <c>fanout_item_count</c> carries the slots skipped and <c>slowest_item</c> the slowest step. Both timing splits are
+    /// NULL and no rows were collected. A failed write is the writer's own logged failure, and nothing here throws but a
+    /// stop: a cycle that is already late must not be stopped by the record of it.
+    /// </summary>
+    /// <param name="cycleStampUtc">The late cycle's own start: the stamp the wait returned, when the loop noticed the gap. The row is stamped there, not at the previous cycle, so a gap of any length stays inside the 24-hour surfaces for 24 hours after it ends. The message carries the gap's other end.</param>
+    internal async Task LogSkippedCycleAsync(DateTime cycleStampUtc, CycleSkipReport report, CancellationToken cancellationToken)
     {
         try
         {
-            var durationMs = (int)(DateTime.UtcNow - startTime).TotalMilliseconds;
+            if (LocalDatabaseIsDown())
+            {
+                return;
+            }
 
+            /* Registered like a collection: the row is a collection_log write, and a reset landing under it would fail it
+               the way #2594's did. */
+            using var collectionScope = await CollectionResetGate.BeginCollectionAsync(cancellationToken);
+
+            foreach (var server in _serverManager.GetEnabledServers())
+            {
+                await WriteCollectionLogRowAsync(GetServerId(server), server.DisplayName, CollectionCycleSkip.CollectorName,
+                    cycleStampUtc, report.CycleMs, CollectionCycleSkip.Status, report.Message, 0, sqlMs: null, duckDbMs: null,
+                    new FanoutCost(report.SlotsSkipped, report.SlowestStep, report.SlowestStepMs));
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("Collector", $"Could not record the skipped collection slots: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private async Task WriteCollectionLogRowAsync(int serverId, string serverName, string collectorName, DateTime startTime, int durationMs, string status, string? errorMessage, int rowsCollected, int? sqlMs, int? duckDbMs, FanoutCost? fanout)
+    {
+        try
+        {
             /* Read lock (#4343): a plain append of a new row with a generated id cannot collide with
                another writer (DuckDbInitializer's own rule), but this runs every collection cycle for
                every collector, so with the sentinel live an unlocked connection can attach to an instance
@@ -1101,8 +1148,8 @@ public partial class RemoteCollectorService
             command.Parameters.Add(new DuckDBParameter { Value = status });
             command.Parameters.Add(new DuckDBParameter { Value = errorMessage ?? (object)DBNull.Value });
             command.Parameters.Add(new DuckDBParameter { Value = rowsCollected });
-            command.Parameters.Add(new DuckDBParameter { Value = (int)sqlMs });
-            command.Parameters.Add(new DuckDBParameter { Value = (int)duckDbMs });
+            command.Parameters.Add(new DuckDBParameter { Value = sqlMs.HasValue ? sqlMs.Value : (object)DBNull.Value });
+            command.Parameters.Add(new DuckDBParameter { Value = duckDbMs.HasValue ? duckDbMs.Value : (object)DBNull.Value });
 
             /* All three NULL together or all three set (#2472): a slowest item with no count cannot be
                turned into the dominance ratio the columns exist for, so half an answer is worse than none.

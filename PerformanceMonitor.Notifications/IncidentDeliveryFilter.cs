@@ -174,6 +174,7 @@ public static class IncidentDeliveryFilter
             AttachmentXml = attachment?.Xml,
             AttachmentFileName = attachment?.FileName,
             AgReplicaIdentity = context.AgReplicaIdentity,
+            External = context.External,
             NewestSample = context.NewestSample,
             /* #5641: a tier escalation's cooldown bypass is about the firing, not one incident, so the filtered copy
                keeps it. The email and webhook sends read the flag off the context they are handed, which is this
@@ -251,6 +252,7 @@ public static class IncidentDeliveryFilter
             AttachmentXml = context?.AttachmentXml,
             AttachmentFileName = context?.AttachmentFileName,
             AgReplicaIdentity = context?.AgReplicaIdentity,
+            External = context?.External,
             NewestSample = context?.NewestSample,
             /* #5641: the same cooldown bypass the filtered copy keeps (see ForDelivery's render copy). */
             EscalationBypassesCooldown = context?.EscalationBypassesCooldown ?? false,

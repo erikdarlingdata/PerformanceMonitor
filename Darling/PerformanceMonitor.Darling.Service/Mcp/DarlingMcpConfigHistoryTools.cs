@@ -222,7 +222,9 @@ public sealed class DarlingMcpConfigHistoryTools
             var windowEndNaive = NaiveUtc(windowEnd);
             var windowStart = windowEndNaive.AddHours(-hours_back);
             var snapshots = await DarlingConfigHistoryReader.GetTraceFlagSnapshotsAsync(postgres, resolved.ServerId, cancellationToken);
-            var changes = ConfigChangeDiff.DiffTraceFlagChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
+            /* #5633 item 19: a successful run that stored no row is an empty snapshot, so the LAST flag being turned off is a change. */
+            var emptyRuns = await DarlingCollectorRunFactsReader.ReadEmptyTraceFlagRunsAsync(postgres, resolved.ServerId, windowStart, windowEndNaive, cancellationToken);
+            var changes = ConfigChangeDiff.DiffTraceFlagChanges(snapshots, emptyRuns, windowStart, UpperEdge(as_of, windowEndNaive));
             if (changes.Count == 0)
             {
                 /* Decide not_collected first: it carries no notice, so probing before it would throw the probe away. */
@@ -233,7 +235,10 @@ public sealed class DarlingMcpConfigHistoryTools
                 }
 
                 var emptyNotice = await ReadNoticeAsync(postgres, "trace_flags", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
-                return NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice);
+                /* #5633 item 19: a successful run that stored zero rows IS the collector saying no flag is on; only a collector that has not
+                   run (or stored rows) really has "fewer than two snapshots". */
+                var runFacts = await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "trace_flags", null, windowEndNaive, cancellationToken);
+                return NoTraceFlagChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, runFacts);
             }
 
             var notice = await ReadNoticeAsync(postgres, "trace_flags", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
@@ -429,6 +434,33 @@ public sealed class DarlingMcpConfigHistoryTools
             notice.IsUnavailable
                 ? (object)new { server = serverName, snapshot_count = snapshotCount }
                 : (object)new { server = serverName, snapshot_count = snapshotCount, effective_start = notice.EffectiveStart, window_truncated = notice.WindowTruncated, truncation_note = notice.TruncationNote });
+
+    /// <summary>
+    /// #5633 item 19: the empty answer of <c>get_trace_flag_changes</c>. When the trace_flags collector's newest successful run stored zero
+    /// rows, no flag is on (<c>DBCC TRACESTATUS(-1)</c> lists only flags that are), and that is what the answer says instead of "fewer than
+    /// two snapshots". Otherwise it is <see cref="NoChanges"/> unchanged. <c>snapshot_count</c> stays what it always was: captures that
+    /// listed a flag.
+    /// </summary>
+    internal static string NoTraceFlagChanges(string serverName, int hoursBack, int snapshotCount, McpWindowNotice notice, CollectorRunFacts runFacts)
+    {
+        var none = runFacts.NoTraceFlagsEnabled();
+        if (none is null)
+        {
+            return NoChanges(serverName, hoursBack, snapshotCount, notice);
+        }
+
+        /* A run that finds no flag stores no rows; the diff reads each successful empty run as an empty capture, so a flag turned off shows as a
+           change at that run's time. Reaching this answer means none falls in the window: say that rather than imply an earlier flag is still on. */
+        var message = snapshotCount == 0
+            ? none + " No trace flag has ever been captured as enabled, so there is nothing to diff."
+            : none + " Earlier captures listed a flag, and a successful run that finds none counts as an empty capture, so a flag turned off shows as a change at that run's time; none falls in this window.";
+        return McpHelpers.Status(
+            "empty",
+            message,
+            notice.IsUnavailable
+                ? (object)new { server = serverName, snapshot_count = snapshotCount }
+                : (object)new { server = serverName, snapshot_count = snapshotCount, effective_start = notice.EffectiveStart, window_truncated = notice.WindowTruncated, truncation_note = notice.TruncationNote });
+    }
 
     /// <summary>#5245: keeps the rows whose database is one of the chosen ones (ordinal, ignoring case: the match these two
     /// reads always made against one name); every row for <see cref="DatabaseFilter.All"/>.</summary>

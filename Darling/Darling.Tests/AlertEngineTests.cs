@@ -45,6 +45,9 @@ public sealed class AlertEngineTests
         public bool RunnableQueueEnabled { get; set; }
         public int RunnableQueueWarningPerScheduler { get; set; } = 8;
         public int RunnableQueueCriticalPerScheduler { get; set; } = 16;
+        public bool ClientTimeoutsEnabled { get; set; }
+        public int ClientTimeoutsWarningPerMinute { get; set; } = 10;
+        public int ClientTimeoutsCriticalPerMinute { get; set; } = 60;
         public bool LongRunningQueryEnabled { get; set; }
         public bool TempDbSpaceEnabled { get; set; }
         public bool LowDiskEnabled { get; set; }
@@ -157,6 +160,26 @@ public sealed class AlertEngineTests
             PoisonWaitWindowMinutesAsked = windowMinutes;
             return Task.FromResult(new List<PoisonWaitAccumulation>(PoisonWaits));
         }
+
+        public AttentionWindow Attention { get; set; } = AttentionWindow.Empty;
+
+        public int AttentionLookbackMinutesAsked;
+
+        public int AttentionReads;
+
+        public Task<AttentionWindow> GetAttentionWindowAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
+
+        {
+
+            AttentionLookbackMinutesAsked = lookbackMinutes;
+
+            AttentionReads++;
+
+            return Task.FromResult(Attention);
+
+        }
+
+        
 
         public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
         {
@@ -4700,6 +4723,9 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
+        public Task<AttentionWindow> GetAttentionWindowAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("store down");
+        
         public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(string serverKey, int thresholdMinutes, int maxResults, bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc, IReadOnlyList<string> excludedDatabases, LongRunningQueryExclusions exclusions, bool orderByCpu = false, CancellationToken cancellationToken = default) =>

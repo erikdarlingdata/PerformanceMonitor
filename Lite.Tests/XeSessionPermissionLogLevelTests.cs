@@ -30,32 +30,62 @@ namespace PerformanceMonitorLite.Tests;
 /// </summary>
 public class XeSessionPermissionLogLevelTests
 {
-    private static readonly string[] XeSources =
+    /* #4964 moved the logging of a failed create out of each session's own routine and into ONE shared ensure
+       (EnsureServerScopedXeSessionAsync, in the blocked-process file), so the deadlock, blocked-process and attention
+       (client timeout, #5640) sessions cannot drift apart. Each routine lets a failure propagate to that ensure. */
+    private const string SharedEnsureFile = "RemoteCollectorService.BlockedProcessReport.cs";
+
+    /* The file of each session's ensure, and the constant naming the session it hands to the shared ensure. */
+    private static readonly (string File, string SessionConstant)[] SessionEnsures =
     {
-        "RemoteCollectorService.Deadlocks.cs",
-        "RemoteCollectorService.BlockedProcessReport.cs",
+        ("RemoteCollectorService.Deadlocks.cs", "DeadlockXeSessionName"),
+        ("RemoteCollectorService.BlockedProcessReport.cs", "BlockedProcessXeSessionName"),
+        ("RemoteCollectorService.AttentionXeSession.cs", "AttentionXeSessionName"),
     };
 
     [Fact]
     public void ADeniedXeSession_LogsAtWarn_NotError()
     {
-        foreach (var file in XeSources)
+        var source = ReadServiceSource(SharedEnsureFile);
+
+        var guards = Regex.Matches(
+            source,
+            @"if \(SqlServerPermissionErrors\.IsPermissionDenied\(ex\.Number\)\)\s*\{\s*AppLogger\.(\w+)\(",
+            RegexOptions.Singleline);
+
+        Assert.True(
+            guards.Count > 0,
+            $"{SharedEnsureFile} no longer routes a denied XE session through IsPermissionDenied, so a least-privilege "
+            + "login is back to logging as a fault.");
+
+        foreach (Match guard in guards)
+        {
+            Assert.Equal("Warn", guard.Groups[1].Value);
+        }
+
+        AssertEverySessionRoutesThroughTheSharedEnsure();
+    }
+
+    /// <summary>
+    /// The Warn and Error arms only cover a session whose routine hands its failure to the shared ensure: each
+    /// session's file must call it with the session's own name, and must not catch and log the failure a second time
+    /// (a line there would repeat at full level every cycle, which the shared ensure's log-once rule ends).
+    /// </summary>
+    private static void AssertEverySessionRoutesThroughTheSharedEnsure()
+    {
+        foreach (var (file, sessionConstant) in SessionEnsures)
         {
             var source = ReadServiceSource(file);
 
-            var guards = Regex.Matches(
-                source,
-                @"if \(SqlServerPermissionErrors\.IsPermissionDenied\(ex\.Number\)\)\s*\{\s*AppLogger\.(\w+)\(",
-                RegexOptions.Singleline);
-
             Assert.True(
-                guards.Count > 0,
-                $"{file} no longer routes a denied XE session through IsPermissionDenied, so a least-privilege "
-                + "login is back to logging as a fault.");
+                Regex.IsMatch(source, @"EnsureServerScopedXeSessionAsync\(\s*server,\s*""[^""]+"",\s*" + sessionConstant + @"\b"),
+                $"{file} no longer hands the {sessionConstant} session to EnsureServerScopedXeSessionAsync, so its failure "
+                + "skips the Warn-when-denied, Error-otherwise rule.");
 
-            foreach (Match guard in guards)
+            if (file != SharedEnsureFile)
             {
-                Assert.Equal("Warn", guard.Groups[1].Value);
+                Assert.DoesNotContain("AppLogger.Error(\"XeSession\"", source, StringComparison.Ordinal);
+                Assert.DoesNotContain("catch (SqlException", source, StringComparison.Ordinal);
             }
         }
     }
@@ -67,12 +97,11 @@ public class XeSessionPermissionLogLevelTests
     [Fact]
     public void AnXeFailureThatIsNotPermissions_StillLogsAtError()
     {
-        foreach (var file in XeSources)
-        {
-            var source = ReadServiceSource(file);
+        var source = ReadServiceSource(SharedEnsureFile);
 
-            Assert.Contains("AppLogger.Error(\"XeSession\"", source, StringComparison.Ordinal);
-        }
+        Assert.Contains("AppLogger.Error(\"XeSession\"", source, StringComparison.Ordinal);
+
+        AssertEverySessionRoutesThroughTheSharedEnsure();
     }
 
     private static string ReadServiceSource(string fileName)

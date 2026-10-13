@@ -104,11 +104,11 @@ public sealed class FinOpsRecommendationFiguresTests
         InEnUs(() =>
         {
             var low = Assert.Single(FinOpsRecommendationFigures.VmRightSizing(14.99m, "w", 16, 0, 0, 0, "m", 1000m));
-            Assert.Contains("from 16 to 4 cores", low.Finding, StringComparison.Ordinal);
+            Assert.Contains("from 16 to 4 logical CPUs", low.Finding, StringComparison.Ordinal);
             Assert.Equal(375m, low.EstMonthlySavings);   // 1000 * (1 - 4/16) * 0.50
 
             var mid = Assert.Single(FinOpsRecommendationFigures.VmRightSizing(15m, "w", 16, 0, 0, 0, "m", 1000m));
-            Assert.Contains("from 16 to 8 cores", mid.Finding, StringComparison.Ordinal);
+            Assert.Contains("from 16 to 8 logical CPUs", mid.Finding, StringComparison.Ordinal);
             Assert.Equal(250m, mid.EstMonthlySavings);   // 1000 * (1 - 8/16) * 0.50
 
             Assert.Empty(FinOpsRecommendationFigures.VmRightSizing(30m, "w", 16, 0, 0, 0, "m", 1000m));

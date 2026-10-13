@@ -137,7 +137,9 @@ public partial class LocalDataService
         using var _q = TimeQuery("GetTraceFlagChangesAsync", "v_trace_flags snapshot diff");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var snapshots = await ReadTraceFlagSnapshotsAsync(serverId, endTime);
-        return ConfigChangeDiff.DiffTraceFlagChanges(snapshots, startTime, endTime)
+        /* #5633 item 19: a successful run that stored no row is an empty snapshot, so the LAST flag being turned off is a change. */
+        var emptyRuns = await GetEmptyTraceFlagRunsAsync(serverId, startTime, endTime);
+        return ConfigChangeDiff.DiffTraceFlagChanges(snapshots, emptyRuns, startTime, endTime)
             .Select(c => new TraceFlagChangeRow(c))
             .ToList();
     }
@@ -167,7 +169,7 @@ public partial class LocalDataService
         command.CommandText = $@"
 SELECT 1
 WHERE EXISTS (SELECT 1 FROM {view} WHERE server_id = $1 AND capture_time < $2)
-AND   EXISTS (SELECT 1 FROM v_collection_log WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)";
+AND   EXISTS (SELECT 1 FROM v_collection_log WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 AND collector_name <> '{CollectionCycleSkip.CollectorName}')";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });

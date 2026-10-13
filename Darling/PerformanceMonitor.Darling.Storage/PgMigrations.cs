@@ -943,6 +943,53 @@ END $$;";
     private static readonly string V174Sql = ServiceVersionTable.CreateSql;
 
     /// <summary>
+    /// V179 (#5640) - everything the Client Timeouts alert needs in the store, in one rung. (1) <c>collect.attention_events</c>: the
+    /// <c>AttentionCollector</c> table, a <c>count</c> row for each run whose event_counter delta is above zero (event_time NULL; a quiet run writes none) plus one <c>sample</c> row per kept ring-buffer
+    /// event (attention_count 0). A collector table that stays a PLAIN table on every store (<c>ICollectorSchemaInfo.StaysPlainTable</c>): no hypertable, no compression and no
+    /// Timescale retention policy, because the 73rd hypertable is a grid decision (#3035, #3044, #3107) and its rows are low volume. Its 30-day
+    /// retention is the time-sliced DELETE the retention sweep runs on both store kinds. A fresh store already has it from V1's catalog walk, so
+    /// the CREATE is a no-op there and the real create on upgrade.
+    /// Columns are exactly <c>PgSchemaGenerator.CreateTable</c>'s output for the catalog entry. (2)
+    /// <c>config.config_mute_rules.client_app_pattern</c>: the client-application match for mute rules (nullable text, no default,
+    /// like V157's <c>server_id</c>). (3) Three alert settings on <c>config.config_alert_settings</c>, named like V177's:
+    /// <c>client_timeouts_enabled</c> (<c>boolean NOT NULL DEFAULT FALSE</c>: the alert ships OFF until the bars are checked against a
+    /// week of capture on the field stores), <c>client_timeouts_warning_per_minute</c> (default 10) and
+    /// <c>client_timeouts_critical_per_minute</c> (default 60), attentions per minute averaged over three minutes. The defaults are
+    /// a guess from "a healthy app rarely times out", not a measured normal rate. Written as literals because a migration's text is
+    /// frozen at the version it ships in. No CHECK on the bounds, no reload beacon of its own (V17's trigger bumps the version on any
+    /// write to the settings row), no GRANT (the <c>collect</c> and <c>config</c> schemas carry blanket SELECT and table-level
+    /// grants). Catalog-only: every added column is nullable or has a constant default. Every statement is idempotent. <b>Lite twin:</b>
+    /// the DuckDB bump to schema 68. Sequenced after V176-V178 (#5638, #5641, #5684), which are in other open changes.
+    /// </summary>
+    private const string V179Sql = @"
+CREATE TABLE IF NOT EXISTS collect.attention_events (
+    attention_event_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    event_time timestamp,
+    event_kind text,
+    attention_count bigint,
+    database_name text,
+    client_app_name text,
+    client_hostname text,
+    session_id integer,
+    request_id integer,
+    interrupt_duration_us bigint,
+    statement_fingerprint text,
+    statement_text text
+);
+
+CREATE INDEX IF NOT EXISTS idx_attention_events_time ON collect.attention_events(server_id, collection_time);
+
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS client_app_pattern text;
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS client_timeouts_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS client_timeouts_warning_per_minute integer NOT NULL DEFAULT 10,
+    ADD COLUMN IF NOT EXISTS client_timeouts_critical_per_minute integer NOT NULL DEFAULT 60;";
+
+    /// <summary>
     /// V175 (#5631) — <c>collect.plan_regression_daily.rowcount_sum</c>: the day's sum of <c>avg_rowcount * execution_count</c> for
     /// the plan, so PLAN_REGRESSION can tell a plan whose cost followed a much bigger output from a real regression on the daily
     /// path, as it can on the raw and interval-table paths. NULL when any interval of the day had no <c>avg_rowcount</c>, so a
@@ -1041,6 +1088,18 @@ ALTER TABLE config.config_alert_settings
     /// watermark read.</para>
     /// </summary>
     private const string V178Sql = QueryStoreWatermarks.CreateSql;
+
+    /// <summary>
+    /// V180 (#5654) — the tables for alerts that another service raises through Darling's channels, routes and mute rules:
+    /// <c>config.external_alert_source</c> (the registry that maps a login role to a source name), <c>config.external_alert_pending</c>
+    /// (the queue the provisioned function appends to and the service drains) and <c>config.external_alert_state</c> (which keys are
+    /// firing), plus <c>config.config_mute_rules.external_source</c>, so a mute rule can name a source. The text is on
+    /// <see cref="ExternalAlertTables"/>, which the rung embeds. All three tables are created empty, so nothing is moved, and the
+    /// column is nullable with no default: one catalog-only <c>ADD COLUMN</c>, and every stored rule keeps its effect (NULL names no
+    /// source). No GRANT here: the <c>config</c> schema's blanket SELECT covers the tables, and owner-only writes, and the one EXECUTE
+    /// each source role holds, are provisioning's, re-asserted on every start. <b>No Lite twin:</b> Lite has no PostgreSQL store.
+    /// </summary>
+    private static readonly string V180Sql = ExternalAlertTables.CreateSql;
 
     /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
@@ -1332,6 +1391,8 @@ $rung$;";
         new Migration(176, "procedure-stats-totals", V176Sql),
         new Migration(177, "runnable-queue-alert-settings", V177Sql),
         new Migration(178, "query-store-watermarks", V178Sql),
+        new Migration(179, "client-timeouts-alert", V179Sql),
+        new Migration(180, "external-alerts", V180Sql),
     };
 
     /// <summary>

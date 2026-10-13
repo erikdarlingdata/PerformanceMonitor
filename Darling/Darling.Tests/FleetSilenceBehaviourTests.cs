@@ -105,6 +105,7 @@ public sealed class FleetSilenceBehaviourTests
     {
         if (!TryRun("unsilence", out var r)) return;
 
+        /* The harness also holds a rule limited to one external source (#5654): it is left alone, like "narrow". */
         Assert.Equal(new[] { "Unsilence" }, Labels(r, "before"));
         var urls = r.GetProperty("writes").EnumerateArray().Select(w => w.GetProperty("method").GetString() + " " + w.GetProperty("url").GetString()).ToArray();
         Assert.Equal(new[] { "DELETE /api/mute-rules/own-1", "DELETE /api/mute-rules/hand-built" }, urls);

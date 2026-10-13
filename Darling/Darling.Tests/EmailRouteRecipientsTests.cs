@@ -63,6 +63,25 @@ public sealed class EmailRouteRecipientsTests
         Assert.Equal((0, (string?)null), rig.Core.GetEmailHealth());
     }
 
+    /// <summary>#5654: an external alert's title is marked in the subject; a built-in alert's subject is unchanged.</summary>
+    [Fact]
+    public async Task AnExternalAlertsSubject_NamesTheSource_AndABuiltInSubjectDoesNot()
+    {
+        using var rig = new Rig(defaultRecipients: "ops@example.invalid");
+
+        var external = await rig.FireAsync(
+            "External:billing:queue-depth",
+            context: new AlertContext { External = new AlertExternalOrigin("billing", "queue-depth", 3) },
+            displayName: "Server Unreachable");
+        var builtIn = await rig.FireAsync("Server Unreachable", displayName: "Server Unreachable");
+
+        Assert.Equal(AlertChannelOutcome.Delivered, external.EmailOutcome);
+        Assert.Equal(AlertChannelOutcome.Delivered, builtIn.EmailOutcome);
+        Assert.Equal(2, rig.Smtp.RawMessages.Count);
+        Assert.Contains("Subject: [SQL Monitor Alert] [External: billing] Server Unreachable on SRV1", rig.Smtp.RawMessages[0], StringComparison.Ordinal);
+        Assert.Contains("Subject: [SQL Monitor Alert] Server Unreachable on SRV1", rig.Smtp.RawMessages[1], StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// The negative half, and the one that would have turned silence into failed rows: SMTP is now "enabled"
     /// on host and from alone, so a firing no route covers reaches the recipient resolution with nobody to
@@ -282,10 +301,11 @@ public sealed class EmailRouteRecipientsTests
 
         public EmailSendCore Core { get; }
 
-        public Task<EmailFanoutResult> FireAsync(string metricName, AlertNotificationMode? deliveryMode = null) =>
+        public Task<EmailFanoutResult> FireAsync(
+            string metricName, AlertNotificationMode? deliveryMode = null, AlertContext? context = null, string? displayName = null) =>
             Core.TrySendAsync(
-                metricName, "SRV1", "95%", "80%", "srv1", context: null, attemptChannels: true,
-                deliveryMode: deliveryMode);
+                metricName, "SRV1", "95%", "80%", "srv1", context: context, attemptChannels: true,
+                displayName: displayName, deliveryMode: deliveryMode);
 
         public void Dispose() => Smtp.Dispose();
     }

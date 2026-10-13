@@ -117,6 +117,10 @@ public partial class RemoteCollectorService
                 case AlwaysOnXeChange.Created:
                     AppLogger.Info("XeSession", $"{label} created and started (database-scoped, {DescribeChoice(result.Choice)})");
                     break;
+                case AlwaysOnXeChange.CreatedWithoutStatementText:
+                    /* #5640: the capture note for a create Azure SQL Database refused for an unproved action (error 25744). */
+                    AppLogger.Warn("XeSession", $"{label} created and started without statement text: Azure SQL Database refused an action of the full definition (error 25744), so these client timeouts carry no sql_text ({DescribeChoice(result.Choice)})");
+                    break;
                 case AlwaysOnXeChange.Started:
                     AppLogger.Info("XeSession", $"{label} was stopped and has been started ({DescribeChoice(result.Choice)})");
                     break;

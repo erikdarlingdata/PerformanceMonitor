@@ -54,6 +54,9 @@ public sealed class DarlingSelfAlertTests
         public bool RunnableQueueEnabled { get; set; }
         public int RunnableQueueWarningPerScheduler { get; set; } = 8;
         public int RunnableQueueCriticalPerScheduler { get; set; } = 16;
+        public bool ClientTimeoutsEnabled { get; set; }
+        public int ClientTimeoutsWarningPerMinute { get; set; } = 10;
+        public int ClientTimeoutsCriticalPerMinute { get; set; } = 60;
         public bool LongRunningQueryEnabled { get; set; }
         public bool TempDbSpaceEnabled { get; set; }
         public bool LowDiskEnabled { get; set; }
@@ -5586,6 +5589,9 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult(new List<DeadlockAlertRow>());
         public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<PoisonWaitAccumulation>());
+        public Task<AttentionWindow> GetAttentionWindowAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
+            Task.FromResult(AttentionWindow.Empty);
+        
         public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<RunnableQueueSample>>(new List<RunnableQueueSample>());
         public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(

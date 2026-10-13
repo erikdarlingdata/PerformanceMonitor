@@ -187,12 +187,12 @@ public static class ServerHardwareScope
 
     /// <summary>
     /// What a sentence calls the CPU count it prints beside a number: "vCores" on an Azure SQL Database, where that count is the
-    /// vCores the service objective gives the database (the same rule as <see cref="CpuCountUnit"/>), and "cores" everywhere else,
-    /// which is the word the FinOps CPU right-sizing recommendation has always used. The recommendation takes the count from the
+    /// vCores the service objective gives the database (the same rule as <see cref="CpuCountUnit"/>), and "logical CPUs" everywhere else:
+    /// the count is <c>cpu_count</c>, the logical processors the OS shows, not physical cores (16 logical CPUs can be 8 cores). The recommendation takes the count from the
     /// FinOps utilization read, so it names it the way the utilization card does.
     /// </summary>
     public static string CpuCoreNoun(int? engineEdition) =>
-        HardwareIsTheHosts(engineEdition) ? "vCores" : "cores";
+        HardwareIsTheHosts(engineEdition) ? "vCores" : "logical CPUs";
 
     /// <summary>
     /// What the FinOps utilization card measures the buffer pool against: physical RAM on SQL Server and Managed Instance, and

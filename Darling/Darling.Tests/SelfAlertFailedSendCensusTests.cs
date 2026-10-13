@@ -478,6 +478,7 @@ public sealed class SelfAlertFailedSendCensusTests
     [InlineData("ApplyAgentNotRunningAsync", 0, "AgentDownMetric")]
     [InlineData("ApplyAgDatabaseHealthAsync", 1, "AgSyncFellBehindMetric")]
     [InlineData("ApplyCustomRuleHealthAsync", 0, "CustomRuleHealthMetric")]
+    [InlineData("ApplyExternalAlertsAsync", 0, "ExternalAlertsUndeliveredMetric")]
     [InlineData("ApplyFleetGateAsync", 0, "FleetGateMetric")]
     [InlineData("ApplyStoreJobCadenceAsync", 0, "JobCadenceMetric")]
     [InlineData("ApplyRetentionHoldsAsync", 0, "RetentionHoldMetric")]

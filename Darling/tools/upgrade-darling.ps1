@@ -2059,6 +2059,21 @@ function Get-DarlingRollbackBackups([string]$installRoot) {
     return ,@($mine | Sort-Object -Property LastWriteTimeUtc, Name -Descending)
 }
 
+# Every rollback backup that is kept is limited to SYSTEM and Administrators (#5700): a backup taken by an earlier run copied the
+# install root's files under the root's inherited DACL. Each backup folder gets the protected DACL on its own, and the files in it
+# are reset to inherit it. A problem is a warning and the upgrade carries on.
+#
+# The list is assigned before the loop and NOT wrapped in @( ): Get-DarlingRollbackBackups returns a unary-comma array, and @( )
+# around the call makes a one-element array holding the whole list, so with two or more backups the loop ran once and the folder
+# step received every path joined by spaces (#5700 follow-up).
+function Protect-DarlingKeptRollbackBackups([string]$installRoot) {
+    $kept = Get-DarlingRollbackBackups $installRoot
+    foreach ($retained in $kept) {
+        $retainedProblem = Protect-DarlingRollbackBackupFolder $retained.FullName -ResetChildren
+        if ($retainedProblem) { Warn $retainedProblem }
+    }
+}
+
 # The backups past retention, given the newest-first list Get-DarlingRollbackBackups produces.
 #
 # $keep counts the backup this run just took, so -KeepRollbacks 3 means "this one and the two before it".
@@ -3545,13 +3560,8 @@ if ($prunable.Count -gt 0) {
     Good ("Reclaimed {0}." -f (Format-DarlingBytes $result.Reclaimed))
 }
 
-# Every rollback backup that is kept is limited to SYSTEM and Administrators (#5700): a backup taken by an earlier run copied the
-# install root's files under the root's inherited DACL. The folder gets the protected DACL and the files in it are reset to
-# inherit it. A problem is a warning and the upgrade carries on.
-foreach ($retained in @(Get-DarlingRollbackBackups $InstallRoot)) {
-    $retainedProblem = Protect-DarlingRollbackBackupFolder $retained.FullName -ResetChildren
-    if ($retainedProblem) { Warn $retainedProblem }
-}
+# Every kept rollback backup is limited to SYSTEM and Administrators, one folder at a time (#5700).
+Protect-DarlingKeptRollbackBackups $InstallRoot
 
 # THIS COPY IS AN OVERLAY, not a replacement. Expand-Archive -Force (and the Copy-Item -Recurse -Force
 # folder path) overwrite what the new build ships and delete nothing else, so a file the old version had

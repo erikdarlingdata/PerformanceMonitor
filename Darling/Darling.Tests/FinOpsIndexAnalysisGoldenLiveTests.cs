@@ -71,15 +71,15 @@ public sealed class FinOpsIndexAnalysisGoldenLiveTests
         RunAsync(async (connectionString, anchor, ct) =>
         {
             await using var dataSource = NpgsqlDataSource.Create(connectionString);
-            var inputs = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, ServerIdA, 30, ct);
+            var inputs = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, ServerIdA, 30, cancellationToken: ct);
             var options = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync(dataSource, ServerIdA, 30, cancellationToken: ct);
             var noProps = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync(dataSource, ServerIdB, 30, cancellationToken: ct);
-            var timed = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(dataSource, ServerIdA, 30, ct);
+            var timed = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(dataSource, ServerIdA, 30, cancellationToken: ct);
             var result = timed.Result;
-            var empty = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisAsync(dataSource, ServerIdB, 30, ct);
-            var longInputs = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, ServerIdC, 30, ct);
+            var empty = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisAsync(dataSource, ServerIdB, 30, cancellationToken: ct);
+            var longInputs = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, ServerIdC, 30, cancellationToken: ct);
             var longOptions = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupOptionsAsync(dataSource, ServerIdC, 30, cancellationToken: ct);
-            var longTimed = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(dataSource, ServerIdC, 30, ct);
+            var longTimed = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(dataSource, ServerIdC, 30, cancellationToken: ct);
             var longResult = longTimed.Result;
             return Serialize(anchor,
                 new object[] { inputs, options, noProps, result,

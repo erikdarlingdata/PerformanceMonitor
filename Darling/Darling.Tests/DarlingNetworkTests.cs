@@ -153,6 +153,11 @@ public sealed class DarlingNetworkTests
     [InlineData("adminviewer")]               // a missing separator is one unknown role, not two known ones
     [InlineData("admin;viewer")]              // ';' is not a separator this accepts
     [InlineData("admin|viewer")]
+    [InlineData("source")]                    // #5654: the token is "sources", and a near miss fails closed
+    [InlineData("sources,darling")]
+    [InlineData("darling_alert_sources")]     // the group's own name is not a token
+    [InlineData("+darling_alert_sources")]    // nor its pg_hba spelling ('+' is a separator, so this is the name)
+    [InlineData("viewer;sources")]
     public void NormalizeNetworkRoles_AnyUnrecognisedElement_InvalidatesTheWholeValue(string role)
     {
         /* Whole-value rejection, not element filtering. Keeping the good half of "admin,darling" would
@@ -184,7 +189,10 @@ public sealed class DarlingNetworkTests
     [InlineData("admin,viewer")]
     [InlineData("viewer+admin")]
     [InlineData("  admin , viewer  ")]
-    public void NormalizeNetworkRoles_NeverEmitsAnythingButViewerOrAdmin(string? role)
+    [InlineData("sources")]
+    [InlineData("viewer,sources")]
+    [InlineData("SOURCES+admin+viewer")]
+    public void NormalizeNetworkRoles_NeverEmitsAnythingButViewerAdminOrSources(string? role)
     {
         /* D6, stated over the OUTPUT rather than the input: whatever this returns is written straight into a
            pg_hba login-role field, so no accepted spelling — including the list forms the field newly takes —
@@ -192,7 +200,62 @@ public sealed class DarlingNetworkTests
         var roles = DarlingNetwork.NormalizeNetworkRoles(role);
         Assert.NotNull(roles);
         Assert.NotEmpty(roles!);
-        Assert.All(roles!, r => Assert.True(r is "viewer" or "admin", $"'{r}' is not a remote seat role"));
+        Assert.All(roles!, r => Assert.True(r is "viewer" or "admin" or "sources", $"'{r}' is not a network role token"));
+    }
+
+    [Theory]
+    [InlineData("sources", new[] { "sources" })]
+    [InlineData("Sources", new[] { "sources" })]
+    [InlineData("viewer,sources", new[] { "sources", "viewer" })]
+    [InlineData("sources+viewer", new[] { "sources", "viewer" })]
+    [InlineData("admin,sources", new[] { "admin", "sources" })]
+    [InlineData("sources viewer admin", new[] { "admin", "sources", "viewer" })]
+    [InlineData("viewer,admin,sources,sources", new[] { "admin", "sources", "viewer" })]
+    public void NormalizeNetworkRoles_Sources_AcceptedAloneAndInCombination_InOneStableOrder(string role, string[] expected)
+    {
+        /* #5654: one order however the field is written (ordinal: admin, sources, viewer), so the pg_hba block is the same
+           text and the reconciler does not rewrite and reload on a reordering. */
+        Assert.Equal(expected, DarlingNetwork.NormalizeNetworkRoles(role)!);
+    }
+
+    [Fact]
+    public void NormalizeNetworkRole_SourcesAlone_IsNotAdmin()
+    {
+        /* The singular answers "is admin reachable from the network"; listing sources does not make it so. */
+        Assert.Equal("sources", DarlingNetwork.NormalizeNetworkRole("sources"));
+        Assert.NotEqual("admin", DarlingNetwork.NormalizeNetworkRole("viewer,sources"));
+        Assert.Equal("admin", DarlingNetwork.NormalizeNetworkRole("admin,sources"));
+    }
+
+    [Theory]
+    [InlineData("sources", "hostssl darling +darling_alert_sources 192.0.2.0/24 scram-sha-256")]
+    [InlineData("viewer", "hostssl darling viewer 192.0.2.0/24 scram-sha-256")]
+    [InlineData("admin", "hostssl darling admin 192.0.2.0/24 scram-sha-256")]
+    [InlineData("viewer,sources",
+        "hostssl darling +darling_alert_sources 192.0.2.0/24 scram-sha-256\nhostssl darling viewer 192.0.2.0/24 scram-sha-256")]
+    [InlineData("admin,sources",
+        "hostssl darling admin 192.0.2.0/24 scram-sha-256\nhostssl darling +darling_alert_sources 192.0.2.0/24 scram-sha-256")]
+    [InlineData("sources,viewer,admin",
+        "hostssl darling admin 192.0.2.0/24 scram-sha-256\nhostssl darling +darling_alert_sources 192.0.2.0/24 scram-sha-256\nhostssl darling viewer 192.0.2.0/24 scram-sha-256")]
+    public void BuildNetworkPgHbaLines_SourcesToken_IsTheGroupLine_ExactTextPerCombination(string role, string expected)
+    {
+        /* #5654: the token maps to '+darling_alert_sources' (pg_hba's '+' matches the group's members), never 'all' and never
+           a role literally named 'sources'. */
+        var block = DarlingManagedPostgres.BuildNetworkPgHbaLines(DarlingNetwork.NormalizeNetworkRoles(role)!, "192.0.2.0/24");
+        Assert.Equal(expected, block);
+    }
+
+    [Fact]
+    public void PgHbaRoleField_MapsEachTokenExplicitly_AndRefusesAnythingElse()
+    {
+        Assert.Equal("viewer", DarlingManagedPostgres.PgHbaRoleField("viewer"));
+        Assert.Equal("admin", DarlingManagedPostgres.PgHbaRoleField("admin"));
+        Assert.Equal("+" + DarlingManagedRoles.AlertSourceGroupRoleName, DarlingManagedPostgres.PgHbaRoleField("sources"));
+        Assert.Equal("sources", DarlingManagedPostgres.AlertSourcesNetworkToken);
+        foreach (var other in new[] { "all", "darling", "mcp", "Sources", "+darling_alert_sources", "" })
+        {
+            Assert.Throws<ArgumentOutOfRangeException>(() => DarlingManagedPostgres.PgHbaRoleField(other));
+        }
     }
 
     /* ---- listen/ssl -o arg-gen (DarlingManagedPostgres.BuildServerRuntimeOptions) ---- */

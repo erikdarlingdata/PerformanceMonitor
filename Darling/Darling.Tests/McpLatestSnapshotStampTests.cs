@@ -138,7 +138,8 @@ public sealed class McpLatestSnapshotStampTests
     /// Tools the reader-call sweep sees because they call a <c>*Latest*Async</c> reader as an INPUT to a read
     /// that is not itself a latest snapshot: the two CPU rankings read the newest server_properties row for the
     /// core count their attribution divides by; get_plan_corrections reads the newest automatic-tuning settings
-    /// beside its paged correction history; get_sweep_reports reads the newest fleet sweep, a worklist rather than
+    /// beside its paged correction history; audit_config reads the newest server_properties row for the Edition
+    /// string it echoes (#5633 item 10) beside its analysis-fact checks, which are the analysis pass's, not a snapshot; get_sweep_reports reads the newest fleet sweep, a worklist rather than
     /// a per-server snapshot; get_pvs_stats mixes a latest per-database snapshot (stamped per row) with a trend,
     /// and is the named exclusion <see cref="AsOfWindowAnchorTests"/> carries for that reason. None of them is a
     /// latest-snapshot tool, and none gets a <c>captured_at</c> here — the control below fails if one gains it,
@@ -146,7 +147,7 @@ public sealed class McpLatestSnapshotStampTests
     /// </summary>
     public static readonly string[] LatestLookupInsideAnotherRead =
     [
-        "get_plan_corrections", "get_pvs_stats", "get_sweep_reports", "get_top_procedures_by_cpu", "get_top_queries_by_cpu",
+        "audit_config", "get_plan_corrections", "get_pvs_stats", "get_sweep_reports", "get_top_procedures_by_cpu", "get_top_queries_by_cpu",
     ];
 
     /// <summary>get_server_summary carries THREE clocks by name (<c>cpu_captured_at</c>, <c>memory_captured_at</c>,

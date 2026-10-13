@@ -1002,7 +1002,7 @@ ORDER BY bucket";
         return items;
     }
 
-    public async Task<List<ProcedureStatsRow>> GetTopProceduresByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, ServerClock? serverClock = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    public async Task<List<ProcedureStatsRow>> GetTopProceduresByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, ServerClock? serverClock = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, IReadOnlyList<string>? excludeDatabaseNames = null)
     {
         using var _q = TimeQuery("GetTopProceduresByCpuAsync", "v_procedure_stats top N by CPU");
         using var connection = await OpenConnectionAsync();
@@ -1011,6 +1011,8 @@ ORDER BY bucket";
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
 
+        /* #5633 review: databases the server dropped, left out of an all-databases ranking. NULL-safe: a row with no database name stays. */
+        var excludeClause = BuildDbExcludeClause(excludeDatabaseNames, "database_name", 6 + dbValues.Count, out var excludeValues);
         command.CommandText = @"
 SELECT
     database_name,
@@ -1045,7 +1047,7 @@ FROM v_procedure_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + @"
+AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + excludeClause + @"
 GROUP BY database_name, schema_name, object_name, object_type
 HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
 ORDER BY SUM(delta_worker_time) DESC
@@ -1058,6 +1060,8 @@ LIMIT $4";
         /* $5: the window start on the server's clock, as in GetTopQueriesByCpuAsync (#4766). */
         command.Parameters.Add(new DuckDBParameter { Value = (serverClock ?? ServerClock.Utc).OffsetMinutesAt(startTime) });
         foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+        foreach (var db in excludeValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<ProcedureStatsRow>();

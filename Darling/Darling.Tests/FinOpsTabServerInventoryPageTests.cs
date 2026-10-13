@@ -76,8 +76,8 @@ public sealed class FinOpsTabServerInventoryPageTests
         var row = RowSlice();
         foreach (var key in keys)
             Assert.Matches("(?m)^\\s+" + Regex.Escape(key) + " = ", row);
-        // engine_edition is emitted but not shown, as on the desktop; so is health_score_note (the words for a dash in place of a score).
-        Assert.Equal(27, Regex.Matches(row, "(?m)^\\s+[a-z_]+ = ").Count);
+        // engine_edition is emitted but not shown, as on the desktop; so are health_score_note (the words for a dash in place of a score) and cost_reason (why the cost is null, #5633).
+        Assert.Equal(28, Regex.Matches(row, "(?m)^\\s+[a-z_]+ = ").Count);
         Assert.Equal(25, keys.Count);
     }
 

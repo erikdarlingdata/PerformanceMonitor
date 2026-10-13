@@ -91,7 +91,9 @@
     //                                    // holds the config-table service-credential pivot), or BOTH as
     //                                    // "admin,viewer" — one hostssl line per role, so an admin seat
     //                                    // and read-only seats reach the same store, and narrowing
-    //                                    // allowFrom later tightens every one of them. Never the
+    //                                    // allowFrom later tightens every one of them. "sources" admits
+    //                                    // the external alert source logins (--add-alert-source) through
+    //                                    // one "+darling_alert_sources" line, e.g. "viewer,sources". Never the
     //                                    // superuser, never all; one bad element rejects the whole value.
     // }
   },
@@ -217,7 +219,7 @@
   "procedureStatsDeferredPlanFetch": "on",
 
   // The alert engine (optional section). Every default mirrors Performance Monitor Lite's:
-  // cpu 80% (total mode), blocking 1, deadlock 1, poison wait 500 ms, runnable queue 8 / 16 per scheduler, long-running query
+  // cpu 80% (total mode), blocking 1, deadlock 1, poison wait 500 ms, runnable queue 8 / 16 per scheduler, client timeouts OFF (10 / 60 per minute), long-running query
   // 30 min, tempdb 80%, low disk 10% / 5 GB, job multiplier 3x, failed-job lookback 60 min,
   // cooldown 5 min. Omit the whole section (or any key) for those defaults.
   "alerts": {

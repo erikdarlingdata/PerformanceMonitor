@@ -76,9 +76,16 @@ public static class CollectionCaveatStore
     /// server's whole row set with it is equivalent to upserting the unread ones and deleting the read ones,
     /// without needing their names.</para>
     ///
-    /// <para>Opens no connection when <paramref name="unread"/> is empty AND the server has no existing rows
-    /// to clear — the common steady-state case (a clean pass with nothing ever recorded) pays nothing. A
-    /// clean pass on a server with standing rows still opens a connection, to clear them.</para>
+    /// <para>Always opens a connection and always runs the clear (the DELETE), even when
+    /// <paramref name="unread"/> is empty and the server has no rows: one cheap statement per scheduled pass,
+    /// in exchange for not having to read the table first to find out. The upsert is skipped when nothing is
+    /// unread.</para>
+    ///
+    /// <para><b>Scheduled passes only (#5633 item 13).</b> This table is the SCHEDULED analysis pass's state, so
+    /// only the worker's pass, running as the service role, calls this. An on-demand pass (the MCP
+    /// <c>analyze_server</c> tool, anchored or not) computes its caveats for its own response and never
+    /// writes the table; the <c>mcp</c> role holds no write on it (see <c>DarlingAnalysisService.AnalyzeAsync</c>'s
+    /// <c>persistCollectionCaveats</c>).</para>
     ///
     /// <para>Never throws. Logged once at Warning and swallowed: a store write that failed loses this pass's
     /// update to the table, not the pass itself, and the next pass tries again.</para>

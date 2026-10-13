@@ -140,9 +140,14 @@ public sealed class CollectorStateContractTests
            EIGHT since #4200. blocked_process_report and deadlocks each persist the dedicated XE ring-buffer
            session's own execution_count (server-scoped, or per database via XeShredGate.KeyFor on Azure SQL
            DB) so the next cycle can tell "nothing arrived" from a stale watermark and skip the cast+shred.
-           Also no host code: change-only, generic wiring. */
+           Also no host code: change-only, generic wiring.
+
+           NINE since #5640. attention persists two things per scope (server, or per database on Azure SQL DB): the
+           ring-buffer session's execution_count (XeShredGate, the same gate as the two collectors above) and the
+           event_counter's last count (the prior its next delta is taken against). Both are staged and land only
+           once the run's rows are written; no host code. */
         Assert.Equal(
-            new[] { "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" },
+            new[] { "attention", "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" },
             CollectorCatalog.All
                 .Where(c => c.StateKeys.Count > 0)
                 .Select(c => c.Name)

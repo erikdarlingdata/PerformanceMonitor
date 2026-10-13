@@ -36,8 +36,8 @@ public sealed class WebAuditLaneDLabelTests
     public void W14_TriageAndMuteAreTheFirstAlertHistoryColumns()
     {
         var alerts = Js("pages", "alerts.js");
-        Assert.Contains("[SELECT_COLUMN, TRIAGE_COLUMN, MUTE_COLUMN].concat(ALERT_COLUMNS)", alerts, StringComparison.Ordinal);
-        Assert.Contains(": [TRIAGE_COLUMN].concat(ALERT_COLUMNS)", alerts, StringComparison.Ordinal);
+        Assert.Contains("[SELECT_COLUMN, TRIAGE_COLUMN, MUTE_COLUMN].concat(base)", alerts, StringComparison.Ordinal);
+        Assert.Contains(": [TRIAGE_COLUMN].concat(base)", alerts, StringComparison.Ordinal);
         Assert.DoesNotContain("{ key: \"triage\", label: \"Triage\", csv: false, render: (a) => triageCell(a) },\n];", alerts, StringComparison.Ordinal);
     }
 

@@ -172,12 +172,14 @@ public class AlertIncidentRenderTests
             new[]
             {
                 "AgReplicaIdentity", "AttachmentFileName", "AttachmentXml", "CollectorName", "Details",
-                "EscalationBypassesCooldown", "Incidents", "NewestSample", "Route", "Routing", "SeverityOverride", "WaitType"
+                "EscalationBypassesCooldown", "External", "Incidents", "NewestSample", "Route", "Routing", "SeverityOverride", "WaitType"
             },
             census);
 
         var context = AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A");
         context.SeverityOverride = AlertSeverityLevel.Critical;
+        /* #5654: the external origin rides every copy, so a delivered card keeps its title mark. */
+        context.External = new AlertExternalOrigin("billing", "queue-depth", 1);
         context.AttachmentXml = "<graph/>";
         context.AttachmentFileName = "deadlock_graph.xml";
         /* #5641: a tier escalation's cooldown bypass rides every copy (the cooldown reads it off the context it is handed). */
@@ -209,6 +211,7 @@ public class AlertIncidentRenderTests
         {
             Assert.Equal(AlertSeverityLevel.Critical, copy.SeverityOverride);
             Assert.Equal("OrdersAG:REPLICA-A", copy.AgReplicaIdentity);
+            Assert.Equal(context.External, copy.External);
             Assert.Equal(context.NewestSample, copy.NewestSample);
             Assert.True(copy.EscalationBypassesCooldown);
         }

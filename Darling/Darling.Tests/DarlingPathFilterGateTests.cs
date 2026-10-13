@@ -265,6 +265,8 @@ public sealed class DarlingPathFilterGateTests
 
         Assert.Contains(".github/workflows/darling-ui-smoke.yml", patterns, StringComparer.Ordinal);
         Assert.Contains("tools/ui-smoke/**/!(*.md)", patterns, StringComparer.Ordinal);
+        // #5745: the WPF smoke workflow carries a fourth copy of the cluster step (the viewer walk), parsed by the same pin.
+        Assert.Contains(".github/workflows/wpf-smoke.yml", patterns, StringComparer.Ordinal);
     }
 
     /// <summary>

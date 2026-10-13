@@ -65,7 +65,7 @@ public sealed class RunnableQueueEscalationTests
     [Fact]
     public void RunnableQueueIsTheOnlyAlertThatOptedIn()
     {
-        Assert.Equal(new[] { "Runnable Queue" }, TierEscalation.OptedInMetrics.OrderBy(m => m, StringComparer.Ordinal));
+        Assert.Equal(new[] { "Client Timeouts", "Runnable Queue" }, TierEscalation.OptedInMetrics.OrderBy(m => m, StringComparer.Ordinal));
         Assert.True(TierEscalation.IsOptedIn(RunnableQueueEvaluator.MetricName));
 
         /* The two-level alerts that keep the old behaviour: a worsening inside the window waits for the cooldown. */
@@ -82,9 +82,11 @@ public sealed class RunnableQueueEscalationTests
     {
         var engine = System.IO.File.ReadAllText(RepoFile("PerformanceMonitor.Alerting/AlertEngine.cs"));
 
-        Assert.Equal(1, Count(engine, "IsEscalation("));
+        /* Runnable Queue and Client Timeouts (#5640) are the two fire sites. */
+        Assert.Equal(2, Count(engine, "IsEscalation("));
         Assert.Equal(1, Count(engine, "_runnableQueueEscalation.IsEscalation("));
-        Assert.Equal(1, Count(engine, "EscalationBypassesCooldown ="));
+        Assert.Equal(1, Count(engine, "_attentionEscalation.IsEscalation("));
+        Assert.Equal(2, Count(engine, "EscalationBypassesCooldown ="));
     }
 
     /* ---------------- the engine ---------------- */

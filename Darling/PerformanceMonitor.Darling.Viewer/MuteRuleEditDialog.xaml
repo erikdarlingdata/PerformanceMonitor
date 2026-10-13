@@ -1,6 +1,7 @@
 <Window x:Class="PerformanceMonitor.Darling.Viewer.MuteRuleEditDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:n="clr-namespace:PerformanceMonitor.Notifications;assembly=PerformanceMonitor.Notifications"
         Title="Create Mute Rule"
         SizeToContent="Height" Width="520"
         WindowStartupLocation="CenterOwner"
@@ -72,6 +73,7 @@
             <ComboBoxItem Content="High CPU"/>
             <ComboBoxItem Content="Poison Wait"/>
             <ComboBoxItem Content="Runnable Queue"/>
+            <ComboBoxItem Content="{x:Static n:AlertFamily.ClientTimeoutsMetric}"/>
             <ComboBoxItem Content="Long-Running Query"/>
             <ComboBoxItem Content="tempdb Space"/>
             <ComboBoxItem Content="Volume Free Space"/>
@@ -85,6 +87,7 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
@@ -104,6 +107,10 @@
 
             <TextBlock Grid.Row="2" Grid.Column="2" x:Name="JobNameLabel" Text="Job Name (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
             <TextBox Grid.Row="3" Grid.Column="2" x:Name="JobNamePatternBox" Margin="0,0,0,8"/>
+
+            <TextBlock Grid.Row="4" Grid.Column="0" x:Name="ClientAppLabel" Text="Client Application (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+            <TextBox Grid.Row="5" Grid.Column="0" x:Name="ClientAppPatternBox" Margin="0,0,0,8"
+                     ToolTip="Alerts raised for a client application whose name contains this value (case-insensitive) will be muted, for example Management Studio to mute SSMS cancels."/>
         </Grid>
 
         <StackPanel Grid.Row="14" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">

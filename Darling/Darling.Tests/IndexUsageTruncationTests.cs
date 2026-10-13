@@ -122,7 +122,9 @@ public sealed class IndexUsageTruncationTests
     public void TheUnusedFirstOrderingKeyIsStillThere_BecauseTheOrderingWasNotTheDefect()
     {
         SqlTextPin.AssertExpresses(
-            "CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 0 ELSE 1 END",
+            /* #5633 item 16: a heap or a clustered index with no reads is 'Table not read', not a drop candidate, so it no longer
+               takes the first sort slot; the unused-first key is otherwise unchanged. */
+            "CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 AND index_type_desc IS DISTINCT FROM 'HEAP' AND COALESCE(index_type_desc, '') NOT LIKE 'CLUSTERED%' THEN 0 ELSE 1 END",
             ReaderSql,
             "drop candidates are no longer ranked ahead of active indexes");
     }

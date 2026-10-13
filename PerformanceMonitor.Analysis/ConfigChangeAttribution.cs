@@ -150,9 +150,10 @@ namespace PerformanceMonitor.Analysis;
 /// <see cref="IsAttributableDatabaseSetting"/> excludes it; the other 26 are options an <c>ALTER DATABASE</c>
 /// (or a restore, an encryption scan, a state change) sets. (2) <c>TraceFlagsCollector</c> writes NO row when
 /// <c>DBCC TRACESTATUS(-1)</c> returns none, so a capture with zero enabled flags is invisible to the
-/// set-diff: "the last flag was disabled" and "the first flag was enabled" are both undetectable, and a
-/// flag's previous-capture span can be wider than the truth. The history tool shares the blind spot; this
-/// class inherits it rather than guessing, and the report names the sentinel-row fix as a follow-up.</para>
+/// rows alone. #5633 item 19 closed that: the callers also read the collector's SUCCESSFUL runs that stored zero rows and
+/// hand them to <c>ConfigChangeDiff.DiffTraceFlagChanges</c> as empty snapshots, so "the last flag was disabled"
+/// and "the first flag was enabled" are detected, and the empty run times join the capture times given to
+/// <see cref="GroupIntoEvents"/>.</para>
 /// </summary>
 public static class ConfigChangeAttribution
 {

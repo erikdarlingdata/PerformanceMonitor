@@ -156,6 +156,8 @@ Lite runs a daily collector only while it is open, one collector at a time per s
 
 A skipped day crosses the 36-hour stale line before the next slot. In both apps, the row says so in `run_time_note`. A full row always carries it (empty when no day was skipped). A partial row carries it only for a collector that has a run time. A compact row never carries it. Lite's note also says that Lite collects only while it is open.
 
+A partial row leaves out every key whose value is null, false or 0, so a missing key means one of those. Only `collector`, `status`, `partial_detail`, `total_runs` and `errors` are always there. `full_detail=true` returns every field.
+
 ### Retention
 
 Three independent mechanisms:

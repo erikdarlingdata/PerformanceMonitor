@@ -376,7 +376,7 @@ public sealed class McpPayloadContractCensusTests
     private static readonly Regex SharedPassThroughProducer = new(
         @"\b(?:DarlingServerResolver|ServerResolver)\.(?:ResolveOrError\w*|ResolveWithFingerprintNameAsync|LoadEnabledOrFaultAsync)\("
         + @"|\bResolveMuteScope\("
-        + @"|\bMcpHelpers\.(?:ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate|ValidateChoice|ValidateMinMs|Refusal)\("
+        + @"|\bMcpHelpers\.(?:ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateBaselineWindow|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate|ValidateChoice|ValidateMinMs|Refusal)\("
         + @"|\bDarlingFleetSweepEndpoints\.ValidateWatchState\("
         + @"|\bTrendBuckets\.(?:Resolve|ValidateWidth|RequireWholeHours)\("
         + @"|\b(?:Darling|Mcp)EngineCapability\.NotCollectedStatusAsync\("

@@ -244,6 +244,29 @@ public sealed class WaitNameSpacedHistoryReadTests : IClassFixture<SharedDuckDbF
         Assert.Equal(1_100, other.TopWaitTimeMs);
     }
 
+    /// <summary>The FinOps wait categories (#5633 item 22): the exchange waits and the hash-spill waits are Parallelism, and CPU holds
+    /// only SOS_SCHEDULER_YIELD. Before, CXPACKET and its siblings were counted as CPU and the hash waits fell into Other.</summary>
+    [Fact]
+    public async Task WaitCategorySummary_ParallelismWaits_AreTheirOwnCategory_NotCpuOrOther()
+    {
+        var t1 = Truncate(DateTime.UtcNow.AddHours(-2));
+        await SeedWaitAsync(t1, "CXPACKET", deltaMs: 1000, deltaSignal: 0, deltaTasks: 10, interval: 300);
+        await SeedWaitAsync(t1, "HTBUILD", deltaMs: 300, deltaSignal: 0, deltaTasks: 3, interval: 300);
+        await SeedWaitAsync(t1, "HTREPARTITION", deltaMs: 200, deltaSignal: 0, deltaTasks: 2, interval: 300);
+        await SeedWaitAsync(t1, "HTDELETE", deltaMs: 100, deltaSignal: 0, deltaTasks: 1, interval: 300);
+        await SeedWaitAsync(t1, "SOS_SCHEDULER_YIELD", deltaMs: 800, deltaSignal: 0, deltaTasks: 20, interval: 300);
+
+        var categories = await _dataService.GetWaitCategorySummaryAsync(ServerId, hoursBack: 24);
+
+        var parallelism = Assert.Single(categories, c => c.Category == "Parallelism");
+        Assert.Equal(1_600, parallelism.TotalWaitTimeMs);
+        Assert.Equal("CXPACKET", parallelism.TopWaitType);
+        var cpu = Assert.Single(categories, c => c.Category == "CPU");
+        Assert.Equal(800, cpu.TotalWaitTimeMs);
+        Assert.Equal("SOS_SCHEDULER_YIELD", cpu.TopWaitType);
+        Assert.DoesNotContain(categories, c => c.Category == "Other");
+    }
+
     /// <summary>The analysis pass's wait facts: one fact under the clean name, with both spellings' time.</summary>
     [Fact]
     public async Task AnalysisWaitFacts_ANameStoredBothWays_IsOneFactUnderTheCleanName()

@@ -38,6 +38,7 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public bool DeadlockEnabled => App.AlertDeadlockEnabled;
     public bool PoisonWaitEnabled => App.AlertPoisonWaitEnabled;
     public bool RunnableQueueEnabled => App.AlertRunnableQueueEnabled;
+    public bool ClientTimeoutsEnabled => App.AlertClientTimeoutsEnabled;
     public bool LongRunningQueryEnabled => App.AlertLongRunningQueryEnabled;
     public bool TempDbSpaceEnabled => App.AlertTempDbSpaceEnabled;
     public bool LowDiskEnabled => App.AlertLowDiskEnabled;
@@ -71,6 +72,11 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
         RunnableQueueEvaluator.ClampBars(App.AlertRunnableQueueWarningPerScheduler, App.AlertRunnableQueueCriticalPerScheduler).Warning;
     public int RunnableQueueCriticalPerScheduler =>
         RunnableQueueEvaluator.ClampBars(App.AlertRunnableQueueWarningPerScheduler, App.AlertRunnableQueueCriticalPerScheduler).Critical;
+    /* #5640: the Client Timeouts pair as the engine reads it - Warning at least 1, Critical never below Warning. */
+    public int ClientTimeoutsWarningPerMinute =>
+        AttentionEvaluator.ClampBars(App.AlertClientTimeoutsWarningPerMinute, App.AlertClientTimeoutsCriticalPerMinute).Warning;
+    public int ClientTimeoutsCriticalPerMinute =>
+        AttentionEvaluator.ClampBars(App.AlertClientTimeoutsWarningPerMinute, App.AlertClientTimeoutsCriticalPerMinute).Critical;
     public int LongRunningQueryThresholdMinutes => App.AlertLongRunningQueryThresholdMinutes;
 
     /* The six long-running-query read knobs — Lite exposes all six as real settings. */

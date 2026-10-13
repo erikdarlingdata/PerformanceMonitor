@@ -769,6 +769,9 @@ public partial class SettingsWindow : Window
         AlertRunnableQueueCheckBox.IsChecked = r.RunnableQueueEnabled;
         AlertRunnableQueueWarningBox.Text = r.RunnableQueueWarningPerScheduler.ToString(CultureInfo.InvariantCulture);
         AlertRunnableQueueCriticalBox.Text = r.RunnableQueueCriticalPerScheduler.ToString(CultureInfo.InvariantCulture);
+        AlertClientTimeoutsCheckBox.IsChecked = r.ClientTimeoutsEnabled;
+        AlertClientTimeoutsWarningBox.Text = r.ClientTimeoutsWarningPerMinute.ToString(CultureInfo.InvariantCulture);
+        AlertClientTimeoutsCriticalBox.Text = r.ClientTimeoutsCriticalPerMinute.ToString(CultureInfo.InvariantCulture);
         AlertLongRunningQueryCheckBox.IsChecked = r.LongRunningQueryEnabled;
         AlertLongRunningQueryThresholdBox.Text = r.LongRunningQueryThresholdMinutes.ToString(CultureInfo.InvariantCulture);
         /* V20: the long-running-query read shape (max-results + the five noise filters) is store-backed now. */
@@ -864,6 +867,7 @@ public partial class SettingsWindow : Window
             DeadlockEnabled = AlertDeadlockCheckBox.IsChecked == true,
             PoisonWaitEnabled = AlertPoisonWaitCheckBox.IsChecked == true,
             RunnableQueueEnabled = AlertRunnableQueueCheckBox.IsChecked == true,
+            ClientTimeoutsEnabled = AlertClientTimeoutsCheckBox.IsChecked == true,
             LongRunningQueryEnabled = AlertLongRunningQueryCheckBox.IsChecked == true,
             /* V20 long-running-query read shape (the five noise-filter opt-outs; max-results parsed below). */
             LongRunningQueryExcludeSpServerDiagnostics = LrqExcludeSpServerDiagnosticsCheckBox.IsChecked == true,
@@ -934,6 +938,24 @@ public partial class SettingsWindow : Window
             errors.Add(!warningOk
                 ? "Runnable queue Warning must be a whole number of at least 1 runnable task per scheduler."
                 : "Runnable queue Critical must be a whole number no lower than the Warning bar.");
+        }
+        /* #5640: the Client Timeouts bars, the engine's own rule (AttentionEvaluator.ClampBars: Warning at least 1, Critical never
+           below Warning), refused rather than clamped, and whatever the checkbox says, for the reason above (the row is built fresh
+           with the 10/60 defaults). */
+        var ctWarningOk = int.TryParse(AlertClientTimeoutsWarningBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ctWarning) && ctWarning >= 1;
+        var ctCriticalOk = int.TryParse(AlertClientTimeoutsCriticalBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ctCritical) && ctCritical >= 1;
+        if (ctWarningOk && ctCriticalOk && ctCritical >= ctWarning)
+        {
+            row.ClientTimeoutsWarningPerMinute = ctWarning;
+            row.ClientTimeoutsCriticalPerMinute = ctCritical;
+        }
+        else
+        {
+            errors.Add(!ctWarningOk
+                ? "Client timeouts Warning must be a whole number of at least 1 attention per minute."
+                : !ctCriticalOk
+                    ? "Client timeouts Critical must be a whole number of at least 1 attention per minute."
+                    : "Client timeouts Critical must be a whole number no lower than the Warning bar.");
         }
         if (int.TryParse(AlertLongRunningQueryThresholdBox.Text, out var lrq) && lrq > 0)
             row.LongRunningQueryThresholdMinutes = lrq;
@@ -1075,6 +1097,8 @@ public partial class SettingsWindow : Window
         AlertPoisonWaitThresholdBox.Text = "500";
         AlertRunnableQueueWarningBox.Text = RunnableQueueEvaluator.DefaultWarningPerScheduler.ToString(CultureInfo.InvariantCulture);
         AlertRunnableQueueCriticalBox.Text = RunnableQueueEvaluator.DefaultCriticalPerScheduler.ToString(CultureInfo.InvariantCulture);
+        AlertClientTimeoutsWarningBox.Text = AttentionEvaluator.DefaultWarningPerMinute.ToString(CultureInfo.InvariantCulture);
+        AlertClientTimeoutsCriticalBox.Text = AttentionEvaluator.DefaultCriticalPerMinute.ToString(CultureInfo.InvariantCulture);
         AlertLongRunningQueryThresholdBox.Text = "30";
         /* V20: the long-running-query read shape resets to Lite's App defaults (5 rows, every filter on). */
         AlertLongRunningQueryMaxResultsBox.Text = "5";
@@ -1201,6 +1225,9 @@ public partial class SettingsWindow : Window
         if (AlertRunnableQueueCheckBox.IsChecked == true)
             parts.Add(string.Create(CultureInfo.InvariantCulture,
                 $"runnable queue >= {AlertRunnableQueueWarningBox.Text}/{AlertRunnableQueueCriticalBox.Text} per scheduler (avg {RunnableQueueEvaluator.WindowMinutes}min)"));
+        if (AlertClientTimeoutsCheckBox.IsChecked == true)
+            parts.Add(string.Create(CultureInfo.InvariantCulture,
+                $"client timeouts >= {AlertClientTimeoutsWarningBox.Text}/{AlertClientTimeoutsCriticalBox.Text} per minute (avg {AttentionEvaluator.WindowMinutes}min)"));
         if (AlertLongRunningQueryCheckBox.IsChecked == true)
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
@@ -1281,6 +1308,9 @@ public partial class SettingsWindow : Window
         AlertRunnableQueueCheckBox.IsEnabled = enabled;
         AlertRunnableQueueWarningBox.IsEnabled = enabled;
         AlertRunnableQueueCriticalBox.IsEnabled = enabled;
+        AlertClientTimeoutsCheckBox.IsEnabled = enabled;
+        AlertClientTimeoutsWarningBox.IsEnabled = enabled;
+        AlertClientTimeoutsCriticalBox.IsEnabled = enabled;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         /* V20 long-running-query read-shape controls follow the master switch like the rest of the engine. */

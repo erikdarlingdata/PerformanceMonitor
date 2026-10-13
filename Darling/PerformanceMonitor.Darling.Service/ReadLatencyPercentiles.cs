@@ -33,8 +33,14 @@ public static class ReadLatencyPercentiles
     /// count is the overflow bucket, one past every finite bound); that bucket's answer is flagged
     /// <see cref="ReadLatencyPercentileEstimate.IsAtLeast"/> — the true duration only known to exceed the last
     /// bound, never by how much.
+    ///
+    /// <para><paramref name="maxMs"/> (#5633 item 23) is the slowest duration actually seen over the same samples. No
+    /// duration exceeds it, so no percentile can either: a bucket bound above it is capped to it. A capped value is
+    /// no longer a bucket bound, but it is still an UPPER-BOUND estimate (the true percentile is at or below it), so
+    /// <see cref="ReadLatencyPercentileEstimate.IsAtLeast"/> stays false and the "at most" reading stays true. Max 3,568
+    /// ms with every percentile in the 5,000 ms bucket answers 3,568, not a p99 above the max.</para>
     /// </summary>
-    public static ReadLatencyPercentileEstimate? FromBuckets(long[] counts, int[] bounds, double p)
+    public static ReadLatencyPercentileEstimate? FromBuckets(long[] counts, int[] bounds, double p, long? maxMs = null)
     {
         if (counts is null || bounds is null || counts.Length != bounds.Length + 1)
         {
@@ -68,7 +74,7 @@ public static class ReadLatencyPercentiles
             cumulative += counts[i];
             if (cumulative >= target)
             {
-                return new ReadLatencyPercentileEstimate(bounds[i], IsAtLeast: false);
+                return new ReadLatencyPercentileEstimate(CapAtMax(bounds[i], maxMs), IsAtLeast: false);
             }
         }
 
@@ -76,4 +82,8 @@ public static class ReadLatencyPercentiles
            bucket. The last finite bound is reported as a FLOOR ("≥"), not a made-up finite value. */
         return new ReadLatencyPercentileEstimate(bounds[^1], IsAtLeast: true);
     }
+
+    /// <summary>A bucket bound capped at the observed maximum when it is higher (a negative max is "unknown", not a cap).</summary>
+    private static long CapAtMax(long boundMs, long? maxMs) =>
+        maxMs is >= 0 && boundMs > maxMs ? maxMs.Value : boundMs;
 }

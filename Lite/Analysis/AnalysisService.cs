@@ -997,6 +997,7 @@ ORDER BY event_time";
 
             var databaseSnapshots = await ReadDatabaseConfigSnapshotsAsync(context);
             var traceFlagSnapshots = await ReadTraceFlagSnapshotsAsync(context);
+            var emptyTraceFlagRuns = await ReadEmptyTraceFlagRunsAsync(context);
 
             var serverEvents = ConfigChangeAttribution.GroupIntoEvents(
                 ConfigChangeDiff.DiffServerConfigChanges(snapshots, context.TimeRangeStart, context.TimeRangeEnd)
@@ -1009,9 +1010,9 @@ ORDER BY event_time";
                     .Select(c => (c.ChangeTime, ConfigChangeAttribution.SettingChange.ForDatabase(c.DatabaseName, c.SettingName, c.OldValue, c.NewValue))),
                 databaseSnapshots.Select(s => s.CaptureTime));
             var traceFlagEvents = ConfigChangeAttribution.GroupIntoEvents(
-                ConfigChangeDiff.DiffTraceFlagChanges(traceFlagSnapshots, context.TimeRangeStart, context.TimeRangeEnd)
+                ConfigChangeDiff.DiffTraceFlagChanges(traceFlagSnapshots, emptyTraceFlagRuns, context.TimeRangeStart, context.TimeRangeEnd)
                     .Select(c => (c.ChangeTime, ConfigChangeAttribution.SettingChange.ForTraceFlag(c.TraceFlag, c.ChangeType, c.Scope, c.PreviousStatus, c.NewStatus))),
-                traceFlagSnapshots.Select(s => s.CaptureTime));
+                traceFlagSnapshots.Select(s => s.CaptureTime).Concat(emptyTraceFlagRuns));
             var events = ConfigChangeAttribution.MergeSameConnectEvents(serverEvents.Concat(databaseEvents).Concat(traceFlagEvents));
             if (events.Count == 0)
                 return;
@@ -1097,6 +1098,19 @@ ORDER BY event_time";
         }
 
         return rows;
+    }
+
+    /// <summary>The times of the successful trace_flags runs that stored no row (#5633 item 19), through
+    /// <see cref="LocalDataService.EmptyTraceFlagRunsSql"/>. No catch of its own, for the reason
+    /// <see cref="ReadDatabaseConfigSnapshotsAsync"/> states.</summary>
+    private async Task<List<DateTime>> ReadEmptyTraceFlagRunsAsync(AnalysisContext context)
+    {
+        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(context.CancellationToken);
+        using var command = connection.CreateCommand();
+        return await LocalDataService.ReadEmptyTraceFlagRunsAsync(
+            command, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
     }
 
     /// <summary>

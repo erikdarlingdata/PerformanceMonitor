@@ -49,6 +49,8 @@ darling:
   # #5616: the Darling PostgreSQL shard script and the Lite shard script are run by the shard jobs and
   # parsed by Darling.Tests pins, so an edit to either has to reach the suite.
   - '.github/scripts/run-darling-pg-shard.ps1'
+  - '.github/scripts/darling-shard-pack.py'
+  - '.github/scripts/darling-shard-weights.json'
   - '.github/scripts/run-lite-shard.ps1'
   # #5627: the Darling upgrade-shape workflow and its script. The workflow runs the install and upgrade scripts under
   # Darling/tools (already covered above) over real releases, and Darling.Tests parses both files, so an edit to
@@ -61,6 +63,9 @@ darling:
   # job and leave a stale count literal to surface as an unrelated red on the next Darling pull request.
   - '.github/workflows/darling-ui-smoke.yml'
   - 'tools/ui-smoke/**/!(*.md)'
+  # #5745: the WPF smoke workflow copies the same cluster step again (viewer walk on a seeded store), so it is parsed by
+  # CiClusterWorkerSizingTests too.
+  - '.github/workflows/wpf-smoke.yml'
 
 # Lite/** is deliberately ABSENT, though build.yml's own `darling` filter carries it. That entry
 # exists because Darling.Tests reads Lite source in its cross-app parity guards, and those guards run

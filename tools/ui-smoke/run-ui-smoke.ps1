@@ -21,6 +21,9 @@
 .PARAMETER WorkDir     Scratch folder for the config, logs, cluster and screenshots. Made if missing.
 .PARAMETER NoBuild     Skip dotnet build (the caller already built the Release service).
 .PARAMETER Channel     Browser channel for playwright-core: chrome (the runner's) or msedge.
+.PARAMETER SeedOnly    Stop after seed.sql is applied: no npm, no browser walk. The WPF smoke check (#5745, wpf-smoke.yml) uses this to
+                       get a migrated, seeded store for the Darling viewer; the service is stopped, and the caller keeps the cluster
+                       and the config in -WorkDir\cfg\darling.json (the viewer reads it through DARLING_CONFIG).
 #>
 [CmdletBinding()]
 param(
@@ -29,7 +32,8 @@ param(
     [int] $WebPort = 5153,
     [string] $WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) 'darling-ui-smoke'),
     [switch] $NoBuild,
-    [string] $Channel = 'chrome'
+    [string] $Channel = 'chrome',
+    [switch] $SeedOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -90,6 +94,11 @@ try {
     if (-not $registered) { throw "the service did not register ui-sql in the store in 120 s (migrations still running? see service.out.log)" }
 
     Invoke-Psql @('-f', (Join-Path $here 'seed.sql'))
+
+    if ($SeedOnly) {
+        Write-Host "store seeded; config is $cfgPath"
+        return
+    }
 
     Push-Location $here
     try {

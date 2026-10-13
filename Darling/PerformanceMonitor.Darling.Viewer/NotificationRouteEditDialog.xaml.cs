@@ -45,7 +45,7 @@ public partial class NotificationRouteEditDialog : Window
         if (existing is null)
         {
             Route = new NotificationRouteRow();
-            FamilyCombo.SelectedIndex = AlertFamily.All.Count - 1; /* performance — the pages family, the likeliest first route */
+            FamilyCombo.SelectedIndex = System.Linq.Enumerable.ToList(AlertFamily.All).IndexOf(AlertFamily.Performance); /* the pages family, the likeliest first route */
             return;
         }
 

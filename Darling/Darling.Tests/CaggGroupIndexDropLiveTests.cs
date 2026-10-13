@@ -318,6 +318,18 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < ExternalAlertTables.RungVersion)
+        {
+            /* V180 (#5654) - the registry of the services that raise alerts through the store is the probe's sentinel; its two dependants go with it. The shared helper owns the removal. */
+            await RungRewindArtifacts.DropV180SentinelAsync(connection, ct);
+        }
+
+        if (simulatedVersion < 179)
+        {
+            /* V179 (#5640) - the Client Timeouts settings columns are the probe's newest sentinel. The shared helper owns the removal. */
+            await RungRewindArtifacts.DropV179SentinelAsync(connection, ct);
+        }
+
         if (simulatedVersion < QueryStoreWatermarks.RungVersion)
         {
             /* V178 (#5684) - the per-batch Query Store watermark table is the probe's newest sentinel; the coverage table goes with it. The shared helper owns the removal. */
@@ -326,7 +338,7 @@ public sealed class CaggGroupIndexDropLiveTests
 
         if (simulatedVersion < 177)
         {
-            /* V177 (#5641) - the Runnable Queue settings columns are the probe's newest sentinel. The shared helper owns the removal. */
+            /* V177 (#5641) - the Runnable Queue settings columns are the next sentinel down. The shared helper owns the removal. */
             await RungRewindArtifacts.DropV177SentinelAsync(connection, ct);
         }
 

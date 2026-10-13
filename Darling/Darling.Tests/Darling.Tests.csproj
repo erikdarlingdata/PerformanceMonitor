@@ -128,11 +128,15 @@
     <!-- #5701: the UI-smoke workflow stands up a third copy of the same cluster (the same worker numbers), so it is
          copied beside the test binary and parsed by the same formula check. -->
     <None Include="..\..\.github\workflows\darling-ui-smoke.yml" Link="Fixtures\darling-ui-smoke.yml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #5745: the WPF smoke workflow starts the same cluster for the viewer walk, so it is parsed too. -->
+    <None Include="..\..\.github\workflows\wpf-smoke.yml" Link="Fixtures\wpf-smoke.yml" CopyToOutputDirectory="PreserveNewest" />
     <!-- #5616: the shard scripts both workflows call. The cut, the chunking and the per-chunk runs moved out of the
          workflow steps into them, so the pins that read those steps (CiShardCommandLineBudgetTests,
          CiShardHangReportTests) read these copies. -->
     <None Include="..\..\.github\scripts\run-darling-pg-shard.ps1" Link="Fixtures\run-darling-pg-shard.ps1" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\.github\scripts\run-lite-shard.ps1" Link="Fixtures\run-lite-shard.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #5669: the duration table the Darling PG shard cut reads (DarlingShardWeightsTests pins its shape and coverage). -->
+    <None Include="..\..\.github\scripts\darling-shard-weights.json" Link="Fixtures\darling-shard-weights.json" CopyToOutputDirectory="PreserveNewest" />
     <!-- #3072: Darling/README.md, copied beside the test binary so ReadmeDerivedCountPinTests parses
          the REAL file. Its collector-inventory, V1-table, hypertable and worker-sizing figures are
          restatements of CollectorCatalog.All / TimescaleSupport.HypertableCount, and prose cannot call

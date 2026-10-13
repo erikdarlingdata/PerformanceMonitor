@@ -484,6 +484,39 @@ public sealed class DarlingManagedRolesTests
         }
     }
 
+    /// <summary>
+    /// #5633 item 13, as ruled: <c>collect.analysis_collection_caveats</c> is the SCHEDULED pass's state, written
+    /// only by the worker as the service role. The mcp role holds no write on it: no statement in the managed
+    /// batch or in the BYO <c>provision-roles.sql</c> names the table at all, and no <c>GRANT ALL</c> reaches mcp
+    /// (which would carry INSERT/UPDATE/DELETE/TRIGGER/REFERENCES onto it, and onto every other table the grant
+    /// names). The live census (McpCollectionCaveatGrantLiveTests) proves the same on a real role; this one runs
+    /// without a database.
+    /// </summary>
+    [Fact]
+    public void McpRole_HoldsNoWriteOnTheCaveatTable_InTheManagedBatchOrTheByoScript()
+    {
+        var managed = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+        var byo = RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql");
+
+        foreach (var (name, script) in new[] { ("managed", managed), ("byo", byo) })
+        {
+            var code = Regex.Replace(script, @"(?m)--.*$", "");
+            Assert.True(!code.Contains("analysis_collection_caveats", StringComparison.Ordinal), name + ": a statement names the caveat table");
+            Assert.True(!Regex.IsMatch(code, GrantAllToMcp), name + ": GRANT ALL reaches mcp");
+            Assert.True(!Regex.IsMatch(code, McpWriteOnWholeCollectSchema), name + ": a collect-wide non-SELECT grant reaches mcp");
+        }
+
+        /* The patterns catch the shapes the earlier single-keyword regex missed. */
+        Assert.Matches(GrantAllToMcp, "GRANT ALL ON collect.analysis_collection_caveats TO mcp;");
+        Assert.Matches(GrantAllToMcp, "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA collect TO admin, mcp;");
+        Assert.Matches(GrantAllToMcp, "ALTER DEFAULT PRIVILEGES IN SCHEMA collect GRANT ALL ON TABLES TO mcp;");
+        Assert.Matches(McpWriteOnWholeCollectSchema, "GRANT TRIGGER ON ALL TABLES IN SCHEMA collect TO mcp;");
+        Assert.DoesNotMatch(McpWriteOnWholeCollectSchema, "GRANT SELECT ON ALL TABLES IN SCHEMA collect TO mcp;");
+    }
+
+    private const string GrantAllToMcp = @"(?is)\bGRANT\s+ALL\b[^;]*\bTO\b[^;]*\bmcp\b";
+    private const string McpWriteOnWholeCollectSchema = @"(?is)\bGRANT\s+(?!SELECT\s+ON\b)[^;]*\bON\s+ALL\s+TABLES\s+IN\s+SCHEMA\s+collect\b[^;]*\bTO\b[^;]*\bmcp\b";
+
     [Fact]
     public void BuildProvisioningSql_McpRole_GrantsCustomViewsWrite_LikeViewer()
     {

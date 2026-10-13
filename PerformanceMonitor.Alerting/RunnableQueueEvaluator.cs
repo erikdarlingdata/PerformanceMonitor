@@ -146,14 +146,22 @@ public static class RunnableQueueEvaluator
     /// (two gaps). The median ignores one outage gap or a few late collections, so a busy host does not widen the
     /// window, and only the newest gaps count, so a changed cadence is picked up within three collections.
     /// </summary>
-    public static double? MedianGapMinutes(IReadOnlyList<RunnableQueueSample>? samples)
+    public static double? MedianGapMinutes(IReadOnlyList<RunnableQueueSample>? samples) =>
+        MedianGapOfTimes(samples?.Select(s => s.CollectionTime).ToList());
+
+    /// <summary>
+    /// <see cref="MedianGapMinutes(IReadOnlyList{RunnableQueueSample})"/> over bare collection times, so another alert
+    /// that judges the freshness of a collector's runs (the Client Timeouts alert, #5640) applies this one rule
+    /// instead of a copy of it. The times may arrive in any order.
+    /// </summary>
+    public static double? MedianGapOfTimes(IReadOnlyList<DateTime>? collectionTimes)
     {
-        if (samples is null || samples.Count < MinimumSamples)
+        if (collectionTimes is null || collectionTimes.Count < MinimumSamples)
         {
             return null;
         }
 
-        var times = samples.Select(s => s.CollectionTime).OrderByDescending(t => t).Take(CadenceGapCount + 1).ToList();
+        var times = collectionTimes.OrderByDescending(t => t).Take(CadenceGapCount + 1).ToList();
         var gaps = new List<double>(times.Count - 1);
         for (var i = 1; i < times.Count; i++)
         {
@@ -169,9 +177,17 @@ public static class RunnableQueueEvaluator
     /// the median collection gap when that is longer, never more than <see cref="ReadLookbackMinutes"/>. Samples that
     /// give no cadence (fewer than 3) get the 10-minute floor.
     /// </summary>
-    public static double FallbackWindowMinutes(IReadOnlyList<RunnableQueueSample>? samples)
+    public static double FallbackWindowMinutes(IReadOnlyList<RunnableQueueSample>? samples) =>
+        FallbackWindowOfTimes(samples?.Select(s => s.CollectionTime).ToList());
+
+    /// <summary>
+    /// <see cref="FallbackWindowMinutes(IReadOnlyList{RunnableQueueSample})"/> over bare collection times (#5640's
+    /// reuse; see <see cref="MedianGapOfTimes(IReadOnlyList{DateTime})"/>). The cap is this alert's read lookback, which
+    /// the Client Timeouts read shares (<c>AttentionEvaluator.ReadLookbackMinutes</c> is pinned equal to it).
+    /// </summary>
+    public static double FallbackWindowOfTimes(IReadOnlyList<DateTime>? collectionTimes)
     {
-        var gap = MedianGapMinutes(samples);
+        var gap = MedianGapOfTimes(collectionTimes);
         return gap is null
             ? FallbackMinutes
             : Math.Min(ReadLookbackMinutes, Math.Max(FallbackMinutes, CadenceMultiplier * gap.Value));

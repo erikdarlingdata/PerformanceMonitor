@@ -218,6 +218,32 @@ public static class DarlingRetention
     internal const string TerminalCommandStatuses = "status IN ('succeeded', 'failed')";
 
     /// <summary>
+    /// config.external_alert_pending (the queue of alerts other services submit, #5654) keeps its FINISHED rows this long.
+    /// Like the command queue it is not an audit surface: the alert history row is the record of an alert, and the queue
+    /// row only says what the drain did with the submission, which is worth as long as the metric data it sits beside
+    /// (<see cref="DataRetentionBaseDays"/>). It is the only thing that bounds the table, because a source may submit up to
+    /// its per-minute cap for as long as it runs.
+    /// </summary>
+    internal const int ExternalAlertRetentionDays = DataRetentionBaseDays;
+
+    /// <summary>
+    /// The finished-row filter for the external alert queue purge: every status except the two a live row holds. A
+    /// <c>pending</c> row is never purged however old, because it has not been delivered or expired yet, and a
+    /// <c>claimed</c> row belongs to a run that may still be sending (the reaper marks a dead run's claims
+    /// <c>interrupted</c>, which makes them finished). Compile-time constant, never user input.
+    /// </summary>
+    internal const string FinishedExternalAlertStatuses = "status NOT IN ('pending', 'claimed')";
+
+    /// <summary>
+    /// The purge filter for config.external_alert_state (#5654): a subject that is not firing. A cleared subject's row only
+    /// keeps the identity of its last episode, which the next fire overwrites, so deleting it changes nothing a clear or a
+    /// fire reads (an absent row reads as not firing). A firing row is never purged, however old. Compile-time constant,
+    /// never user input. The age column is <c>last_fired_at</c>, which a clear does not move, so it is the last time the
+    /// subject fired and a row cleared long after its fire goes with the horizon too.
+    /// </summary>
+    internal const string ClearedExternalAlertState = "NOT firing";
+
+    /// <summary>
     /// The row cap for <see cref="QueryStorePlanMap"/>'s and <see cref="QueryStoreTextStore"/>'s prune
     /// (#4250 item 3), shared by both tables rather than sized per table, because both clear it in ONE
     /// batch at every measured rate and a single named constant is easier to keep correct than two.
@@ -450,7 +476,10 @@ public static class DarlingRetention
                     continue;
                 }
 
-                if (timescaleAvailable)
+                /* #5640: a catalog entry that stays a plain table (the attention table) has no chunks to drop, so on
+                   a TimescaleDB store it takes the same time-sliced DELETE a plain-PostgreSQL store runs, straight
+                   away, instead of a drop_chunks call that fails and warns once per sweep before falling back. */
+                if (timescaleAvailable && !definition.StaysPlainTable)
                 {
                     var dropped = await DropChunksOneAsync(
                         postgres, definition.TargetTable, DropChunksSqlFor(definition, retentionDays),
@@ -910,6 +939,49 @@ public static class DarlingRetention
             {
                 tablesPurged++;
                 totalRowsDeleted += commandsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            /* config.external_alert_pending (#5654): the queue of alerts other services submit. Finished rows go at
+               ExternalAlertRetentionDays; pending and claimed rows are never touched, however old (expiry and the
+               reaper finish them, retention does not). SCHEMA-QUALIFIED like config.config_command: a bare name would
+               resolve to nothing in `collect`. Keyed on submitted_at (NOT NULL, defaulted), so no row can slip past the
+               horizon by never being stamped. The cutoff is bound as an unspecified-kind DateTime and the store's
+               sessions are pinned to UTC (DarlingStoreConnection), so it compares against the timestamptz column as UTC.
+               config.external_alert_state is purged below. external_alert_source is the registry and is not purged here.
+               Failure-isolated like every sibling. */
+            var externalAlertsDeleted = await PurgeOneAsync(
+                postgres, "config.external_alert_pending",
+                TimeSlicedDeleteSql("config.external_alert_pending", "submitted_at", FinishedExternalAlertStatuses),
+                utcNow.AddDays(-ExternalAlertRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            if (externalAlertsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += externalAlertsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            /* config.external_alert_state (#5654): one row per subject, and a subject is (source, alert_key, server_label),
+               all free text a submitter chooses, so the row count is the number of distinct keys a source has used and a
+               clear only sets firing = false. Rows that are not firing go ExternalAlertRetentionDays after the subject last
+               fired (last_fired_at, set on every fire; a NULL one is never aged out, and a fire always sets it). A firing
+               row stays however old: it is an open incident a clear still has to close. */
+            var externalStateDeleted = await PurgeOneAsync(
+                postgres, "config.external_alert_state",
+                TimeSlicedDeleteSql("config.external_alert_state", "last_fired_at", ClearedExternalAlertState),
+                utcNow.AddDays(-ExternalAlertRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            if (externalStateDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += externalStateDeleted.Value;
             }
             else
             {

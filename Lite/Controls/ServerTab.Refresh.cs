@@ -1245,6 +1245,19 @@ public partial class ServerTab : UserControl
                page is the newest CollectionLogGridCap runs, a sliver of a long range, so the chart is not fed from it. */
             var collectorDurationTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.DurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectorDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, cancellationToken: ct), ct)));
 
+            /* #5643: the late cycles of the last 24 h, beside the grids' reads and independent of the range picker. A failed read
+               leaves the line saying nothing is known rather than the all-clear. */
+            var skippedCyclesTask = Task.Run(async () =>
+            {
+                try { return (SkippedCycleSummary?)await _dataService.GetSkippedCycleSummaryAsync(_serverId, cancellationToken: ct); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    AppLogger.Info("ServerTab", $"[{_server.DisplayName}] GetSkippedCycleSummaryAsync failed: {ex.Message}");
+                    return null;
+                }
+            });
+
             await System.Threading.Tasks.Task.WhenAll(collectionHealthTask, collectionLogTask, collectorDurationTask);
 
             /* #5371: a pass a newer request superseded while only one of the three reads was still running ends here: the replay
@@ -1258,6 +1271,7 @@ public partial class ServerTab : UserControl
             foreach (var row in collectionHealthTask.Result) row.Clock = tabClock;
             foreach (var row in collectionLogTask.Result) row.Clock = tabClock;
 
+            SkippedCyclesSummary.Text = (await skippedCyclesTask)?.SummaryLine(tabClock) ?? "Skipped cycles in 24 h: could not be read";
             _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
             _collectionLogFilterMgr!.UpdateData(collectionLogTask.Result);
             UpdateCollectorDurationChart(collectorDurationTask.Result, hoursBack, fromDate, toDate);

@@ -183,7 +183,8 @@ CREATE TABLE IF NOT EXISTS config_mute_rules (
     database_pattern VARCHAR,
     query_text_pattern VARCHAR,
     wait_type_pattern VARCHAR,
-    job_name_pattern VARCHAR
+    job_name_pattern VARCHAR,
+    client_app_pattern VARCHAR
 )";
 
     public const string CreateDismissedArchiveAlertsTable = @"

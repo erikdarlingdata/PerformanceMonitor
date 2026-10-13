@@ -13,6 +13,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -58,9 +59,15 @@ public sealed class ReadmeDerivedCountPinTests
 
     private static int Hypertables => TimescaleSupport.HypertableCount;
 
-    private static int BackgroundWorkers => Hypertables + 2;
+    /* The README states the RAM-bounded rule and ONE example host (8 GB), not a number that is wrong on every
+       other host (#5633 item 14). The example is derived from the product's own formula. */
+    private const long ExampleHostRamBytes = 8L * 1024 * 1024 * 1024;
 
-    private static int WorkerProcesses => 3 + BackgroundWorkers + 8;
+    private static int BackgroundWorkers =>
+        DarlingManagedPostgres.DeriveWorkerSettings(Hypertables, ExampleHostRamBytes).MaxBackgroundWorkers;
+
+    private static int WorkerProcesses =>
+        DarlingManagedPostgres.DeriveWorkerSettings(Hypertables, ExampleHostRamBytes).MaxWorkerProcesses;
 
     /// <summary>
     /// PostgreSQL collectors that apply to a self-hosted (non-Aurora) PG17 writer — everything except the
@@ -174,8 +181,9 @@ public sealed class ReadmeDerivedCountPinTests
 
         yield return (
             "the worker-sizing paragraph",
-            new Regex(@"Today that is \*\*(\d+)\*\* and \*\*(\d+)\*\* for (\d+) hypertables \(the (\d+) collector tables plus"),
-            () => new[] { BackgroundWorkers, WorkerProcesses, Hypertables, CollectorTotal });
+            new Regex(@"For an 8 GB host that is \*\*(\d+)\*\* and \*\*(\d+)\*\* for (\d+) hypertables \(the (\d+) collector tables plus"),
+            /* The 4th figure is the collector tables that are HYPERTABLES, not the catalog: the attention table stays plain (#5640). */
+            () => new[] { BackgroundWorkers, WorkerProcesses, Hypertables, TimescaleSupport.HypertableTables.Count });
 
         yield return (
             "the empty-PostgreSQL-tables sentence",
