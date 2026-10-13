@@ -216,8 +216,17 @@ for (const spec of config.pages) {
 }
 await browser.close();
 
-/* Screenshot baselines (#5744): the pages marked "screenshot" in pages.json, in Playwright's own pinned Chromium. */
-const shotProblems = await runShots({ config, baseUrl, outDir, only, settle });
+/* The walk's result lands first (report.json is { pages, screenshotProblems }), so nothing the screenshot stage does can lose it. */
+writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: [] }, null, 2));
+
+/* Screenshot baselines (#5744): the pages marked "screenshot" in pages.json, in Playwright's own pinned Chromium. A throw out of the
+   stage (Chromium not installed, an unwritable folder) is a screenshot problem like any other: it fails the run, it does not crash it. */
+let shotProblems;
+try {
+  shotProblems = await runShots({ config, baseUrl, outDir, only, settle });
+} catch (e) {
+  shotProblems = [`screenshots: the stage threw: ${e && e.message ? e.message.split("\n")[0] : e}`];
+}
 for (const p of shotProblems) console.log(`       PROBLEM ${p}`);
 
 writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: shotProblems }, null, 2));

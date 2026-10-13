@@ -46,6 +46,10 @@ jobs:
     runs-on: windows-latest
     # Expected 8 to 10 minutes warm (service build 2, PostgreSQL 1, browser walk 2 to 3); 3 more on a cold pg-runtime cache.
     timeout-minutes: 20
+    # One explicit home for Playwright's Chromium. The `env` context holds only variables declared in an env: map (never the runner's
+    # own LOCALAPPDATA), so the cache step and the install in run-ui-smoke.ps1 both use this path, not Playwright's default.
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\.playwright-browsers
     steps:
       - uses: actions/checkout@v7
 
@@ -110,11 +114,12 @@ jobs:
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
           if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
 
-      # Playwright's own Chromium for the screenshot pages, pinned by the playwright-core version in package-lock.json and cached by it.
+      # Playwright's own Chromium for the screenshot pages, pinned by the playwright-core version in package-lock.json and cached by it,
+      # at PLAYWRIGHT_BROWSERS_PATH (job env above), which `playwright-core install chromium` and chromium.launch() both honour.
       - name: Cache Playwright Chromium
         uses: actions/cache@v6
         with:
-          path: ${{ env.LOCALAPPDATA }}\ms-playwright
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('tools/ui-smoke/package-lock.json') }}
 
       - name: Run the web UI smoke check

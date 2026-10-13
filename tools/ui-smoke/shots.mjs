@@ -27,6 +27,11 @@ const AS_OF_AFTER_ANCHOR_MS = 60000;
 const MAX_DIFF_PIXELS = 0;
 const PIXEL_THRESHOLD = 0.1;
 const MAX_SHOT_TRIES = 8;
+/* How long to wait for every card to turn collection stale. The band opens 2 minutes after the seed anchor (the run log prints the wait it took). */
+const STALE_WAIT_MS = 4 * 60 * 1000;
+/* Screenshot-only: the status bar's database size changes width when it crosses a digit count (99 MB to 100 MB), and a mask hides the
+   glyphs but not the box, so every item to its right would move. A fixed width, wide enough for "Database: 1023 MB (stale)". */
+const SHOT_STYLE = "#statusbar .sb-store-size { display: inline-block; flex: none; box-sizing: border-box; width: 14em; overflow: hidden; white-space: nowrap; }";
 /* A timestamp farther than this from the seed anchor is not seed-relative (a build date, a plan's compile time): left alone. */
 const SHIFT_REACH_MS = 60 * 24 * 3600 * 1000;
 const TS = /(\d{4})-(\d{2})-(\d{2})([T ])(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?/g;
@@ -90,6 +95,7 @@ async function shoot(browser, spec, ctx) {
     reducedMotion: "reduce",
     locale: "en-US",
     timezoneId: "UTC",
+    bypassCSP: true,
   });
   const page = await context.newPage();
   const asOf = new Date(anchorMs + AS_OF_AFTER_ANCHOR_MS).toISOString();
@@ -109,6 +115,8 @@ async function shoot(browser, spec, ctx) {
   await page.clock.setFixedTime(new Date(FIXED_ANCHOR_MS + AS_OF_AFTER_ANCHOR_MS));
   try {
     await page.goto(baseUrl + "/" + spec.hash, { waitUntil: "domcontentloaded" });
+    /* A stylesheet, not an inline style: the status bar is re-mounted on a refresh. The page's CSP (style-src 'self') is why the context bypasses it. */
+    await page.addStyleTag({ content: SHOT_STYLE });
     await settle(page);
     await page.evaluate(() => document.fonts.ready);
     const selectors = [...(config.screenshotDefaults?.mask || []), ...(spec.screenshot?.mask || [])];
@@ -140,19 +148,35 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
 
   /* The service marks a server it cannot reach "collection stale" some minutes after it started, on its own clock: a page shot before
      that shows "Online", one shot after shows "Warning" (the red-proof run caught this, #5744). Wait until /api/fleet says every
-     card is stale, so every run photographs the same state. */
-  const staleDeadline = Date.now() + 12 * 60 * 1000;
+     card is stale, so every run photographs the same state.
+     "Stale" is a BAND, not a threshold: it opens 2 minutes after a server's last collection and closes at 30 (ServerHealthBands.cs,
+     where the card turns Offline and is_online goes false). So the wait has two ways to fail, and each names its own cause: the cards
+     are already past the band (the seed anchor aged past 30 minutes before the shots started), or they never reached it. The anchor
+     is a minute old when this starts and the band opens at 2 minutes, so a real run is stale within a minute or two; the deadline is
+     a few minutes, well inside the job's timeout-minutes. */
+  const staleStarted = Date.now();
+  const staleDeadline = staleStarted + STALE_WAIT_MS;
+  let seen = "no answer from /api/fleet";
   for (;;) {
-    let allStale = false;
     try {
       const fleet = await (await fetch(baseUrl + "/api/fleet")).json();
       const cards = fleet.cards || [];
-      allStale = cards.length > 0 && cards.every((c) => c.collection_stale === true);
+      const stale = cards.filter((c) => c.collection_stale === true).length;
+      const offline = cards.filter((c) => c.is_online === false).length;
+      seen = `${cards.length} cards, ${stale} stale, ${offline} offline`;
+      if (cards.length > 0 && stale === cards.length) {
+        console.log(`ok   fleet is collection stale after ${((Date.now() - staleStarted) / 1000).toFixed(0)}s of waiting (${seen})`);
+        break;
+      }
+      if (offline > 0) {
+        return [`screenshots: the fleet is already past collection stale (${seen}); the cards go Offline 30 minutes after the seed anchor, so the walk ran too long for the seed to stay stale. Shorten the walk or re-seed.`];
+      }
     } catch {
       /* the service answers again on the next poll */
     }
-    if (allStale) break;
-    if (Date.now() > staleDeadline) return ["screenshots: the fleet never reported every server as collection stale in 12 minutes"];
+    if (Date.now() > staleDeadline) {
+      return [`screenshots: the fleet never reached collection stale in ${STALE_WAIT_MS / 60000} minutes (${seen}); the band opens 2 minutes after the seed anchor, so the service clock or the seed anchor is wrong, or /api/fleet stopped answering`];
+    }
     await new Promise((r) => setTimeout(r, 5000));
   }
 
