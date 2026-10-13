@@ -501,6 +501,10 @@ public sealed class ExternalAlertDrainLiveTests
 
     private static async Task WithDrainAsync(Func<Rig, Task> body)
     {
+        /* #5755: the live classes skip when DARLING_TEST_PG is unset (CI's whole-tree guard job has no store). The skip comes before
+           ScratchPostgres.CreateAsync, so neither the create nor its teardown ever sees a null connection string. */
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the external alert drain's live facts (each mints its own scratch database).");
+
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
         await using var seed = new NpgsqlConnection(scratch.ConnectionString);
