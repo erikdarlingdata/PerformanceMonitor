@@ -116,6 +116,14 @@ const BODIES = {
     trend: { status: "empty", message: "No blocking." },
     stats: { status: "empty", message: "No blocking." },
   },
+  /* #5644 W16: every deadlock read answers the {status, message} envelope with ITS OWN wording (the trend's carries the collector-run
+     count, the table's says "specified time range"); the stats read, which draws Deadlock Severity, says a third thing. */
+  deadlockEmpty: {
+    trend: { source: null, trend: [] },
+    stats: { status: "empty", message: "No blocking or deadlock data in the specified time range." },
+    deadlockTrend: { status: "empty", message: "No deadlock was recorded for SRV1 in the last 24 hour(s). 288 collector run(s) DID execute." },
+    deadlocks: { status: "empty", message: "No deadlocks found in the specified time range." },
+  },
 };
 
 const settle = async () => {
@@ -134,10 +142,12 @@ const panelsOf = (root) => {
     if (!hasClass(node, "panel")) return;
     const h3 = node.children.find((c) => c.tag === "h3");
     const strips = [];
+    const empties = [];
     walk(node, (x) => {
       if (hasClass(x, "source")) strips.push(x.textContent);
+      if (hasClass(x, "empty")) empties.push(x.textContent);
     });
-    found.push({ title: h3 && h3.children[0] ? h3.children[0].textContent : "", strips });
+    found.push({ title: h3 && h3.children[0] ? h3.children[0].textContent : "", strips, empties });
   });
   return found;
 };
@@ -146,7 +156,15 @@ const body = BODIES[scenario];
 if (!body) throw new Error("unknown scenario " + scenario);
 globalThis.fetch = async (url) => {
   const u = String(url);
-  const answer = u.includes("/get_blocking_trend") ? body.trend : u.includes("/get_blocking_stats") ? body.stats : {};
+  const answer = u.includes("/get_blocking_trend")
+    ? body.trend
+    : u.includes("/get_blocking_stats")
+      ? body.stats
+      : u.includes("/get_deadlock_trend")
+        ? body.deadlockTrend || {}
+        : u.includes("/get_deadlocks")
+          ? body.deadlocks || {}
+          : {};
   return { status: 200, ok: true, text: async () => JSON.stringify(answer) };
 };
 

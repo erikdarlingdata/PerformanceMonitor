@@ -89,6 +89,15 @@ export function getPanelSignal() {
 }
 
 /**
+ * The sentence an empty envelope shows (#5644 W16). A panel that sets `emptyWins` has ONE agreed sentence for its
+ * empty state (the Blocking tab's deadlock panels, whose reads each worded "nothing happened" differently), and it
+ * replaces the read's own message; every other panel keeps the server's message.
+ */
+export function emptyHeadline(desc, res) {
+  return desc && desc.emptyWins && desc.emptyText ? desc.emptyText : res.message;
+}
+
+/**
  * Build a panel node. It returns immediately with a loading strip and fills itself once the fetch resolves,
  * mapping the API response kinds (data / empty envelope / error / aborted / auth) to the right UI.
  */
@@ -168,7 +177,7 @@ async function loadPanelBody(desc, body, signal) {
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
        new server's empty week does not read as a quiet one. windowFloorStrip is null for a chart and for an envelope
        without the note. */
-    mount(body, [kept, windowFloorStrip(res.data, desc), emptyStrip(res.message)]);
+    mount(body, [kept, windowFloorStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);
     return;
   }
 

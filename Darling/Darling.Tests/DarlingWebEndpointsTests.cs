@@ -506,6 +506,45 @@ public sealed class DarlingWebEndpointsTests
         }
     }
 
+    /* #5644 W22: the tools refuse an out-of-range window as hours_back; a web caller that sent hours is told about hours. */
+    private static string HoursBackRefusal(int value) =>
+        McpHelpers.ValidateHoursBack(value)!;
+
+    [Theory]
+    [InlineData(-5)]
+    [InlineData(500)]
+    public void WindowRefusal_NamesTheHoursParameterTheWebCallerSent(int value)
+    {
+        var refusal = HoursBackRefusal(value);
+        Assert.Contains("hours_back", refusal);
+
+        var named = DarlingWebEndpoints.NameWindowParameterTheCallerSent(refusal, k => k == "hours" ? value.ToString() : null);
+
+        var doc = System.Text.Json.JsonDocument.Parse(named).RootElement;
+        Assert.Equal("invalid", doc.GetProperty("status").GetString());
+        Assert.Equal("hours", doc.GetProperty("hints").GetProperty("parameter").GetString());
+        var message = doc.GetProperty("message").GetString()!;
+        Assert.DoesNotContain("hours_back", message);
+        Assert.Contains($"hours value '{value}'", message);
+    }
+
+    [Fact]
+    public void WindowRefusal_ForAnMcpStyleRequest_OrAnotherParameter_IsLeftAlone()
+    {
+        var refusal = HoursBackRefusal(-5);
+
+        /* The caller sent hours_back (alone or beside hours): the tool's own wording is right. */
+        Assert.Equal(refusal, DarlingWebEndpoints.NameWindowParameterTheCallerSent(refusal, k => k == "hours_back" ? "-5" : null));
+        Assert.Equal(refusal, DarlingWebEndpoints.NameWindowParameterTheCallerSent(refusal, k => k is "hours" or "hours_back" ? "-5" : null));
+        /* No window parameter sent, and a result that is data rather than a refusal. */
+        Assert.Equal(refusal, DarlingWebEndpoints.NameWindowParameterTheCallerSent(refusal, _ => null));
+        const string Data = "{\"status\":\"ok\",\"hints\":{\"parameter\":\"hours_back\"}}";
+        Assert.Equal(Data, DarlingWebEndpoints.NameWindowParameterTheCallerSent(Data, k => k == "hours" ? "1" : null));
+        /* A refusal for a different parameter keeps its wording, even when it mentions hours_back. */
+        var other = McpHelpers.Refusal("baseline_hours_back", "baseline_hours_back must be greater than hours_back.");
+        Assert.Equal(other, DarlingWebEndpoints.NameWindowParameterTheCallerSent(other, k => k == "hours" ? "4" : null));
+    }
+
     [Fact]
     public void NonIntegerParamRefusal_ThroughTheQueryString_ReadsTheFirstNonEmptyValue()
     {

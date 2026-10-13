@@ -355,7 +355,7 @@ public sealed class WebChartAtTimeBehaviourTests
 
         // line() panels: Blocking Events sits on both the Overview tab and the Blocking tab; the deadlock chart is "Deadlocks" on Overview and
         // "Deadlock trend" on the Blocking tab (#5644 W16, so the Deadlocks grid below it is the only panel with that title there).
-        foreach (var (title, item, count) in new[] { ("Blocking Events", "blocking", 2), ("Deadlocks", "deadlocks", 1), ("Deadlock trend", "deadlocks", 1), ("Lock Waits", "blocking", 1) })
+        foreach (var (title, item, count) in new[] { ("Blocked process report trend", "blocking", 2), ("Deadlocks", "deadlocks", 1), ("Deadlock trend", "deadlocks", 1), ("Lock Waits", "blocking", 1) })
         {
             var calls = Regex.Matches(tabs, @"line\(""" + title + @""",");
             Assert.Equal(count, calls.Count);

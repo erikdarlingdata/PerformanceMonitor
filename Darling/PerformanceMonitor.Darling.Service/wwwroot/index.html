@@ -9,6 +9,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Darling Web</title>
+    <!-- #5644: the app has no icon file, so a page load asked for /favicon.ico and got a 404 (a console error). An empty data: icon answers the browser without a request; the CSP allows data: images. -->
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="css/theme.css" />
     <link rel="stylesheet" href="css/app.css" />
     <link rel="stylesheet" href="css/editor.css" />

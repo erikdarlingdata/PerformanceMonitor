@@ -76,7 +76,7 @@ public sealed class WebBlockingSourceBehaviourTests
         var r = Run(scenario);
 
         /* Blocking Events is on the Overview tab and the Blocking tab; Blocking Severity only on the Blocking tab. */
-        var events = Lines(r, "Blocking Events");
+        var events = Lines(r, "Blocked process report trend");
         Assert.Equal(2, events.Length);
         Assert.All(events, lines => Assert.Equal(new[] { expected }, lines));
         var severity = Lines(r, "Blocking Severity");
@@ -96,6 +96,54 @@ public sealed class WebBlockingSourceBehaviourTests
         Assert.All(r.GetProperty("panels").EnumerateArray(), p => Assert.Empty(p.GetProperty("strips").EnumerateArray()));
     }
 
+    /// <summary>The empty sentences every panel of one tab drew, for the panels with that title.</summary>
+    private static string[][] Empties(JsonElement r, string tab, string title) =>
+        r.GetProperty("panels").EnumerateArray()
+            .Where(p => p.GetProperty("tab").GetString() == tab && p.GetProperty("title").GetString() == title)
+            .Select(p => p.GetProperty("empties").EnumerateArray().Select(s => s.GetString()!).ToArray())
+            .ToArray();
+
+    /// <summary>#5644 W16: each deadlock read answers its own empty message (the trend's carries the collector-run count, the table's says
+    /// "specified time range"), and only the Deadlock Severity panel showed the page's sentence. Every deadlock empty state on the
+    /// Blocking tab now says that one sentence, whatever the read said.</summary>
+    [Fact]
+    public void EveryDeadlockEmptyState_OnTheBlockingTab_SaysTheOneSentence()
+    {
+        var r = Run("deadlockEmpty");
+        const string One = "No deadlocks in this window.";
+
+        /* The Blocking tab: the chart (titled Deadlock trend), the Deadlocks grid and the Deadlock Severity panel. */
+        Assert.Equal(new[] { One }, Assert.Single(Empties(r, "blocking", "Deadlock trend")));
+        Assert.Equal(new[] { One }, Assert.Single(Empties(r, "blocking", "Deadlocks")));
+        Assert.Equal(new[] { One }, Assert.Single(Empties(r, "blocking", "Deadlock Severity")));
+    }
+
+    /// <summary>#5644 W16: the panels that are NOT deadlock states keep the read's own message (the sentence is a per-panel opt-in).</summary>
+    [Fact]
+    public void ABlockingEmptyState_StillShowsTheReadsOwnMessage()
+    {
+        var r = Run("deadlockEmpty");
+
+        /* get_blocking_stats answered the envelope, so Blocking Severity (same read as Deadlock Severity) shows the read's message. */
+        Assert.Equal(new[] { "No blocking or deadlock data in the specified time range." }, Assert.Single(Empties(r, "blocking", "Blocking Severity")));
+    }
+
+    /// <summary>#5644 W16: the chart counts one point per blocked-process REPORT while the tile beside it counts one event per wait, so
+    /// the chart says reports (title, legend and empty sentence), on the Overview and Blocking tabs and in the starter dashboard.</summary>
+    [Fact]
+    public void TheBlockingTrendChart_SaysItCountsBlockedProcessReports()
+    {
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        var templates = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "view-templates.js");
+
+        Assert.DoesNotContain("\"Blocking Events\"", tabs);
+        Assert.DoesNotContain("\"Blocking Events\"", templates);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(tabs, "line\\(\"Blocked process report trend\", \"get_blocking_trend\"").Count);
+        Assert.Contains("const BLOCKING_REPORT_SERIES = [{ key: \"count\", label: \"Reports\" }];", tabs);
+        Assert.DoesNotContain("No blocking events in this window — an empty trend", tabs);
+        Assert.Contains("label: \"Reports\"", templates);
+    }
+
     [Fact]
     public void OnlyTheBlockingPanelsGetOne()
     {
@@ -105,6 +153,6 @@ public sealed class WebBlockingSourceBehaviourTests
             .Where(p => p.GetProperty("strips").GetArrayLength() > 0)
             .Select(p => p.GetProperty("title").GetString())
             .ToArray();
-        Assert.Equal(new[] { "Blocking Events", "Blocking Events", "Blocking Severity" }, titles);
+        Assert.Equal(new[] { "Blocked process report trend", "Blocked process report trend", "Blocking Severity" }, titles);
     }
 }

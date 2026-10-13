@@ -16,6 +16,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -415,6 +416,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     }
 
                     result = await handler(context, postgres, analysis);
+
+                    /* #5644 W22: the tools' own window parameter is hours_back, but a web caller sends hours; a refusal for an
+                       out-of-range one (?hours=-5, ?hours=500) is worded in the caller's own parameter. */
+                    result = NameWindowParameterTheCallerSent(result, key => First(context, key));
 
                     /* #4966: a grid over a window says where its table's data starts when that is after the window's
                        start. Added to the web mirror only, never to the tool, so the MCP payloads are unchanged. A
@@ -6464,6 +6469,43 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// #5644 W22: the window refusal (<c>hints.parameter</c> <c>hours_back</c>) a web caller got for <c>?hours=</c> out of range, said in
+    /// the parameter the caller sent. The tools name <c>hours_back</c> (the MCP parameter, kept as it is for MCP callers); the web
+    /// accepts both spellings, and a request that sent only <c>hours</c> was told off for a parameter it never used. A request that
+    /// sent <c>hours_back</c> (alone or beside <c>hours</c>), a refusal for any other parameter, and a result that is not a refusal
+    /// envelope come back unchanged. Only the standalone word is renamed: <c>baseline_hours_back</c> stays.
+    /// </summary>
+    internal static string NameWindowParameterTheCallerSent(string result, Func<string, string?> lookup)
+    {
+        if (!McpHelpers.IsRefusalEnvelope(result) || string.IsNullOrEmpty(lookup("hours")) || !string.IsNullOrEmpty(lookup("hours_back")))
+        {
+            return result;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(result) is not JsonObject envelope
+                || envelope["hints"] is not JsonObject hints
+                || hints["parameter"]?.GetValue<string>() != "hours_back")
+            {
+                return result;
+            }
+
+            hints["parameter"] = "hours";
+            if (envelope["message"]?.GetValue<string>() is { } message)
+            {
+                envelope["message"] = Regex.Replace(message, @"(?<![A-Za-z0-9_])hours_back(?![A-Za-z0-9_])", "hours");
+            }
+
+            return envelope.ToJsonString();
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
+        {
+            return result;
+        }
     }
 
     private static string? NonIntegerParamRefusal(HttpContext context) =>
