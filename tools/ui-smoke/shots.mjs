@@ -137,6 +137,24 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
   const waitMs = anchorMs + AS_OF_AFTER_ANCHOR_MS + 2000 - Date.now();
   if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
 
+  /* The service marks a server it cannot reach "collection stale" some minutes after it started, on its own clock: a page shot before
+     that shows "Online", one shot after shows "Warning" (the red-proof run caught this, #5744). Wait until /api/fleet says every
+     card is stale, so every run photographs the same state. */
+  const staleDeadline = Date.now() + 12 * 60 * 1000;
+  for (;;) {
+    let allStale = false;
+    try {
+      const fleet = await (await fetch(baseUrl + "/api/fleet")).json();
+      const cards = fleet.cards || [];
+      allStale = cards.length > 0 && cards.every((c) => c.collection_stale === true);
+    } catch {
+      /* the service answers again on the next poll */
+    }
+    if (allStale) break;
+    if (Date.now() > staleDeadline) return ["screenshots: the fleet never reported every server as collection stale in 12 minutes"];
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+
   /* Playwright's own Chromium, pinned by the playwright-core version (the workflow installs and caches it): the runner's Chrome
      updates with the image and would move pixels. */
   const browser = await chromium.launch({ headless: true });
