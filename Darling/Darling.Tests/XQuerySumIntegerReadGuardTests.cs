@@ -22,6 +22,15 @@ namespace Darling.Tests;
 /// <c>1.2E1</c>), which fails with "Error converting data type nvarchar to bigint" (the Client Timeouts collector, on every run).
 /// The safe form reads <c>float</c> and CONVERTs. Narrow on purpose: only <c>value('sum(...)', 'int-type')</c> and
 /// <c>value('avg(...)', 'int-type')</c>. <c>count()</c> returns xs:integer and is fine.
+///
+/// <para>Two bounds. (1) <c>[^']*'</c> ends the XQuery at its first single quote, so an XQuery that itself contains a T-SQL-escaped
+/// <c>''</c> literal, such as <c>.value('sum(/a/b[@n=''x'']/@c)', 'bigint')</c>, is not matched: the scan stops at the <c>''</c> and the
+/// <c>\s*,</c> after it cannot match. No such read exists today (<c>AttentionCollector</c> holds the only <c>value('sum(</c> in the live
+/// tree), so this is a documentation gap, not a hole. (2) <c>ScannedTrees</c> covers every shipped <c>.value('...')</c> today: all of them
+/// are in <c>PerformanceMonitor.Collectors</c> (<c>LongQueryCompletionsCollector</c>, <c>DeadlocksCollector</c>, <c>AttentionCollector</c>,
+/// <c>BlockedProcessReportCollector</c>, <c>SystemHealthEventsCollector</c>, <c>MemoryPressureEventsCollector</c>,
+/// <c>IndexObjectStatsCollector</c>, <c>CpuUtilizationCollector</c>). The other four trees are belt and braces; the only <c>.value(</c>
+/// outside them is in <c>install/</c> and <c>deprecated/</c>, the retired SKUs that <c>TsqlConventionGuardTests</c> also treats as out of scope.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
 [Trait("Reads", "Lite")]

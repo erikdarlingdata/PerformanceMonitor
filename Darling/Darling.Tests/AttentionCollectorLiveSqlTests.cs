@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service.Targets;
 using Xunit;
 
 namespace Darling.Tests;
@@ -83,14 +84,6 @@ public sealed class AttentionCollectorLiveSqlTests
             Watermark = Now.AddMinutes(-10),
         };
 
-    private static SqlParameter ToSqlParameter(CollectorParameter parameter) => parameter.Type switch
-    {
-        CollectorParameterType.DateTime2 => new SqlParameter(parameter.Name, SqlDbType.DateTime2) { Value = parameter.Value ?? DBNull.Value },
-        CollectorParameterType.BigInt => new SqlParameter(parameter.Name, SqlDbType.BigInt) { Value = parameter.Value ?? DBNull.Value },
-        CollectorParameterType.Int32 => new SqlParameter(parameter.Name, SqlDbType.Int) { Value = parameter.Value ?? DBNull.Value },
-        _ => throw new NotSupportedException(parameter.Type.ToString()),
-    };
-
     /// <summary>Runs the collector's real batch and its real <c>ReadAsync</c>, the way the host does.</summary>
     private static async Task<(List<AttentionCollector.Row> Rows, CollectorContext Context)> RunCollectorAsync(
         string connectionString, string sessionName, IReadOnlyDictionary<string, string>? state, CancellationToken ct)
@@ -100,11 +93,8 @@ public sealed class AttentionCollectorLiveSqlTests
 
         await using var connection = new SqlConnection(connectionString);
         await connection.OpenAsync(ct);
-        await using var command = new SqlCommand(query.Text, connection) { CommandTimeout = 60 };
-        foreach (var parameter in query.Parameters)
-        {
-            command.Parameters.Add(ToSqlParameter(parameter));
-        }
+        /* The shipped command builder, so the text and the parameter bindings are the host's own, not a copy of them. */
+        await using var command = SqlServerTargetProvider.Instance.CreateCommand(query, connection, 60);
 
         await using var reader = await command.ExecuteReaderAsync(ct);
         var rows = await AttentionCollector.Instance.ReadAsync(reader, context, ct);
@@ -160,7 +150,8 @@ public sealed class AttentionCollectorLiveSqlTests
 
             /* Count 0: the counter target lists the event at zero from the start, which is the case that failed on every run. */
             var (quietRows, quietContext) = await RunCollectorAsync(connectionString!, sessionName, null, ct);
-            Assert.Empty(quietRows);
+            /* Filtered by this test's application name: the session is server-scoped, so another client's attention must not red this read. */
+            Assert.DoesNotContain(quietRows, r => r.EventKind == AttentionCollector.KindSample && r.ClientAppName == appName);
             Assert.Equal(0, StagedCount(quietContext));
             Assert.True(quietContext.StagedItemState.ContainsKey(XeShredGate.KeyFor(null)), "the ring buffer's execution_count is staged");
 
@@ -254,16 +245,21 @@ public sealed class AttentionCollectorLiveSqlTests
         Assert.Equal(expected, await command.ExecuteScalarAsync(ct));
     }
 
-    [Fact]
-    public void BatchText_NoLongerReadsTheSumStraightIntoBigint()
-    {
-        var text = AttentionCollector.BuildText(AttentionCollector.XeSessionName, isAzureSqlDb: false);
-        Assert.DoesNotContain("{3}", text, StringComparison.Ordinal);
-        Assert.Contains(AttentionCollector.EventCountExpression, text, StringComparison.Ordinal);
-        Assert.DoesNotMatch(new Regex(@"value\s*\(\s*'sum\([^']*'\s*,\s*'(big)?int", RegexOptions.IgnoreCase), text);
+    /* The shipped TEXT, independent of EventCountExpression (BuildText substitutes that constant itself, so comparing against it passes by
+       construction): the event-count read is an XQuery sum read as 'float', wrapped in CONVERT(bigint, ...). */
+    private static readonly Regex EventCountRead = new(
+        @"@event_count\s*=\s*CONVERT\(\s*bigint\s*,\s*@target_data\.value\(\s*'sum\([^']*\)'\s*,\s*'float'\s*\)\s*\)\s*;",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
-        var azure = AttentionCollector.BuildText(AttentionCollector.XeSessionName, isAzureSqlDb: true);
-        Assert.Contains(AttentionCollector.EventCountExpression, azure, StringComparison.Ordinal);
-        Assert.Contains("sys.dm_xe_database_session_targets", azure, StringComparison.Ordinal);
+    [Theory]
+    [InlineData(false, "sys.dm_xe_session_targets")]
+    [InlineData(true, "sys.dm_xe_database_session_targets")]
+    public void BatchText_ReadsTheCountAsFloat_WrappedInConvertBigint_OnBothDmvForms(bool isAzureSqlDb, string targetsDmv)
+    {
+        var text = AttentionCollector.BuildText(AttentionCollector.XeSessionName, isAzureSqlDb);
+        Assert.DoesNotContain("{3}", text, StringComparison.Ordinal);
+        Assert.Contains(targetsDmv, text, StringComparison.Ordinal);
+        Assert.Single(EventCountRead.Matches(text));
+        Assert.DoesNotMatch(new Regex(@"value\s*\(\s*'sum\([^']*'\s*,\s*'(big)?int", RegexOptions.IgnoreCase), text);
     }
 }
