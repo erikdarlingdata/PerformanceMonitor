@@ -16,8 +16,6 @@ name: WPF smoke
 # Not a required check. A workflow that is skipped by its path filter never reports, so it cannot be one; the job name is
 # left free of the names build.yml's ruleset uses.
 on:
-  push:
-    branches: ['fix/5745-wpf-smoke']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
@@ -44,9 +42,9 @@ jobs:
     # Skip a draft pull request; a dispatch has no pull request and always runs.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: windows-latest
-    # Expected 14 to 18 minutes warm (builds of Lite, the service and the viewer 6 to 8, PostgreSQL 1, store migration 1 to 2,
-    # the two walks 2 to 4); 3 more on a cold pg-runtime cache.
-    timeout-minutes: 30
+    # Expected 4 to 6 minutes warm (restore and builds of Lite, the service and the viewer 3, PostgreSQL and the store migration 1,
+    # the two walks under 1); 3 more on a cold pg-runtime cache.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
