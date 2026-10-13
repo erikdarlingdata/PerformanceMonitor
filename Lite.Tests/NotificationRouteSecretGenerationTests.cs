@@ -26,7 +26,7 @@ namespace PerformanceMonitorLite.Tests;
 /// store's own cleanup cannot run, as after a real process death; a second store over the same file then stands in for the
 /// restart. Credential Manager is an in-memory fake, never the real one.
 /// </summary>
-[Collection("app-logger-statics")]
+[Collection("app-alert-statics")]
 public sealed class NotificationRouteSecretGenerationTests : IDisposable
 {
     private const string OldTeams = "https://teams.old-secret.test/hook/aaa111";

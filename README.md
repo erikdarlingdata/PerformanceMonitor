@@ -444,10 +444,10 @@ A notification route sends some alerts to their own destinations. By default eve
 To add a route, open **Settings** and select **Manage Notification Routes**. Each route has these parts:
 
 - **Matches.** An exact metric name, a family such as `performance`, or `*` for every metric. The `*` match is offered only when the route has a server or tag scope.
-- **Scope.** All servers, one server, or one tag. A tag covers every server assigned to it and to any of its sub-tags.
+- **Applies to.** All servers, one server, or one tag. A tag covers every server assigned to it and to any of its sub-tags.
 - **Destinations.** A Teams URL, a Slack URL, a generic webhook URL, a PagerDuty routing key, and email recipients.
 
-A route replaces the app-wide setting for each channel that it fills in. A channel that the route leaves empty keeps using the app-wide setting. An alert never goes to both the route destination and the app-wide destination for the same channel.
+A route replaces the app-wide setting for each channel that it fills in. A channel that the route leaves empty goes to the next matching route that fills it. If no other route fills that channel, it goes to the app-wide setting. An alert never goes to both the route destination and the app-wide destination for the same channel.
 
 When several routes match an alert, Lite picks one in this order:
 
