@@ -19,34 +19,47 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rig-common.ps1')
 
-$stopped = 0; $deleted = 0; $kept = 0; $refused = 0
+$stopped = 0; $deleted = 0; $kept = 0; $refused = 0; $gone = 0
 
-foreach ($row in Read-RigRegistry) {
-    $data = ConvertTo-RigPath $row.DataDir
-    $pmPid = 0
-    [void][int]::TryParse($row.Pid, [ref]$pmPid)
+foreach ($snapshot in Read-RigRegistry) {
+    $data = ConvertTo-RigPath $snapshot.DataDir
 
-    # An owner is a worktree path or an agent id; only a path can be checked for existence.
-    $ownerIsPath = [System.IO.Path]::IsPathRooted($row.Owner)
-    $ownerGone = $ownerIsPath -and -not (Test-Path -LiteralPath $row.Owner)
-    $pidGone = -not ($pmPid -gt 0 -and (Test-RigPostmaster -ProcessId $pmPid -DataDir $data))
+    # Read, decide and act for one rig under the registry lock, so a rig another lane stopped and unregistered
+    # after the snapshot is not stopped twice (#5787 review). The block returns one outcome word.
+    $outcome = Invoke-RigRegistryLocked {
+        $row = @(Read-RigRegistry | Where-Object { [string]::Equals((ConvertTo-RigPath $_.DataDir), $data, [System.StringComparison]::OrdinalIgnoreCase) }) | Select-Object -First 1
+        if (-not $row) {
+            Write-Host "gone     $data (unregistered by someone else since the sweep began)"
+            return 'gone'
+        }
+        $pmPid = 0
+        [void][int]::TryParse($row.Pid, [ref]$pmPid)
 
-    if (-not $ownerGone -and -not $pidGone) {
-        Write-Host "keep     $data (PID $pmPid, port $($row.Port), owner $($row.Owner), started $($row.StartedUtc))"
-        $kept++
-        continue
+        # An owner is a worktree path or an agent id; only a path can be checked for existence.
+        $ownerIsPath = [System.IO.Path]::IsPathRooted($row.Owner)
+        $ownerGone = $ownerIsPath -and -not (Test-Path -LiteralPath $row.Owner)
+        $pidGone = -not ($pmPid -gt 0 -and (Test-RigPostmaster -ProcessId $pmPid -DataDir $data))
+
+        if (-not $ownerGone -and -not $pidGone) {
+            Write-Host "keep     $data (PID $pmPid, port $($row.Port), owner $($row.Owner), started $($row.StartedUtc))"
+            return 'kept'
+        }
+
+        $why = if ($ownerGone) { "owner '$($row.Owner)' no longer exists" } else { "postmaster PID $pmPid is gone" }
+        $r = Stop-RigCluster -DataDir $data -RegisteredPid $pmPid
+        if ($r.Refused) {
+            Write-Host "REFUSED  $data ($why): $($r.Refused) Line kept."
+            return 'refused'
+        }
+        Write-Host ("sweep    {0} ({1}): stopped {2}, deleted {3}. {4}" -f $data, $why, $r.Stopped, $r.Deleted, $r.Note).Trim()
+        return ('swept', $(if ($r.Stopped) { 'stopped' }), $(if ($r.Deleted) { 'deleted' })) -join ' '
     }
-
-    $why = if ($ownerGone) { "owner '$($row.Owner)' no longer exists" } else { "postmaster PID $pmPid is gone" }
-    $r = Stop-RigCluster -DataDir $data -RegisteredPid $pmPid
-    if ($r.Refused) {
-        Write-Host "REFUSED  $data ($why): $($r.Refused) Line kept."
-        $refused++
-        continue
+    switch -Wildcard ($outcome) {
+        'gone'     { $gone++ }
+        'kept'     { $kept++ }
+        'refused'  { $refused++ }
+        'swept*'   { if ($outcome -match 'stopped') { $stopped++ }; if ($outcome -match 'deleted') { $deleted++ } }
     }
-    if ($r.Stopped) { $stopped++ }
-    if ($r.Deleted) { $deleted++ }
-    Write-Host ("sweep    {0} ({1}): stopped {2}, deleted {3}. {4}" -f $data, $why, $r.Stopped, $r.Deleted, $r.Note).Trim()
 }
 
 # Registered data directories after the sweep, to tell which running postmasters nobody registered.
@@ -57,4 +70,4 @@ foreach ($u in $unregistered) {
     Write-Host "UNREGISTERED  PID $($u.ProcessId)  data $dataText  ($($u.Children) child processes). Not stopped."
 }
 
-Write-Host "Summary: stopped $stopped, deleted $deleted, kept $kept, unregistered $($unregistered.Count), refused $refused."
+Write-Host "Summary: stopped $stopped, deleted $deleted, kept $kept, unregistered $($unregistered.Count), refused $refused, already gone $gone."

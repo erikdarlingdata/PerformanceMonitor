@@ -18,11 +18,15 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rig-common.ps1')
 
 $data = ConvertTo-RigPath $DataDir
-$registered = @(Read-RigRegistry | Where-Object { [string]::Equals((ConvertTo-RigPath $_.DataDir), $data, [System.StringComparison]::OrdinalIgnoreCase) })
-$registeredPid = 0
-if ($registered.Count -gt 0) { [void][int]::TryParse($registered[0].Pid, [ref]$registeredPid) }
-
-$r = Stop-RigCluster -DataDir $data -RegisteredPid $registeredPid
+# Read the line and stop under the registry lock, as rig-sweep.ps1 does, so a sweep and a stop never act on
+# the same rig at once (#5787 review).
+$registered = @()
+$r = Invoke-RigRegistryLocked {
+    $script:registered = @(Read-RigRegistry | Where-Object { [string]::Equals((ConvertTo-RigPath $_.DataDir), $data, [System.StringComparison]::OrdinalIgnoreCase) })
+    $registeredPid = 0
+    if ($script:registered.Count -gt 0) { [void][int]::TryParse($script:registered[0].Pid, [ref]$registeredPid) }
+    Stop-RigCluster -DataDir $data -RegisteredPid $registeredPid
+}
 if ($r.Refused) {
     Write-Host "Refused: $($r.Refused)"
     exit 2

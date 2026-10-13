@@ -51,9 +51,13 @@ function Get-RigPathRefusal {
     return $null
 }
 
+# Reads under the registry lock too: Remove-RigRegistryLine rewrites the whole file, and a reader outside the lock
+# can meet a sharing violation or a half-written file (#5787 review).
 function Read-RigRegistry {
-    if (-not (Test-Path -LiteralPath $script:RigRegistryPath)) { return @() }
-    $rows = foreach ($line in Get-Content -LiteralPath $script:RigRegistryPath) {
+    $lines = @(Invoke-RigRegistryLocked {
+        if (Test-Path -LiteralPath $script:RigRegistryPath) { Get-Content -LiteralPath $script:RigRegistryPath }
+    })
+    $rows = foreach ($line in $lines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         $f = $line.Split("`t")
         [pscustomobject]@{
@@ -68,13 +72,16 @@ function Read-RigRegistry {
     return @($rows)
 }
 
-# Every registry change runs under one machine-wide mutex: lanes start and stop rigs at the same time.
+# Every registry read and change runs under one machine-wide mutex: lanes start and stop rigs at the same time.
+# A named mutex is owned by its thread, so a holder may nest calls (rig-sweep.ps1 holds it across one rig's
+# decide-and-stop, and Stop-RigCluster takes it again to drop the line). The wait covers one rig's stop (up to
+# about 90 seconds) by another caller.
 function Invoke-RigRegistryLocked {
     param([Parameter(Mandatory)][scriptblock]$Body)
     $mutex = [System.Threading.Mutex]::new($false, 'Global\PerformanceMonitorRigRegistry')
     $held = $false
     try {
-        try { $held = $mutex.WaitOne([TimeSpan]::FromSeconds(30)) } catch [System.Threading.AbandonedMutexException] { $held = $true }
+        try { $held = $mutex.WaitOne([TimeSpan]::FromSeconds(180)) } catch [System.Threading.AbandonedMutexException] { $held = $true }
         if (-not $held) { throw "Timed out waiting for the rig registry lock." }
         & $Body
     }
