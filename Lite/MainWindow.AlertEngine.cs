@@ -45,6 +45,13 @@ public partial class MainWindow : Window
     /// </summary>
     private async Task SeedKnownEngineEditionsAsync()
     {
+        /* #5703: the Job History tab's Server drop-down offers exactly the servers the job history collector runs on (not a disabled
+           server or an Azure SQL Database), with the edition resolved here the way the alert sweep's is. The tab reads it on each
+           load, so wiring it before the seed lands is safe: an unseeded server has only its live edition, as everywhere else. */
+        JobHistoryContent.OfferedServers = () => LocalDataService.BuildJobHistoryChoiceMap(
+            _serverManager.GetAllServers(),
+            s => _engineEditions.Resolve(KnownEngineEditions.StorageId(s), _serverManager.GetConnectionStatus(s.Id).SqlEngineEdition));
+
         /* Off the dispatcher, because DuckDB.NET is synchronous. It has its own LocalDataService over the initialized
            store, because _dataService is built further down MainWindow_Loaded. */
         await _engineEditions.SeedFromStoreAsync(

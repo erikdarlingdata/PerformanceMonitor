@@ -146,8 +146,30 @@ const scenarios = {
     out.texts = texts;
     out.goneStatus = status(gone);
   },
+  async tsvFormulas() {
+    const texts = [];
+    setNav({ clipboard: { writeText: async (t) => { texts.push(t); } } });
+    const trows = [
+      { q: "=cmd", a: "-1,234.5", b: -7 },
+      { q: "x\n=HYPERLINK(1)", a: "-2", b: "+3" },
+      { q: "+1\t=2", a: "1", b: "2" },
+      { q: "@SUM(1)", a: "1", b: "2" },
+      { q: "-cmd", a: "1", b: "2" },
+    ];
+    const tcols = [{ key: "q", label: "Q" }, { key: "a", label: "A" }, { key: "b", label: "B" }];
+    const w = VIZ.table({ rows: trows }, { rowsKey: "rows", columns: tcols, title: "Tsv" });
+    const tb = tbodyOf(w);
+    tb.fire("click", { target: tb.children[0].children[0] });
+    btn(w, "Copy cell").click(); await flush();
+    btn(w, "Copy row").click(); await flush();
+    tb.fire("click", { target: tb.children[1].children[0] });
+    btn(w, "Copy row").click(); await flush();
+    btn(w, "Copy all").click(); await flush();
+    out.texts = texts;
+    out.cells = ["=1", "+x", "-x", "@y", "\t=1", "-5", "-1,234.5", "-1e-3", "-5x", "x\n=1", " =1", "\r@SUM(1)", "  -5", "\u00a0=1", " x", "\n\t =1", "-.5", "-1e5", "-.e5", "-1e"].map(tools.tsvCell);
+  },
   async helpers() {
-    out.field = [tools.csvField("a,b"), tools.csvField('q"q'), tools.csvField("=1+1"), tools.csvField("+x"), tools.csvField("@y"), tools.csvField(-5), tools.csvField("-5"), tools.csvField("+3.5e-2"), tools.csvField("-5x"), tools.csvField(null), tools.csvField("plain")];
+    out.field = [tools.csvField("a,b"), tools.csvField('q"q'), tools.csvField("=1+1"), tools.csvField("+x"), tools.csvField("@y"), tools.csvField(-5), tools.csvField("-5"), tools.csvField("+3.5e-2"), tools.csvField("-5x"), tools.csvField(null), tools.csvField("plain"), tools.csvField("a;b"), tools.csvField("a\tb"), tools.csvField("a b"), tools.csvField("  =1")];
     out.name = tools.csvFileName("Wait Stats / Top 10!", new Date("2026-01-05T14:30:07Z"));
     out.nameEmpty = tools.csvFileName("", new Date("2026-01-05T14:30:07Z"));
   },

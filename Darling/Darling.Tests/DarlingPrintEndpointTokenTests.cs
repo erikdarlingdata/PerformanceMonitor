@@ -107,7 +107,8 @@ public class DarlingPrintEndpointTokenTests
 
         /* The honesty clause. If this ever starts reading as "the token is protected by elevation", the
            operator stops guarding the thing that actually protects it. */
-        Assert.Contains("INTERACTIVE read", message, StringComparison.Ordinal);
+        Assert.Contains(DarlingOperatorGroup.Name, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("INTERACTIVE", message, StringComparison.Ordinal);
         Assert.Contains("LocalMachine", message, StringComparison.Ordinal);
         Assert.Contains("ACL", message, StringComparison.Ordinal);
     }
@@ -121,7 +122,7 @@ public class DarlingPrintEndpointTokenTests
         var error = new StringWriter();
 
         var exit = DarlingCliCommands.PrintEndpointToken(
-            "web", "web dashboard access", "--print-web-token", "presented via ?token=",
+            "web", "web dashboard access", "--print-web-token", "pasted into the sign-in form",
             elevated: true, configured: false, () => null, output, error);
 
         Assert.Equal(1, exit);

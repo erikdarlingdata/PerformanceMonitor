@@ -993,6 +993,19 @@ END
 $$;";
 
     /// <summary>
+    /// V176 (#5638) - <c>collect.procedure_stats_totals</c>: the per-collection totals of <c>collect.procedure_stats</c> that the raw
+    /// procedure duration trend reads instead of every row of every collection (about 560 to 1,060 rows per collection since #5463).
+    /// The collector writes it on the COPY's own transaction (<c>ProcedureStatsTotalsWriter</c>); the grain, the measures, the
+    /// NULL database handling and the retention are on <see cref="ProcedureStatsTotals"/>, which the rung embeds.
+    ///
+    /// <para><b>Empty when created, no backfill</b> (the data-moving census therefore has nothing to declare): a collection written
+    /// before the rung has no totals row and the read keeps reading its rows. A plain table, not a collector, so no catalog, hypertable or
+    /// grant change; the <c>collect</c> schema's blanket SELECT and owner default privileges cover it. No Lite twin: Lite's store is
+    /// DuckDB with its own procedure trend.</para>
+    /// </summary>
+    private const string V176Sql = ProcedureStatsTotals.CreateSql;
+
+    /// <summary>
     /// V177 (#5641) - the Runnable Queue alert's three settings on <c>config.config_alert_settings</c>:
     /// <c>runnable_queue_enabled</c> (<c>boolean NOT NULL DEFAULT TRUE</c>, like <c>poison_wait_enabled</c>) and the two bars,
     /// <c>runnable_queue_warning_per_scheduler</c> (default 8) and <c>runnable_queue_critical_per_scheduler</c> (default 16),
@@ -1301,6 +1314,7 @@ $rung$;";
         new Migration(173, "query-store-compose-stamp", V173Sql),
         new Migration(174, "service-version", V174Sql),
         new Migration(175, "plan-regression-daily-rowcount", V175Sql),
+        new Migration(176, "procedure-stats-totals", V176Sql),
         new Migration(177, "runnable-queue-alert-settings", V177Sql),
     };
 

@@ -110,6 +110,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     {
         var services = new ServiceCollection();
         services.AddSingleton(typeof(NpgsqlDataSource), _ => null!);
+        services.AddSingleton(typeof(DarlingMcpAddServersPolicy), _ => null!);
         services.AddMcpServer().WithGeminiCompatibleTools<DarlingMcpServerAdminTools>();
         using var provider = services.BuildServiceProvider();
         return provider.GetServices<McpServerTool>().ToDictionary(t => t.ProtocolTool.Name, t => t.ProtocolTool);

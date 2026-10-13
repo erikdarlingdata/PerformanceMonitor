@@ -4481,6 +4481,11 @@ public sealed class DarlingCollectorRunner
             writer.CountNonZeroAt(QueryStatsHourLedgerWriter.IntervalPayloadIndex(definition));
         }
 
+        /* #5638: a procedure_stats batch also brings the per-collection totals up to date (ProcedureStatsTotalsWriter), in
+           the COPY's own transaction below. Like the ledger, it is chosen by the table this COPY writes, so a definition aimed
+           at procedure_stats that is not the catalog's ProcedureStatsCollector (an import or backfill) writes its totals too. */
+        var totalsBatch = string.Equals(definition.TargetTable, ProcedureStatsCollector.Instance.TargetTable, StringComparison.OrdinalIgnoreCase);
+
         /* #3953: a Query Store batch also maintains the latest-snapshot-per-interval table, in the COPY's own
            transaction behind a savepoint (QueryStoreIntervalLatest). Its two wider reads, the coverage row's
            creation and the hourly gap check, run HERE, before the transaction, so nothing inside it reads raw
@@ -4517,7 +4522,7 @@ public sealed class DarlingCollectorRunner
                transaction; everything else keeps the pre-#1767 single-COPY commit and pays nothing. query_stats diverts
                its text and plans today, so the ledger term does not add a transaction; it is named so that the ledger
                upsert can never be left without the transaction its atomicity with the COPY depends on. */
-            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch
+            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch || totalsBatch
                 ? await pgConnection.BeginTransactionAsync(cancellationToken)
                 : null;
 
@@ -4674,6 +4679,28 @@ public sealed class DarlingCollectorRunner
                     await QueryStatsHourLedgerWriter.AddBatchAsync(
                         pgConnection, transaction, server.ServerId, server.StorageName, storedCollectionTime,
                         writer.NonZeroCounted, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+                }
+
+                /* #5638: the collection's per-database totals, read back from the rows the store now holds for this
+                   collection_time and upserted, on THIS transaction after the COPY and before the commit, so rows and totals
+                   commit together or not at all. No savepoint and no catch HERE, like the ledger above: a fault in the upsert
+                   throws out of the batch, the transaction rolls back and the rows are not stored, because rows the totals never
+                   saw would make a read of the totals disagree with the rows. The one exception is inside the writer: the gap
+                   fill of collections an older binary left behind runs behind its own savepoint and statement_timeout, and its
+                   failure is logged and skipped, so it can never stop a server's collection. Recomputed, never added, so a
+                   second batch at this collection_time or a re-attempt is exact. A batch of 0 rows writes nothing: the read
+                   keeps its collection_log axis for an idle run. */
+                if (totalsBatch)
+                {
+                    await ProcedureStatsTotalsWriter.UpsertBatchAsync(
+                        pgConnection, transaction, server.ServerId, storedCollectionTime,
+                        rowsWritten, ServiceCommandDeadlines.CollectionSweepSeconds,
+                        /* The databases THIS batch holds (one per batch on Azure SQL Database): the read-back is limited to them. Null
+                           (rows of another type, an import) reads the whole collection. DatabaseNamesOf matches any
+                           IEnumerable<ProcedureStatsCollector.Row>. */
+                        ProcedureStatsTotalsWriter.DatabaseNamesOf(rows),
+                        cancellationToken,
+                        _logger, server.StorageName);
                 }
 
                 /* #3953: after the COPY and the dimension flush, in the unstamped region (#3095): a fault here is not

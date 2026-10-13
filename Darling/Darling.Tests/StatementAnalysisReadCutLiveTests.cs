@@ -215,11 +215,16 @@ VALUES ($1, $2, $3, $4, $5, 'UriDb', $6, 'running', 9000)",
             var at = run.Context.TimeRangeStart.AddMinutes(30);
             foreach (var (shape, statement) in new[] { ("relation a", marker), ("relation b", plain) })
             {
+                /* The victim shown is the graph's own victim line (the masking rules are applied to the graph), so the
+                   graph carries the statement as the collector stores it. */
+                var graph = $"Process 4242 waits for ShareLock on transaction 900; blocked by process 4243.\n"
+                    + $"Process 4243 waits for ShareLock on transaction 901; blocked by process 4242.\nProcess 4242: {statement}\n"
+                    + $"Process 4243: UPDATE other_table SET x = 1";
                 await DarlingMcpTestData.ExecAsync(run.Connection, run.Ct, @"
 INSERT INTO pg_deadlocks
     (collection_id, collection_time, server_id, server_name, occurred_at, victim_pid, participant_count, deadlock_hash, lock_modes, resources, victim_statement, graph_text)
-VALUES ($1, $2, $3, $4, $2, 4242, 2, upper(left(encode(sha256(convert_to($5, 'UTF8')), 'hex'), 32)), 'ShareLock', $6, $5, 'graph')",
-                    CollectionIdGenerator.Next(), at, PgServerId, PgServerName, statement, shape);
+VALUES ($1, $2, $3, $4, $2, 4242, 2, upper(left(encode(sha256(convert_to($5, 'UTF8')), 'hex'), 32)), 'ShareLock', $6, $5, $7)",
+                    CollectionIdGenerator.Next(), at, PgServerId, PgServerName, statement, shape, graph);
             }
 
             var context = new AnalysisContext

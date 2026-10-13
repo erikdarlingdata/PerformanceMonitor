@@ -239,6 +239,36 @@ public sealed class JobHistoryPageTests
         Assert.Equal(0, run.GetProperty("quiet").GetProperty("noticeCount").GetInt32());
     }
 
+    /// <summary>
+    /// #5703: the row-limit note names how far back the list reaches and suggests narrowing. It suggests picking a server only while
+    /// the Server pick is All servers; a list already scoped to one server is not told to pick one. The full text is pinned (the
+    /// time between is the browser's local format, so the test checks what stands either side of it).
+    /// </summary>
+    [Fact]
+    public void TheRowLimitNoteSuggestsPickingAServerOnlyWhenNoServerIsPicked()
+    {
+        const string head = "Showing the newest 2 runs; more matched. They reach back to ";
+        const string fleetTail = ". Raise the row limit, pick a server or narrow the filters to see the rest.";
+        const string serverTail = ". Raise the row limit or narrow the filters to see the rest.";
+
+        var run = Run();
+        var notes = run.GetProperty("limitNotes");
+        var fleet = notes.GetProperty("fleet").GetString()!;
+        var one = notes.GetProperty("oneServer").GetString()!;
+        Assert.StartsWith(head, fleet, StringComparison.Ordinal);
+        Assert.EndsWith(fleetTail, fleet, StringComparison.Ordinal);
+        Assert.StartsWith(head, one, StringComparison.Ordinal);
+        Assert.EndsWith(serverTail, one, StringComparison.Ordinal);
+        Assert.DoesNotContain("pick a server", one, StringComparison.Ordinal);
+        Assert.True(notes.GetProperty("notCut").GetBoolean());
+
+        /* The rendered page hands the note its own Server pick: All servers offers the pick, srv-a does not. */
+        Assert.Contains("pick a server", run.GetProperty("notices").GetProperty("text").GetString(), StringComparison.Ordinal);
+        var rendered = run.GetProperty("noticesOneServer").GetProperty("text").GetString()!;
+        Assert.Contains(serverTail, rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("pick a server", rendered, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ARebuildInPlaceKeepsTheTypedTextFocusAndCaretWithOneRead()
     {

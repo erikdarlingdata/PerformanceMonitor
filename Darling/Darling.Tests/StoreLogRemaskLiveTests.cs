@@ -103,7 +103,9 @@ VALUES ((now() AT TIME ZONE 'UTC'), $1, $2, 1, $3, $4)", c);
         Assert.Equal("statement: SELECT * FROM t WHERE code = '?'", stored[StoreLogClassifier.SlowStatementClass].Message);
         Assert.Contains("STATEMENT:  ALTER ROLE admin PASSWORD '?'", stored["statement_timeout"].Sample, StringComparison.Ordinal);
         Assert.Equal("invalid input syntax for type integer: \"?\"", stored["unclassified"].Message);
-        Assert.Equal(Prefix + "ERROR:  invalid input syntax for type integer: \"Remask3915b\"", stored["unclassified"].Sample);
+        /* The quoted input value is one of PostgreSQL's own value-bearing forms: the walk masks it in the sample's
+           slot too, so a row stored under the earlier rules comes to the current ones. */
+        Assert.Equal(Prefix + "ERROR:  invalid input syntax for type integer: \"?\"", stored["unclassified"].Sample);
         Assert.Equal("deadlock detected", stored["deadlock"].Message);
 
         /* Idempotent: a second pass over the same table rewrites nothing. */

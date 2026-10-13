@@ -721,8 +721,14 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         var source = File.ReadAllText(FindingStoreSourcePath()).Replace("\r\n", "\n", StringComparison.Ordinal);
 
         /* The choice. The write lock is not banned outright — it is banned from these three without a
-           reason, which is what a failing test forces someone to supply. */
-        Assert.DoesNotContain("AcquireWriteLock", source, StringComparison.Ordinal);
+           reason, which is what a failing test forces someone to supply. The one write-lock site is the unmute:
+           a DELETE of a registry row can lose a race with a second DELETE of the same row, which DuckDB fails
+           instead of queueing, so it is the second kind of statement in the rule on DuckDbInitializer.s_dbLock.
+           Pinned to exactly that site and to its written reason, so a second write-lock site, or the unmute
+           going back to the read lock without the reason being answered, is a decision made here. */
+        Assert.Equal(1, CountOf(source, "AcquireWriteLock("));
+        Assert.Contains("AcquireWriteLock(", Between(source, "public async Task<int> UnmuteStoryAsync(", "await connection.OpenAsync("), StringComparison.Ordinal);
+        Assert.Contains("WRITE lock, unlike", Between(source, "Removes the mute registered for", "public async Task<int> UnmuteStoryAsync("), StringComparison.Ordinal);
         /* Nine sites: the three write paths (#2455), the three read-backs, CountStoredFindingsAsync (#3541
            A14 — the mute verb's matched_now read, a READ taking the read lock, tokened), and — since #3653
            item 3 — GetPriorOccurrencesAsync, the recurrence labeler's prior-weeks read: a READ on the analysis

@@ -44,17 +44,11 @@ internal static class DarlingMcpInstructions
     private const string Preamble = """
         You are connected to a SQL Server performance monitoring tool via PerformanceMonitor Darling, the headless collector service.
 
-        ## CRITICAL: Read-Only Access
+        ## CRITICAL: What this server can and cannot do
 
-        This MCP server provides STRICTLY READ-ONLY access to previously collected performance data. You CANNOT:
-        - Execute arbitrary SQL queries against any monitored server
-        - Kill sessions, processes, or connections
-        - Change any server configuration or settings
-        - Modify, insert, or delete any collected data
-        - Run any ad-hoc diagnostics beyond what the collectors have already captured
+        This MCP server reads previously collected performance data. It cannot run SQL on a monitored server, kill sessions, change a monitored server's settings, alter collected data, or run diagnostics the collectors did not capture.
 
-        The writes this server performs (analysis mutes, Custom Views authoring, alert tuning, server onboarding) all land in the MONITORING store — the same store the web viewer and Settings window write. None of them touches a monitored SQL Server or the collected performance data itself.
-        """;
+        """ + DarlingMcpWritePolicy.InstructionsLine;
 
     private const string Body = """
         ## How Data Is Collected

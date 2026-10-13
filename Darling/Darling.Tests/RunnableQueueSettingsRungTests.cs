@@ -37,7 +37,7 @@ public sealed class RunnableQueueSettingsRungTests
     private const int RungVersion = 177;
 
     /// <summary>The sentinel's column in the probe's select list and its parameter in <c>MapProbedSchemaVersion</c>.</summary>
-    private const int ProbeOrdinal = 151;
+    private const int ProbeOrdinal = 152;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -91,23 +91,22 @@ public sealed class RunnableQueueSettingsRungTests
         var parameters = method.GetParameters();
         Assert.Equal("hasRunnableQueueSettings", parameters[^1].Name);
         Assert.Equal(ProbeOrdinal, parameters.Length - 1);
-        Assert.Equal("hasPlanRegressionDailyRowcount", parameters[ProbeOrdinal - 1].Name);
+        Assert.Equal("hasProcedureStatsTotals", parameters[ProbeOrdinal - 1].Name);
 
         /* The sentinel resolves to 177 and is the top arm: every sentinel present answers 177 (this build's version),
-           and with only the sentinel below it the answer is 175, V175's. V176 has no sentinel of its own, so the
-           ladder's 176 is reachable only through its own PR. */
+           and with only the sentinel below it (V176's procedure totals table) the answer is 176. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, all)!);
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
         var withoutThis = (object[])all.Clone();
         withoutThis[ProbeOrdinal] = false;
-        Assert.Equal(175, (int)method.Invoke(null, withoutThis)!);
+        Assert.Equal(176, (int)method.Invoke(null, withoutThis)!);
 
-        /* In the source the arm is the first one, above V175's, and returns 177. */
+        /* In the source the arm is the first one, above V176's, and returns 177. */
         var thisArm = viewer.IndexOf("if (hasRunnableQueueSettings)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasPlanRegressionDailyRowcount)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0 && previousArm > thisArm, "the V177 arm sits above V175's");
+        var previousArm = viewer.IndexOf("if (hasProcedureStatsTotals)", StringComparison.Ordinal);
+        Assert.True(thisArm >= 0 && previousArm > thisArm, "the V177 arm sits above V176's");
         Assert.Contains("return " + RungVersion + ";", viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 

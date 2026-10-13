@@ -188,18 +188,53 @@ ORDER BY p.collection_time, p.server_id";
 
     /// <summary>
     /// The raw hash of the report the page read, found in the store by the row's own place rather than sent back
-    /// (#4035): <c>$1</c> server, <c>$2</c> its <c>collection_time</c>, <c>$3</c>/<c>$4</c> what the page read. Still
-    /// raw, or no row; two different raw reports in one place end the statement with <c>21000</c>, which the slice
-    /// counts as a report left for another walk rather than guess which one the page read.
+    /// (#4035): <c>$1</c> server, <c>$2</c> its <c>collection_time</c>, <c>$3</c>/<c>$4</c> what the page read. Two raw
+    /// reports can share a place (one backend the victim of two deadlocks within a second, in a store written before
+    /// the upgrade), so the anchor is the place's raw hashes in order and <c>$8</c> the position of the report's own
+    /// among them, read in the same transaction by <see cref="ReportRawGraphsSql"/>; the write also checks <c>$9</c>,
+    /// how many there were. The set only shrinks, so the same count is the same set and the position names the same
+    /// report; a set changed since writes nothing, and the report waits for the next walk.
     /// </summary>
     private static readonly string ReportAnchorSql = $@"(
-          SELECT DISTINCT a.deadlock_hash
+          SELECT a.deadlock_hash
+          FROM pg_deadlocks AS a
+          WHERE a.server_id = $1
+          AND   a.collection_time = $2
+          AND   a.occurred_at IS NOT DISTINCT FROM $3
+          AND   a.victim_pid IS NOT DISTINCT FROM $4
+          AND   {PgDeadlockLogParser.RawGraphHashSql("a.deadlock_hash", "a.graph_text")}
+          GROUP BY a.deadlock_hash
+          ORDER BY a.deadlock_hash
+          OFFSET $8 LIMIT 1)";
+
+    /// <summary>How many raw reports the place holds, the write's check that the position <see cref="ReportAnchorSql"/>
+    /// names is the one read in the same transaction.</summary>
+    private static readonly string ReportRawCountSql = $@"(
+          SELECT count(DISTINCT a.deadlock_hash)
           FROM pg_deadlocks AS a
           WHERE a.server_id = $1
           AND   a.collection_time = $2
           AND   a.occurred_at IS NOT DISTINCT FROM $3
           AND   a.victim_pid IS NOT DISTINCT FROM $4
           AND   {PgDeadlockLogParser.RawGraphHashSql("a.deadlock_hash", "a.graph_text")})";
+
+    /// <summary>
+    /// The graphs of the raw reports at one place, in the order <see cref="ReportAnchorSql"/> ranks them: read in the
+    /// update's own transaction, so the position of the graph the page read is the one the write names. One graph
+    /// per hash, because a raw hash is over its graph. Not computed by the page: a report at the same place rewritten
+    /// earlier in the walk, through a sighting in an earlier batch, moves the ones ranked after it, and a position the
+    /// page computed would then name another report.
+    /// </summary>
+    public static readonly string ReportRawGraphsSql = $@"
+SELECT a.graph_text
+FROM pg_deadlocks AS a
+WHERE a.server_id = $1
+AND   a.collection_time = $2
+AND   a.occurred_at IS NOT DISTINCT FROM $3
+AND   a.victim_pid IS NOT DISTINCT FROM $4
+AND   {PgDeadlockLogParser.RawGraphHashSql("a.deadlock_hash", "a.graph_text")}
+GROUP BY a.deadlock_hash, a.graph_text
+ORDER BY a.deadlock_hash";
 
     /// <summary>
     /// Rewrites every sighting of one raw report: <c>$1</c> server, <c>$2</c> the sighting the page met (the pager
@@ -225,6 +260,7 @@ AND   d.collection_time >= $2
 AND   d.occurred_at = $3
 AND   d.victim_pid = $4
 AND   d.deadlock_hash = {ReportAnchorSql}
+AND   {ReportRawCountSql} = $9
 AND   {PgDeadlockLogParser.RawGraphHashSql("d.deadlock_hash", "d.graph_text")}";
 
     /// <summary>
@@ -242,6 +278,7 @@ AND   d.collection_time = $2
 AND   d.occurred_at IS NOT DISTINCT FROM $3
 AND   d.victim_pid IS NOT DISTINCT FROM $4
 AND   d.deadlock_hash = {ReportAnchorSql}
+AND   {ReportRawCountSql} = $9
 AND   {PgDeadlockLogParser.RawGraphHashSql("d.deadlock_hash", "d.graph_text")}";
 
     /// <summary>One slice of deadlock alert rows of ONE server (<c>$1</c>) in <c>alert_time</c> order after <c>$2</c>
@@ -341,6 +378,12 @@ SELECT
 FROM reports AS r
 ORDER BY is_report, sort_time";
 
+    /// <summary><see cref="AlertPageSql"/> for the repair pass: a report in #4005's form comes back with its graph too,
+    /// so an incident built under an earlier rule can be rebuilt from it. Normalized text only: the graph of a report
+    /// that is not raw is what every read shows for it.</summary>
+    public static readonly string AlertRepairPageSql = AlertPageSql.Replace(
+        "CASE WHEN r.raw_hash THEN r.graph_text END", "r.graph_text", StringComparison.Ordinal);
+
     /// <summary>Writes one alert row's normalized context and detail back, only while the row is still the version the
     /// page read (<c>ctid</c> and <c>xmin</c>), so a row changed in between is left for the next walk. By its version,
     /// not by comparing its text: the raw text sent back as a parameter would land in the store's own log under
@@ -358,7 +401,7 @@ AND   xmin = $4::xid";
     /// row out, and a row already in this form is left as it is by the slice's raw test, never by this.
     /// </summary>
     public static (string? VictimStatement, string GraphText, string DeadlockHash) RemaskReport(
-        DateTime? occurredAt, string? victimStatement, string graphText)
+        DateTime? occurredAt, int? victimPid, string graphText)
     {
         ArgumentNullException.ThrowIfNull(graphText);
 
@@ -375,8 +418,12 @@ AND   xmin = $4::xid";
              follow are withheld here where the live read keeps them. Claiming complete for a report that was cut is
              #3996's review's out-of-step read, a literal kept as a word, so it is not claimed. */
         var graph = PgDeadlockLogParser.NormalizeGraph(graphText)!.TrimEnd('\n');
+
+        /* The victim statement is the normalized graph's own for the victim's pid, as the collector takes it from
+           a report it reads live, and not the stored statement normalized on its own: the stored one, read alone,
+           can keep a value the graph withholds (PgDeadlockLogParser.VictimStatementOf). */
         return (
-            PgDeadlockLogParser.NormalizeStatement(victimStatement),
+            PgDeadlockLogParser.VictimStatementOf(graph, victimPid),
             graph,
             PgDeadlockLogParser.IdentityOf(occurredAt ?? default, graph));
     }
@@ -443,14 +490,38 @@ AND   xmin = $4::xid";
                 continue;
             }
 
-            var (victim, graph, hash) = RemaskReport(row.OccurredAt, row.Victim, row.Graph);
+            var (victim, graph, hash) = RemaskReport(row.OccurredAt, row.VictimPid, row.Graph);
             RowOutcome outcome;
             try
             {
                 await using var transaction = await BeginBoundedAsync(connection, cancellationToken);
-                var sql = row.OccurredAt is not null && row.VictimPid is not null ? ReportUpdateSql : ReportUpdateOwnBatchSql;
-                await using (var update = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+
+                /* The place's raw graphs in the anchor's order, read in this transaction (ReportRawGraphsSql): the
+                   position of the graph the page read is what the write names. Not there: the report was rewritten
+                   since the page was read, with an earlier batch's sighting of it, and there is nothing to do. */
+                var rawGraphs = new List<string>();
+                await using (var place = new NpgsqlCommand(ReportRawGraphsSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
                 {
+                    place.Parameters.AddWithValue(row.ServerId);
+                    place.Parameters.Add(new NpgsqlParameter { Value = row.CollectionTime, NpgsqlDbType = NpgsqlDbType.Timestamp });
+                    place.Parameters.Add(new NpgsqlParameter { Value = (object?)row.OccurredAt ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
+                    place.Parameters.Add(new NpgsqlParameter { Value = (object?)row.VictimPid ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Integer });
+                    await using var reader = await place.ExecuteReaderAsync(cancellationToken);
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        rawGraphs.Add(reader.GetString(0));
+                    }
+                }
+
+                var position = rawGraphs.IndexOf(row.Graph);
+                if (position < 0)
+                {
+                    outcome = RowOutcome.Unchanged;
+                }
+                else
+                {
+                    var sql = row.OccurredAt is not null && row.VictimPid is not null ? ReportUpdateSql : ReportUpdateOwnBatchSql;
+                    await using var update = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandBackstopSeconds };
                     update.Parameters.AddWithValue(row.ServerId);
                     update.Parameters.Add(new NpgsqlParameter { Value = row.CollectionTime, NpgsqlDbType = NpgsqlDbType.Timestamp });
                     update.Parameters.Add(new NpgsqlParameter { Value = (object?)row.OccurredAt ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
@@ -458,6 +529,8 @@ AND   xmin = $4::xid";
                     update.Parameters.Add(new NpgsqlParameter { Value = (object?)victim ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
                     update.Parameters.Add(new NpgsqlParameter { Value = graph, NpgsqlDbType = NpgsqlDbType.Text });
                     update.Parameters.Add(new NpgsqlParameter { Value = hash, NpgsqlDbType = NpgsqlDbType.Text });
+                    update.Parameters.Add(new NpgsqlParameter { Value = position, NpgsqlDbType = NpgsqlDbType.Integer });
+                    update.Parameters.Add(new NpgsqlParameter { Value = rawGraphs.Count, NpgsqlDbType = NpgsqlDbType.Integer });
                     var written = await update.ExecuteNonQueryAsync(cancellationToken);
                     rewritten += written;
                     outcome = written > 0 ? RowOutcome.Rewritten : RowOutcome.Unchanged;
@@ -479,6 +552,201 @@ AND   xmin = $4::xid";
             ? (ReportCursor?)null
             : new ReportCursor(page[^1].CollectionTime, page[^1].ServerId);
         return (next, page.Count, rewritten, failed);
+    }
+
+    /// <summary>
+    /// The version of the rules the stored deadlock text is held to: reports, alerts, findings and finding alerts.
+    /// The raw-hash passes find what an earlier build left raw. Rows an earlier build's pass rewrote carry a hash that
+    /// is no longer over a raw graph, so those passes skip them, and their victim statements were normalized alone,
+    /// which can keep a value the graph withholds (<see cref="PgDeadlockLogParser.VictimStatementOf"/>). The repair
+    /// stages read every such row once per store, and the version is what says a store has had them: it is written to
+    /// <c>collect.collector_state</c> (the shape <see cref="PgSettingScrub"/> uses for its marker, so no migration)
+    /// when every repair stage has finished a clean walk, and a store at this version never runs them again. A change
+    /// to those rules raises the number, and the stages run once more.
+    /// </summary>
+    public const int RulesVersion = PgTargetDrillDownCollector.DeadlockTextRulesVersion;
+
+    /// <summary>The owner name of the version marker in <c>collect.collector_state</c>.</summary>
+    public const string StateCollectorName = "pg_deadlock_remask";
+
+    /// <summary>The marker's one key: the <see cref="RulesVersion"/> the store was last repaired under, as text.</summary>
+    public const string RulesVersionStateKey = "rules_version";
+
+    /// <summary>The marker read; one short keyed row.</summary>
+    public const string RulesMarkerGetSql = @"
+SELECT state_value
+FROM collect.collector_state
+WHERE server_id = $1 AND collector_name = $2 AND state_key = $3";
+
+    /// <summary>The marker write.</summary>
+    public const string RulesMarkerUpsertSql = @"
+INSERT INTO collect.collector_state (server_id, collector_name, state_key, state_value, updated_at)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (server_id, collector_name, state_key)
+DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at";
+
+    /// <summary>
+    /// <see cref="ReportPageSql"/> for the repair stage: the rows already in #4005's form come back with their
+    /// statement and graph (normalized text, what every read shows), a raw row with neither, since the raw-hash stage
+    /// owns it. Every row is returned, so the page's size and the cursor mean what they do there.
+    /// </summary>
+    public static readonly string ReportRepairPageSql = ReportPageSql
+        .Replace("CASE WHEN r.raw_hash THEN p.victim_statement END", "CASE WHEN NOT COALESCE(r.raw_hash, false) THEN p.victim_statement END", StringComparison.Ordinal)
+        .Replace("CASE WHEN r.raw_hash THEN p.graph_text END", "CASE WHEN NOT COALESCE(r.raw_hash, false) THEN p.graph_text END", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Sets one report's victim statement to the graph's own, in the batch the page read it in (<c>collection_time = $2</c>,
+    /// which a compressed batch's range is tested by): <c>$1</c> server, <c>$2</c> batch, <c>$3</c>/<c>$4</c> the
+    /// report's timestamp and victim pid, <c>$5</c> the new statement, <c>$6</c> the report's identity. The identity
+    /// is not a raw hash (the page only repairs a row whose hash is not over its raw graph), so it may be sent back.
+    /// A row already holding the statement is not touched, so a second pass writes nothing.
+    /// </summary>
+    public const string ReportStatementUpdateSql = @"
+UPDATE pg_deadlocks AS d
+SET victim_statement = $5
+WHERE d.server_id = $1
+AND   d.collection_time = $2
+AND   d.occurred_at IS NOT DISTINCT FROM $3
+AND   d.victim_pid IS NOT DISTINCT FROM $4
+AND   d.deadlock_hash = $6
+AND   d.victim_statement IS DISTINCT FROM $5";
+
+    /// <summary>
+    /// The victim statement a stored report in #4005's form carries under <see cref="RulesVersion"/> 2: the normalized
+    /// graph's own for the victim's pid, never the stored statement normalized alone. Null when the graph carries
+    /// none. Pure; the same graph gives the same statement, and a statement this build wrote is its own result.
+    /// </summary>
+    public static string? RepairedVictimStatement(int? victimPid, string graphText) =>
+        PgDeadlockLogParser.VictimStatementOf(PgDeadlockLogParser.NormalizeGraph(graphText)?.TrimEnd('\n'), victimPid);
+
+    /// <summary>
+    /// Examines one slice of stored reports and sets the victim statement of each one in #4005's form to the graph's
+    /// own (<see cref="RepairedVictimStatement"/>), where it differs: the statement an earlier build's pass wrote was
+    /// the stored one normalized alone. Same paging, cursor and per-row outcomes as
+    /// <see cref="RemaskStoredReportsAsync"/>; the report's graph, hash and identity are not touched, so no dedupe
+    /// identity moves.
+    /// </summary>
+    public static async Task<(ReportCursor? Next, int Examined, int Rewritten, int Failed)> RepairStoredReportStatementsAsync(
+        NpgsqlConnection connection, ReportCursor? after, Action<ReportCursor?, RowOutcome>? rowDone,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var page = new List<(DateTime CollectionTime, int ServerId, string Hash, DateTime? OccurredAt, int? VictimPid,
+            string? Victim, string? Graph, bool Raw)>();
+        await using (var transaction = await BeginBoundedAsync(connection, cancellationToken))
+        {
+            await using (var select = new NpgsqlCommand(ReportRepairPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+            {
+                select.Parameters.Add(new NpgsqlParameter { Value = after is { } a ? a.CollectionTime : DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
+                select.Parameters.Add(new NpgsqlParameter { Value = after is { } b ? b.ServerId : DBNull.Value, NpgsqlDbType = NpgsqlDbType.Integer });
+                select.Parameters.Add(new NpgsqlParameter { Value = (long)MaxReportRowsPerPass, NpgsqlDbType = NpgsqlDbType.Bigint });
+                await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    page.Add((
+                        reader.GetDateTime(0),
+                        reader.GetInt32(1),
+                        reader.GetString(2),
+                        reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                        reader.IsDBNull(4) ? null : reader.GetInt32(4),
+                        reader.IsDBNull(5) ? null : reader.GetString(5),
+                        reader.IsDBNull(6) ? null : reader.GetString(6),
+                        reader.GetBoolean(7)));
+                }
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+        }
+
+        int rewritten = 0, failed = 0;
+        var done = new HashSet<(int, DateTime, string, DateTime?, int?)>();
+        for (var i = 0; i < page.Count; i++)
+        {
+            var row = page[i];
+            ReportCursor? closes = i == page.Count - 1
+                || page[i + 1].CollectionTime != row.CollectionTime || page[i + 1].ServerId != row.ServerId
+                    ? new ReportCursor(row.CollectionTime, row.ServerId)
+                    : null;
+
+            if (row.Raw || row.Graph is null || !done.Add((row.ServerId, row.CollectionTime, row.Hash, row.OccurredAt, row.VictimPid)))
+            {
+                rowDone?.Invoke(closes, RowOutcome.Unchanged);
+                continue;
+            }
+
+            var statement = RepairedVictimStatement(row.VictimPid, row.Graph);
+            if (string.Equals(statement, row.Victim, StringComparison.Ordinal))
+            {
+                rowDone?.Invoke(closes, RowOutcome.Unchanged);
+                continue;
+            }
+
+            RowOutcome outcome;
+            try
+            {
+                await using var transaction = await BeginBoundedAsync(connection, cancellationToken);
+                await using (var update = new NpgsqlCommand(ReportStatementUpdateSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+                {
+                    update.Parameters.AddWithValue(row.ServerId);
+                    update.Parameters.Add(new NpgsqlParameter { Value = row.CollectionTime, NpgsqlDbType = NpgsqlDbType.Timestamp });
+                    update.Parameters.Add(new NpgsqlParameter { Value = (object?)row.OccurredAt ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
+                    update.Parameters.Add(new NpgsqlParameter { Value = (object?)row.VictimPid ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Integer });
+                    update.Parameters.Add(new NpgsqlParameter { Value = (object?)statement ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
+                    update.Parameters.Add(new NpgsqlParameter { Value = row.Hash, NpgsqlDbType = NpgsqlDbType.Text });
+                    var written = await update.ExecuteNonQueryAsync(cancellationToken);
+                    rewritten += written;
+                    /* A statement that differs and an UPDATE that finds no row: the row went (retention) or the write
+                       cannot find it. Left, so the walk is not a clean one and no marker is written over it. */
+                    outcome = written > 0 ? RowOutcome.Rewritten : RowOutcome.Left;
+                    failed += written > 0 ? 0 : 1;
+                }
+
+                await transaction.CommitAsync(cancellationToken);
+            }
+            catch (PostgresException) when (connection.State == System.Data.ConnectionState.Open)
+            {
+                failed++;
+                outcome = RowOutcome.Left;
+            }
+
+            rowDone?.Invoke(closes, outcome);
+        }
+
+        var next = page.Count < MaxReportRowsPerPass
+            ? (ReportCursor?)null
+            : new ReportCursor(page[^1].CollectionTime, page[^1].ServerId);
+        return (next, page.Count, rewritten, failed);
+    }
+
+    /// <summary>The <see cref="RulesVersion"/> the store was last repaired under, or null when it never was.</summary>
+    public static async Task<string?> ReadRulesMarkerAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(RulesMarkerGetSql, connection) { CommandTimeout = CommandBackstopSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DarlingObservability.FleetServerId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = StateCollectorName });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = RulesVersionStateKey });
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
+    /// <summary>Records that the store has been repaired under <see cref="RulesVersion"/>.</summary>
+    public static async Task WriteRulesMarkerAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(RulesMarkerUpsertSql, connection) { CommandTimeout = CommandBackstopSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DarlingObservability.FleetServerId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = StateCollectorName });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = RulesVersionStateKey });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Text,
+            Value = RulesVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Timestamp,
+            Value = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+        });
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>What became of one row a slice examined, as its per-row callback hears it (#4012's review, finding
@@ -527,10 +795,29 @@ AND   xmin = $4::xid";
     /// <summary>Whether an alert incident's key has a PostgreSQL deadlock report's hash shape.</summary>
     public static bool IsReportHash(string? key) => key is not null && s_reportHash.IsMatch(key);
 
-    /// <summary>An incident's objects with each statement normalized; the live alert's no-statement text, which
-    /// carries no SQL, as it is.</summary>
-    private static List<string> NormalizedObjects(List<string> objects) =>
-        objects.ConvertAll(o => string.IsNullOrEmpty(o) || s_noStatementObject.IsMatch(o) ? o : PgDeadlockLogParser.NormalizeStatement(o)!);
+    /// <summary>Whether an alert incident's key is one an earlier build wrote for a report it could not name by hash: a
+    /// keyed hash (<see cref="PgLogHashKey.DeadlockAlertKeyTag"/>, a report retention had pruned) or a timestamp identity
+    /// (<see cref="PgDeadlockLogParser.ReportIdentity"/>, a report that was still raw). The repair pass withholds the
+    /// statement of such an incident.</summary>
+    public static bool IsEarlierBuildKey(string? key) =>
+        key is not null
+        && (key.StartsWith(PgLogHashKey.DeadlockAlertKeyTag, StringComparison.Ordinal)
+            || PgDeadlockLogParser.TryParseReportIdentity(key, out _, out _));
+
+    /// <summary>Whether a statement object still holds text normalization would change: only the decision whether a row
+    /// was ever rewritten (it is keyed before any report is rewritten only then), never the text a row is given.</summary>
+    private static bool StillCarriesLiterals(List<string> objects) =>
+        objects.Any(o => !string.IsNullOrEmpty(o) && !s_noStatementObject.IsMatch(o)
+            && !string.Equals(PgDeadlockLogParser.NormalizeStatement(o), o, StringComparison.Ordinal));
+
+    /// <summary>An incident's objects for a report that cannot be found: each statement withheld, since there is no
+    /// graph to derive it from and a stored statement normalized on its own can keep a value the graph withholds
+    /// (<see cref="PgDeadlockLogParser.VictimStatementOf"/>). The live alert's no-statement text, which carries no
+    /// SQL, and an object already withheld stay as they are, so a second pass changes nothing.</summary>
+    private static List<string> WithheldObjects(List<string> objects) =>
+        objects.ConvertAll(o => string.IsNullOrEmpty(o) || s_noStatementObject.IsMatch(o) || o == PgLogTextRedactor.WithheldStatement
+            ? o
+            : PgLogTextRedactor.WithheldStatement);
 
     /// <summary>
     /// The property the pass adds to an incident it rebuilt from its raw report (#4036's round-2 review, finding 2),
@@ -604,12 +891,11 @@ AND   xmin = $4::xid";
     /// report's new identity and its object the normalized victim statement.
     /// </summary>
     public static AlertIncident RemaskedIncident(
-        DateTime? occurredAt, int? victimPid, int? participantCount, string? victimStatement, string graphText)
+        DateTime? occurredAt, int? victimPid, int? participantCount, string graphText)
     {
-        var (victim, _, identity) = RemaskReport(occurredAt, victimStatement, graphText);
+        var (victim, _, identity) = RemaskReport(occurredAt, victimPid, graphText);
         return DarlingWorker.BuildPgDeadlockIncident(new DarlingPgDeadlockReader.PgDeadlockRow(
-            occurredAt ?? default, victimPid ?? 0, participantCount ?? 0, identity, null, null,
-            PgDeadlockLogParser.NormalizeStatement(victim), 0));
+            occurredAt ?? default, victimPid ?? 0, participantCount ?? 0, identity, null, null, victim, 0));
     }
 
     /// <summary>
@@ -640,7 +926,7 @@ AND   xmin = $4::xid";
     /// report is rewritten.</param>
     public static (string ContextJson, string? DetailText)? RemaskAlert(
         string contextJson, string? detailText, Func<string, ResolvedReport> resolve, PgLogHashKey? keyUnresolvedWith,
-        bool reportsMayBeRaw = false)
+        bool reportsMayBeRaw = false, bool repair = false)
     {
         ArgumentNullException.ThrowIfNull(resolve);
 
@@ -663,16 +949,27 @@ AND   xmin = $4::xid";
            while the report is raw it finds nothing by it, and it is never keyed. */
         var rebuilt = RebuiltIncidentIndexes(contextJson);
         var resolvedAt = new Dictionary<int, ResolvedReport>();
+        var keyedByEarlierBuild = new HashSet<int>();
         var neverRemasked = false;
         for (var index = 0; index < incidents.Count; index++)
         {
-            if (incidents[index] is { } candidate && IsReportHash(candidate.DedupKey) && !rebuilt.Contains(index))
+            if (repair && incidents[index] is { } earlier && IsEarlierBuildKey(earlier.DedupKey))
+            {
+                /* An incident an earlier build keyed (a keyed hash for a report retention had pruned, or a timestamp
+                   identity for a raw report) holds a victim that build normalized alone, and there is no report to
+                   derive it from by this key: it is withheld, whatever it says, and its key stays. */
+                resolvedAt[index] = new ResolvedReport(ReportState.Missing, null);
+                keyedByEarlierBuild.Add(index);
+                continue;
+            }
+
+            if (incidents[index] is { } candidate && IsReportHash(candidate.DedupKey) && (repair || !rebuilt.Contains(index)))
             {
                 var resolved = resolve(candidate.DedupKey);
                 resolvedAt[index] = resolved;
                 var objects = candidate.InvolvedObjects ?? new List<string>();
                 neverRemasked |= resolved.State == ReportState.Raw
-                    || (resolved.State == ReportState.Missing && !NormalizedObjects(objects).SequenceEqual(objects, StringComparer.Ordinal));
+                    || (resolved.State == ReportState.Missing && StillCarriesLiterals(objects));
             }
         }
 
@@ -703,8 +1000,19 @@ AND   xmin = $4::xid";
             }
             else if (resolved.State == ReportState.Missing)
             {
-                newKey = keyWith?.DeadlockAlertKey(incident.DedupKey) ?? incident.DedupKey;
-                newObjects = NormalizedObjects(objects);
+                /* There is no graph to derive the statement from, so it is withheld whatever rule wrote it. An
+                   incident a pass rebuilt already carries its report's new identity: it is never keyed, only
+                   withheld. */
+                newKey = rebuilt.Contains(index) || keyedByEarlierBuild.Contains(index)
+                    ? incident.DedupKey
+                    : keyWith?.DeadlockAlertKey(incident.DedupKey) ?? incident.DedupKey;
+                newObjects = WithheldObjects(objects);
+            }
+            else if (repair && resolved is { State: ReportState.Current, Incident: { } current })
+            {
+                /* The repair pass: a report in #4005's form, read with its graph, gives the object the live alert
+                   would build for it now, whichever rule wrote the stored one. The key stays as it is. */
+                newObjects = current.InvolvedObjects.ToList();
             }
             else
             {
@@ -735,10 +1043,14 @@ AND   xmin = $4::xid";
         }) ?? dto.Details!;
 
         var json = MarkRebuilt(JsonSerializer.Serialize(dto with { Details = details, Incidents = rewritten }), rebuilt);
+        /* Longest objects first: an overflow row's text carries several incidents, and where one incident's
+           statement is a prefix of a later one's, replacing the shorter first rewrote the longer line's head
+           and left its tail (the literals past the prefix) as it was. The longer line rewritten first no longer
+           contains the shorter raw statement, whose own line is then the only place it is found. */
         var detail = detailText;
         if (detail is not null)
         {
-            foreach (var (oldKey, newKey, oldObjects, newObjects) in replacements)
+            foreach (var (oldKey, newKey, oldObjects, newObjects) in replacements.OrderByDescending(r => r.OldObjects.Length))
             {
                 if (oldObjects != newObjects)
                 {
@@ -787,9 +1099,21 @@ AND   xmin = $4::xid";
     /// <c>alert_time</c> (null while rows of that instant are left in the page), so a cancel mid-page resumes after
     /// the last instant finished and never skips a row tied with it.
     /// </summary>
-    public static async Task<(AlertLogCursor? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredAlertsAsync(
+    public static Task<(AlertLogCursor? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredAlertsAsync(
         NpgsqlConnection connection, AlertLogCursor? afterCursor, PgLogHashKey? keyUnresolvedWith, bool reportsMayBeRaw,
-        Action<AlertLogCursor?, RowOutcome>? rowDone, CancellationToken cancellationToken = default)
+        Action<AlertLogCursor?, RowOutcome>? rowDone, CancellationToken cancellationToken = default) =>
+        RemaskStoredAlertsCoreAsync(connection, afterCursor, keyUnresolvedWith, reportsMayBeRaw, rowDone, repair: false, cancellationToken);
+
+    /// <summary><see cref="RemaskStoredAlertsAsync"/> for the repair pass (<see cref="RulesVersion"/>): every report is read
+    /// with its graph, and an incident built under an earlier rule is rebuilt from it. Keys nothing.</summary>
+    public static Task<(AlertLogCursor? NextCursor, int Examined, int Rewritten, int Raced)> RepairStoredAlertsAsync(
+        NpgsqlConnection connection, AlertLogCursor? afterCursor, Action<AlertLogCursor?, RowOutcome>? rowDone,
+        CancellationToken cancellationToken = default) =>
+        RemaskStoredAlertsCoreAsync(connection, afterCursor, null, reportsMayBeRaw: false, rowDone, repair: true, cancellationToken);
+
+    private static async Task<(AlertLogCursor? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredAlertsCoreAsync(
+        NpgsqlConnection connection, AlertLogCursor? afterCursor, PgLogHashKey? keyUnresolvedWith, bool reportsMayBeRaw,
+        Action<AlertLogCursor?, RowOutcome>? rowDone, bool repair, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
@@ -814,7 +1138,7 @@ AND   xmin = $4::xid";
             var steps = 0;
             while (server is { } current)
             {
-                await using (var select = new NpgsqlCommand(AlertPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+                await using (var select = new NpgsqlCommand(repair ? AlertRepairPageSql : AlertPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
                 {
                     select.Parameters.Add(new NpgsqlParameter { Value = current, NpgsqlDbType = NpgsqlDbType.Integer });
                     select.Parameters.Add(new NpgsqlParameter { Value = (object?)after ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
@@ -836,14 +1160,16 @@ AND   xmin = $4::xid";
 
                         /* A stored report one of the page's incidents names. */
                         var raw = reader.GetBoolean(13);
-                        reports[(reader.GetInt32(3), reader.GetString(7))] = raw && !reader.IsDBNull(12)
-                            ? new ResolvedReport(ReportState.Raw, RemaskedIncident(
+                        var incident = !reader.IsDBNull(12)
+                            ? RemaskedIncident(
                                 reader.IsDBNull(8) ? null : reader.GetDateTime(8),
                                 reader.IsDBNull(9) ? null : reader.GetInt32(9),
                                 reader.IsDBNull(10) ? null : reader.GetInt32(10),
-                                reader.IsDBNull(11) ? null : reader.GetString(11),
-                                reader.GetString(12)))
-                            : new ResolvedReport(ReportState.Current, null);
+                                reader.GetString(12))
+                            : null;
+                        reports[(reader.GetInt32(3), reader.GetString(7))] = raw && incident is not null
+                            ? new ResolvedReport(ReportState.Raw, incident)
+                            : new ResolvedReport(ReportState.Current, repair ? incident : null);
                     }
                 }
 
@@ -872,7 +1198,7 @@ AND   xmin = $4::xid";
             var row = page[i];
             var remasked = RemaskAlert(row.Context, row.Detail, reportKey =>
                 reports.TryGetValue((row.ServerId, reportKey), out var report) ? report : new ResolvedReport(ReportState.Missing, null), keyUnresolvedWith,
-                reportsMayBeRaw);
+                reportsMayBeRaw, repair);
             var outcome = RowOutcome.Unchanged;
             if (remasked is { } alert)
             {
@@ -979,6 +1305,16 @@ AND   CASE
       END
 ORDER BY f.ctid";
 
+    /// <summary><see cref="FindingPageSql"/> for the repair pass, which reads the sections an earlier build stamped
+    /// <c>sql_normalized</c> too (see <see cref="RulesVersion"/>), and none that says it was written under this version
+    /// (<see cref="PgTargetDrillDownCollector.DeadlockTextRulesVersionKey"/>): a section this build wrote, or the pass
+    /// rewrote, is not read again.</summary>
+    public static readonly string FindingRepairPageSql = FindingPageSql.Replace(
+        "AND strpos(f.drill_down_json, '\"sql_normalized\":true') = 0",
+        "AND strpos(f.drill_down_json, '\"" + PgTargetDrillDownCollector.DeadlockTextRulesVersionKey + "\":" + RulesVersion + ",') = 0"
+        + " AND strpos(f.drill_down_json, '\"" + PgTargetDrillDownCollector.DeadlockTextRulesVersionKey + "\":" + RulesVersion + "}') = 0",
+        StringComparison.Ordinal);
+
     /// <summary>Writes one finding's normalized drill-down and prose back, only while the row is still the version
     /// the page read (<c>ctid</c> and <c>xmin</c>), never by sending its raw text back (#4012's review).</summary>
     public const string FindingUpdateSql = @"
@@ -996,13 +1332,17 @@ AND   xmin = $4::xid";
     /// (<see cref="PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars"/>), so the rewritten finding reads
     /// exactly as it read before, and the stamp is what the read and a later pass leave it as it is by. Pure.
     /// </summary>
-    public static (string DrillDownJson, string StoryText)? RemaskFinding(string drillDownJson, string storyText)
+    public static (string DrillDownJson, string StoryText)? RemaskFinding(string drillDownJson, string storyText, bool repair = false)
     {
         var finding = new AnalysisFinding { DrillDown = DrillDownSerializer.Deserialize(drillDownJson), StoryText = storyText };
-        return PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding, markNormalized: true)
-            && DrillDownSerializer.Serialize(finding.DrillDown) is { } json
-                ? (json, finding.StoryText)
-                : null;
+        if (!PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding, markNormalized: true, restamped: repair)
+            || DrillDownSerializer.Serialize(finding.DrillDown) is not { } json)
+        {
+            return null;
+        }
+
+        /* The repair pass reads sections that are stamped already; one it leaves as it was is not written. */
+        return repair && json == drillDownJson && finding.StoryText == storyText ? null : (json, finding.StoryText);
     }
 
     /// <summary>
@@ -1024,9 +1364,22 @@ AND   xmin = $4::xid";
         RemaskStoredFindingsAsync(connection, afterCursor, rowDone, null, cancellationToken);
 
     /// <inheritdoc cref="RemaskStoredFindingsAsync(NpgsqlConnection, long?, Action{long?, RowOutcome}?, CancellationToken)"/>
-    public static async Task<(long? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingsAsync(
+    public static Task<(long? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingsAsync(
         NpgsqlConnection connection, long? afterCursor, Action<long?, RowOutcome>? rowDone,
-        FindingWalk? walk, CancellationToken cancellationToken)
+        FindingWalk? walk, CancellationToken cancellationToken) =>
+        RemaskStoredFindingsCoreAsync(connection, afterCursor, rowDone, walk, repair: false, cancellationToken);
+
+    /// <summary><see cref="RemaskStoredFindingsAsync(NpgsqlConnection, long?, Action{long?, RowOutcome}?, FindingWalk?, CancellationToken)"/>
+    /// for the repair pass (<see cref="RulesVersion"/>): the sections an earlier pass stamped <c>sql_normalized</c> are
+    /// read too, and one that comes out as it went in is not written.</summary>
+    public static Task<(long? NextCursor, int Examined, int Rewritten, int Raced)> RepairStoredFindingsAsync(
+        NpgsqlConnection connection, long? afterCursor, Action<long?, RowOutcome>? rowDone,
+        FindingWalk? walk, CancellationToken cancellationToken) =>
+        RemaskStoredFindingsCoreAsync(connection, afterCursor, rowDone, walk, repair: true, cancellationToken);
+
+    private static async Task<(long? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingsCoreAsync(
+        NpgsqlConnection connection, long? afterCursor, Action<long?, RowOutcome>? rowDone,
+        FindingWalk? walk, bool repair, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
@@ -1055,7 +1408,7 @@ AND   xmin = $4::xid";
 
             if (from < blocks)
             {
-                await using var select = new NpgsqlCommand(FindingPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds };
+                await using var select = new NpgsqlCommand(repair ? FindingRepairPageSql : FindingPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds };
                 select.Parameters.Add(new NpgsqlParameter { Value = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"({from},0)"), NpgsqlDbType = NpgsqlDbType.Text });
                 select.Parameters.Add(new NpgsqlParameter { Value = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"({from + FindingBlocksPerPass},0)"), NpgsqlDbType = NpgsqlDbType.Text });
                 await using var reader = await select.ExecuteReaderAsync(cancellationToken);
@@ -1072,7 +1425,7 @@ AND   xmin = $4::xid";
         foreach (var row in page)
         {
             var outcome = RowOutcome.Unchanged;
-            if (RemaskFinding(row.DrillDown, row.Story) is { } finding)
+            if (RemaskFinding(row.DrillDown, row.Story, repair) is { } finding)
             {
                 await using var transaction = await BeginBoundedAsync(connection, cancellationToken);
                 await using (var update = new NpgsqlCommand(FindingUpdateSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
@@ -1201,6 +1554,14 @@ LEFT JOIN LATERAL
 ) AS f ON true
 ORDER BY t.alert_time".Replace("__SINCE__", FindingAlertSectionSince.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
 
+    /// <summary><see cref="FindingAlertPageSql"/> for the repair pass, which reads the alerts stamped <c>Sql Normalized</c>
+    /// too (see <see cref="RulesVersion"/>), and none whose section carries <see cref="TextRulesVersionLabel"/> at this
+    /// version: an alert flattened from a section written under these rules needs nothing.</summary>
+    public static readonly string FindingAlertRepairPageSql = FindingAlertPageSql.Replace(
+        "AND strpos(c.context_json, '{\"Label\":\"Sql Normalized\",\"Value\":\"true\"}') = 0",
+        "AND strpos(c.context_json, '{\"Label\":\"" + TextRulesVersionLabel + "\",\"Value\":\"" + RulesVersion + "\"}') = 0",
+        StringComparison.Ordinal);
+
     /// <summary>Writes one finding alert's context back, only while the row is still the version the page read
     /// (<c>ctid</c> and <c>xmin</c>). Its <c>detail_text</c> carries no drill-down and is not touched.</summary>
     public const string FindingAlertUpdateSql = @"
@@ -1234,7 +1595,8 @@ AND   xmin = $3::xid";
     /// for the alert's, and the SQL is withheld.</para>
     /// </summary>
     public static string? RemaskFindingAlert(
-        string contextJson, string? findingDrillDownJson, string? findingStoryText, FindingDiagnosis? findingDiagnosis)
+        string contextJson, string? findingDrillDownJson, string? findingStoryText, FindingDiagnosis? findingDiagnosis,
+        bool repair = false)
     {
         AlertContextDto? dto;
         try
@@ -1255,9 +1617,13 @@ AND   xmin = $3::xid";
 
         var item = dto!.Details[index];
         var fields = item.Fields ?? new List<FieldDto>();
-        if (fields.Any(f => f.Label == SqlNormalizedLabel && f.Value == "true")
-            || fields.Any(f => f.Value == WithheldBefore4005))
+        if ((!repair && fields.Any(f => f.Label == SqlNormalizedLabel && f.Value == "true"))
+            || fields.Any(f => f.Value == WithheldBefore4005)
+            || fields.Any(f => f.Label == TextRulesVersionLabel
+                && f.Value == RulesVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)))
         {
+            /* Withheld already, or flattened from a section written under these rules (so its finding, if it aged out
+               since, is no reason to take its text away). */
             return null;
         }
 
@@ -1266,7 +1632,7 @@ AND   xmin = $3::xid";
         if (findingDrillDownJson is not null && findingDiagnosis is { } diagnosis && SameDiagnosis(dto, diagnosis))
         {
             var finding = new AnalysisFinding { DrillDown = DrillDownSerializer.Deserialize(findingDrillDownJson), StoryText = findingStoryText ?? string.Empty };
-            PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding, markNormalized: true);
+            PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding, markNormalized: true, restamped: repair);
             if (finding.DrillDown is not null
                 && finding.DrillDown.TryGetValue(PgTargetDrillDownCollector.DeadlockExemplarsSection, out var section)
                 && FindingMessageFormatter.DrillDownItem(PgTargetDrillDownCollector.DeadlockExemplarsSection, section) is { } rebuilt)
@@ -1282,6 +1648,9 @@ AND   xmin = $3::xid";
             }
         }
 
+        /* With no finding to rebuild the fields from, the SQL they carry is withheld, in the repair pass as in the first:
+           an alert an earlier build stamped holds a victim that build normalized alone, and nothing is left to check
+           it against. The next walk stops at the withheld fields above. */
         var newFields = live ?? fields.ConvertAll(f => f.Label is ExemplarsLabel or NoteLabel ? f with { Value = WithheldBefore4005 } : f);
         var details = new List<AlertDetailItemDto>(dto.Details.Count);
         for (var i = 0; i < dto.Details.Count; i++)
@@ -1300,7 +1669,8 @@ AND   xmin = $3::xid";
             });
         }
 
-        return JsonSerializer.Serialize(dto with { Details = details });
+        var rebuiltContext = JsonSerializer.Serialize(dto with { Details = details });
+        return repair && rebuiltContext == contextJson ? null : rebuiltContext;
 
         /* An evaluator, not a replacement pattern: a normalized statement keeps its "$1" placeholders, which a
            pattern would read as a group reference. */
@@ -1353,6 +1723,10 @@ AND   xmin = $3::xid";
     private const string NoteLabel = "Note";
     private const string SqlNormalizedLabel = "Sql Normalized";
 
+    /// <summary>The field a section's <see cref="PgTargetDrillDownCollector.DeadlockTextRulesVersionKey"/> flattens to in
+    /// a finding alert.</summary>
+    private const string TextRulesVersionLabel = "Text Rules Version";
+
     /* The top exemplar's normalized fingerprint, the one the advice prose names (PgTargetAdvice.DescribeShape over
        the first exemplar). */
     private static string? TopVictimFingerprint(object section)
@@ -1380,9 +1754,21 @@ AND   xmin = $3::xid";
     /// <see cref="MaxFindingAlertRowsPerPass"/> alerts are examined or the log ends (#5625). Alerts are examined
     /// whether or not they need work, so the cursor moves on a slice that rewrites nothing.
     /// </summary>
-    public static async Task<(AlertLogCursor? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingAlertsAsync(
+    public static Task<(AlertLogCursor? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingAlertsAsync(
         NpgsqlConnection connection, AlertLogCursor? afterCursor, Action<AlertLogCursor?, RowOutcome>? rowDone,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        RemaskStoredFindingAlertsCoreAsync(connection, afterCursor, rowDone, repair: false, cancellationToken);
+
+    /// <summary><see cref="RemaskStoredFindingAlertsAsync"/> for the repair pass (<see cref="RulesVersion"/>): the alerts
+    /// stamped <c>Sql Normalized</c> are read too, and rebuilt from their finding.</summary>
+    public static Task<(AlertLogCursor? NextCursor, int Examined, int Rewritten, int Raced)> RepairStoredFindingAlertsAsync(
+        NpgsqlConnection connection, AlertLogCursor? afterCursor, Action<AlertLogCursor?, RowOutcome>? rowDone,
+        CancellationToken cancellationToken = default) =>
+        RemaskStoredFindingAlertsCoreAsync(connection, afterCursor, rowDone, repair: true, cancellationToken);
+
+    private static async Task<(AlertLogCursor? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingAlertsCoreAsync(
+        NpgsqlConnection connection, AlertLogCursor? afterCursor, Action<AlertLogCursor?, RowOutcome>? rowDone,
+        bool repair, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
@@ -1412,7 +1798,7 @@ AND   xmin = $3::xid";
                 if (current.IsAnalysis)
                 {
                     DateTime? last = null;
-                    await using (var select = new NpgsqlCommand(FindingAlertPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+                    await using (var select = new NpgsqlCommand(repair ? FindingAlertRepairPageSql : FindingAlertPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
                     {
                         select.Parameters.Add(new NpgsqlParameter { Value = current.Server, NpgsqlDbType = NpgsqlDbType.Integer });
                         select.Parameters.Add(new NpgsqlParameter { Value = current.Metric, NpgsqlDbType = NpgsqlDbType.Text });
@@ -1469,7 +1855,7 @@ AND   xmin = $3::xid";
         {
             var row = page[i];
             var outcome = RowOutcome.Unchanged;
-            if (RemaskFindingAlert(row.Context, row.DrillDown, row.Story, row.Diagnosis) is { } context)
+            if (RemaskFindingAlert(row.Context, row.DrillDown, row.Story, row.Diagnosis, repair) is { } context)
             {
                 await using var transaction = await BeginBoundedAsync(connection, cancellationToken);
                 await using (var update = new NpgsqlCommand(FindingAlertUpdateSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
@@ -1545,8 +1931,10 @@ AND   xmin = $3::xid";
         /// <summary>Rows the current walk left as they were: changed under the write, or a rewrite that failed.</summary>
         public int WalkLeft { get; set; }
 
-        /// <summary>True once a cancel or a failure has cut the current walk short (#4012's review, finding 2): such a
-        /// walk is never the clean one a stage is done after, however little it counted.</summary>
+        /// <summary>True once a failure, a cut inside a batch (<see cref="CutBySlice"/>) or a restart of the finding
+        /// table's walk has interrupted the current walk, over all of its slices (#4012's review, finding 2): such a
+        /// walk is never the clean one a stage is done after, however little it counted. A slice's budget that cuts
+        /// the walk after a finished batch does not set it.</summary>
         public bool WalkInterrupted { get; set; }
 
         /// <summary>Walks that rewrote nothing but left rows or were cut short, which count toward
@@ -1563,6 +1951,11 @@ AND   xmin = $3::xid";
         /// tried again from the start.</summary>
         public DateTime? GaveUpUtc { get; set; }
 
+        /// <summary>True while the page in hand has a batch open: a row was counted that did not close its batch (or,
+        /// for the finding walk, the page is the batch and has rows counted), so the walk's cursor does not yet stand
+        /// after that row. Cleared at each page's start, and by a slice's end.</summary>
+        internal bool BatchOpen { get; set; }
+
         /// <summary>Counts one row's outcome toward the current walk.</summary>
         public void Count(RowOutcome outcome)
         {
@@ -1576,6 +1969,32 @@ AND   xmin = $3::xid";
             }
         }
 
+        /// <summary>Counts one row's outcome, and whether the row closed its batch (the walk's cursor moved to
+        /// it).</summary>
+        internal void Count(RowOutcome outcome, bool batchClosed)
+        {
+            Count(outcome);
+            BatchOpen = !batchClosed;
+        }
+
+        /// <summary>
+        /// A slice's budget (or the service's shutdown) cut the stage's walk. The one rule for the main stages and the
+        /// repair stages: a cut after a finished batch, or before the page's first row, leaves the cursor on a closed
+        /// batch, every finished row counted, and the walk goes on there on the next tick, so it is neither unclean
+        /// nor a new walk. A cut inside a batch makes the walk unclean: the batch is read again from its start. The
+        /// walk's counts and flag live on the stage, so a walk that spans many slices is clean only if it rewrote
+        /// nothing, left nothing and was never cut inside a batch or failed, over all of them.
+        /// </summary>
+        internal void CutBySlice()
+        {
+            if (BatchOpen)
+            {
+                WalkInterrupted = true;
+            }
+
+            BatchOpen = false;
+        }
+
         /// <summary>A stage that gave up, as it was before its first walk.</summary>
         internal void Reset()
         {
@@ -1585,6 +2004,7 @@ AND   xmin = $3::xid";
             WalkRewritten = 0;
             WalkLeft = 0;
             WalkInterrupted = false;
+            BatchOpen = false;
             NoProgressWalks = 0;
             ConsecutiveFailures = 0;
             SkipTicks = 0;
@@ -1640,11 +2060,40 @@ AND   xmin = $3::xid";
         /// null in the service.</summary>
         public Action<StageProgress, RowOutcome>? RowCounted { get; set; }
 
+        /// <summary>The repair stages (<see cref="RulesVersion"/>), which run once per store beside the stages above, not
+        /// after them: the victim statements of the reports an earlier build's pass rewrote, then the alerts,
+        /// findings and finding alerts it stamped or keyed.</summary>
+        public StageProgress RepairReports { get; } = new("report statement");
+
+        public StageProgress RepairAlerts { get; } = new("repaired alert");
+
+        public StageProgress RepairFindings { get; } = new("repaired finding");
+
+        public StageProgress RepairFindingAlerts { get; } = new("repaired finding alert");
+
+        /// <summary>The repair walks' cursors, as the stages above keep theirs.</summary>
+        public ReportCursor? RepairReportCursor { get; set; }
+
+        public AlertLogCursor? RepairAlertCursor { get; set; }
+
+        public long? RepairFindingCursor { get; set; }
+
+        public long? RepairFindingFilenode { get; set; }
+
+        public AlertLogCursor? RepairFindingAlertCursor { get; set; }
+
+        /// <summary>Whether the store's marker already says <see cref="RulesVersion"/>: null until the first tick
+        /// reads it, true when the repair stages have nothing to do (they start done), false while they run.</summary>
+        public bool? RulesCurrent { get; set; }
+
         /// <summary>Every stage, in the order a tick runs them.</summary>
         public IReadOnlyList<StageProgress> Stages => [Alerts, Reports, AlertKeys, Findings, FindingAlerts];
 
+        /// <summary>The repair stages, in the order a tick runs them.</summary>
+        public IReadOnlyList<StageProgress> RepairStages => [RepairReports, RepairAlerts, RepairFindings, RepairFindingAlerts];
+
         /// <summary>True once every stage is done for this process, a stage that gave up included. Not the worker's
-        /// gate: <see cref="Pending"/> is.</summary>
+        /// gate: <see cref="Pending"/> is. The repair stages are not part of it (<see cref="RepairStages"/>).</summary>
         public bool Done => Stages.All(stage => stage.Done);
 
         /// <summary>
@@ -1656,6 +2105,10 @@ AND   xmin = $3::xid";
         /// while nothing is due: every stage is skipped without a statement.
         /// </summary>
         public bool Pending => Stages.Any(stage => !stage.Done || stage.GaveUp);
+
+        /// <summary>Whether <see cref="RunRepairAsync"/> has anything to do: until the store's marker is known to say
+        /// <see cref="RulesVersion"/>.</summary>
+        public bool RepairPending => RulesCurrent != true;
     }
 
     /// <summary>
@@ -1684,7 +2137,9 @@ AND   xmin = $3::xid";
     /// retention.</para>
     ///
     /// <para><b>A stage is done only after a whole walk that counted no rewrite and left nothing, and that no
-    /// cancel or failure cut short</b> (#4012's review, findings 2 and 4). Each row's outcome is counted as it is
+    /// failure or cut inside a batch interrupted, over all of the slices it spans</b> (#4012's review, findings 2 and
+    /// 4). A budget cut after a finished batch resumes at the cursor and interrupts nothing
+    /// (<see cref="StageProgress.CutBySlice"/>, the rule <see cref="RunRepairAsync"/> follows too). Each row's outcome is counted as it is
     /// finished, through its slice's per-row callback, so a page cut short loses none. A walk that rewrote rows is
     /// followed by another, which catches a row an UPDATE moved behind the cursor; one that rewrote nothing but left
     /// rows or was cut short counts toward <see cref="MaxRescansPerProcess"/>. A stage that gave up is tried again
@@ -1752,9 +2207,9 @@ AND   xmin = $3::xid";
             }
 
             int examined = 0, rewritten = 0, left = 0;
-            void Counted(RowOutcome outcome)
+            void Counted(RowOutcome outcome, bool batchClosed)
             {
-                stage.Count(outcome);
+                stage.Count(outcome, batchClosed);
                 rewritten += outcome == RowOutcome.Rewritten ? 1 : 0;
                 left += outcome == RowOutcome.Left ? 1 : 0;
                 progress.RowCounted?.Invoke(stage, outcome);
@@ -1764,6 +2219,7 @@ AND   xmin = $3::xid";
             {
                 while (!stage.Done)
                 {
+                    stage.BatchOpen = false;
                     if (connection.State != System.Data.ConnectionState.Open)
                     {
                         /* A Broken connection must be closed before it can open again. */
@@ -1779,7 +2235,7 @@ AND   xmin = $3::xid";
                            store; an incident this pass rebuilt carries RebuiltIncidentMarker and is never keyed. */
                         var (next, e, _, _) = await RemaskStoredAlertsAsync(
                             connection, progress.AlertCursor, key, reportsMayBeRaw: true,
-                            (row, outcome) => { progress.AlertCursor = row ?? progress.AlertCursor; Counted(outcome); }, cancellationToken);
+                            (row, outcome) => { progress.AlertCursor = row ?? progress.AlertCursor; Counted(outcome, row is not null); }, cancellationToken);
                         progress.AlertCursor = next;
                         page = (next is null, e);
                     }
@@ -1787,14 +2243,14 @@ AND   xmin = $3::xid";
                     {
                         var (next, e, _, _) = await RemaskStoredAlertsAsync(
                             connection, progress.AlertKeyCursor, key, reportsMayBeRaw: false,
-                            (row, outcome) => { progress.AlertKeyCursor = row ?? progress.AlertKeyCursor; Counted(outcome); }, cancellationToken);
+                            (row, outcome) => { progress.AlertKeyCursor = row ?? progress.AlertKeyCursor; Counted(outcome, row is not null); }, cancellationToken);
                         progress.AlertKeyCursor = next;
                         page = (next is null, e);
                     }
                     else if (ReferenceEquals(stage, progress.Reports))
                     {
                         var (next, e, _, _) = await RemaskStoredReportsAsync(
-                            connection, progress.ReportCursor, (row, outcome) => { progress.ReportCursor = row ?? progress.ReportCursor; Counted(outcome); }, cancellationToken);
+                            connection, progress.ReportCursor, (row, outcome) => { progress.ReportCursor = row ?? progress.ReportCursor; Counted(outcome, row is not null); }, cancellationToken);
                         progress.ReportCursor = next;
                         page = (next is null, e);
                     }
@@ -1802,7 +2258,7 @@ AND   xmin = $3::xid";
                     {
                         var walk = new FindingWalk { Filenode = progress.FindingFilenode };
                         var (next, e, _, _) = await RemaskStoredFindingsAsync(
-                            connection, progress.FindingCursor, (row, outcome) => { progress.FindingCursor = row ?? progress.FindingCursor; Counted(outcome); }, walk, cancellationToken);
+                            connection, progress.FindingCursor, (row, outcome) => { progress.FindingCursor = row ?? progress.FindingCursor; Counted(outcome, row is not null); }, walk, cancellationToken);
                         progress.FindingCursor = next;
                         progress.FindingFilenode = walk.Filenode;
                         stage.WalkInterrupted |= walk.Restarted;
@@ -1811,7 +2267,7 @@ AND   xmin = $3::xid";
                     else
                     {
                         var (next, e, _, _) = await RemaskStoredFindingAlertsAsync(
-                            connection, progress.FindingAlertCursor, (row, outcome) => { progress.FindingAlertCursor = row ?? progress.FindingAlertCursor; Counted(outcome); }, cancellationToken);
+                            connection, progress.FindingAlertCursor, (row, outcome) => { progress.FindingAlertCursor = row ?? progress.FindingAlertCursor; Counted(outcome, row is not null); }, cancellationToken);
                         progress.FindingAlertCursor = next;
                         page = (next is null, e);
                     }
@@ -1825,6 +2281,7 @@ AND   xmin = $3::xid";
                     }
 
                     stage.ConsecutiveFailures = 0;
+                    stage.BatchOpen = false;
                     examined += page.Examined;
                     if (page.End)
                     {
@@ -1834,9 +2291,10 @@ AND   xmin = $3::xid";
             }
             catch (Exception) when (cancellationToken.IsCancellationRequested)
             {
-                /* The tick's budget (or shutdown) ended it: each walk's cursor stands at the last row it finished,
-                   and every finished row is counted; the walk is not a clean one. */
-                stage.WalkInterrupted = true;
+                /* The tick's budget (or shutdown) ended it: each walk's cursor stands on the last batch it finished
+                   and every finished row is counted. The walk goes on there on the next tick, unclean only if the
+                   cut fell inside a batch (the repair stages' rule: StageProgress.CutBySlice). */
+                stage.CutBySlice();
                 LogTick(stage, examined, rewritten, left, logger, finished: false);
                 return;
             }
@@ -1866,6 +2324,175 @@ AND   xmin = $3::xid";
         }
     }
 
+    /// <summary>
+    /// One tick of the repair (<see cref="RulesVersion"/>), run by the worker after <see cref="RunAsync"/>. It reads the
+    /// store's marker once, and when the store is not at this version walks, in this order: the statements of the
+    /// reports in #4005's form, the alerts built from them (an incident an earlier build keyed <c>hk-</c> or <c>at-</c>
+    /// has its statement withheld), the stamped findings and the stamped finding alerts. It does not wait for the
+    /// stages of <see cref="RunAsync"/>: it skips the rows those own (a raw report) and writes the same text they do for
+    /// the rest, so neither needs the other done, and a slow stage there cannot hold this one back. A stage's
+    /// failures and retry follow <see cref="RunAsync"/>'s rules; a walk the slice's budget cut goes on at its cursor on
+    /// the next tick, and is not an unclean one. Once every stage has finished a clean walk the marker is written, and
+    /// the store never runs the stages again.
+    /// </summary>
+    public static async Task RunRepairAsync(
+        NpgsqlConnection connection, RemaskProgress progress, ILogger logger, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(progress);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        if (progress.RulesCurrent == true)
+        {
+            return;
+        }
+
+        if (progress.RulesCurrent is null)
+        {
+            var marker = await ReadRulesMarkerAsync(connection, cancellationToken);
+            progress.RulesCurrent = marker == RulesVersion.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (progress.RulesCurrent == true)
+            {
+                return;
+            }
+        }
+
+        var now = DateTime.UtcNow;
+        foreach (var stage in progress.RepairStages)
+        {
+            if (stage.GaveUp && stage.GaveUpUtc is { } gaveUp && now - gaveUp >= RetryGivenUpAfter)
+            {
+                stage.Reset();
+                if (ReferenceEquals(stage, progress.RepairReports)) progress.RepairReportCursor = null;
+                else if (ReferenceEquals(stage, progress.RepairAlerts)) progress.RepairAlertCursor = null;
+                else if (ReferenceEquals(stage, progress.RepairFindings)) { progress.RepairFindingCursor = null; progress.RepairFindingFilenode = null; }
+                else progress.RepairFindingAlertCursor = null;
+            }
+        }
+
+        foreach (var stage in progress.RepairStages)
+        {
+            if (stage.Done)
+            {
+                continue;
+            }
+
+            if (stage.SkipTicks > 0)
+            {
+                stage.SkipTicks--;
+                continue;
+            }
+
+            int examined = 0, rewritten = 0, left = 0;
+            void Counted(RowOutcome outcome, bool batchClosed)
+            {
+                stage.Count(outcome, batchClosed);
+                rewritten += outcome == RowOutcome.Rewritten ? 1 : 0;
+                left += outcome == RowOutcome.Left ? 1 : 0;
+                progress.RowCounted?.Invoke(stage, outcome);
+            }
+
+            try
+            {
+                while (!stage.Done)
+                {
+                    stage.BatchOpen = false;
+                    if (connection.State != System.Data.ConnectionState.Open)
+                    {
+                        await connection.CloseAsync();
+                        await connection.OpenAsync(cancellationToken);
+                    }
+
+                    (bool End, int Examined) page;
+                    if (ReferenceEquals(stage, progress.RepairReports))
+                    {
+                        var (next, e, _, _) = await RepairStoredReportStatementsAsync(
+                            connection, progress.RepairReportCursor, (row, outcome) => { progress.RepairReportCursor = row ?? progress.RepairReportCursor; Counted(outcome, row is not null); }, cancellationToken);
+                        progress.RepairReportCursor = next;
+                        page = (next is null, e);
+                    }
+                    else if (ReferenceEquals(stage, progress.RepairAlerts))
+                    {
+                        /* No key: the repair keys nothing. An incident whose report is gone is withheld, whatever key it
+                           carries, and one this pass cannot resolve is left as it is. */
+                        var (next, e, _, _) = await RepairStoredAlertsAsync(
+                            connection, progress.RepairAlertCursor,
+                            (row, outcome) => { progress.RepairAlertCursor = row ?? progress.RepairAlertCursor; Counted(outcome, row is not null); }, cancellationToken);
+                        progress.RepairAlertCursor = next;
+                        page = (next is null, e);
+                    }
+                    else if (ReferenceEquals(stage, progress.RepairFindings))
+                    {
+                        var walk = new FindingWalk { Filenode = progress.RepairFindingFilenode };
+                        var (next, e, _, _) = await RepairStoredFindingsAsync(
+                            connection, progress.RepairFindingCursor, (row, outcome) => { progress.RepairFindingCursor = row ?? progress.RepairFindingCursor; Counted(outcome, row is not null); },
+                            walk, cancellationToken);
+                        progress.RepairFindingCursor = next;
+                        progress.RepairFindingFilenode = walk.Filenode;
+                        stage.WalkInterrupted |= walk.Restarted;
+                        page = (next is null, e);
+                    }
+                    else
+                    {
+                        var (next, e, _, _) = await RepairStoredFindingAlertsAsync(
+                            connection, progress.RepairFindingAlertCursor, (row, outcome) => { progress.RepairFindingAlertCursor = row ?? progress.RepairFindingAlertCursor; Counted(outcome, row is not null); },
+                            cancellationToken);
+                        progress.RepairFindingAlertCursor = next;
+                        page = (next is null, e);
+                    }
+
+                    stage.ConsecutiveFailures = 0;
+                    stage.BatchOpen = false;
+                    examined += page.Examined;
+                    if (page.End)
+                    {
+                        EndWalk(stage, logger);
+                    }
+                }
+            }
+            catch (Exception) when (cancellationToken.IsCancellationRequested)
+            {
+                /* The slice's budget ended it. Each walk's cursor stands on a closed batch (the last report batch, alert
+                   instant or finding block range it finished), every finished row is counted, and the next tick
+                   resumes there, so the walk goes on and is neither unclean nor a new one, as for the main stages
+                   (StageProgress.CutBySlice): a store too big for one slice would otherwise never end a clean walk,
+                   and never reach its marker. A failure, a Left row or a cut inside a batch makes the walk unclean. */
+                stage.CutBySlice();
+                LogTick(stage, examined, rewritten, left, logger, finished: false);
+                return;
+            }
+            catch (Exception ex)
+            {
+                stage.WalkInterrupted = true;
+                stage.ConsecutiveFailures++;
+                if (stage.ConsecutiveFailures >= MaxConsecutiveStageFailures)
+                {
+                    GiveUp(stage);
+                    logger.LogWarning(
+                        "PostgreSQL deadlocks: repairing stored {Stage} rows failed {Failures} times in a row, and stops for a day; every read still normalizes them: {Message}",
+                        stage.Name, stage.ConsecutiveFailures, ex.Message);
+                }
+                else
+                {
+                    stage.SkipTicks = (1 << (stage.ConsecutiveFailures - 1)) - 1;
+                    logger.LogWarning(
+                        "PostgreSQL deadlocks: repairing stored {Stage} rows failed ({Failures} of {Max} in a row), and is retried after {Skip} more hourly pass(es): {Message}",
+                        stage.Name, stage.ConsecutiveFailures, MaxConsecutiveStageFailures, stage.SkipTicks, ex.Message);
+                }
+
+                continue;
+            }
+
+            LogTick(stage, examined, rewritten, left, logger, finished: true);
+        }
+
+        if (progress.RepairStages.All(stage => stage.Done && !stage.GaveUp))
+        {
+            await WriteRulesMarkerAsync(connection, cancellationToken);
+            progress.RulesCurrent = true;
+        }
+    }
+
     private static void GiveUp(StageProgress stage)
     {
         stage.Done = true;
@@ -1875,7 +2502,7 @@ AND   xmin = $3::xid";
 
     /// <summary>A walk reached its table's end: done when it counted no rewrite, left nothing and was not cut short,
     /// otherwise walked again.</summary>
-    private static void EndWalk(StageProgress stage, ILogger logger)
+    internal static void EndWalk(StageProgress stage, ILogger logger)
     {
         stage.Walks++;
         if (stage.WalkRewritten == 0 && stage.WalkLeft == 0 && !stage.WalkInterrupted)
@@ -1886,13 +2513,14 @@ AND   xmin = $3::xid";
         {
             GiveUp(stage);
             logger.LogWarning(
-                "PostgreSQL deadlocks: {Left} stored {Stage} row(s) could not be re-masked, or no walk of them finished uncut, in {Walks} walks, and they are tried again in a day; every read still normalizes them.",
+                "PostgreSQL deadlocks: {Walks} walks of the stored {Stage} rows ended without a clean one, and they are tried again in a day. The last walk left {Left} row(s) as they were (changed under the write, or a rewrite that failed), or was interrupted by a failure or by a pass cut inside a batch; every read still normalizes them.",
                 stage.WalkLeft, stage.Name, stage.Walks);
         }
 
         stage.WalkRewritten = 0;
         stage.WalkLeft = 0;
         stage.WalkInterrupted = false;
+        stage.BatchOpen = false;
     }
 
     private static void LogTick(StageProgress stage, int examined, int rewritten, int left, ILogger logger, bool finished)

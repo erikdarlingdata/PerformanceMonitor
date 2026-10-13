@@ -572,6 +572,9 @@ public partial class App : Application
         LoadDuckDbMemoryLimit();
         LoadDefaultTimeRange();
         LoadAlertSettings();
+        /* An SMTP setup saved before the settings window warned about it is named in the log when it loads. */
+        if (LoadedSmtpCleartextWarning(GetSmtpPassword) is { } smtpWarning)
+            AppLogger.Warn("SMTP", smtpWarning);
 
         /* #3577: the operator's per-theme color overrides live beside settings.json, in the same per-user
            config directory, and are read by ThemeManager on every Apply — so the path and the log hooks
@@ -1189,6 +1192,19 @@ public partial class App : Application
     }
 
     public static void LoadAlertSettings() => LoadAlertSettings(ConfigDirectory, GetWebhookUrl, SaveWebhookUrl);
+
+    /// <summary>
+    /// The settings window's SMTP warning, for the settings just loaded: non-null when SMTP is on, SSL is off and a
+    /// username and password are set, so the login would cross the network readable. The password is read only
+    /// when the earlier conditions hold, through <paramref name="readPassword"/> so a test needs no credential store.
+    /// </summary>
+    internal static string? LoadedSmtpCleartextWarning(Func<string?> readPassword)
+    {
+        if (!SmtpEnabled || SmtpUseSsl || string.IsNullOrWhiteSpace(SmtpUsername))
+            return null;
+
+        return EmailSendCore.CleartextCredentialsWarning(SmtpUseSsl, SmtpUsername, !string.IsNullOrEmpty(readPassword()));
+    }
 
     /// <summary>
     /// Path- and secret-store-injected form, so the "secrets load even without settings.json" contract is

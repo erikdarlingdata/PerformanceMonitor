@@ -187,7 +187,15 @@ public sealed class ControlPlaneReloadDurabilityTests
             return CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', code.IndexOf(')', at)));
         }
 
-        Assert.Contains("return await ProvisionRolesAsync(", Body("public static async Task<int> EnsureProvisionedAsync("), StringComparison.Ordinal);
+        /* The managed entry point hands the core's result back unchanged. The credential files are written between
+           the batch and the return (a file is only ever written after the batch that set its password), so the
+           call is bound to a name first and that name is what is returned. */
+        var entry = code.IndexOf("public static Task<int> EnsureProvisionedAsync(", StringComparison.Ordinal);
+        Assert.True(entry > 0, "the managed entry point could not be located");
+        Assert.Contains("ProvisionManagedRolesAsync(", code[entry..code.IndexOf(';', entry)], StringComparison.Ordinal);
+        var managed = Body("internal static async Task<int> ProvisionManagedRolesAsync(");
+        Assert.Contains("var applied = await ProvisionRolesAsync(", managed, StringComparison.Ordinal);
+        Assert.Contains("return applied;", managed, StringComparison.Ordinal);
         var compose = Body("public static async Task<ComposeStoreProvisioning> EnsureComposeStoreProvisionedAsync(");
         Assert.Contains("var applied = await ProvisionRolesAsync(", compose, StringComparison.Ordinal);
         Assert.Contains("ComposeStoreProvisioning.Succeeded(applied,", compose, StringComparison.Ordinal);

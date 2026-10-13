@@ -168,6 +168,147 @@ public sealed class ScramVerifierLiveTests
         }
     }
 
+    /// <summary>
+    /// A role's credential file is written only after the batch that sets its password has committed, on a real
+    /// managed store. A batch that fails leaves no credential file, and an untrusted one that was there beforehand is gone;
+    /// the web and MCP hosts' own readers find nothing to log in with. Once the store accepts the batch, the retry
+    /// writes the files, the hosts' readers return logins the store accepts, and the old file's password is nobody's.
+    /// A later failed attempt leaves the files it wrote untouched and still working.
+    ///
+    /// <para>It boots its own cluster, like the test above, so it is not in the <c>live-postgres</c>
+    /// collection.</para>
+    /// </summary>
+    [Fact]
+    public async Task AFailedBatch_LeavesNoCredentialFile_AndTheRetryWritesFilesTheHostsLogInWith_Gated()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe) to run the credential-file proof on the product's own conf.");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime and the DPAPI credential files are Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-rolefiles-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var config = new PostgresConfig
+        {
+            Managed = true,
+            Port = DarlingManagedPostgresTests.FindFreeTcpPort(),
+            DataDirectory = dataDirectory,
+        };
+        var owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
+            var ct = timeout.Token;
+            var ownerCs = new NpgsqlConnectionStringBuilder(await owner.EnsureRunningAsync(ct)) { Pooling = false };
+            await using (var c = await OpenAsync(ownerCs.ConnectionString, ct))
+            {
+                await PgMigrations.MigrateAsync(c, ct);
+            }
+
+            await using var dataSource = NpgsqlDataSource.Create(ownerCs.ConnectionString);
+            var credentialPaths = new[]
+            {
+                DarlingManagedPostgres.AdminCredentialPathFor(dataDirectory),
+                DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory),
+                DarlingManagedPostgres.McpCredentialPathFor(dataDirectory),
+            };
+            var viewerPath = credentialPaths[1];
+            const string oldPassword = "WrittenByAnotherAccount1";
+
+            /* A batch that fails: an unmarked `mcp` makes the DO block raise. An untrusted viewer file is already
+               there, judged untrusted by the owner check the test passes in (a real one needs elevation). */
+            await using (var c = await OpenAsync(ownerCs.ConnectionString, ct))
+            {
+                await ExecAsync(c, "CREATE ROLE mcp LOGIN", ct);
+            }
+
+            File.WriteAllText(viewerPath, DarlingSecrets.Protect(oldPassword));
+            await Assert.ThrowsAsync<PostgresException>(() => DarlingManagedRoles.ProvisionManagedRolesAsync(
+                dataSource, dataDirectory, NullLogger.Instance, isTrustedOwner: _ => false, ct));
+
+            foreach (var path in credentialPaths)
+            {
+                Assert.False(File.Exists(path), $"{Path.GetFileName(path)} exists after a batch that failed");
+            }
+
+            Assert.Empty(Directory.GetFiles(root.FullName, "*.tmp"));
+            Assert.Null(DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential(config));
+            Assert.Null(DarlingManagedPostgres.TryBuildMcpConnectionStringFromStoredCredential(config));
+
+            /* The retry, once the store accepts the batch. */
+            await using (var c = await OpenAsync(ownerCs.ConnectionString, ct))
+            {
+                await ExecAsync(c, "DROP ROLE mcp", ct);
+            }
+
+            var retry = new CapturingTestLogger();
+            await DarlingManagedRoles.EnsureProvisionedAsync(dataSource, dataDirectory, retry, ct);
+            Assert.Contains("Role passwords: re-asserted for admin, viewer, mcp", retry.Joined, StringComparison.Ordinal);
+
+            foreach (var path in credentialPaths)
+            {
+                Assert.True(File.Exists(path), $"{Path.GetFileName(path)} is missing after the retry succeeded");
+            }
+
+            Assert.Empty(Directory.GetFiles(root.FullName, "*.tmp"));
+
+            /* The hosts read the files through these two, and what they return is a login the store accepts. */
+            var viewerCs = DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential(config);
+            var mcpCs = DarlingManagedPostgres.TryBuildMcpConnectionStringFromStoredCredential(config);
+            Assert.NotNull(viewerCs);
+            Assert.NotNull(mcpCs);
+            Assert.NotEqual(oldPassword, new NpgsqlConnectionStringBuilder(viewerCs).Password);
+            await using (var login = await OpenAsync(new NpgsqlConnectionStringBuilder(viewerCs) { Pooling = false }.ConnectionString, ct))
+            {
+                Assert.Equal("viewer", await ScalarAsync<string>(login, "SELECT current_user::text", ct));
+            }
+
+            await using (var login = await OpenAsync(new NpgsqlConnectionStringBuilder(mcpCs) { Pooling = false }.ConnectionString, ct))
+            {
+                Assert.Equal("mcp", await ScalarAsync<string>(login, "SELECT current_user::text", ct));
+            }
+
+            await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var wrong = await OpenAsync(Login(ownerCs, "viewer", oldPassword), ct);
+            });
+
+            /* A later attempt that fails leaves the files it wrote alone, and they still log in: the table the mcp
+               grants name is moved out of the way for the attempt, then put back. */
+            var before = credentialPaths.ToDictionary(p => p, p => File.ReadAllBytes(p));
+            await using (var c = await OpenAsync(ownerCs.ConnectionString, ct))
+            {
+                await ExecAsync(c, "ALTER TABLE collect.analysis_findings RENAME TO analysis_findings_away", ct);
+                try
+                {
+                    await Assert.ThrowsAsync<PostgresException>(() =>
+                        DarlingManagedRoles.EnsureProvisionedAsync(dataSource, dataDirectory, NullLogger.Instance, ct));
+                }
+                finally
+                {
+                    await ExecAsync(c, "ALTER TABLE collect.analysis_findings_away RENAME TO analysis_findings", ct);
+                }
+            }
+
+            foreach (var (path, bytes) in before)
+            {
+                Assert.Equal(bytes, File.ReadAllBytes(path));
+            }
+
+            await using (var login = await OpenAsync(new NpgsqlConnectionStringBuilder(viewerCs) { Pooling = false }.ConnectionString, ct))
+            {
+                Assert.Equal("viewer", await ScalarAsync<string>(login, "SELECT current_user::text", ct));
+            }
+        }
+        finally
+        {
+            await owner.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
     private static string ReadCredential(string path) =>
         DarlingSecrets.Unprotect(File.ReadAllText(path).Trim());
 
