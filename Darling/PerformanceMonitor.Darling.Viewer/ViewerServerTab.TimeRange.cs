@@ -133,6 +133,15 @@ public partial class ViewerServerTab
         return (startUtc, endUtc);
     }
 
+    /// <summary><see cref="GetWindowUtc"/> plus the clock the duration trends' tier decision measures against (#5725): the window's own
+    /// end for a live range (one clock read serves both), null for a fixed or finished range
+    /// (<see cref="ViewerTimeRangeWindow.TierNowUtc"/>).</summary>
+    private (DateTime startUtc, DateTime endUtc, DateTime? tierNowUtc) GetWindowUtcWithTierClock()
+    {
+        var (startUtc, endUtc, isLive) = ViewerTimeRangeWindow.Window(RangePicker.Value, DateTime.UtcNow, TabDisplayZone);
+        return (startUtc, endUtc, ViewerTimeRangeWindow.TierNowUtc(isLive, endUtc));
+    }
+
     /// <summary>True when the window ends in the past (a fixed range, or a calendar period that has finished), so a read
     /// that is start-only server-side must bound its end itself (the CPU chart). A window that slides with now is not.</summary>
     private bool IsCustomRange => !ViewerTimeRangeWindow.Window(RangePicker.Value, DateTime.UtcNow, TabDisplayZone).IsLive;

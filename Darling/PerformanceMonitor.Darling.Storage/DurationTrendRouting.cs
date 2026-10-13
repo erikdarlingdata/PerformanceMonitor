@@ -79,6 +79,21 @@ public static class DurationTrendRouting
         startUtc >= nowUtc - TimescaleSupport.RawRetentionSpan + RawTierMargin;
 
     /// <summary>
+    /// The clock the tier decision (<see cref="ShouldUseRawTier"/>, <see cref="ResolveTier"/>) measures against, captured ONCE
+    /// where a window is built (#5638, #5725). When the window's end IS now (<paramref name="windowEndIsNow"/>: an MCP call with no
+    /// <c>as_of</c>, a viewer range that slides with the clock) that end instant is the clock, so the tier is decided against the very
+    /// instant the window was computed. A router that read a second <c>DateTime.UtcNow</c> a few milliseconds LATER saw a window whose
+    /// start sat exactly on the raw boundary (<see cref="TimescaleSupport.RawRetentionSpan"/> less <see cref="RawTierMargin"/>, 95 h)
+    /// fall just past it and flip to the hourly tier on a read that should always be raw. When the end is an anchor in the past (an
+    /// <c>as_of</c>, a fixed or finished viewer range) it is NEVER the clock: <see cref="ShouldUseRawTier"/> (#2353) measures against
+    /// the wall clock because retention drops by age, so the clock is one <paramref name="wallClock"/> reading (the real clock unless a
+    /// test passes one). The MCP tools (<c>DarlingMcpTrendTools.TierClock</c>) and the viewer's Performance Trends load both call this
+    /// one definition.
+    /// </summary>
+    public static DateTime TierClock(bool windowEndIsNow, DateTime windowEndUtc, Func<DateTime>? wallClock = null) =>
+        windowEndIsNow ? windowEndUtc : (wallClock?.Invoke() ?? DateTime.UtcNow);
+
+    /// <summary>
     /// The one tier decision every unkeyed duration trend makes (#3541 A2): get_query_trend's age rule
     /// (<see cref="ShouldUseRawTier"/>), degraded to what the store HAS and to what it has MATERIALIZED, in that
     /// order.
