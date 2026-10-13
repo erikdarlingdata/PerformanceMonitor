@@ -130,7 +130,7 @@ internal sealed class NotificationRouteCacheCore
 
         /* Not under _gate: a load holds the gate for as long as the loader takes (it can wait on the DuckDB write lock with no
            timeout), and this method promises to hold no thread. Reading the field under the gate blocked the caller behind
-           the very load it was about to wait for. Configure swaps the field; a caller that read the old one just sees it done. */
+           the very load it was about to wait for. Configure (called once, at start) swaps the field; a caller still holding the old one waits out its bound at most. */
         var first = _firstLoad;
 
         if (first.Task.IsCompleted)
