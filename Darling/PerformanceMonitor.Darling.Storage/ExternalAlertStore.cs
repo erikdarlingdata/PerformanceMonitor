@@ -214,32 +214,53 @@ WHERE status = 'claimed'
   AND claimed_at < $1";
 
     /// <summary>
-    /// The reap with the delivered-if-logged refinement (#5654). $1 the instant a claim must predate, as <see cref="ReapSql"/>.
-    /// A claimed row that old becomes <c>delivered</c> when a history row written after the claim carries its pending id
-    /// in <c>context_json</c> and is not a send that failed on every channel (the drain writes that row after the send, so its existence is the proof the send
-    /// happened), else <c>interrupted</c>. Either way it is never claimed again and never sent again. The history scan is
-    /// bounded below by the claim time, so it reads only rows written since.
+    /// The claimed rows old enough to reap (#5654). $1 the instant a claim must predate, as <see cref="ReapSql"/>. The reap
+    /// with history builds each row's history pattern in code from this list, so the pattern has one definition.
+    /// </summary>
+    public const string ReapCandidatesSql = @"
+SELECT pending_id
+FROM config.external_alert_pending
+WHERE status = 'claimed'
+  AND claimed_at < $1";
+
+    /// <summary>
+    /// The reap with the delivered-if-logged refinement (#5654). $1 the instant a claim must predate, as <see cref="ReapSql"/>;
+    /// $2 the candidate pending ids and $3 their history <c>LIKE</c> patterns, one per id and built by the caller from
+    /// <c>AlertContextSerializer.BuildPendingIdLikePattern</c> (the one definition of what a drain history row carries).
+    /// A claimed row that old becomes <c>delivered</c> when a history row written after the claim matches its pattern and is
+    /// not a send that failed on every channel (the drain writes that row after the send, so its existence is the proof the
+    /// send happened), else <c>interrupted</c>. Either way it is never claimed again and never sent again. The status and
+    /// age guards are repeated on the update, so a row that was released or restamped since the candidates were read is
+    /// left alone. The history scan is bounded below by the claim time, so it reads only rows written since.
     /// </summary>
     public const string ReapWithHistorySql = @"
-WITH reaped AS (
-    UPDATE config.external_alert_pending p
-    SET status = CASE WHEN EXISTS (
-                         SELECT 1
-                         FROM config.config_alert_log l
-                         WHERE l.alert_time >= (p.claimed_at AT TIME ZONE 'UTC') - interval '1 minute'
-                           AND (l.alert_sent OR l.send_error IS NULL)
-                           AND l.context_json LIKE '%""PendingId"":' || p.pending_id::text || '}%')
-                     THEN 'delivered' ELSE 'interrupted' END,
-        completed_at = now(),
-        reason = CASE WHEN EXISTS (
-                         SELECT 1
-                         FROM config.config_alert_log l
-                         WHERE l.alert_time >= (p.claimed_at AT TIME ZONE 'UTC') - interval '1 minute'
-                           AND (l.alert_sent OR l.send_error IS NULL)
-                           AND l.context_json LIKE '%""PendingId"":' || p.pending_id::text || '}%')
-                     THEN 'the run that claimed it ended before marking it; its history row shows it was sent'
-                     ELSE 'the run that claimed it ended before reporting a result; not sent again' END
+WITH cand AS (
+    SELECT p.pending_id, p.claimed_at, c.pat
+    FROM config.external_alert_pending p
+    JOIN unnest($2::bigint[], $3::text[]) AS c(id, pat) ON c.id = p.pending_id
     WHERE p.status = 'claimed'
+      AND p.claimed_at < $1
+),
+logged AS (
+    SELECT cand.pending_id,
+           EXISTS (
+               SELECT 1
+               FROM config.config_alert_log l
+               WHERE l.alert_time >= (cand.claimed_at AT TIME ZONE 'UTC') - interval '1 minute'
+                 AND (l.alert_sent OR l.send_error IS NULL)
+                 AND l.context_json LIKE cand.pat) AS sent
+    FROM cand
+),
+reaped AS (
+    UPDATE config.external_alert_pending p
+    SET status = CASE WHEN logged.sent THEN 'delivered' ELSE 'interrupted' END,
+        completed_at = now(),
+        reason = CASE WHEN logged.sent
+                      THEN 'the run that claimed it ended before marking it; its history row shows it was sent'
+                      ELSE 'the run that claimed it ended before reporting a result; not sent again' END
+    FROM logged
+    WHERE p.pending_id = logged.pending_id
+      AND p.status = 'claimed'
       AND p.claimed_at < $1
     RETURNING p.status
 )
@@ -283,11 +304,15 @@ FROM config.external_alert_state
 WHERE source_id = $1 AND alert_key = $2 AND server_label = $3";
 
     /// <summary>
-    /// Records a fire and returns what the subject was before it. $1 source_id, $2 alert_key, $3 server_label,
-    /// $4 server_id, $5 server_key, $6 server_name, $7 severity. The returned row is the state read before the write, so a
-    /// repeat fire reports <c>true</c>. The identity the fire is sent under is kept with the state, and a repeat fire of a
-    /// subject that is still firing keeps the identity the episode began with (the columns it returns are the kept ones), so a
-    /// server registered or renamed mid-episode re-triggers the same incident.
+    /// Records a fire and returns what the subject was before it (#5654). $1 source_id, $2 alert_key, $3 server_label,
+    /// $4 server_id, $5 server_key, $6 server_name. The returned row is the state read before the write, so a repeat fire
+    /// reports <c>true</c>. The identity the fire is sent under is kept with the state, and a repeat fire of a subject that is
+    /// still firing keeps the identity the episode began with (the columns it returns are the kept ones), so a server
+    /// registered or renamed mid-episode re-triggers the same incident.
+    /// <para><c>fired_severity</c> is the severity the operator was last TOLD about, as a built-in alert's delivered band is: a
+    /// fire that opens the subject leaves it null until <see cref="ConfirmFireSql"/> records a send that went out, and a
+    /// repeat fire keeps what was confirmed. A firing subject whose severity is still null is an incident that opened and
+    /// has not been delivered.</para>
     /// </summary>
     public const string RecordFireSql = @"
 WITH prev AS (
@@ -298,13 +323,13 @@ WITH prev AS (
 up AS (
     INSERT INTO config.external_alert_state
         (source_id, alert_key, server_label, server_id, server_key, server_name, firing, fired_severity, last_fired_at)
-    VALUES ($1, $2, $3, $4, $5, $6, true, $7, now())
+    VALUES ($1, $2, $3, $4, $5, $6, true, NULL, now())
     ON CONFLICT (source_id, alert_key, server_label) DO UPDATE SET
         server_id = CASE WHEN config.external_alert_state.firing THEN config.external_alert_state.server_id ELSE EXCLUDED.server_id END,
         server_key = CASE WHEN config.external_alert_state.firing THEN config.external_alert_state.server_key ELSE EXCLUDED.server_key END,
         server_name = CASE WHEN config.external_alert_state.firing THEN config.external_alert_state.server_name ELSE EXCLUDED.server_name END,
+        fired_severity = CASE WHEN config.external_alert_state.firing THEN config.external_alert_state.fired_severity ELSE NULL END,
         firing = true,
-        fired_severity = EXCLUDED.fired_severity,
         last_fired_at = EXCLUDED.last_fired_at
     RETURNING server_id, server_key, server_name
 )
@@ -312,15 +337,40 @@ SELECT COALESCE((SELECT firing FROM prev), false), (SELECT fired_severity FROM p
 FROM up";
 
     /// <summary>
+    /// Records that a fire's send went out (#5654), so the severity is the one the operator was told. $1 source_id,
+    /// $2 alert_key, $3 server_label, $4 severity. Touches only a subject that is firing.
+    /// </summary>
+    public const string ConfirmFireSql = @"
+UPDATE config.external_alert_state
+SET fired_severity = $4
+WHERE source_id = $1 AND alert_key = $2 AND server_label = $3
+  AND firing";
+
+    /// <summary>
+    /// Ends an incident whose opening fire gave up without a send going out (#5654), the way a built-in alert leaves a fire
+    /// no channel took undelivered. $1 source_id, $2 alert_key, $3 server_label. Touches only a firing subject whose
+    /// severity was never confirmed, so a repeat fire that gives up leaves the incident an earlier fire opened firing.
+    /// Returns a row when it ended one.
+    /// </summary>
+    public const string AbandonFireSql = @"
+UPDATE config.external_alert_state
+SET firing = false
+WHERE source_id = $1 AND alert_key = $2 AND server_label = $3
+  AND firing
+  AND fired_severity IS NULL
+RETURNING 1";
+
+    /// <summary>
     /// Records a clear. $1 source_id, $2 alert_key, $3 server_label. Returns the severity the subject fired at when it was
-    /// firing, and no row when it was not, so a clear for a key that never fired is told apart from a real one.
+    /// firing (empty when its fire was never confirmed sent), and no row when it was not, so a clear for a key that never
+    /// fired is told apart from a real one.
     /// </summary>
     public const string RecordClearSql = @"
 UPDATE config.external_alert_state
 SET firing = false
 WHERE source_id = $1 AND alert_key = $2 AND server_label = $3
   AND firing
-RETURNING fired_severity";
+RETURNING COALESCE(fired_severity, '')";
 
     /// <summary>
     /// The rows the drain gave up on inside a window (#5654), by source and terminal status: <c>expired</c> (past its deadline
@@ -551,15 +601,38 @@ ORDER BY s.source_name, p.status";
     /// <summary>
     /// <see cref="ReapAsync"/> with the delivered-if-logged refinement (#5654): a row a dead run left claimed is
     /// <c>delivered</c> if the alert history holds a row carrying its pending id, else <c>interrupted</c>. Returns how
-    /// many rows went each way. Never sends anything.
+    /// many rows went each way. Never sends anything. <paramref name="pendingIdLikePattern"/> builds the history
+    /// <c>LIKE</c> pattern for one pending id; production passes <c>AlertContextSerializer.BuildPendingIdLikePattern</c>.
     /// </summary>
     public async Task<(int Delivered, int Interrupted)> ReapWithHistoryAsync(
-        TimeSpan claimedFor, CancellationToken cancellationToken = default)
+        TimeSpan claimedFor, Func<long, string> pendingIdLikePattern, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(claimedFor, TimeSpan.Zero);
+        ArgumentNullException.ThrowIfNull(pendingIdLikePattern);
+        var cutoff = UtcAgo(claimedFor);
+
+        var ids = new List<long>();
+        await using (var candidates = _dataSource.CreateCommand(ReapCandidatesSql))
+        {
+            candidates.CommandTimeout = _commandTimeoutSeconds;
+            candidates.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
+            await using var candidateReader = await candidates.ExecuteReaderAsync(cancellationToken);
+            while (await candidateReader.ReadAsync(cancellationToken))
+            {
+                ids.Add(candidateReader.GetInt64(0));
+            }
+        }
+
+        if (ids.Count == 0)
+        {
+            return (0, 0);
+        }
+
         await using var command = _dataSource.CreateCommand(ReapWithHistorySql);
         command.CommandTimeout = _commandTimeoutSeconds;
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = UtcAgo(claimedFor) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
+        command.Parameters.Add(new NpgsqlParameter<long[]> { TypedValue = ids.ToArray() });
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = ids.Select(pendingIdLikePattern).ToArray() });
 
         var delivered = 0;
         var interrupted = 0;
@@ -603,17 +676,18 @@ ORDER BY s.source_name, p.status";
     }
 
     /// <summary>
-    /// Records that the subject is firing at <paramref name="severity"/> and returns what it was before: whether it was
-    /// already firing, and at what severity. A subject that never fired reports <c>(false, null)</c>. The subject is the
+    /// Records that the subject is firing and returns what it was before: whether it was already firing, and the severity the
+    /// operator was last told about (null when it never fired, or opened and has had no send confirmed). The subject is the
     /// normalized submitted name <paramref name="serverLabel"/> (empty when none was given); <paramref name="serverId"/>,
     /// <paramref name="serverKey"/> and <paramref name="serverName"/> are the identity this fire is sent under, kept so the
-    /// clear closes the same incident.
+    /// clear closes the same incident. Written before the send, so a clear that follows pairs with the fire even when a stopped
+    /// run never marked it; <see cref="ConfirmFireAsync"/> follows a send that went out and <see cref="AbandonFireAsync"/> a
+    /// fire that gave up.
     /// </summary>
     public async Task<ExternalAlertFireResult> RecordFireAsync(
-        int sourceId, string alertKey, string serverLabel, int serverId, string serverKey, string serverName, string severity,
+        int sourceId, string alertKey, string serverLabel, int serverId, string serverKey, string serverName,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrEmpty(severity);
         ArgumentNullException.ThrowIfNull(serverKey);
         ArgumentNullException.ThrowIfNull(serverName);
         return await InStateWriteAsync(
@@ -625,7 +699,6 @@ ORDER BY s.source_name, p.status";
                 command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
                 command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serverKey });
                 command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serverName });
-                command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = severity });
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 await reader.ReadAsync(cancellationToken);
                 return new ExternalAlertFireResult(
@@ -634,9 +707,44 @@ ORDER BY s.source_name, p.status";
             cancellationToken);
     }
 
+    /// <summary>Records that a fire's send went out (or that nothing is owed it), at <paramref name="severity"/>.</summary>
+    public async Task ConfirmFireAsync(
+        int sourceId, string alertKey, string serverLabel, string severity, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(severity);
+        await InStateWriteAsync(
+            async (connection, transaction) =>
+            {
+                await using var command = new NpgsqlCommand(ConfirmFireSql, connection, transaction);
+                command.CommandTimeout = _commandTimeoutSeconds;
+                BindSubject(command, sourceId, alertKey, serverLabel);
+                command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = severity });
+                return await command.ExecuteNonQueryAsync(cancellationToken);
+            },
+            cancellationToken);
+    }
+
     /// <summary>
-    /// Records a clear. Returns the severity the subject fired at when it was firing, and null when it was not (a clear with
-    /// no fire to pair with).
+    /// Ends an incident whose opening fire gave up with nothing sent, so a later clear closes nothing. Returns true when it
+    /// ended one, and false when the subject is not firing or an earlier fire's send was confirmed (the incident stays open).
+    /// </summary>
+    public async Task<bool> AbandonFireAsync(
+        int sourceId, string alertKey, string serverLabel, CancellationToken cancellationToken = default)
+    {
+        return await InStateWriteAsync(
+            async (connection, transaction) =>
+            {
+                await using var command = new NpgsqlCommand(AbandonFireSql, connection, transaction);
+                command.CommandTimeout = _commandTimeoutSeconds;
+                BindSubject(command, sourceId, alertKey, serverLabel);
+                return await command.ExecuteScalarAsync(cancellationToken) is not null;
+            },
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Records a clear. Returns the severity the subject fired at when it was firing (empty when no send of its fire was ever
+    /// confirmed), and null when it was not (a clear with no fire to pair with).
     /// </summary>
     public async Task<string?> RecordClearAsync(
         int sourceId, string alertKey, string serverLabel, CancellationToken cancellationToken = default)

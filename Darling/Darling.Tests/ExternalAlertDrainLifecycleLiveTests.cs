@@ -205,7 +205,7 @@ public sealed class ExternalAlertDrainLifecycleLiveTests
                 else if (sends == 2)
                 {
                     /* Another instance's reap, with an age the claim time alone would already exceed. */
-                    reapedDuringSecondSend = await rig.Store.ReapWithHistoryAsync(TimeSpan.FromSeconds(3), rig.Ct);
+                    reapedDuringSecondSend = await rig.Store.ReapWithHistoryAsync(TimeSpan.FromSeconds(3), AlertContextSerializer.BuildPendingIdLikePattern, rig.Ct);
                 }
             };
 

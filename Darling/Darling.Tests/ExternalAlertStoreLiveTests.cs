@@ -250,14 +250,19 @@ public sealed class ExternalAlertStoreLiveTests
             Assert.Null(await store.GetStateAsync(sourceId, "disk:c", "", ct));
             Assert.Null(await store.RecordClearAsync(sourceId, "disk:c", "", ct));
 
-            Assert.Equal(new ExternalAlertFireResult(false, null, 0, "external:External (state_svc)", "External (state_svc)"), await store.RecordFireAsync(sourceId, "disk:c", "", 0, "external:External (state_svc)", "External (state_svc)", "critical", ct));
+            Assert.Equal(new ExternalAlertFireResult(false, null, 0, "external:External (state_svc)", "External (state_svc)"), await store.RecordFireAsync(sourceId, "disk:c", "", 0, "external:External (state_svc)", "External (state_svc)", ct));
             var firing = await store.GetStateAsync(sourceId, "disk:c", "", ct);
             Assert.NotNull(firing);
             Assert.True(firing!.Firing);
-            Assert.Equal("critical", firing.FiredSeverity);
+            /* The severity is the one the operator was told, so it stays empty until a send is confirmed. */
+            Assert.Null(firing.FiredSeverity);
+            await store.ConfirmFireAsync(sourceId, "disk:c", "", "critical", ct);
+            Assert.Equal("critical", (await store.GetStateAsync(sourceId, "disk:c", "", ct))!.FiredSeverity);
             Assert.NotNull(firing.LastFiredAtUtc);
             Assert.Equal((0, "external:External (state_svc)", "External (state_svc)"), (firing.ServerId, firing.ServerKey, firing.ServerName));
-            Assert.Equal(new ExternalAlertFireResult(true, "critical", 0, "external:External (state_svc)", "External (state_svc)"), await store.RecordFireAsync(sourceId, "disk:c", "", 0, "external:External (state_svc)", "External (state_svc)", "warning", ct));
+            Assert.Equal(new ExternalAlertFireResult(true, "critical", 0, "external:External (state_svc)", "External (state_svc)"), await store.RecordFireAsync(sourceId, "disk:c", "", 0, "external:External (state_svc)", "External (state_svc)", ct));
+            Assert.Equal("critical", (await store.GetStateAsync(sourceId, "disk:c", "", ct))!.FiredSeverity);
+            await store.ConfirmFireAsync(sourceId, "disk:c", "", "warning", ct);
             Assert.Equal("warning", (await store.GetStateAsync(sourceId, "disk:c", "", ct))!.FiredSeverity);
 
             /* The same key on another server name is its own subject. */
@@ -286,8 +291,10 @@ public sealed class ExternalAlertStoreLiveTests
             await using var dataSource = NpgsqlDataSource.Create(connectionString);
             var store = new ExternalAlertStore(dataSource, Deadline);
 
-            await store.RecordFireAsync(sourceId, "k", "a", 0, "external:A", "A", "critical", ct);
-            await store.RecordFireAsync(sourceId, "k", "b", 0, "external:B", "B", "warning", ct);
+            await store.RecordFireAsync(sourceId, "k", "a", 0, "external:A", "A", ct);
+            await store.ConfirmFireAsync(sourceId, "k", "a", "critical", ct);
+            await store.RecordFireAsync(sourceId, "k", "b", 0, "external:B", "B", ct);
+            await store.ConfirmFireAsync(sourceId, "k", "b", "warning", ct);
             Assert.Equal("2", await ScalarAsync(seed, "SELECT count(*) FROM config.external_alert_state WHERE alert_key = 'k'", ct));
 
             /* A's clear finds A's identity and closes only A. */
@@ -302,15 +309,17 @@ public sealed class ExternalAlertStoreLiveTests
             Assert.Equal("warning", await store.RecordClearAsync(sourceId, "k", "b", ct));
 
             /* A repeat fire of a subject that is still firing keeps the identity its episode began with; a fire after a clear takes the new one. */
-            var kept = await store.RecordFireAsync(sourceId, "k2", "z", 0, "external:Z", "Z", "warning", ct);
+            var kept = await store.RecordFireAsync(sourceId, "k2", "z", 0, "external:Z", "Z", ct);
             Assert.Equal(new ExternalAlertFireResult(false, null, 0, "external:Z", "Z"), kept);
+            await store.ConfirmFireAsync(sourceId, "k2", "z", "warning", ct);
             Assert.Equal(new ExternalAlertFireResult(true, "warning", 0, "external:Z", "Z"),
-                await store.RecordFireAsync(sourceId, "k2", "z", 9, "9", "Zed", "critical", ct));
+                await store.RecordFireAsync(sourceId, "k2", "z", 9, "9", "Zed", ct));
+            await store.ConfirmFireAsync(sourceId, "k2", "z", "critical", ct);
             var stateZ = await store.GetStateAsync(sourceId, "k2", "z", ct);
             Assert.Equal((0, "external:Z", "Z"), (stateZ!.ServerId, stateZ.ServerKey, stateZ.ServerName));
             Assert.Equal("critical", await store.RecordClearAsync(sourceId, "k2", "z", ct));
             Assert.Equal(new ExternalAlertFireResult(false, "critical", 9, "9", "Zed"),
-                await store.RecordFireAsync(sourceId, "k2", "z", 9, "9", "Zed", "warning", ct));
+                await store.RecordFireAsync(sourceId, "k2", "z", 9, "9", "Zed", ct));
 
             /* A clear for a name that never fired closes nothing. */
             Assert.Null(await store.RecordClearAsync(sourceId, "k", "c", ct));
@@ -343,8 +352,68 @@ public sealed class ExternalAlertStoreLiveTests
             Assert.Equal(string.Join(",", new[] { oldPending, oldClaimed, recentDone }.OrderBy(i => i)), remaining);
             Assert.Empty(oldIds.Select(i => i.ToString(CultureInfo.InvariantCulture)).Intersect(remaining.Split(',')));
 
-            /* The registry and the firing state are not trimmed by age. */
+            /* The registry is not trimmed by age. */
             Assert.Equal("1", await ScalarAsync(seed, "SELECT count(*) FROM config.external_alert_source", ct));
+        });
+    }
+
+    [Fact]
+    public async Task Retention_TrimsOldClearedState_AndNeverAFiringSubjectOrARecentlyClearedOne()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the external alert store's live facts (each mints its own scratch database).");
+
+        await WithStoreAsync(async (seed, connectionString, ct) =>
+        {
+            var sourceId = await AddSourceAsync(seed, "state_keep_svc", ct);
+            var ageDays = DarlingRetention.ExternalAlertRetentionDays + 10;
+            var insert = "INSERT INTO config.external_alert_state (source_id, alert_key, server_label, firing, fired_severity, last_fired_at)"
+                + " VALUES ({0}, '{1}', '', {2}, 'warning', now() - interval '{3} days')";
+            foreach (var (key, firing, days) in new[]
+                     {
+                         ("old-cleared-a", false, ageDays), ("old-cleared-b", false, ageDays + 40),
+                         ("old-firing", true, ageDays), ("recent-cleared", false, 1), ("recent-firing", true, 1),
+                     })
+            {
+                await ExecAsync(seed, string.Format(CultureInfo.InvariantCulture, insert, sourceId, key, firing ? "true" : "false", days), ct);
+            }
+
+            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, logger: null, ct);
+
+            Assert.Equal("old-firing,recent-cleared,recent-firing",
+                await ScalarAsync(seed, "SELECT string_agg(alert_key, ',' ORDER BY alert_key) FROM config.external_alert_state", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AnOpeningFireThatGivesUpUnconfirmed_EndsTheIncident_ButARepeatFireThatGivesUpLeavesAConfirmedOneOpen()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the external alert store's live facts (each mints its own scratch database).");
+
+        await WithStoreAsync(async (seed, connectionString, ct) =>
+        {
+            var sourceId = await AddSourceAsync(seed, "abandon_svc", ct);
+            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            var store = new ExternalAlertStore(dataSource, Deadline);
+
+            /* A fire that opened the subject and was never confirmed: giving up ends it, so a clear finds nothing to close. */
+            await store.RecordFireAsync(sourceId, "a", "", 0, "external:A", "A", ct);
+            await store.RecordFireAsync(sourceId, "a", "", 0, "external:A", "A", ct);
+            Assert.True(await store.AbandonFireAsync(sourceId, "a", "", ct));
+            Assert.False((await store.GetStateAsync(sourceId, "a", "", ct))!.Firing);
+            Assert.Null(await store.RecordClearAsync(sourceId, "a", "", ct));
+            Assert.False(await store.AbandonFireAsync(sourceId, "a", "", ct));
+
+            /* A confirmed incident stays open when a later fire gives up, and its clear is told the confirmed severity. */
+            await store.RecordFireAsync(sourceId, "b", "", 0, "external:B", "B", ct);
+            await store.ConfirmFireAsync(sourceId, "b", "", "warning", ct);
+            await store.RecordFireAsync(sourceId, "b", "", 0, "external:B", "B", ct);
+            Assert.False(await store.AbandonFireAsync(sourceId, "b", "", ct));
+            Assert.Equal("warning", await store.RecordClearAsync(sourceId, "b", "", ct));
+
+            /* An unconfirmed incident that is cleared reports an empty severity, not a missing fire. */
+            await store.RecordFireAsync(sourceId, "c", "", 0, "external:C", "C", ct);
+            Assert.Equal(string.Empty, await store.RecordClearAsync(sourceId, "c", "", ct));
         });
     }
 
@@ -366,6 +435,12 @@ public sealed class ExternalAlertStoreLiveTests
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
         }
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task<int> AddSourceAsync(NpgsqlConnection connection, string name, CancellationToken ct) =>
@@ -400,11 +475,4 @@ public sealed class ExternalAlertStoreLiveTests
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = Deadline };
         var value = await command.ExecuteScalarAsync(ct);
         return value is null or DBNull ? null : Convert.ToString(value, CultureInfo.InvariantCulture);
-    }
-
-    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
-    {
-        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = Deadline };
-        await command.ExecuteNonQueryAsync(ct);
-    }
-}
+    }}

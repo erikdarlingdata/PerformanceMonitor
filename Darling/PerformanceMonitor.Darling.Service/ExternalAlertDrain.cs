@@ -133,7 +133,8 @@ public sealed class ExternalAlertDrain
     {
         var expired = await _store.ExpireAsync(cancellationToken);
 
-        var (reapedDelivered, reapedInterrupted) = await _store.ReapWithHistoryAsync(ReapClaimsOlderThan, cancellationToken);
+        var (reapedDelivered, reapedInterrupted) = await _store.ReapWithHistoryAsync(
+            ReapClaimsOlderThan, AlertContextSerializer.BuildPendingIdLikePattern, cancellationToken);
         if (reapedDelivered + reapedInterrupted > 0)
         {
             _logger.LogWarning(
@@ -259,9 +260,12 @@ public sealed class ExternalAlertDrain
 
         var detail = Clean(row.Detail, MaxDetailLength);
         /* The firing state is written before the send, so a clear that follows pairs with this fire even when the send
-           has to be retried or a stopped run never marked it. A repeat fire only refreshes it. */
+           has to be retried or a stopped run never marked it. A repeat fire only refreshes it. The severity the operator was
+           told about is recorded only once a send has gone out (ConfirmFireAsync), and a fire that opens the subject and gives
+           up undelivered ends the incident (AbandonFireAsync), as a built-in alert's fire that no channel took leaves no
+           incident for a resolve to close. */
         var fired = await _store.RecordFireAsync(
-            row.SourceId, row.AlertKey, server.StateLabel, server.BucketId, server.Key, server.Label, row.Severity, cancellationToken);
+            row.SourceId, row.AlertKey, server.StateLabel, server.BucketId, server.Key, server.Label, cancellationToken);
         var wasFiring = fired.WasFiring;
         var previousSeverity = fired.PreviousSeverity;
 
@@ -270,6 +274,7 @@ public sealed class ExternalAlertDrain
         var muted = _isMuted(new AlertMuteContext
         {
             ServerName = fired.ServerName,
+            /* A registered server's key is its id (Identify); an unregistered name's key carries a prefix and is no number. */
             ServerId = int.TryParse(fired.ServerKey, NumberStyles.None, CultureInfo.InvariantCulture, out var keptId) ? keptId : null,
             MetricName = metric,
             /* A mute rule can name the source (#5654): it silences this source's alerts and no other source's. */
@@ -285,6 +290,8 @@ public sealed class ExternalAlertDrain
         var outcome = new AlertOutcome(
             fired.ServerKey, fired.ServerName, metric, currentText, "",
             Context: context, DetailText: detailText,
+            /* A submitted value is the measurement. A submission without one is a state: the explicit 0 the history column
+               needs, which the External: family's IsStateOnly arm shows as a dash instead of 0.00 (#1881). */
             NumericCurrentValue: row.Value ?? 0, NumericThresholdValue: null,
             Muted: muted, Severity: severity,
             ShortMessage: title, DisplayName: title);
@@ -295,12 +302,14 @@ public sealed class ExternalAlertDrain
         {
             /* The deliverer gave no answer: something outside its channels threw. Whether a post went out is unknown, so
                the row is closed and not sent again. */
+            await TryConfirmFireAsync(row, server.StateLabel);
             await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Interrupted, "the deliverer gave no answer; not sent again");
             return ExternalAlertOutcome.Interrupted;
         }
 
         if (muted)
         {
+            await TryConfirmFireAsync(row, server.StateLabel);
             await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Muted, "a mute rule matched");
             return ExternalAlertOutcome.Muted;
         }
@@ -311,13 +320,20 @@ public sealed class ExternalAlertDrain
                that no request left the process (a webhook that timed out after its request was sent reads the same as a
                refused connection), so a repeat can post twice. PagerDuty drops a repeat trigger that carries the same dedup
                key, and the key is derived from the server and the metric name, so every attempt of this row sends the same one. */
-            return await RetryOrFailAsync(row, "every channel failed; the alert history row has the error");
+            var result = await RetryOrFailAsync(row, "every channel failed; the alert history row has the error");
+            if (result == ExternalAlertOutcome.Failed)
+            {
+                await TryAbandonFireAsync(row, server.StateLabel);
+            }
+
+            return result;
         }
 
+        await TryConfirmFireAsync(row, server.StateLabel);
         if (delivery.Sent)
         {
             await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Delivered,
-                wasFiring && !string.Equals(previousSeverity, row.Severity, StringComparison.OrdinalIgnoreCase)
+                wasFiring && previousSeverity is not null && !string.Equals(previousSeverity, row.Severity, StringComparison.OrdinalIgnoreCase)
                     ? $"severity changed from {previousSeverity} to {row.Severity}"
                     : null);
             return ExternalAlertOutcome.Delivered;
@@ -409,6 +425,38 @@ public sealed class ExternalAlertDrain
         return null;
     }
 
+    /// <summary>Records the severity a fire's send went out at. A failure is logged and left: the send is done, and an
+    /// unconfirmed severity only means a later fire that gives up could end an incident this one opened.</summary>
+    private async Task TryConfirmFireAsync(ExternalAlertPendingRow row, string stateLabel)
+    {
+        try
+        {
+            await _store.ConfirmFireAsync(row.SourceId, row.AlertKey, stateLabel, row.Severity);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "External alert {PendingId} was sent but its severity could not be recorded on the firing state", row.PendingId);
+        }
+    }
+
+    /// <summary>Ends the incident a fire opened when the fire gave up with nothing sent, so a clear that follows has no
+    /// incident to resolve. A repeat fire that gives up leaves an incident an earlier delivered fire opened. A failure is
+    /// logged and left.</summary>
+    private async Task TryAbandonFireAsync(ExternalAlertPendingRow row, string stateLabel)
+    {
+        try
+        {
+            if (await _store.AbandonFireAsync(row.SourceId, row.AlertKey, stateLabel))
+            {
+                _logger.LogInformation("External alert {PendingId} ({Source}/{Key}) gave up before any send went out; the subject is no longer firing", row.PendingId, row.SourceName, row.AlertKey);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "External alert {PendingId} gave up but the firing state could not be ended", row.PendingId);
+        }
+    }
+
     /// <summary>A failed mark leaves a claimed row, which the next start's reap closes; it must never undo a handled alert.</summary>
     private async Task TryMarkAsync(long pendingId, ExternalAlertOutcome outcome, string? reason)
     {
@@ -427,7 +475,7 @@ public sealed class ExternalAlertDrain
 
     /// <summary><c>StateLabel</c> is what the firing state is keyed on: the submitted name, cleaned and lower-cased (empty when
     /// none was given), so a fire and its clear meet whatever the server registry says in between.</summary>
-    private readonly record struct Identity(string Key, string Label, int? MuteId, int BucketId, string StateLabel);
+    private readonly record struct Identity(string Key, string Label, int BucketId, string StateLabel);
 
     /// <summary>A registered server is its id and display name. An unregistered name is a label only, in the server_id 0
     /// bucket: its key is not a number (and carries a prefix, so a server named "5" can never collide with server 5).</summary>
@@ -437,11 +485,11 @@ public sealed class ExternalAlertDrain
         var stateLabel = name.ToLowerInvariant();
         if (name.Length > 0 && _resolveServer(name) is { } server)
         {
-            return new Identity(server.ServerId.ToString(CultureInfo.InvariantCulture), server.DisplayName, server.ServerId, server.ServerId, stateLabel);
+            return new Identity(server.ServerId.ToString(CultureInfo.InvariantCulture), server.DisplayName, server.ServerId, stateLabel);
         }
 
         var label = name.Length > 0 ? name : "External (" + row.SourceName + ")";
-        return new Identity("external:" + label, label, null, 0, stateLabel);
+        return new Identity("external:" + label, label, 0, stateLabel);
     }
 
     private static string Clean(string? value, int maxLength) => CleanText(value, maxLength);

@@ -340,9 +340,125 @@ public sealed class ExternalAlertDrainLiveTests
             Assert.Equal("delivered", await rig.StatusAsync(logged));
             Assert.Equal("interrupted", await rig.StatusAsync(lost));
             Assert.Empty(rig.Sent);
+        });
+    }
 
-            /* A row 12 must not be found by a history row for 123 (the closing brace anchors the id). */
-            Assert.Equal("%\"PendingId\":12}%", AlertContextSerializer.BuildPendingIdLikePattern(12));
+    [Fact]
+    public async Task AReapedRow_IsFoundByItsOwnPendingId_AndNotByAHistoryRowForALongerId()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            /* Ids are sequential, so burn ones until a 1-digit id and a longer id that starts with it both exist. */
+            var ids = new List<long>();
+            for (var i = 0; i < 12; i++)
+            {
+                ids.Add(await rig.SubmitAsync("fire", "k" + i.ToString(CultureInfo.InvariantCulture)));
+            }
+
+            var short1 = ids[0];
+            var longer = ids.First(id => id.ToString(CultureInfo.InvariantCulture).StartsWith(short1.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal) && id != short1);
+            await rig.ExecAsync($"UPDATE config.external_alert_pending SET status = 'claimed', claimed_at = now() - interval '10 minutes' WHERE pending_id IN ({short1})");
+
+            /* Only the longer id has a history row, so the short id's row must not be called delivered by it. */
+            var context = AlertContextSerializer.Serialize(new AlertContext { External = new AlertExternalOrigin("nagios", "k", longer) });
+            await rig.History.RecordAlertAsync(new AlertHistoryRecord(
+                "7", "SQL01", "External:nagios:k", "1", "", 1, null,
+                AlertDelivery.FromLegacyStoredColumns(true, "webhook", null), false, "x", context));
+
+            var pass = await rig.Drain.RunPassAsync(rig.Ct);
+
+            Assert.Equal(0, pass.ReapedDelivered);
+            Assert.Equal(1, pass.ReapedInterrupted);
+            Assert.Equal("interrupted", await rig.StatusAsync(short1));
+        });
+    }
+
+    [Fact]
+    public async Task AFireWithAValue_IsSentMeasured_AndAFireWithoutOne_IsSentAsAState()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            await rig.SubmitAsync("fire", "disk", value: 91.5);
+            await rig.SubmitAsync("fire", "svc");
+            await rig.Drain.RunPassAsync(rig.Ct);
+
+            var valued = Assert.Single(rig.Sent, o => o.MetricName == "External:nagios:disk");
+            var valueless = Assert.Single(rig.Sent, o => o.MetricName == "External:nagios:svc");
+            Assert.Equal(91.5, valued.NumericCurrentValue);
+            Assert.Equal("91.5", valued.CurrentValue);
+            Assert.Equal(0.0, valueless.NumericCurrentValue);
+            Assert.Equal("warning", valueless.CurrentValue);
+
+            /* What the history grids make of the stored numbers: the measurement as a number, the state as a dash. */
+            Assert.Equal("91.50", AlertMetricClassifier.FormatHistoryValue(valued.MetricName, valued.NumericCurrentValue!.Value));
+            Assert.Equal(AlertMetricClassifier.StateOnlyDisplay, AlertMetricClassifier.FormatHistoryValue(valueless.MetricName, valueless.NumericCurrentValue!.Value));
+        });
+    }
+
+    [Fact]
+    public async Task AFireThatGaveUpBeforeAnySendWentOut_LeavesNothingFiring_SoItsClearResolvesNothing()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            rig.Answer = AlertDelivery.FromLegacyStoredColumns(false, "failed", "boom");
+            var fire = await rig.SubmitAsync("fire", "disk", server: "BOX-A");
+            await rig.GiveUpAsync(fire);
+            Assert.Equal("failed", await rig.StatusAsync(fire));
+            Assert.Equal("false", await rig.ScalarAsync("SELECT firing::text FROM config.external_alert_state WHERE alert_key = 'disk'"));
+
+            var clear = await rig.SubmitAsync("clear", "disk", server: "BOX-A");
+            var pass = await rig.Drain.RunPassAsync(rig.Ct);
+
+            Assert.Equal(1, pass.Ignored);
+            Assert.Equal("ignored", await rig.StatusAsync(clear));
+            Assert.Empty(rig.PagerDutyResolves);
+            Assert.Equal("0", await rig.ScalarAsync("SELECT count(*) FROM config.config_alert_log WHERE metric_name LIKE '% Resolved'"));
+        });
+    }
+
+    [Fact]
+    public async Task ARepeatFireThatGaveUp_LeavesTheIncidentAnEarlierDeliveredFireOpened_SoItsClearStillResolvesIt()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            var first = await rig.SubmitAsync("fire", "disk", server: "BOX-A");
+            await rig.Drain.RunPassAsync(rig.Ct);
+            Assert.Equal("delivered", await rig.StatusAsync(first));
+
+            rig.Answer = AlertDelivery.FromLegacyStoredColumns(false, "failed", "boom");
+            var repeat = await rig.SubmitAsync("fire", "disk", server: "BOX-A");
+            await rig.GiveUpAsync(repeat);
+            Assert.Equal("failed", await rig.StatusAsync(repeat));
+            Assert.Equal("true", await rig.ScalarAsync("SELECT firing::text FROM config.external_alert_state WHERE alert_key = 'disk'"));
+
+            var clear = await rig.SubmitAsync("clear", "disk", server: "BOX-A");
+            await rig.Drain.RunPassAsync(rig.Ct);
+
+            Assert.Equal("delivered", await rig.StatusAsync(clear));
+            Assert.Equal(new[] { "disk" }, rig.PagerDutyResolves);
+        });
+    }
+
+    [Fact]
+    public async Task AFireOpenedByARetryThatSucceeds_IsConfirmed_AndItsClearResolvesIt()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            rig.Answer = AlertDelivery.FromLegacyStoredColumns(false, "failed", "boom");
+            var fire = await rig.SubmitAsync("fire", "disk", server: "BOX-A");
+            Assert.Equal(1, (await rig.Drain.RunPassAsync(rig.Ct)).Retried);
+            Assert.Equal("true", await rig.ScalarAsync("SELECT firing::text FROM config.external_alert_state WHERE alert_key = 'disk'"));
+
+            rig.Answer = AlertDelivery.FromLegacyStoredColumns(true, "webhook", null);
+            await rig.ExecAsync($"UPDATE config.external_alert_pending SET next_attempt_at = now() - interval '1 second' WHERE pending_id = {fire}");
+            await rig.Drain.RunPassAsync(rig.Ct);
+            Assert.Equal("delivered", await rig.StatusAsync(fire));
+            Assert.Equal("warning", await rig.ScalarAsync("SELECT fired_severity FROM config.external_alert_state WHERE alert_key = 'disk'"));
+
+            var clear = await rig.SubmitAsync("clear", "disk", server: "BOX-A");
+            await rig.Drain.RunPassAsync(rig.Ct);
+            Assert.Equal("delivered", await rig.StatusAsync(clear));
+            Assert.Equal(new[] { "disk" }, rig.PagerDutyResolves);
         });
     }
 
@@ -457,6 +573,16 @@ public sealed class ExternalAlertDrainLiveTests
             command.Parameters.Add(new NpgsqlParameter { Value = (object?)server ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
             command.Parameters.Add(new NpgsqlParameter { Value = (object?)value ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Double });
             return Convert.ToInt64(await command.ExecuteScalarAsync(Ct), CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Runs passes, making the row due again after each, until the drain has given up on it.</summary>
+        public async Task GiveUpAsync(long id)
+        {
+            for (var attempt = 1; attempt <= ExternalAlertDrain.MaxSendAttempts; attempt++)
+            {
+                await Drain.RunPassAsync(Ct);
+                await ExecAsync($"UPDATE config.external_alert_pending SET next_attempt_at = now() - interval '1 second' WHERE pending_id = {id} AND status = 'pending'");
+            }
         }
 
         public Task<string?> StatusAsync(long id) => ScalarAsync($"SELECT status FROM config.external_alert_pending WHERE pending_id = {id}");

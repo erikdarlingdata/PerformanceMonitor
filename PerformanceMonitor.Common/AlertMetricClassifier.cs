@@ -308,6 +308,14 @@ namespace PerformanceMonitor.Common
             if (IsResolution(metricName))
                 return true;
 
+            /* #5654, the External: family (a submitter's alert, named External:<source>:<key>, AlertFamily.ExternalMetricPrefix).
+               A submission may carry a measurement or none, and the drain stores the explicit 0 for one with none, so the
+               family joins here under the 0-gate below: a stored 0 reads as no value, any other number is the submitted
+               measurement. The cost is a submitted value of exactly 0, which also reads as a dash. The literal is the
+               prefix's twin: Common cannot see Notifications, and a Darling.Tests pin holds the two equal. */
+            if (metricName.StartsWith("External:", StringComparison.Ordinal))
+                return true;
+
             return metricName switch
             {
                 /* Role desc ("PRIMARY"/"SECONDARY"), connected state ("DISCONNECTED"), the
