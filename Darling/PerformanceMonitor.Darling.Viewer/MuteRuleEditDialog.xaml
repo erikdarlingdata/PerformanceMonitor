@@ -1,6 +1,7 @@
 <Window x:Class="PerformanceMonitor.Darling.Viewer.MuteRuleEditDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:n="clr-namespace:PerformanceMonitor.Notifications;assembly=PerformanceMonitor.Notifications"
         Title="Create Mute Rule"
         SizeToContent="Height" Width="520"
         WindowStartupLocation="CenterOwner"
@@ -72,6 +73,7 @@
             <ComboBoxItem Content="High CPU"/>
             <ComboBoxItem Content="Poison Wait"/>
             <ComboBoxItem Content="Runnable Queue"/>
+            <ComboBoxItem Content="{x:Static n:AlertFamily.ClientTimeoutsMetric}"/>
             <ComboBoxItem Content="Long-Running Query"/>
             <ComboBoxItem Content="tempdb Space"/>
             <ComboBoxItem Content="Volume Free Space"/>
