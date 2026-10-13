@@ -434,7 +434,7 @@ public class CollectionBackgroundService : BackgroundService
     [
         new HousekeepingLoop("maintenance",
         [
-            new HousekeepingStep("archival", _ => RunArchivalIfDueAsync()),
+            new HousekeepingStep("archival", token => RunArchivalIfDueAsync(token)),
             new HousekeepingStep("retention", _ => RunRetentionIfDueAsync()),
             new HousekeepingStep("findings_cleanup", _ => RunFindingsCleanupIfDueAsync()),
             new HousekeepingStep("dismissed_alerts_cleanup", _ => RunDismissedAlertsCleanupIfDueAsync()),
@@ -719,7 +719,7 @@ public class CollectionBackgroundService : BackgroundService
     internal static DateTime ArchiveStampAfterRun(bool complete, DateTime nowUtc) =>
         complete ? nowUtc : nowUtc - (ArchiveInterval - ArchiveRetryDelay);
 
-    private async Task RunArchivalIfDueAsync()
+    private async Task RunArchivalIfDueAsync(CancellationToken cancellationToken = default)
     {
         if (_archiveService == null)
         {
@@ -745,7 +745,9 @@ public class CollectionBackgroundService : BackgroundService
             }
             else
             {
-                complete = await _archiveService.ArchiveOldDataAsync(hotDataDays: ArchiveService.HotDataDays);
+                /* #5731: the housekeeping loop's stop token reaches the pass, so a service stop ends it between tables
+                   instead of waiting out the whole pass. A stopped pass returns false and takes the retry stamp. */
+                complete = await _archiveService.ArchiveOldDataAsync(hotDataDays: ArchiveService.HotDataDays, cancellationToken: cancellationToken);
             }
             _lastArchiveTime = ArchiveStampAfterRun(complete, DateTime.UtcNow);
         }

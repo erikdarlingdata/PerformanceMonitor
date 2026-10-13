@@ -207,7 +207,7 @@ public sealed class HousekeepingLoopTests
         build = build[..build.IndexOf("];", StringComparison.Ordinal)];
 
         var last = -1;
-        foreach (var call in new[] { "RunArchivalIfDueAsync()", "RunRetentionIfDueAsync()", "RunFindingsCleanupIfDueAsync()",
+        foreach (var call in new[] { "RunArchivalIfDueAsync(token)", "RunRetentionIfDueAsync()", "RunFindingsCleanupIfDueAsync()",
                      "RunDismissedAlertsCleanupIfDueAsync()", "RunQueryStoreBackfillIfDueAsync(token)", "RunAnalysisIfDueAsync(token)" })
         {
             var at = build.IndexOf(call, StringComparison.Ordinal);
@@ -217,7 +217,7 @@ public sealed class HousekeepingLoopTests
 
         /* The first three share the maintenance loop (archival before retention: they delete and merge the same parquet files). */
         Assert.True(build.IndexOf("new HousekeepingLoop(\"maintenance\"", StringComparison.Ordinal)
-                    < build.IndexOf("RunArchivalIfDueAsync()", StringComparison.Ordinal));
+                    < build.IndexOf("RunArchivalIfDueAsync(token)", StringComparison.Ordinal));
         Assert.True(build.IndexOf("RunDismissedAlertsCleanupIfDueAsync()", StringComparison.Ordinal)
                     < build.IndexOf("new HousekeepingLoop(\"query_store_backfill\"", StringComparison.Ordinal));
         Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(build, @"new HousekeepingLoop\(").Count);

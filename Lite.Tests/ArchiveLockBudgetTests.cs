@@ -412,4 +412,40 @@ SELECT TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'Blocking
         var full = (DateTime)stampField.GetValue(service)!;
         Assert.True(DateTime.UtcNow - full < TimeSpan.FromMinutes(1));
     }
+
+    [Fact]
+    public async Task RunArchivalIfDueAsync_AStopDuringThePass_EndsItBetweenTables_AndStampsTheRetry()
+    {
+        var initializer = await SeedAsync();
+        using var cts = new CancellationTokenSource();
+        var promoted = new List<string>();
+        var archive = new ArchiveService(initializer, _archiveDir)
+        {
+            WriteLockBudget = TimeSpan.FromSeconds(30),
+            /* The service stops once the first table is promoted: the pass must not reach the second. */
+            AfterPromoteForTests = table =>
+            {
+                promoted.Add(table);
+                cts.Cancel();
+            }
+        };
+        var service = new CollectionBackgroundService(null!, initializer, archiveService: archive);
+        const BindingFlags nonPublic = BindingFlags.NonPublic | BindingFlags.Instance;
+        var stampField = typeof(CollectionBackgroundService).GetField("_lastArchiveTime", nonPublic)!;
+        var oldStamp = DateTime.UtcNow.AddDays(-2);
+        stampField.SetValue(service, oldStamp);
+        var step = typeof(CollectionBackgroundService).GetMethod("RunArchivalIfDueAsync", nonPublic)!;
+        var args = step.GetParameters()
+            .Select(p => p.ParameterType == typeof(CancellationToken) ? (object)cts.Token : null)
+            .ToArray();
+
+        await (Task)step.Invoke(service, args)!;
+
+        /* #5731: without the stop token reaching the pass, both tables are archived and the full stamp lands. */
+        Assert.Single(promoted);
+        var stamp = (DateTime)stampField.GetValue(service)!;
+        var dueIn = stamp + CollectionBackgroundService.ArchiveInterval - DateTime.UtcNow;
+        Assert.InRange(dueIn, TimeSpan.FromMinutes(4), TimeSpan.FromMinutes(5));
+        Assert.True(stamp > oldStamp, "the stamp moved off the old one, to the retry stamp");
+    }
 }
