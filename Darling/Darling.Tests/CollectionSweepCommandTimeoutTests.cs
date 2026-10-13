@@ -134,7 +134,9 @@ public sealed class CollectionSweepCommandTimeoutTests
         ("DarlingWorker.cs", "TryRefreshPgStatementTextAsync"),
         ("DarlingWorker.cs", "ReadCollectorWatermarksAsync"),
         ("DarlingObservability.cs", "UpsertServerAsync"),
-        ("DarlingObservability.cs", "LogCollectionAsync"),
+        /* #5735: the collection_log insert moved out of LogCollectionAsync (now a thin wrapper) into the one binding it shares with
+           the skipped-slots row, so the guard follows the command to WriteCollectionLogRowAsync. */
+        ("DarlingObservability.cs", "WriteCollectionLogRowAsync"),
         ("DarlingObservability.cs", "WriteAnalysisStateAsync"),
         ("Targets/RdsCpuIngestor.cs", "GetWatermarkAsync"),
     };

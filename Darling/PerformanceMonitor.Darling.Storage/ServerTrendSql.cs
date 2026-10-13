@@ -571,10 +571,11 @@ public static class ServerTrendSql
         """;
 
     /// <summary>Whether the server has EVER logged a collector run. $1 server_id.</summary>
-    public const string HasAnyCollectionLog = """
+    public const string HasAnyCollectionLog = $"""
         SELECT 1
         FROM v_collection_log
         WHERE server_id = $1
+        AND   {CollectionCycleRow.NotCycleRowSql}
         LIMIT 1
         """;
 }

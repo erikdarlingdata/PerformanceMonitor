@@ -498,7 +498,7 @@ WHERE s.server_id <> 0";
     /// out of the list and of every count built from it. <c>$1</c> (include_removed) keeps those rows, for a caller
     /// that asks for the history behind a removed server.</para>
     /// </summary>
-    public const string ServerInventorySql = @"
+    public const string ServerInventorySql = $@"
 SELECT
     sp.server_id,
     COALESCE(s.display_name, s.server_name) AS server_name,
@@ -522,7 +522,7 @@ SELECT
     /* #2359: real collection freshness, which is NOT what sp.collection_time means. server_properties
        has FrequencyMinutes 0 - collected once on server load - so its timestamp is the last service
        start, not a heartbeat. Appended LAST so no existing reader ordinal moves. */
-    (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = sp.server_id) AS last_collection
+    (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = sp.server_id AND {CollectionCycleRow.NotCycleRowSql}) AS last_collection
 FROM (
     SELECT DISTINCT ON (server_id)
         server_id, edition, product_version, product_level, product_update_level,

@@ -88,6 +88,30 @@ public partial class ViewerServerTab
         await ShowCollectionHealthAsync(
             healthTask.Result, logTask.Result, durationTask.Result, caveatsTask.Result, dataStartTask, startUtc, CollectionLogTruncationBanner,
             _collectionHealthFilterMgr!.UpdateData, _collectionLogFilterMgr!.UpdateData, RenderCollectorDurationChart, ShowCollectionCaveats);
+
+        await ShowSkippedCyclesAsync();
+    }
+
+    /// <summary>
+    /// #5735: the skipped-slot line above the Collection Health sub-tabs. Its own read after the tab has drawn, so it is not one of
+    /// the reads the tab's declared width counts and its failure costs the line alone: a failed read words "could not be read"
+    /// rather than the all-clear, and a cancelled one still throws.
+    /// </summary>
+    private async Task ShowSkippedCyclesAsync()
+    {
+        try
+        {
+            SkippedCyclesLine.Text = SkippedCycleLine.Format(await _dataService.GetSkippedCycleSummaryAsync(_server.ServerId));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Warn("Collection Health", $"Skipped collection slots read failed: {ex.Message}");
+            SkippedCyclesLine.Text = SkippedCycleLine.Unreadable;
+        }
     }
 
     /// <summary>

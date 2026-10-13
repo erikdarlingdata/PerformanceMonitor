@@ -3203,7 +3203,7 @@ internal static class DarlingDataReader
     /// exactly as it did before this fix (<c>DarkPastRetentionReadsOfflineTests</c> pins that rule unchanged)
     /// — this is a plan-shape fix, not a semantic one, and the rows are identical.</para>
     /// </summary>
-    public const string ServerListSql = """
+    public const string ServerListSql = $"""
         SELECT
             s.server_id,
             s.server_name,
@@ -3220,6 +3220,7 @@ internal static class DarlingDataReader
             SELECT cl.collection_time
             FROM v_collection_log cl
             WHERE cl.server_id = s.server_id
+            AND   {CollectionCycleRow.NotCycleRowSql}
             ORDER BY cl.collection_time DESC
             LIMIT 1
         ) AS latest ON TRUE
@@ -3467,6 +3468,7 @@ internal static class DarlingDataReader
             FROM v_collection_log
             WHERE server_id = $1
             AND   collection_time >= $2
+            AND   {CollectionCycleRow.NotCycleRowSql}
             GROUP BY collector_name
         )
         SELECT
@@ -4405,10 +4407,11 @@ FROM config.config_collector_schedules";
     /// need opposite responses from the caller -- widen the window, versus go find out why collection
     /// is not running. LIMIT 1 with no ordering, so it stops at the first row rather than scanning.</para>
     /// </summary>
-    public const string HasAnyCollectionLogSql = """
+    public const string HasAnyCollectionLogSql = $"""
         SELECT 1
         FROM v_collection_log
         WHERE server_id = $1
+        AND   {CollectionCycleRow.NotCycleRowSql}
         LIMIT 1
         """;
 
@@ -4601,11 +4604,15 @@ FROM config.config_collector_schedules";
     /// <summary>Whether ANY enabled server has EVER recorded a collector run — the fleet-wide
     /// <see cref="HasAnyCollectionLogSql"/>, used the same way: to tell a genuinely quiet fleet-wide window
     /// from a fleet that has never once collected (every server newly added, or the service never started).
+    /// #5735: the skipped-slots row is not a collector run, so the predicate leaves it out; <c>NotCycleRowSql</c> starts with
+    /// the column name, so the <c>cl.</c> in front qualifies it. The walk stops at the first collector row, which a fleet
+    /// that has ever collected has, so the added filter does not lengthen it in practice.
     /// </summary>
-    public const string HasAnyCollectionLogFleetSql = """
+    public const string HasAnyCollectionLogFleetSql = $"""
         SELECT 1
         FROM v_collection_log cl
         JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
+        WHERE cl.{CollectionCycleRow.NotCycleRowSql}
         LIMIT 1
         """;
 

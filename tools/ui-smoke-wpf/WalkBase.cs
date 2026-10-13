@@ -8,7 +8,9 @@ using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Capturing;
 using FlaUI.Core.Definitions;
+using FlaUI.Core.Input;
 using FlaUI.Core.Tools;
+using FlaUI.Core.WindowsAPI;
 using FlaUI.UIA3;
 using Xunit;
 
@@ -90,9 +92,10 @@ public abstract class WalkBase : IAsyncLifetime
             main.FindAllDescendants(cf => cf.ByAutomationId("OverviewServerCardName"))
                 .FirstOrDefault(c => c.Name == ServerName), "an OverviewServerCardName reading " + ServerName));
 
-        // Open the server (double-click the picker row), then walk its tabs.
-        // The element is looked up again at the click: the viewer rebinds the picker's items on each refresh, so an
-        // element found earlier can belong to a row that has been replaced and has no clickable point (#5761).
+        // Open the server (select the picker row, press Enter on the list), then walk its tabs. The row and the list are
+        // looked up again at the action: the viewer rebinds the picker's items on each refresh, so an element found
+        // earlier can belong to a row that has been replaced (#5761). Enter is the keyboard path #5763 added; a mouse
+        // double-click is unreliable to drive from automation.
         Step("open the server", () => OpenServer(main));
 
         Step("Wait Stats tab", () => SelectTab(main, "Wait Stats"));
@@ -109,17 +112,25 @@ public abstract class WalkBase : IAsyncLifetime
             ?.FindAllDescendants(cf => cf.ByControlType(ControlType.ListItem))
             .FirstOrDefault(i => i.Name == ServerName);
 
-    /// <summary>Double-clicks the seeded server's picker row, looking the row up afresh on every attempt.</summary>
+    /// <summary>Selects the seeded server's picker row, then presses Enter with the picker focused. Every attempt looks
+    /// the list and the row up afresh, and presses Enter only once the row reports itself selected.</summary>
     private bool OpenServer(AutomationElement main)
     {
         var r = Retry.WhileFalse(() =>
         {
-            var item = FindPickerItem(main);
-            if (item is null) return false;
-            item.DoubleClick();
+            var picker = main.FindFirstDescendant(cf => cf.ByAutomationId("ServerPicker"));
+            var item = picker is null ? null : FindPickerItem(main);
+            if (picker is null || item is null) return false;
+
+            var selection = item.Patterns.SelectionItem.Pattern;
+            selection.Select();
+            if (!selection.IsSelected.ValueOrDefault) return false;
+
+            picker.Focus();
+            Keyboard.Type(VirtualKeyShort.RETURN);
             return true;
         }, s_wait, TimeSpan.FromMilliseconds(500), ignoreException: true);
-        Assert.True(r.Result, "could not double-click the " + ServerName + " picker row within " + s_wait);
+        Assert.True(r.Result, "could not select the " + ServerName + " picker row and press Enter within " + s_wait);
         return true;
     }
 

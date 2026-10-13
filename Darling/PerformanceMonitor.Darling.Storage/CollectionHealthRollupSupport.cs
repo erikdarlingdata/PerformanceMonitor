@@ -262,6 +262,7 @@ WITH parts AS
            last_non_skip_time, last_productive_time, last_zero_row_streak_break_time, latest_run_note
     FROM collect." + TimescaleSupport.CollectionHealthHourlyView + @"
     WHERE bucket >= $2
+    AND   " + CollectionCycleRow.NotCycleRowSql + @"
     UNION ALL
 " + headSlice + holesSql + @"
 )

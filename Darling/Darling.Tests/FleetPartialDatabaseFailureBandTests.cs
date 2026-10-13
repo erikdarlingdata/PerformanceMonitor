@@ -86,7 +86,9 @@ public class FleetPartialDatabaseFailureBandTests
         /* The note is the LAST column: the reader is positional and ordinal 13 is the fourteenth. */
         Assert.True(flat.IndexOf("AS last_zero_row_streak_break_time", StringComparison.Ordinal)
                     < flat.IndexOf("AS latest_run_note", StringComparison.Ordinal));
-        Assert.EndsWith(" FROM v_collection_log WHERE collection_time >= $1 AND server_id <> 0 GROUP BY server_id, collector_name",
+        /* #5735: the raw read leaves the stepped-over-slots row (collector_name collection_cycle) out with one more plain predicate
+           ahead of the GROUP BY, so the row is never counted as a collector's run; the read stays a plain aggregate. */
+        Assert.EndsWith($" FROM v_collection_log WHERE collection_time >= $1 AND server_id <> 0 AND {CollectionCycleRow.NotCycleRowSql} GROUP BY server_id, collector_name",
             flat.Replace("\"", string.Empty), StringComparison.Ordinal);
     }
 

@@ -397,6 +397,11 @@ internal sealed class FleetGateLogCadence
 /// sleep, a stall and a clock step of either sign all show up), and a pause, whose ticks keep coming but start no
 /// collection (<see cref="Resume"/>).</para>
 ///
+/// <para><b>#5735: no skipped-slots row for a slept or paused host.</b> The slots this floor leaves out are the ones the
+/// <c>collection_cycle</c> row (<see cref="CycleSkipAccumulator"/>) never counts either, because the row is fed from the same
+/// count: a computer that slept or hibernated, a clock that stepped and a pause write no row. That is the documented
+/// difference from Lite, whose wait overrun records a slept computer.</para>
+///
 /// <para>Thread-safe: the loop thread calls <see cref="Tick"/> and <see cref="Resume"/>, and the per-server
 /// collection bodies read the floor from the thread pool. The clock is a parameter, so the rule is tested with a fixed
 /// one.</para>

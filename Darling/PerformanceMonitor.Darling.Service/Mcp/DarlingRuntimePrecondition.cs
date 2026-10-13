@@ -67,7 +67,7 @@ internal static class DarlingRuntimePrecondition
     /// has never run has no row to find, so for it the read still goes through the server's whole retained history.
     /// $1 server_id, $2 collector.</para>
     /// </summary>
-    public const string CollectorLastRunSql = @"
+    public const string CollectorLastRunSql = $@"
 SELECT (
            SELECT collection_time
            FROM collection_log
@@ -80,11 +80,13 @@ SELECT (
            SELECT MAX(collection_time)
            FROM collection_log
            WHERE server_id = $1
+           AND   {CollectionCycleRow.NotCycleRowSql}
        ) AS server_last_collected,
        (
            SELECT collection_time
            FROM collection_log
            WHERE server_id = $1
+           AND   {CollectionCycleRow.NotCycleRowSql}
            ORDER BY collection_time ASC
            LIMIT 1
        ) AS server_first_collected";

@@ -159,7 +159,21 @@ public sealed class ViewerServerSetSyncTests
 
         /* The sidebar and the status bar's "Servers: N". */
         Assert.Matches(@"_fleet\s*\.\s*SetAll\s*\(", load);
-        Assert.Matches(@"ServerList\s*\.\s*ItemsSource\s*=\s*_fleet\s*\.\s*Visible\b", load);
+        /* The rebind goes through ServerListKeyboard.Rebind (it keeps the keyboard on the list, #5763); what it binds
+           is still the fleet's Visible rows. A Rebind that reads anything else does not match. */
+        Assert.Matches(@"ServerListKeyboard\s*\.\s*Rebind\s*\(\s*ServerList\s*,\s*_fleet\s*\.\s*Visible\s*\)", load);
+        Assert.DoesNotMatch(@"ServerList\s*\.\s*ItemsSource\s*=", load);
+
+        /* Every other path that rebinds the sidebar (add, remove, tags, the search box) reads the same fleet. */
+        var viewer = Path.GetDirectoryName(ViewerPath("MainWindow.xaml.cs"))!;
+        foreach (var file in Directory.EnumerateFiles(viewer, "MainWindow*.cs"))
+        {
+            var code = Stripped(Path.GetFileName(file));
+
+            Assert.Equal(
+                Regex.Matches(code, @"ServerListKeyboard\s*\.\s*Rebind\s*\(").Count,
+                Regex.Matches(code, @"ServerListKeyboard\s*\.\s*Rebind\s*\(\s*ServerList\s*,\s*_fleet\s*\.\s*Visible\s*\)").Count);
+        }
         Assert.Matches(@"\bUpdateServerCountText\s*\(\s*\)", load);
         Assert.Matches(
             new Regex(@"\bUpdateServerCountText\s*\(\s*\)\s*=>[^;]*_fleet\s*\.\s*TotalCount\b", RegexOptions.Singleline),
@@ -269,7 +283,7 @@ public sealed class ViewerServerSetSyncTests
         /* A change made while the server list loads is the user's latest choice. Read before the await, the
            reload put back the server that the sidebar or the picker showed when the load began. */
         var loaded = Regex.Match(load, @"\bawait\s+_dataService\s*\.\s*GetManagedServersAsync\s*\(");
-        var rebind = Regex.Match(load, @"ServerList\s*\.\s*ItemsSource\s*=");
+        var rebind = Regex.Match(load, @"ServerListKeyboard\s*\.\s*Rebind\s*\(\s*ServerList\s*,\s*_fleet\s*\.\s*Visible\s*\)");
 
         Assert.True(loaded.Success && rebind.Success, "LoadServersAsync must await the server list, then rebind the sidebar");
 

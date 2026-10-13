@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -49,7 +50,7 @@ internal static class DarlingAdminServersReader
     /// test can pin the dialect ungated. The lateral probe is the same per-server ordered descent
     /// <see cref="DarlingDataReader.ServerListSql"/> uses.
     /// </summary>
-    internal const string AdminServersSql = """
+    internal const string AdminServersSql = $"""
         SELECT
             c.server_id,
             c.name,
@@ -77,6 +78,7 @@ internal static class DarlingAdminServersReader
             SELECT cl.collection_time
             FROM v_collection_log cl
             WHERE cl.server_id = c.server_id
+            AND   {CollectionCycleRow.NotCycleRowSql}
             ORDER BY cl.collection_time DESC
             LIMIT 1
         ) AS latest ON TRUE
