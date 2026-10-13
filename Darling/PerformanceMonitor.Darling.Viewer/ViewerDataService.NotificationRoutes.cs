@@ -38,25 +38,26 @@ public sealed partial class ViewerDataService
     private const string NotificationRouteDestinationColumns =
         "teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients";
 
-    /// <summary>The full row, for an <c>admin</c> seat. Ordered by <c>route_id</c> — the resolver's
-    /// "first matching route wins" order — so the grid shows routes in the order they are consulted.</summary>
+    /// <summary>The full row, for an <c>admin</c> seat, with the two scope columns (V181, #5750). Ordered by
+    /// <c>route_id</c>; the window re-sorts the grid newest first. The resolver's order is the scope tier, then the
+    /// metric level, then the route id, so the id order is no longer the order routes are consulted in.</summary>
     public const string NotificationRoutesSelectSql =
-        "SELECT route_id, metric_match, " + NotificationRouteDestinationColumns + ", enabled, modified_at, configured_channels "
+        "SELECT route_id, metric_match, " + NotificationRouteDestinationColumns + ", enabled, modified_at, configured_channels, scope_server_id, scope_tag_id "
         + "FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>The secret-free projection a read-only <c>viewer</c> seat reads: the four webhook-class
     /// destinations are omitted (they 42501 for that role), <c>smtp_recipients</c> stays (an address list is
     /// not a secret, on the parent either), and <c>configured_channels</c> carries presence.</summary>
     public const string NotificationRoutesSelectNoSecretSql =
-        "SELECT route_id, metric_match, smtp_recipients, enabled, modified_at, configured_channels "
+        "SELECT route_id, metric_match, smtp_recipients, enabled, modified_at, configured_channels, scope_server_id, scope_tag_id "
         + "FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>Inserts one route. <c>route_id</c> is <c>GENERATED ALWAYS AS IDENTITY</c>, so it is never in
     /// the column list; RETURNING hands it back for the grid.</summary>
     public const string NotificationRouteInsertSql = @"
 INSERT INTO config_notification_routes
-    (metric_match, " + NotificationRouteDestinationColumns + @", enabled, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, (now() AT TIME ZONE 'UTC'))
+    (metric_match, " + NotificationRouteDestinationColumns + @", enabled, scope_server_id, scope_tag_id, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, (now() AT TIME ZONE 'UTC'))
 RETURNING route_id";
 
     public const string NotificationRouteUpdateSql = @"
@@ -68,6 +69,8 @@ UPDATE config_notification_routes SET
     pagerduty_routing_key = $6,
     smtp_recipients = $7,
     enabled = $8,
+    scope_server_id = $9,
+    scope_tag_id = $10,
     modified_at = (now() AT TIME ZONE 'UTC')
 WHERE route_id = $1";
 
@@ -106,6 +109,8 @@ WHERE route_id = $1";
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.PagerDutyRoutingKey.Trim() }); // $5
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.SmtpRecipients.Trim() });    // $6
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.Enabled });                    // $7
+        AddNullableInt(command, row.ScopeServerId);                                                        // $8
+        AddNullableInt(command, row.ScopeTagId);                                                           // $9
         var id = await ExecuteWriteScalarAsync(command, cancellationToken);
         return Convert.ToInt32(id, System.Globalization.CultureInfo.InvariantCulture);
     }
@@ -125,6 +130,8 @@ WHERE route_id = $1";
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.PagerDutyRoutingKey.Trim() }); // $6
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.SmtpRecipients.Trim() });    // $7
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.Enabled });                    // $8
+        AddNullableInt(command, row.ScopeServerId);                                                        // $9
+        AddNullableInt(command, row.ScopeTagId);                                                           // $10
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
@@ -157,6 +164,9 @@ WHERE route_id = $1";
                 }
 
                 insert.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = typed.Enabled });
+                /* The scope goes in with the insert: a scoped "*" route would fail the V181 CHECK with no scope. */
+                AddNullableInt(insert, typed.ScopeServerId);
+                AddNullableInt(insert, typed.ScopeTagId);
                 routeId = Convert.ToInt32(await insert.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
             }
 
@@ -175,6 +185,8 @@ WHERE route_id = $1";
             update.Parameters.Add(new NpgsqlParameter<string> { TypedValue = resolved.PagerDutyRoutingKey });   // $6
             update.Parameters.Add(new NpgsqlParameter<string> { TypedValue = resolved.SmtpRecipients.Trim() }); // $7
             update.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = resolved.Enabled });                 // $8
+            AddNullableInt(update, resolved.ScopeServerId);                                                      // $9
+            AddNullableInt(update, resolved.ScopeTagId);                                                         // $10
             await update.ExecuteNonQueryAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return routeId;
@@ -209,7 +221,10 @@ WHERE route_id = $1";
     /// <summary>
     /// The write-side validation the edit dialog also runs, so a row the dialog accepts is a row the store
     /// accepts: a non-blank match (the V131 CHECK's twin), and at least one destination — a route with every
-    /// column empty inherits everything and would read in the grid as a configured route that does nothing.
+    /// column empty inherits everything and would read in the grid as a configured route that does nothing. Since
+    /// V181 (#5750) it also refuses a route scoped to both a server and a tag, and the every-metric match
+    /// (<see cref="NotificationRoute.WildcardMatch"/>) on a route with no scope: the store's two CHECKs, said in words
+    /// before the statement runs.
     /// </summary>
     public static string? ValidateNotificationRoute(NotificationRouteRow row)
     {
@@ -217,6 +232,16 @@ WHERE route_id = $1";
         if (string.IsNullOrWhiteSpace(row.MetricMatch))
         {
             return "Choose a family or enter an exact metric name.";
+        }
+
+        if (row.ScopeServerId.HasValue && row.ScopeTagId.HasValue)
+        {
+            return "A route is scoped to one server or one tag, not both.";
+        }
+
+        if (row.MetricMatch.Trim() == NotificationRoute.WildcardMatch && !row.ScopeServerId.HasValue && !row.ScopeTagId.HasValue)
+        {
+            return "Every metric (*) needs a server or a tag scope. Pick one, or choose a family or an exact metric.";
         }
 
         if (!row.HasAnyDestination)
@@ -248,6 +273,8 @@ WHERE route_id = $1";
         Enabled = reader.GetBoolean(7),
         ModifiedAtUtc = DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc),
         ConfiguredChannels = reader.IsDBNull(9) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(9),
+        ScopeServerId = reader.IsDBNull(10) ? null : reader.GetInt32(10),
+        ScopeTagId = reader.IsDBNull(11) ? null : reader.GetInt32(11),
     };
 
     /// <summary>The secret-free reader: the four carved destinations stay empty (the seat cannot author them
@@ -264,6 +291,8 @@ WHERE route_id = $1";
         Enabled = reader.GetBoolean(3),
         ModifiedAtUtc = DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc),
         ConfiguredChannels = reader.IsDBNull(5) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(5),
+        ScopeServerId = reader.IsDBNull(6) ? null : reader.GetInt32(6),
+        ScopeTagId = reader.IsDBNull(7) ? null : reader.GetInt32(7),
     };
 }
 
@@ -286,6 +315,20 @@ public sealed class NotificationRouteRow
     public DateTime ModifiedAtUtc { get; set; }
     public IReadOnlyList<string> ConfiguredChannels { get; set; } = Array.Empty<string>();
 
+    /// <summary>The registry <c>server_id</c> this route is scoped to, or null (V181, #5750). At most one of the two scope
+    /// ids is set; both null means fleet-wide.</summary>
+    public int? ScopeServerId { get; set; }
+
+    /// <summary>The server tag this route is scoped to, with all its sub-tags, or null (V181, #5750).</summary>
+    public int? ScopeTagId { get; set; }
+
+    /// <summary>The Scope column: "All servers", the server's display name or the tag path. Filled by the window from the
+    /// registry and the tag tree (<see cref="ViewerNotificationRouteScope.ScopeText"/>); not stored.</summary>
+    public string ScopeDisplay { get; set; } = ViewerNotificationRouteScope.AllServersLabel;
+
+    /// <summary>The Status column (<see cref="ViewerNotificationRouteScope.StatusText"/>). Filled by the window; not stored.</summary>
+    public string StatusDisplay { get; set; } = "";
+
     /// <summary>The family this route matches, or null for an exact metric name.</summary>
     public string? Family => AlertFamily.NormalizeFamily(MetricMatch);
 
@@ -297,7 +340,7 @@ public sealed class NotificationRouteRow
         || !string.IsNullOrWhiteSpace(SmtpRecipients);
 
     /* Grid display members. */
-    public string MatchKindDisplay => Family is null ? "Exact metric" : "Family";
+    public string MatchKindDisplay => MetricMatch.Trim() == NotificationRoute.WildcardMatch ? "Every metric" : Family is null ? "Exact metric" : "Family";
     public string ChannelsDisplay => ConfiguredChannels.Count == 0 ? "—" : string.Join(", ", ConfiguredChannels);
 
     /// <summary>
@@ -321,5 +364,9 @@ public sealed class NotificationRouteRow
         Enabled = Enabled,
         ModifiedAtUtc = ModifiedAtUtc,
         ConfiguredChannels = ConfiguredChannels,
+        ScopeServerId = ScopeServerId,
+        ScopeTagId = ScopeTagId,
+        ScopeDisplay = ScopeDisplay,
+        StatusDisplay = StatusDisplay,
     };
 }

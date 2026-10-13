@@ -245,14 +245,14 @@ public sealed class NotificationRoutesRungTests
         Assert.Equal(new[] { "RouteId", "MetricMatch", "TeamsUrl", "SlackUrl", "GenericUrl", "PagerDutyRoutingKey", "SmtpRecipients", "Enabled" }, ctor);
 
         var viewerSelect = ColumnsOf(ViewerDataService.NotificationRoutesSelectSql, "SELECT", "FROM");
-        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "modified_at", "configured_channels" }), viewerSelect);
+        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "modified_at", "configured_channels", "scope_server_id", "scope_tag_id" }), viewerSelect);
 
         var insert = ColumnsOf(ViewerDataService.NotificationRouteInsertSql, "(", ")");
-        Assert.Equal(new[] { "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "modified_at" }), insert);
+        Assert.Equal(new[] { "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id", "modified_at" }), insert);
         Assert.DoesNotContain("route_id", insert);
         Assert.Contains("RETURNING route_id", ViewerDataService.NotificationRouteInsertSql, StringComparison.Ordinal);
 
-        foreach (var column in DestinationColumns.Concat(new[] { "metric_match", "enabled", "modified_at" }))
+        foreach (var column in DestinationColumns.Concat(new[] { "metric_match", "enabled", "scope_server_id", "scope_tag_id", "modified_at" }))
         {
             Assert.Contains($"{column} = ", ViewerDataService.NotificationRouteUpdateSql, StringComparison.Ordinal);
         }
@@ -438,6 +438,8 @@ public sealed class NotificationRoutesLivePostgresTests
                 insert.Parameters.AddWithValue("");
                 insert.Parameters.AddWithValue("");
                 insert.Parameters.AddWithValue(true);
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = DBNull.Value }); /* scope_server_id (V181, #5750) */
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = DBNull.Value }); /* scope_tag_id */
                 routeId = Convert.ToInt32(await insert.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
             }
 
