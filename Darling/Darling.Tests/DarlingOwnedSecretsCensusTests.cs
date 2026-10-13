@@ -233,4 +233,209 @@ public sealed class DarlingOwnedSecretsCensusTests
             Assert.Contains(found, f => f.EndsWith("." + prop, StringComparison.Ordinal));
         }
     }
+
+    /* ═══════════ which test classes can change the owned set while another reads it (#5768) ═══════════ */
+
+    private const string CollectionName = "darling-owned-secrets";
+
+    private static readonly string[] s_testsDir = { "Darling", "Darling.Tests" };
+
+    /// <summary>A top-level class declaration and the attribute lines right above it. The test files declare their classes
+    /// at column 0 under a file-scoped namespace, so one match starts a class and the next match ends it.</summary>
+    private static readonly Regex s_topLevelClass = new(
+        @"^((?:\[[^\r\n]*\]\r?\n)*)(?:public|internal)\s+(?:(?:sealed|static|abstract|partial)\s+)*class\s+(\w+)",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    /// <summary>A method declaration at member indent in a service source file.</summary>
+    private static readonly Regex s_memberDeclaration = new(
+        @"^    (?:(?:public|internal|private|protected|static|async|override)\s+)+[^=;\r\n(]*?\b(\w+)\s*(?:<[^>\r\n]*>)?\s*\(",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex s_setsTheOwnedSet = new(@"\bDarlingOwnedSecrets\s*\.\s*Set\s*\(", RegexOptions.CultureInvariant);
+
+    /// <summary>A class that asserts what the owned set refuses, or saves and puts back the current set.</summary>
+    private static readonly Regex s_readsTheOwnedSet = new(
+        @"\bDarlingOwnedSecrets\s*\.\s*(?:Current|ReferenceRefusalText|ReferenceRefusal|Unpopulated)\b|own configuration or secrets",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex s_loadsAConfig = new(@"\bDarlingConfig\s*\.\s*Load\s*\(", RegexOptions.CultureInvariant);
+
+    private static readonly Regex s_cliCall = new(@"\bDarlingCliCommands\s*\.\s*(\w+)\s*\(", RegexOptions.CultureInvariant);
+
+    private static readonly Regex s_construction = new(@"\bnew\s+(\w+)\s*\(", RegexOptions.CultureInvariant);
+
+    private sealed record SourceFile(string Name, string Text);
+
+    private sealed record TestClass(string Name, bool InCollection, string Text);
+
+    private static IEnumerable<SourceFile> SourceFiles(string[] directory)
+    {
+        var separator = Path.DirectorySeparatorChar;
+        foreach (var file in Directory.EnumerateFiles(PathTo(directory), "*.cs", SearchOption.AllDirectories))
+        {
+            if (file.Contains($"{separator}obj{separator}", StringComparison.Ordinal)
+                || file.Contains($"{separator}bin{separator}", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            yield return new SourceFile(Path.GetFileName(file), File.ReadAllText(file));
+        }
+    }
+
+    private static IEnumerable<TestClass> TestClasses()
+    {
+        foreach (var file in SourceFiles(s_testsDir))
+        {
+            var declarations = s_topLevelClass.Matches(file.Text);
+            for (var i = 0; i < declarations.Count; i++)
+            {
+                var end = i + 1 < declarations.Count ? declarations[i + 1].Index : file.Text.Length;
+                yield return new TestClass(
+                    declarations[i].Groups[2].Value,
+                    declarations[i].Groups[1].Value.Contains($"[Collection(\"{CollectionName}\")]", StringComparison.Ordinal),
+                    file.Text[declarations[i].Index..end]);
+            }
+        }
+    }
+
+    /// <summary>The name of the member declared last before <paramref name="index"/> in <paramref name="text"/>.</summary>
+    private static string EnclosingMember(string text, int index) =>
+        s_memberDeclaration.Matches(text).LastOrDefault(m => m.Index < index)?.Groups[1].Value ?? "";
+
+    /// <summary>
+    /// The product calls that reach <see cref="DarlingConfig.Load"/>: the <see cref="DarlingCliCommands"/> members that
+    /// call it, directly or through another member of that class (matched by name, so an overload of a member that loads
+    /// counts too), and the service types outside it whose source calls it (the worker and the two host services).
+    /// </summary>
+    private static (HashSet<string> CliMembers, HashSet<string> Types) LoadingProductCalls()
+    {
+        var cliMembers = new HashSet<string>(StringComparer.Ordinal);
+        var types = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var file in SourceFiles(s_serviceDir))
+        {
+            if (file.Name == "DarlingCliCommands.cs")
+            {
+                var declarations = s_memberDeclaration.Matches(file.Text);
+                var spans = new List<(string Name, string Body)>();
+                for (var i = 0; i < declarations.Count; i++)
+                {
+                    var end = i + 1 < declarations.Count ? declarations[i + 1].Index : file.Text.Length;
+                    spans.Add((declarations[i].Groups[1].Value, file.Text[declarations[i].Index..end]));
+                }
+
+                foreach (var span in spans.Where(s => s_loadsAConfig.IsMatch(s.Body)))
+                {
+                    cliMembers.Add(span.Name);
+                }
+
+                for (var grew = true; grew;)
+                {
+                    grew = false;
+                    foreach (var span in spans.Where(s => !cliMembers.Contains(s.Name)))
+                    {
+                        if (cliMembers.Any(name => Regex.IsMatch(span.Body, $@"(?<![\w.])(?:DarlingCliCommands\s*\.\s*)?{name}\s*\(")))
+                        {
+                            grew = cliMembers.Add(span.Name) || grew;
+                        }
+                    }
+                }
+            }
+            else if (file.Name != "DarlingConfig.cs" && s_loadsAConfig.IsMatch(file.Text))
+            {
+                types.Add(Path.GetFileNameWithoutExtension(file.Name));
+            }
+        }
+
+        return (cliMembers, types);
+    }
+
+    private static bool ReachesALoad(string text, (HashSet<string> CliMembers, HashSet<string> Types) calls) =>
+        s_loadsAConfig.IsMatch(text)
+        || s_cliCall.Matches(text).Any(m => calls.CliMembers.Contains(m.Groups[1].Value))
+        || s_construction.Matches(text).Any(m => calls.Types.Contains(m.Groups[1].Value));
+
+    /// <summary>
+    /// #5768: the product changes the owned set in one place, <see cref="DarlingConfig.Load"/>, which publishes the set it
+    /// computed from the file it loaded. So any code that reaches <c>Load</c> changes the set for the whole process, and
+    /// the census below finds those test classes by looking for <c>Load</c> and what calls it. Inside the service process
+    /// <c>Load</c> is called only with no argument (the worker and the two host services, each reading the one file the
+    /// service runs on), so a set published there always comes from that file. A call with a path is a CLI verb in
+    /// <see cref="DarlingCliCommands"/>, which runs as its own process. A load of any other file inside the service would
+    /// publish a set for a file the service does not run on: it must compute without publishing.
+    /// </summary>
+    [Fact]
+    public void TheProductPublishesTheOwnedSet_OnlyFromDarlingConfigLoad_AndTheServiceLoadsOnlyItsOwnFile()
+    {
+        var writers = SourceFiles(s_serviceDir)
+            .SelectMany(f => s_setsTheOwnedSet.Matches(f.Text).Select(m => $"{f.Name}:{EnclosingMember(f.Text, m.Index)}"))
+            .ToList();
+        Assert.Equal(new[] { "DarlingConfig.cs:Load" }, writers);
+
+        var serviceLoads = SourceFiles(s_serviceDir)
+            .Where(f => f.Name != "DarlingCliCommands.cs")
+            .SelectMany(f => s_loadsAConfig.Matches(f.Text).Select(m => (f.Name, Call: f.Text.Substring(m.Index, m.Length + 1))))
+            .ToList();
+        Assert.NotEmpty(serviceLoads);
+        Assert.All(serviceLoads, load => Assert.True(
+            load.Call.EndsWith("Load()", StringComparison.Ordinal),
+            $"{load.Name} loads a configuration file with an argument inside the service process. DarlingConfig.Load publishes "
+            + "the owned set it computes, so the service would refuse references by a file it does not run on."));
+    }
+
+    /// <summary>
+    /// #5768: the classes in the <c>darling-owned-secrets</c> collection set the owned set and then assert what it refuses.
+    /// Test classes outside it change the set without calling <see cref="DarlingOwnedSecrets.Set"/>: every
+    /// <see cref="DarlingConfig.Load"/> they reach publishes the set computed from their own file. One such load landed
+    /// between <c>DarlingSecretsOwnedReferenceTests</c>' set and its next resolve, and a store row naming a reference the
+    /// file declares for another server id resolved. Several of those classes are in other collections
+    /// (<c>live-postgres</c>, <c>pg-cluster-roles</c>, <c>darling-config-env</c>), and a class is in one collection only,
+    /// so this collection runs alone instead: xUnit starts it after every parallel collection has finished.
+    /// </summary>
+    [Fact]
+    public void TheCollection_RunsAlone_BecauseTestClassesOutsideItPublishTheOwnedSet()
+    {
+        var calls = LoadingProductCalls();
+        Assert.Contains("ValidateConfigAsync", calls.CliMembers);
+        Assert.Contains("DarlingWorker", calls.Types);
+
+        var publishers = TestClasses()
+            .Where(c => !c.InCollection && ReachesALoad(c.Text, calls))
+            .Select(c => c.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+        Assert.True(
+            publishers.Count > 0,
+            "The scan found no test class outside the collection that reaches DarlingConfig.Load; it has stopped seeing the "
+            + "test sources or the product calls.");
+
+        var definition = typeof(DarlingOwnedSecretsCensusTests).Assembly.GetTypes()
+            .Select(t => t.GetCustomAttribute<CollectionDefinitionAttribute>())
+            .SingleOrDefault(a => a?.Name == CollectionName);
+        Assert.True(
+            definition is { DisableParallelization: true },
+            $"The \"{CollectionName}\" collection must be declared with DisableParallelization = true. These test classes outside "
+            + "it reach DarlingConfig.Load, which publishes the owned set, and can run beside it: "
+            + string.Join(", ", publishers));
+    }
+
+    /// <summary>
+    /// #5768: a class that sets the owned set, or asserts what it refuses, is in the <c>darling-owned-secrets</c>
+    /// collection, so it runs alone with the set it put there.
+    /// </summary>
+    [Fact]
+    public void EveryTestClassThatSetsOrReadsTheOwnedSet_IsInTheCollection()
+    {
+        var users = TestClasses()
+            .Where(c => s_setsTheOwnedSet.IsMatch(c.Text) || s_readsTheOwnedSet.IsMatch(c.Text))
+            .ToList();
+        Assert.True(
+            users.Count >= 2,
+            $"The scan found {users.Count} test classes that set or read the owned set; it has stopped seeing the test sources.");
+
+        var outside = users.Where(c => !c.InCollection).Select(c => c.Name).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        Assert.True(
+            outside.Count == 0,
+            $"These test classes set or read the owned set without [Collection(\"{CollectionName}\")]: " + string.Join(", ", outside));
+    }
 }

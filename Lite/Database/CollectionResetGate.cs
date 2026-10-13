@@ -40,8 +40,10 @@ namespace PerformanceMonitorLite.Database;
 public static class CollectionResetGate
 {
     /// <summary>
-    /// Held for the whole of a reset, and momentarily by a collection as it registers. A collection that
-    /// arrives during a reset waits here rather than starting against a database about to be deleted.
+    /// Held by a reset while it drains collections, exports, swaps the file and reinitializes the database
+    /// (not through the compaction that follows, #5733), and momentarily by a collection as it registers. A
+    /// collection that arrives during a reset waits here rather than starting against a database about to be
+    /// deleted.
     /// </summary>
     private static readonly SemaphoreSlim s_resetExclusive = new(1, 1);
 
