@@ -10,8 +10,12 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -44,11 +48,15 @@ public sealed class ExternalAlertSourceGroupLiveTests
 
     private static readonly string OtherName = "other_" + Suffix;
 
+    private static readonly string MonitorName = "mon_" + Suffix;
+
+    private const string MonitorPassword = "Mon5654Probe";
+
     private static readonly string SourceName = "grp_" + Suffix;
 
     private static readonly string RoleName = ExternalAlertSourceAdmin.RoleNameFor(SourceName);
 
-    private static readonly string[] CleanupRoles = ["admin", "viewer", "mcp", GroupName, RoleName, OtherName, OwnerName];
+    private static readonly string[] CleanupRoles = ["admin", "viewer", "mcp", GroupName, RoleName, OtherName, OwnerName, MonitorName];
 
     private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
@@ -321,4 +329,264 @@ WHERE nspname NOT IN ('pg_catalog', 'information_schema')
             await CleanUpAsync(scratch, bodySucceeded);
         }
     }
+
+    private static async Task<string?> SettingOrNullAsync(NpgsqlConnection connection, string setting, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT pg_catalog.current_setting($1, true)", connection);
+        command.Parameters.AddWithValue(setting);
+        return await command.ExecuteScalarAsync(ct) as string;
+    }
+
+    /// <summary>
+    /// With <c>pg_stat_statements</c> loaded and utility tracking on, a CREATEROLE owner cannot turn the tracking off (the
+    /// setting needs a superuser or a grant to SET it), so the add verb says the statistics may hold the login's password
+    /// verifier and prints the statement that clears them (#5654).
+    /// </summary>
+    [Fact]
+    public async Task ACreateroleOwner_WhoCannotTurnTrackingOff_GetsTheStatisticsWarning_AndTheResetStatement()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres (+TimescaleDB) connection string, owner/superuser, to run the alert source group live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var superuser = new NpgsqlConnection(scratch.ConnectionString);
+            await superuser.OpenAsync(ct);
+            await using var owner = await PrepareAsync(scratch, superuser, ct);
+            Assert.SkipWhen(owner is null,
+                "This needs PostgreSQL 16 or later (a creator's implicit membership) and no cluster-wide admin/viewer/mcp role.");
+            var tracking = await SettingOrNullAsync(superuser, "pg_stat_statements.track_utility", ct);
+            Assert.SkipWhen(tracking is null || !string.Equals(tracking, "on", StringComparison.OrdinalIgnoreCase),
+                "pg_stat_statements must be in shared_preload_libraries with track_utility on (its default) on this cluster.");
+            Assert.False(await ScalarAsync<bool>(superuser, $"SELECT rolsuper FROM pg_roles WHERE rolname = '{OwnerName}'", ct));
+            var ownerConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = OwnerName }.ConnectionString;
+
+            var add = await RunVerbAsync(owner!, ownerConnectionString, "--add-alert-source", SourceName, new PostgresConfig { Managed = false }, ct);
+            Assert.True(add.Exit == 0, add.Error);
+            Assert.Contains($"created (login '{RoleName}')", add.Output, StringComparison.Ordinal);
+            Assert.Contains("cannot turn utility statement tracking off", add.Output, StringComparison.Ordinal);
+            Assert.Contains("statement statistics may hold", add.Output, StringComparison.Ordinal);
+            Assert.Contains("the login's password verifier", add.Output, StringComparison.Ordinal);
+            Assert.Contains("SELECT pg_stat_statements_reset();", add.Output, StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// On the store's own database, a login with <c>pg_monitor</c> (which includes <c>pg_read_all_stats</c>) keeps reading the
+    /// <c>pg_stat_statements</c> view and its info view after the revoke from PUBLIC, and a source login, which holds neither,
+    /// is refused (#5654).
+    /// </summary>
+    [Fact]
+    public async Task OnTheStoreDatabase_AMonitorLoginReadsStatementStatistics_AndASourceLoginDoesNot()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres (+TimescaleDB) connection string, owner/superuser, to run the alert source group live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var superuser = new NpgsqlConnection(scratch.ConnectionString);
+            await superuser.OpenAsync(ct);
+            await using var owner = await PrepareAsync(scratch, superuser, ct);
+            Assert.SkipWhen(owner is null,
+                "This needs PostgreSQL 16 or later (a creator's implicit membership) and no cluster-wide admin/viewer/mcp role.");
+            Assert.SkipWhen(
+                await SettingOrNullAsync(superuser, "pg_stat_statements.track", ct) is null,
+                "pg_stat_statements must be in shared_preload_libraries on this cluster.");
+            var ownerConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = OwnerName }.ConnectionString;
+
+            await ExecAsync(superuser, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements WITH SCHEMA public", ct);
+            await ExecAsync(superuser, StoreStatementStats.BuildRevokePublicSql("public", withInfoView: true), ct);
+            await ExecAsync(superuser, $"CREATE ROLE {MonitorName} LOGIN PASSWORD '{MonitorPassword}'; GRANT pg_monitor TO {MonitorName}", ct);
+
+            var add = await RunVerbAsync(owner!, ownerConnectionString, "--add-alert-source", SourceName, new PostgresConfig { Managed = false }, ct);
+            Assert.True(add.Exit == 0, add.Error);
+            await ExecAsync(superuser, $"ALTER ROLE \"{RoleName}\" PASSWORD '{MonitorPassword}'", ct);
+
+            var views = new[] { "public.pg_stat_statements", "public.pg_stat_statements_info" };
+            var monitorCs = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = MonitorName, Password = MonitorPassword, Pooling = false };
+            await using (var monitor = new NpgsqlConnection(monitorCs.ConnectionString))
+            {
+                await monitor.OpenAsync(ct);
+                foreach (var view in views)
+                {
+                    Assert.True(await ScalarAsync<long>(monitor, $"SELECT count(*) FROM {view}", ct) >= 0);
+                }
+            }
+
+            var sourceCs = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = RoleName, Password = MonitorPassword, Pooling = false };
+            await using (var source = new NpgsqlConnection(sourceCs.ConnectionString))
+            {
+                await source.OpenAsync(ct);
+                foreach (var view in views)
+                {
+                    var refused = await Assert.ThrowsAsync<PostgresException>(() => ScalarAsync<long>(source, $"SELECT count(*) FROM {view}", ct));
+                    Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, refused.SqlState);
+                }
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>An IPv4 address of this machine that is not loopback, to bind the exposed store to; null when there is none.</summary>
+    private static string? NonLoopbackIPv4()
+    {
+        foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (nic.OperationalStatus != OperationalStatus.Up || nic.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+            {
+                continue;
+            }
+
+            foreach (var unicast in nic.GetIPProperties().UnicastAddresses)
+            {
+                if (unicast.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(unicast.Address)
+                    && !unicast.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal))
+                {
+                    return unicast.Address.ToString();
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// On the managed store with network exposure for the alert source group (#5654): a start where the group holds a member that is
+    /// not a source login leaves the pg_hba line out, then the role provisioning of the SAME start revokes the member, and the second
+    /// network pass writes the line, so the line is in pg_hba.conf and live without another restart.
+    /// </summary>
+    [Fact]
+    public async Task OnTheManagedStore_AStrayGroupMemberTheProvisioningRevokes_DoesNotKeepTheLineOutAfterThatStart_Gated()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe) to run the managed start proof.");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+        var listen = NonLoopbackIPv4();
+        Assert.SkipWhen(listen is null, "This machine has no non-loopback IPv4 address to expose the store on.");
+
+        var root = Directory.CreateTempSubdirectory("darling-hba-");
+        var config = new PostgresConfig
+        {
+            Managed = true,
+            Port = DarlingManagedPostgresTests.FindFreeTcpPort(),
+            DataDirectory = Path.Combine(root.FullName, "pg"),
+            Network = new PostgresNetworkConfig { Listen = listen, AllowFrom = listen + "/32", Role = DarlingManagedPostgres.AlertSourcesNetworkToken },
+        };
+        var groupLine = "+" + GroupName;
+        var stray = "stray_" + Suffix;
+        var firstLog = new CapturingTestLogger();
+        var secondLog = new CapturingTestLogger();
+        var first = new DarlingManagedPostgres(config, firstLog, runtimeRoot);
+        DarlingManagedPostgres? second = null;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
+            var ct = timeout.Token;
+            var ownerCs = new NpgsqlConnectionStringBuilder(await first.EnsureRunningAsync(ct)) { Pooling = false };
+            var hbaPath = Path.Combine(config.DataDirectory, "pg_hba.conf");
+
+            /* The first start has no group yet, so nothing is left out and the line is written. */
+            Assert.True((await File.ReadAllTextAsync(hbaPath, ct)).Contains(groupLine, StringComparison.Ordinal), firstLog.Joined);
+
+            await using (var c = new NpgsqlConnection(ownerCs.ConnectionString))
+            {
+                await c.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(c, ct);
+            }
+
+            await using (var dataSource = NpgsqlDataSource.Create(ownerCs.ConnectionString))
+            {
+                await DarlingManagedRoles.EnsureProvisionedAsync(dataSource, config.DataDirectory, NullLogger.Instance, ct);
+                await using var c = await dataSource.OpenConnectionAsync(ct);
+                await ExecAsync(c, $"CREATE ROLE {stray} NOLOGIN; GRANT {GroupName} TO {stray}", ct);
+            }
+
+            await first.StopIfStartedByThisProcessAsync();
+
+            /* The same port and credentials come back, so a pooled connection to the stopped server would answer the next start. */
+            NpgsqlConnection.ClearAllPools();
+
+            /* A start with that member in the group leaves the line out. */
+            second = new DarlingManagedPostgres(config, secondLog, runtimeRoot);
+            ownerCs = new NpgsqlConnectionStringBuilder(await second.EnsureRunningAsync(ct)) { Pooling = false };
+            Assert.False((await File.ReadAllTextAsync(hbaPath, ct)).Contains(groupLine, StringComparison.Ordinal), secondLog.Joined);
+            Assert.True(secondLog.Joined.Contains("The pg_hba line for alert sources is left out", StringComparison.Ordinal),
+                string.Join(" | ", secondLog.Joined.Split(" | ").Where(l => l.Contains("pg_hba", StringComparison.Ordinal))));
+
+            /* The provisioning of that start revokes the member, then the worker runs the network pass again. */
+            await using (var dataSource = NpgsqlDataSource.Create(ownerCs.ConnectionString))
+            {
+                await DarlingManagedRoles.EnsureProvisionedAsync(dataSource, config.DataDirectory, NullLogger.Instance, ct);
+                await using var c = await dataSource.OpenConnectionAsync(ct);
+                Assert.Empty(await DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync(c, ct));
+            }
+
+            await second.ReconcileNetworkAfterRoleProvisioningAsync(ct);
+            Assert.Contains(groupLine, await File.ReadAllTextAsync(hbaPath, ct), StringComparison.Ordinal);
+            await using (var c = new NpgsqlConnection(ownerCs.ConnectionString))
+            {
+                await c.OpenAsync(ct);
+                Assert.True(await ScalarAsync<bool>(c,
+                    $"SELECT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE '{groupLine}' = ANY (user_name) AND error IS NULL)", ct));
+            }
+        }
+        finally
+        {
+            if (second is not null)
+            {
+                await second.StopIfStartedByThisProcessAsync();
+            }
+
+            await first.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The worker runs the second network pass after the role provisioning of the same start, in the managed branch, and the pass
+    /// that records the work for it sits in the reconcile that runs before the collection loop (#5654).
+    /// </summary>
+    [Fact]
+    public void TheWorkerRunsTheSecondNetworkPass_AfterTheRoleProvisioningOfTheSameStart()
+    {
+        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs").Replace("\r\n", "\n", StringComparison.Ordinal);
+        var loop = worker.IndexOf("private async Task RunCollectionLoopAsync(", StringComparison.Ordinal);
+        Assert.True(loop > 0, "RunCollectionLoopAsync could not be located, so this check proves nothing");
+        var provisioning = worker.IndexOf("await DarlingManagedRoles.EnsureProvisionedAsync(postgres, dataDirectory", loop, StringComparison.Ordinal);
+        var rerun = worker.IndexOf("await reconcileNetworkAfterRoleProvisioning(stoppingToken);", loop, StringComparison.Ordinal);
+        var composeBranch = worker.IndexOf("else if (!config.Postgres.Managed && Hosting.DarlingHostBinding.IsRunningInContainer)", loop, StringComparison.Ordinal);
+        Assert.True(provisioning > loop, "the managed provisioning call is in the loop method");
+        Assert.True(rerun > provisioning, "the second network pass follows the provisioning");
+        Assert.True(rerun < composeBranch, "the second network pass is inside the managed branch");
+        Assert.Contains(
+            "managedPostgres.ReconcileNetworkAfterRoleProvisioningAsync",
+            worker[..loop], StringComparison.Ordinal);
+
+        var postgres = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedPostgres.cs").Replace("\r\n", "\n", StringComparison.Ordinal);
+        var pass = postgres.IndexOf("private async Task ReconcileNetworkAsync(", StringComparison.Ordinal);
+        Assert.True(pass > 0);
+        var body = postgres[pass..postgres.IndexOf("await CheckStoreFirewallAsync(", pass, StringComparison.Ordinal)];
+        Assert.Matches(@"\n\s+_alertSourceLineRerun = \(binDirectory, fullPlan, ownerConnectionString\);", body);
+        Assert.Contains("await ReconcileNetworkAsync(rerun.BinDirectory, rerun.Plan, rerun.OwnerConnectionString, cancellationToken);", postgres, StringComparison.Ordinal);
+    }
 }
+

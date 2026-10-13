@@ -858,6 +858,14 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     internal ManagedConfMigrationOutcome? LastManagedConfVerification { get; private set; }
 
+    /// <summary>
+    /// #5654: the network reconcile's inputs from a start whose pg_hba pass left the alert sources line out because
+    /// <c>darling_alert_sources</c> had extra members. The role provisioning that runs after the bootstrap revokes
+    /// the extras it can, so <see cref="ReconcileNetworkAfterRoleProvisioningAsync"/> runs the same pass once more
+    /// from these inputs. Null when the line was written, was not wanted, or nothing was left out for that reason.
+    /// </summary>
+    private (string BinDirectory, NetworkPlan Plan, string OwnerConnectionString)? _alertSourceLineRerun;
+
     /// <summary>null/empty dataDirectory means %ProgramData%\PerformanceMonitorDarling\pg (created with inherited ACLs).</summary>
     public static string ResolveDataDirectory(PostgresConfig config)
     {
@@ -6198,6 +6206,25 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
+    /// #5654: runs the network reconcile once more, after the role provisioning that follows the bootstrap, when this
+    /// start's first pass left the alert sources pg_hba line out because <c>darling_alert_sources</c> had extra
+    /// members. Provisioning revokes the extras it can, so a line left out for those members is written (and the
+    /// server reloaded) on this start instead of the next. Does nothing when the first pass did not leave the line out
+    /// for that reason. Never throws, like the reconcile it runs.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal async Task ReconcileNetworkAfterRoleProvisioningAsync(CancellationToken cancellationToken)
+    {
+        if (_alertSourceLineRerun is not { } rerun)
+        {
+            return;
+        }
+
+        _alertSourceLineRerun = null;
+        await ReconcileNetworkAsync(rerun.BinDirectory, rerun.Plan, rerun.OwnerConnectionString, cancellationToken);
+    }
+
+    /// <summary>
     /// Reconciles the LIVE server's network access to <paramref name="plan"/> (D5), symmetric and
     /// fail-closed. Rewrites the pg_hba marked block (add the hostssl rule when exposed, remove it when
     /// loopback/degraded), reloads (exit-checked), verifies the intended rule really took via
@@ -6218,8 +6245,10 @@ public sealed class DarlingManagedPostgres
             /* #5654: the +darling_alert_sources line admits every member of the group at any depth, so it is written only
                while those members are exactly the registered, marked source logins. Any other member (one the provisioning
                step could not revoke, or one that could not be read) leaves the line out, and the rest of the block stays. */
+            _alertSourceLineRerun = null;
             if (exposed && plan.Roles!.Contains(AlertSourcesNetworkToken, StringComparer.Ordinal))
             {
+                var fullPlan = plan;
                 IReadOnlyList<string>? extras;
                 try
                 {
@@ -6240,6 +6269,7 @@ public sealed class DarlingManagedPostgres
                     _logger.LogWarning(
                         "The pg_hba line for alert sources is left out: {Group} also has these members, directly or through a source login, which are not registered alert source logins and could not be revoked: {Roles}. Revoke them as a superuser; the next start checks again.",
                         DarlingManagedRoles.AlertSourceGroupRoleName, string.Join(", ", extras));
+                    _alertSourceLineRerun = (binDirectory, fullPlan, ownerConnectionString);
                 }
 
                 plan = plan with { Roles = AdmittedNetworkRoles(plan.Roles!, extras) };

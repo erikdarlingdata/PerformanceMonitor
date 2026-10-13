@@ -2211,7 +2211,8 @@ LIMIT 1";
         {
             await RunCollectionLoopAsync(
                 config, storeConnectionString, storeUpgradeReport, storeTimescaleReport,
-                managedDataDirectory, managedConfWriteResult, managedUsedLastGoodConf, managedConfVerification, stoppingToken);
+                managedDataDirectory, managedConfWriteResult, managedUsedLastGoodConf, managedConfVerification,
+                OperatingSystem.IsWindows() && managedPostgres is not null ? managedPostgres.ReconcileNetworkAfterRoleProvisioningAsync : null, stoppingToken);
         }
         finally
         {
@@ -2642,6 +2643,7 @@ LIMIT 1";
         ManagedConfWriteResult? managedConfWriteResult,
         bool managedUsedLastGoodConf,
         ManagedConfMigrationOutcome? managedConfVerification,
+        Func<CancellationToken, Task>? reconcileNetworkAfterRoleProvisioning,
         CancellationToken stoppingToken)
     {
         /* Carry the collect/config search path on the store connection string BEFORE the data
@@ -2899,6 +2901,14 @@ LIMIT 1";
                    would keep none while the viewer and mcp roles keep their earlier credentials. Best effort; the
                    call warns for itself and never throws. */
                 await DarlingManagedRoles.EnsureServerPasswordRulesAsync(postgres, _logger, stoppingToken);
+            }
+
+            /* #5654: the pg_hba pass in the bootstrap leaves the alert sources line out while the group has members
+               beyond the registered source logins. Provisioning above revokes the extras it can, so a pass that left
+               the line out for that reason runs once more now, and the line lands on this start. */
+            if (reconcileNetworkAfterRoleProvisioning is not null)
+            {
+                await reconcileNetworkAfterRoleProvisioning(stoppingToken);
             }
         }
         else if (!config.Postgres.Managed && Hosting.DarlingHostBinding.IsRunningInContainer)
