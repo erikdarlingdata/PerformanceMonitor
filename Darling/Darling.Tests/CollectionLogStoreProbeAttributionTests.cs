@@ -51,7 +51,7 @@ namespace Darling.Tests;
 /// surfaces that drew the wrong inference, and the premise the FLOOR caveat rests on.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public class CollectionLogStoreProbeAttributionTests
 {
     /// <summary>

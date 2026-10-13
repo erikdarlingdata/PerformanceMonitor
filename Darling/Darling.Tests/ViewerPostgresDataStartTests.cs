@@ -20,7 +20,7 @@ namespace Darling.Tests;
 /// The PostgreSQL tabs' windowed grids name where their data starts (#4966). The lists below are the single place a grid is added:
 /// <see cref="Grids"/> for the table-driven pins, <see cref="ProbeTables"/> for the probe's table check.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class ViewerPostgresDataStartTests
 {
     /// <summary>Collector (the name the tab asks for), its table, the banner, the loader that fills the grid, and how the banner is shown.</summary>

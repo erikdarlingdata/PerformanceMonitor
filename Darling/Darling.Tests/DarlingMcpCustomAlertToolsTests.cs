@@ -29,7 +29,7 @@ namespace Darling.Tests;
 /// CustomAlertRuleDefinition.TryParse authority (the one the evaluator uses) BEFORE any persistence - an invalid
 /// definition never reaches the store. The live CRUD round-trip is gated below.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpCustomAlertToolsSurfaceTests
 {
     /// <summary>A dead data source (unroutable port) - proves the validate-before-persist tools bail on a bad

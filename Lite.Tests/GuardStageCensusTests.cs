@@ -35,8 +35,8 @@ namespace Lite.Tests;
 /// <para><b>Rule R4 (#5776).</b> A class that reaches a whole catalog (the MCP tool catalog, every type of a product
 /// assembly, or every collector definition) names no symbol a change touches, so a lane's selection by changed
 /// symbol cannot find it, and a new tool or collector is exactly what turns it red. It carries
-/// <c>[Trait("Stage", "Census")]</c>, which the guard job runs beside Stage=Guard, or is exempt with its R3
-/// reason. R3 holds over Census as it does over Guard.</para>
+/// <c>[Trait("Stage", "Guard")]</c> or is exempt with its R3 reason. The scanner's slow list (classes of 50 s or more
+/// in the nightly map) names Darling.Tests classes only, so this suite passes none.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class GuardStageCensusTests
@@ -147,36 +147,32 @@ public sealed class GuardStageCensusTests
     }
 
     [Fact]
-    public void TheCensus_FlagsAnUntaggedCatalogClassAndACensusTaggedStoreClass()
+    public void TheCensus_FlagsAnUntaggedCatalogClassAndATaggedStoreClass()
     {
         const string text = "namespace Synthetic;\n\n"
-          + "[Trait(\"Stage\", \"Census\")]\npublic sealed class CatalogSweepTests\n{\n    [Fact]\n    public void A() { var all = CollectorCatalog.All; }\n}\n\n"
+          + "[Trait(\"Stage\", \"Guard\")]\npublic sealed class CatalogSweepTests\n{\n    [Fact]\n    public void A() { var all = CollectorCatalog.All; }\n}\n\n"
           + "public sealed class ToolListTests\n{\n    [Fact]\n    public void B() { var t = typeof(DarlingMcpTools).Assembly.GetTypes(); }\n}\n\n"
           + "public sealed class PlainReadTests\n{\n    [Fact]\n    public void C() { var one = CollectorCatalog.Find(\"x\"); }\n}\n";
 
         var rows = GuardStageScanner.ScanText(text).ToDictionary(r => r.Name);
 
         Assert.True(rows["CatalogSweepTests"].ReachesACatalog);
-        Assert.True(rows["CatalogSweepTests"].TaggedCensus);
-        Assert.False(rows["CatalogSweepTests"].Tagged);
-        Assert.True(rows["CatalogSweepTests"].Satisfied);
+        Assert.True(rows["CatalogSweepTests"].Tagged);
         Assert.True(rows["ToolListTests"].ReachesACatalog);
-        Assert.False(rows["ToolListTests"].AlwaysRun);
+        Assert.False(rows["ToolListTests"].Tagged);
         Assert.False(rows["PlainReadTests"].Candidate);
 
         var withStore = rows.Values.Append(new GuardStageScanner.Row(
-            "LiveCatalogTests", "e.cs", true, false, true, false, false, false, ReachesACatalog: true, TaggedCensus: true)).ToList();
+            "LiveCatalogTests", "e.cs", true, true, true, false, false, false, ReachesACatalog: true)).ToList();
         var problems = GuardStageScanner.Problems(withStore, new Dictionary<string, string>());
 
-        Assert.Contains(problems, p => p.StartsWith("MISSING", StringComparison.Ordinal) && p.Contains("ToolListTests", StringComparison.Ordinal)
-            && p.Contains("Stage=Census", StringComparison.Ordinal));
-        Assert.Contains(problems, p => p.StartsWith("STORE", StringComparison.Ordinal) && p.Contains("LiveCatalogTests", StringComparison.Ordinal)
-            && p.Contains("Stage=Census", StringComparison.Ordinal));
+        Assert.Contains(problems, p => p.StartsWith("MISSING", StringComparison.Ordinal) && p.Contains("ToolListTests", StringComparison.Ordinal));
+        Assert.Contains(problems, p => p.StartsWith("STORE", StringComparison.Ordinal) && p.Contains("LiveCatalogTests", StringComparison.Ordinal));
         Assert.Equal(2, problems.Count);
     }
 
     [Fact]
-    public void EveryCatalogWideClass_CarriesAnAlwaysRunTrait_OrIsExempt()
+    public void EveryCatalogWideClass_CarriesTheStageGuardTrait_OrIsExempt()
     {
         var rows = GuardStageScanner.Scan(TestsRoot(), ProjectFile());
         var catalog = rows.Where(r => r.ReachesACatalog).ToList();
@@ -184,15 +180,15 @@ public sealed class GuardStageCensusTests
         /* Rule R4 (#5776): the classes a symbol selection cannot find. Each is tagged or exempt; the full census below
            holds the same rule, and this case names it alone so a red run says which rule broke. */
         var untagged = catalog
-            .Where(r => !r.AlwaysRun && !s_exempt.ContainsKey(r.Name))
+            .Where(r => !r.Tagged && !s_exempt.ContainsKey(r.Name))
             .Select(r => $"{r.File}: {r.Name}")
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
         Assert.True(
             untagged.Count == 0,
             $"These Lite.Tests classes reach a whole catalog (the MCP tools, a product assembly's types or every collector) "
-          + $"and carry no always-run trait. Add {GuardStageScanner.CensusTraitText} directly above each (build.yml's guard-tests "
-          + "job runs it beside Stage=Guard), or, when it needs a store, list it in GuardStageCensusTests.s_exempt with the reason:\n  "
+          + $"and are not tagged. Add {GuardStageScanner.GuardTraitText} directly above each (build.yml's guard-tests job then "
+          + "runs it on every pull request), or, when it needs a store, list it in GuardStageCensusTests.s_exempt with the reason:\n  "
           + string.Join("\n  ", untagged));
 
         Assert.True(
@@ -204,7 +200,7 @@ public sealed class GuardStageCensusTests
         {
             var row = catalog.SingleOrDefault(r => r.Name == name);
             Assert.True(row is not null, $"{name} is no longer read as reaching a whole catalog");
-            Assert.True(row!.AlwaysRun, $"{name} is not tagged to always run");
+            Assert.True(row!.Tagged, $"{name} is not tagged to always run");
         }
     }
 

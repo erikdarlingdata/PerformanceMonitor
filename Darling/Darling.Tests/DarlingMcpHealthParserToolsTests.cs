@@ -36,7 +36,7 @@ namespace Darling.Tests;
 /// service-side twin of the viewer's <see cref="SystemEventSignificance"/> (asserted equal, so the twin
 /// can't drift), producing the same SIGNIFICANT warning set.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
 {
     private static string LoadFixture(string name) =>

@@ -30,7 +30,7 @@ namespace Darling.Tests;
 /// pins (v_session_stats latest snapshot; query_snapshots windowed with the WAITFOR trim; waiting_tasks base
 /// table — no v_ view), and the Gemini-clean advertised schema.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpSessionToolsSurfaceAndSqlTests
 {
     private static readonly string[] SessionToolSurface =

@@ -36,7 +36,7 @@ namespace Darling.Tests;
 /// is Gemini-clean.
 /// </summary>
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
 {
     private static readonly string[] HealthToolSurface =

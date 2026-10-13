@@ -25,7 +25,7 @@ namespace PerformanceMonitorLite.Tests;
 /// exact-match — so the pin there guards the PREDICATE SHAPE against being broadened to a
 /// not-success form, which would silently re-admit yields into the Critical band.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public class LockTimeoutYieldTests
 {
     private const int ServerId = 42;

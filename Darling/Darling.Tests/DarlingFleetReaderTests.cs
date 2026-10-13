@@ -443,7 +443,7 @@ public sealed class DarlingFleetDtoJsonTests
 
 /// <summary>The new fleet MCP tool's surface — exactly get_fleet_overview, static, string-returning, on a
 /// discoverable [McpServerToolType] class (the WithGeminiCompatibleTools registration path's requirements).</summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpFleetToolsSurfaceTests
 {
     [Fact]

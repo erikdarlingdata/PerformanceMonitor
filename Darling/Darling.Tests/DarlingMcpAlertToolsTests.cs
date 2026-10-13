@@ -43,7 +43,7 @@ namespace Darling.Tests;
 /// write — a bad or unknown field returns {status:"invalid"} without ever opening a connection. The live
 /// tune / CRUD round-trip (and the config_version self-bump) is gated below.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
 {
     /// <summary>A dead data source (unroutable port) — proves the validate-before-write path bails on a bad

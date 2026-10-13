@@ -39,7 +39,7 @@ namespace Darling.Tests;
 /// </summary>
 [Collection("darling-owned-secrets")]
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpServerAdminToolsSurfaceTests
 {
     /// <summary>A dead data source (unroutable port) — proves the validate-before-write path bails on a bad request

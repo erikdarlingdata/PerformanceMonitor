@@ -32,7 +32,7 @@ namespace Darling.Tests;
 /// horizon the MCP publishes and the purge enforces, and that a grey cell now says why it is grey.
 /// </summary>
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class ViewerCalendarRetentionPortTests
 {
     private static readonly DateTime Today = new(2026, 8, 19, 0, 0, 0, DateTimeKind.Utc);

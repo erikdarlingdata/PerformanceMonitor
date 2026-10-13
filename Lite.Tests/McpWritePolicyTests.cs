@@ -38,7 +38,7 @@ namespace PerformanceMonitorLite.Tests;
 /// cases run over the REAL registered tool set; the wired cases go through the SDK's own options, which is where
 /// the host applies the policy.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class McpWritePolicyTests
 {
     private static McpServerPrimitiveCollection<McpServerTool> RegisteredTools()

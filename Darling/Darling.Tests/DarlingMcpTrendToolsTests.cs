@@ -35,7 +35,7 @@ namespace Darling.Tests;
 /// get_query_trend), the read-SQL pins (Postgres dialect, positional params, the collector columns the schema
 /// generator emits, BOTH-sides collection_time window), and the Gemini-clean advertised schema (#1074).
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
 {
     private static readonly string[] TrendToolSurface =

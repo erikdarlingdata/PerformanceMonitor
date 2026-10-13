@@ -23,7 +23,7 @@ namespace Darling.Tests;
 /// that would land in the wrong column. V29 and V34 assert that equivalence in a doc comment; this
 /// asserts it in code.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingPlanCorrectionMigrationTests
 {
     private static string V46Sql =>

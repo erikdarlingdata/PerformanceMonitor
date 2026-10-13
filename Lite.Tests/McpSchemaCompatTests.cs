@@ -26,7 +26,7 @@ namespace Lite.Tests;
 /// JSON schema the server advertises in tools/list (McpServerTool.ProtocolTool.InputSchema) — no
 /// running server required.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public class McpSchemaCompatTests
 {
     /// <summary>All Lite MCP tool classes, discovered by their [McpServerToolType] attribute.</summary>

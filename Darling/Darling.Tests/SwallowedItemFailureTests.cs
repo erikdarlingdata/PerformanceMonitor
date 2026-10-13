@@ -33,7 +33,7 @@ namespace Darling.Tests;
 /// SUCCESS. Both rows then reached the health tool as HEALTHY, <c>errors 0</c>, and an output finding
 /// asserting the opposite of what happened.</para>
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class SwallowedItemFailureTests
 {
     /* ── the runner: the driver's account becomes the run record ── */

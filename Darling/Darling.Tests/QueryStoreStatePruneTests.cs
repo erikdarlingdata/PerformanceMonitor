@@ -41,7 +41,7 @@ namespace Darling.Tests;
 /// one SKU and orphaning on the other.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class QueryStoreStatePruneTests
 {
     private static string Qsowm(string database) => QueryStoreOpenIntervalState.WatermarkKeyPrefix + database;

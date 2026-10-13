@@ -12,7 +12,7 @@ namespace Darling.Tests;
 /// running-job snapshot with no job running, sources whose zero is the normal answer. They now get their own sentence, and
 /// the set that earns it is pinned against the catalog.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class ZeroIsNormalCollectorTests
 {
     private static CollectorHealth Zero(string collector, long notes = 0, long errors = 0) => new()

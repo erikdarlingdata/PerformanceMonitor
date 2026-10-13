@@ -42,7 +42,7 @@ namespace Darling.Tests;
 /// watches the answer move with it (#2518).</para>
 /// </summary>
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class CollectorEngineCapabilityTests
 {
     private const int Enterprise = 3;
@@ -343,7 +343,7 @@ public sealed class CollectorEngineCapabilityTests
 /// <c>McpMissMessageParityPinTests</c> exists for got there.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class EngineCapabilityReadWiringTests
 {
     private const string DarlingMcp = "Darling/PerformanceMonitor.Darling.Service/Mcp";

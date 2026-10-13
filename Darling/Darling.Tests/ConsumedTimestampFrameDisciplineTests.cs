@@ -59,7 +59,6 @@ namespace Darling.Tests;
 /// unreadable set and counted, so the hole cannot quietly grow.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
 public sealed class ConsumedTimestampFrameDisciplineTests
 {
     /// <summary>Which clock a stored value is in. Naive UTC is the store's default and the frame every

@@ -29,7 +29,7 @@ namespace PerformanceMonitorLite.Tests;
 /// so the default-size cut is per-field. Seeds every SQL Server catalog collector, mostly boring-healthy plus
 /// six rows that must never compact, and measures McpHealthTools.GetCollectionHealth's own UTF-8 bytes.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class CollectionHealthPayloadBudgetToolTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const string ServerName = "CollHealthBudgetSrv";

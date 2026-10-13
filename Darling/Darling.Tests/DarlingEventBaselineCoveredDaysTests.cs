@@ -33,7 +33,7 @@ namespace Darling.Tests;
 /// <see cref="DarlingEventBaselineCoveredDaysLiveTests"/> (and in Lite's <c>EventBaselineCoveredDaysTests</c> over DuckDB).
 /// </summary>
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingEventBaselineCoveredDaysTests
 {
     /// <summary>The compiled arm text with its line endings normalized, so a multi-line anchor matches on any checkout.</summary>

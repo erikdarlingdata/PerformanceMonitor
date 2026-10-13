@@ -30,7 +30,7 @@ namespace PerformanceMonitorLite.Tests;
 /// error is worse than no recommendation. Reflected off the Lite assembly's <c>[McpServerTool]</c> attributes,
 /// the way the host discovers them, so a tool renamed on the surface fails here rather than on the wire.</para>
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class ToolRecommendationsTests
 {
     private static readonly Dictionary<string, MethodInfo> LiteTools = typeof(McpAnalysisTools).Assembly.GetTypes()

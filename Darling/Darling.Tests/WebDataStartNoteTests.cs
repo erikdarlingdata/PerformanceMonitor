@@ -32,7 +32,6 @@ namespace Darling.Tests;
 /// side, rows that start inside the range and a quiet start, is <see cref="WebDataStartNoteLiveTests"/>.
 /// </summary>
 [Trait("Cost", "Slow")]
-[Trait("Stage", "Census")]
 public sealed class WebDataStartNoteTests
 {
     private const string Rows = "{\"server\":\"sql01\",\"hours_back\":168,\"waiting_tasks\":[{\"wait_type\":\"LCK_M_X\"}]}";

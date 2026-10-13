@@ -36,7 +36,7 @@ namespace Darling.Tests;
 /// the stale-entry test), and every other tool, including every tool the filter work widens, must keep it last.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DatabaseNameParamTwinTests
 {
     private const string Param = "database_name";

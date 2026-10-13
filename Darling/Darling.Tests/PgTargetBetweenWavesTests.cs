@@ -26,7 +26,7 @@ namespace Darling.Tests;
 /// next-read. Each pin here is the property the item's decision rests on; the families' own tests keep their
 /// pins and the ones this pass deliberately moved say so inline.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class PgTargetBetweenWavesTests
 {
     /* ───────────────────────── item 1: the bad-actor alias ───────────────────────── */

@@ -34,7 +34,7 @@ namespace Darling.Tests;
 /// columns the schema generator emits, and windows on the naive-UTC collection_time; and the advertised
 /// tools/list schema is Gemini-clean.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
 {
     private static readonly string[] BlockingToolSurface =

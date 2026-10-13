@@ -35,8 +35,9 @@ namespace Darling.Tests;
 /// <para><b>Rule R4 (#5776).</b> A class that reaches a whole catalog (the MCP tool catalog, every type of a product
 /// assembly, or every collector definition) names no symbol a change touches, so a lane's selection by changed
 /// symbol cannot find it, and a new tool or collector is exactly what turns it red. It carries
-/// <c>[Trait("Stage", "Census")]</c>, which the guard job runs beside Stage=Guard, or is exempt with its R3
-/// reason. R3 holds over Census as it does over Guard.</para>
+/// <c>[Trait("Stage", "Guard")]</c>, or is exempt with its R3 reason, or is on the scanner's slow list
+/// (<c>GuardStageScanner.SlowCatalogClasses</c>: 50 s or more in the nightly map, rule R4 alone; those run on the
+/// shards). Both lists only shrink, and their sizes are pinned.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class GuardStageCensusTests
@@ -90,6 +91,12 @@ public sealed class GuardStageCensusTests
 
     /// <summary>The size of the list above. A new entry is a deliberate edit of this number and a reason.</summary>
     private const int CatalogExemptionCeiling = 25;
+
+    /// <summary>
+    /// The size of <see cref="GuardStageScanner.SlowCatalogClasses"/>: the rule-R4 classes left off the guard stage for
+    /// being slow (#5776). A new entry is a deliberate edit of this number and a nightly-map figure.
+    /// </summary>
+    private const int SlowCatalogCeiling = 3;
 
     /// <summary>Both exemption lists, as the scanner reads them.</summary>
     private static Dictionary<string, string> AllExempt() =>
@@ -196,52 +203,64 @@ public sealed class GuardStageCensusTests
     }
 
     [Fact]
-    public void TheCensus_FlagsAnUntaggedCatalogClassAndACensusTaggedStoreClass()
+    public void TheCensus_FlagsAnUntaggedCatalogClass_AndHonoursOnlyARuleR4OnlySlowEntry()
     {
         const string text = "namespace Synthetic;\n\n"
-          + "[Trait(\"Stage\", \"Census\")]\npublic sealed class CatalogSweepTests\n{\n    [Fact]\n    public void A() { var all = CollectorCatalog.All; }\n}\n\n"
+          + "[Trait(\"Stage\", \"Guard\")]\npublic sealed class CatalogSweepTests\n{\n    [Fact]\n    public void A() { var all = CollectorCatalog.All; }\n}\n\n"
           + "public sealed class ToolListTests\n{\n    [Fact]\n    public void B() { var t = typeof(DarlingMcpTools).Assembly.GetTypes(); }\n}\n\n"
+          + "public sealed class SlowSweepTests\n{\n    [Fact]\n    public void D() { var all = CollectorCatalog.All; }\n}\n\n"
+          + "public sealed class SlowSweepCensusTests\n{\n    [Fact]\n    public void E() { var all = CollectorCatalog.All; }\n}\n\n"
           + "public sealed class PlainReadTests\n{\n    [Fact]\n    public void C() { var one = CollectorCatalog.Find(\"x\"); }\n}\n";
 
         var rows = GuardStageScanner.ScanText(text).ToDictionary(r => r.Name);
 
         Assert.True(rows["CatalogSweepTests"].ReachesACatalog);
-        Assert.True(rows["CatalogSweepTests"].TaggedCensus);
-        Assert.False(rows["CatalogSweepTests"].Tagged);
-        Assert.True(rows["CatalogSweepTests"].Satisfied);
+        Assert.True(rows["CatalogSweepTests"].Tagged);
         Assert.True(rows["ToolListTests"].ReachesACatalog);
-        Assert.False(rows["ToolListTests"].AlwaysRun);
+        Assert.False(rows["ToolListTests"].Tagged);
+        Assert.True(rows["SlowSweepTests"].CatalogOnly);
+        Assert.False(rows["SlowSweepCensusTests"].CatalogOnly);
         Assert.False(rows["PlainReadTests"].Candidate);
 
         var withStore = rows.Values.Append(new GuardStageScanner.Row(
-            "LiveCatalogTests", "e.cs", true, false, true, false, false, false, ReachesACatalog: true, TaggedCensus: true)).ToList();
-        var problems = GuardStageScanner.Problems(withStore, new Dictionary<string, string>());
+            "LiveCatalogTests", "e.cs", true, true, true, false, false, false, ReachesACatalog: true)).ToList();
+        var problems = GuardStageScanner.Problems(
+            withStore,
+            new Dictionary<string, string>(),
+            new Dictionary<string, string>
+            {
+                ["SlowSweepTests"] = "slow: 90 s in the nightly map of 2026-10-13",
+                ["SlowSweepCensusTests"] = "slow: 90 s in the nightly map of 2026-10-13",
+            });
 
-        Assert.Contains(problems, p => p.StartsWith("MISSING", StringComparison.Ordinal) && p.Contains("ToolListTests", StringComparison.Ordinal)
-            && p.Contains("Stage=Census", StringComparison.Ordinal));
-        Assert.Contains(problems, p => p.StartsWith("STORE", StringComparison.Ordinal) && p.Contains("LiveCatalogTests", StringComparison.Ordinal)
-            && p.Contains("Stage=Census", StringComparison.Ordinal));
-        Assert.Equal(2, problems.Count);
+        /* SlowSweepTests is R4 alone and listed: no problem. SlowSweepCensusTests is guard-style by name (R1), so the slow
+           list does not cover it: it is MISSING and its entry is STALE. */
+        Assert.Contains(problems, p => p.StartsWith("MISSING", StringComparison.Ordinal) && p.Contains("ToolListTests", StringComparison.Ordinal));
+        Assert.Contains(problems, p => p.StartsWith("MISSING", StringComparison.Ordinal) && p.Contains("SlowSweepCensusTests", StringComparison.Ordinal));
+        Assert.Contains(problems, p => p.StartsWith("STALE", StringComparison.Ordinal) && p.Contains("SlowSweepCensusTests", StringComparison.Ordinal));
+        Assert.Contains(problems, p => p.StartsWith("STORE", StringComparison.Ordinal) && p.Contains("LiveCatalogTests", StringComparison.Ordinal));
+        Assert.DoesNotContain(problems, p => p.Contains("SlowSweepTests ", StringComparison.Ordinal) || p.Contains("SlowSweepTests:", StringComparison.Ordinal));
+        Assert.Equal(4, problems.Count);
     }
 
     [Fact]
-    public void EveryCatalogWideClass_CarriesAnAlwaysRunTrait_OrIsExempt()
+    public void EveryCatalogWideClass_CarriesTheStageGuardTrait_OrIsExemptOrSlow()
     {
         var rows = GuardStageScanner.Scan(TestsRoot(), ProjectFile());
         var catalog = rows.Where(r => r.ReachesACatalog).ToList();
 
-        /* Rule R4 (#5776): the classes a symbol selection cannot find. Each is tagged or exempt; the full census below
-           holds the same rule, and this case names it alone so a red run says which rule broke. */
+        /* Rule R4 (#5776): the classes a symbol selection cannot find. Each is tagged, exempt, or on the scanner's slow
+           list; the full census below holds the same rule, and this case names it alone so a red run says which rule broke. */
         var untagged = catalog
-            .Where(r => !r.AlwaysRun && !AllExempt().ContainsKey(r.Name))
+            .Where(r => !r.Tagged && !AllExempt().ContainsKey(r.Name) && !GuardStageScanner.SlowCatalogClasses.ContainsKey(r.Name))
             .Select(r => $"{r.File}: {r.Name}")
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
         Assert.True(
             untagged.Count == 0,
             $"These Darling.Tests classes reach a whole catalog (the MCP tools, a product assembly's types or every collector) "
-          + $"and carry no always-run trait. Add {GuardStageScanner.CensusTraitText} directly above each (build.yml's guard-tests "
-          + "job runs it beside Stage=Guard), or, when it needs a store, list it in GuardStageCensusTests.s_exemptCatalog with the reason:\n  "
+          + $"and are not tagged. Add {GuardStageScanner.GuardTraitText} directly above each (build.yml's guard-tests job then "
+          + "runs it on every pull request), or, when it needs a store, list it in GuardStageCensusTests.s_exemptCatalog with the reason:\n  "
           + string.Join("\n  ", untagged));
 
         Assert.True(
@@ -253,7 +272,14 @@ public sealed class GuardStageCensusTests
         {
             var row = catalog.SingleOrDefault(r => r.Name == name);
             Assert.True(row is not null, $"{name} is no longer read as reaching a whole catalog");
-            Assert.True(row!.AlwaysRun, $"{name} is not tagged to always run");
+            Assert.True(row!.Tagged, $"{name} is not tagged to always run");
+        }
+
+        /* The slow classes run on the shards only, so none may carry the trait (the full census calls that STALE too). */
+        foreach (var name in GuardStageScanner.SlowCatalogClasses.Keys)
+        {
+            var row = catalog.SingleOrDefault(r => r.Name == name);
+            Assert.True(row is not null && row.CatalogOnly && !row.Tagged, $"{name} is on the slow list but is not an untagged rule-R4-only class");
         }
     }
 
@@ -262,7 +288,7 @@ public sealed class GuardStageCensusTests
     {
         var rows = GuardStageScanner.Scan(TestsRoot(), ProjectFile());
 
-        var problems = GuardStageScanner.Problems(rows, AllExempt());
+        var problems = GuardStageScanner.Problems(rows, AllExempt(), GuardStageScanner.SlowCatalogClasses);
 
         Assert.True(
             problems.Count == 0,
@@ -457,6 +483,7 @@ public sealed class GuardStageCensusTests
     {
         Assert.Equal(ExemptionCeiling, s_exempt.Count);
         Assert.Equal(CatalogExemptionCeiling, s_exemptCatalog.Count);
+        Assert.Equal(SlowCatalogCeiling, GuardStageScanner.SlowCatalogClasses.Count);
     }
 
     private static string TestsRoot([CallerFilePath] string thisFile = "") =>

@@ -43,7 +43,7 @@ namespace Darling.Tests;
 /// which is how the NEXT rung's build goes red.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class CollectorDatabaseScopeRungTests
 {
     private const int RungVersion = 125;

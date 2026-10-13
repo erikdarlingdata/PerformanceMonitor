@@ -24,7 +24,7 @@ namespace Darling.Tests;
 /// Pins for <c>get_finops_inventory</c> that need no store: the tool surface, the refusals (which the tool decides
 /// before it touches the data source), and the row shape on hand-built inventory rows.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpFinOpsInventoryToolsTests
 {
     private static ServerInventoryDto Dto(

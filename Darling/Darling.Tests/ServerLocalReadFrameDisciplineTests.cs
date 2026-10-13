@@ -51,7 +51,7 @@ namespace Darling.Tests;
 /// <c>dte</c> alias, so a rename would otherwise turn it into an assertion about nothing.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class ServerLocalReadFrameDisciplineTests
 {
     /* ───────────────────────── the literal-SQL reads of default_trace_events ───────────────────────── */

@@ -30,7 +30,7 @@ namespace Darling.Tests;
 /// pins (v_latch_stats / v_spinlock_stats, LAG per-second, DISTINCT ON latest), the reproduced Dashboard CASE
 /// enrichment (severity / description / recommendation), and the Gemini-clean advertised schema.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpLatchSpinlockToolsSurfaceAndSqlTests
 {
     private static readonly string[] LatchSpinlockToolSurface =

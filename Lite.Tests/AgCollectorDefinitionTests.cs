@@ -26,7 +26,7 @@ namespace Lite.Tests;
 /// unlike the wait/latch definition tests there is no delta group/key/gap contract to pin — the
 /// absence is itself pinned by <see cref="WritePayload_EmitsPayloadOrder_AndTakesNoDeltas"/>.</para>
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class AgCollectorDefinitionTests
 {
     private static readonly ICollectorSchemaInfo[] AgCollectors =

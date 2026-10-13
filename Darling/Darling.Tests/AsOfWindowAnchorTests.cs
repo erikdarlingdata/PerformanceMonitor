@@ -36,7 +36,7 @@ namespace Darling.Tests;
 /// unanchored, prove the two disagree — is <see cref="AsOfWindowAnchorLivePostgresTests"/>.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class AsOfWindowAnchorTests
 {
     /* ── the resolver's contract ── */

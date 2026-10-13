@@ -45,11 +45,18 @@ internal static class GuardStageScanner
     internal const string GuardTraitText = "[Trait(\"Stage\", \"Guard\")]";
 
     /// <summary>
-    /// The attribute a catalog-wide class carries (rule R4, #5776). The guard job runs it beside Stage=Guard, so it
-    /// is always run too; it is a trait of its own only because the R4 set took well over two minutes in the nightly
-    /// test map (545 s of Darling.Tests), so the set stays separable from the fast source pins.
+    /// The catalog-wide classes (rule R4, #5776) that stay off the guard stage because they are slow: 50 s or more in
+    /// the nightly test map. They carry no Stage trait and run on the shards, as every untagged class does. Together they
+    /// were 501 s of the 545 s the R4 set took in Darling.Tests; without them the Guard-tagged R4 classes are about 44 s,
+    /// so the guard job stays fast. A rule-R4-only class may be listed here; one that is guard-style by name (R1) or
+    /// walks the repo root (R2) may not. Shrinks only: GuardStageCensusTests pins its size.
     /// </summary>
-    internal const string CensusTraitText = "[Trait(\"Stage\", \"Census\")]";
+    internal static readonly IReadOnlyDictionary<string, string> SlowCatalogClasses = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["ConsumedTimestampFrameDisciplineTests"] = "slow: 188 s in the nightly map of 2026-10-13",
+        ["QueryStatsWriterCensusPins"] = "slow: 56 s in the nightly map of 2026-10-13",
+        ["WebDataStartNoteTests"] = "slow: 257 s in the nightly map of 2026-10-13",
+    };
 
     /// <summary>The attribute a class that reads a Lite file carries, as it is written in source (#5459 cut 3a).</summary>
     internal const string LiteTraitText = "[Trait(\"Reads\", \"Lite\")]";
@@ -106,20 +113,16 @@ internal static class GuardStageScanner
         bool UsesStoreHelper,
         bool ReadsLite = false,
         bool TaggedLite = false,
-        bool ReachesACatalog = false,
-        bool TaggedCensus = false)
+        bool ReachesACatalog = false)
     {
-        /// <summary>Whether the class carries either always-run trait, Stage=Guard or Stage=Census: the guard job runs both.</summary>
-        internal bool AlwaysRun => Tagged || TaggedCensus;
-
-        /// <summary>Whether the class carries the trait its rules ask for: Stage=Guard for R1 or R2, either for R4 alone.</summary>
-        internal bool Satisfied => GuardStyleByName || EnumeratesRepoRoot ? Tagged : AlwaysRun;
-
         /// <summary>Whether the class is guard-style by name (R1).</summary>
         internal bool GuardStyleByName => GuardStyleName.IsMatch(Name);
 
-        /// <summary>Whether the class is a guard candidate by either rule (R1 or R2).</summary>
+        /// <summary>Whether the class is a guard candidate by any rule (R1, R2 or R4).</summary>
         internal bool Candidate => IsTest && (GuardStyleByName || EnumeratesRepoRoot || ReachesACatalog);
+
+        /// <summary>Whether rule R4 alone makes the class a candidate, so it may sit on <see cref="SlowCatalogClasses"/>.</summary>
+        internal bool CatalogOnly => IsTest && ReachesACatalog && !GuardStyleByName && !EnumeratesRepoRoot;
 
         /// <summary>Whether tagging the class would break rule R3: the guard job has no store.</summary>
         internal bool NeedsAStore => LiveCollection || ReadsTestVariable || UsesStoreHelper;
@@ -146,8 +149,7 @@ internal static class GuardStageScanner
         string OwnCode,
         bool ReadsLite,
         bool TaggedLite,
-        bool ReachesACatalog,
-        bool TaggedCensus);
+        bool ReachesACatalog);
 
     /// <summary>
     /// Every test class under <paramref name="testsRoot"/>, one row per class name. When <paramref name="projectFile"/>
@@ -210,8 +212,7 @@ internal static class GuardStageScanner
                 UsesStoreHelper: usesHelper,
                 ReadsLite: group.Any(d => d.ReadsLite),
                 TaggedLite: group.Any(d => d.TaggedLite),
-                ReachesACatalog: group.Any(d => d.ReachesACatalog),
-                TaggedCensus: group.Any(d => d.TaggedCensus)));
+                ReachesACatalog: group.Any(d => d.ReachesACatalog)));
         }
 
         return rows;
@@ -219,27 +220,47 @@ internal static class GuardStageScanner
 
     /// <summary>
     /// What is wrong with the suite's tagging, one line per fault; empty when it is right. Rules R1 and R2: a
-    /// guard candidate carries Stage=Guard or is exempt. Rule R4 (#5776): a catalog-wide class carries Stage=Census
-    /// (or Stage=Guard) or is exempt. Rule R3: a class with either trait needs no store. And an exemption must still
-    /// be one: it names a candidate that is untagged, with a reason.
+    /// guard candidate carries Stage=Guard or is exempt. Rule R4 (#5776): a catalog-wide class carries Stage=Guard,
+    /// is exempt, or is on <paramref name="slow"/> (a class that rule R4 alone flags, 50 s or more in the nightly map).
+    /// Rule R3: a tagged class needs no store. And an exemption must still be one: it names a candidate that is
+    /// untagged, with a reason. Lite.Tests passes no slow list: <see cref="SlowCatalogClasses"/> names Darling.Tests classes.
     /// </summary>
-    internal static List<string> Problems(IReadOnlyList<Row> rows, IReadOnlyDictionary<string, string> exempt)
+    internal static List<string> Problems(
+        IReadOnlyList<Row> rows, IReadOnlyDictionary<string, string> exempt, IReadOnlyDictionary<string, string>? slow = null)
     {
+        slow ??= new Dictionary<string, string>();
         var problems = new List<string>();
         var byName = rows.ToDictionary(r => r.Name, StringComparer.Ordinal);
 
-        foreach (var r in rows.Where(r => r.Candidate && !r.Satisfied && !exempt.ContainsKey(r.Name)).OrderBy(r => r.Name, StringComparer.Ordinal))
+        foreach (var r in rows
+            .Where(r => r.Candidate && !r.Tagged && !exempt.ContainsKey(r.Name) && !(r.CatalogOnly && slow.ContainsKey(r.Name)))
+            .OrderBy(r => r.Name, StringComparer.Ordinal))
         {
             var why = r.GuardStyleByName ? "guard-style name"
                 : r.EnumeratesRepoRoot ? "enumerates the repo root recursively"
                 : "reaches a whole catalog: the MCP tools, a product assembly's types or every collector (R4)";
-            var trait = r.GuardStyleByName || r.EnumeratesRepoRoot ? "Stage=Guard" : "Stage=Census";
-            problems.Add($"MISSING {r.File}: {r.Name} ({why}; needs {trait}; store: {(r.NeedsAStore ? r.StoreReasons : "none")})");
+            problems.Add($"MISSING {r.File}: {r.Name} ({why}; store: {(r.NeedsAStore ? r.StoreReasons : "none")})");
         }
 
-        foreach (var r in rows.Where(r => r.AlwaysRun && r.NeedsAStore).OrderBy(r => r.Name, StringComparer.Ordinal))
+        foreach (var r in rows.Where(r => r.Tagged && r.NeedsAStore).OrderBy(r => r.Name, StringComparer.Ordinal))
         {
-            problems.Add($"STORE {r.File}: {r.Name} is tagged {(r.Tagged ? "Stage=Guard" : "Stage=Census")} but {r.StoreReasons}; the guard job has no PostgreSQL");
+            problems.Add($"STORE {r.File}: {r.Name} is tagged Stage=Guard but {r.StoreReasons}; the guard job has no PostgreSQL");
+        }
+
+        foreach (var (name, reason) in slow)
+        {
+            if (!reason.StartsWith("slow: ", StringComparison.Ordinal))
+            {
+                problems.Add($"REASON {name}: a slow entry's reason reads 'slow: <N> s in the nightly map of <date>'");
+            }
+            else if (!byName.TryGetValue(name, out var row) || !row.CatalogOnly)
+            {
+                problems.Add($"STALE {name}: is on the slow list but rule R4 alone does not flag it (renamed, deleted, or R1/R2 now applies); drop the entry");
+            }
+            else if (row.Tagged)
+            {
+                problems.Add($"STALE {name}: is on the slow list but now carries the trait; drop the entry");
+            }
         }
 
         foreach (var (name, reason) in exempt)
@@ -252,7 +273,7 @@ internal static class GuardStageScanner
             {
                 problems.Add($"STALE {name}: is exempt but is not a guard candidate (renamed, deleted or no longer matches); drop the entry");
             }
-            else if (row.Satisfied)
+            else if (row.Tagged)
             {
                 problems.Add($"STALE {name}: is exempt but now carries the trait; drop the entry");
             }
@@ -321,8 +342,7 @@ internal static class GuardStageScanner
                 ownCode,
                 fileReadsLite,
                 attributes.Any(a => Squash(a).Contains(Squash(LiteTraitText), StringComparison.Ordinal)),
-                ReachesACatalog(ownCode),
-                attributes.Any(a => Squash(a).Contains(Squash(CensusTraitText), StringComparison.Ordinal)));
+                ReachesACatalog(ownCode));
         }
     }
 
@@ -481,7 +501,7 @@ internal static class GuardStageScanner
         return decls
             .Select(d => new Row(
                 d.Name, d.File, true, d.Tagged, d.LiveCollection, d.EnumeratesRepoRoot, d.ReadsTestVariable, false,
-                d.ReadsLite, d.TaggedLite, d.ReachesACatalog, d.TaggedCensus))
+                d.ReadsLite, d.TaggedLite, d.ReachesACatalog))
             .ToList();
     }
 
@@ -569,12 +589,10 @@ internal static class GuardStageScanner
         return result;
     }
 
-    /* Stage=Census too (#5776): the guard job runs both traits, so rule R3 holds over both. */
     private static bool HasGuardTrait(IEnumerable<Attribute> attributes) =>
         attributes.OfType<ITraitAttribute>().Any(a => a.GetTraits().Any(
             t => string.Equals(t.Key, "Stage", StringComparison.OrdinalIgnoreCase)
-              && (string.Equals(t.Value, "Guard", StringComparison.OrdinalIgnoreCase)
-                  || string.Equals(t.Value, "Census", StringComparison.OrdinalIgnoreCase))));
+              && string.Equals(t.Value, "Guard", StringComparison.OrdinalIgnoreCase)));
 
     /// <summary>
     /// Where the source scan and xunit disagree, and rule R3 over the reflected set (M1 of #5471's review). Both
@@ -596,22 +614,22 @@ internal static class GuardStageScanner
                 problems.Add($"UNSCANNED {r.Name}: xunit runs it in the guard job but the source scan found no test class of that name "
                   + "(a linked file the csproj does not list, or tests inherited from a base class)");
             }
-            else if (!row.AlwaysRun)
+            else if (!row.Tagged)
             {
-                problems.Add($"UNTAGGED {row.File}: {r.Name} is selected by -trait Stage=Guard or Stage=Census through a trait the source scan does not read "
+                problems.Add($"UNTAGGED {row.File}: {r.Name} is selected by -trait Stage=Guard through a trait the source scan does not read "
                   + "(a method-level trait, a combined attribute list, a constant, a base class); write it as the one attribute line above the class");
             }
 
-            if (r.LiveCollection || (row is not null && row.NeedsAStore && !row.AlwaysRun))
+            if (r.LiveCollection || (row is not null && row.NeedsAStore && !row.Tagged))
             {
-                problems.Add($"STORE {r.Name} is selected by -trait Stage=Guard or Stage=Census but needs a store ("
+                problems.Add($"STORE {r.Name} is selected by -trait Stage=Guard but needs a store ("
                   + (r.LiveCollection ? "live-postgres collection" : row!.StoreReasons) + "); the guard job has no PostgreSQL");
             }
         }
 
-        foreach (var row in rows.Where(r => r.AlwaysRun && !reflectedNames.Contains(r.Name)).OrderBy(r => r.Name, StringComparer.Ordinal))
+        foreach (var row in rows.Where(r => r.Tagged && !reflectedNames.Contains(r.Name)).OrderBy(r => r.Name, StringComparer.Ordinal))
         {
-            problems.Add($"PHANTOM {row.File}: {row.Name} reads as tagged in source but xunit does not select it for -trait Stage=Guard or Stage=Census "
+            problems.Add($"PHANTOM {row.File}: {row.Name} reads as tagged in source but xunit does not select it for -trait Stage=Guard "
               + "(not public, abstract, or no test method)");
         }
 

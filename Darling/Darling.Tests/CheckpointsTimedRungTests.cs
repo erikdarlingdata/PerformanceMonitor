@@ -41,7 +41,7 @@ namespace Darling.Tests;
 /// where the reader lives, in <c>StoreToastAndCheckpointerTests</c>. This file is the RUNG: the ladder, the
 /// DDL, and the probe.</para>
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class CheckpointsTimedRungTests
 {
     private const int RungVersion = 140;

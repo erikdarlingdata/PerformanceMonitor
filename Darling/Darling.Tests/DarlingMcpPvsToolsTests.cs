@@ -26,7 +26,7 @@ namespace Darling.Tests;
 /// percent-of-database computed PER POINT from the same row's data-file denominator — the #2018 chart's
 /// exact story, so no surface can disagree with another.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingMcpPvsToolsTests
 {
     private static MethodInfo[] ToolMethods() => typeof(DarlingMcpPvsTools)

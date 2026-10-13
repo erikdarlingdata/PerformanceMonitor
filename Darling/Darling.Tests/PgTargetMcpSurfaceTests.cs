@@ -27,7 +27,7 @@ namespace Darling.Tests;
 /// <c>CONFIG_PG_*</c> facts instead — the structural pin is here, the projected payload is executed live in
 /// <c>PgTargetAuditConfigTests</c>.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class PgTargetMcpSurfaceTests
 {
     /// <summary>Every tool the Darling MCP host registers, by attribute name, across every tool class.</summary>

@@ -28,7 +28,7 @@ namespace Darling.Tests;
 /// no running server required. Lite twin: <see cref="Lite.Tests.McpAlwaysLoadedToolsTests"/> (Lite has
 /// no <c>get_fleet_overview</c>; central-store-only, Darling only).
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public class McpAlwaysLoadedToolsTests
 {
     private static readonly string[] ExpectedAlwaysLoaded =

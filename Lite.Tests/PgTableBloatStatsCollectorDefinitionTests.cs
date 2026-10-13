@@ -21,7 +21,7 @@ namespace Lite.Tests;
 /// as a measurement, that the trust signals which decide whether it may be published all travel with it, and
 /// that the never-analyzed sentinel survives the reader instead of being floored into a claim.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public class PgTableBloatStatsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

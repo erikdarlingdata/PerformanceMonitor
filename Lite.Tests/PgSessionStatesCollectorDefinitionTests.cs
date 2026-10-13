@@ -23,7 +23,7 @@ namespace Lite.Tests;
 /// handled by substitution rather than by gating the collector off, and that the query text cannot re-enter
 /// through the command-tag column.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public class PgSessionStatesCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

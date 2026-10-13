@@ -32,7 +32,7 @@ namespace Darling.Tests;
 /// missed from the web surface (it fails this test until it is wired or explicitly excluded). The response-kind
 /// and query-parse pins cover the thin glue around the reused tool methods.
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingWebEndpointsTests
 {
     /// <summary>Every <c>[McpServerTool(Name = ...)]</c> across every <c>[McpServerToolType]</c> class in the

@@ -35,7 +35,7 @@ namespace Darling.Tests;
 /// reader; only the host wiring stays a source pin, because that branch is the tail of a live payload read.
 /// </para>
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingPayloadProbeFailureTests
 {
     /* ── the back-compat guarantee: a payload-only reader behaves exactly as before ── */

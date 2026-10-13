@@ -21,7 +21,7 @@ namespace Lite.Tests;
 /// and the escape hatch that lets an invalid index through it, the writers-only gate, and — the substance of
 /// the collector — the catalog facts that stop "unused" being read as "droppable".
 /// </summary>
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public class PgIndexUsageStatsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();

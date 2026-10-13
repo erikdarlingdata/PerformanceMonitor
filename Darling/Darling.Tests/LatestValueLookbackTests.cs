@@ -45,7 +45,7 @@ namespace Darling.Tests;
 /// pinned to the same text, and the gated arm seeds ghosts and asks the planner.</para>
 /// </summary>
 [Trait("Reads", "Lite")]
-[Trait("Stage", "Census")]
+[Trait("Stage", "Guard")]
 public sealed class LatestValueLookbackSqlTests
 {
     /// <summary>Every lookback-bounded read, by name: the six the issue inventoried plus memory_stats, the same
