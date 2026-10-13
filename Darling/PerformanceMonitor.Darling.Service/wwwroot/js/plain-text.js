@@ -185,6 +185,19 @@ export function plainText(text) {
   /* A trend's width note: "...near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer
      points." The page picks the width, so only the narrower range is left to say. */
   t = t.replace(/pass bucket_minutes \(1-\d+\) for another width, or /g, "");
+  /* #5644 W8: a trend note's closing advice, and the field names it explains. The CPU and Memory pages have no bucket control (the
+     page picks the width), so "narrow the bucket" is said as the control that exists, the time range; the Waits, Latch/Spinlock
+     and Activity notes name their fields by the column or tile the page shows. */
+  t = t.replace(/\bnarrow the bucket to see it\b/g, "narrow the time range to see it");
+  t = t.replace(/\bwait_time_ms_per_second is recomputed\b/g, "Wait ms/s is recomputed");
+  t = t.replace(/\bcollisions_per_second is recomputed\b/g, "Coll/s is recomputed");
+  t = t.replace(
+    /\btop_application_name, top_application_connections, top_host_name and top_host_connections are\b/g,
+    "the top application, its connection count, the top host and its connection count are",
+  );
+  /* "24 hour(s)", "288 collector run(s)": the count is known, so the word agrees with it ("1 hour", "24 hours", "2 queries"). */
+  t = t.replace(/(?<![\w.])(\d[\d,]*) ((?:[a-z]+ )?[a-z]+)\(s\)/g, (m, n, word) => n + " " + (n === "1" ? word : /[^aeiou]y$/.test(word) ? word.slice(0, -1) + "ies" : word + "s"));
+
   /* "raise limit": the pages have no row-limit control. "...filter - raise limit to see more." and "...returned; raise limit
      (now 50) for more." lose the clause; ", or raise limit," and ", and raise limit if none ... shows one" lose theirs. */
   t = t.replace(/\s*[;—–-]+\s*raise (?:the )?limit(?: \(now [\d,]+\))?(?: (?:to see|for) (?:more|the rest(?: of the rows)?))?(?=\.)/g, "");

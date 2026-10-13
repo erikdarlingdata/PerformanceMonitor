@@ -183,15 +183,16 @@ export const DASHBOARD_TEMPLATES = [
       definition: {
         panels: [
           {
-            title: "Blocking Events",
+            title: "Blocked process report trend",
             read: "get_blocking_trend",
             params: { server, hours: 24 },
             viz: "line",
             rowsKey: "trend",
             xKey: "time",
-            emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
-            series: [{ key: "count", label: "Events" }],
+            emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
+            series: [{ key: "count", label: "Reports" }],
             format: "int",
+            unit: "reports",
           },
           {
             title: "Deadlocks",

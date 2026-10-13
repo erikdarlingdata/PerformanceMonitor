@@ -97,6 +97,34 @@ public sealed class WebPlainTextTests
         Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[0]);
     }
 
+    /* #5644 W8 (live check): the CPU and Memory pages have no bucket control, the Waits and Activity notes print raw field names, and a
+       window count printed "24 hour(s)". */
+    [Fact]
+    public void TrendNotes_NameTheTimeRange_TheColumnLabels_AndAgreeInNumber()
+    {
+        var o = Run(
+        [
+            "Each point averages the samples in one 5-minute bucket and is stamped at the bucket's start. A level is averaged, never summed, so a spike inside a bucket is smoothed into its average; narrow the bucket to see it. The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
+            "wait_time_ms_per_second is recomputed from the summed wait time over the seconds the collections covered.",
+            "collisions_per_second is recomputed from the summed delta.",
+            "The session counts are levels, averaged, never summed; top_application_name, top_application_connections, top_host_name and top_host_connections are the newest collection's own values in the bucket.",
+            "No query-stats group on SRV in the last 24 hour(s) has a cached plan.",
+            "No blocking was recorded in the last 1 hour(s). 288 collector run(s) DID execute; 1 collector run(s) failed.",
+            "3 query(s) failed, 1 query(s) retried, 2 policy(s) skipped.",
+        ], out _);
+        Assert.DoesNotContain("narrow the bucket", o[0]);
+        Assert.Contains("narrow the time range to see it", o[0]);
+        Assert.DoesNotContain("wait_time_ms_per_second", o[1]);
+        Assert.StartsWith("Wait ms/s is recomputed", o[1]);
+        Assert.StartsWith("Coll/s is recomputed", o[2]);
+        Assert.DoesNotContain("top_application_name", o[3]);
+        Assert.Contains("the top application, its connection count, the top host and its connection count are", o[3]);
+        Assert.Equal("No query-stats group on SRV in the last 24 hours has a cached plan.", o[4]);
+        Assert.Equal("No blocking was recorded in the last 1 hour. 288 collector runs DID execute; 1 collector run failed.", o[5]);
+        /* a noun ending in a consonant plus y takes "ies", not a bare "s" */
+        Assert.Equal("3 queries failed, 1 query retried, 2 policies skipped.", o[6]);
+    }
+
     /* #5644 W8: the clauses that point an MCP caller at a parameter the page has no control for. */
     [Fact]
     public void ParameterClauses_ForAnMcpCaller_AreDroppedOrSaidInThePagesWords()
@@ -123,7 +151,7 @@ public sealed class WebPlainTextTests
         Assert.Equal(" truncated: 5 of 9 returned.", o[4]);
         Assert.EndsWith("still cover every database.", o[5]);
         Assert.Contains("per database - so its totals", o[6]);
-        Assert.Equal("No active query snapshots on SQL2025 in the last 1 hour(s) matched blocking queries only. The filters were applied in SQL over the whole window.", o[7]);
+        Assert.Equal("No active query snapshots on SQL2025 in the last 1 hour matched blocking queries only. The filters were applied in SQL over the whole window.", o[7]);
         Assert.Contains("matched database 'Sales' with blocking queries only with wait type 'LCK_M_X'.", o[8]);
         Assert.Contains("so this is a normal result, not missing data.", o[9]);
         Assert.EndsWith("Select a single server to see the rest.", o[10]);

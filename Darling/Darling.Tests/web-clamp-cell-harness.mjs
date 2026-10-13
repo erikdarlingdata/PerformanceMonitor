@@ -135,4 +135,25 @@ out.shapes = l2rows.map((tr, i) => {
 });
 out.sqlZ = sqlZ;
 
+/* #5644 W20 (H1): get_alert_history's detail_text opts in with localizeAlertDetail: the labelled time lines shift, the sample-age line
+   shifts from the row's newest_sample, and the SQL lines (and a not-opted-in copy of the same text) print as written. */
+const detail = "Incident Since: 2026-10-12 23:13:00Z\nNewest blocked process sample: 23:12:45 UTC, 5m 20s old\nBlocked Query: SELECT * FROM t WHERE d = '2026-01-01 00:00:00Z'";
+const l3 = VIZ.table({ rows: [{ detail_text: detail, newest_sample: { instant_utc: "2026-10-12T23:12:45Z" } }] }, {
+  rowsKey: "rows", title: "Alert detail", tools: false,
+  columns: [
+    { key: "detail_text", label: "Detail", wrap: true },
+    { key: "detail_text", label: "Detail (opted in)", wrap: true, localizeAlertDetail: true },
+  ],
+});
+const l3tr = l3.findAll((n) => n.tag === "tr").filter((n) => n.parent && n.parent.tag === "tbody")[0];
+const l3t = l3tr.children.map((c) => c.textContent);
+out.alertDetail = {
+  notOpted: l3t[0],
+  raw: detail,
+  opted: l3t[1],
+  sinceLocal: "Incident Since: " + new Date("2026-10-12T23:13:00Z").toLocaleString(),
+  sampleLocal: "Newest blocked process sample: " + new Date("2026-10-12T23:12:45Z").toLocaleString() + ", 5m 20s old",
+  sqlLine: "Blocked Query: SELECT * FROM t WHERE d = '2026-01-01 00:00:00Z'",
+};
+
 console.log(JSON.stringify(out));

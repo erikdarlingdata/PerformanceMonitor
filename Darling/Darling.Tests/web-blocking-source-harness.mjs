@@ -28,6 +28,7 @@ class FakeNode {
     return this.children[0] || null;
   }
   appendChild(child) {
+    child.parentNode = this;
     this.children.push(child);
     return child;
   }
@@ -81,7 +82,7 @@ try {
       "export const CATEGORICAL_COLORS = SERIES_COLORS;\n" +
       "export function normalizeColor(color) { return color; }\n" +
       "export function renderLineChart() { return document.createElement('div'); }\n" +
-      "export function zoomableLineChart() { return document.createElement('div'); }\n" +
+      "export function zoomableLineChart(spec) { (globalThis.__charts = globalThis.__charts || []).push({ title: spec.title, labels: (spec.series || []).map((x) => x.label), unit: spec.unit }); return document.createElement('div'); }\n" +
       "export function chartZoomScope() { return ''; }\n"
   );
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
@@ -116,6 +117,21 @@ const BODIES = {
     trend: { status: "empty", message: "No blocking." },
     stats: { status: "empty", message: "No blocking." },
   },
+  /* #5644 W16: every deadlock read answers the {status, message} envelope with ITS OWN wording (the trend's carries the collector-run
+     count, the table's says "specified time range"); the stats read, which draws Deadlock Severity, says a third thing. */
+  /* #5644 W16: the engine has no deadlock data source (not_collected), or it cannot be read right now (unavailable): neither is a quiet window. */
+  deadlockNotCollected: {
+    trend: { source: null, trend: [] },
+    stats: { status: "not_collected", message: "This is a permanent engine capability gap: Azure SQL Database has no system_health session." },
+    deadlockTrend: { status: "not_collected", message: "This is a permanent engine capability gap: Azure SQL Database has no system_health session." },
+    deadlocks: { status: "unavailable", message: "Deadlock data is unavailable right now: the collector has not run." },
+  },
+  deadlockEmpty: {
+    trend: { source: null, trend: [] },
+    stats: { status: "empty", message: "No blocking or deadlock data in the specified time range." },
+    deadlockTrend: { status: "empty", message: "No deadlock was recorded for SRV1 in the last 24 hour(s). 288 collector run(s) DID execute." },
+    deadlocks: { status: "empty", message: "No deadlocks found in the specified time range." },
+  },
 };
 
 const settle = async () => {
@@ -134,10 +150,12 @@ const panelsOf = (root) => {
     if (!hasClass(node, "panel")) return;
     const h3 = node.children.find((c) => c.tag === "h3");
     const strips = [];
+    const empties = [];
     walk(node, (x) => {
       if (hasClass(x, "source")) strips.push(x.textContent);
+      if (hasClass(x, "empty")) empties.push(x.textContent);
     });
-    found.push({ title: h3 && h3.children[0] ? h3.children[0].textContent : "", strips });
+    found.push({ title: h3 && h3.children[0] ? h3.children[0].textContent : "", strips, empties });
   });
   return found;
 };
@@ -146,7 +164,15 @@ const body = BODIES[scenario];
 if (!body) throw new Error("unknown scenario " + scenario);
 globalThis.fetch = async (url) => {
   const u = String(url);
-  const answer = u.includes("/get_blocking_trend") ? body.trend : u.includes("/get_blocking_stats") ? body.stats : {};
+  const answer = u.includes("/get_blocking_trend")
+    ? body.trend
+    : u.includes("/get_blocking_stats")
+      ? body.stats
+      : u.includes("/get_deadlock_trend")
+        ? body.deadlockTrend || {}
+        : u.includes("/get_deadlocks")
+          ? body.deadlocks || {}
+          : {};
   return { status: 200, ok: true, text: async () => JSON.stringify(answer) };
 };
 
@@ -157,4 +183,4 @@ for (const tab of tabs.SERVER_TABS) {
   await settle();
   for (const p of panelsOf(holder)) out.push({ tab: tab.id, ...p });
 }
-console.log(JSON.stringify({ panels: out, rejections }));
+console.log(JSON.stringify({ panels: out, charts: globalThis.__charts || [], rejections }));

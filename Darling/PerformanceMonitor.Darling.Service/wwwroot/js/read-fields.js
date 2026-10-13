@@ -582,7 +582,7 @@ export const READ_FIELDS = {
         { key: "threshold_value", label: "Threshold", format: "num2" },
         { key: "notification_type", label: "Notification" },
         { key: "muted", label: "Muted", format: "bool" },
-        { key: "detail_text", label: "Detail", wrap: true },
+        { key: "detail_text", label: "Detail", wrap: true, localizeAlertDetail: true },
       ],
     },
   },
