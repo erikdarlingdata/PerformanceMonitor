@@ -55,8 +55,13 @@ public enum ExternalAlertOutcome
     Interrupted,
 }
 
-/// <summary>The remembered firing state of one <c>(source, key, server)</c> subject.</summary>
-public sealed record ExternalAlertFiringState(bool Firing, string? FiredSeverity, DateTime? LastFiredAtUtc);
+/// <summary>
+/// The remembered firing state of one <c>(source, key, submitted server name)</c> subject, with the identity its fire was
+/// sent under: the server id (0 for a name that was not registered), the server key and the display name. A clear closes
+/// the incident under these, whatever the server registry says by then.
+/// </summary>
+public sealed record ExternalAlertFiringState(
+    bool Firing, string? FiredSeverity, DateTime? LastFiredAtUtc, int ServerId, string ServerKey, string ServerName);
 
 /// <summary>
 /// The service's side of the external alert queue (#5654): claims what a source submitted through
@@ -210,26 +215,31 @@ WITH reaped AS (
 )
 SELECT status, count(*)::int FROM reaped GROUP BY status";
 
-    /// <summary>Reads one subject's firing state. $1 source_id, $2 alert_key, $3 server_id.</summary>
+    /// <summary>Reads one subject's firing state. $1 source_id, $2 alert_key, $3 server_label (the normalized submitted name).</summary>
     public const string GetStateSql = @"
-SELECT firing, fired_severity, last_fired_at
+SELECT firing, fired_severity, last_fired_at, server_id, server_key, server_name
 FROM config.external_alert_state
-WHERE source_id = $1 AND alert_key = $2 AND server_id = $3";
+WHERE source_id = $1 AND alert_key = $2 AND server_label = $3";
 
     /// <summary>
-    /// Records a fire and returns what the subject was before it. $1 source_id, $2 alert_key, $3 server_id, $4 severity.
-    /// The returned row is the state read before the write, so a repeat fire reports <c>true</c>.
+    /// Records a fire and returns what the subject was before it. $1 source_id, $2 alert_key, $3 server_label,
+    /// $4 server_id, $5 server_key, $6 server_name, $7 severity. The returned row is the state read before the write, so a
+    /// repeat fire reports <c>true</c>. The identity the fire is sent under is kept with the state.
     /// </summary>
     public const string RecordFireSql = @"
 WITH prev AS (
     SELECT firing, fired_severity
     FROM config.external_alert_state
-    WHERE source_id = $1 AND alert_key = $2 AND server_id = $3
+    WHERE source_id = $1 AND alert_key = $2 AND server_label = $3
 ),
 up AS (
-    INSERT INTO config.external_alert_state (source_id, alert_key, server_id, firing, fired_severity, last_fired_at)
-    VALUES ($1, $2, $3, true, $4, now())
-    ON CONFLICT (source_id, alert_key, server_id) DO UPDATE SET
+    INSERT INTO config.external_alert_state
+        (source_id, alert_key, server_label, server_id, server_key, server_name, firing, fired_severity, last_fired_at)
+    VALUES ($1, $2, $3, $4, $5, $6, true, $7, now())
+    ON CONFLICT (source_id, alert_key, server_label) DO UPDATE SET
+        server_id = EXCLUDED.server_id,
+        server_key = EXCLUDED.server_key,
+        server_name = EXCLUDED.server_name,
         firing = true,
         fired_severity = EXCLUDED.fired_severity,
         last_fired_at = EXCLUDED.last_fired_at
@@ -239,13 +249,13 @@ SELECT COALESCE((SELECT firing FROM prev), false), (SELECT fired_severity FROM p
 FROM up";
 
     /// <summary>
-    /// Records a clear. $1 source_id, $2 alert_key, $3 server_id. Returns the severity the subject fired at when it was
+    /// Records a clear. $1 source_id, $2 alert_key, $3 server_label. Returns the severity the subject fired at when it was
     /// firing, and no row when it was not, so a clear for a key that never fired is told apart from a real one.
     /// </summary>
     public const string RecordClearSql = @"
 UPDATE config.external_alert_state
 SET firing = false
-WHERE source_id = $1 AND alert_key = $2 AND server_id = $3
+WHERE source_id = $1 AND alert_key = $2 AND server_label = $3
   AND firing
 RETURNING fired_severity";
 
@@ -410,11 +420,11 @@ RETURNING fired_severity";
 
     /// <summary>Reads one subject's firing state. Null when the subject has never fired.</summary>
     public async Task<ExternalAlertFiringState?> GetStateAsync(
-        int sourceId, string alertKey, int serverId, CancellationToken cancellationToken = default)
+        int sourceId, string alertKey, string serverLabel, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(GetStateSql);
         command.CommandTimeout = _commandTimeoutSeconds;
-        BindSubject(command, sourceId, alertKey, serverId);
+        BindSubject(command, sourceId, alertKey, serverLabel);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -424,20 +434,32 @@ RETURNING fired_severity";
         return new ExternalAlertFiringState(
             reader.GetBoolean(0),
             reader.IsDBNull(1) ? null : reader.GetString(1),
-            reader.IsDBNull(2) ? null : reader.GetFieldValue<DateTime>(2));
+            reader.IsDBNull(2) ? null : reader.GetFieldValue<DateTime>(2),
+            reader.GetInt32(3),
+            reader.GetString(4),
+            reader.GetString(5));
     }
 
     /// <summary>
     /// Records that the subject is firing at <paramref name="severity"/> and returns what it was before: whether it was
-    /// already firing, and at what severity. A subject that never fired reports <c>(false, null)</c>.
+    /// already firing, and at what severity. A subject that never fired reports <c>(false, null)</c>. The subject is the
+    /// normalized submitted name <paramref name="serverLabel"/> (empty when none was given); <paramref name="serverId"/>,
+    /// <paramref name="serverKey"/> and <paramref name="serverName"/> are the identity this fire is sent under, kept so the
+    /// clear closes the same incident.
     /// </summary>
     public async Task<(bool WasFiring, string? PreviousSeverity)> RecordFireAsync(
-        int sourceId, string alertKey, int serverId, string severity, CancellationToken cancellationToken = default)
+        int sourceId, string alertKey, string serverLabel, int serverId, string serverKey, string serverName, string severity,
+        CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(severity);
+        ArgumentNullException.ThrowIfNull(serverKey);
+        ArgumentNullException.ThrowIfNull(serverName);
         await using var command = _dataSource.CreateCommand(RecordFireSql);
         command.CommandTimeout = _commandTimeoutSeconds;
-        BindSubject(command, sourceId, alertKey, serverId);
+        BindSubject(command, sourceId, alertKey, serverLabel);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serverKey });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serverName });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = severity });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         await reader.ReadAsync(cancellationToken);
@@ -449,21 +471,22 @@ RETURNING fired_severity";
     /// no fire to pair with).
     /// </summary>
     public async Task<string?> RecordClearAsync(
-        int sourceId, string alertKey, int serverId, CancellationToken cancellationToken = default)
+        int sourceId, string alertKey, string serverLabel, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(RecordClearSql);
         command.CommandTimeout = _commandTimeoutSeconds;
-        BindSubject(command, sourceId, alertKey, serverId);
+        BindSubject(command, sourceId, alertKey, serverLabel);
         var severity = await command.ExecuteScalarAsync(cancellationToken);
         return severity is string text ? text : null;
     }
 
-    private static void BindSubject(NpgsqlCommand command, int sourceId, string alertKey, int serverId)
+    private static void BindSubject(NpgsqlCommand command, int sourceId, string alertKey, string serverLabel)
     {
         ArgumentException.ThrowIfNullOrEmpty(alertKey);
+        ArgumentNullException.ThrowIfNull(serverLabel);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = sourceId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = alertKey });
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serverLabel });
     }
 
     private static string StatusFor(ExternalAlertOutcome outcome) => outcome switch

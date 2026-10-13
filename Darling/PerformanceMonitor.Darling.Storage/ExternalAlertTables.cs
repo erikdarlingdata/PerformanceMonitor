@@ -17,7 +17,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// caller up by <c>session_user</c>, so no source can claim another's name). <c>config.external_alert_pending</c> is the
 /// queue the function appends to and the service drains on its 15 s pass: one row per fire or clear, with the status the
 /// drain moves it through. <c>config.external_alert_state</c> remembers which keys are firing, so a clear pairs with its
-/// fire (the shape of the custom alert state store). The registry column is <c>external_source</c> on the mute rule,
+/// fire (the shape of the custom alert state store). It is keyed on the submitted server name (<c>server_label</c>: trimmed
+/// and lower-cased), and it keeps the server id, key and display name the fire was sent under (<c>server_id</c>,
+/// <c>server_key</c>, <c>server_name</c>), so the clear closes that incident even when the server was registered, renamed or
+/// removed in between. The registry column is <c>external_source</c> on the mute rule,
 /// not <c>source</c>: Lite's alert history view already has a <c>source</c> column that means live or archive.</para>
 ///
 /// <para><b>Privileges are not here.</b> The <c>config</c> schema's blanket SELECT and default privileges cover these
@@ -91,11 +94,14 @@ CREATE TABLE IF NOT EXISTS config.external_alert_state
 (
     source_id integer NOT NULL,
     alert_key text NOT NULL,
+    server_label text NOT NULL DEFAULT '',
     server_id integer NOT NULL DEFAULT 0,
+    server_key text NOT NULL DEFAULT '',
+    server_name text NOT NULL DEFAULT '',
     firing boolean NOT NULL DEFAULT false,
     fired_severity text,
     last_fired_at timestamptz,
-    CONSTRAINT pk_external_alert_state PRIMARY KEY (source_id, alert_key, server_id),
+    CONSTRAINT pk_external_alert_state PRIMARY KEY (source_id, alert_key, server_label),
     CONSTRAINT fk_external_alert_state_source FOREIGN KEY (source_id)
         REFERENCES config.external_alert_source (source_id) ON DELETE CASCADE
 );

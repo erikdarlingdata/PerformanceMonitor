@@ -198,7 +198,7 @@ public sealed class ExternalAlertDrain
         /* The firing state is written before the send, so a clear that follows pairs with this fire even when the send
            has to be retried or a stopped run never marked it. A repeat fire only refreshes it. */
         var (wasFiring, previousSeverity) = await _store.RecordFireAsync(
-            row.SourceId, row.AlertKey, server.BucketId, row.Severity, cancellationToken);
+            row.SourceId, row.AlertKey, server.StateLabel, server.BucketId, server.Key, server.Label, row.Severity, cancellationToken);
 
         var context = new AlertContext { External = new AlertExternalOrigin(row.SourceName, row.AlertKey, row.PendingId) };
         var currentText = row.Value is { } value
@@ -258,7 +258,7 @@ public sealed class ExternalAlertDrain
     private async Task<ExternalAlertOutcome?> HandleClearAsync(ExternalAlertPendingRow row, CancellationToken cancellationToken)
     {
         var server = Identify(row);
-        var state = await _store.GetStateAsync(row.SourceId, row.AlertKey, server.BucketId, cancellationToken);
+        var state = await _store.GetStateAsync(row.SourceId, row.AlertKey, server.StateLabel, cancellationToken);
         if (state is not { Firing: true })
         {
             await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Ignored, "a clear for a key that was not firing");
@@ -268,17 +268,22 @@ public sealed class ExternalAlertDrain
         var firingMetric = MetricNameFor(row.SourceName, row.AlertKey);
         var title = Clean(row.Title, MaxTitleLength);
         var detail = Clean(row.Detail, MaxDetailLength);
-        var message = $"{server.Label}: {(title.Length == 0 ? row.AlertKey : title)}{(detail.Length == 0 ? "" : " - " + detail)}";
+
+        /* The server the fire was sent under is the one the state stored: a server registered, renamed or removed since the
+           fire must not move the incident this clear closes. */
+        var firedKey = state.ServerKey;
+        var firedLabel = state.ServerName;
+        var message = $"{firedLabel}: {(title.Length == 0 ? row.AlertKey : title)}{(detail.Length == 0 ? "" : " - " + detail)}";
 
         /* The PagerDuty resolve goes first: it posts only with auto-resolve on and a PagerDuty destination for this alert, and
            if it fails the firing state is left alone so the retry still finds a fire to close. */
-        var pagerDuty = await _resolvePagerDuty(firingMetric, server.Label, server.Key, message, cancellationToken);
+        var pagerDuty = await _resolvePagerDuty(firingMetric, firedLabel, firedKey, message, cancellationToken);
         if (pagerDuty == AlertChannelOutcome.Failed)
         {
             return await RetryOrFailAsync(row, "the PagerDuty resolve failed", cancellationToken);
         }
 
-        var firedSeverity = await _store.RecordClearAsync(row.SourceId, row.AlertKey, server.BucketId, cancellationToken);
+        var firedSeverity = await _store.RecordClearAsync(row.SourceId, row.AlertKey, server.StateLabel, cancellationToken);
         if (firedSeverity is null)
         {
             await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Ignored, "the key was cleared by another run");
@@ -292,7 +297,7 @@ public sealed class ExternalAlertDrain
             External = new AlertExternalOrigin(row.SourceName, row.AlertKey, row.PendingId),
         });
         await _history.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(new AlertResolution(
-            server.Key, server.Label, firingMetric, ResolvedMetricNameFor(row.SourceName, row.AlertKey), message))
+            firedKey, firedLabel, firingMetric, ResolvedMetricNameFor(row.SourceName, row.AlertKey), message))
             with { ContextJson = resolvedContext });
 
         await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Delivered,
@@ -335,23 +340,55 @@ public sealed class ExternalAlertDrain
         }
     }
 
-    private readonly record struct Identity(string Key, string Label, int? MuteId, int BucketId);
+    /// <summary><c>StateLabel</c> is what the firing state is keyed on: the submitted name, cleaned and lower-cased (empty when
+    /// none was given), so a fire and its clear meet whatever the server registry says in between.</summary>
+    private readonly record struct Identity(string Key, string Label, int? MuteId, int BucketId, string StateLabel);
 
     /// <summary>A registered server is its id and display name. An unregistered name is a label only, in the server_id 0
     /// bucket: its key is not a number (and carries a prefix, so a server named "5" can never collide with server 5).</summary>
     private Identity Identify(ExternalAlertPendingRow row)
     {
         var name = Clean(row.ServerName, MaxServerLength);
+        var stateLabel = name.ToLowerInvariant();
         if (name.Length > 0 && _resolveServer(name) is { } server)
         {
-            return new Identity(server.ServerId.ToString(CultureInfo.InvariantCulture), server.DisplayName, server.ServerId, server.ServerId);
+            return new Identity(server.ServerId.ToString(CultureInfo.InvariantCulture), server.DisplayName, server.ServerId, server.ServerId, stateLabel);
         }
 
         var label = name.Length > 0 ? name : "External (" + row.SourceName + ")";
-        return new Identity("external:" + label, label, null, 0);
+        return new Identity("external:" + label, label, null, 0, stateLabel);
     }
 
-    private static string Clean(string? value, int maxLength) => CustomAlertEvaluator.SanitizeDisplayText(value, maxLength);
+    private static string Clean(string? value, int maxLength) => CleanText(value, maxLength);
+
+    /// <summary>
+    /// Sanitizes <paramref name="value"/> and caps it at <paramref name="maxLength"/> code points, the unit the submit
+    /// function counts in (<c>char_length</c>). The sanitizer's own cap counts UTF-16 units, so it only ever sees a length that
+    /// cannot bite; the cap that does is cut on a code point boundary, and a surrogate pair is never split.
+    /// </summary>
+    internal static string CleanText(string? value, int maxLength)
+    {
+        var cleaned = CustomAlertEvaluator.SanitizeDisplayText(value, value?.Length ?? 0);
+        if (maxLength <= 0)
+        {
+            return string.Empty;
+        }
+
+        var codePoints = 0;
+        var index = 0;
+        foreach (var rune in cleaned.EnumerateRunes())
+        {
+            if (codePoints == maxLength)
+            {
+                return cleaned[..index].TrimEnd();
+            }
+
+            codePoints++;
+            index += rune.Utf16SequenceLength;
+        }
+
+        return cleaned;
+    }
 
     private static string Trim(string value) => value.Length <= 500 ? value : value[..500];
 }

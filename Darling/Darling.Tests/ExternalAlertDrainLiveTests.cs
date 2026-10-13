@@ -87,6 +87,87 @@ public sealed class ExternalAlertDrainLiveTests
     }
 
     [Fact]
+    public async Task OneKeyFiredForTwoUnregisteredNames_IsTwoIncidents_AndEachClearResolvesItsOwn()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            var fireA = await rig.SubmitAsync("fire", "disk", server: "BOX-A");
+            var fireB = await rig.SubmitAsync("fire", "disk", server: "BOX-B");
+            var clearA = await rig.SubmitAsync("clear", "disk", server: "BOX-A");
+            var clearB = await rig.SubmitAsync("clear", "disk", server: "BOX-B");
+
+            for (var pass = 0; pass < 4; pass++)
+            {
+                await rig.Drain.RunPassAsync(false, rig.Ct);
+            }
+
+            Assert.Equal("delivered", await rig.StatusAsync(fireA));
+            Assert.Equal("delivered", await rig.StatusAsync(fireB));
+            Assert.Equal("delivered", await rig.StatusAsync(clearA));
+            Assert.Equal("delivered", await rig.StatusAsync(clearB));
+            Assert.Equal(new[] { "BOX-A|external:BOX-A", "BOX-B|external:BOX-B" }, rig.PagerDutyIdentities.OrderBy(i => i, StringComparer.Ordinal).ToArray());
+            Assert.Equal("2", await rig.ScalarAsync("SELECT count(*) FROM config.config_alert_log WHERE metric_name LIKE '% Resolved'"));
+            Assert.Equal("BOX-A,BOX-B", await rig.ScalarAsync("SELECT string_agg(server_name, ',' ORDER BY server_name) FROM config.config_alert_log WHERE metric_name LIKE '% Resolved'"));
+            Assert.Equal("0", await rig.ScalarAsync("SELECT count(*) FROM config.external_alert_state WHERE firing"));
+        });
+    }
+
+    [Fact]
+    public async Task AClearForOneNameWhenOnlyAnotherFired_IsIgnored_AndLeavesTheOtherFiring()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            await rig.SubmitAsync("fire", "disk", server: "BOX-B");
+            await rig.Drain.RunPassAsync(false, rig.Ct);
+            var clearA = await rig.SubmitAsync("clear", "disk", server: "BOX-A");
+            await rig.Drain.RunPassAsync(false, rig.Ct);
+
+            Assert.Equal("ignored", await rig.StatusAsync(clearA));
+            Assert.Empty(rig.PagerDutyResolves);
+            Assert.Equal("1", await rig.ScalarAsync("SELECT count(*) FROM config.external_alert_state WHERE firing"));
+        });
+    }
+
+    [Fact]
+    public async Task AServerRegisteredBetweenAFireAndItsClear_StillResolvesTheIncidentTheFireOpened()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            var fire = await rig.SubmitAsync("fire", "cpu", server: "NEWBOX");
+            await rig.Drain.RunPassAsync(false, rig.Ct);
+            Assert.Equal("NEWBOX|external:NEWBOX", rig.Sent.Select(o => o.ServerName + "|" + o.ServerKey).Single());
+
+            rig.Registry["NEWBOX"] = new ExternalAlertServer(9, "NEWBOX");
+            var clear = await rig.SubmitAsync("clear", "cpu", server: "NEWBOX");
+            await rig.Drain.RunPassAsync(false, rig.Ct);
+
+            Assert.Equal("delivered", await rig.StatusAsync(fire));
+            Assert.Equal("delivered", await rig.StatusAsync(clear));
+            Assert.Equal(new[] { "NEWBOX|external:NEWBOX" }, rig.PagerDutyIdentities.ToArray());
+            Assert.Equal("0", await rig.ScalarAsync("SELECT server_id::text FROM config.config_alert_log WHERE metric_name LIKE '% Resolved'"));
+        });
+    }
+
+    [Fact]
+    public async Task AServerRenamedOrRemovedBetweenAFireAndItsClear_StillResolvesTheIncidentTheFireOpened()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            await rig.SubmitAsync("fire", "cpu", server: "sql01");
+            await rig.Drain.RunPassAsync(false, rig.Ct);
+
+            rig.Registry.Clear();
+            var clear = await rig.SubmitAsync("clear", "cpu", server: "SQL01");
+            await rig.Drain.RunPassAsync(false, rig.Ct);
+
+            /* The clear differs from the fire in case and in what the registry says; it resolves under the fire's key and name. */
+            Assert.Equal("delivered", await rig.StatusAsync(clear));
+            Assert.Equal(new[] { "SQL01|7" }, rig.PagerDutyIdentities.ToArray());
+            Assert.Equal("7", await rig.ScalarAsync("SELECT server_id::text FROM config.config_alert_log WHERE metric_name LIKE '% Resolved'"));
+        });
+    }
+
+    [Fact]
     public async Task AClearWithNoFire_IsIgnored_AndAsksForNoResolve()
     {
         await WithDrainAsync(async rig =>
@@ -250,14 +331,15 @@ public sealed class ExternalAlertDrainLiveTests
                         AlertContextSerializer.Serialize(outcome.Context!)));
                     return delivery;
                 },
-                (metric, _, _, _, _) =>
+                (metric, serverName, serverKey, _, _) =>
                 {
                     PagerDutyResolves.Add(metric.Split(':')[2]);
+                    PagerDutyIdentities.Add(serverName + "|" + serverKey);
                     return Task.FromResult(AlertChannelOutcome.Delivered);
                 },
                 History,
                 _ => Muted,
-                name => string.Equals(name, "SQL01", StringComparison.OrdinalIgnoreCase) ? new ExternalAlertServer(7, "SQL01") : null,
+                name => Registry.TryGetValue(name, out var server) ? server : null,
                 "test:1",
                 NullLogger.Instance);
         }
@@ -267,6 +349,13 @@ public sealed class ExternalAlertDrainLiveTests
         public ExternalAlertDrain Drain { get; }
         public List<AlertOutcome> Sent { get; } = new();
         public List<string> PagerDutyResolves { get; } = new();
+
+        /// <summary>The server name and server key each PagerDuty resolve was asked to close, as <c>name|key</c>.</summary>
+        public List<string> PagerDutyIdentities { get; } = new();
+
+        /// <summary>The registered servers, by the name the drain looks up (case-insensitive); a test edits it between a fire and its clear.</summary>
+        public Dictionary<string, ExternalAlertServer> Registry { get; } =
+            new(StringComparer.OrdinalIgnoreCase) { ["SQL01"] = new ExternalAlertServer(7, "SQL01") };
         public bool Muted { get; set; }
         public bool Enabled { get; set; } = true;
         public AlertDelivery Answer { get; set; } = AlertDelivery.FromLegacyStoredColumns(true, "webhook", null);

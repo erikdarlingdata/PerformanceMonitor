@@ -247,30 +247,62 @@ public sealed class ExternalAlertStoreLiveTests
             Assert.Equal("state_svc", first[0].SourceName);
             Assert.Empty(await store.ClaimAsync("host:1", 50, ct));
 
-            Assert.Null(await store.GetStateAsync(sourceId, "disk:c", 0, ct));
-            Assert.Null(await store.RecordClearAsync(sourceId, "disk:c", 0, ct));
+            Assert.Null(await store.GetStateAsync(sourceId, "disk:c", "", ct));
+            Assert.Null(await store.RecordClearAsync(sourceId, "disk:c", "", ct));
 
-            Assert.Equal((false, (string?)null), await store.RecordFireAsync(sourceId, "disk:c", 0, "critical", ct));
-            var firing = await store.GetStateAsync(sourceId, "disk:c", 0, ct);
+            Assert.Equal((false, (string?)null), await store.RecordFireAsync(sourceId, "disk:c", "", 0, "external:External (state_svc)", "External (state_svc)", "critical", ct));
+            var firing = await store.GetStateAsync(sourceId, "disk:c", "", ct);
             Assert.NotNull(firing);
             Assert.True(firing!.Firing);
             Assert.Equal("critical", firing.FiredSeverity);
             Assert.NotNull(firing.LastFiredAtUtc);
-            Assert.Equal((true, "critical"), await store.RecordFireAsync(sourceId, "disk:c", 0, "warning", ct));
-            Assert.Equal("warning", (await store.GetStateAsync(sourceId, "disk:c", 0, ct))!.FiredSeverity);
+            Assert.Equal((0, "external:External (state_svc)", "External (state_svc)"), (firing.ServerId, firing.ServerKey, firing.ServerName));
+            Assert.Equal((true, "critical"), await store.RecordFireAsync(sourceId, "disk:c", "", 0, "external:External (state_svc)", "External (state_svc)", "warning", ct));
+            Assert.Equal("warning", (await store.GetStateAsync(sourceId, "disk:c", "", ct))!.FiredSeverity);
 
-            /* The same key on another server is its own subject. */
-            Assert.Null(await store.GetStateAsync(sourceId, "disk:c", 7, ct));
+            /* The same key on another server name is its own subject. */
+            Assert.Null(await store.GetStateAsync(sourceId, "disk:c", "sql07", ct));
 
             Assert.True(await store.MarkDeliveredAsync(fire, ct));
             var second = Assert.Single(await store.ClaimAsync("host:1", 50, ct));
             Assert.Equal(clear, second.PendingId);
             Assert.Equal("clear", second.Kind);
 
-            Assert.Equal("warning", await store.RecordClearAsync(sourceId, "disk:c", 0, ct));
-            var cleared = await store.GetStateAsync(sourceId, "disk:c", 0, ct);
+            Assert.Equal("warning", await store.RecordClearAsync(sourceId, "disk:c", "", ct));
+            var cleared = await store.GetStateAsync(sourceId, "disk:c", "", ct);
             Assert.False(cleared!.Firing);
-            Assert.Null(await store.RecordClearAsync(sourceId, "disk:c", 0, ct));
+            Assert.Null(await store.RecordClearAsync(sourceId, "disk:c", "", ct));
+        });
+    }
+
+    [Fact]
+    public async Task OneKeyFiredForTwoServerNames_HoldsTwoStates_AndEachClearClosesOnlyItsOwn()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the external alert store's live facts (each mints its own scratch database).");
+
+        await WithStoreAsync(async (seed, connectionString, ct) =>
+        {
+            var sourceId = await AddSourceAsync(seed, "twin_svc", ct);
+            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            var store = new ExternalAlertStore(dataSource, Deadline);
+
+            await store.RecordFireAsync(sourceId, "k", "a", 0, "external:A", "A", "critical", ct);
+            await store.RecordFireAsync(sourceId, "k", "b", 0, "external:B", "B", "warning", ct);
+            Assert.Equal("2", await ScalarAsync(seed, "SELECT count(*) FROM config.external_alert_state WHERE alert_key = 'k'", ct));
+
+            /* A's clear finds A's identity and closes only A. */
+            var stateA = await store.GetStateAsync(sourceId, "k", "a", ct);
+            Assert.Equal(("external:A", "A", true), (stateA!.ServerKey, stateA.ServerName, stateA.Firing));
+            Assert.Equal("critical", await store.RecordClearAsync(sourceId, "k", "a", ct));
+            Assert.True((await store.GetStateAsync(sourceId, "k", "b", ct))!.Firing);
+
+            /* B was left firing, so B's clear still finds its fire. */
+            var stateB = await store.GetStateAsync(sourceId, "k", "b", ct);
+            Assert.Equal(("external:B", "B", true), (stateB!.ServerKey, stateB.ServerName, stateB.Firing));
+            Assert.Equal("warning", await store.RecordClearAsync(sourceId, "k", "b", ct));
+
+            /* A clear for a name that never fired closes nothing. */
+            Assert.Null(await store.RecordClearAsync(sourceId, "k", "c", ct));
         });
     }
 
