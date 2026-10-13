@@ -125,7 +125,7 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
             + "is_unique = false, is_primary_key = false, is_disabled = false, user_seeks = 0, user_scans = 0, user_lookups = 0, user_updates = 5", ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        var read = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(ds, ServerA, 30, ct);
+        var read = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(ds, ServerA, 30, cancellationToken: ct);
         Assert.Equal(new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Utc), read.SnapshotTimes[DbX]);
         Assert.Equal(new DateTime(2026, 1, 12, 12, 0, 0, DateTimeKind.Utc), read.SnapshotTimes[DbY]);
 
@@ -178,7 +178,7 @@ public sealed class FinOpsIndexAnalysisLatestSnapshotLiveTests
         var at7 = new DateTime(2026, 1, 11, 12, 0, 0, DateTimeKind.Utc);
         var at8 = new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Utc);
         var at9 = new DateTime(2026, 1, 14, 12, 0, 0, DateTimeKind.Utc);
-        var read = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(ds, ServerA, 30, ct);
+        var read = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(ds, ServerA, 30, cancellationToken: ct);
         Assert.Equal(at7, read.SnapshotTimes[7]);
         Assert.Equal(at8, read.SnapshotTimes[8]);
         Assert.Equal(at9, read.SnapshotTimes[9]);

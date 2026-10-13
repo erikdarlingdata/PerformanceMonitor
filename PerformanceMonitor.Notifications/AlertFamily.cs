@@ -63,6 +63,13 @@ public static class AlertFamily
     /// rules and analysis findings. The fall-through family for any name the census does not know.</summary>
     public const string Performance = "performance";
 
+    /// <summary>Alerts another service raised through <c>config.submit_external_alert</c> (#5654), named
+    /// <c>External:&lt;source&gt;:&lt;key&gt;</c>. Its own family so a route can send everything an outside system
+    /// raises to its own channel; with no route it goes where every other alert goes, to the parent channels.</summary>
+    public const string External = "external";
+
+    /// <summary>The metric-name prefix of an external alert (#5654): <c>External:&lt;source&gt;:&lt;key&gt;</c>.</summary>
+    public const string ExternalMetricPrefix = "External:";
     /// <summary>
     /// The Client Timeouts alert's metric name (#5640): the ONE declaration. The engine's evaluator
     /// (<c>AttentionEvaluator.MetricName</c>) takes it from here, because this assembly sits below the engine, and the
@@ -72,7 +79,7 @@ public static class AlertFamily
     public const string ClientTimeoutsMetric = "Client Timeouts";
 
     /// <summary>Every family, in the order the settings surfaces list them.</summary>
-    public static readonly IReadOnlyList<string> All = new[] { SelfMonitor, Reports, AgentJobs, Performance };
+    public static readonly IReadOnlyList<string> All = new[] { SelfMonitor, Reports, AgentJobs, Performance, External };
 
     /// <summary>
     /// The exact metric NAME → family census. Every entry is a string the engines deliver verbatim — the
@@ -133,6 +140,9 @@ public static class AlertFamily
         ["Store Job Over Cadence"] = SelfMonitor,
         ["Retention Held"] = SelfMonitor,
         ["Custom Alert Rules Unhealthy"] = SelfMonitor,
+        /* #5654: external alerts the drain could not deliver (expired, interrupted or failed rows). Its
+           "External Alerts Delivered Again" recovery is a resolution row, like "Custom Alert Rules Recovered". */
+        ["External Alerts Undelivered"] = SelfMonitor,
         ["Stale Mute Rules"] = SelfMonitor,
         ["Web TLS Certificate Expiring"] = SelfMonitor,
         /* #5288: the MCP endpoint's twin of the web certificate alert, its own metric so a mute or route for
@@ -225,11 +235,13 @@ public static class AlertFamily
         RecoveryPairs.ContainsKey(metricName)
         || RecoveryPairs.Values.Any(value => string.Equals(value, metricName, StringComparison.Ordinal));
 
-    /// <summary>The metric-name prefixes of the two dynamic alert shapes, each with its family.</summary>
+    /// <summary>The metric-name prefixes of the dynamic alert shapes, each with its family.</summary>
     public static readonly IReadOnlyList<(string Prefix, string Family)> PrefixFamilies = new[]
     {
         /* CustomAlertEvaluator.MetricNameFor: "Custom:" + rule id. */
         ("Custom:", Performance),
+        /* ExternalAlertDrain.MetricNameFor (#5654): "External:" + source + ":" + key. */
+        (ExternalMetricPrefix, External),
         /* FindingMessageFormatter.MetricName: "Analysis: {category} [{hash}]". */
         ("Analysis: ", Performance),
     };

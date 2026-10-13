@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 
@@ -99,6 +100,7 @@ public sealed partial class DarlingMcpFinOpsTools
         [Description("Database to limit the view to (index_analysis, storage_growth).")] string? database_name = null,
         [Description("Return full script and definition text (index_analysis only; default false).")] bool full_text = false,
         [Description("schema.table of one object (storage_growth only, with database_name).")] string? object_name = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -130,7 +132,7 @@ public sealed partial class DarlingMcpFinOpsTools
                 case UtilizationView:
                     return await ReadUtilizationAsync(postgres, resolved, hours_back, limit, cancellationToken);
                 case IndexAnalysisView:
-                    return await ReadIndexAnalysisAsync(postgres, resolved, hours_back, limit, database_name, full_text, cancellationToken);
+                    return await ReadIndexAnalysisAsync(postgres, resolved, hours_back, limit, database_name, full_text, cancellationToken, logger);
                 // FinOps web parity (#4843), set A ends.
                 // Each set belongs to one series of changes. Append to your own set only,
                 // so the two series never edit the same lines of this switch.

@@ -100,6 +100,9 @@ public sealed class McpAlertTools
                     server_id = r.ServerId,
                     server_name = r.ServerName,
                     metric_name = r.MetricName,
+                    /* #5654: Darling's external-alert source for the row. Lite has no external alert intake, so the key is
+                       always null; it is here so both products return one row shape. */
+                    external_source = (string?)null,
                     current_value = r.CurrentValue,
                     threshold_value = r.ThresholdValue,
                     alert_sent = r.AlertSent,
@@ -488,6 +491,8 @@ public sealed class McpAlertTools
                     reason = r.Reason,
                     server_name = r.ServerName,
                     metric_name = r.MetricName,
+                    /* #5654: always null in Lite (no external alert intake); the key keeps one rule shape across products. */
+                    external_source = (string?)null,
                     database_pattern = r.DatabasePattern,
                     query_text_pattern = r.QueryTextPattern,
                     wait_type_pattern = r.WaitTypePattern,

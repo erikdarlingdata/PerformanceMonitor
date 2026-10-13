@@ -103,7 +103,10 @@ public sealed class AzureSiblingSizePayloadTests
     {
         var sql = DarlingObjectStatsReader.DatabaseSizeLatestSql;
 
-        Assert.Matches(new Regex(@"volume_free_mb,\s*file_id\s*FROM v_database_size_stats"), sql);
+        /* #5633 item 6 appended the percent-growth pair AFTER file_id, so file_id is no longer the last column. The
+           reader maps by ordinal (file_id at 11, then is_percent_growth 12, growth_pct 13); this pins that exact
+           order, so a column slipped in before file_id would shift the mapping and fail here. */
+        Assert.Matches(new Regex(@"volume_free_mb,\s*file_id,\s*is_percent_growth,\s*CAST\(growth_pct AS double precision\) AS growth_pct\s*FROM v_database_size_stats"), sql);
     }
 
     [Fact]

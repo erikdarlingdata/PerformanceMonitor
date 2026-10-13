@@ -135,6 +135,8 @@ try {
       rules = [
         own,
         { ...own, id: "narrow", metric_name: "Blocking" },
+        /* #5654: limited to one external source, so it mutes only that source's alerts: not a whole-server silence. */
+        { ...own, id: "from-source", external_source: "nagios" },
         { ...own, id: "other-server", server_id: 11 },
         { ...own, id: "hand-built", reason: "my own words" },
         { ...own, id: "other-name", server_id: null, server_name: "elsewhere" },

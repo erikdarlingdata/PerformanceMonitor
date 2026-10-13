@@ -85,27 +85,34 @@ public sealed class RunnableQueueSettingsRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        /* V178's (#5684) and V179's (#5640) sentinels are appended after this one, so this rung is no longer the top. */
+        /* V178's (#5684), V179's (#5640) and V180's (#5654) sentinels are appended after this one, so this rung is no longer the top. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         Assert.Equal("hasQueryStoreWatermarks", parameters[ProbeOrdinal + 1].Name);
-        Assert.Equal("hasClientTimeoutSettings", parameters[^1].Name);
+        Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal + 2].Name);
+        Assert.Equal("hasExternalAlerts", parameters[^1].Name);
         Assert.Equal("hasRunnableQueueSettings", parameters[ProbeOrdinal].Name);
-        Assert.Equal(ProbeOrdinal + 2, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 3, parameters.Length - 1);
         Assert.Equal("hasProcedureStatsTotals", parameters[ProbeOrdinal - 1].Name);
 
-        /* Every sentinel present answers this build's version (V179's). With the later sentinels absent this rung is the answer, 177; with
+        /* Every sentinel present answers this build's version (V180's). With the later sentinels absent this rung is the answer, 177; with
            this sentinel absent too, only the one below it (V176's procedure totals table) is left and the answer is 176. The
            newest-first order means V178's sentinel alone still answers 178. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        /* With V179's sentinel (the top) absent the answer is V178's, 178; with V178's absent too, this rung is the answer. */
-        var withoutV179 = (object[])all.Clone();
+        /* With V180's sentinel (the top) absent the answer is V179's, 179; with V179's absent too, V178's, 178; with V178's absent
+           too, this rung is the answer. */
+        var withoutV180 = (object[])all.Clone();
+        withoutV180[ProbeOrdinal + 3] = false;
+        Assert.Equal(179, (int)method.Invoke(null, withoutV180)!);
+
+        var withoutV179 = (object[])withoutV180.Clone();
         withoutV179[ProbeOrdinal + 2] = false;
         Assert.Equal(178, (int)method.Invoke(null, withoutV179)!);
 

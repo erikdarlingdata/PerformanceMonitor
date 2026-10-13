@@ -298,6 +298,24 @@ public sealed class AlertNotebookTableCatalogTests
         return source;
     }
 
+    /// <summary>The ways a payload's source spells a key it builds: an anonymous-object member (<c>key = ...</c>), a SQL alias, an
+    /// indexer write (<c>row["key"] = ...</c>), a JsonPropertyName, and (#5748) the omit-the-default helper
+    /// <c>AddUnlessDefault(row, "key", ...)</c> a dictionary-built row uses.</summary>
+    private static Regex BuiltKeyPattern(string key) =>
+        new("\\b" + Regex.Escape(key) + "\\s*=(?!=)|\\bAS\\s+" + Regex.Escape(key) + "\\b|\\[\"" + Regex.Escape(key) + "\"\\]|\\bAddUnlessDefault\\(\\s*\\w+\\s*,\\s*\"" + Regex.Escape(key) + "\"|JsonPropertyName\\(\"" + Regex.Escape(key) + "\"\\)");
+
+    [Fact]
+    public void TheBuiltKeyScan_CountsTheDictionaryRowForms_AndStillFlagsAKeyNeverBuilt()
+    {
+        var source = "AddUnlessDefault(row, \"recovered_note\", r.RecoveredNote); row[\"output_finding_truncated\"] = true; plain = 1;";
+        Assert.Matches(BuiltKeyPattern("recovered_note"), source);
+        Assert.Matches(BuiltKeyPattern("output_finding_truncated"), source);
+        Assert.Matches(BuiltKeyPattern("plain"), source);
+        Assert.DoesNotMatch(BuiltKeyPattern("never_built_key"), source);
+        /* A key that is only a prefix of a built one is not built. */
+        Assert.DoesNotMatch(BuiltKeyPattern("recovered"), source);
+    }
+
     [Fact]
     public void EveryFieldKeyInTheCatalog_IsAFieldTheReadsOwnPayloadBuilds()
     {
@@ -331,7 +349,7 @@ public sealed class AlertNotebookTableCatalogTests
             var source = PayloadSourceFor(read, toolFiles);
             foreach (var key in keys.Distinct())
             {
-                var assignment = new Regex("\\b" + Regex.Escape(key) + "\\s*=(?!=)|\\bAS\\s+" + Regex.Escape(key) + "\\b|\\[\"" + Regex.Escape(key) + "\"\\]|JsonPropertyName\\(\"" + Regex.Escape(key) + "\"\\)");
+                var assignment = BuiltKeyPattern(key);
                 var viaConstant = s_keyConstants.TryGetValue(read + "." + key, out var constant) && source.Contains(constant, StringComparison.Ordinal);
                 if (!assignment.IsMatch(source) && !viaConstant) bad.Add(read + "." + key);
             }

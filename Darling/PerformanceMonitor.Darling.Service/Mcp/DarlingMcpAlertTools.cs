@@ -76,7 +76,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpAlertTools
 {
-    [McpServerTool(Name = "get_alert_history"), Description("Gets alert history, NEWEST FIRST: each row FIRED; notification_type says whether it was DELIVERED, a separate question from DISMISSED (UI-acknowledged), excluded by default. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated says the window held more, and oldest/newest_returned_alert_time bound how far the page reached. An EMPTY page can mean no alerts fired, or that every alert here was dismissed: dismissed_excluded_count says which; include_dismissed = true returns them, labelled dismissed = true. A null send_error proves nothing about delivery.<<GUIDE>> Gets recent alert history from the alert log, NEWEST FIRST: what alerts fired, when, for which server, the current vs threshold value, whether email/webhook delivery succeeded, and whether the alert was muted. hours_back reaches 2160 (90 days, the alert table's retention). Omit server_name to see the whole fleet (each row names its server); pass one to scope to a single server. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, so on a noisy fleet a 24-hour request at the default limit may cover minutes. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Viewer's Alert History grid. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'throttled' means the delivery cooldown was still inside this alert's window so nothing was attempted (the throttle working, not a fault); 'folded' means a repeat was rolled onto another server's post for the same metric and is named there under 'Other Servers Affected', so it WAS reported; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'unconfigured' means no email or webhook channel is set up; 'muted' means a mute rule suppressed it; 'digest' means the analysis finding was UNCORROBORATED (one fact in its chain, no matched co-fire check) and the corroboration gate routed it to the daily Analysis Singles Digest and the web/MCP surfaces instead of a paging channel — nothing was attempted, nothing was suppressed, and routing_reason on the row says which components decided; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null on 'throttled', 'folded' and 'digest' rows and on every row written before those values existed, so a null error is not evidence of a working cooldown. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which — count those rows separately rather than attributing them. severity is the row's tier — 'critical', 'warning', 'info' or 'resolution' — and severity_source says where it came from: 'fired' when the row persisted the tier the alert actually fired at (graded alerts such as Poison Wait, Volume Free Space and Database State fire Warning OR Critical by measurement), 'metric_name' when the row carries no tier and the metric's name is the only evidence (rows written before the tier was persisted, alerts whose severity is fixed per metric, and every resolution row). Do not infer a graded alert's tier from its name: a 'Poison Wait' row with severity 'warning' fired as a warning. route says WHERE the posts went: the alert's family (self-monitor / reports / agent-jobs / performance), the notification route that matched it (route_id null = the parent channels in Settings > Notifications answered everything) and each delivered channel with the route that supplied its destination — see get_notification_routes for the taxonomy and the routes. route is null on rows written before routing existed and on rows that never reached a delivery decision (throttled, folded, muted, unconfigured, digest, resolutions), so a null route is not evidence of a routing fault. routing is a DIFFERENT question from route: for an 'Analysis: …' finding it is the corroboration gate's decision one step UPSTREAM of the fan-out — 'page' when the finding earned a channel (two or more facts in its chain, or a matched co-fire check, or one of the two by-construction stories) and 'digest' when it was a lone uncorroborated fact — with routing_reason naming the components the gate read, so 'why didn't this page' is answered by the row. Both are null on every engine alert and on analysis rows written before the gate existed. To see what the digest carried, read the rows with notification_type 'digest' in the window: each is a persisted finding with its full detail_text and context, findable in get_analysis_findings by the story hash in its metric_name. Dismissal is an acknowledgement, not a verdict — a dismissed critical still fired — so set this when reconstructing an incident rather than triaging what is still open. Each row then carries dismissed so the two populations stay distinguishable.")]
+    [McpServerTool(Name = "get_alert_history"), Description("Gets alert history, NEWEST FIRST: each row FIRED; notification_type says whether it was DELIVERED, a separate question from DISMISSED (UI-acknowledged), excluded by default. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated says the window held more, and oldest/newest_returned_alert_time bound how far the page reached. An EMPTY page can mean no alerts fired, or that every alert here was dismissed: dismissed_excluded_count says which; include_dismissed = true returns them, labelled dismissed = true. A null send_error proves nothing about delivery.<<GUIDE>> Gets recent alert history from the alert log, NEWEST FIRST: what alerts fired, when, for which server, the current vs threshold value, whether email/webhook delivery succeeded, and whether the alert was muted. external_source names the external alert source an alert came from (null on every built-in and custom alert): it is the value a mute rule's external_source matches. hours_back reaches 2160 (90 days, the alert table's retention). Omit server_name to see the whole fleet (each row names its server); pass one to scope to a single server. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, so on a noisy fleet a 24-hour request at the default limit may cover minutes. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Viewer's Alert History grid. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'throttled' means the delivery cooldown was still inside this alert's window so nothing was attempted (the throttle working, not a fault); 'folded' means a repeat was rolled onto another server's post for the same metric and is named there under 'Other Servers Affected', so it WAS reported; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'unconfigured' means no email or webhook channel is set up; 'muted' means a mute rule suppressed it; 'digest' means the analysis finding was UNCORROBORATED (one fact in its chain, no matched co-fire check) and the corroboration gate routed it to the daily Analysis Singles Digest and the web/MCP surfaces instead of a paging channel — nothing was attempted, nothing was suppressed, and routing_reason on the row says which components decided; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null on 'throttled', 'folded' and 'digest' rows and on every row written before those values existed, so a null error is not evidence of a working cooldown. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which — count those rows separately rather than attributing them. severity is the row's tier — 'critical', 'warning', 'info' or 'resolution' — and severity_source says where it came from: 'fired' when the row persisted the tier the alert actually fired at (graded alerts such as Poison Wait, Volume Free Space and Database State fire Warning OR Critical by measurement), 'metric_name' when the row carries no tier and the metric's name is the only evidence (rows written before the tier was persisted, alerts whose severity is fixed per metric, and every resolution row). Do not infer a graded alert's tier from its name: a 'Poison Wait' row with severity 'warning' fired as a warning. route says WHERE the posts went: the alert's family (self-monitor / reports / agent-jobs / performance), the notification route that matched it (route_id null = the parent channels in Settings > Notifications answered everything) and each delivered channel with the route that supplied its destination — see get_notification_routes for the taxonomy and the routes. route is null on rows written before routing existed and on rows that never reached a delivery decision (throttled, folded, muted, unconfigured, digest, resolutions), so a null route is not evidence of a routing fault. routing is a DIFFERENT question from route: for an 'Analysis: …' finding it is the corroboration gate's decision one step UPSTREAM of the fan-out — 'page' when the finding earned a channel (two or more facts in its chain, or a matched co-fire check, or one of the two by-construction stories) and 'digest' when it was a lone uncorroborated fact — with routing_reason naming the components the gate read, so 'why didn't this page' is answered by the row. Both are null on every engine alert and on analysis rows written before the gate existed. To see what the digest carried, read the rows with notification_type 'digest' in the window: each is a persisted finding with its full detail_text and context, findable in get_analysis_findings by the story hash in its metric_name. Dismissal is an acknowledgement, not a verdict — a dismissed critical still fired — so set this when reconstructing an incident rather than triaging what is still open. Each row then carries dismissed so the two populations stay distinguishable.")]
     public static async Task<string> GetAlertHistory(
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Omit to return alerts across all servers (the fleet default).")] string? server_name = null,
@@ -152,6 +152,10 @@ public sealed class DarlingMcpAlertTools
                        (server_name above is the registry display name where one exists). */
                     stored_server_name = r.StoredServerName,
                     metric_name = r.MetricName,
+                    /* #5654: the external source the alert came from, read off the stored metric name
+                       (External:<source>:<key>) the way the Viewer's rows do; null for every built-in and custom
+                       alert. It is the value a mute rule's external_source matches. */
+                    external_source = AlertMuteContext.ExternalSourceOf(r.MetricName),
                     current_value = r.CurrentValue,
                     threshold_value = r.ThresholdValue,
                     alert_sent = r.AlertSent,
@@ -676,6 +680,7 @@ public sealed class DarlingMcpAlertTools
         AlertFamily.Reports => "Scheduled prose (the collector-cost digest, the fleet sweep rollup) — to read, never to be paged by.",
         AlertFamily.AgentJobs => "SQL Server Agent: failed and anomalously long jobs, and the Agent service being down.",
         AlertFamily.Performance => "A monitored server's health: blocking, deadlocks, CPU, long-running queries, space, availability groups, connection loss, custom rules and analysis findings. Also the fall-through for any metric the taxonomy does not name.",
+        AlertFamily.External => "Alerts another service raised through its own database login (External:<source>:<key>). Route them to their own channel, or leave them on the parent channels.",
         _ => "",
     };
 
@@ -813,6 +818,7 @@ public sealed class DarlingMcpAlertTools
         server_name = r.ServerName,
         server_id = r.ServerId,
         metric_name = r.MetricName,
+        external_source = r.ExternalSource,
         database_pattern = r.DatabasePattern,
         query_text_pattern = r.QueryTextPattern,
         wait_type_pattern = r.WaitTypePattern,
@@ -1055,10 +1061,13 @@ public sealed class DarlingMcpAlertTools
         "combination of the scope/pattern fields; a field left out does not narrow the rule, so a rule with NO " +
         "fields set matches — and mutes — EVERY alert (a whole-fleet silence). server_name and metric_name match " +
         "the alert's exact values (see get_alert_history / get_alert_settings for the names in use); the *_pattern " +
-        "fields are case-insensitive substring matches. expires_at is an optional ISO-8601 UTC timestamp after " +
+        "fields are case-insensitive substring matches. external_source (optional, lower case, e.g. nagios) limits " +
+        "the rule to alerts that one external source raised through Darling's alert intake: it never mutes a " +
+        "built-in alert or another source's alert, and a rule without it still mutes an external alert whose other " +
+        "fields match; a name that is not a valid source name is refused. expires_at is an optional ISO-8601 UTC timestamp after " +
         "which the rule stops applying; omit it for a permanent rule. Returns the stored rule, including its " +
         "generated id (for delete_mute_rule). Repeating a call is safe: when an enabled, unexpired rule already " +
-        "holds the same seven scope and pattern fields and the same expires_at, nothing is created and the answer is " +
+        "holds the same seven scope and pattern fields, the same external_source and the same expires_at, nothing is created and the answer is " +
         "status already_exists with that rule's id (a disabled or expired rule does not count; a different " +
         "expires_at is a different rule). The running service applies the rule on its next collection " +
         "sweep, when the write's config_version bump makes it reload its mute cache — so a matching alert " +
@@ -1077,9 +1086,10 @@ public sealed class DarlingMcpAlertTools
         [Description("Optional human-readable reason, shown in the mute-rule list.")] string? reason = null,
         [Description("Optional ISO-8601 UTC expiry (e.g. 2026-08-01T00:00:00Z); after this the rule no longer mutes. Omit for a permanent rule.")] string? expires_at = null,
         [Description("Optional server_id (from get_fleet_overview) to key the rule on that one server.")] int? server_id = null,
-        [Description("Case-insensitive substring of the alert's client application name (e.g. 'Management Studio'). Omit for any.")] string? client_app_pattern = null) =>
+        [Description("Case-insensitive substring of the alert's client application name (e.g. 'Management Studio'). Omit for any.")] string? client_app_pattern = null,
+        [Description("Optional external alert source name (lower case, e.g. 'nagios'): mute only that source's alerts. Omit for any source.")] string? external_source = null) =>
         CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
-            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern);
+            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern, external_source);
 
     /// <summary>The refusal for a <c>server_id</c> no registered server has: a rule keyed on it would mute
     /// nothing while reading as if it muted something.</summary>
@@ -1122,10 +1132,29 @@ public sealed class DarlingMcpAlertTools
         string? expires_at,
         int? server_id = null,
         Func<int, Task<string?>>? serverNameLookup = null,
-        string? client_app_pattern = null)
+        string? client_app_pattern = null,
+        string? external_source = null)
     {
         try
         {
+            /* #5654: a source name the registry could never hold would key a rule that mutes nothing. A value that is blank
+               or holds a control character is refused, never read as "any source" (that would widen the rule to every
+               source's alerts); only an omitted field means any source, as on the web create and PATCH. */
+            string? externalSource = null;
+            if (external_source is not null)
+            {
+                externalSource = external_source.Trim();
+                if (externalSource.Length == 0 || HasControlCharacter(external_source))
+                {
+                    return Outcome("invalid", "'external_source' is blank or holds a control character. Omit it for any source, or pass a source name.");
+                }
+
+                if (!MuteRule.IsValidExternalSource(externalSource))
+                {
+                    return Outcome("invalid", MuteRule.InvalidExternalSourceMessage(externalSource));
+                }
+            }
+
             DateTime? expiresAtUtc = null;
             if (!string.IsNullOrWhiteSpace(expires_at))
             {
@@ -1162,6 +1191,7 @@ public sealed class DarlingMcpAlertTools
                 ServerName = Trimmed(server_name) ?? labelFromRegistry,
                 ServerId = server_id,
                 MetricName = Trimmed(metric_name),
+                ExternalSource = externalSource,
                 DatabasePattern = Trimmed(database_pattern),
                 QueryTextPattern = Trimmed(query_text_pattern),
                 WaitTypePattern = Trimmed(wait_type_pattern),
@@ -1433,8 +1463,9 @@ public sealed class DarlingMcpAlertTools
         "{\"reason\":\"root cause found\",\"expires_at_utc\":\"2026-08-01T00:00:00Z\"}); a field you do NOT " +
         "send is left exactly as stored, and an EXPLICIT JSON null clears a field — the same clearing the " +
         "Viewer's edit dialog performs by blanking it — so {\"expires_at_utc\":null} makes a rule permanent and " +
-        "{\"job_name_pattern\":null} stops constraining that dimension. Editable fields: server_name, server_id, " +
-        "metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, " +
+        "{\"job_name_pattern\":null} stops constraining that dimension (external_source clears the same way: null " +
+        "makes the rule stop being limited to one source, and a blank string is refused). Editable fields: server_name, server_id, " +
+        "metric_name, external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, " +
         "expires_at_utc (create_mute_rule's expires_at spelling is accepted as a write-only alias; send only " +
         "one). enabled is NOT editable here — use set_mute_rule_enabled, the dedicated reversible verb. USE THIS " +
         "rather than delete_mute_rule followed by create_mute_rule: a re-created rule is a NEW rule with a new " +
@@ -1647,6 +1678,31 @@ public sealed class DarlingMcpAlertTools
             }
         }
 
+        /* #5654: a source is text like the others (null clears, blank is refused) plus the registry's name shape,
+           so a rule can never be saved on a source name that no alert could carry. */
+        void AddSource(JsonNode? node)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                changes.Add(new MuteRuleFieldChange("external_source", r => r.ExternalSource = null));
+            }
+            else if (node is JsonValue v && v.TryGetValue<string>(out var s))
+            {
+                var trimmed = s.Trim();
+                if (trimmed.Length == 0)
+                    error = "'external_source' is blank. Pass null to clear the field, or a source name to set it.";
+                else if (HasControlCharacter(s) || !MuteRule.IsValidExternalSource(trimmed))
+                    error = MuteRule.InvalidExternalSourceMessage(trimmed);
+                else
+                    changes.Add(new MuteRuleFieldChange("external_source", r => r.ExternalSource = trimmed));
+            }
+            else
+            {
+                error = "'external_source' must be a string, or null to clear it.";
+            }
+        }
+
         /* `spelling` is the key the caller sent (for the error text); the recorded Field is always the
            canonical expires_at_utc, so both spellings in one body surface as a duplicate below. */
         void AddExpiry(string spelling, JsonNode? node)
@@ -1677,6 +1733,7 @@ public sealed class DarlingMcpAlertTools
                 case "server_name": AddText("server_name", prop.Value, (r, v) => r.ServerName = v); break;
                 case "server_id": AddInt("server_id", prop.Value, (r, v) => r.ServerId = v); break;
                 case "metric_name": AddText("metric_name", prop.Value, (r, v) => r.MetricName = v); break;
+                case "external_source": AddSource(prop.Value); break;
                 case "database_pattern": AddText("database_pattern", prop.Value, (r, v) => r.DatabasePattern = v); break;
                 case "query_text_pattern": AddText("query_text_pattern", prop.Value, (r, v) => r.QueryTextPattern = v); break;
                 case "wait_type_pattern": AddText("wait_type_pattern", prop.Value, (r, v) => r.WaitTypePattern = v); break;
@@ -1702,7 +1759,7 @@ public sealed class DarlingMcpAlertTools
                     error = "'summary' is derived from the scope fields and is not stored — edit the fields it summarizes instead.";
                     break;
                 default:
-                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, server_id, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, expires_at_utc.";
+                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, server_id, metric_name, external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, expires_at_utc.";
                     break;
             }
         }
@@ -1726,6 +1783,7 @@ public sealed class DarlingMcpAlertTools
         string.Equals(a.ServerName, b.ServerName, StringComparison.Ordinal)
         && a.ServerId == b.ServerId
         && string.Equals(a.MetricName, b.MetricName, StringComparison.Ordinal)
+        && string.Equals(a.ExternalSource, b.ExternalSource, StringComparison.Ordinal)
         && string.Equals(a.DatabasePattern, b.DatabasePattern, StringComparison.Ordinal)
         && string.Equals(a.QueryTextPattern, b.QueryTextPattern, StringComparison.Ordinal)
         && string.Equals(a.WaitTypePattern, b.WaitTypePattern, StringComparison.Ordinal)
@@ -1796,6 +1854,7 @@ public sealed class DarlingMcpAlertTools
         string.Equals(a.ServerName, b.ServerName, StringComparison.Ordinal)
         && a.ServerId == b.ServerId
         && string.Equals(a.MetricName, b.MetricName, StringComparison.Ordinal)
+        && string.Equals(a.ExternalSource, b.ExternalSource, StringComparison.Ordinal)
         && string.Equals(a.DatabasePattern, b.DatabasePattern, StringComparison.Ordinal)
         && string.Equals(a.QueryTextPattern, b.QueryTextPattern, StringComparison.Ordinal)
         && string.Equals(a.WaitTypePattern, b.WaitTypePattern, StringComparison.Ordinal)
@@ -1847,6 +1906,10 @@ public sealed class DarlingMcpAlertTools
     internal const string DeliveryCooldownColumn = "email_cooldown_minutes";
 
     private static string? Trimmed(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    /* #5654: a source name keeps the spaces-are-trimmed rule of every text field, but a line feed or other control character
+       anywhere in it is refused rather than trimmed away, the same answer the verbs give a name with a trailing line feed. */
+    private static bool HasControlCharacter(string? value) => value is not null && value.Any(char.IsControl);
 
     /// <summary>A small {status, message} envelope for a non-data write outcome (invalid / not_found / unavailable)
     /// — the same shape <see cref="DarlingMcpCustomViewTools"/> uses, so an MCP client can branch on the outcome

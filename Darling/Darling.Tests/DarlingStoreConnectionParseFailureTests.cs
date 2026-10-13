@@ -360,7 +360,7 @@ public sealed class DarlingStoreConnectionParseFailureTests
         var config = new DarlingConfig { Postgres = new PostgresConfig { ConnectionString = connectionString } };
 
         var task = (Task)method.Invoke(
-            worker, [config, connectionString, null, null, null, null, false, null, CancellationToken.None])!;
+            worker, [config, connectionString, null, null, null, null, false, null, null, CancellationToken.None])!;
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => task);
 
         Assert.StartsWith("postgres.connectionString could not be used: " + FixedHintStart, ex.Message, StringComparison.Ordinal);

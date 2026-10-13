@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 
@@ -22,6 +23,13 @@ public partial class LocalDataService
     /// Gets recent waiting task snapshots for a server: the waiting tasks captured over the window, newest capture first then longest wait, capped at
     /// <paramref name="limit"/> when one is given.
     ///
+    /// <para>#5633 item 18: one row per session and wait type per snapshot, with <c>ThreadCount</c>; a blocker equal to the session is
+    /// <c>IntraQueryParallelism</c>, not a blocker. Darling's twin is <c>DarlingSessionReader.WaitingTasksSql</c>.</para>
+    /// <para>#5633 review L-a: <c>WaitDurationMs</c>, <c>ResourceDescription</c> and <c>BlockingSessionId</c> are the LONGEST-waiting thread's
+    /// (an ordered <c>first</c>), not three independent MAXes; when that thread waits on its own session the blocker is the longest-waiting thread
+    /// blocked by another session. Review round 2 Low-2: every column takes its thread through the SAME ordering as Darling's ordered
+    /// <c>array_agg</c> (wait DESC NULLS LAST, then the blocker ASC NULLS LAST, then the resource DESC NULLS LAST), the fallback blocker
+    /// included, so equal waits and NULL waits give the row PostgreSQL gives; <c>arg_max</c> picked an arbitrary tie and ignored NULL waits. <c>BlockingSessionIds</c> lists every distinct other blocker, only when there is more than one.</para>
     /// <para>The cap is a PARAMETER (#3541 A3), null for the grid callers that read the whole window as they
     /// always did. <c>get_waiting_tasks</c> read this UNBOUNDED and then took <c>limit</c> rows in C#, so a busy
     /// window materialised every waiting-task row to return thirty, and the envelope stated no bound at all.
@@ -48,16 +56,27 @@ SELECT
     collection_time,
     session_id,
     rtrim(wait_type) AS wait_type,
-    wait_duration_ms,
-    blocking_session_id,
-    resource_description,
-    database_name
+    MAX(wait_duration_ms) AS wait_duration_ms,
+    COALESCE(
+        first(CASE WHEN blocking_session_id <> session_id THEN blocking_session_id END
+              ORDER BY wait_duration_ms DESC NULLS LAST, blocking_session_id ASC NULLS LAST),
+        first(blocking_session_id ORDER BY wait_duration_ms DESC NULLS LAST, blocking_session_id ASC NULLS LAST)
+            FILTER (WHERE blocking_session_id <> session_id)) AS blocking_session_id,
+    first(resource_description
+          ORDER BY wait_duration_ms DESC NULLS LAST, blocking_session_id ASC NULLS LAST, resource_description DESC NULLS LAST) AS resource_description,
+    database_name,
+    COUNT(*) AS thread_count,
+    COALESCE(BOOL_OR(blocking_session_id = session_id), FALSE) AS intra_query_parallelism,
+    CASE WHEN COUNT(DISTINCT blocking_session_id) FILTER (WHERE blocking_session_id <> session_id) > 1
+         THEN list_aggregate(list_sort(list_distinct(list(blocking_session_id) FILTER (WHERE blocking_session_id <> session_id))), 'string_agg', ',')
+    END AS blocking_session_ids
 FROM v_waiting_tasks
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3{dbClause}
 {exclude}
-ORDER BY collection_time DESC, wait_duration_ms DESC{limitClause}";
+GROUP BY collection_time, session_id, rtrim(wait_type), database_name
+ORDER BY collection_time DESC, MAX(wait_duration_ms) DESC{limitClause}";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -79,7 +98,12 @@ ORDER BY collection_time DESC, wait_duration_ms DESC{limitClause}";
                 WaitDurationMs = reader.IsDBNull(3) ? 0 : ToInt64(reader.GetValue(3)),
                 BlockingSessionId = reader.IsDBNull(4) ? (int?)null : reader.GetInt32(4),
                 ResourceDescription = reader.IsDBNull(5) ? "" : reader.GetString(5),
-                DatabaseName = reader.IsDBNull(6) ? "" : reader.GetString(6)
+                DatabaseName = reader.IsDBNull(6) ? "" : reader.GetString(6),
+                ThreadCount = reader.IsDBNull(7) ? 1 : (int)ToInt64(reader.GetValue(7)),
+                IntraQueryParallelism = !reader.IsDBNull(8) && reader.GetBoolean(8),
+                BlockingSessionIds = reader.IsDBNull(9)
+                    ? null
+                    : reader.GetString(9).Split(',', StringSplitOptions.RemoveEmptyEntries).Select(int.Parse).ToArray()
             });
         }
 
@@ -286,6 +310,13 @@ public class WaitingTaskRow
     public int? BlockingSessionId { get; set; }
     public string ResourceDescription { get; set; } = "";
     public string DatabaseName { get; set; } = "";
+    /// <summary>#5633 item 18: waiting tasks (threads) rolled into this row.</summary>
+    public int ThreadCount { get; set; } = 1;
+    /// <summary>#5633 item 18: some of those threads wait on their own session (a parallel query's exchange waits); not a blocker.</summary>
+    public bool IntraQueryParallelism { get; set; }
+    /// <summary>#5633 review L-a: every distinct blocker other than the session itself, set only when the threads have more than one;
+    /// <see cref="BlockingSessionId"/>, <see cref="ResourceDescription"/> and <see cref="WaitDurationMs"/> are the longest-waiting thread's.</summary>
+    public IReadOnlyList<int>? BlockingSessionIds { get; set; }
 
     public string WaitDurationFormatted => WaitDurationMs < 1000
         ? $"{WaitDurationMs} ms"

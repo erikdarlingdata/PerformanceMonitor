@@ -270,13 +270,10 @@ public sealed class WatermarkPolicyTests
            copy of 'lite' (split with 'darling_reads_shard'), pinned equal by CrossAppGuardCiGateTests. This pin
            follows the suite rather than the name, because what it protects is the Darling Service tree REACHING the
            tests; 'lite' itself still gates the Lite build and publish in the build job. */
-        var at = yaml.IndexOf("\n            darling_reads_shard:\n", StringComparison.Ordinal);
-        Assert.True(at > 0, "build.yml's 'darling_reads_shard' path filter is gone — find where it moved before editing this test");
-
-        /* The block runs to the next area key at the same indent; its own entries are indented deeper. */
-        var rest = yaml[(at + 1)..];
-        var next = Regex.Match(rest, "\n            [a-z_]+:\n");
-        var block = next.Success ? rest[..next.Index] : rest;
+        /* #5669: the set lives in .github/lite-paths-filter.yml, the one file the shard legs, lite-scope and
+           ci-select.py read. */
+        var block = string.Join("\n", CrossAppGuardCiGateTests.LiteFilterFilePatterns("darling_reads_shard"));
+        Assert.True(block.Length > 0, ".github/lite-paths-filter.yml's 'darling_reads_shard' path filter is gone — find where it moved before editing this test");
 
         Assert.Contains("Darling/PerformanceMonitor.Darling.Service/**/!(*.md)", block, StringComparison.Ordinal);
 

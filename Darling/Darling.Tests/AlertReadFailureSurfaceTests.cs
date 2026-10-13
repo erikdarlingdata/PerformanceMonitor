@@ -922,8 +922,9 @@ public sealed class AlertReadFailureSurfaceTests
            self-alert's evidence (the readings) is a parameter too, with the read counted in
            DarlingWorker. 16th exempt since #4750: EvaluateNotificationChannelsAsync's wrapper catch — the
            webhook channels' failure counts are read from the webhook service's memory, so there is no store
-           read for the condition to swallow. */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 13, 18),
+           read for the condition to swallow. 19th exempt since #5654: EvaluateExternalAlertsAsync's wrapper
+           catch - the delivery self-alert's report is a parameter, with the count read counted in DarlingWorker. */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 13, 19),
     };
 
     /// <summary>
@@ -957,6 +958,10 @@ public sealed class AlertReadFailureSurfaceTests
            ReadStoreSizeBytesAsync's size figure, a RejectedValue row is one of the three conditions the
            alert fires on, so a swallowed read here leaves that condition unjudgeable, not merely undescribed. */
         "ReadRejectedManagedConfSettingNamesAsync",
+        /* #5654: the external-alert delivery self-alert's one store read, the count of rows the drain gave up on. COUNTED:
+           a swallowed read would leave the standing alert unjudged, and the worker holds it (sends no report) rather than
+           resolving it. */
+        "EvaluateExternalAlertsAsync",
         /* #3354: the mute-rule reload. Not an alert pass — a control-plane read — but its swallowed
            failure decides what the engine suppresses on every following sweep, so it belongs to this
            population. It is also the member whose scope this list was designed to admit: an alerting read
@@ -965,9 +970,10 @@ public sealed class AlertReadFailureSurfaceTests
         "LoadMuteRulesAsync",
     };
 
+    /* 12th since #5654: EvaluateExternalAlertsAsync's catch, the external-alert delivery count. */
     /* 11th since #4215: ReadRejectedManagedConfSettingNamesAsync's catch — COUNTED,
        not exempt, because a RejectedValue row is judgeable evidence for the alert, not context for its text. */
-    private const int WorkerCountedSites = 11;
+    private const int WorkerCountedSites = 12;
     /* 13th: the deadlock text repair pass's catch in SweepStoreSelfMetricsAsync, exempt like the re-mask pass beside it. */
     private const int WorkerExemptSites = 13;
 
@@ -1019,10 +1025,10 @@ public sealed class AlertReadFailureSurfaceTests
     /// read neither fires nor clears the alert, so a population of them would leave a saturated scheduler queue
     /// unreported for as long as the store stayed unreadable. And a FORTIETH since #5641: the Runnable Queue card's top-request
     /// read ("runnable queue top requests"), counted because it IS a store read the alert pass swallowed, though only
-    /// the card's request items go missing and the fire does not. And a FORTY-FIRST since #5640: the Client Timeouts window read ("client timeouts"), counted because a swallowed read neither fires nor clears the alert.</para>
-    /// And a FORTY-SECOND since #5715 part B: the escalation-tier seed read ("escalation tier seed"), counted because a swallowed read leaves a Warning delivered before a restart unknown to the engine, so the Critical that follows waits out the cooldown instead of escalating; it seeds nothing, never blocks a fire, and is retried on the next sweep.
+    /// the card's request items go missing and the fire does not. And a FORTY-FIRST since #5640: the Client Timeouts window read ("client timeouts"), counted because a swallowed read neither fires nor clears the alert. And a FORTY-SECOND since #5654: the external-alert delivery self-alert's count of undelivered rows, counted because a
+    /// swallowed read leaves the standing alert unjudged (the worker holds it rather than resolving it). And a FORTY-THIRD since #5715 part B: the escalation-tier seed read ("escalation tier seed"), counted because a swallowed read leaves a Warning delivered before a restart unknown to the engine, so the Critical that follows waits out the cooldown instead of escalating; it seeds nothing, never blocks a fire, and is retried on the next sweep.</para>
     /// </summary>
-    private const int CountedSites = 42;
+    private const int CountedSites = 43;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -1038,6 +1044,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Connection-change self-alert delivery failed"] = "the delivery path",
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Custom-alert rule-health self-alert failed"] = "handed its evidence (the report) as a parameter; the report-building read is in CustomAlertEvaluator, outside this census",
+        ["External-alert delivery self-alert failed"] = "handed its evidence (the report) as a parameter; the count read is counted in DarlingWorker (#5654)",
         ["Store runtime upgrade self-alert failed"] = "handed its evidence as parameters",
         ["Collection gap at start self-alert failed"] = "handed its evidence as parameters",
         ["Store TimescaleDB self-alert failed"] = "handed its evidence as parameters; the version was read by the bootstrap (#3908)",
@@ -1258,8 +1265,9 @@ public sealed class AlertReadFailureSurfaceTests
            #5097: the store statement history snapshot's catch, a telemetry write sweep whose loss costs an hour's
            capture and never an alert. 36th since #5450: the Collection Gap At Start self-alert's catch, handed
            its evidence as a parameter. 37th: the deadlock text repair pass, the second stage beside the re-mask pass (the same
-           maintenance rewrite, marker-gated, resumed next hour). */
-        Assert.Equal(37, totalExempt);
+           maintenance rewrite, marker-gated, resumed next hour). 38th since #5654: the external-alert delivery self-alert's
+           wrapper catch, handed its report as a parameter. */
+        Assert.Equal(38, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

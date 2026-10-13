@@ -346,6 +346,11 @@ public sealed class DarlingSecuritySplitLiveTests
             Assert.False(await HasPrivAsync(mcp, "config.config_command", "INSERT", ct));
             Assert.False(await HasPrivAsync(mcp, "config.analysis_muted", "DELETE", ct));
             Assert.False(await HasPrivAsync(mcp, "collect.analysis_findings", "UPDATE", ct));
+            /* #5633 item 13: the caveat table is the scheduled pass's state; mcp reads it and writes nothing. */
+            foreach (var privilege in new[] { "INSERT", "UPDATE", "DELETE", "TRUNCATE", "TRIGGER", "REFERENCES" })
+            {
+                Assert.False(await HasPrivAsync(mcp, "collect.analysis_collection_caveats", privilege, ct), privilege);
+            }
 
             /* #1599: mcp gets the SAME single-table custom_views write viewer has (the MCP custom-view tools) —
                proven by a real INSERT/UPDATE/DELETE round-trip as the mcp role (IDENTITY id needs no sequence

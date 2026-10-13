@@ -387,14 +387,21 @@ public sealed class ProductiveZeroBandingTests
                shape and once in every partial shape (#4938: the partial row has a second shape for a collector
                with a run time, so a file holds one or two of them). A bare Contains could not see a partial copy
                go missing, because the full one would satisfy it. */
-            var partialAt = payload.IndexOf("private static object PartialCollectionHealthRow(", StringComparison.Ordinal);
+            /* #5748: the partial row is one dictionary built key by key, leaving out a key whose value is null, false or
+               0, so it has one shape in the source, and the flag and the sentence each appear once in it as an
+               AddUnlessDefault call. */
+            var partialAt = payload.IndexOf("static Dictionary<string, object?> PartialCollectionHealthRow(", StringComparison.Ordinal);
+            Assert.True(partialAt > 0, path + " must keep PartialCollectionHealthRow");
             var partialShape = payload[partialAt..];
-            var partialShapes = CountOf(partialShape, "partial_detail = true,");
-            Assert.InRange(partialShapes, 1, 2);
-            foreach (var carried in new[] { "regressed_from_productive = r.AnyRegression,", "regression_finding = r.AnyRegressionFinding," })
+            Assert.Equal(1, CountOf(partialShape, "[\"partial_detail\"] = true,"));
+            foreach (var (carried, partialCarried) in new[]
+            {
+                ("regressed_from_productive = r.AnyRegression,", "AddUnlessDefault(row, \"regressed_from_productive\", r.AnyRegression);"),
+                ("regression_finding = r.AnyRegressionFinding,", "AddUnlessDefault(row, \"regression_finding\", r.AnyRegressionFinding);"),
+            })
             {
                 Assert.Equal(1, CountOf(payload[..partialAt], carried));
-                Assert.Equal(partialShapes, CountOf(partialShape, carried));
+                Assert.Equal(1, CountOf(partialShape, partialCarried));
             }
         }
 

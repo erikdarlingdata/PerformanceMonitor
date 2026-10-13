@@ -91,7 +91,9 @@
     //                                    // holds the config-table service-credential pivot), or BOTH as
     //                                    // "admin,viewer" — one hostssl line per role, so an admin seat
     //                                    // and read-only seats reach the same store, and narrowing
-    //                                    // allowFrom later tightens every one of them. Never the
+    //                                    // allowFrom later tightens every one of them. "sources" admits
+    //                                    // the external alert source logins (--add-alert-source) through
+    //                                    // one "+darling_alert_sources" line, e.g. "viewer,sources". Never the
     //                                    // superuser, never all; one bad element rejects the whole value.
     // }
   },

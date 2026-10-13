@@ -256,7 +256,8 @@ public sealed class McpToolsListBudgetTests
     /* #5640 Lane E2: get_client_timeouts is a new read (a 394-byte head, four parameters): the measured total went to 198,604 bytes. */
     /* #5640 Lane F: get_client_timeouts gains its reading guide (the 31-byte guide pointer; the head names not_collected on both SKUs and is
        byte-identical to Lite's): 394 -> 422 bytes, the measured total went to 198,632 bytes. */
-    private const int TotalCeilingBytes = 198_632;
+    /* #5654 D2: create_mute_rule also gains external_source (a 117-character description, +162 bytes). */
+    private const int TotalCeilingBytes = 198_817;
 
 
 

@@ -315,6 +315,63 @@ public sealed class LiteMcpServerClockTests : IClassFixture<SharedDuckDbFixture>
         Assert.DoesNotContain("dbo.ProcBefore", names);
     }
 
+    /// <summary>
+    /// #5633 review (finding D), the bot's store on Lite: GoneDb has procedure_stats rows, LiveDb has none, and the newest database_states
+    /// snapshot (at or before the as_of anchor) names only LiveDb. With no database_name the ranking leaves GoneDb out; the empty page must
+    /// not say the collector "recorded nothing" and must name GoneDb. A page with rows carries the same names. Naming GoneDb reads it.
+    /// </summary>
+    [Fact]
+    public async Task TopProcedures_SaysWhichDatabasesItLeftOut_AndDoesNotClaimTheCollectorRecordedNothing()
+    {
+        await SeedServerClockAsync(_easternId, EasternName, -240, EasternZone);
+        async Task ProcAsync(string database, string objectName) => await ExecuteAsync(@"INSERT INTO procedure_stats
+            (collection_id, collection_time, server_id, server_name, database_name,
+             schema_name, object_name, object_type, last_execution_time,
+             delta_execution_count, delta_worker_time, delta_elapsed_time)
+            VALUES ($1, $2, $3, $4, $5, 'dbo', $6, 'SQL_STORED_PROCEDURE', $7, 10, 200000, 200000)",
+            -_nextId++, SummerCollected, _easternId, EasternName, database, objectName, At(2026, 7, 15, 9, 0));
+        await ProcAsync("GoneDb", "ProcGone");
+
+        /* Two successful runs of the collector inside the window, so the empty page takes the "ran, found nothing" branch. */
+        var anchor = new DateTime(2026, 7, 15, 16, 0, 0, DateTimeKind.Unspecified);
+        foreach (var minutes in new[] { 20, 80 })
+        {
+            await ExecuteAsync(@"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected)
+                VALUES ($1, $2, $3, 'procedure_stats', $4, 'SUCCESS', 1)",
+                -_nextId++, _easternId, EasternName, anchor.AddMinutes(-minutes));
+        }
+
+        foreach (var (hoursBefore, database) in new[] { (2.0, "GoneDb"), (2.0, "LiveDb"), (0.2, "LiveDb") })
+        {
+            await ExecuteAsync(@"INSERT INTO database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby)
+                VALUES ($1, $2, $3, $4, $5, 5, 'ONLINE', false)",
+                -_nextId++, anchor.AddHours(-hoursBefore), _easternId, EasternName, database);
+        }
+
+        using var empty = System.Text.Json.JsonDocument.Parse(
+            await McpQueryTools.GetTopProceduresByCpu(_dataService, _serverManager, EasternName, hours_back: 4, as_of: SummerAsOf));
+        Assert.Equal("empty", empty.RootElement.GetProperty("status").GetString());
+        var message = empty.RootElement.GetProperty("message").GetString()!;
+        Assert.DoesNotContain("recorded nothing for it", message, StringComparison.Ordinal);
+        Assert.Contains("a database this server still has", message, StringComparison.Ordinal);
+        Assert.Contains("1 database(s) the server no longer lists", message, StringComparison.Ordinal);
+        Assert.Equal(new[] { "GoneDb" }, empty.RootElement.GetProperty("databases_left_out").EnumerateArray().Select(n => n.GetString()!).ToArray());
+        Assert.Contains("no longer lists them", empty.RootElement.GetProperty("databases_left_out_note").GetString(), StringComparison.Ordinal);
+
+        var namedJson = await McpQueryTools.GetTopProceduresByCpu(_dataService, _serverManager, EasternName, hours_back: 4, database_name: "GoneDb", as_of: SummerAsOf);
+        Assert.Contains("dbo.ProcGone", ValuesOf(namedJson, "procedures", "full_name"));
+        using var named = System.Text.Json.JsonDocument.Parse(namedJson);
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, named.RootElement.GetProperty("databases_left_out").ValueKind);
+
+        await ProcAsync("LiveDb", "ProcLive");
+        var pageJson = await McpQueryTools.GetTopProceduresByCpu(_dataService, _serverManager, EasternName, hours_back: 4, as_of: SummerAsOf);
+        var names = ValuesOf(pageJson, "procedures", "full_name");
+        Assert.Contains("dbo.ProcLive", names);
+        Assert.DoesNotContain("dbo.ProcGone", names);
+        using var page = System.Text.Json.JsonDocument.Parse(pageJson);
+        Assert.Equal(new[] { "GoneDb" }, page.RootElement.GetProperty("databases_left_out").EnumerateArray().Select(n => n.GetString()!).ToArray());
+    }
+
     // ── reading the tool's answer ──
 
     private static DateTime At(int y, int mo, int d, int h, int mi) => new(y, mo, d, h, mi, 0, DateTimeKind.Unspecified);

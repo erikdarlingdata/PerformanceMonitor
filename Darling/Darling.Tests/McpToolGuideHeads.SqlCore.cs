@@ -54,7 +54,7 @@ public sealed class McpToolGuideHeadsSqlCoreTests
         ("analyze_server", "empty: window observed, nothing fired (a true all-clear)"),
         ("analyze_server", "Unanchored runs persist findings to the store; as_of runs are exploratory, not saved"),
         ("analyze_server", "remediation_command is advisory, never auto-executed"),
-        ("compare_analysis", "must exceed hours_back, else refused"),
+        ("compare_analysis", ">= 2 x hours_back, else refused"),
         ("compare_analysis", "N=1 vs N=1: never proves causation"),
         ("compare_analysis", "unavailable = BOTH windows had zero facts"),
         ("compare_analysis", "coverage_caveat flags a partly-collected side"),

@@ -158,15 +158,6 @@ public sealed class FinOpsRecommendationsReadsLiveTests
         Assert.Empty(await DarlingFinOpsRecommendationsReader.GetStorageTierIoAsync(dataSource, idB, cutoff, TimeoutSeconds, ct));
         Assert.Empty(await DarlingFinOpsRecommendationsReader.GetStorageTierIoAsync(dataSource, idC, cutoff, TimeoutSeconds, ct));
 
-        /* CPU P95 (servers A and B carry the same series): 30 samples, value cpu[i % 10] for
-           { 20, 22, 24, 21, 23, 22, 20, 24, 22, 21 }, so 20 x 6, 21 x 6, 22 x 9, 23 x 3, 24 x 6. Sorted, the 95th
-           percentile sits at 0.95 * 29 = 27.55, between ranks 27 and 28, both 24 (ranks 24 to 29 are the 24s), so
-           P95 = 24. The samples run 45 minutes apart, 29 gaps = 1305 minutes = 21.75 hours, which reads "21 hours". */
-        var cpuExpected = (24m, "31 samples over 22 hours");
-        Assert.Equal(cpuExpected, await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idA, cutoff, TimeoutSeconds, ct));
-        Assert.Equal(cpuExpected, await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idB, cutoff, TimeoutSeconds, ct));
-        Assert.Null(await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idC, cutoff, TimeoutSeconds, ct));
-
         /* Reserved capacity: the same 31 samples (three full cycles of ten and a 31st of 20, the 24-hour CPU rule needs
            the oldest sample 23 hours old). Sum = 3 * 219 + 20 = 677, so the mean is 677 / 31 = 21.8387096774193548.
            Sum of squares = 3 * 4815 + 400 = 14845, so the squared deviations total 14845 - 677^2 / 31 = 60.19355, the
@@ -204,12 +195,9 @@ public sealed class FinOpsRecommendationsReadsLiveTests
         Assert.Equal(builtReserved!.Finding, viewedReserved.Finding);
         Assert.Equal(builtReserved.Detail, viewedReserved.Detail);
 
-        var (p95Cpu, cpuWindow) = (await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idA, cutoff, TimeoutSeconds, ct))!.Value;
-        var builtCpu = Assert.Single(FinOpsRecommendationFigures.VmRightSizing(p95Cpu, cpuWindow, 16, 98304, 0, 0L, "no samples", 1000m));
-        var viewedCpu = Assert.Single(viewedA, r => r.Category == "Hardware" && r.Finding.StartsWith("CPU:", StringComparison.Ordinal));
-        Assert.Equal(builtCpu.Finding, viewedCpu.Finding);
-        Assert.Equal(builtCpu.Detail, viewedCpu.Detail);
-        Assert.Equal(builtCpu.EstMonthlySavings, viewedCpu.EstMonthlySavings);
+        /* Server A's day averages 21.8%, which the Utilization view calls RIGHT_SIZED, so no CPU right-sizing row (compute or
+           Hardware) is built from it: the recommendations follow the view's verdict (#5633 item 11, #5644 W18). */
+        Assert.DoesNotContain(viewedA, r => r.Finding.StartsWith("CPU", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -361,7 +349,7 @@ VALUES ($1, $2, $3, $4, $5,
     private static string SourcePath([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
 
     [Fact]
-    public async Task Composer_DoesNotReportTheVmCpuFallback_WhileTheVmRowsStillEmit()
+    public async Task CpuRightSizing_FollowsTheUtilizationVerdict_OneRowOneWindowOneP95()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -378,35 +366,28 @@ VALUES ($1, $2, $3, $4, $5,
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var idA = FinOpsRecommendationsGoldenLiveTests.ServerIdA;
-        var baseline = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, idA, 1000m, TimeoutSeconds, cancellationToken: ct);
 
-        /* Rows older than 30 hours raise a division by zero when the 7-day P95 statement (the only one that orders the CPU
-           column with PERCENTILE_CONT) projects them. The 24-hour utilization read never touches them, and since the CPU
-           sample-span rule (the 7-day span read the Hardware CPU row needs) now reads the same view over 7 days, the poison
-           is scoped to the P95 statement by its text: a poison on every read of the column would also fail the span read and
-           withhold the CPU row for a reason this test is not about. So only the inner fallback of the VM check fires. */
+        /* The seed's 22% CPU is RIGHT_SIZED (average 15% or more), so neither CPU row speaks: with a P95 of 24% the old rules said
+           "reduce from 16 to 8" about a server the Utilization view called right-sized. */
+        var util = await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(dataSource, idA, TimeoutSeconds, ct);
+        Assert.Equal(ProvisioningVerdict.RightSized, util!.ProvisioningStatus);
+        var rightSized = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, idA, 1000m, TimeoutSeconds, cancellationToken: ct);
+        Assert.DoesNotContain(rightSized, r => r.Finding.StartsWith("CPU", StringComparison.Ordinal));
+
+        /* An idle day (8% flat): OVER_PROVISIONED, and exactly one CPU row, read off the view's own 24-hour P95. */
         await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
         {
             await connection.OpenAsync(ct);
-            await using var cols = new NpgsqlCommand(
-                "SELECT string_agg(CASE WHEN column_name = 'sqlserver_cpu_utilization' " +
-                "THEN 'CASE WHEN collection_time < now() - interval ''30 hours'' AND current_query() LIKE ''%PERCENTILE_CONT%'' THEN (sqlserver_cpu_utilization / 0)::int ELSE sqlserver_cpu_utilization END AS sqlserver_cpu_utilization' " +
-                "ELSE quote_ident(column_name) END, ', ' ORDER BY ordinal_position) FROM information_schema.columns " +
-                "WHERE table_schema = current_schema() AND table_name = 'cpu_utilization_stats'", connection);
-            var list = (string)(await cols.ExecuteScalarAsync(ct))!;
-            await using var swap = new NpgsqlCommand(
-                "DROP VIEW v_cpu_utilization_stats CASCADE; CREATE VIEW v_cpu_utilization_stats AS SELECT " + list + " FROM cpu_utilization_stats;" +
-                "CREATE TEMP TABLE old_cpu AS SELECT * FROM cpu_utilization_stats WHERE server_id = " + idA + " LIMIT 1;" +
-                "UPDATE old_cpu SET collection_id = 999001, collection_time = now() - interval '3 days';" +
-                "INSERT INTO cpu_utilization_stats SELECT * FROM old_cpu", connection);
-            await swap.ExecuteNonQueryAsync(ct);
+            await using var idle = new NpgsqlCommand(
+                "UPDATE cpu_utilization_stats SET sqlserver_cpu_utilization = 8 WHERE server_id = " + idA, connection);
+            await idle.ExecuteNonQueryAsync(ct);
         }
 
-        var failed = new System.Collections.Generic.List<string>();
-        var after = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(
-            dataSource, idA, 1000m, TimeoutSeconds, (label, _) => failed.Add(label), cancellationToken: ct);
-
-        Assert.DoesNotContain("VM right-sizing", failed);
-        Assert.Contains(after, r => r.Category == "Hardware" && r.Finding.StartsWith("CPU:", StringComparison.Ordinal));
+        util = await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(dataSource, idA, TimeoutSeconds, ct);
+        Assert.Equal(ProvisioningVerdict.OverProvisioned, util!.ProvisioningStatus);
+        var idleRecs = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, idA, 1000m, TimeoutSeconds, cancellationToken: ct);
+        var cpuRow = Assert.Single(idleRecs, r => r.Finding.StartsWith("CPU", StringComparison.Ordinal));
+        Assert.Contains($"P95 = {util.P95CpuPct:N1}%", cpuRow.Finding, StringComparison.Ordinal);
+        Assert.Contains("16 logical CPUs", cpuRow.Finding + cpuRow.Detail, StringComparison.Ordinal);
     }
 }

@@ -306,7 +306,9 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
                 /* The three SQL Server histories answer through the one NoChanges helper, whose word is empty; the nine system_health
                    reads through EmptyAsync, whose rungs all answer empty or unavailable. */
                 var answersIt = body.Contains("\"" + word + "\"", StringComparison.Ordinal)
-                    || (word == "empty" && (body.Contains("NoChanges(", StringComparison.Ordinal) || body.Contains("EmptyAsync(", StringComparison.Ordinal)));
+                    || (word == "empty" && (body.Contains("NoChanges(", StringComparison.Ordinal) || body.Contains("EmptyAsync(", StringComparison.Ordinal)
+                        /* #5633 item 19: get_trace_flag_changes answers through NoTraceFlagChanges, which is NoChanges unless a successful empty run says no flag is on (then "empty" itself). */
+                        || body.Contains("NoTraceFlagChanges(", StringComparison.Ordinal)));
                 Assert.True(answersIt, read + " is admitted for " + word + " but its tool never answers it");
             }
             else

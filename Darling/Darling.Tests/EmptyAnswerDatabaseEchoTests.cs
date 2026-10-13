@@ -72,7 +72,7 @@ public sealed class EmptyAnswerDatabaseEchoTests
     [Theory]
     [InlineData("DarlingMcpLongQueryTools.cs", 1)]
     [InlineData("DarlingMcpPlanCorrectionTools.cs", 1)]
-    [InlineData("DarlingMcpQueryStoreClutterTools.cs", 2)]
+    [InlineData("DarlingMcpQueryStoreClutterTools.cs", 3)] // #5633 review (finding D): the third is the empty page naming the databases the read left out; it keeps the database echo.
     public void EmptyAnswers_GoThroughStatusForDatabase(string file, int expected)
     {
         var source = Tool(file);

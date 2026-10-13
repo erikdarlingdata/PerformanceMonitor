@@ -52,21 +52,14 @@ public partial class RemoteCollectorService
         => RunCollectorDefinitionAsync(QueryStoreHealthCollector.Instance, server, cancellationToken);
 
     /// <summary>
-    /// Collects active trace flags via the shared <see cref="TraceFlagsCollector"/> definition.
-    /// Wrapped in a permission-tolerant catch — DBCC may be denied — so a failure degrades to
-    /// zero rows with a warning, exactly as the original collector did. On-load only.
+    /// Collects active trace flags via the shared <see cref="TraceFlagsCollector"/> definition. On-load only.
+    /// <para>#5633 item 19: no catch of its own. This used to swallow every SqlException into 0 rows, which logged the run
+    /// SUCCESS, and a SUCCESS run with 0 rows is now read as "no flag is enabled" (the trace-flag change diff, get_trace_flags and
+    /// the analysis attribution), so a denied DBCC or a timeout read as every flag turned off. A failure now reaches
+    /// <c>RunCollectorAsync</c>, which records PERMISSIONS for a denied permission and ERROR otherwise, like every other
+    /// collector. Azure SQL Database, where DBCC TRACESTATUS is not supported, never reaches this: the collector's
+    /// <c>AppliesTo</c> gate skips it (SKIPPED).</para>
     /// </summary>
-    private async Task<int> CollectTraceFlagsAsync(ServerConnection server, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await RunCollectorDefinitionAsync(TraceFlagsCollector.Instance, server, cancellationToken);
-        }
-        catch (SqlException ex)
-        {
-            _logger?.LogWarning("Failed to collect trace flags on '{Server}' (may lack DBCC permissions): {Message}",
-                server.DisplayName, ex.Message);
-            return 0;
-        }
-    }
+    private Task<int> CollectTraceFlagsAsync(ServerConnection server, CancellationToken cancellationToken)
+        => RunCollectorDefinitionAsync(TraceFlagsCollector.Instance, server, cancellationToken);
 }

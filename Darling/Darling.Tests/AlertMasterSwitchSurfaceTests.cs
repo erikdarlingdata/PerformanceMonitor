@@ -138,6 +138,11 @@ public sealed class AlertMasterSwitchSurfaceTests
 
         /* The user-authored rules (#3464 gated them): the public entry consults the injected master
            switch before the rule load; the deliver site sits two private hops below it, chain pinned. */
+        /* #5654: the external-alert drain's deliver seam, handed to the drain in the worker's loop method. The drain
+           claims and sends only while its master switch (passed in ahead of the deliver seam) reads on; with the
+           switch off the pass only expires rows. */
+        new("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "RunCollectionLoopAsync", 1, GateMode.Inline,
+            "alertsEnabled: () => alertSettings.AlertsEnabled"),
         new("Darling/PerformanceMonitor.Darling.Service/CustomAlertEvaluator.cs", "DeliverFireAsync", 1, GateMode.GatedCaller,
             "reached only via EvaluateRuleForServerAsync from EvaluateServerAsync, whose _alertsEnabled() gate is pinned"),
 

@@ -96,12 +96,14 @@ public sealed class MuteRuleClientAppTests
         Assert.Contains("client_app_pattern", ViewerDataService.MuteRuleInsertSql, StringComparison.Ordinal);
         Assert.Contains("client_app_pattern = $12", ViewerDataService.MuteRuleUpdateSql, StringComparison.Ordinal);
 
-        /* The service store: the same three statements, 13 bound insert values and 12 update values. */
+        /* The service store: the same three statements, with the external_source column (V180, #5654) after the client
+           application column: 14 bound insert values and 13 update values. */
         var store = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "PgMuteRuleStore.cs");
-        Assert.Contains("job_name_pattern, server_id, client_app_pattern\nFROM config_mute_rules", store, StringComparison.Ordinal);
-        Assert.Contains("job_name_pattern, server_id, client_app_pattern)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)", store, StringComparison.Ordinal);
-        Assert.Contains("server_id = $11, client_app_pattern = $12", store, StringComparison.Ordinal);
+        Assert.Contains("job_name_pattern, server_id, client_app_pattern, external_source\nFROM config_mute_rules", store, StringComparison.Ordinal);
+        Assert.Contains("job_name_pattern, server_id, client_app_pattern, external_source)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", store, StringComparison.Ordinal);
+        Assert.Contains("server_id = $11, client_app_pattern = $12,\n    external_source = $13", store, StringComparison.Ordinal);
         Assert.Contains("ClientAppPattern = reader.IsDBNull(12)", store, StringComparison.Ordinal);
+        Assert.Contains("ExternalSource = reader.IsDBNull(13)", store, StringComparison.Ordinal);
 
         /* A rule narrowed only by client application is not the whole-server silence the fleet bell reads. */
         var fleet = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingFleetReader.cs");
@@ -187,9 +189,11 @@ public sealed class MuteRuleClientAppTests
     public void TheMcpToolsNameTheClientAppParameter_InCreateAndTheUpdateFieldList()
     {
         var mcp = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs");
-        Assert.Contains("string? client_app_pattern = null) =>", mcp, StringComparison.Ordinal);
+        /* The create tool's parameter list ends with client_app_pattern and then external_source (V180, #5654). */
+        Assert.Contains("string? client_app_pattern = null,\n", mcp, StringComparison.Ordinal);
+        Assert.Contains("string? external_source = null) =>", mcp, StringComparison.Ordinal);
         Assert.Contains("client_app_pattern = r.ClientAppPattern,", mcp, StringComparison.Ordinal);
-        Assert.Contains("wait_type_pattern, job_name_pattern, client_app_pattern, reason, expires_at_utc.", mcp, StringComparison.Ordinal);
+        Assert.Contains("metric_name, external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, \" +", mcp, StringComparison.Ordinal);
     }
 
     /// <summary>Live round trip over the real store: the column V179 adds is written by insert, rewritten by update,

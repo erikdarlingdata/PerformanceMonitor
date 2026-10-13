@@ -1090,6 +1090,18 @@ ALTER TABLE config.config_alert_settings
     private const string V178Sql = QueryStoreWatermarks.CreateSql;
 
     /// <summary>
+    /// V180 (#5654) — the tables for alerts that another service raises through Darling's channels, routes and mute rules:
+    /// <c>config.external_alert_source</c> (the registry that maps a login role to a source name), <c>config.external_alert_pending</c>
+    /// (the queue the provisioned function appends to and the service drains) and <c>config.external_alert_state</c> (which keys are
+    /// firing), plus <c>config.config_mute_rules.external_source</c>, so a mute rule can name a source. The text is on
+    /// <see cref="ExternalAlertTables"/>, which the rung embeds. All three tables are created empty, so nothing is moved, and the
+    /// column is nullable with no default: one catalog-only <c>ADD COLUMN</c>, and every stored rule keeps its effect (NULL names no
+    /// source). No GRANT here: the <c>config</c> schema's blanket SELECT covers the tables, and owner-only writes, and the one EXECUTE
+    /// each source role holds, are provisioning's, re-asserted on every start. <b>No Lite twin:</b> Lite has no PostgreSQL store.
+    /// </summary>
+    private static readonly string V180Sql = ExternalAlertTables.CreateSql;
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1380,6 +1392,7 @@ $rung$;";
         new Migration(177, "runnable-queue-alert-settings", V177Sql),
         new Migration(178, "query-store-watermarks", V178Sql),
         new Migration(179, "client-timeouts-alert", V179Sql),
+        new Migration(180, "external-alerts", V180Sql),
     };
 
     /// <summary>

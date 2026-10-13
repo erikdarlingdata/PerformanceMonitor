@@ -1,0 +1,75 @@
+# The ONE Lite path gate, the Lite counterpart of .github/darling-paths-filter.yml (#5669). Three readers
+# evaluate THIS text and no other copy of it:
+#   - each leg of the `lite-tests` matrix in .github/workflows/build.yml (its "Detect changed paths" step reads
+#     it through dorny/paths-filter's documented `filters: <relative path>` form, then "Decide how much of the
+#     Lite suite runs" turns the answers into full / reads / none);
+#   - the `lite-scope` job, which runs the same dorny step over the pull request's files AND asks
+#     .github/scripts/ci-select.py `lite-mode` (the Python matcher, which reads this file too, and so do its
+#     failure-corpus replay and the test-map shadow check). The Lite shards are skipped only when both engines
+#     say nothing here matched; any disagreement runs them;
+#   - the pins in Lite.Tests CrossAppGuardCiGateTests, DarlingReadsTraitGuardTests and WatermarkPolicyTests.
+#
+# These were inline in the lite-tests job, byte copies of the build job's root / core / lite filters. The copies
+# stay a copy: CrossAppGuardCiGateTests.TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs pins this file's
+# root_shard, core_shard and lite_shard + darling_reads_shard equal to the build job's own sets. Two engines
+# (picomatch in dorny, the Python matcher in ci-select.py) read the same patterns from this one file, so a
+# pattern edit cannot reach one engine and not the other. It lives outside .github/workflows/ deliberately:
+# anything inside that directory is parsed as a workflow.
+#
+# The REASONING for every entry lives at the build job's own filter block and is not duplicated here:
+# duplicated prose is prose that rots out of step. What matters is that the sets stay identical, so the shards
+# run the Lite suite in exactly the cases the build job's step used to, or the split loses coverage silently.
+# That includes the entries that look foreign to Lite (the three Darling trees): Lite.Tests reads those files
+# in its cross-app and docs guards, so an edit there has to reach this suite.
+#
+# Every area pattern is `dir/**/!(*.md)`, any non-markdown file under the area, and NOT a `dir/**` include plus
+# a bare `!**/*.md` exclude: dorny evaluates each pattern as an INDEPENDENT predicate, so a bare negation is its
+# own rule meaning "any non-markdown file anywhere" (see .github/darling-paths-filter.yml for the measured case).
+root_shard:
+  - 'PerformanceMonitor.sln'
+  - 'Directory.Build.props'
+  - 'global.json'
+  - 'nuget.config'
+  - 'NuGet.config'
+  - '.github/workflows/build.yml'
+core_shard:
+  - 'PerformanceMonitor.Alerting/**/!(*.md)'
+  - 'PerformanceMonitor.Analysis/**/!(*.md)'
+  - 'PerformanceMonitor.Collectors/**/!(*.md)'
+  - 'PerformanceMonitor.Common/**/!(*.md)'
+  - 'PerformanceMonitor.Notifications/**/!(*.md)'
+  - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
+  - 'PerformanceMonitor.Ui/**/!(*.md)'
+lite_shard:
+  - 'Lite/**/!(*.md)'
+  - 'Lite.Tests/**/!(*.md)'
+  # #5616: the Lite shard script and its packer are test inputs (Lite.Tests CrossAppGuardCiGateTests parses the script), so an edit to either has to reach the Lite suite.
+  - '.github/scripts/run-lite-shard.ps1'
+  - '.github/scripts/lite-shard-pack.py'
+  # #5656: Lite.Tests pins read install/ scripts as source (CpuSchedulerStatsCollectorDefinitionTests reads install/17,
+  # DmvResourceDatabaseSentinelTests reads install/56). A PR that edits only an install script fires `installer`
+  # and `sql-validation`, neither of which runs Lite.Tests, so the nightly would be the first to catch drift.
+  - 'install/**/!(*.md)'
+  # #5669: this file decides whether the Lite shards start at all, so an edit to it has to reach the suite.
+  - '.github/lite-paths-filter.yml'
+# The rest of the build job's `lite` set: the three Darling trees Lite.Tests reads as source.
+# A diff that reaches ONLY these (no lite_shard, core_shard or root_shard entry) runs just the
+# Lite.Tests classes tagged [Trait("Reads", "Darling")], in one shard; see the scope step below.
+# lite_shard followed by darling_reads_shard is the build job's `lite` set, entry for entry.
+darling_reads_shard:
+  - 'Darling/PerformanceMonitor.Darling.Viewer/**/!(*.md)'
+  - 'Darling/Darling.Tests/**/!(*.md)'
+  - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
+# Darling.Tests files that Lite.Tests.csproj COMPILES into its own assembly. An edit to one
+# changes code that dozens of Lite.Tests classes run, not just text they read, so it takes the
+# whole suite. Not part of the build job's `lite` set (those entries are covered there by the
+# Darling.Tests tree); DarlingReadsTraitGuardTests pins this list to the project's linked compiles.
+lite_linked_shard:
+  - 'Darling/Darling.Tests/CSharpSourceWalker.cs'
+  - 'Darling/Darling.Tests/McpInProcessHost.cs'
+  - 'Darling/Darling.Tests/McpArgumentTypeRows.cs'
+  - 'Darling/Darling.Tests/StatementScrubCanary.cs'
+  - 'Darling/Darling.Tests/GuardStageScanner.cs'
+  - 'Darling/Darling.Tests/StaTestThread.cs'
+  - 'Darling/Darling.Tests/TimingTestScanner.cs'
+  - 'Darling/Darling.Tests/WpfExitSwitchTests.cs'

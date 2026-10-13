@@ -663,6 +663,7 @@ public static class ShowPlanParser
         // Statement-level metadata from QueryPlan attributes
         stmt.CachedPlanSizeKB = ParseLong(queryPlanEl.Attribute("CachedPlanSize")?.Value);
         stmt.DegreeOfParallelism = (int)ParseDouble(queryPlanEl.Attribute("DegreeOfParallelism")?.Value);
+        stmt.HasDegreeOfParallelism = queryPlanEl.Attribute("DegreeOfParallelism") != null; // #5633: absent is unknown, not 0
         stmt.NonParallelPlanReason = queryPlanEl.Attribute("NonParallelPlanReason")?.Value;
         stmt.RetrievedFromCache = stmtEl.Attribute("RetrievedFromCache")?.Value is "true" or "1";
         stmt.CompileTimeMs = ParseLong(queryPlanEl.Attribute("CompileTime")?.Value);

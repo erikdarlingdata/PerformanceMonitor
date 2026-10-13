@@ -264,7 +264,7 @@
                 <!-- Server List -->
                 <!-- #2020 2b-i-b: a ListBox rendering the FleetView projection (group headers + servers)
                      via the template selector, replacing the flat ListView of ServerConnection rows. -->
-                <ListBox Grid.Row="1" x:Name="ServerListView"
+                <ListBox Grid.Row="1" x:Name="ServerListView" AutomationProperties.AutomationId="ServerPicker"
                          SelectionMode="Single"
                          SelectionChanged="ServerListView_SelectionChanged"
                          MouseDoubleClick="ServerListView_MouseDoubleClick"
@@ -453,7 +453,7 @@
                                                                      ToolTip="{Binding StatusTooltip}"
                                                                      VerticalAlignment="Center"/>
                                                         </StackPanel>
-                                                        <TextBlock Text="{Binding DisplayName}" FontSize="16" FontWeight="SemiBold"
+                                                        <TextBlock Text="{Binding DisplayName}" AutomationProperties.AutomationId="OverviewServerCardName" FontSize="16" FontWeight="SemiBold"
                                                                    TextTrimming="CharacterEllipsis"
                                                                    Foreground="{DynamicResource ForegroundBrush}"/>
                                                     </DockPanel>

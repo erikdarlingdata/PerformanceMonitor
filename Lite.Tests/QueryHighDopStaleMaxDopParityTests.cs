@@ -64,9 +64,9 @@ public sealed class QueryHighDopStaleMaxDopParityTests
     /// literal Darling's twin declares, and the meta-pin below compares the two.
     /// </summary>
     internal const string CanonicalStaleMaxDopGuard =
-        "COUNT(CASE WHEN v.max_dop > 8 " +
+        "COUNT(DISTINCT CASE WHEN v.max_dop > 8 " +
         "AND (m.value_in_use IS NULL OR m.value_in_use = 0 OR v.max_dop <= m.value_in_use) " +
-        "THEN 1 END) AS high_dop_queries";
+        "THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS high_dop_queries";
 
     /// <summary>
     /// Copies of the cross-check in Lite's analysis tree. Darling's twin declares this same number as its
@@ -105,7 +105,7 @@ public sealed class QueryHighDopStaleMaxDopParityTests
     /// WITHOUT the cross-check still lands here.
     /// </summary>
     private static readonly Regex HighDopCount = new(
-        @"COUNT\([ \t]*CASE[ \t]+WHEN[ \t]+(?:[A-Za-z_]\w*\.)?max_dop[ \t]*(?<floorOp>>=?)[ \t]*(?<floor>\d+)",
+        @"COUNT\([ \t]*(?:DISTINCT[ \t]+)?CASE[ \t]+WHEN[ \t]+(?:[A-Za-z_]\w*\.)?max_dop[ \t]*(?<floorOp>>=?)[ \t]*(?<floor>\d+)",
         RegexOptions.IgnoreCase);
 
     /// <summary>
@@ -115,11 +115,12 @@ public sealed class QueryHighDopStaleMaxDopParityTests
     /// blank line or a reordering cannot slide past.
     /// </summary>
     private static readonly Regex StaleMaxDopGuard = new(
-        @"COUNT\([ \t]*CASE[ \t]+WHEN[ \t]+v\.max_dop[ \t]*(?<floorOp>>=?)[ \t]*(?<floor>\d+)[ \t]*\r?\n"
+        @"COUNT\([ \t]*DISTINCT[ \t]+CASE[ \t]+WHEN[ \t]+v\.max_dop[ \t]*(?<floorOp>>=?)[ \t]*(?<floor>\d+)[ \t]*\r?\n"
         + @"[ \t]*AND[ \t]+\([ \t]*m\.value_in_use[ \t]+IS[ \t]+NULL[ \t]+OR[ \t]+"
         + @"m\.value_in_use[ \t]*=[ \t]*(?<unlimited>\d+)[ \t]+OR[ \t]+"
         + @"v\.max_dop[ \t]*<=[ \t]*m\.value_in_use[ \t]*\)[ \t]*\r?\n"
-        + @"[ \t]*THEN[ \t]+1[ \t]+END\)[ \t]+AS[ \t]+high_dop_queries",
+        + @"[ \t]*THEN[ \t]+COALESCE\(v\.database_name,[ \t]*''\)[ \t]*\|\|[ \t]*'/'[ \t]*\|\|[ \t]*COALESCE\(v\.query_hash,[ \t]*''\)"
+        + @"[ \t]+END\)[ \t]+AS[ \t]+high_dop_queries",
         RegexOptions.IgnoreCase);
 
     /// <summary>
@@ -338,13 +339,13 @@ public sealed class QueryHighDopStaleMaxDopParityTests
            tree is CRLF, so both have to reduce to one answer. */
         string[] shipped =
         [
-            "    COUNT(CASE WHEN v.max_dop > 8\r\n"
+            "    COUNT(DISTINCT CASE WHEN v.max_dop > 8\r\n"
             + "                AND (m.value_in_use IS NULL OR m.value_in_use = 0 OR v.max_dop <= m.value_in_use)\r\n"
-            + "               THEN 1 END) AS high_dop_queries,\r\n",
+            + "               THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS high_dop_queries,\r\n",
 
-            "    COUNT(CASE WHEN v.max_dop > 8\n"
+            "    COUNT(DISTINCT CASE WHEN v.max_dop > 8\n"
             + "                AND (m.value_in_use IS NULL OR m.value_in_use = 0 OR v.max_dop <= m.value_in_use)\n"
-            + "               THEN 1 END) AS high_dop_queries,\n",
+            + "               THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS high_dop_queries,\n",
         ];
 
         foreach (var sql in shipped)

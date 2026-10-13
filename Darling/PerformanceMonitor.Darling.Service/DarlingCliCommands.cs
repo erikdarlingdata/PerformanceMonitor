@@ -225,6 +225,22 @@ public static class DarlingCliCommands
         string.Equals(arg, "--add-server", StringComparison.OrdinalIgnoreCase)
         || string.Equals(arg, "--add-servers", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="AddAlertSourceAsync"/> handles: make a source for external alerts, a login of its own that can submit alerts and nothing else (#5654).</summary>
+    public static bool IsAddAlertSourceVerb(string arg) =>
+        string.Equals(arg, "--add-alert-source", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="RotateAlertSourceAsync"/> handles: give a source a new password (#5654).</summary>
+    public static bool IsRotateAlertSourceVerb(string arg) =>
+        string.Equals(arg, "--rotate-alert-source", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="RemoveAlertSourceAsync"/> handles: drop a source's login and its registry row (#5654).</summary>
+    public static bool IsRemoveAlertSourceVerb(string arg) =>
+        string.Equals(arg, "--remove-alert-source", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="ListAlertSourcesAsync"/> handles: list the sources and how they are doing (#5654).</summary>
+    public static bool IsListAlertSourcesVerb(string arg) =>
+        string.Equals(arg, "--list-alert-sources", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The verb <see cref="ToggleCollectorAsync"/> handles with <c>enable: true</c> — turn one collector ON in the
     /// store's schedule overrides, fleet-wide or for one server (#3752). Until this verb the only writer of that
     /// flag was the WPF Viewer's Collector Schedules window, which needs an interactive desktop and the
@@ -358,6 +374,10 @@ public static class DarlingCliCommands
         || IsCollapseLegacySlicesVerb(arg)
         || IsRecompressPlanDimVerb(arg)
         || IsAddServerVerb(arg)
+        || IsAddAlertSourceVerb(arg)
+        || IsRotateAlertSourceVerb(arg)
+        || IsRemoveAlertSourceVerb(arg)
+        || IsListAlertSourcesVerb(arg)
         || IsEnableCollectorVerb(arg)
         || IsDisableCollectorVerb(arg)
         || IsSetCollectorRunAtVerb(arg)
@@ -442,6 +462,10 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --add-alert-source <name> [--config <path>]      Make a source for external alerts: a login that can send alerts and do nothing else. Prints its connection string ONCE; Darling keeps no copy. <name> is 2-31 characters: a letter, then lower-case letters, digits or underscores." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --rotate-alert-source <name> [--config <path>]   Give a source a new password and print its connection string once. The old password stops working." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --remove-alert-source <name> [--config <path>]   Drop a source's login and remove it, along with any alerts of its that are still queued. Alerts it already sent stay in the history." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --list-alert-sources [--config <path>]           List the sources: name, created, last alert sent and alerts not yet delivered. Never shows a password." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --set-collector-run-at <collector> <HH:MM|none|default> [--server <server>] [--config <path>]   Set the time of day (the monitored server's own clock) a collector that runs once a day or less often starts; none stops a fixed time, default clears the row's time so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the run time changes. The running service applies it within one sweep." + Environment.NewLine +
@@ -1425,13 +1449,27 @@ public static class DarlingCliCommands
            An explicitly-invalid value is a hard error: the store degrades to loopback for it, so no remote
            connection exists at all. */
         var network = postgres.Network;
-        var roles = DarlingNetwork.NormalizeNetworkRoles(network?.Role);
-        if (roles is null || roles.Count == 0)
+        var allRoles = DarlingNetwork.NormalizeNetworkRoles(network?.Role);
+        if (allRoles is null || allRoles.Count == 0)
         {
             error.WriteLine(
                 $"postgres.network.role '{network?.Role}' is invalid — it must be \"viewer\" (default, read-only), " +
-                $"\"admin\", or both (e.g. \"admin,viewer\"). The store degrades to loopback for an unknown role, so " +
-                $"there is no remote connection to {action}.");
+                $"\"admin\", \"sources\" (external alert source logins), or several (e.g. \"admin,viewer\"). The store " +
+                $"degrades to loopback for an unknown role, so there is no remote connection to {action}.");
+            return null;
+        }
+
+        /* #5654: "sources" admits the external alert source logins, which are not a viewer seat: each source's connection
+           string comes from --add-alert-source, and there is no credential file for it here. */
+        var roles = allRoles
+            .Where(r => !string.Equals(r, DarlingManagedPostgres.AlertSourcesNetworkToken, StringComparison.Ordinal))
+            .ToList();
+        if (roles.Count == 0)
+        {
+            error.WriteLine(
+                $"postgres.network.role admits only external alert source logins (\"sources\"), so there is no viewer seat " +
+                $"to {action}. Add \"viewer\" or \"admin\" to the field for a remote Viewer; a source's connection string " +
+                "comes from --add-alert-source.");
             return null;
         }
 
@@ -1451,9 +1489,7 @@ public static class DarlingCliCommands
            Every credential and the cert live in the same directory (ParentOf(dataDirectory)), so the cert
            path is role-independent. */
         var dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(postgres);
-        var certificatePath = Path.Combine(
-            Path.GetDirectoryName(DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory))!,
-            DarlingManagedPostgres.ServerCertFileName);
+        var certificatePath = ManagedStoreCertificatePath(dataDirectory);
 
         var handoffs = new List<ViewerHandoff>(roles.Count);
         foreach (var role in roles)
@@ -2242,6 +2278,15 @@ public static class DarlingCliCommands
         $"Host={host};Port={port};Username={role};Password={password};Database=darling;" +
         $"Search Path=collect,config,public;SSL Mode=VerifyFull;Root Certificate={rootCertificatePath}";
 
+    /// <summary>
+    /// The managed store's TLS certificate (the PEM a remote client names in <c>Root Certificate</c>), beside the role credentials
+    /// in the parent of the data directory. The viewer handoff and the alert source verbs (#5654) both name this file.
+    /// </summary>
+    internal static string ManagedStoreCertificatePath(string dataDirectory) =>
+        Path.Combine(
+            Path.GetDirectoryName(DarlingManagedPostgres.ViewerCredentialPathFor(dataDirectory))!,
+            DarlingManagedPostgres.ServerCertFileName);
+
     /* ================================================================================================
        --configure-network: the interactive opt-in exposure wizard (#1561).
 
@@ -2782,9 +2827,10 @@ public static class DarlingCliCommands
             }
 
             output.WriteLine("Remote pg_hba role(s): 'viewer' (read-only, the secure default), 'admin' (remote WRITES),");
-            output.WriteLine("or BOTH as 'admin,viewer' — that writes one hostssl rule per role inside the managed block, so");
-            output.WriteLine("an admin seat and read-only seats can reach the same store and a later CIDR narrowing tightens");
-            output.WriteLine("all of them together (#2665).");
+            output.WriteLine("'sources' (external alert source logins, made by --add-alert-source), or several, e.g.");
+            output.WriteLine("'admin,viewer' or 'viewer,sources' — that writes one hostssl rule per role inside the managed");
+            output.WriteLine("block, so the seats and sources can reach the same store and a later CIDR narrowing tightens");
+            output.WriteLine("all of them together (#2665, #5654).");
             var role = Prompt(input, output, "Role(s)", "viewer");
             if (role is null)
             {
@@ -6319,6 +6365,478 @@ public static class DarlingCliCommands
         }
 
         return exitCode;
+    }
+
+    /* ───────────────────── --add / --rotate / --remove / --list -alert-source (#5654) ───────────────────── */
+
+    /// <summary>
+    /// Parses the alert source verbs' arguments STRICTLY (the posture <see cref="TryParseCollectorToggleArgs"/> takes): one
+    /// bare argument, the source name, for the three verbs that need one, none for <c>--list-alert-sources</c>; <c>--config
+    /// &lt;path&gt;</c> takes a value; anything else starting with '-' is refused rather than taken as a name. Pure so the
+    /// grammar pins. Returns false with a ready-to-print <paramref name="errorMessage"/>.
+    /// </summary>
+    /// <param name="verb">The verb as typed (for the messages).</param>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    /// <param name="takesName">Whether the verb takes a source name.</param>
+    public static bool TryParseAlertSourceArgs(
+        string verb, string[] rest, bool takesName, out string? sourceName, out string? configPath, out string? errorMessage)
+    {
+        sourceName = null;
+        configPath = null;
+        errorMessage = null;
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (string.Equals(arg, "--config", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                {
+                    errorMessage = $"--config needs a path: {verb}{(takesName ? " <name>" : string.Empty)} --config <path to darling.json>";
+                    return false;
+                }
+
+                configPath = rest[++i];
+                continue;
+            }
+
+            if (arg.StartsWith('-'))
+            {
+                errorMessage = $"Unknown option for {verb}: {arg}";
+                return false;
+            }
+
+            if (!takesName)
+            {
+                errorMessage = $"{verb} takes no name; got '{arg}'.";
+                return false;
+            }
+
+            if (sourceName is not null)
+            {
+                errorMessage = $"{verb} takes ONE source name; got '{sourceName}' and '{arg}'.";
+                return false;
+            }
+
+            sourceName = arg;
+        }
+
+        if (takesName && string.IsNullOrWhiteSpace(sourceName))
+        {
+            errorMessage = $"{verb} needs a source name.";
+            return false;
+        }
+
+        if (takesName && !ExternalAlertSourceAdmin.IsValidName(sourceName))
+        {
+            errorMessage = $"'{sourceName}' is not a valid source name: use 2 to 31 characters, a lower-case letter first, then lower-case letters, digits or underscores.";
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary><c>--add-alert-source &lt;name&gt;</c>: see <see cref="ExternalAlertSourceAdmin.AddAsync"/>. Prints the connection string once.</summary>
+    public static Task<int> AddAlertSourceAsync(string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken) =>
+        RunAlertSourceVerbAsync("--add-alert-source", rest, takesName: true, output, error, cancellationToken);
+
+    /// <summary><c>--rotate-alert-source &lt;name&gt;</c>: see <see cref="ExternalAlertSourceAdmin.RotateAsync"/>. Prints the new connection string once.</summary>
+    public static Task<int> RotateAlertSourceAsync(string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken) =>
+        RunAlertSourceVerbAsync("--rotate-alert-source", rest, takesName: true, output, error, cancellationToken);
+
+    /// <summary><c>--remove-alert-source &lt;name&gt;</c>: see <see cref="ExternalAlertSourceAdmin.RemoveAsync"/>.</summary>
+    public static Task<int> RemoveAlertSourceAsync(string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken) =>
+        RunAlertSourceVerbAsync("--remove-alert-source", rest, takesName: true, output, error, cancellationToken);
+
+    /// <summary><c>--list-alert-sources</c>: see <see cref="ExternalAlertSourceAdmin.ListAsync"/>.</summary>
+    public static Task<int> ListAlertSourcesAsync(string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken) =>
+        RunAlertSourceVerbAsync("--list-alert-sources", rest, takesName: false, output, error, cancellationToken);
+
+    /// <summary>
+    /// The one body behind the four alert source verbs: parse, open the store as its owner (the connection
+    /// <see cref="ToggleCollectorAsync"/> opens, so a refusal reads the same), run the verb on one connection and print the outcome.
+    /// Exit codes are <see cref="CollectorToggleExitCode"/>'s: 1 for a usage, configuration or name problem, 2 when the store
+    /// cannot be reached or refuses the change.
+    /// </summary>
+    private static async Task<int> RunAlertSourceVerbAsync(
+        string verb, string[] rest, bool takesName, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        if (!TryParseAlertSourceArgs(verb, rest, takesName, out var sourceName, out var configPath, out var parseError))
+        {
+            error.WriteLine(parseError);
+            output.WriteLine($"Usage: {verb}{(takesName ? " <name>" : string.Empty)} [--config <path to darling.json>]");
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        var created = TryCreateCollectorStoreDataSource(verb, configPath, error);
+        if (created is null)
+        {
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        /* The config already loaded once inside TryCreateCollectorStoreDataSource; read again here for the network block,
+           which the add and rotate text describe (whether a source on another machine is admitted). */
+        PostgresConfig? postgres = null;
+        try
+        {
+            postgres = DarlingConfig.Load(configPath).Postgres;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            postgres = null;
+        }
+
+        await using var dataSource = created;
+        try
+        {
+            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            return await RunAlertSourceVerbAsync(verb, connection, sourceName, dataSource.ConnectionString, output, error, cancellationToken, postgres);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not change the alert sources in the store: {ex.Message}");
+            return CollectorToggleExitCode.StoreUnavailable;
+        }
+    }
+
+    /// <summary>The verb on an open owner connection, so a live test drives exactly what the command line does.</summary>
+    internal static async Task<int> RunAlertSourceVerbAsync(
+        string verb, NpgsqlConnection connection, string? sourceName, string storeConnectionString,
+        TextWriter output, TextWriter error, CancellationToken cancellationToken, PostgresConfig? postgres = null,
+        Func<NpgsqlConnection, CancellationToken, Task<IReadOnlyList<string>>>? readGroupExtras = null)
+    {
+        if (IsListAlertSourcesVerb(verb))
+        {
+            return PrintAlertSourceList(await ExternalAlertSourceAdmin.ListAsync(connection, cancellationToken), output, error);
+        }
+
+        var result = IsAddAlertSourceVerb(verb) ? await ExternalAlertSourceAdmin.AddAsync(connection, sourceName!, cancellationToken)
+            : IsRotateAlertSourceVerb(verb) ? await ExternalAlertSourceAdmin.RotateAsync(connection, sourceName!, cancellationToken)
+            : await ExternalAlertSourceAdmin.RemoveAsync(connection, sourceName!, cancellationToken);
+
+        /* The roles besides the source logins that a +darling_alert_sources pg_hba line would admit (#5654): what the
+           provisioning step could not revoke, read after it ran. The add and rotate text name each one. The verb has
+           committed by now, so a failure here is reported after the result (and its one-time password), never in its place. */
+        IReadOnlyList<string>? groupExtras = null;
+        if (!IsRemoveAlertSourceVerb(verb)
+            && result.Outcome is ExternalAlertSourceAdmin.Outcome.Done or ExternalAlertSourceAdmin.Outcome.NeedsDbaSql)
+        {
+            try
+            {
+                groupExtras = await (readGroupExtras ?? DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync)(connection, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                var group = DarlingManagedRoles.AlertSourceGroupRoleName;
+                var failure = $"The change above is committed, but the read of which other roles are members of {group} failed ({ex.Message}), "
+                    + $"so none is named above. Before a +{group} pg_hba line admits the group, list them as the store owner with:"
+                    + Environment.NewLine + DarlingManagedRoles.AlertSourceGroupExtrasSql(PgSchemaGenerator.ConfigSchema, registryExists: true).Trim();
+                result = result with { FollowUpFailure = result.FollowUpFailure is null ? failure : result.FollowUpFailure + Environment.NewLine + failure };
+            }
+        }
+
+        /* On the managed store the alert sources line written at the last service start is taken out of pg_hba.conf now,
+           and the server reloads it, rather than staying live until the next start. */
+        string? lineDropFailure = null;
+        if (postgres is { Managed: true } && groupExtras is { Count: > 0 })
+        {
+            lineDropFailure = await DarlingManagedPostgres.DropAlertSourcePgHbaLineAsync(
+                DarlingManagedPostgres.ResolveDataDirectory(postgres), connection, cancellationToken);
+        }
+
+        return PrintAlertSourceResult(verb, result, sourceName!, storeConnectionString, output, error, postgres, groupExtras, lineDropFailure);
+    }
+
+    /// <summary>Prints what an add, rotate or remove did, and returns the exit code. The only place a password is written, and only inside the connection string.</summary>
+    internal static int PrintAlertSourceResult(
+        string verb, ExternalAlertSourceAdmin.Result result, string sourceName, string storeConnectionString, TextWriter output, TextWriter error,
+        PostgresConfig? postgres = null, IReadOnlyList<string>? groupExtras = null, string? lineDropFailure = null)
+    {
+        switch (result.Outcome)
+        {
+            case ExternalAlertSourceAdmin.Outcome.InvalidName:
+                error.WriteLine($"'{sourceName}' is not a valid source name: use 2 to 31 characters, a lower-case letter first, then lower-case letters, digits or underscores.");
+                return CollectorToggleExitCode.UsageOrConfig;
+            case ExternalAlertSourceAdmin.Outcome.NoTables:
+                error.WriteLine("This store has no external alert tables yet. Start the Darling service once so it upgrades the store, then run this again.");
+                return CollectorToggleExitCode.UsageOrConfig;
+            case ExternalAlertSourceAdmin.Outcome.AlreadyRegistered:
+                error.WriteLine($"A source named '{sourceName}' already exists. Use --rotate-alert-source {sourceName} for a new password, or --remove-alert-source {sourceName} first.");
+                return CollectorToggleExitCode.UsageOrConfig;
+            case ExternalAlertSourceAdmin.Outcome.LoginExists:
+                error.WriteLine($"A database login named '{result.RoleName}' already exists and is not a registered source, so it was left alone. Pick another name, or drop that login first.");
+                return CollectorToggleExitCode.UsageOrConfig;
+            case ExternalAlertSourceAdmin.Outcome.NotRegistered:
+                error.WriteLine($"No source named '{sourceName}'. --list-alert-sources shows the sources there are.");
+                return CollectorToggleExitCode.UsageOrConfig;
+            case ExternalAlertSourceAdmin.Outcome.LoginNotManaged:
+                error.WriteLine($"The login '{result.RoleName}' is missing or was not made by --add-alert-source, so its password was not changed.");
+                return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        output.WriteLine();
+        if (IsRemoveAlertSourceVerb(verb))
+        {
+            output.WriteLine($"Source '{sourceName}' removed. It can no longer send alerts.");
+            output.WriteLine(result.LoginDropped
+                ? $"  Login '{result.RoleName}' dropped."
+                : $"  Login '{result.RoleName}' was not dropped: it is missing, or it was not made by --add-alert-source, or the statements below drop it.");
+            output.WriteLine($"  Removed with it: {result.RemovedRows} queued alert row(s), {result.RemovedUndelivered} of them not yet delivered. Alerts it already sent stay in the alert history.");
+            WriteEndedSessions(result, output);
+        }
+        else
+        {
+            var pending = result.Outcome == ExternalAlertSourceAdmin.Outcome.NeedsDbaSql;
+            output.WriteLine(IsRotateAlertSourceVerb(verb)
+                ? pending
+                    ? $"Source '{sourceName}': a new password was generated, and nothing is changed yet. It takes effect, and the old password stops working, only after a database administrator runs the statements below."
+                    : $"Source '{sourceName}': new password set. The old password no longer works for a new connection."
+                : pending
+                    ? $"Source '{sourceName}' is registered, and its login '{result.RoleName}' does not exist yet. A database administrator creates it with the statements below; until then the connection string does not work."
+                    : $"Source '{sourceName}' created (login '{result.RoleName}').");
+            WriteEndedSessions(result, output);
+            output.WriteLine();
+            output.WriteLine("Connection string (shown ONCE; Darling keeps no copy, so save it now. If it is lost, --rotate-alert-source makes a new one):");
+            output.WriteLine();
+            output.WriteLine("  " + ExternalAlertSourceAdmin.BuildSourceConnectionString(storeConnectionString, result.RoleName, result.Password!));
+            output.WriteLine();
+
+            /* #5654: a source on another machine always gets a string that verifies the server (SSL Mode=VerifyFull with a root
+               certificate), never the local string with only the host changed. */
+            var remote = BuildRemoteAlertSourceConnectionString(postgres, result.RoleName, result.Password!);
+            output.WriteLine("The string above is for a source on this machine. A source on another machine uses this one (also shown ONCE):");
+            output.WriteLine();
+            if (remote is null)
+            {
+                output.WriteLine("  " + ExternalAlertSourceAdmin.BuildRemoteSourceConnectionString(storeConnectionString, result.RoleName, result.Password!));
+                output.WriteLine();
+                output.WriteLine("It verifies the store's certificate (SSL Mode=VerifyFull). Replace the Root Certificate placeholder with the path, on the source");
+                output.WriteLine("machine, of the CA certificate that signed the store server's certificate. Host must be a name or address the store is reached at");
+                output.WriteLine("and that the server certificate carries.");
+            }
+            else
+            {
+                output.WriteLine("  " + remote.ConnectionString);
+                output.WriteLine();
+                output.WriteLine($"It verifies the store's certificate (SSL Mode=VerifyFull). Copy {remote.CertificatePath} to the source machine and point");
+                output.WriteLine("\"Root Certificate\" at the copy. Host must be a name or address the certificate carries.");
+                if (!remote.SourcesListed)
+                {
+                    output.WriteLine("It works once \"sources\" is listed in the store's network roles (postgres.network.role); until then the store admits no alert source from the network.");
+                }
+            }
+
+            foreach (var line in BuildAlertSourceNetworkNote(postgres, groupExtras, lineDropFailure))
+            {
+                output.WriteLine(line);
+            }
+
+            output.WriteLine("The source sends an alert with:  SELECT config.submit_external_alert('fire', 'key', 'warning', 'title', 'detail', 'server name', 1);");
+        }
+
+        if (result.Outcome == ExternalAlertSourceAdmin.Outcome.NeedsDbaSql)
+        {
+            output.WriteLine();
+            output.WriteLine(result.DbaReason is null
+                ? "This store's owner cannot make, change or drop logins (it lacks CREATEROLE)."
+                : $"The login step was not completed as this store's owner: {result.DbaReason}");
+            output.WriteLine(IsRotateAlertSourceVerb(verb)
+                ? "Nothing is applied yet. Have a database administrator run:"
+                : "The registry is updated and nothing of the login is applied yet. Have a database administrator run:");
+            output.WriteLine();
+            output.WriteLine(result.DbaSql);
+        }
+
+        if (result.ServerLogSettingsOn is not null)
+        {
+            /* #5654: the same warning step 0 of tools/provision-roles.sql gives when it may not turn the server log off. */
+            output.WriteLine();
+            output.WriteLine($"The server log records this store owner's statements ({result.ServerLogSettingsOn}), and this owner may not turn that off for its");
+            output.WriteLine("transaction, so the statement that set the login's password verifier was written to the server log.");
+        }
+
+        output.WriteLine();
+
+        /* #5654: a step after the commit that did not complete. The change and the password above stand; this says which step
+           and what to run, and the exit code stays success because the change itself is in effect. */
+        if (result.FollowUpFailure is not null)
+        {
+            error.WriteLine(result.FollowUpFailure);
+        }
+
+        return CollectorToggleExitCode.Success;
+    }
+
+    /// <summary>The sessions line of rotate and remove (#5654): how many open sessions of the login were ended, or the statement a database administrator runs when the owner may not end them.</summary>
+    private static void WriteEndedSessions(ExternalAlertSourceAdmin.Result result, TextWriter output)
+    {
+        if (result.SessionsEnded is { } ended)
+        {
+            output.WriteLine($"  Ended {ended} open session(s) of login '{result.RoleName}'.");
+        }
+        else if (result.EndSessionsSqlForDba is { } sql)
+        {
+            output.WriteLine($"  This store's owner may not end the open sessions of login '{result.RoleName}', so any it holds stay connected. Have a database administrator run:");
+            output.WriteLine("  " + sql);
+        }
+    }
+
+    /// <summary>A source's connection string for another machine, the certificate file it names, and whether the store's network roles list <c>sources</c> now.</summary>
+    internal sealed record RemoteAlertSourceString(string ConnectionString, string CertificatePath, bool SourcesListed);
+
+    /// <summary>
+    /// The connection string for a source on another machine (#5654), built exactly as the remote viewer's is
+    /// (<see cref="BuildViewerConnectionString"/>: the host <see cref="ResolveViewerHost"/> picks, SSL Mode=VerifyFull and the store's
+    /// own certificate as the root), with the source's login and password. For a managed store, whether or not
+    /// <c>postgres.network.role</c> lists <c>sources</c> yet (<see cref="RemoteAlertSourceString.SourcesListed"/>); null for a store
+    /// Darling does not manage, which gets <see cref="ExternalAlertSourceAdmin.BuildRemoteSourceConnectionString"/>. Pure: nothing is written or kept.
+    /// </summary>
+    internal static RemoteAlertSourceString? BuildRemoteAlertSourceConnectionString(PostgresConfig? postgres, string roleName, string password)
+    {
+        if (postgres is null || !postgres.Managed)
+        {
+            return null;
+        }
+
+        var roles = DarlingNetwork.NormalizeNetworkRoles(postgres.Network?.Role);
+        var sourcesListed = roles is not null && roles.Contains(DarlingManagedPostgres.AlertSourcesNetworkToken, StringComparer.Ordinal);
+        var certificatePath = ManagedStoreCertificatePath(DarlingManagedPostgres.ResolveDataDirectory(postgres));
+        return new RemoteAlertSourceString(
+            BuildViewerConnectionString(ResolveViewerHost(postgres.Network?.Listen), postgres.Port, roleName, password, certificatePath),
+            certificatePath,
+            sourcesListed);
+    }
+
+    /// <summary>
+    /// The add and rotate text's note on a source that runs on another machine (#5654): whether the store admits alert source
+    /// logins from the network now, and if not, the one change that does. On the managed store that is the <c>sources</c> token
+    /// in <c>postgres.network.role</c>, which writes <c>hostssl darling +darling_alert_sources &lt;allowFrom&gt; scram-sha-256</c>
+    /// into the managed pg_hba block; the suggested value keeps every role the field admits today. A bring-your-own store's own
+    /// pg_hba.conf decides, so the note names the line to add there. Pure.
+    /// <para><paramref name="groupExtras"/> are the roles besides the source logins that are members of the group at any depth
+    /// (<see cref="DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync"/>), which a <c>+</c> line admits too. Each is named:
+    /// on the managed store the verb has just taken the alert source line out of pg_hba.conf and reloaded the server
+    /// (<see cref="DarlingManagedPostgres.DropAlertSourcePgHbaLineAsync"/>), or, when <paramref name="lineDropFailure"/> says
+    /// it could not, the note says the line written at the last start stays live until the service restarts. A
+    /// bring-your-own store gets a <c>reject</c> line for each, to go above the group line.</para>
+    /// </summary>
+    internal static IReadOnlyList<string> BuildAlertSourceNetworkNote(PostgresConfig? postgres, IReadOnlyList<string>? groupExtras = null, string? lineDropFailure = null)
+    {
+        var lines = BuildAlertSourceNetworkNoteCore(postgres);
+        if (groupExtras is not { Count: > 0 })
+        {
+            return lines;
+        }
+
+        var group = DarlingManagedRoles.AlertSourceGroupRoleName;
+        var named = string.Join(", ", groupExtras.Select(role => $"'{role}'"));
+        var all = new List<string>(lines)
+        {
+            $"These roles are members of {group} too, directly or through a source login, and could not be removed (PostgreSQL 16 makes a role that is not a superuser a member of each role it creates): {named}.",
+        };
+        if (postgres is { Managed: true })
+        {
+            all.Add(lineDropFailure is null
+                ? $"The managed pg_hba block now holds no +{group} line (the verb took it out and reloaded pg_hba.conf if it was there), so no source connects from another machine. A superuser revokes the membership; each service start checks again and writes the line back only when no such role remains."
+                : $"The +{group} line could not be taken out of the live pg_hba rules here ({lineDropFailure}). The line written at the last service start stays live, and admits these roles from the allowed range, until the service restarts: restart it now, or have a superuser revoke the membership.");
+        }
+        else
+        {
+            all.Add($"A +{group} line admits them too. Put these lines ABOVE it, so they cannot connect from that range:");
+            all.AddRange(groupExtras.Select(role => $"  hostssl <database> {QuotePgHbaRole(role)} <range> reject"));
+        }
+
+        return all;
+    }
+
+    private static string QuotePgHbaRole(string role) => DarlingManagedPostgres.QuotePgHbaName(role);
+
+    private static IReadOnlyList<string> BuildAlertSourceNetworkNoteCore(PostgresConfig? postgres)
+    {
+        const string token = "sources";
+        if (postgres is null)
+        {
+            return new[] { $"A source on another machine is admitted only when postgres.network.role lists \"{token}\" (see the README's \"Alert sources on another machine\")." };
+        }
+
+        if (!postgres.Managed)
+        {
+            return new[]
+            {
+                $"This store is your own PostgreSQL, so its pg_hba.conf decides who connects from another machine. This line admits, from one range over TLS, each role that is a member of {DarlingManagedRoles.AlertSourceGroupRoleName} directly or through another role; Darling keeps those members to the registered alert source logins and names any other it cannot remove:",
+                $"  hostssl <database> +{DarlingManagedRoles.AlertSourceGroupRoleName} <range> scram-sha-256",
+            };
+        }
+
+        var network = postgres.Network;
+        var roles = DarlingNetwork.NormalizeNetworkRoles(network?.Role);
+        var exposed = DarlingNetwork.IsExposedListenAddress(network?.Listen);
+
+        if (roles is not null && roles.Contains(token, StringComparer.Ordinal) && exposed)
+        {
+            return new[]
+            {
+                $"postgres.network.role lists \"{token}\", so a source on another machine connects with TLS from {network!.AllowFrom} (postgres.network.allowFrom), to {network.Listen}.",
+            };
+        }
+
+        var lines = new List<string>();
+        if (roles is null)
+        {
+            lines.Add($"postgres.network.role '{network?.Role}' is not valid, so the store admits no connection from the network.");
+            lines.Add($"To admit alert sources from another machine, set \"role\": \"viewer,{token}\" in postgres.network.");
+        }
+        else if (!roles.Contains(token, StringComparer.Ordinal))
+        {
+            var suggested = string.Join(",", roles.Append(token));
+            lines.Add($"postgres.network.role does not list \"{token}\", so the store admits no alert source login from another machine.");
+            lines.Add($"To admit them, set \"role\": \"{suggested}\" in postgres.network (it keeps the roles admitted now).");
+        }
+        else
+        {
+            lines.Add($"postgres.network.role lists \"{token}\", but postgres.network.listen is not a network address, so the store is reachable only from this machine.");
+        }
+
+        if (!exposed)
+        {
+            lines.Add("postgres.network.listen and allowFrom must also be set: the store listens on that address and admits only that range.");
+        }
+
+        lines.Add("A service restart applies the change. The source then connects with TLS from the postgres.network.allowFrom range.");
+        return lines;
+    }
+
+    /// <summary>Prints the source table. No secret is in it.</summary>
+    internal static int PrintAlertSourceList(IReadOnlyList<ExternalAlertSourceAdmin.SourceRow>? rows, TextWriter output, TextWriter error)
+    {
+        if (rows is null)
+        {
+            error.WriteLine("This store has no external alert tables yet. Start the Darling service once so it upgrades the store, then run this again.");
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        output.WriteLine();
+        if (rows.Count == 0)
+        {
+            output.WriteLine("No alert sources. --add-alert-source <name> makes one.");
+            output.WriteLine();
+            return CollectorToggleExitCode.Success;
+        }
+
+        var nameWidth = Math.Max("SOURCE".Length, rows.Max(r => r.Name.Length));
+        output.WriteLine($"{"SOURCE".PadRight(nameWidth)}  {"STATE",-8}  {"CREATED (UTC)",-16}  {"LAST ALERT SENT (UTC)",-21}  UNDELIVERED");
+        foreach (var row in rows)
+        {
+            output.WriteLine(
+                $"{row.Name.PadRight(nameWidth)}  {(row.Enabled ? "enabled" : "disabled"),-8}  "
+                + $"{row.CreatedAt.UtcDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture),-16}  "
+                + $"{(row.LastSubmit is { } last ? last.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) : "never"),-21}  {row.Undelivered}");
+        }
+
+        output.WriteLine();
+        output.WriteLine("The last alert sent and the undelivered count come from the queue rows the store still keeps.");
+        output.WriteLine();
+        return CollectorToggleExitCode.Success;
     }
 
     /* ───────────────────── --enable-collector / --disable-collector (#3752) ───────────────────── */

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -43,7 +44,17 @@ public readonly record struct DatabaseFilter
     /// <summary>The kept names: null for "all", otherwise at least one, distinct, never blank.</summary>
     private readonly string[]? _names;
 
+    /// <summary>#5633 review L2 leftover: names a read must NOT cover, set only by <see cref="Excluding"/> on an <see cref="All"/>
+    /// filter. Null when nothing is excluded. Only the readers that carry <see cref="ExcludeClause"/> apply it.</summary>
+    private readonly string[]? _excluded;
+
     private DatabaseFilter(string[] names) => _names = names;
+
+    private DatabaseFilter(string[]? names, string[]? excluded)
+    {
+        _names = names;
+        _excluded = excluded;
+    }
 
     /// <summary>Every database (the same value as <c>default</c>).</summary>
     public static DatabaseFilter All => default;
@@ -75,6 +86,49 @@ public readonly record struct DatabaseFilter
 
         return kept.Count == 0 ? default : new DatabaseFilter(kept.ToArray());
     }
+
+    /// <summary>
+    /// #5633 review: every database EXCEPT <paramref name="excluded"/> (blank names dropped, repeats kept once). It is still
+    /// <see cref="IsAll"/> (no database is chosen), so a caller that does not apply the exclusion reads every database as before.
+    /// A list with no name left is plain <see cref="All"/>. Only the top-procedures ranking applies it today (see
+    /// <see cref="ExcludeClause"/>); <c>CurrentDatabaseScope.NarrowAsync</c> is its one producer.
+    /// </summary>
+    public static DatabaseFilter Excluding(IEnumerable<string?>? excluded)
+    {
+        var kept = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in excluded ?? Array.Empty<string?>())
+        {
+            if (!string.IsNullOrWhiteSpace(name) && seen.Add(name))
+            {
+                kept.Add(name);
+            }
+        }
+
+        return kept.Count == 0 ? default : new DatabaseFilter(null, kept.ToArray());
+    }
+
+    /// <summary>The names a read leaves out (empty when none): see <see cref="Excluding"/>.</summary>
+    public IReadOnlyList<string> ExcludedNames => _excluded is null ? Array.Empty<string>() : Array.AsReadOnly(_excluded);
+
+    /// <summary>
+    /// The exclusion's <c>text[]</c> parameter for a statement carrying <see cref="ExcludeClause"/>: SQL NULL when nothing is
+    /// excluded. A new parameter on every call.
+    /// </summary>
+    public NpgsqlParameter ExcludeParameter() =>
+        new()
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
+            Value = _excluded is null ? DBNull.Value : _excluded.Clone(),
+        };
+
+    /// <summary>
+    /// The always-present exclusion predicate, bound at <paramref name="index"/> by <see cref="ExcludeParameter"/>. NULL-safe on the
+    /// column: a row with no database name is not a dropped database, so it stays. Independent of the selection, like
+    /// <see cref="Clause"/>.
+    /// </summary>
+    public static string ExcludeClause(string column, int index) =>
+        $" AND (${index}::text[] IS NULL OR {column} IS NULL OR {column} <> ALL(${index}))";
 
     /// <summary>True when no database is named, so the read covers every database.</summary>
     public bool IsAll => _names is null;
@@ -117,6 +171,11 @@ public readonly record struct DatabaseFilter
     /// <summary>Two filters are equal when they name the same set of databases, whatever the order.</summary>
     public bool Equals(DatabaseFilter other)
     {
+        if (!SameSet(_excluded, other._excluded))
+        {
+            return false;
+        }
+
         if (_names is null || other._names is null)
         {
             return _names is null && other._names is null;
@@ -139,6 +198,16 @@ public readonly record struct DatabaseFilter
         return true;
     }
 
+    private static bool SameSet(string[]? left, string[]? right)
+    {
+        if (left is null || right is null)
+        {
+            return left is null && right is null;
+        }
+
+        return left.Length == right.Length && left.All(name => Array.IndexOf(right, name) >= 0);
+    }
+
     /// <summary>The hash of the set: it does not depend on the order, as <see cref="Equals(DatabaseFilter)"/> does not.</summary>
     public override int GetHashCode()
     {
@@ -148,6 +217,14 @@ public readonly record struct DatabaseFilter
             foreach (var name in _names)
             {
                 hash += StringComparer.Ordinal.GetHashCode(name);
+            }
+        }
+
+        if (_excluded is not null)
+        {
+            foreach (var name in _excluded)
+            {
+                hash += 31 * StringComparer.Ordinal.GetHashCode(name);
             }
         }
 

@@ -231,8 +231,9 @@ public sealed class DarlingManagedPostgres
     /// version marker heals "we changed our mind about the formula", this heals "the machine changed
     /// underneath it". Precedence is therefore never ambiguous even though both write the same file:
     /// v8 re-states the SAME formulas (it calls <see cref="DeriveMemorySettings"/> and
-    /// <see cref="DeriveWorkerSettings"/>, the same helpers the version blocks use), so it can only ever
-    /// differ from them by being FRESHER, never by disagreeing.</para>
+    /// <see cref="DeriveWorkerSettings(int, long)"/>, the same helpers the version blocks use), so it can only ever
+    /// differ from them by being FRESHER, never by disagreeing. The one deliberate exception is the worker
+    /// pair: v2 writes the floor and v8 raises it with RAM, so v8 is the larger and wins (it comes later).</para>
     /// </summary>
     public const string ConfMarkerV8 = "# Managed by PerformanceMonitor Darling (v8 hardware sizing) -- do not remove this block";
 
@@ -858,6 +859,14 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     internal ManagedConfMigrationOutcome? LastManagedConfVerification { get; private set; }
 
+    /// <summary>
+    /// #5654: the network reconcile's inputs from a start whose pg_hba pass left the alert sources line out because
+    /// <c>darling_alert_sources</c> had extra members. The role provisioning that runs after the bootstrap revokes
+    /// the extras it can, so <see cref="ReconcileNetworkAfterRoleProvisioningAsync"/> runs the same pass once more
+    /// from these inputs. Null when the line was written, was not wanted, or nothing was left out for that reason.
+    /// </summary>
+    private (string BinDirectory, NetworkPlan Plan, string OwnerConnectionString)? _alertSourceLineRerun;
+
     /// <summary>null/empty dataDirectory means %ProgramData%\PerformanceMonitorDarling\pg (created with inherited ACLs).</summary>
     public static string ResolveDataDirectory(PostgresConfig config)
     {
@@ -937,18 +946,21 @@ public sealed class DarlingManagedPostgres
     /// "failed to launch job ... failed to start a background worker" storms and most policy runs
     /// fail (caught live: 21 failures vs 7 successes in timescaledb_information.job_stats on a
     /// fresh managed instance). Sizing follows the TimescaleDB guidance
-    /// (max_worker_processes = 3 + timescaledb.max_background_workers + max_parallel_workers,
-    /// background workers sized to hypertables + 2): DERIVED from the live hypertable count
+    /// (max_worker_processes = 3 + timescaledb.max_background_workers + max_parallel_workers).
+    /// This block keeps the FLOOR, hypertables + 2 (<see cref="DeriveWorkerFloor"/>; 74/85 at 72 hypertables):
+    /// it has no RAM input. The v8 hardware block, later in the file, raises it by host RAM up to every policy job
+    /// the schema carries (#5633 item 14: 142 jobs are all overdue at a restart; see
+    /// <see cref="DeriveWorkerSettings(int, long)"/>). DERIVED from the live hypertable count
     /// (<see cref="TimescaleSupport.HypertableCount"/> = the collector catalog PLUS collection_log, the V23
     /// non-catalog hypertable) so it never goes stale as collectors are added and is not under-sized by the
-    /// collection_log compression policy (27 hypertables -> 29/40, 33 -> 35/46). Idle background workers
-    /// cost a few MB each and no CPU. Both settings need a PostgreSQL restart, so an existing
+    /// collection_log compression policy. An idle slot is about 25-40 KB of shared memory and no process; a
+    /// slot a restart FILLS is a backend. Both settings need a PostgreSQL restart, so an existing
     /// cluster picks this up on its next service-owned start — an adopted (not-started-by-us)
     /// server heals the conf now and applies it whenever its operator next restarts it.
     /// </summary>
     public static string BuildWorkerSizingConfAppend()
     {
-        var workers = DeriveWorkerSettings(TimescaleSupport.HypertableCount);
+        var workers = DeriveWorkerFloor(TimescaleSupport.HypertableCount);
         var builder = new StringBuilder();
         builder.Append('\n');
         builder.Append(ConfMarkerV2).Append('\n');
@@ -957,27 +969,94 @@ public sealed class DarlingManagedPostgres
         return builder.ToString();
     }
 
-    /// <summary>The two worker settings derived from the live hypertable count, both restart-only.</summary>
+    /// <summary>The two worker settings, both restart-only.</summary>
     internal readonly record struct WorkerSettings(int MaxBackgroundWorkers, int MaxWorkerProcesses);
 
     /// <summary>
-    /// Derives the worker sizing from the hypertable count — extracted from
-    /// <see cref="BuildWorkerSizingConfAppend"/> (#2845) so the v2 block and the v8 hardware re-derivation
-    /// share ONE formula and cannot drift apart. One background worker per per-hypertable compression
-    /// policy that can run concurrently + the scheduler + slack; max_worker_processes = 3 (other bg
-    /// workers) + bg workers + 8 (the PostgreSQL default max_parallel_workers, which this class does not
-    /// set — see the v8 block for why raising it is deliberately NOT bundled here).
+    /// The FLOOR of the worker sizing: <c>hypertables + 2</c> background workers and <c>3 + workers + 8</c>
+    /// worker processes, the shape every release up to 3.10.0 wrote and the one the v2 block still writes
+    /// (it has no RAM input; the v8 block is later in the file and wins, #5633 item 14). 74 / 85 at 72
+    /// hypertables. 3 = launcher, logical-replication launcher and slack; 8 = the PostgreSQL default
+    /// <c>max_parallel_workers</c>, which this class does not set — see the v8 block for why raising it is
+    /// deliberately NOT bundled here.
+    /// </summary>
+    internal static WorkerSettings DeriveWorkerFloor(int hypertableCount)
+        => WithWorkerProcesses(hypertableCount + 2);
+
+    /// <summary>
+    /// Derives the v8 worker sizing from the host's RAM (#5633 item 14, extracted from
+    /// <see cref="BuildWorkerSizingConfAppend"/> in #2845 so every caller shares ONE formula):
+    /// <c>workers = clamp(WorkerSlotsPerGb x RAM GB, floor, ceiling)</c>, <c>max_worker_processes = 3 + workers + 8</c>.
+    /// The floor is <see cref="DeriveWorkerFloor"/> (74 at 72 hypertables). The ceiling is
+    /// <see cref="DeriveWorkerCeiling"/>: every policy job the schema can create plus headroom (177 at 72
+    /// hypertables and 29 aggregates).
+    ///
+    /// <para>Why RAM bounds it. After any downtime EVERY policy job is overdue at the next start (a migrated
+    /// store holds 142), and each one asks for its own background worker at once: with the old 74 slots the
+    /// restart logged 61-68 "out of background workers" launch failures that each retried later, with 160
+    /// none. Every extra slot a restart actually fills is a postgres backend (measured on an empty migrated
+    /// store: about 4-6 MB private each; one that loaded a big chunk or sorts at maintenance_work_mem costs far
+    /// more). 16 slots per GB keeps a full burst of backends near 100-250 MB per GB of RAM even at the
+    /// review's 15 MB per backend, under a quarter of the host; the floor keeps a small host at the old
+    /// sizing, whose retried launches are slow, not lost.</para>
     ///
     /// <para>The v2 doc comment claims this "never goes stale as collectors are added". That was true of
     /// the FORMULA and false of its application: v2 is marker-keyed, so an existing store computed these
     /// once and kept the answer no matter how many collectors arrived afterwards. The v8 block is what
     /// makes the claim true, by re-deriving whenever the hypertable count changes.</para>
     /// </summary>
-    internal static WorkerSettings DeriveWorkerSettings(int hypertableCount)
+    /// <param name="quantizedRamBytes">The whole-GB RAM figure the v8 fingerprint records (<see cref="QuantizeRam"/>).</param>
+    internal static WorkerSettings DeriveWorkerSettings(int hypertableCount, long quantizedRamBytes)
+        => DeriveWorkerSettings(hypertableCount, TimescaleSupport.ContinuousAggregateCount, quantizedRamBytes);
+
+    /// <inheritdoc cref="DeriveWorkerSettings(int, long)"/>
+    internal static WorkerSettings DeriveWorkerSettings(int hypertableCount, int continuousAggregateCount, long quantizedRamBytes)
     {
-        var maxBackgroundWorkers = hypertableCount + 2;
-        return new WorkerSettings(maxBackgroundWorkers, 3 + maxBackgroundWorkers + 8);
+        var ramGb = quantizedRamBytes / (1024L * 1024L * 1024L);
+        var floor = hypertableCount + 2;
+        var ceiling = Math.Max(floor, DeriveWorkerCeiling(hypertableCount, continuousAggregateCount));
+        var byRam = (int)Math.Min(ceiling, ramGb * WorkerSlotsPerGb);
+        return WithWorkerProcesses(Math.Clamp(byRam, floor, ceiling));
     }
+
+    /// <summary>
+    /// The most background workers worth granting: the policy jobs the SCHEMA can create (one compression
+    /// policy per hypertable, up to <see cref="PolicyJobsPerContinuousAggregate"/> per continuous aggregate,
+    /// <see cref="NonObjectPolicyJobs"/> store-wide) plus <see cref="WorkerSlotHeadroom"/>. Counts hypertables
+    /// AND aggregates and every policy kind; keying it on hypertables alone missed 70 of the 142 measured jobs
+    /// (#5633 item 14). Each new aggregate adds up to 3 jobs, and the live test fails the day the real count
+    /// outgrows this.
+    /// </summary>
+    internal static int DeriveWorkerCeiling(int hypertableCount, int continuousAggregateCount)
+        => hypertableCount + PolicyJobsPerContinuousAggregate * continuousAggregateCount + NonObjectPolicyJobs + WorkerSlotHeadroom;
+
+    private static WorkerSettings WithWorkerProcesses(int maxBackgroundWorkers)
+        => new(maxBackgroundWorkers, 3 + maxBackgroundWorkers + 8);
+
+    /// <summary>
+    /// Background-worker slots granted per GB of host RAM (#5633 item 14). Measured on a rig with every job of a
+    /// migrated store overdue at a restart: a job backend costs about 4-6 MB private on an empty store, so 16
+    /// per GB is about 64-100 MB per GB at the measured cost and 240 MB per GB at the review's 15 MB, under a
+    /// quarter of RAM either way. 4 GB -> 74 (floor), 8 GB -> 128, 16 GB and up -> 177 (ceiling).
+    /// </summary>
+    internal const int WorkerSlotsPerGb = 16;
+
+    /// <summary>The most policy jobs one continuous aggregate carries: compression, refresh and retention
+    /// (the six frozen rollups carry fewer). Measured 3 x 29 aggregates = 87, 70 of the 142 jobs of a migrated
+    /// store of 72 hypertables (#5633 item 14).</summary>
+    internal const int PolicyJobsPerContinuousAggregate = 3;
+
+    /// <summary>Policy jobs that belong to no hypertable or aggregate: the job-history retention policy and
+    /// the telemetry policy (#5633 item 14).</summary>
+    internal const int NonObjectPolicyJobs = 2;
+
+    /// <summary>
+    /// Worker slots beyond the policy jobs themselves: the one scheduler per database, and slack for a manual
+    /// job or a retention purge started while the policies run. An unused slot costs about 25-40 KB of shared
+    /// memory (its PGPROC, worker slot, lock-table and status entries) and no process, so headroom is cheap;
+    /// a slot that is FILLED is a backend (#5633 item 14).
+    /// </summary>
+    internal const int WorkerSlotHeadroom = 16;
 
     /// <summary>
     /// The v4 write-throughput block. Two fixed settings, deliberately not derived:
@@ -1580,7 +1659,7 @@ public sealed class DarlingManagedPostgres
     {
         /* The SAME quantized value the fingerprint records, so the block is exactly reproducible from it. */
         var settings = DeriveMemorySettings(QuantizeRam(totalPhysicalMemoryBytes));
-        var workers = DeriveWorkerSettings(hypertableCount);
+        var workers = DeriveWorkerSettings(hypertableCount, QuantizeRam(totalPhysicalMemoryBytes));
         var builder = new StringBuilder();
         builder.Append('\n');
         builder.Append(ConfMarkerV8).Append('\n');
@@ -3981,7 +4060,7 @@ public sealed class DarlingManagedPostgres
                 File.WriteAllText(confPath, ReplaceOrAppendHardwareSizingBlock(v8CurrentConf, v8Append));
 
                 var v8Settings = DeriveMemorySettings(v8QuantizedRam);
-                var v8Workers = DeriveWorkerSettings(hypertableCount);
+                var v8Workers = DeriveWorkerSettings(hypertableCount, v8QuantizedRam);
                 _logger.LogInformation(
                     "{Action} v8 hardware sizing in postgresql.conf ({Reason}; host RAM {RamMb} MB, {Hypertables} hypertables -> effective_cache_size {EffectiveCache}MB, maintenance_work_mem {Maintenance}MB, work_mem {WorkMem}MB, timescaledb.max_background_workers {BgWorkers}, max_worker_processes {WorkerProcesses}; shared_buffers deliberately NOT re-derived, see #2845){CollapseNote}",
                     v8PriorCopies == 0 ? "Appended" : "Rewrote", v8Reason, v8QuantizedRam / (1024L * 1024L), hypertableCount,
@@ -5806,8 +5885,8 @@ public sealed class DarlingManagedPostgres
         if (roles is null || roles.Count == 0)
         {
             return Degrade(
-                $"postgres.network.role '{network.Role}' must be 'viewer', 'admin', or both "
-                + "(e.g. \"admin,viewer\") — never the superuser");
+                $"postgres.network.role '{network.Role}' must be 'viewer', 'admin', 'sources' (external alert source logins), "
+                + "or several of them (e.g. \"admin,viewer\" or \"viewer,sources\") — never the superuser");
         }
 
         /* The cert path rides the -o string, which cannot nest-quote a space -> a spaced path fail-DEADS
@@ -6066,7 +6145,65 @@ public sealed class DarlingManagedPostgres
     /// the given login role and CIDR; never <c>all</c>, never the superuser (D5/D6). Pure + testable.
     /// </summary>
     internal static string BuildNetworkPgHbaLine(string role, string cidr)
-        => $"hostssl {DatabaseName} {role} {cidr} scram-sha-256";
+        => $"hostssl {DatabaseName} {PgHbaRoleField(role)} {cidr} scram-sha-256";
+
+    /// <summary>
+    /// The pg_hba user field for one <c>postgres.network.role</c> token (#5654), mapped explicitly: <c>viewer</c> and
+    /// <c>admin</c> are the login roles of those names, and <c>sources</c> is <c>+darling_alert_sources</c>, the group every
+    /// registered external alert source login belongs to (pg_hba's <c>+</c> matches a role's members). Anything else throws:
+    /// the normalizer admits only these three, and a pg_hba line must never fall back to <c>all</c> or a name it did not
+    /// check. Pure.
+    /// </summary>
+    internal static string PgHbaRoleField(string token) => token switch
+    {
+        ViewerRoleName => QuotePgHbaName(ViewerRoleName),
+        AdminRoleName => QuotePgHbaName(AdminRoleName),
+        AlertSourcesNetworkToken => "+" + DarlingManagedRoles.AlertSourceGroupRoleName,
+        _ => throw new ArgumentOutOfRangeException(nameof(token), token, "Not a postgres.network.role token."),
+    };
+
+    /// <summary>
+    /// A role or database name as a pg_hba field (#5654): bare when it is plain lower-case letters, digits and underscores
+    /// and not one of pg_hba's keywords (<c>all</c>, <c>sameuser</c>, <c>samerole</c>, <c>samegroup</c>,
+    /// <c>replication</c>), double-quoted otherwise. pg_hba reads a quoted word as a name, never as a keyword, so a role
+    /// named <c>all</c> is that one role and not every role. The same rule as the reject lines of
+    /// <c>tools/provision-roles.sql</c>. Pure.
+    /// </summary>
+    internal static string QuotePgHbaName(string name)
+        => name.Length > 0
+           && name.All(c => c is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_')
+           && !PgHbaKeywords.Contains(name)
+            ? name
+            : "\"" + name.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+
+    private static readonly HashSet<string> PgHbaKeywords = new(StringComparer.Ordinal) { "all", "sameuser", "samerole", "samegroup", "replication" };
+
+    /// <summary>The <c>postgres.network.role</c> token that admits every external alert source login (#5654).</summary>
+    internal const string AlertSourcesNetworkToken = "sources";
+
+    /// <summary>
+    /// The network roles the managed pg_hba block writes a line for (#5654): <paramref name="roles"/> as configured, less
+    /// <see cref="AlertSourcesNetworkToken"/> unless <paramref name="groupExtras"/> was read and is empty (the group's members at
+    /// any depth are exactly the registered, marked source logins). Null means the members could not be read. Pure.
+    /// </summary>
+    internal static IReadOnlyList<string> AdmittedNetworkRoles(IReadOnlyList<string> roles, IReadOnlyList<string>? groupExtras)
+    {
+        if (groupExtras is { Count: 0 })
+        {
+            return roles;
+        }
+
+        var admitted = new List<string>();
+        foreach (var role in roles)
+        {
+            if (!string.Equals(role, AlertSourcesNetworkToken, StringComparison.Ordinal))
+            {
+                admitted.Add(role);
+            }
+        }
+
+        return admitted;
+    }
 
     /// <summary>
     /// The managed pg_hba block for every admitted role (#2665) — one <c>hostssl</c> line each, in the
@@ -6156,6 +6293,106 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
+    /// <paramref name="existing"/> pg_hba text with the alert sources line (user field <c>+darling_alert_sources</c>) taken
+    /// out of the managed block (#5654); the block's other lines stay, and a block left empty is removed. Text outside the
+    /// block is kept as <see cref="ReconcilePgHba"/> keeps it. <c>Removed</c> is false, and the text unchanged, when the
+    /// block holds no such line. Pure.
+    /// </summary>
+    internal static (string Text, bool Removed) RemoveAlertSourcePgHbaLine(string existing)
+    {
+        existing ??= string.Empty;
+        var field = PgHbaRoleField(AlertSourcesNetworkToken);
+        var kept = new List<string>();
+        var removed = false;
+        var insideBlock = false;
+        foreach (var line in existing.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (string.Equals(trimmed, PgHbaBeginMarker, StringComparison.Ordinal))
+            {
+                insideBlock = true;
+                continue;
+            }
+
+            if (string.Equals(trimmed, PgHbaEndMarker, StringComparison.Ordinal))
+            {
+                insideBlock = false;
+                continue;
+            }
+
+            if (insideBlock && trimmed.Length > 0)
+            {
+                var fields = trimmed.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                if (fields.Length > 2 && string.Equals(fields[2], field, StringComparison.Ordinal))
+                {
+                    removed = true;
+                }
+                else
+                {
+                    kept.Add(trimmed);
+                }
+            }
+        }
+
+        return removed ? (ReconcilePgHba(existing, kept.Count == 0 ? null : string.Join("\n", kept)), true) : (existing, false);
+    }
+
+    /// <summary>
+    /// Takes the alert sources line out of the managed store's live pg_hba.conf at once (#5654), for the add and rotate
+    /// verbs when <c>darling_alert_sources</c> has members besides the source logins: rewrites the file without it
+    /// (<see cref="RemoveAlertSourcePgHbaLine"/>) and has the server reload it (<c>pg_reload_conf()</c> on
+    /// <paramref name="connection"/>, the store owner). Returns null when the line is out of the file and the server was
+    /// told to reload (or the line was not there), else why it could not be done: the line written at the last service
+    /// start then stays live until the next start.
+    /// </summary>
+    internal static async Task<string?> DropAlertSourcePgHbaLineAsync(string dataDirectory, NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var hbaPath = Path.Combine(dataDirectory, "pg_hba.conf");
+            if (!File.Exists(hbaPath))
+            {
+                return $"{hbaPath} was not found";
+            }
+
+            var current = await File.ReadAllTextAsync(hbaPath, cancellationToken);
+            var (updated, removed) = RemoveAlertSourcePgHbaLine(current);
+            if (!removed)
+            {
+                return null;
+            }
+
+            await File.WriteAllTextAsync(hbaPath, updated, cancellationToken);
+            await using var reload = new NpgsqlCommand("SELECT pg_catalog.pg_reload_conf()", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+            await reload.ExecuteScalarAsync(cancellationToken);
+            return null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// #5654: runs the network reconcile once more, after the role provisioning that follows the bootstrap, when this
+    /// start's first pass left the alert sources pg_hba line out because <c>darling_alert_sources</c> had extra
+    /// members. Provisioning revokes the extras it can, so a line left out for those members is written (and the
+    /// server reloaded) on this start instead of the next. Does nothing when the first pass did not leave the line out
+    /// for that reason. Never throws, like the reconcile it runs.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal async Task ReconcileNetworkAfterRoleProvisioningAsync(CancellationToken cancellationToken)
+    {
+        if (_alertSourceLineRerun is not { } rerun)
+        {
+            return;
+        }
+
+        _alertSourceLineRerun = null;
+        await ReconcileNetworkAsync(rerun.BinDirectory, rerun.Plan, rerun.OwnerConnectionString, cancellationToken);
+    }
+
+    /// <summary>
     /// Reconciles the LIVE server's network access to <paramref name="plan"/> (D5), symmetric and
     /// fail-closed. Rewrites the pg_hba marked block (add the hostssl rule when exposed, remove it when
     /// loopback/degraded), reloads (exit-checked), verifies the intended rule really took via
@@ -6172,6 +6409,42 @@ public sealed class DarlingManagedPostgres
         try
         {
             var exposed = plan.Mode == NetworkMode.Exposed;
+
+            /* #5654: the +darling_alert_sources line admits every member of the group at any depth, so it is written only
+               while those members are exactly the registered, marked source logins. Any other member (one the provisioning
+               step could not revoke, or one that could not be read) leaves the line out, and the rest of the block stays. */
+            _alertSourceLineRerun = null;
+            IReadOnlyList<string> leftOut = Array.Empty<string>();
+            if (exposed && plan.Roles!.Contains(AlertSourcesNetworkToken, StringComparer.Ordinal))
+            {
+                var fullPlan = plan;
+                IReadOnlyList<string>? extras;
+                try
+                {
+                    await using var connection = new NpgsqlConnection(DarlingStoreConnection.WithApplicationName(
+                        DarlingStoreConnection.PinSessionTimeZoneUtc(ownerConnectionString), ServiceApplicationName));
+                    await connection.OpenAsync(cancellationToken);
+                    extras = await DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync(connection, cancellationToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning("Could not read the members of {Group} ({Message}), so the pg_hba line for alert sources is left out on this start.",
+                        DarlingManagedRoles.AlertSourceGroupRoleName, ex.Message);
+                    extras = null;
+                }
+
+                if (extras is { Count: > 0 })
+                {
+                    _logger.LogWarning(
+                        "The pg_hba line for alert sources is left out: {Group} also has these members, directly or through a source login, which are not registered alert source logins and could not be revoked: {Roles}. Revoke them as a superuser; the next start checks again.",
+                        DarlingManagedRoles.AlertSourceGroupRoleName, string.Join(", ", extras));
+                    _alertSourceLineRerun = (binDirectory, fullPlan, ownerConnectionString);
+                }
+
+                plan = plan with { Roles = AdmittedNetworkRoles(plan.Roles!, extras) };
+                leftOut = fullPlan.Roles!.Where(role => !plan.Roles!.Contains(role, StringComparer.Ordinal)).ToArray();
+            }
+
             var desiredLine = exposed ? BuildNetworkPgHbaLines(plan.Roles!, plan.Cidr!) : null;
 
             var hbaPath = Path.Combine(_dataDirectory, "pg_hba.conf");
@@ -6220,7 +6493,7 @@ public sealed class DarlingManagedPostgres
             }
 
             /* Verify the live rules match intent (reload can report success on a rejected malformed file). */
-            await VerifyPgHbaAsync(ownerConnectionString, plan, changed, cancellationToken);
+            await VerifyPgHbaAsync(ownerConnectionString, plan, leftOut, changed, cancellationToken);
 
             /* Adopted server: we did not start it, so the -o listen_addresses/ssl override never applied.
                If its live listener cannot satisfy the desired exposure, say so loud and do not claim exposed. */
@@ -6248,13 +6521,38 @@ public sealed class DarlingManagedPostgres
         }
     }
 
+    /// <summary>What the exposed-store check of the live pg_hba rules found (#2665, #5654).</summary>
+    internal enum PgHbaVerdict
+    {
+        /// <summary>Every admitted role has a live rule and no left-out role has one.</summary>
+        Ok,
+
+        /// <summary>An admitted role has no live rule.</summary>
+        AdmittedRoleMissing,
+
+        /// <summary>A role this start left out of the block (the alert sources line) still has a live rule.</summary>
+        LeftOutRoleLive,
+    }
+
+    /// <summary>
+    /// The exposed-store verdict from the counts <see cref="VerifyPgHbaAsync"/> reads (#5654): distinct admitted roles with a
+    /// live rule against how many were admitted, and distinct left-out roles with a live rule. A left-out role that is
+    /// live fails first, so a block reduced to no line at all (only <c>sources</c> configured, and the group has other
+    /// members) is checked for the line it must not have rather than passing on zero of zero. Pure.
+    /// </summary>
+    internal static PgHbaVerdict ExposedPgHbaVerdict(int admitted, long admittedLive, int leftOut, long leftOutLive)
+        => leftOut > 0 && leftOutLive > 0 ? PgHbaVerdict.LeftOutRoleLive
+            : admittedLive < admitted ? PgHbaVerdict.AdmittedRoleMissing
+            : PgHbaVerdict.Ok;
+
     /// <summary>
     /// Confirms the live pg_hba rules match intent via <c>pg_hba_file_rules</c>: no rule has a parse error,
     /// and a Darling hostssl rule exists for EVERY admitted network role when exposed / for none of them
     /// when loopback (#2665). A mismatch is logged critical (a reload delivers a SIGHUP that Postgres may
     /// then reject). Best-effort — a query failure degrades to a warning, not a throw.
     /// </summary>
-    private async Task VerifyPgHbaAsync(string ownerConnectionString, NetworkPlan plan, bool reloaded, CancellationToken cancellationToken)
+    private async Task VerifyPgHbaAsync(
+        string ownerConnectionString, NetworkPlan plan, IReadOnlyList<string> leftOut, bool reloaded, CancellationToken cancellationToken)
     {
         var exposed = plan.Mode == NetworkMode.Exposed;
         try
@@ -6293,10 +6591,29 @@ public sealed class DarlingManagedPostgres
                     + "WHERE r.type = 'hostssl' AND $1 = ANY(r.database) AND u = ANY($2::text[])",
                     connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
                 command.Parameters.AddWithValue(DatabaseName);
-                command.Parameters.AddWithValue(plan.Roles!.ToArray());
+                command.Parameters.AddWithValue(plan.Roles!.Select(PgHbaRoleField).ToArray());
                 present = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
 
-                if (present < plan.Roles!.Count)
+                /* #5654: a role this start left out (the alert sources line, while the group has other members) must have
+                   no live rule. With every configured role left out the admitted count is zero, so this is the check that
+                   says something there. */
+                long leftOutLive = 0;
+                if (leftOut.Count > 0)
+                {
+                    command.Parameters[1].Value = leftOut.Select(PgHbaRoleField).ToArray();
+                    leftOutLive = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
+                }
+
+                var verdict = ExposedPgHbaVerdict(plan.Roles!.Count, present, leftOut.Count, leftOutLive);
+                if (verdict == PgHbaVerdict.LeftOutRoleLive)
+                {
+                    _logger.LogCritical(
+                        "pg_hba verification: a live 'hostssl {Db} <role> {Cidr}' rule still admits '{Roles}', which this start left out of the managed block — check {Path} for a line outside the markers",
+                        DatabaseName, plan.Cidr, string.Join(", ", leftOut), Path.Combine(_dataDirectory, "pg_hba.conf"));
+                    return;
+                }
+
+                if (verdict == PgHbaVerdict.AdmittedRoleMissing)
                 {
                     _logger.LogCritical(
                         "pg_hba verification: only {Present} of the {Expected} configured role(s) '{Roles}' have a live 'hostssl {Db} <role> {Cidr} scram-sha-256' rule after reload — the store is not accepting network clients as intended",

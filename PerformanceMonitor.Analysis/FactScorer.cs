@@ -506,7 +506,7 @@ public class FactScorer
     {
         return fact.Key switch
         {
-            // Spills: concerning at 100, critical at 1000 in the period
+            // Spilled pages (8 KB each, sys.dm_exec_query_stats total_spills deltas): concerning at 100, critical at 1000 in the period
             "QUERY_SPILLS" => ApplyThresholdFormula(fact.Value, 100, 1000),
             // High DOP queries: concerning at 5, critical at 20 in the period
             "QUERY_HIGH_DOP" => ApplyThresholdFormula(fact.Value, 5, 20),

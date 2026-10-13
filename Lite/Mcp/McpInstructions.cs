@@ -56,7 +56,7 @@ internal static class McpInstructions
 
         ## Workflow
 
-        `list_servers` -> `get_collection_health` -> `analyze_server` (follow each finding's `next_tools`) -> `compare_analysis`/`audit_config` -> `mute_analysis_finding` to silence an accepted pattern.
+        `list_servers` -> `get_collection_health` -> `analyze_server` (follow each finding's `next_tools`) -> `compare_analysis`/`audit_config` -> `mute_analysis_finding` to silence an accepted pattern. `skipped_cycles`: late cycles (log: `collection_cycle`).
 
         ## Important Limitations
 

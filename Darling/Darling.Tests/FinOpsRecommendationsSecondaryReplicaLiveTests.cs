@@ -193,7 +193,7 @@ public sealed class FinOpsRecommendationsSecondaryReplicaLiveTests
     private static async Task<JsonElement> FinOpsAsync(NpgsqlDataSource dataSource, CancellationToken ct)
     {
         var json = await DarlingMcpFinOpsRecommendationsTools.GetFinOpsRecommendations(
-            dataSource, FinOpsRecommendationsGoldenLiveTests.ServerNameA, ct);
+            dataSource, FinOpsRecommendationsGoldenLiveTests.ServerNameA, cancellationToken: ct);
         return JsonDocument.Parse(json).RootElement.Clone();
     }
 }

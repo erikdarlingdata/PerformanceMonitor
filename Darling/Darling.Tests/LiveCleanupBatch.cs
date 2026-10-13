@@ -319,6 +319,110 @@ internal sealed class LiveCleanupBatch
             + string.Join(", ", roles.Select(r => $"'{r}'")) + "))",
             ct);
 
+    /// <summary>
+    /// Removes the roles a live test made, one statement at a time, and proves none is left (#5654).
+    ///
+    /// <para>The shape this replaces ran <c>DROP OWNED BY</c> and <c>DROP ROLE</c> for every role inside one <c>DO</c> block,
+    /// that is one transaction. When a bring-your-own owner had granted the source login its privileges, the login's
+    /// <c>DROP ROLE</c> failed with 2BP01 (privileges for the database, the schema and the submit function remained) and the
+    /// whole block rolled back, so every role stayed; the same statements run one at a time did not fail. Roles are
+    /// cluster-wide, so the next test of the class met <c>42710 role ... already exists</c> instead of the cause.
+    /// Here, as the connected superuser and in the store's own database, each existing role first gives its objects to the
+    /// superuser (<c>REASSIGN OWNED</c>) and loses its privileges (<c>DROP OWNED</c>) in its own statement; only then are the
+    /// roles dropped. A role that still exists afterwards is reported by name, in the ledger and in the thrown exception.</para>
+    /// </summary>
+    /// <param name="roles">Every role the test can have made, including the fixed-name ones.</param>
+    /// <param name="runSuffix">The per-test suffix every role of this test's own ends with; no role ending in it may survive.</param>
+    public async Task RemoveRolesAsync(IReadOnlyList<string> roles, string runSuffix, CancellationToken ct)
+    {
+        Exception? lastFailure = null;
+        var left = new List<string>();
+
+        for (var attempt = 1; attempt <= _maxAttempts; attempt++)
+        {
+            lastFailure = null;
+            try
+            {
+                await EnsureOpenAsync(ct);
+                var present = await RolesPresentAsync(roles, runSuffix, ct);
+                var paramAcl = _connection.PostgreSqlVersion.Major >= 15;
+
+                foreach (var role in present)
+                {
+                    var quoted = "\"" + role.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+                    try
+                    {
+                        if (paramAcl)
+                        {
+                            /* A SET grant on a parameter is cluster-wide; DROP OWNED in this database does not take it. */
+                            await ExecuteAsync("REVOKE ALL ON PARAMETER pg_stat_statements.track_utility FROM " + quoted, ct);
+                        }
+
+                        await ExecuteAsync("REASSIGN OWNED BY " + quoted + " TO CURRENT_USER", ct);
+                        await ExecuteAsync("DROP OWNED BY " + quoted, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        lastFailure = new InvalidOperationException($"role {role}: {ex.Message}", ex);
+                    }
+                }
+
+                foreach (var role in present)
+                {
+                    try
+                    {
+                        await ExecuteAsync("DROP ROLE IF EXISTS \"" + role.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"", ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        lastFailure = new InvalidOperationException($"role {role}: {ex.Message}", ex);
+                    }
+                }
+
+                left = await RolesPresentAsync(roles, runSuffix, ct);
+            }
+            catch (Exception ex)
+            {
+                lastFailure = ex;
+                left = [.. roles];
+            }
+
+            if (left.Count == 0)
+            {
+                return;
+            }
+
+            if (attempt < _maxAttempts)
+            {
+                await Task.Delay(BackoffFor(attempt), ct);
+            }
+        }
+
+        var named = string.Join(", ", left);
+        Record($"roles {named}", "REASSIGN OWNED BY <role> TO CURRENT_USER; DROP OWNED BY <role>; DROP ROLE IF EXISTS <role>", lastFailure);
+        throw new InvalidOperationException(
+            $"The live test left role(s) {named} behind; roles are cluster-wide, so the next test would meet them. Last failure: {lastFailure?.Message ?? "none reported"}",
+            lastFailure);
+    }
+
+    /// <summary>The named roles, plus every role ending in this test's suffix, that exist now.</summary>
+    private async Task<List<string>> RolesPresentAsync(IReadOnlyList<string> roles, string runSuffix, CancellationToken ct)
+    {
+        await EnsureOpenAsync(ct);
+        using var command = new NpgsqlCommand(
+            "SELECT rolname::text FROM pg_roles WHERE rolname = ANY($1) OR rolname LIKE $2 ORDER BY 1", _connection);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text, Value = roles.ToArray() });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = "%\\_" + runSuffix });
+        var found = new List<string>();
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            found.Add(reader.GetString(0));
+        }
+
+        return found;
+    }
+
     private void Record(string what, string removeSql, Exception? failure)
     {
         var reason = failure is null

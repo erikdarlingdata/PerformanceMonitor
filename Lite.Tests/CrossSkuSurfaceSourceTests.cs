@@ -229,8 +229,9 @@ public sealed class CrossSkuSurfaceSourceTests
            reason, and the pair that shipped un-inventoried because that PR's own build check was cancelled
            rather than red. Twelfth since #4215: the store settings self-alert's managed-conf verdicts read,
            Darling-only like the other store self-alerts. Thirteenth since #5450: the daily
-           collection-history audit's rollup read, Darling-only for the same reason. */
-        Assert.Equal(13, nullKeyReads.Count);
+           collection-history audit's rollup read, Darling-only for the same reason. Fourteenth since #5654: the
+           external-alert delivery self-alert's undelivered-row count, Darling-only like the other store self-alerts. */
+        Assert.Equal(14, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
@@ -252,6 +253,7 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains(nullKeyReads, r => r.Contains("checkpointer pressure", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("managed-conf verdicts", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("collection-history audit", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("external alert self-alert", StringComparison.Ordinal));
         /* #3354: config_mute_rules belongs to the store, not to any monitored server, so its failed read
            lands in the instance total and in no server's count — exactly the case a per-server-only
            surface would have given no home. Recorded TWICE across the tree, once per SKU, and that is the
@@ -274,6 +276,7 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains("checkpointer pressure", inventory, StringComparison.Ordinal);
         Assert.Contains("managed-conf verdicts", inventory, StringComparison.Ordinal);
         Assert.Contains("collection-history audit", inventory, StringComparison.Ordinal);
+        Assert.Contains("external-alert delivery", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
            recorded-store-size lookup that is context for the alert text — so naming it here would send an

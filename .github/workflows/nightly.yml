@@ -1405,6 +1405,15 @@ jobs:
     if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
     uses: ./.github/workflows/darling-ui-smoke.yml
 
+  # #5745: the WPF smoke check (wpf-smoke.yml, the same workflow a pull request touching Lite runs): the real Lite exe on a
+  # seeded data folder, walked with FlaUI. Gated like the other jobs here and NOT in publish's needs, for the same reason
+  # as the web UI smoke above. Its screenshots are the run's `wpf-smoke` artifact.
+  wpf-smoke:
+    name: WPF smoke (Lite)
+    needs: check
+    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
+    uses: ./.github/workflows/wpf-smoke.yml
+
   # ── Linux artifact + container image (#1804) ─────────────────────────────────────────────────────
   # Runs in parallel with the windows build job — it shares only the check job's nightly stamp,
   # not any windows artifact. Publishes the linux-x64 service tar.gz with its own checksum file
