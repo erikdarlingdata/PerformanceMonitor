@@ -26,7 +26,9 @@ namespace PerformanceMonitor.Common;
 /// being read, so two reports of one (blocked, blocker) pair belong to the same wait when their derived starts are
 /// within <see cref="WaitStartToleranceMs"/> of the previous one (reports sorted by derived start). A different
 /// wait of the same pair that was reported at all lasted at least the threshold (5 s) before its first report,
-/// so its start is at least that far from the previous wait's start; the tolerance sits well below it.</para>
+/// so its start is at least that far from the previous wait's start; the tolerance sits well below it. That
+/// holds for blocked-process reports only. A DMV blocking snapshot catches a wait of any length, so two separate
+/// short waits of one pair can start less than 2 s apart and count as one wait; issue #5743 tracks the fix.</para>
 ///
 /// <para>The same rule is written twice because the counts live in two places: <see cref="Collapse"/> for rows
 /// already in memory (the alert engine's read), and <see cref="WaitsCteSql"/> for the counts that run in the
@@ -122,12 +124,21 @@ public static class BlockingWaits
     /// <c>wait_time_ms</c> is the longest wait of that wait's reports and whose other columns are that
     /// report's. The caller continues the WITH list after it (the text ends with the closing parenthesis, no
     /// trailing comma).
+    ///
+    /// <para><paramref name="reportCount"/> adds a <c>wait_reports</c> column to the chain's last CTE: how many source
+    /// rows (blocked-process reports, or DMV snapshot rows) the wait collapsed. It is the count a health band
+    /// whose tiers were measured in REPORTS per server-hour reads (#5644), while the displayed count stays one per
+    /// wait. Off by default so every other caller's CTE keeps its shape.</para>
     /// </summary>
     public static string WaitsCteSql(
-        SqlDialect dialect, string name, string source, IReadOnlyList<string>? partitionColumns = null)
+        SqlDialect dialect, string name, string source, IReadOnlyList<string>? partitionColumns = null,
+        bool reportCount = false)
     {
         var partition = string.Join(
             ", ", (partitionColumns ?? Array.Empty<string>()).Concat(new[] { "blocked_spid", "blocking_spid" }));
+        var reportColumn = reportCount
+            ? $", COUNT(*) OVER (PARTITION BY {partition}, n.wait_no) AS wait_reports"
+            : string.Empty;
         var epochMs = dialect == SqlDialect.DuckDb
             ? "(CAST(epoch_us(s.event_time) AS DOUBLE) / 1000.0)"
             : "(date_part('epoch', s.event_time) * 1000.0)";
@@ -154,7 +165,7 @@ public static class BlockingWaits
 ),
 {name}_ranked AS (
     SELECT n.*,
-        ROW_NUMBER() OVER (PARTITION BY {partition}, n.wait_no ORDER BY n.wait_time_ms DESC NULLS LAST, n.event_time DESC NULLS LAST) AS wait_rank
+        ROW_NUMBER() OVER (PARTITION BY {partition}, n.wait_no ORDER BY n.wait_time_ms DESC NULLS LAST, n.event_time DESC NULLS LAST) AS wait_rank{reportColumn}
     FROM {name}_numbered AS n
 ),
 {name} AS (

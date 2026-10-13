@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -323,8 +324,17 @@ public partial class DuckDbInitializer : IDisposable
         {
             s_dbLock.EnterWriteLock();
         }
-        return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true));
+        return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true), WriteHoldWarnAfter);
     }
+
+    /// <summary>
+    /// #5731 hold watchdog: a WRITE hold that lasts longer than this logs one warning naming the holder when it
+    /// is released. A waiting writer makes every new reader (every collector's log append) wait, and a writer's
+    /// hold keeps them out, so a long write hold is the number the housekeeping budgets are tuned against. The
+    /// same five seconds as <c>LocalDataService.WriteLockBudget</c>, the longest a writer will wait for the
+    /// lock. An instance value rather than a static so a test can lower it on its own initializer.
+    /// </summary>
+    internal TimeSpan WriteHoldWarnAfter { get; set; } = TimeSpan.FromSeconds(5);
 
     private sealed class NoOpDisposable : IDisposable
     {
@@ -366,19 +376,40 @@ public partial class DuckDbInitializer : IDisposable
         private readonly ReaderWriterLockSlim _lock;
         private readonly bool _write;
         private readonly long _holdId;
+        private readonly long _acquiredAt = Stopwatch.GetTimestamp();
+        private readonly TimeSpan _warnAfter;
         private bool _disposed;
 
-        public LockReleaser(ReaderWriterLockSlim rwLock, bool write, long holdId)
+        public LockReleaser(ReaderWriterLockSlim rwLock, bool write, long holdId, TimeSpan warnAfter = default)
         {
             _lock = rwLock;
             _write = write;
             _holdId = holdId;
+            _warnAfter = warnAfter;
         }
 
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
+            /* #5731: write holds only, so a read pays one timestamp and nothing else. Logged before the release so
+               the registry still names the holder, and guarded because Dispose must never throw past the unlock. */
+            if (_write && _warnAfter > TimeSpan.Zero)
+            {
+                try
+                {
+                    var held = Stopwatch.GetElapsedTime(_acquiredAt);
+                    if (held > _warnAfter)
+                    {
+                        AppLogger.Warn("DuckDb", string.Create(CultureInfo.InvariantCulture,
+                            $"{StoreLockHolders.HolderName(_holdId)} held the local database write lock for {held.TotalSeconds:0.#} s (warns past {_warnAfter.TotalSeconds:0.#} s); collectors were held off for that long (#5731)"));
+                    }
+                }
+                catch (Exception)
+                {
+                    /* The warning is measurement only. */
+                }
+            }
             StoreLockHolders.Unregister(_holdId);
             if (_write) _lock.ExitWriteLock();
             else _lock.ExitReadLock();
@@ -388,7 +419,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 67;
+    internal const int CurrentSchemaVersion = 68;
 
     private readonly string _archivePath;
 
@@ -2900,6 +2931,18 @@ public partial class DuckDbInitializer : IDisposable
                 _logger?.LogWarning("Migration to v67 on total_size_mb encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
+
+        if (fromVersion < 68)
+        {
+            /* v68 (#5640): the Client Timeouts alert. Two additions, both additive. (1) The attention_events table is a collector
+                    table, generated from the catalog by the table statements that run right after the migrations, so a database
+                    older than v68 gets it there, and nothing in this step names it. (2) config_mute_rules.client_app_pattern,
+                    the client-application match of a mute rule, is a nullable VARCHAR added through the shared added-columns
+                    list, so a failed add is retried on the next start like every other entry. Nothing to backfill: a rule saved
+                    before the upgrade has no client-application match. */
+            _logger?.LogInformation("Running migration to v68: config_mute_rules.client_app_pattern (Client Timeouts alert)");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(68));
+        }
     }
 
     /// <summary>
@@ -2928,6 +2971,7 @@ public partial class DuckDbInitializer : IDisposable
         (65, "ag_replica_states", "group_id", "VARCHAR"),
         (65, "ag_database_replica_states", "group_id", "VARCHAR"),
         (66, "query_store_stats", "interval_end_time_utc", "TIMESTAMP"),
+        (68, "config_mute_rules", "client_app_pattern", "VARCHAR"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

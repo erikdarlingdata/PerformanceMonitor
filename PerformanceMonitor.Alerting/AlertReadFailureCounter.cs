@@ -840,6 +840,10 @@ public sealed class AlertReadFailureCounter
     /// read fails or times out is left unread and retried until the next day's slot, so a nonzero count naming
     /// it says a source could not be asked, and a fault folded into "no thin hours" would read an unreadable
     /// history as a complete one.</para>
+    ///
+    /// <para>#5654 added the external-alert delivery self-alert's count of the rows the drain gave up on, Darling-only:
+    /// a failed read sends no report, so the standing alert is held rather than resolved, and a nonzero count naming
+    /// it says delivery could not be checked, not that it failed.</para>
     /// </summary>
     public const string FleetScopedReads =
         "the collector-cost regression self-alert and its two #3443 companions (the collector-cost census "
@@ -851,7 +855,8 @@ public sealed class AlertReadFailureCounter
         + "health reads behind compression-job health, store-job cadence and retention holds, and the two "
         + "informational store self-alerts #3826 added — the plan dimension's TOAST slack read and the "
         + "store checkpointer pressure read behind the WAL levers, and the store settings self-alert's "
-        + "managed-conf verdicts read (#4215), and the daily collection-history audit's rollup read (#5450)";
+        + "managed-conf verdicts read (#4215), the daily collection-history audit's rollup read (#5450), and the "
+        + "external-alert delivery self-alert's count of undelivered rows (#5654)";
 
     /// <summary>
     /// The window these figures cover, and the window they do NOT.

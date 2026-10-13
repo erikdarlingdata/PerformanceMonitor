@@ -35,9 +35,11 @@ export function isWithheldMarker(text) {
 /** Parses an alert's detail text into the mute-context dimensions. Mirrors AlertMuteContext.PopulateFromDetailText:
  *  indented "Label: value" lines, a multi-line query value, and no parse at all for a custom alert. */
 export function parseDetailContext(detailText, metricName) {
-  const ctx = { database: null, waitType: null, jobName: null, queryText: null };
+  const ctx = { database: null, waitType: null, jobName: null, clientApp: null, queryText: null };
   if (!detailText) return ctx;
   if (typeof metricName === "string" && metricName.startsWith("Custom:")) return ctx;
+  /* #5654: an external alert carries another service's text; no dimension is pre-filled from it. */
+  if (typeof metricName === "string" && metricName.startsWith("External:")) return ctx;
 
   let query = null;
   const flush = () => {
@@ -57,6 +59,9 @@ export function parseDetailContext(detailText, metricName) {
     } else if (ctx.jobName === null && trimmed.startsWith("Job Name: ")) {
       flush();
       ctx.jobName = trimmed.substring("Job Name: ".length).trim();
+    } else if (ctx.clientApp === null && trimmed.startsWith("Client Application: ")) {
+      flush();
+      ctx.clientApp = trimmed.substring("Client Application: ".length).trim();
     } else if (ctx.queryText === null && query === null && prefix) {
       query = trimmed.substring(prefix.length).trim();
     } else if (query !== null) {
@@ -82,6 +87,7 @@ export function mutePrefillParams(a) {
     query_text_pattern: isWithheldMarker(d.queryText) ? null
       : d.queryText && d.queryText.length > QUERY_MAX ? d.queryText.substring(0, QUERY_MAX) : d.queryText,
     job_name_pattern: d.jobName,
+    client_app_pattern: d.clientApp,
   };
   return params;
 }

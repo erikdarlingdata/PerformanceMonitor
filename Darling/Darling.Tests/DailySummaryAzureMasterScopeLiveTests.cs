@@ -81,9 +81,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = $3
             await Server(LoneId, Base + "-lone", 5);
             await Server(PlainId, Base + "-plain", 3);
 
-            async Task Bpr(int id, string name, DateTime day, int waitMs, string db) =>
+            async Task Bpr(int id, string name, DateTime day, int waitMs, string db, int minute = 0) =>
                 await Exec(connection, "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name) VALUES ($1,$2,$3,$4,$2,$5,60,70,'suspended',$6)",
-                    ct, CollectionIdGenerator.Next(), day.AddHours(12), id, name, waitMs, db);
+                    ct, CollectionIdGenerator.Next(), day.AddHours(12).AddMinutes(minute), id, name, waitMs, db);
             async Task Dmv(int id, string name, DateTime day, int waitMs) =>
                 await Exec(connection, "INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid, wait_time_ms, blocking_status) VALUES ($1,$2,$3,$4,$2,'master',70,60,$5,'suspended')",
                     ct, CollectionIdGenerator.Next(), day.AddHours(13), id, name, waitMs);
@@ -93,10 +93,13 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = $3
 
             var master = Base + "-master";
             /* Day 1: three GP reports waiting 600 s, one of the master's own waiting 2 s; day 2: only GP's, so the
-               scoped day falls back to the DMV snapshots. Unequal waits, so a peak taken from the wrong set shows. */
-            for (var i = 0; i < 3; i++) await Bpr(MasterId, master, Day1, 600_000, "GP");
-            await Bpr(MasterId, master, Day1, 2_000, "master");
-            for (var i = 0; i < 2; i++) await Bpr(MasterId, master, Day2, 400_000, "GP");
+               scoped day falls back to the DMV snapshots. Unequal waits, so a peak taken from the wrong set shows.
+               #5644: the daily summary counts blocking WAITS (BlockingWaits.WaitsCteSql: one per blocked session,
+               blocker and derived start), not report rows, so each intended event gets its own minute and is its
+               own wait; reports of one pair at one instant would be a single wait. */
+            for (var i = 0; i < 3; i++) await Bpr(MasterId, master, Day1, 600_000, "GP", minute: i);
+            await Bpr(MasterId, master, Day1, 2_000, "master", minute: 3);
+            for (var i = 0; i < 2; i++) await Bpr(MasterId, master, Day2, 400_000, "GP", minute: i);
             await Dmv(MasterId, master, Day2, 7_000);
             await Dmv(MasterId, master, Day2, 3_000);
             /* Day 1 deadlocks: an own-database row; a master-stamped graph wholly in GP; a master-stamped mixed

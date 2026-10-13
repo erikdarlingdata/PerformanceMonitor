@@ -21,8 +21,8 @@ using PerformanceMonitor.Darling.Service.Targets;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// Creates and starts the app-managed XE ring-buffer sessions the deadlock and blocked-process
-/// collectors read — ported from Lite's Ensure* lifecycle (session names come from the shared
+/// Creates and starts the app-managed XE sessions the deadlock, blocked-process and attention (client
+/// timeout, #5640) collectors read — ported from Lite's Ensure* lifecycle (session names come from the shared
 /// definitions so the reader and this lifecycle can never disagree). Server-scoped sessions on
 /// on-prem/MI/RDS; on Azure SQL DB a database-scoped session in EVERY monitored database (#1535
 /// — a single session only ever captured the connection's own database), matching the
@@ -41,7 +41,32 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 public static class DarlingXeSessions
 {
-    public static async Task EnsureAllAsync(ServerRuntime server, DarlingCollectorRunner runner, ILogger? logger, CancellationToken cancellationToken)
+    /// <summary>
+    /// A client-timeout session the login was refused (#5640, H2): the message the run records on its PERMISSIONS row. Only a
+    /// permission denial is carried. Any other failure leaves the session absent, and the read of an absent session records
+    /// SESSION_MISSING, which is right for a capture that broke.
+    /// </summary>
+    public sealed record AttentionEnsureFault(string Message);
+
+    /// <summary>
+    /// The fault a failed client-timeout ensure leaves for the run, or null when the failure was not a permission denial. The
+    /// login lacks ALTER ANY EVENT SESSION (CREATE ANY DATABASE EVENT SESSION on Azure SQL Database): a least-privilege choice an
+    /// operator is entitled to make (#1823), so the run records PERMISSIONS (#5378) and no Capture Down fires for it.
+    /// </summary>
+    internal static AttentionEnsureFault? AttentionFaultFor(Exception ex) =>
+        ErrorNumbersOf(ex).Any(SqlServerPermissionErrors.IsPermissionDenied)
+            ? new AttentionEnsureFault(
+                $"XE session {AlwaysOnXeSessions.AttentionXeSessionName} could not be created because the monitoring login lacks the permission to create Extended Events sessions (ALTER ANY EVENT SESSION on-premises, CREATE ANY DATABASE EVENT SESSION on Azure SQL Database), so no client timeouts can be captured until it is granted: {AlwaysOnXeSessions.DescribeFailure(ex)}")
+            : null;
+
+    /// <summary>
+    /// Ensures the always-on sessions. Returns the permission fault of the client-timeout session, or null (#5640). With
+    /// <paramref name="attentionEnabled"/> false the client-timeout session is neither created nor started, and nothing is
+    /// dropped: the collector is off, and the session captures statement text, so it is not brought back for a server that does not
+    /// read it. The deadlock and blocked-process sessions are ensured either way.
+    /// </summary>
+    public static async Task<AttentionEnsureFault?> EnsureAllAsync(
+        ServerRuntime server, DarlingCollectorRunner runner, ILogger? logger, CancellationToken cancellationToken, bool attentionEnabled = true)
     {
         /* Same self-gate as ReconcileLongQueryCompletionsAsync, same reason: this method constructs a
            SqlConnection from the engine-ambiguous connection string, so it enforces its own precondition
@@ -49,22 +74,22 @@ public static class DarlingXeSessions
            forever. XE does not exist on PostgreSQL. */
         if (server.Target.Engine != PerformanceMonitor.Collectors.CollectorTargetEngine.SqlServer)
         {
-            return;
+            return null;
         }
 
         /* A test replaces the whole ensure of one server. Null in production. */
         if (runner.XeEnsureOverrideForTests is { } ensureOverride)
         {
             await ensureOverride(server, cancellationToken);
-            return;
+            return null;
         }
 
         if (server.Target.IsAzureSqlDb)
         {
-            await EnsureDatabaseScopedAsync(server, runner, logger, cancellationToken);
-            return;
+            return await EnsureDatabaseScopedAsync(server, runner, logger, attentionEnabled, cancellationToken);
         }
 
+        AttentionEnsureFault? attentionFault = null;
         try
         {
             using var connection = new SqlConnection(server.ConnectionString);
@@ -100,12 +125,45 @@ public static class DarlingXeSessions
                 logger?.LogError("[{Server}] Failed to ensure blocked process XE session: {Message} — blocked-process collection will read zero rows until resolved",
                     server.Config.DisplayName, ex.Message);
             }
+
+            /* The client-timeout capture (#5640), its own try block like the two above: a failure of one capture never
+               skips another. A read of the attention session whose ensure failed records SESSION_MISSING or PERMISSIONS
+               (it never reads zero rows as success). */
+            if (attentionEnabled)
+            {
+                try
+                {
+                    await EnsureAttentionOnPremAsync(connection, server, logger, cancellationToken);
+                }
+                catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
+                {
+                    logger?.LogInformation("[{Server}] Attention XE session already present (benign, #1251)", server.Config.DisplayName);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    /* #5640 (H2): a denied create is a permission state, recorded as PERMISSIONS by the run, so it is a Warning and not
+                       the error of a capture that broke. Any other failure leaves the session absent and the read records SESSION_MISSING. */
+                    attentionFault = AttentionFaultFor(ex);
+                    if (attentionFault is not null)
+                    {
+                        logger?.LogWarning("[{Server}] Could not ensure the attention XE session: {Message} — client-timeout collection will record PERMISSIONS until the login is granted ALTER ANY EVENT SESSION",
+                            server.Config.DisplayName, ex.Message);
+                    }
+                    else
+                    {
+                        logger?.LogError("[{Server}] Failed to ensure attention XE session: {Message} — client-timeout collection will record SESSION_MISSING until resolved",
+                            server.Config.DisplayName, ex.Message);
+                    }
+                }
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogError("[{Server}] Failed to ensure XE sessions: {Message} — deadlock/blocked-process collection will read zero rows until resolved",
+            logger?.LogError("[{Server}] Failed to ensure XE sessions: {Message} — deadlock/blocked-process/client-timeout collection will not find its session until resolved",
                 server.Config.DisplayName, ex.Message);
         }
+
+        return attentionFault;
     }
 
     /// <summary>
@@ -115,8 +173,14 @@ public static class DarlingXeSessions
     /// logical master. Failure isolation is per database AND per capture: one broken database (or
     /// one broken session) never blocks the rest.
     /// </summary>
-    private static async Task EnsureDatabaseScopedAsync(ServerRuntime server, DarlingCollectorRunner runner, ILogger? logger, CancellationToken cancellationToken)
+    private static async Task<AttentionEnsureFault?> EnsureDatabaseScopedAsync(
+        ServerRuntime server, DarlingCollectorRunner runner, ILogger? logger, bool attentionEnabled, CancellationToken cancellationToken)
     {
+        /* #5640 (H2): the databases where the client-timeout create was refused for permission, against the databases it was tried
+           in. The run records PERMISSIONS only when EVERY database refused it; a refusal in some leaves the survivors' read real. */
+        var attentionTried = 0;
+        AttentionEnsureFault? attentionDenied = null;
+        var attentionDeniedIn = 0;
         List<string> databases;
         try
         {
@@ -135,7 +199,7 @@ public static class DarlingXeSessions
         {
             logger?.LogError("[{Server}] Failed to enumerate databases for XE sessions: {Message} — deadlock/blocked-process collection will read zero rows until resolved",
                 server.Config.DisplayName, ex.Message);
-            return;
+            return null;
         }
 
         foreach (var databaseName in databases)
@@ -174,6 +238,17 @@ public static class DarlingXeSessions
                     database, runner, server, databaseName, AlwaysOnXeSessionKind.Deadlock, "deadlock", logger, cancellationToken);
                 await DarlingAlwaysOnXeSessions.EnsureAsync(
                     database, runner, server, databaseName, AlwaysOnXeSessionKind.BlockedProcess, "blocked process", logger, cancellationToken);
+                if (attentionEnabled)
+                {
+                    attentionTried++;
+                    var denied = await DarlingAlwaysOnXeSessions.EnsureAsync(
+                        database, runner, server, databaseName, AlwaysOnXeSessionKind.Attention, "client timeout", logger, cancellationToken);
+                    if (denied is not null)
+                    {
+                        attentionDenied ??= denied;
+                        attentionDeniedIn++;
+                    }
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -186,6 +261,8 @@ public static class DarlingXeSessions
                 connection?.Dispose();
             }
         }
+
+        return attentionTried > 0 && attentionDeniedIn == attentionTried ? attentionDenied : null;
     }
 
     private static async Task EnsureDeadlockOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
@@ -333,6 +410,61 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
         createCmd.CommandTimeout = 60;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         logger?.LogInformation("[{Server}] Created and started blocked process XE session", server.Config.DisplayName);
+    }
+
+    /// <summary>
+    /// The client-timeout session (#5640), server-scoped, through the shared builder (<see cref="AlwaysOnXeSessions.BuildAttentionServerCreateSql"/>):
+    /// start it when it exists but is not running, create and start it when it does not exist, and replace it when a session of
+    /// that name has another definition (L4). Gated on the attention collector being enabled for the server by the caller
+    /// (<see cref="EnsureAllAsync"/>): the session captures statement text, so it is not brought back for a server that does not
+    /// read it. Turning the collector on again ensures it at the next sweep.
+    /// </summary>
+    private static async Task EnsureAttentionOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
+    {
+        using (var cmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerProbeSql("PerformanceMonitorDarling"), connection))
+        {
+            cmd.CommandTimeout = 60;
+            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = AlwaysOnXeSessions.AttentionXeSessionName });
+            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+
+            if (result != null)
+            {
+                /* #5640 (L4): the name is ours, so a session of it with other events, actions or targets is an older definition of our
+                   own session. Without the event_counter the count is NULL on every read, and without the ring buffer the read returns
+                   zero rows as SUCCESS forever. Dropped and recreated once per connect, logged once; if the recreated session still
+                   reads as another definition, it is left alone. */
+                if (result is int mismatch && mismatch == AlwaysOnXeSessions.AttentionDefinitionMismatch)
+                {
+                    if (server.AttentionXeDefinitionReplaced)
+                    {
+                        logger?.LogDebug("[{Server}] The attention XE session still has another definition after it was replaced on this connection; left as it is", server.Config.DisplayName);
+                        return;
+                    }
+
+                    server.AttentionXeDefinitionReplaced = true;
+                    logger?.LogWarning("[{Server}] The attention XE session {Session} has a definition other than this version's (events, actions or targets): dropping it and creating it again", server.Config.DisplayName, AlwaysOnXeSessions.AttentionXeSessionName);
+                    using var dropCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropSql(), connection);
+                    dropCmd.CommandTimeout = 60;
+                    await dropCmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+                else
+                {
+                    if (result is int isRunning && isRunning == 0)
+                    {
+                        using var startCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerStartSql(), connection);
+                        startCmd.CommandTimeout = 60;
+                        await startCmd.ExecuteNonQueryAsync(cancellationToken);
+                        logger?.LogInformation("[{Server}] Started attention XE session", server.Config.DisplayName);
+                    }
+                    return;
+                }
+            }
+        }
+
+        using var createCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerCreateSql(), connection);
+        createCmd.CommandTimeout = 60;
+        await createCmd.ExecuteNonQueryAsync(cancellationToken);
+        logger?.LogInformation("[{Server}] Created and started attention XE session", server.Config.DisplayName);
     }
 
     /// <summary>

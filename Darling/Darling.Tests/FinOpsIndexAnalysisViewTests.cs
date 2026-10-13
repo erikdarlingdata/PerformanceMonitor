@@ -207,6 +207,24 @@ public sealed class FinOpsIndexAnalysisViewTests
         Assert.Equal("empty", DarlingMcpTestData.StatusOf(DarlingMcpFinOpsTools.BuildIndexAnalysisPayload("srv", r, 10, "nope", false, null)));
     }
 
+    /// <summary>#5633 review (finding D): when the shared index read left a dropped database out and nothing else is left, the empty page
+    /// claims only the databases the server still has, and the tool's envelope names what was left out.</summary>
+    [Fact]
+    public void NoRollups_AfterALeftOutDatabase_DoesNotSayNothingWasCollected_AndTheEnvelopeNamesIt()
+    {
+        var none = new IndexCleanupAnalysisResult();
+        var json = DarlingMcpFinOpsTools.BuildIndexAnalysisPayload("srv", none, 10, null, false, null, null, databasesLeftOut: 1);
+        Assert.Equal("empty", DarlingMcpTestData.StatusOf(json));
+        using var doc = JsonDocument.Parse(json);
+        var message = doc.RootElement.GetProperty("message").GetString()!;
+        Assert.DoesNotContain("collected for this server yet", message, StringComparison.Ordinal);
+        Assert.Contains("1 database(s) the server no longer lists", message, StringComparison.Ordinal);
+
+        using var named = JsonDocument.Parse(McpHelpers.WithDatabasesLeftOut(json, new[] { "GoneDb" })!);
+        Assert.Equal("GoneDb", named.RootElement.GetProperty("databases_left_out")[0].GetString());
+        Assert.Contains("no longer lists them", named.RootElement.GetProperty("databases_left_out_note").GetString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void NoRollups_AnswersTheCapabilityStatusWhenGiven_ElseEmpty()
     {

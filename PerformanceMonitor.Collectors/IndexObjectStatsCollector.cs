@@ -448,6 +448,7 @@ LEFT JOIN #index_compression AS comp
   AND comp.index_id = i.index_id
 WHERE o.is_ms_shipped = 0
 AND   o.type IN (N'U', N'V')
+AND   o.name NOT LIKE N'#%' /* #5633 item 15: tempdb temp tables (this collector's own #usage, #ops, #index_columns and the rest) are not user tables */
 OPTION(RECOMPILE);";
     }
 

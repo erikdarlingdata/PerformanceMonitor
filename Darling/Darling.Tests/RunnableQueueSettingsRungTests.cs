@@ -79,31 +79,52 @@ public sealed class RunnableQueueSettingsRungTests
     }
 
     [Fact]
-    public void TheProbeNamesTheFirstColumn_AndMapsToThisRungAsTheTop()
+    public void TheProbeNamesTheFirstColumn_AndMapsToThisRungBelowV178()
     {
         Assert.Contains("attname = 'runnable_queue_enabled'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        /* V178's (#5684), V179's (#5640) and V180's (#5654) sentinels are appended after this one, so this rung is no longer the top. */
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal("hasRunnableQueueSettings", parameters[^1].Name);
-        Assert.Equal(ProbeOrdinal, parameters.Length - 1);
+        Assert.Equal("hasQueryStoreWatermarks", parameters[ProbeOrdinal + 1].Name);
+        Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal + 2].Name);
+        Assert.Equal("hasExternalAlerts", parameters[^1].Name);
+        Assert.Equal("hasRunnableQueueSettings", parameters[ProbeOrdinal].Name);
+        Assert.Equal(ProbeOrdinal + 3, parameters.Length - 1);
         Assert.Equal("hasProcedureStatsTotals", parameters[ProbeOrdinal - 1].Name);
 
-        /* The sentinel resolves to 177 and is the top arm: every sentinel present answers 177 (this build's version),
-           and with only the sentinel below it (V176's procedure totals table) the answer is 176. */
+        /* Every sentinel present answers this build's version (V180's). With the later sentinels absent this rung is the answer, 177; with
+           this sentinel absent too, only the one below it (V176's procedure totals table) is left and the answer is 176. The
+           newest-first order means V178's sentinel alone still answers 178. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(RungVersion, (int)method.Invoke(null, all)!);
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        var withoutThis = (object[])all.Clone();
+        /* With V180's sentinel (the top) absent the answer is V179's, 179; with V179's absent too, V178's, 178; with V178's absent
+           too, this rung is the answer. */
+        var withoutV180 = (object[])all.Clone();
+        withoutV180[ProbeOrdinal + 3] = false;
+        Assert.Equal(179, (int)method.Invoke(null, withoutV180)!);
+
+        var withoutV179 = (object[])withoutV180.Clone();
+        withoutV179[ProbeOrdinal + 2] = false;
+        Assert.Equal(178, (int)method.Invoke(null, withoutV179)!);
+
+        var withoutV178 = (object[])withoutV179.Clone();
+        withoutV178[ProbeOrdinal + 1] = false;
+        Assert.Equal(RungVersion, (int)method.Invoke(null, withoutV178)!);
+
+        var withoutThis = (object[])withoutV178.Clone();
         withoutThis[ProbeOrdinal] = false;
         Assert.Equal(176, (int)method.Invoke(null, withoutThis)!);
 
-        /* In the source the arm is the first one, above V176's, and returns 177. */
+        /* In the source the arm sits above V176's (and below V178's) and returns 177. */
         var thisArm = viewer.IndexOf("if (hasRunnableQueueSettings)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasProcedureStatsTotals)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0 && previousArm > thisArm, "the V177 arm sits above V176's");
@@ -137,7 +158,7 @@ public sealed class RunnableQueueSettingsRungTests
                the store to the newest rung. */
             Assert.Equal(Expected, await ScalarAsync(connection, ColumnsSql, ct));
             Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct));
-            Assert.Equal(RungVersion, Convert.ToInt32(await ScalarAsync(connection, "SELECT max(version) FROM darling_schema_version", ct), CultureInfo.InvariantCulture));
+            Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await ScalarAsync(connection, "SELECT max(version) FROM darling_schema_version", ct), CultureInfo.InvariantCulture));
 
             /* An upgrade: one rung behind (the columns gone, the version row gone) with a settings row that must survive
                the rung and read the defaults afterwards. Every other NOT NULL column of the row has its own default. */

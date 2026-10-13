@@ -40,7 +40,7 @@ public sealed class GuardStageWorkflowTests
         "if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}";
 
     private const string LiteShardIf =
-        "if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}";
+        "if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') && needs.lite-scope.outputs.mode != 'none' }}";
 
     [Fact]
     public void TheGuardJob_IsNamedOnceNotRequiredByName_AndRunsBothSuitesByTrait()
@@ -249,7 +249,133 @@ public sealed class GuardStageWorkflowTests
 
         /* The result jobs keep the pinned `needs: [gate, ` prefix and add the guard before the matrix. */
         Assert.Contains("\n    needs: [gate, guard-tests, darling-pg]\n", JobBlock(yaml, "darling-pg-result"), StringComparison.Ordinal);
-        Assert.Contains("\n    needs: [gate, guard-tests, lite-tests]\n", JobBlock(yaml, "lite-tests-result"), StringComparison.Ordinal);
+        Assert.Contains("\n    needs: [gate, guard-tests, lite-scope, lite-tests]\n", JobBlock(yaml, "lite-tests-result"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5669: the Lite shards are not started when the diff touches nothing the Lite suite depends on, and the
+    /// REQUIRED check <c>Lite tests (result)</c> still ends success, saying so. A skipped matrix reads as passing in
+    /// some states and as missing in others, so the result job must not infer the planned skip from "skipped" alone:
+    /// it needs a pull request, a skipped matrix AND the lite-scope job's own <c>none</c>, and only after the gate
+    /// and guard arms (a declined run or a failed guard never reaches it). Every other skip still lands on the error.
+    /// </summary>
+    [Fact]
+    public void TheLiteShards_AreSkippedWhenTheLiteScopeIsNone_AndTheResultJobStillSucceeds()
+    {
+        var yaml = Yaml();
+
+        var scope = JobBlock(yaml, "lite-scope");
+        Assert.Contains("\n    name: Lite scope\n", scope, StringComparison.Ordinal);
+        Assert.Contains("\n    needs: [gate]\n", scope, StringComparison.Ordinal);
+        Assert.Contains("\n    if: github.event_name == 'pull_request' && needs.gate.outputs.run == 'true'\n", scope, StringComparison.Ordinal);
+        Assert.Contains("\n    continue-on-error: true\n", scope, StringComparison.Ordinal);
+        Assert.Contains("\n      mode: ${{ steps.scope.outputs.mode }}\n", scope, StringComparison.Ordinal);
+        Assert.Contains("ci-select.py lite-mode --event pull_request --files-from changed.txt", scope, StringComparison.Ordinal);
+        /* It never fails the run: an unknown answer sends the shards down their own scope step. */
+        Assert.DoesNotContain("exit 1", scope, StringComparison.Ordinal);
+        Assert.Contains("mode=unknown", scope, StringComparison.Ordinal);
+
+        /* Both engines must agree to skip. The dorny step is the very step, version and pattern file the shard legs
+           run; `mode=none` is assigned once, under both answers being `none`; and a disagreement is a warning naming
+           both answers and leaves the mode unknown, so the shards run. */
+        var dornyStep = Step(scope, "Detect changed paths (dorny/paths-filter)");
+        Assert.Contains("\n        continue-on-error: true\n", dornyStep, StringComparison.Ordinal);
+        Assert.Contains("\n          filters: .github/lite-paths-filter.yml\n", dornyStep, StringComparison.Ordinal);
+        Assert.DoesNotContain("filters: |", scope, StringComparison.Ordinal);
+        var liteJob = JobBlock(yaml, "lite-tests");
+        Assert.Equal(
+            Regex.Match(liteJob, @"dorny/paths-filter@(?<v>[\w.]+)").Groups["v"].Value,
+            Regex.Match(dornyStep, @"dorny/paths-filter@(?<v>[\w.]+)").Groups["v"].Value);
+        Assert.Matches(@"dorny/paths-filter@v\d", dornyStep);
+
+        var scopeStep = Step(scope, "Decide the Lite scope from the changed files");
+        foreach (var output in new[] { "lite_shard", "core_shard", "root_shard", "darling_reads_shard", "lite_linked_shard" })
+        {
+            Assert.Contains("${{ steps.filter.outputs." + output + " }}", scopeStep, StringComparison.Ordinal);
+        }
+
+        Assert.Single(Regex.Matches(scopeStep, @"^\s*mode=none\s*$", RegexOptions.Multiline));
+        Assert.Contains(
+            "if [ \"${pyans}\" = \"none\" ] && [ \"${dorny}\" = \"none\" ]; then\n            mode=none\n",
+            scopeStep,
+            StringComparison.Ordinal);
+        var warning = scopeStep[scopeStep.IndexOf("::warning", StringComparison.Ordinal)..];
+        warning = warning[..warning.IndexOf('\n', StringComparison.Ordinal)];
+        Assert.Contains("${pyans}", warning, StringComparison.Ordinal);
+        Assert.Contains("${dorny}", warning, StringComparison.Ordinal);
+        Assert.Contains("exit 0", scopeStep, StringComparison.Ordinal);
+
+        var lite = JobBlock(yaml, "lite-tests");
+        var needs = Regex.Match(lite, @"\n    needs: \[(?<list>[^\]]*)\]\n").Groups["list"].Value.Split(',').Select(n => n.Trim()).ToList();
+        Assert.Contains("lite-scope", needs);
+        /* Only an explicit `none` skips: an empty answer (a push, a failed scope job) runs the shards. */
+        Assert.Contains("needs.lite-scope.outputs.mode != 'none'", lite, StringComparison.Ordinal);
+        Assert.DoesNotContain("needs.lite-scope.outputs.mode == ''", lite, StringComparison.Ordinal);
+
+        var result = JobBlock(yaml, "lite-tests-result");
+        Assert.Contains("LITE_SCOPE_MODE: ${{ needs.lite-scope.outputs.mode }}", result, StringComparison.Ordinal);
+
+        var guardArm = result.IndexOf("if [ \"${GUARD_RESULT}\" != \"success\" ]", StringComparison.Ordinal);
+        var overrideAt = result.IndexOf("RESULT=\"not-selected\"", StringComparison.Ordinal);
+        var cases = result.IndexOf("case \"${RESULT}\" in", StringComparison.Ordinal);
+        Assert.True(guardArm > 0 && overrideAt > guardArm && cases > overrideAt,
+            "the planned skip must be decided after the gate and guard arms and before the matrix result is read");
+
+        var condition = result[result.LastIndexOf("if [", overrideAt, StringComparison.Ordinal)..overrideAt];
+        Assert.Contains("[ \"${RESULT}\" = \"skipped\" ]", condition, StringComparison.Ordinal);
+        Assert.Contains("[ \"${EVENT_NAME}\" = \"pull_request\" ]", condition, StringComparison.Ordinal);
+        Assert.Contains("[ \"${LITE_SCOPE_MODE}\" = \"none\" ]", condition, StringComparison.Ordinal);
+
+        var arm = result[result.IndexOf("            not-selected)", StringComparison.Ordinal)..];
+        arm = arm[..arm.IndexOf(";;", StringComparison.Ordinal)];
+        Assert.Contains("No Lite tests were selected", arm, StringComparison.Ordinal);
+        Assert.Contains("GITHUB_STEP_SUMMARY", arm, StringComparison.Ordinal);
+        Assert.DoesNotContain("exit 1", arm, StringComparison.Ordinal);
+        Assert.DoesNotContain("::error", arm, StringComparison.Ordinal);
+
+        /* The Darling result job and the other shard jobs know nothing of it. */
+        Assert.DoesNotContain("lite-scope", JobBlock(yaml, "darling-pg-result"), StringComparison.Ordinal);
+        Assert.DoesNotContain("lite-scope", JobBlock(yaml, "darling-pg"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5669 census: the Lite shard path filters live in ONE file, <c>.github/lite-paths-filter.yml</c>. The
+    /// shard legs' <c>dorny/paths-filter</c> step, the <c>lite-scope</c> job's <c>dorny/paths-filter</c> step and
+    /// <c>ci-select.py</c> (the replay, the test-map shadow check and <c>lite-mode</c>) all read it, and no inline
+    /// copy of its filters remains in the workflow. Two engines on two copies is how a pattern one matches and the
+    /// other does not would skip Lite tests for a diff that needed them.
+    /// </summary>
+    [Fact]
+    public void TheLiteShardFilters_LiveInOneFile_ReadByTheShardLegsTheScopeJobAndCiSelect()
+    {
+        const string File = ".github/lite-paths-filter.yml";
+        var yaml = Yaml();
+
+        foreach (var jobId in new[] { "lite-tests", "lite-scope" })
+        {
+            var job = JobBlock(yaml, jobId);
+            Assert.Contains("\n          filters: " + File + "\n", job, StringComparison.Ordinal);
+            Assert.DoesNotContain("filters: |", job, StringComparison.Ordinal);
+        }
+
+        /* No inline definition of any of the five sets is left anywhere in the workflow (an output READ is
+           `steps.filter.outputs.lite_shard`, never a key line). */
+        var keys = new[] { "root_shard", "core_shard", "lite_shard", "darling_reads_shard", "lite_linked_shard" };
+        foreach (var key in keys)
+        {
+            Assert.DoesNotMatch(new Regex("^\\s+" + key + ":\\s*(#.*)?$", RegexOptions.Multiline), yaml);
+        }
+
+        var file = RepoFile.ReadRepoFileLf(".github", "lite-paths-filter.yml");
+        foreach (var key in keys)
+        {
+            Assert.Matches(new Regex("^" + key + ":\\s*$\\n(\\s*#.*\\n)*\\s+- '", RegexOptions.Multiline), file);
+        }
+
+        var select = RepoFile.ReadRepoFileLf(".github", "scripts", "ci-select.py");
+        Assert.Contains("LITE_FILTER = os.path.join(ROOT, \".github\", \"lite-paths-filter.yml\")", select, StringComparison.Ordinal);
+        Assert.Contains("self.lite_shards = load_file_filters(lite_filter)", select, StringComparison.Ordinal);
+        Assert.DoesNotContain("wf[\"lite-tests\"]", select, StringComparison.Ordinal);
     }
 
     /// <summary>

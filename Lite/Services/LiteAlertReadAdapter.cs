@@ -125,6 +125,14 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return await Task.Run(() => _dataService.GetRunnableQueueSamplesAsync(serverId, lookbackMinutes), cancellationToken);
     }
 
+    /// <summary>#5640: the Client Timeouts window (runs, count rows, sample groups, top lists), delegated like every other member so the engine stays free of DuckDB.</summary>
+    public async Task<AttentionWindow> GetAttentionWindowAsync(
+        string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return await Task.Run(() => _dataService.GetAttentionWindowAsync(serverId, lookbackMinutes), cancellationToken);
+    }
+
     public async Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         string serverKey,
         int thresholdMinutes,

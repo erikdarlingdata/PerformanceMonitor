@@ -270,7 +270,8 @@ per_wait AS (
 categorized AS (
     SELECT
         CASE
-            WHEN wait_type IN ('SOS_SCHEDULER_YIELD', 'CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER') THEN 'CPU'
+            WHEN wait_type = 'SOS_SCHEDULER_YIELD' THEN 'CPU'
+            WHEN wait_type IN ('CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER', 'HTDELETE', 'HTBUILD', 'HTREPARTITION') THEN 'Parallelism'
             WHEN wait_type ILIKE 'PAGEIOLATCH%'
             OR   wait_type IN ('WRITELOG', 'IO_COMPLETION', 'ASYNC_IO_COMPLETION') THEN 'Storage'
             WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'

@@ -44,7 +44,7 @@ public sealed class TimescaleSupportTests
     {
         /* Scope = the catalog, table-for-table: 26 collector tables, nothing else. */
         Assert.Equal(
-            CollectorCatalog.All.Select(s => s.TargetTable).ToArray(),
+            CollectorCatalog.All.Where(s => !s.StaysPlainTable).Select(s => s.TargetTable).ToArray(),
             TimescaleSupport.HypertableTables.Select(s => s.TargetTable).ToArray());
 
         /* The registry/config/analysis tables stay plain: registries keep their PRIMARY KEYs
@@ -543,8 +543,8 @@ public sealed class TimescaleSupportTests
         Assert.True(await TimescaleSupport.DetectAsync(connection, ct));
 
         /* Conversion covers every collector table and is idempotent (if_not_exists no-ops). */
-        Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
-        Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
 
         /* wait_stats really is a hypertable now — so the purge below genuinely exercises
            drop_chunks, not the per-table DELETE fallback. */
@@ -680,12 +680,12 @@ public sealed class TimescaleSupportTests
             "the dev fixture is expected to have TimescaleDB installed");
 
         /* Compression needs hypertables first — idempotent, so safe regardless of test order. */
-        Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
 
         /* Applies cleanly and idempotently (the second pass re-runs ALTER SET and the policy
            no-ops on if_not_exists). */
-        Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct));
-        Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct));
+        Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct));
+        Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct));
 
         /* The background job really exists. proc_name is 'policy_compression' on the long-stable
            API; the LIKE also tolerates the 2.18+ columnstore rebrand's naming. */
@@ -1687,7 +1687,7 @@ AND   is_compressed = {(compressed ? "true" : "false")}", connection);
 
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
             "the dev fixture is expected to have TimescaleDB installed");
-        Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
         /* #3949: collection_log is OUTSIDE CollectorCatalog (see EnsureCollectionLogHypertableAsync's own
            test above), and the off-grid collection_health_hourly aggregate this test's RetentionPolicyCount
            counts on is built FROM it. The shipped order (DarlingWorker's s_storeObjectConvergence) always
@@ -1826,7 +1826,7 @@ AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
 
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
             "the dev fixture is expected to have TimescaleDB installed");
-        Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
         /* #3949: same ordering requirement as the EndToEnd retention test above - collection_log must be a
            hypertable before EnsureContinuousAggregatesAsync builds the off-grid collection_health_hourly
            aggregate RetentionPolicyCount counts on, or this test's "all 21 applied" depends on run order
@@ -2217,8 +2217,8 @@ AND   j.hypertable_name = '" + relation + "'", connection) { CommandTimeout = Po
 
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
             "the dev fixture is expected to have TimescaleDB installed");
-        Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
-        Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct));
+        Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct));
 
         /* Pick one real compression policy job (on wait_stats). */
         long jobId;
@@ -3442,7 +3442,7 @@ LIMIT 1", connection))
     public void EveryHypertableWeOwn_GetsACompressionMinuteOnTheGrid_AndTheyStaySpread()
     {
         Assert.Equal(TimescaleSupport.HypertableCount, TimescaleSupport.CompressionPhaseOrder.Count);
-        Assert.Equal(CollectorCatalog.All.Count + 1, TimescaleSupport.CompressionPhaseOrder.Count);
+        Assert.Equal(TimescaleSupport.HypertableTables.Count + 1, TimescaleSupport.CompressionPhaseOrder.Count);
         Assert.Equal(TimescaleSupport.CollectionLogTable, TimescaleSupport.CompressionPhaseOrder[^1]);
 
         var byMinute = new Dictionary<int, List<string>>();

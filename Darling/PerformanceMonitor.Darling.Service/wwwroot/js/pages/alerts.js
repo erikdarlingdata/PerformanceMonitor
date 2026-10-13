@@ -56,6 +56,11 @@ const ALERT_COLUMNS = [
    two actions were the last things reached by horizontal scroll. The checkbox column (a seat that can edit) stays
    ahead of them. */
 const TRIAGE_COLUMN = { key: "triage", label: "Triage", csv: false, render: (a) => triageCell(a) };
+/* #5654: the External source column - the name of the service that queued an external alert, from the row's
+   external_source (null for every built-in alert). Shown only while a fetched row carries one, so a store that never
+   receives external alerts keeps the table it had. drawAlerts flips showExternal and rebuilds the table when that changes. */
+let showExternal = false;
+const EXTERNAL_COLUMN = { key: "external_source", label: "External source" };
 
 /* The Mute column exists only for a seat whose session reports can_edit (the server enforces the write gate;
    this is only the affordance). Both links open the Mute Rules create form pre-filled from the row. "Mute this
@@ -65,7 +70,10 @@ const TRIAGE_COLUMN = { key: "triage", label: "Triage", csv: false, render: (a) 
 let canMute = false;
 const MUTE_COLUMN = { key: "mute", label: "Mute", csv: false, render: (a) => muteCell(a) };
 function alertColumns() {
-  return canMute ? [SELECT_COLUMN, TRIAGE_COLUMN, MUTE_COLUMN].concat(ALERT_COLUMNS) : [TRIAGE_COLUMN].concat(ALERT_COLUMNS);
+  const base = showExternal
+    ? ALERT_COLUMNS.slice(0, 3).concat([EXTERNAL_COLUMN], ALERT_COLUMNS.slice(3))
+    : ALERT_COLUMNS;
+  return canMute ? [SELECT_COLUMN, TRIAGE_COLUMN, MUTE_COLUMN].concat(base) : [TRIAGE_COLUMN].concat(base);
 }
 
 /* Dismiss (the web twin of the Viewer's Dismiss Selected / Dismiss All), for a seat that can edit. The checked
@@ -733,6 +741,15 @@ function drawAlerts(state) {
     state.rowMap = null;
     mount(state.tableBox, emptyStrip(q ? 'No alerts match "' + state.filter.value + '".' : "No alerts in this window."));
     return;
+  }
+
+  /* #5654: the External source column appears and disappears with the fetched rows, so the header has to be rebuilt
+     when that changes - the keyed refresh below leaves the header alone. */
+  const wantExternal = state.alerts.some((a) => a.external_source);
+  if (wantExternal !== showExternal) {
+    showExternal = wantExternal;
+    state.tbody = null;
+    state.rowMap = null;
   }
 
   if (state.tbody) {

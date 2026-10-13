@@ -135,8 +135,33 @@ public sealed class AlertEngine
        with no evaluation for RunnableQueueEvaluator.StaleIncidentMinutes is resolved, with the reason stated. */
     private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueEvaluation = new();
     /* #5641: the highest tier delivered for the open Runnable Queue incident, so a Warning that worsens to Critical
-       is delivered at once instead of waiting out the cooldown. Runnable Queue is the only opted-in alert. */
+       is delivered at once instead of waiting out the cooldown. Runnable Queue, Client Timeouts (#5640) and the four
+       older two-tier alerts (#5715, below) opt in. */
     private readonly TierEscalation _runnableQueueEscalation = new();
+
+    /* #5715: the same Warning-to-Critical escalation for the four older two-tier alerts, one instance each, keyed like the
+       alert's own cooldown dictionary (per server; Volume Free Space is one alert per server, for its worst volume, so its escalation
+       is keyed per server too). A failed escalation (#4752) backs off like any failed send: EscalationOpensGate holds it for the
+       retry delay while the family and key have an open failure streak. */
+    private readonly TierEscalation _cpuEscalation = new();
+    private readonly TierEscalation _deadlockEscalation = new();
+    private readonly TierEscalation _poisonWaitEscalation = new();
+    private readonly TierEscalation _lowDiskEscalation = new();
+
+    /* #5640: the Client Timeouts alert's per-server state, shaped like Runnable Queue's (cooldown stamp, newest run fired on,
+       active flag, last evaluation for the stale resolve, and the escalation tier). */
+    private readonly ConcurrentDictionary<string, DateTime> _lastAttentionAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastAttentionRunTime = new();
+    private readonly ConcurrentDictionary<string, bool> _activeAttentionAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastAttentionEvaluation = new();
+    private readonly TierEscalation _attentionEscalation = new();
+
+    /* Round 2 of #5714 (H1): a Muted Client Timeouts fire is not a delivery. The proportional mute changes from one run to the
+       next on its own (the sample mix decides it), so a Muted Critical that stamped the delivery cooldown or recorded its tier
+       held back the next real Critical and killed the escalation bypass. Muted fires keep a cooldown stamp and a run marker of
+       their own, so a muted storm writes one Muted history row per cooldown and not one a minute. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastAttentionMutedAlert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastAttentionMutedRunTime = new();
 
     /* The collection_time of the newest wait_stats row inside the window last actually fired on. Read
        adapters answer "how much poison wait accumulated over the last 10 minutes, and when was the
@@ -342,6 +367,13 @@ public sealed class AlertEngine
     /// else; production passes <see cref="AlertReadFailureCounter.Shared"/>, and tests that want to
     /// observe the counting pass their own instance rather than touching that one.
     /// </param>
+    /// <param name="escalationSeedReader">
+    /// #5715 part B: the alert-history read that seeds the six <see cref="TierEscalation"/> instances across a restart
+    /// (<see cref="EscalationSeed.ReaderFor"/> over the host's <see cref="IAlertHistoryStore"/>). Called once per server key
+    /// and family per process, at the start of that server's sweep. A throw is logged and counted, seeds nothing and is
+    /// retried on the next sweep until the seed ends (a read succeeds, the process touches the key, or one cooldown passes
+    /// since the engine was built); null leaves the tier in memory only.
+    /// </param>
     public AlertEngine(
         IAlertEngineSettings settings,
         IAlertReadAdapter readAdapter,
@@ -353,7 +385,8 @@ public sealed class AlertEngine
         Func<AlertResolution, CancellationToken, Task>? resolutionCallback = null,
         ILogger? logger = null,
         Func<DateTime>? utcNow = null,
-        AlertReadFailureCounter? readFailures = null)
+        AlertReadFailureCounter? readFailures = null,
+        Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? escalationSeedReader = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _readAdapter = readAdapter ?? throw new ArgumentNullException(nameof(readAdapter));
@@ -366,7 +399,36 @@ public sealed class AlertEngine
         _logger = logger;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
         _readFailures = readFailures;
+        _escalationSeedReader = escalationSeedReader;
+        /* #5715 round 1: the restart seed counts only history rows from before this engine existed; construction is the
+           process start for both hosts, which build the engine once at startup. */
+        _engineStartUtc = _utcNow();
+        /* #5715 part B: the six opted-in families, each with the resolution title its history row is stored under. */
+        _escalationSeedFamilies = new (string Metric, string ResolutionTitle, bool CountMuted, bool TierlessRowIsWarning, TierEscalation Escalation)[]
+        {
+            (CpuPersistenceMetric, EscalationSeed.CpuResolvedTitle, true, false, _cpuEscalation),
+            (DeadlockWatermarkMetric, EscalationSeed.DeadlocksClearedTitle, true, false, _deadlockEscalation),
+            (PostgresAlertEvaluator.PoisonWaitMetric, EscalationSeed.PoisonWaitsClearedTitle, true, false, _poisonWaitEscalation),
+            (RunnableQueueEvaluator.MetricName, EscalationSeed.RunnableQueueClearedTitle, true, false, _runnableQueueEscalation),
+            /* A muted Client Timeouts fire is tracked on its own stamp and does not record the tier (see CheckAttentionAsync). */
+            (AttentionEvaluator.MetricName, EscalationSeed.ClientTimeoutsClearedTitle, false, false, _attentionEscalation),
+            /* Volume Free Space persists a tier only for a Critical fire, so its Warning rows are tierless by design: the
+               only family where a tierless history row means Warning. */
+            (VolumeFreeSpaceWatermarkMetric, EscalationSeed.VolumeFreeSpaceResolvedTitle, true, true, _lowDiskEscalation),
+        };
     }
+
+    /// <summary>#5715 part B: the history reader that seeds <see cref="TierEscalation"/> across a restart; null leaves the tier in-memory only.</summary>
+    private readonly Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? _escalationSeedReader;
+
+    private readonly (string Metric, string ResolutionTitle, bool CountMuted, bool TierlessRowIsWarning, TierEscalation Escalation)[] _escalationSeedFamilies;
+
+    /// <summary>#5715 round 1: when this engine was built. History rows at or after it are this process's own; the seed reads
+    /// only rows before it, and a family's seed ends one cooldown after it (every earlier row is then outside the window).</summary>
+    private readonly DateTime _engineStartUtc;
+
+    /// <summary>(server key, metric) pairs whose seed read has completed, so each is read once per process. A failed read is not added.</summary>
+    private readonly ConcurrentDictionary<(string Key, string Metric), bool> _escalationSeeded = new();
 
     /// <summary>#3013: the swallowed-read counter, or null when nothing is counting.</summary>
     private readonly AlertReadFailureCounter? _readFailures;
@@ -418,6 +480,7 @@ public sealed class AlertEngine
            looked at the store. */
         _readFailures?.RecordPass(key);
 
+        await EnsureEscalationSeededAsync(key, now, alertCooldown, ct);
         await EnsureWatermarksSeededAsync(key, ct);
 
         await CheckCpuAsync(snapshot, key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
@@ -430,6 +493,7 @@ public sealed class AlertEngine
         await CheckDeadlocksAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, blockingDeadlockExcluded, ct);
         await CheckPoisonWaitsAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         await CheckRunnableQueueAsync(snapshot, key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
+        await CheckAttentionAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         await CheckLongRunningQueriesAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
         await CheckTempDbSpaceAsync(key, serverName, snapshot.ServerId, now, alertCooldown, suppressed, ct);
         bool lowDiskConditionPresent = await CheckLowDiskAsync(key, serverName, snapshot.ServerId, snapshot.FingerprintServerName, now, alertCooldown, suppressed, ct);
@@ -548,6 +612,72 @@ public sealed class AlertEngine
         }
 
         _seededServerKeys[key] = true;
+    }
+
+    /// <summary>
+    /// #5715 part B: seeds the six <see cref="TierEscalation"/> instances from the alert history, once per server key
+    /// per process, at the start of that server's sweep and before any family evaluates. After a restart in the middle
+    /// of an incident the engine would otherwise not know a Warning was delivered, and the email and webhook cooldowns
+    /// (seeded from the same history) would hold the first Critical for the rest of the Warning's window.
+    /// <para>The window is the family's cooldown: older than that the bypass changes nothing, so nothing older is read.
+    /// Only rows from before the engine started count (<c>_engineStartUtc</c>, exclusive), only a Warning seeds, and the
+    /// seed for a key ends when a read succeeds, when this process has touched the key (<see cref="TierEscalation.IsTouched"/>),
+    /// or one cooldown after the engine started. A fire this process already made therefore always wins.</para>
+    /// <para>A failed read is an annotation, never a suppression: it is logged and counted, seeds nothing, and does not
+    /// stop the sweep; that family is read again on the next sweep. Only cancellation propagates.</para>
+    /// </summary>
+    private async Task EnsureEscalationSeededAsync(string key, DateTime now, TimeSpan alertCooldown, CancellationToken ct)
+    {
+        if (_escalationSeedReader is null || alertCooldown <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var sinceUtc = now - alertCooldown;
+        foreach (var (metric, resolutionTitle, countMuted, tierlessRowIsWarning, escalation) in _escalationSeedFamilies)
+        {
+            if (_escalationSeeded.ContainsKey((key, metric)))
+            {
+                continue;
+            }
+
+            /* The seed for (key, family) ends at the first of: a read succeeds; this process Recorded or Closed the key
+               (an incident it already ran or finished, which a late success must not reach into); one cooldown since the
+               engine started (every row from before it is now outside the window, so a read could only return nothing).
+               That also bounds the retry when the store is unreachable. */
+            if (escalation.IsTouched(key) || now - _engineStartUtc >= alertCooldown)
+            {
+                _escalationSeeded[(key, metric)] = true;
+                continue;
+            }
+
+            var readClock = Stopwatch.StartNew();
+            try
+            {
+                var tier = await _escalationSeedReader(
+                    new EscalationSeedQuery(key, metric, resolutionTitle, sinceUtc, _engineStartUtc, countMuted, tierlessRowIsWarning), ct);
+
+                /* Only a Warning seeds: a seeded Critical never creates an escalation (IsEscalation is tier > highest) and,
+                   because Record keeps the higher tier, could only cancel the NEXT incident's Warning-to-Critical one. A
+                   repeated Critical after a restart is a plain first fire, which the history-seeded email and webhook
+                   cooldowns already hold. The engine drops anything else here, whatever the reader hands back. */
+                if (tier == AlertSeverityLevel.Warning && !escalation.IsTouched(key))
+                {
+                    escalation.Restore(key, AlertSeverityLevel.Warning);
+                }
+
+                _escalationSeeded[(key, metric)] = true;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("Could not read the {Metric} tier from alert history for {ServerKey} after {ElapsedMs} ms; a Warning-to-Critical escalation across a restart is not seeded this sweep: {Message}", metric, key, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "escalation tier seed", readClock.ElapsedMilliseconds);
+            }
+        }
     }
 
     /* ---------------- CPU (Lite AlertEngine.cs:62-114) ---------------- */
@@ -829,8 +959,15 @@ public sealed class AlertEngine
             {
                 await FireCpuAsync(key, serverName, serverId, now, alertCooldown, suppressed, eventValue, cpuMetricLabel, readingUtc, ct);
             }
-            else if (!suppressed)
+            else
             {
+                /* #5715: the incident is over whether or not anyone is told, so the next one starts from nothing delivered. */
+                _cpuEscalation.Close(key);
+                if (suppressed)
+                {
+                    continue;
+                }
+
                 /* The FALLING EDGE comes from the gate rather than from a single sample dropping under the
                    bar, which is the other half of #3282: the pre-gate code resolved on the first clear sample,
                    so a 93%-for-two-minutes excursion produced a fire and a resolve 147 seconds apart and an
@@ -838,7 +975,7 @@ public sealed class AlertEngine
                    CpuClearSamples consecutive clears. Still gated on !suppressed, exactly as before. */
                 await NotifyResolutionAsync(new AlertResolution(
                     key, serverName, "High CPU",
-                    "CPU Resolved",                                                 /* :110 */
+                    EscalationSeed.CpuResolvedTitle,                                                 /* :110 */
                     $"{serverName}: {cpuMetricLabel} back to {eventValue:F0}%"), ct); /* :111 */
             }
         }
@@ -961,11 +1098,20 @@ public sealed class AlertEngine
         string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed,
         double alertCpuValue, string cpuMetricLabel, DateTime? readingUtc, CancellationToken ct)
     {
-        if (!suppressed && CooldownElapsed(_lastCpuAlert, key, now, alertCooldown)) /* :72 */
+        /* #5715: the tier is graded BEFORE the gate (GradeCpuFire is pure) and that one value is the fire's tier, so the
+           escalation test and the card cannot disagree. A Warning incident now graded Critical is delivered past the
+           cooldown; the stamp below restarts it, and the context's flag lets the email and webhook cooldowns through. */
+        var cpuGrade = GradeCpuFire(alertCpuValue);
+        var escalation = _cpuEscalation.IsEscalation(key, cpuGrade);
+
+        if (!suppressed && EscalationOpensGate("High CPU", key, escalation, _lastCpuAlert, now, alertCooldown)) /* :72 */
         {
             var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "High CPU" }; /* :74 */
             bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
             _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
+            /* Recorded before the send (a muted fire's history row must not be late), put back below when every channel failed. */
+            var priorTier = _cpuEscalation.Highest(key);
+            _cpuEscalation.Record(key, cpuGrade);
 
             /* #3495: name the active backup on the card. Everything the annotation needs was knowable
                at fire time from the same active-session surface the operator ended up reading by hand
@@ -1039,8 +1185,8 @@ public sealed class AlertEngine
                byte-identical, so every channel renders what it rendered before plus the tier. Set on
                BOTH the context and the outcome for the reason the deadlock and Poison Wait sites give:
                Lite's deliverer persists only the context, Darling's folds the outcome in. */
-            var cpuGrade = GradeCpuFire(alertCpuValue);
-            var cpuContext = AlertSampleAge.Stamp(new AlertContext { SeverityOverride = cpuGrade }, CpuReadingSource, readingUtc, now);
+            var cpuContext = AlertSampleAge.Stamp(
+                new AlertContext { SeverityOverride = cpuGrade, EscalationBypassesCooldown = escalation }, CpuReadingSource, readingUtc, now);
             /* #5642: the context holds no Details, so the typed field alone would not reach a text channel; the
                hand-built text carries the age line (AlertDetailText.SampleAgeLine, appended once), and the
                channel renderers print the typed field only when the prose does not already carry it. */
@@ -1054,6 +1200,12 @@ public sealed class AlertEngine
                 Muted: isMuted, Severity: cpuGrade,
                 ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {_settings.CpuThresholdPercent}%)"), ct);
             AfterFire("High CPU", _lastCpuAlert, key, now, alertCooldown, delivery);
+
+            /* A fire nobody received has not delivered this tier: the retry is still the escalation (#5709 round 2). */
+            if (EveryChannelFailed(delivery))
+            {
+                _cpuEscalation.Restore(key, priorTier);
+            }
         }
     }
 
@@ -1705,7 +1857,13 @@ public sealed class AlertEngine
 
         /* Edge-trigger the rolling 1-hour count (#1091) — :213-227. */
         int deadlockWatermark = _lastAlertedDeadlockCount.TryGetValue(key, out var ladc) ? ladc : 0; /* :216 */
-        bool deadlockCooldownElapsed = CooldownElapsed(_lastDeadlockAlert, key, now, alertCooldown); /* :217 */
+        /* #5715: graded BEFORE the gate (GradeDeadlockFire is pure) and that one value is the fire's tier, so the
+           escalation test and the card cannot disagree. A Warning incident now graded Critical is a fire past the
+           cooldown. The gate's own new-event test stays: a Critical rate is a higher count than the Warning's, so
+           the watermark the Warning fire left is below it. */
+        var deadlockTier = GradeDeadlockFire(effectiveDeadlockCount, _settings.DeadlockRateThresholds);
+        var deadlockEscalation = _settings.DeadlockEnabled && _deadlockEscalation.IsEscalation(key, deadlockTier);
+        bool deadlockCooldownElapsed = EscalationOpensGate("Deadlocks Detected", key, deadlockEscalation, _lastDeadlockAlert, now, alertCooldown); /* :217 */
         var deadlockDecision = _settings.DeadlockEnabled
             ? RollingCountAlertGate.Evaluate(effectiveDeadlockCount, _settings.DeadlockCountThreshold, deadlockWatermark, deadlockCooldownElapsed, suppressed)
             : new RollingCountAlertGate.Decision(false, false, 0);                  /* :218-220 */
@@ -1717,6 +1875,11 @@ public sealed class AlertEngine
 
         bool wasDeadlockActive = _activeDeadlockAlert.TryGetValue(key, out var wasDeadlock) && wasDeadlock; /* :229 */
         _activeDeadlockAlert[key] = deadlockDecision.Active;                        /* :230 */
+        if (!deadlockDecision.Active)
+        {
+            /* #5715: the window emptied (or the alert was switched off): the incident is over, announced or not. */
+            _deadlockEscalation.Close(key);
+        }
 
         /* #2216: observe every sweep — see the blocking twin above for why this cannot sit inside Fire. */
         var deadlockOccurrences = default(OccurrenceTotals);
@@ -1733,6 +1896,8 @@ public sealed class AlertEngine
             var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Deadlocks Detected" }; /* :234 */
             bool isMuted = _isAlertMuted(muteCtx);                                  /* :235 */
             _lastDeadlockAlert[key] = now;                                          /* :236 */
+            var priorDeadlockTier = _deadlockEscalation.Highest(key);
+            _deadlockEscalation.Record(key, deadlockTier);
 
             /* :249-250 — context from this sweep's fetch. */
             var deadlockContext = AlertContextBuilders.BuildDeadlockContext(
@@ -1754,7 +1919,8 @@ public sealed class AlertEngine
                outcome's severity into the context; Darling's does — setting both makes the two SKUs agree
                by construction, the Poison Wait precedent). */
             deadlockContext ??= new AlertContext();
-            deadlockContext.SeverityOverride = GradeDeadlockFire(effectiveDeadlockCount, _settings.DeadlockRateThresholds);
+            deadlockContext.SeverityOverride = deadlockTier;
+            deadlockContext.EscalationBypassesCooldown = deadlockEscalation;
             AlertSampleAge.Stamp(deadlockContext, "deadlock", AlertSampleAge.Newest(deadlockRows!.Select(r => r.NewestSampleUtc)), now);
             var detailText = AlertContextBuilders.ContextToDetailText(deadlockContext);
 
@@ -1775,6 +1941,8 @@ public sealed class AlertEngine
                and the retry sweep fires again at the same count. */
             if (EveryChannelFailed(delivery))
             {
+                /* #5715: the tier goes back with the watermark, so the retry is still the escalation. */
+                _deadlockEscalation.Restore(key, priorDeadlockTier);
                 var unannouncedWatermark = Math.Min(deadlockWatermark, effectiveDeadlockCount);
                 _lastAlertedDeadlockCount[key] = unannouncedWatermark;
                 await _stateStore.SaveEdgeTriggerWatermarkAsync(key, DeadlockWatermarkMetric, unannouncedWatermark);
@@ -1793,7 +1961,7 @@ public sealed class AlertEngine
             {
                 await NotifyResolutionAsync(new AlertResolution(
                     key, serverName, "Deadlocks Detected",
-                    "Deadlocks Cleared",                                            /* :267 */
+                    EscalationSeed.DeadlocksClearedTitle,                                            /* :267 */
                     $"{serverName}: No deadlocks in the last hour"), ct);           /* :268 */
             }
         }
@@ -1856,9 +2024,14 @@ public sealed class AlertEngine
                 bool hasFreshCollection = !_lastPoisonWaitCollectionTime.TryGetValue(key, out var lastCollectionTime)
                     || newestCollectionTime > lastCollectionTime;
 
-                if (!suppressed && hasFreshCollection && CooldownElapsed(_lastPoisonWaitAlert, key, now, alertCooldown)) /* :283 */
+                /* #5715: the worst finding's tier (findings[0], worst-first from the evaluator) is read before the gate and is
+                   the fire's tier. A Warning incident now graded Critical is delivered past the cooldown; the fresh-collection
+                   guard still applies, so the escalation rests on a reading newer than the one the Warning went out on. */
+                var worst = findings[0];                                            /* :285 — worst-first from the evaluator */
+                var escalation = _poisonWaitEscalation.IsEscalation(key, worst.Severity);
+
+                if (!suppressed && hasFreshCollection && EscalationOpensGate("Poison Wait", key, escalation, _lastPoisonWaitAlert, now, alertCooldown)) /* :283 */
                 {
-                    var worst = findings[0];                                        /* :285 — worst-first from the evaluator */
                     var allWaitNames = string.Join(", ", findings.ConvertAll(f => f.CurrentValueClause)); /* :286 */
 
                     /* :288-293 — mute keys on the worst (highest severity, then most accumulated wait)
@@ -1867,6 +2040,8 @@ public sealed class AlertEngine
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastPoisonWaitAlert[key] = now;                                /* :294 */
                     _lastPoisonWaitCollectionTime[key] = newestCollectionTime;
+                    var priorTier = _poisonWaitEscalation.Highest(key);
+                    _poisonWaitEscalation.Record(key, worst.Severity);
 
                     /* One detail item per firing type, no incidents — the shape IncidentDeliveryFilter
                        documents for this metric (metric-level cooldown fallback). The severity rides on the
@@ -1877,7 +2052,7 @@ public sealed class AlertEngine
                     /* #4223: the worst-graded wait type as structured data, the same value the mute
                        context above already keys on — an alert-notebook reader can branch on it without
                        parsing the detail heading or the prose. */
-                    var poisonContext = new AlertContext { SeverityOverride = worst.Severity, WaitType = worst.WaitType };
+                    var poisonContext = new AlertContext { SeverityOverride = worst.Severity, WaitType = worst.WaitType, EscalationBypassesCooldown = escalation };
                     AlertSampleAge.Stamp(poisonContext, "wait stats", newestCollectionTime, now);
                     foreach (var finding in findings)
                     {
@@ -1918,6 +2093,7 @@ public sealed class AlertEngine
                     if (EveryChannelFailed(delivery))
                     {
                         _lastPoisonWaitCollectionTime.TryRemove(key, out _);
+                        _poisonWaitEscalation.Restore(key, priorTier);
                     }
                     readClock.Restart();
                 }
@@ -1926,11 +2102,12 @@ public sealed class AlertEngine
                 && _activePoisonWaitAlert.TryGetValue(key, out var wasPoisonWait) && wasPoisonWait) /* :323 */
             {
                 _activePoisonWaitAlert[key] = false;                                /* :325 */
+                _poisonWaitEscalation.Close(key);                                   /* #5715 */
                 if (!suppressed)                                                    /* :326 */
                 {
                     await NotifyResolutionAsync(new AlertResolution(
                         key, serverName, "Poison Wait",
-                        "Poison Waits Cleared",                                     /* :329 */
+                        EscalationSeed.PoisonWaitsClearedTitle,                                     /* :329 */
                         string.Create(CultureInfo.InvariantCulture,
                             $"{serverName}: Poison wait accumulated over the last {PoisonWaitEvaluator.WindowMinutes} minutes back below threshold")), ct); /* :330 */
                     readClock.Restart();
@@ -2003,7 +2180,7 @@ public sealed class AlertEngine
                     {
                         await NotifyResolutionAsync(new AlertResolution(
                             key, serverName, RunnableQueueEvaluator.MetricName,
-                            "Runnable Queue Cleared",
+                            EscalationSeed.RunnableQueueClearedTitle,
                             string.Create(CultureInfo.InvariantCulture,
                                 $"{serverName}: Runnable Queue alert resolved - no fresh scheduler data for {RunnableQueueEvaluator.StaleIncidentMinutes} minutes, so the queue could not be re-checked (the cpu_scheduler_stats collector may be disabled, slow or failing)")), ct);
                         readClock.Restart();
@@ -2036,7 +2213,7 @@ public sealed class AlertEngine
                 var escalation = _runnableQueueEscalation.IsEscalation(key, finding.Severity);
 
                 if (!suppressed && hasFreshCollection
-                    && (escalation || CooldownElapsed(_lastRunnableQueueAlert, key, now, alertCooldown)))
+                    && EscalationOpensGate(RunnableQueueEvaluator.MetricName, key, escalation, _lastRunnableQueueAlert, now, alertCooldown))
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = RunnableQueueEvaluator.MetricName };
                     bool isMuted = _isAlertMuted(muteCtx);
@@ -2115,7 +2292,7 @@ public sealed class AlertEngine
                 {
                     await NotifyResolutionAsync(new AlertResolution(
                         key, serverName, RunnableQueueEvaluator.MetricName,
-                        "Runnable Queue Cleared",
+                        EscalationSeed.RunnableQueueClearedTitle,
                         string.Create(CultureInfo.InvariantCulture,
                             $"{serverName}: Runnable tasks per scheduler averaged over the last {reading.SampleCount} collections are back below threshold")), ct);
                     readClock.Restart();
@@ -2130,6 +2307,178 @@ public sealed class AlertEngine
         {
             _logger?.LogError("Failed to check runnable queue for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "runnable queue", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /* ---------------- client timeouts (#5640) ---------------- */
+
+    /// <summary>
+    /// The Client Timeouts alert (#5640): client attentions (a client cancelled or timed out a query) per minute, from the
+    /// attention collector's <c>attention_events</c>, graded Warning at the Warning bar (10 per minute by default) and Critical
+    /// at the Critical bar (60). OFF by default. The count model, the rate rule, the not-observed rule and the proportional
+    /// mute are on <see cref="AttentionEvaluator"/>.
+    ///
+    /// <para>Everything around the grade is Runnable Queue's: a window that is not an observation neither fires nor clears
+    /// (a collector gap cannot announce "Cleared" on silence), a standing alert unevaluated for
+    /// <see cref="AttentionEvaluator.StaleIncidentMinutes"/> resolves with that reason stated, a fire waits for a collector run
+    /// newer than the one last fired on, and a Warning that worsens to Critical is delivered past the cooldown
+    /// (<see cref="TierEscalation"/>).</para>
+    ///
+    /// <para><b>Mute.</b> The mute check runs per sampled (database, client application) group, inside the evaluation
+    /// (<see cref="AttentionEvaluator.Evaluate"/>), because the judged count depends on which groups are muted. A fire whose
+    /// exact count crossed a bar but whose unmuted share did not is recorded Muted, like any muted fire. A Muted finding is not
+    /// a delivery: it neither starts the delivery cooldown nor records an escalation tier, and it is throttled by a cooldown of
+    /// its own (round 2 of #5714).</para>
+    /// </summary>
+    private async Task CheckAttentionAsync(
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
+    {
+        if (!_settings.ClientTimeoutsEnabled)
+        {
+            return;
+        }
+
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            var window = await _readAdapter.GetAttentionWindowAsync(key, AttentionEvaluator.ReadLookbackMinutes, ct);
+            readClock.Restart();
+
+            var reading = AttentionEvaluator.Read(window, now);
+            if (reading is null)
+            {
+                if (_activeAttentionAlert.TryGetValue(key, out var standing) && standing
+                    && _lastAttentionEvaluation.TryGetValue(key, out var lastEvaluated)
+                    && now - lastEvaluated >= TimeSpan.FromMinutes(AttentionEvaluator.StaleIncidentMinutes))
+                {
+                    /* The collector was disabled, slowed past the window, or keeps failing while the alert stood, so no
+                       reading can ever clear it. It resolves through the normal resolve path with the reason in the text. */
+                    _activeAttentionAlert[key] = false;
+                    _attentionEscalation.Close(key);
+                    _lastAttentionEvaluation.TryRemove(key, out _);
+                    if (!suppressed)
+                    {
+                        await NotifyResolutionAsync(new AlertResolution(
+                            key, serverName, AttentionEvaluator.MetricName,
+                            EscalationSeed.ClientTimeoutsClearedTitle,
+                            string.Create(CultureInfo.InvariantCulture,
+                                $"{serverName}: Client Timeouts alert resolved - no fresh attention collector runs for {AttentionEvaluator.StaleIncidentMinutes} minutes, so the rate could not be re-checked (the attention collector may be disabled, slow or failing)")), ct);
+                        readClock.Restart();
+                    }
+                }
+
+                return;
+            }
+
+            _lastAttentionEvaluation[key] = now;
+
+            var finding = AttentionEvaluator.Evaluate(
+                reading, _settings.ClientTimeoutsWarningPerMinute, _settings.ClientTimeoutsCriticalPerMinute,
+                (database, app) => _isAlertMuted(new AlertMuteContext
+                {
+                    ServerName = serverName,
+                    ServerId = serverId,
+                    MetricName = AttentionEvaluator.MetricName,
+                    DatabaseName = database,
+                    ClientAppName = app,
+                }));
+
+            if (finding is not null)
+            {
+                _activeAttentionAlert[key] = true;
+
+                /* The rate is a rolling reading, so a cooldown-elapsed re-ask against an unrefreshed store hands back the same
+                   newest run: a fire waits for a run newer than the one last fired on (Runnable Queue's guard).
+
+                   A Muted finding (round 2 of #5714, H1) is judged against its own stamp and run marker and is never an
+                   escalation: it is recorded for the history, but it is not a delivery, so it neither starts the delivery
+                   cooldown nor records a tier. An unmuted fire right after a Muted one goes out at once, and a later
+                   Warning-to-Critical worsening keeps its bypass. (Runnable Queue's mute changes only when a user edits a
+                   rule, so it keeps its single stamp.) */
+                var stamps = finding.Muted ? _lastAttentionMutedAlert : _lastAttentionAlert;
+                var runTimes = finding.Muted ? _lastAttentionMutedRunTime : _lastAttentionRunTime;
+                bool hasFreshRun = !runTimes.TryGetValue(key, out var lastRun)
+                    || finding.NewestRunTime > lastRun;
+
+                var escalation = !finding.Muted && _attentionEscalation.IsEscalation(key, finding.Severity);
+
+                if (!suppressed && hasFreshRun
+                    && EscalationOpensGate(AttentionEvaluator.MetricName, key, escalation, stamps, now, alertCooldown))
+                {
+                    stamps[key] = now;
+                    runTimes[key] = finding.NewestRunTime;
+
+                    /* Severity rides on the context override as well as the outcome (the channel builders read the context). */
+                    var attentionContext = new AlertContext
+                    {
+                        SeverityOverride = finding.Severity,
+                        EscalationBypassesCooldown = escalation,
+                    };
+                    var priorTier = _attentionEscalation.Highest(key);
+                    if (!finding.Muted)
+                    {
+                        _attentionEscalation.Record(key, finding.Severity);
+                    }
+
+                    AlertSampleAge.Stamp(attentionContext, "attention collector runs", finding.NewestRunTime, now);
+
+                    foreach (var item in AlertContextBuilders.BuildClientTimeoutItems(finding, window))
+                    {
+                        attentionContext.Details.Add(item);
+                    }
+
+                    var detailText = AlertContextBuilders.ContextToDetailText(attentionContext);
+
+                    var delivery = await FireAsync(new AlertOutcome(
+                        key, serverName, AttentionEvaluator.MetricName,
+                        finding.CurrentValueText,
+                        finding.ThresholdText,
+                        attentionContext, detailText,
+                        NumericCurrentValue: finding.RatePerMinute,
+                        NumericThresholdValue: finding.BarCrossed,
+                        Muted: finding.Muted, Severity: finding.Severity,
+                        ShortMessage: finding.Summary), ct);
+                    /* Final round of #5714 (L1): a Muted fire has no channel to back off, so it neither resets nor advances the
+                       unmuted path's failed-send streak (same family and key). Its own stamp was set above. */
+                    if (!finding.Muted)
+                    {
+                        AfterFire(AttentionEvaluator.MetricName, stamps, key, now, alertCooldown, delivery);
+                    }
+
+                    /* A fire nobody received forgets the run marker and puts the tier back, so the retry counts as fresh and
+                       is still the escalation (Runnable Queue's reasoning, rounds 1 and 2 of #5709). */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        runTimes.TryRemove(key, out _);
+                        _attentionEscalation.Restore(key, priorTier);
+                    }
+
+                    readClock.Restart();
+                }
+            }
+            else if (_activeAttentionAlert.TryGetValue(key, out var wasActive) && wasActive)
+            {
+                _activeAttentionAlert[key] = false;
+                _attentionEscalation.Close(key);
+                if (!suppressed)
+                {
+                    await NotifyResolutionAsync(new AlertResolution(
+                        key, serverName, AttentionEvaluator.MetricName,
+                        EscalationSeed.ClientTimeoutsClearedTitle,
+                        string.Create(CultureInfo.InvariantCulture,
+                            $"{serverName}: Client timeouts over the last {reading.CoveredMinutes:N0} minutes are back below threshold")), ct);
+                    readClock.Restart();
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Failed to check client timeouts for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "client timeouts", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -2535,21 +2884,38 @@ public sealed class AlertEngine
                 double? lastLowDiskPercent =
                     _lastAlertedLowDiskPercent.TryGetValue(key, out var lowDiskPct) ? lowDiskPct : (double?)null; /* :491-492 */
                 /* :493-497 — #754 follow-up: notify only on a fresh or worsening breach. */
+                /* #5715: the tier is decided BEFORE the gate (the worst volume's, the same call that grades the fire below)
+                   and is the fire's tier. A Warning incident now critically low is an escalation, and reaching Critical is
+                   new information even when the free space did not drop by the worsening step, so an escalation passes the
+                   worsening check and the cooldown. The alert is one per server (its cooldown and last-alerted level are
+                   keyed by server and its tier comes from the worst volume), so the escalation is keyed the same way. */
+                var lowDiskTier = LowDiskAlertGate.IsCriticallyLow(
+                    worst.FreePercent, worst.FreeGb, _settings.DiskCriticalFreePercent, _settings.DiskCriticalFreeGb)
+                    ? AlertSeverityLevel.Critical
+                    : AlertSeverityLevel.Warning;
+                var escalation = _lowDiskEscalation.IsEscalation(key, lowDiskTier);
+
                 if (!suppressed
-                    && LowDiskAlertGate.ShouldAlert(worst.FreePercent, lastLowDiskPercent)
-                    && CooldownElapsed(_lastLowDiskAlert, key, now, alertCooldown))
+                    && EscalationOpensGate("Volume Free Space", key, escalation, _lastLowDiskAlert, now, alertCooldown)
+                    && (escalation || LowDiskAlertGate.ShouldAlert(worst.FreePercent, lastLowDiskPercent)))
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Volume Free Space" }; /* :499 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :500 */
                     _lastLowDiskAlert[key] = now;                                   /* :501 */
                     _lastAlertedLowDiskPercent[key] = worst.FreePercent;            /* :502 */
+                    var priorTier = _lowDiskEscalation.Highest(key);
+                    _lowDiskEscalation.Record(key, lowDiskTier);
 
                     var lowDiskContext = AlertContextBuilders.BuildVolumeFreeSpaceContext(fingerprintServer, breached, lowDiskOccurrences.Decorate); /* :515 */
                     /* :516-522 — #1136: grade WARNING normally, CRITICAL when critically low. */
-                    if (lowDiskContext is not null && LowDiskAlertGate.IsCriticallyLow(
-                        worst.FreePercent, worst.FreeGb, _settings.DiskCriticalFreePercent, _settings.DiskCriticalFreeGb))
+                    if (lowDiskContext is not null)
                     {
-                        lowDiskContext.SeverityOverride = AlertSeverityLevel.Critical;
+                        if (lowDiskTier == AlertSeverityLevel.Critical)
+                        {
+                            lowDiskContext.SeverityOverride = AlertSeverityLevel.Critical;
+                        }
+
+                        lowDiskContext.EscalationBypassesCooldown = escalation;
                     }
                     lowDiskContext = AlertSampleAge.Stamp(lowDiskContext, "volume", AlertSampleAge.Newest(breached.Select(v => v.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(lowDiskContext); /* :523 */
@@ -2572,6 +2938,7 @@ public sealed class AlertEngine
                     if (EveryChannelFailed(delivery))
                     {
                         RestoreAlertedLevel(_lastAlertedLowDiskPercent, key, lastLowDiskPercent);
+                        _lowDiskEscalation.Restore(key, priorTier);
                     }
                     readClock.Restart();
                 }
@@ -2579,6 +2946,7 @@ public sealed class AlertEngine
             else if (_activeLowDiskAlert.TryGetValue(key, out var wasLowDisk) && wasLowDisk) /* :538 */
             {
                 _activeLowDiskAlert[key] = false;
+                _lowDiskEscalation.Close(key);                                      /* #5715 */
                 await ClearOccurrencesAsync(key, VolumeFreeSpaceWatermarkMetric);                                   /* :540 */
                 readClock.Restart();
                 _lastAlertedLowDiskPercent.TryRemove(key, out _);                   /* :541 */
@@ -2586,7 +2954,7 @@ public sealed class AlertEngine
                 {
                     await NotifyResolutionAsync(new AlertResolution(
                         key, serverName, "Volume Free Space",
-                        "Volume Free Space Resolved",                               /* :545 */
+                        EscalationSeed.VolumeFreeSpaceResolvedTitle,                               /* :545 */
                         $"{serverName}: All volumes back above threshold"), ct);    /* :546 */
                 }
             }
@@ -3698,6 +4066,30 @@ public sealed class AlertEngine
         var exponent = Math.Clamp(consecutiveFailures - 1, 0, 20);
         var delay = TimeSpan.FromMinutes(1L << exponent);
         return delay < cooldown ? delay : (cooldown < TimeSpan.Zero ? TimeSpan.Zero : cooldown);
+    }
+
+    /// <summary>
+    /// The cooldown gate of a family that lets a Warning-to-Critical escalation (#5715) skip the cooldown, written
+    /// once for every such site. An escalation opens the gate at once only while the family and key have NO open
+    /// failure streak in <c>_failedSends</c>. While a streak is open (the escalation's last send reached no
+    /// channel, #4752), the gate waits for <see cref="CooldownElapsed"/>: <see cref="AfterFire"/> back-dated the
+    /// stamp, so that is the retry delay (1, 2, 4, 8 ... minutes). Without this, <c>Restore</c> keeps the next
+    /// evaluation an escalation and a Critical retried at every evaluation while every channel was down. The fire
+    /// that goes after the wait still carries <c>EscalationBypassesCooldown</c>, so the email and webhook cooldowns
+    /// let it through. <paramref name="family"/> is the string the site passes to <see cref="AfterFire"/>.
+    /// </summary>
+    private bool EscalationOpensGate<TKey>(
+        string family, TKey key, bool escalation, ConcurrentDictionary<TKey, DateTime> stamps, DateTime now,
+        TimeSpan cooldown)
+        where TKey : notnull
+    {
+        if (escalation
+            && !_failedSends.HasOpenStreak(family, Convert.ToString(key, CultureInfo.InvariantCulture) ?? string.Empty, now))
+        {
+            return true;
+        }
+
+        return CooldownElapsed(stamps, key, now, cooldown);
     }
 
     /// <summary>

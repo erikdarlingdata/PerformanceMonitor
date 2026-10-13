@@ -85,7 +85,7 @@ internal static class DarlingFleetReader
     /// <para>The <c>is_silenced</c> column (#2031) is the SQL mirror of the Viewer's
     /// <c>ViewerDataService.IsWholeServerSilence</c> predicate — an enabled, unexpired mute rule scoped to the
     /// server (matched on the store server id when the rule carries one, else — a legacy rule — case-insensitively on the
-    /// same COALESCE(display, storage) name the card shows) with NO narrowing pattern on any other field. The
+    /// same COALESCE(display, storage) name the card shows) with NO narrowing pattern on any other field and no external source (#5654: a rule limited to one source mutes only that source's alerts, so it is not a whole-server silence). The
     /// column is read-only; the fleet page's Silence / Unsilence button writes the rule it reads back. It exists so a dataless-quiet server and a silenced one stop looking
     /// identical on the fleet cards and to <c>get_fleet_overview</c>.</para> $ none.</summary>
     public const string FleetServersSql = @"
@@ -98,10 +98,12 @@ SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.s
            AND   m.enabled
            AND   (m.expires_at_utc IS NULL OR m.expires_at_utc > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'))
            AND   m.metric_name IS NULL
+           AND   m.external_source IS NULL
            AND   m.database_pattern IS NULL
            AND   m.query_text_pattern IS NULL
            AND   m.wait_type_pattern IS NULL
            AND   m.job_name_pattern IS NULL
+           AND   m.client_app_pattern IS NULL
        ) AS is_silenced
 FROM servers s
 WHERE s.is_enabled
@@ -334,49 +336,65 @@ WHERE s.is_enabled
 AND   {SqlServerCollectedTargetSql}";
 
     /// <summary>Blocking in the window per server from BOTH sources — XE blocked-process reports and the always-on
-    /// DMV snapshot, each counted per <c>server_id</c> with its worst wait, lined up by a FULL OUTER JOIN so a
+    /// DMV snapshot, each counted per <c>server_id</c> as WAITS with its worst wait (and, for the health band, as
+    /// the raw report rows: <c>xe_reports</c> / <c>dmv_reports</c>, #5644), lined up by a FULL OUTER JOIN so a
     /// server present in only one source still appears. The caller applies Lite's XE-preferred / DMV-fallback per
     /// server. $1 window start, $2 window end, $3 the <see cref="EventWindowFloor"/> for $1 (all naive UTC).
     ///
     /// <para>$3 is the partition-column bound the event window cannot supply (#3895): without it both scans
     /// open every retained chunk to count the last hour. It cannot drop a row the window wants —
     /// <see cref="EventWindowFloor"/> says why.</para></summary>
-    /* #5644 W1: each side counts WAITS (a blocked session, its blocker and the wait's derived start), not report
-       rows, with the longest wait time as its max: SQL Server writes a report for a still-blocked session every
-       threshold seconds, so one one-minute wait was about eleven tile counts. BlockingWaits.WaitsCteSql is the
-       one definition the alert engine and the analysis fact share. The DMV side applies the same rule to its
-       snapshot rows (a wait seen in several snapshots is one wait). */
+    /* #5644 W1: xe_count / dmv_count (and the max waits) count WAITS (a blocked session, its blocker and the wait's
+       derived start), not report rows: SQL Server writes a report for a still-blocked session every threshold
+       seconds, so one one-minute wait was about eleven tile counts. BlockingWaits.WaitsCteSql is the one definition
+       the alert engine and the analysis fact share. The DMV side applies the same rule to its snapshot rows (a wait
+       seen in several snapshots is one wait).
+
+       #5644 (review): xe_reports / dmv_reports keep the raw ROW count of the same two windowed reads. The health
+       band's count tiers (5 / 20 per hour) were measured in blocked-process REPORTS per server-hour, so the band
+       reads those; the tile, the alert value and the MCP counts stay waits. Each source is read once (the
+       *_reports CTE, shared by the report count and the waits chain), so the window and the floor are still
+       applied once per source. */
     public static readonly string FleetBlockingSql = @"
-WITH " + BlockingWaits.WaitsCteSql(
-        BlockingWaits.SqlDialect.Postgres, "xe_waits",
-        @"SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
+WITH xe_reports AS (
+    SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
     FROM v_blocked_process_reports
     WHERE event_time >= $1
     AND   event_time <= $2
-    AND   collection_time >= $3", new[] { "server_id" }) + "," + BlockingWaits.WaitsCteSql(
-        BlockingWaits.SqlDialect.Postgres, "dmv_waits",
-        @"SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
+    AND   collection_time >= $3
+),
+dmv_reports AS (
+    SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
     FROM v_dmv_blocking_snapshots
     WHERE event_time >= $1
     AND   event_time <= $2
-    AND   collection_time >= $3", new[] { "server_id" }) + @"
+    AND   collection_time >= $3
+)," + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "xe_waits",
+        "SELECT * FROM xe_reports", new[] { "server_id" }) + "," + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "dmv_waits",
+        "SELECT * FROM dmv_reports", new[] { "server_id" }) + @"
 SELECT
     COALESCE(xe.server_id, dmv.server_id) AS server_id,
     COALESCE(xe.cnt, 0) AS xe_count,
     COALESCE(xe.max_wait, 0) AS xe_max_wait,
     COALESCE(dmv.cnt, 0) AS dmv_count,
-    COALESCE(dmv.max_wait, 0) AS dmv_max_wait
+    COALESCE(dmv.max_wait, 0) AS dmv_max_wait,
+    COALESCE(xe.reports, 0) AS xe_reports,
+    COALESCE(dmv.reports, 0) AS dmv_reports
 FROM
 (
-    SELECT server_id, COUNT(*) AS cnt, MAX(wait_time_ms) AS max_wait
-    FROM xe_waits
-    GROUP BY server_id
+    SELECT r.server_id, r.reports, w.cnt, w.max_wait
+    FROM (SELECT server_id, COUNT(*) AS reports FROM xe_reports GROUP BY server_id) AS r
+    LEFT JOIN (SELECT server_id, COUNT(*) AS cnt, MAX(wait_time_ms) AS max_wait FROM xe_waits GROUP BY server_id) AS w
+        ON r.server_id = w.server_id
 ) AS xe
 FULL OUTER JOIN
 (
-    SELECT server_id, COUNT(*) AS cnt, MAX(wait_time_ms) AS max_wait
-    FROM dmv_waits
-    GROUP BY server_id
+    SELECT r.server_id, r.reports, w.cnt, w.max_wait
+    FROM (SELECT server_id, COUNT(*) AS reports FROM dmv_reports GROUP BY server_id) AS r
+    LEFT JOIN (SELECT server_id, COUNT(*) AS cnt, MAX(wait_time_ms) AS max_wait FROM dmv_waits GROUP BY server_id) AS w
+        ON r.server_id = w.server_id
 ) AS dmv ON xe.server_id = dmv.server_id";
 
     /// <summary>Deadlocks in the window per server — count and newest deadlock instant (for each card's
@@ -986,6 +1004,14 @@ GROUP BY server_id, collector_name";
            snapshot — both count and worst-wait come from whichever source wins. */
         var blockingCount = blocking.XeCount > 0 ? blocking.XeCount : blocking.DmvCount;
         var maxBlockingWaitMs = blocking.XeCount > 0 ? blocking.XeMaxWait : blocking.DmvMaxWait;
+        /* #5644 (review of W1): the count the BAND reads is the winning source's REPORT count, not blockingCount
+           (waits, which the card shows). ServerHealthThresholds.BlockingWarnPerHour / BlockingCriticalPerHour
+           were measured in blocked-process reports per server-hour; a long wait is many reports and one wait,
+           and handing the waits to those tiers stopped it banding by count. A row built without a report count
+           (the pre-W1 shape a test constructs) reads its own count, which is what it always banded on. */
+        var blockingReportCount = blocking.XeCount > 0
+            ? blocking.XeReports ?? blocking.XeCount
+            : blocking.DmvReports ?? blocking.DmvCount;
 
         var cpuPercent = cpu.SqlCpu;
         var otherCpu = cpu.OtherCpu;
@@ -1042,7 +1068,7 @@ GROUP BY server_id, collector_name";
            computed from an empty set. That is also what keeps #3539 A6's card - an online PostgreSQL
            target nothing has collected from - measuring nothing. */
         var memoryPressureForBand = ServerMetricSources.DmvSourced(hasMemoryPressure, isPostgres);
-        var blockingForBand = ServerMetricSources.DmvSourced(blockingCount, isPostgres);
+        var blockingForBand = ServerMetricSources.DmvSourced(blockingReportCount, isPostgres);
         int? deadlocksForBand = deadlockMeasured ? deadlockCount : null;
 
         var metrics = new ServerHealthMetrics
@@ -1139,7 +1165,9 @@ GROUP BY server_id, collector_name";
             MaxBlockingWaitMs = maxBlockingWaitMs,
             /* blockingForBand, not the raw count, for the reason DeadlockRatePerHour below gives: a
                PostgreSQL target's raw count is a structural zero, and a rate derived from it would publish
-               0.0/hr against a severity that reads Unknown (#3539 A3). */
+               0.0/hr against a severity that reads Unknown (#3539 A3). It is REPORTS per hour, the unit the
+               band's tiers were measured in (#5644), beside a count that is waits. */
+            BlockingReportCount = blockingReportCount,
             BlockingRatePerHour = blockingForBand.HasValue
                 ? ServerHealthClassifier.BlockingRatePerHour(blockingForBand.Value, deadlockWindow)
                 : null,
@@ -1632,7 +1660,12 @@ GROUP BY server_id, collector_name";
                     postgres, server.ServerId, startUtc, endUtc, separate, cancellationToken);
 
                 blocking.TryGetValue(server.ServerId, out var current);
-                blocking[server.ServerId] = current with { XeCount = scoped.XeCount, XeMaxWait = scoped.XeMaxWait };
+                blocking[server.ServerId] = current with
+                {
+                    XeCount = scoped.XeCount,
+                    XeMaxWait = scoped.XeMaxWait,
+                    XeReports = scoped.XeReports,
+                };
                 deadlocks.TryGetValue(server.ServerId, out var currentDeadlock);
                 deadlocks[server.ServerId] = currentDeadlock with
                 {
@@ -1653,8 +1686,10 @@ GROUP BY server_id, collector_name";
     /// <paramref name="startUtc"/>..<paramref name="endUtc"/>, skipping the events of the databases in
     /// <paramref name="separate"/>. <paramref name="DeadlockLastSeen"/> is the newest of the deadlocks that count, or
     /// null when none does.</summary>
+    /// <para><paramref name="XeCount"/> counts waits; <paramref name="XeReports"/> is the report-row count of the same
+    /// scoped read, the band's input (#5644).</para>
     internal readonly record struct AzureMasterScopedCounts(
-        int XeCount, long XeMaxWait, int DeadlockCount, DateTime? DeadlockLastSeen);
+        int XeCount, long XeMaxWait, int DeadlockCount, DateTime? DeadlockLastSeen, int XeReports = 0);
 
     /// <summary>The scoped reads behind <see cref="ScopeAzureMasterRowsAsync"/>, shared with the per-server summary
     /// (<c>get_server_summary</c>) so the two surfaces count a master's events with the same statements.</summary>
@@ -1669,6 +1704,7 @@ GROUP BY server_id, collector_name";
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
 
         var xeCount = 0;
+        var xeReports = 0;
         long xeMaxWait = 0;
         await using (var command = new NpgsqlCommand(PgFactCollector.BlockingSqlSkippingSeparate, connection)
         { CommandTimeout = McpCommandDeadlines.ReadSeconds })
@@ -1683,12 +1719,13 @@ GROUP BY server_id, collector_name";
             {
                 xeCount = reader.IsDBNull(0) ? 0 : (int)Math.Min(Convert.ToInt64(reader.GetValue(0)), int.MaxValue);
                 xeMaxWait = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2));
+                xeReports = reader.IsDBNull(6) ? 0 : (int)Math.Min(Convert.ToInt64(reader.GetValue(6)), int.MaxValue);
             }
         }
 
         var (deadlockCount, deadlockLastSeen) = await PgFactCollector.CountAndNewestDeadlocksSkippingSeparateAsync(
             connection, serverId, startUtc, endUtc, separate, cancellationToken, McpCommandDeadlines.ReadSeconds);
-        return new AzureMasterScopedCounts(xeCount, xeMaxWait, (int)Math.Min(deadlockCount, int.MaxValue), deadlockLastSeen);
+        return new AzureMasterScopedCounts(xeCount, xeMaxWait, (int)Math.Min(deadlockCount, int.MaxValue), deadlockLastSeen, xeReports);
     }
 
     private static async Task<Dictionary<int, BlockingRow>> ReadBlockingAsync(
@@ -1707,7 +1744,9 @@ GROUP BY server_id, collector_name";
                 reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
                 reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
                 reader.IsDBNull(3) ? 0 : Convert.ToInt32(reader.GetValue(3)),
-                reader.IsDBNull(4) ? 0 : Convert.ToInt64(reader.GetValue(4)));
+                reader.IsDBNull(4) ? 0 : Convert.ToInt64(reader.GetValue(4)),
+                reader.IsDBNull(5) ? 0 : Convert.ToInt32(reader.GetValue(5)),
+                reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)));
         }
 
         return map;
@@ -2099,7 +2138,11 @@ GROUP BY server_id, collector_name";
     internal readonly record struct MemoryRow(double? MemoryMb, double? BufferPoolMb);
     internal readonly record struct MemoryPressureRow(long WaiterCount, long TimeoutCount, long ForcedCount, double? GrantedMemoryMb);
     internal readonly record struct ThreadsRow(int? TotalThreads, int? CurrentWorkers, int RunnableTasks, long WorkQueue);
-    internal readonly record struct BlockingRow(int XeCount, long XeMaxWait, int DmvCount, long DmvMaxWait);
+    /// <summary>One server's blocking in the window: <c>XeCount</c> / <c>DmvCount</c> are WAITS (what the card shows),
+    /// <c>XeReports</c> / <c>DmvReports</c> the raw report / snapshot rows the band's per-hour tiers were measured in
+    /// (#5644). Null reports mean "not read separately": the band reads the count.</summary>
+    internal readonly record struct BlockingRow(
+        int XeCount, long XeMaxWait, int DmvCount, long DmvMaxWait, int? XeReports = null, int? DmvReports = null);
     internal readonly record struct DeadlockRow(int Count, DateTime? LastSeen);
 
     /// <summary>One server's <see cref="FleetLastCollectionSql"/> row (#3935): its newest collection inside the
@@ -2501,7 +2544,20 @@ public sealed class FleetServerCard
     [JsonPropertyName("has_memory_pressure")] public bool HasMemoryPressure { get; init; }
     [JsonPropertyName("memory_severity")] public HealthSeverity MemorySeverity { get; init; }
 
-    [JsonPropertyName("blocking_count")] public int BlockingCount { get; init; }
+    /// <summary>Blocking WAITS in the window (#5644 W1: a blocked session, its blocker and the wait's start): what the
+    /// card, the totals and the MCP counts show. The band does NOT read this; it reads
+    /// <see cref="BlockingReportCount"/>, the unit its per-hour tiers were measured in.</summary>
+    [JsonPropertyName("blocking_count")]
+    public int BlockingCount { get; init; }
+
+    /// <summary>The winning source's blocked-process REPORT (or DMV snapshot) rows in the window, before they are
+    /// collapsed to waits (#5644): the count <c>blocking_severity</c> and <c>blocking_rate_per_hour</c> band on,
+    /// because <c>ServerHealthThresholds.BlockingWarnPerHour / BlockingCriticalPerHour</c> were measured in
+    /// reports per server-hour. Not published (the contract is the wait count above); null on a card built
+    /// without one, which re-bands on <see cref="BlockingCount"/>.</summary>
+    [JsonIgnore]
+    public int? BlockingReportCount { get; init; }
+
     [JsonPropertyName("max_blocking_wait_ms")] public long MaxBlockingWaitMs { get; init; }
     /// <summary>Blocking events per HOUR over the card's window — the figure the count arm of
     /// <c>blocking_severity</c> banded on (#3539 A3), or null when the window was too short to normalise.
@@ -2651,7 +2707,8 @@ public sealed class FleetServerCard
            deliberately left as zeros (#3017) — reading them here would hand the ranking a measurement the
            card's own severity says it does not have. */
         HasMemoryPressure = ServerMetricSources.DmvSourced(HasMemoryPressure, IsPostgres),
-        BlockingCount = ServerMetricSources.DmvSourced(BlockingCount, IsPostgres),
+        /* The REPORT count the card banded on (#5644), not the wait count it shows. */
+        BlockingCount = ServerMetricSources.DmvSourced(BlockingReportCount ?? BlockingCount, IsPostgres),
         MaxBlockedSeconds = MaxBlockingWaitMs / 1000.0,
         /* #3539 A3: the count's denominator, for the same reason the deadlock window travels below. */
         BlockingWindow = BlockingWindow,

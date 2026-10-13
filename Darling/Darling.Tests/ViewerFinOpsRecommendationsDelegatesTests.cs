@@ -37,7 +37,6 @@ public sealed class ViewerFinOpsRecommendationsDelegatesTests
     {
         Assert.Equal(DarlingFinOpsRecommendationsReader.EditionFactsSql, ViewerDataService.RecommendationsEditionFactsSql);
         Assert.Equal(DarlingFinOpsRecommendationsReader.MemoryP95Sql, ViewerDataService.RecommendationsMemoryP95Sql);
-        Assert.Equal(DarlingFinOpsRecommendationsReader.CpuP95Sql, ViewerDataService.RecommendationsCpuP95Sql);
         Assert.Equal(DarlingFinOpsRecommendationsReader.MaintenanceWindowSql, ViewerDataService.RecommendationsMaintenanceWindowSql);
         Assert.Equal(DarlingFinOpsRecommendationsReader.StorageTierSql, ViewerDataService.RecommendationsStorageTierSql);
         Assert.Equal(DarlingFinOpsOptimizationReader.IdleCoverageSql, ViewerDataService.RecommendationsIdleCoverageSql);

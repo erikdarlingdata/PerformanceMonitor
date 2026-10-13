@@ -614,6 +614,38 @@ public sealed class FleetSweepEngineTests
     }
 
     /// <summary>
+    /// #5644 review: the blocking family bands on the span's blocked-process REPORT count (the unit its 20/hr tier was
+    /// measured in), while the evidence's <c>blocking_count</c> stays the count of WAITS. One long wait written as 20
+    /// reports in an hour pages as it did before waits were counted; the same wait with no report count, as 1 event,
+    /// does not.
+    /// </summary>
+    [Fact]
+    public void TheBlockingFamily_BandsOnReports_AndShowsWaits()
+    {
+        var oneLongWait = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            BlockingEvents = 1,
+            BlockingReports = 20,
+            Window = FixtureSpan,
+        }, 0, null);
+        var row = ComposeSimple(new[] { oneLongWait }, alertsEnabled: false)
+            .WouldHavePaged.Single(w => w.AlertFamily == FleetSweepEngine.FamilyBlocking);
+        using var evidence = JsonDocument.Parse(row.EvidenceJson);
+        Assert.Equal("blocked-process reports per hour over the sweep span", evidence.RootElement.GetProperty("trigger").GetString());
+        Assert.Equal(20.0, evidence.RootElement.GetProperty("value").GetDouble());
+        Assert.Equal(1, evidence.RootElement.GetProperty("blocking_count").GetInt64());
+
+        var withoutReports = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            BlockingEvents = 1,
+            Window = FixtureSpan,
+        }, 0, null);
+        Assert.Empty(ComposeSimple(new[] { withoutReports }, alertsEnabled: false).WouldHavePaged);
+    }
+
+    /// <summary>
     /// The tiers handed to <c>Compose</c> are the tiers the verdicts band on (#3525) — the store's pair
     /// travels into the shared scorer, so a fleet whose knobs were raised sweeps on the raised pair
     /// rather than the shipped one while <c>get_alert_settings</c> reports the raised numbers.

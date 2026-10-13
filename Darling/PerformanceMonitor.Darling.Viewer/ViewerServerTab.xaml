@@ -574,7 +574,7 @@
                         </StackPanel>
                         <TextBox Grid.Row="2" x:Name="WaitTypeSearchBox" TextChanged="WaitTypeSearch_TextChanged"
                                  Margin="0,0,0,4" Padding="4,2"/>
-                        <ListBox Grid.Row="3" x:Name="WaitTypesList" Background="Transparent" BorderThickness="0">
+                        <ListBox Grid.Row="3" x:Name="WaitTypesList" AutomationProperties.AutomationId="WaitStatsTypeList" Background="Transparent" BorderThickness="0">
                             <ListBox.ItemTemplate>
                                 <DataTemplate>
                                     <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
@@ -898,7 +898,7 @@
                                     </ScrollViewer>
                                 </Expander>
                             </StackPanel>
-                            <DataGrid Grid.Row="2" x:Name="QueryStatsGrid" Style="{StaticResource DarkGrid}"
+                            <DataGrid Grid.Row="2" x:Name="QueryStatsGrid" AutomationProperties.AutomationId="QueryStatsGrid" Style="{StaticResource DarkGrid}"
                                       RowStyle="{StaticResource QueryPlanGridRowStyle}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                                       Sorting="QueryStatsGrid_Sorting">
@@ -989,8 +989,8 @@
                                     <DataGridTextColumn Binding="{Binding TotalRows, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRows" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Rows" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding TotalSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Spills" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding TotalSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Spilled Pages" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding MinCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Min CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -1036,11 +1036,11 @@
                                     </DataGridTextColumn>
                                     <!-- Min/Max Spills + Min/Max DOP (Lite ServerTab.xaml:537-547): ViewerQueryStatsRow
                                          already maps these; they were the only Top Queries columns the viewer dropped. -->
-                                    <DataGridTextColumn Binding="{Binding MinSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Min Spills" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding MinSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Min Spilled Pages" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding MaxSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Max Spills" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding MaxSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Max Spilled Pages" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding MinDop}" ElementStyle="{StaticResource NumericCell}" Width="70">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinDop" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Min DOP" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -1264,11 +1264,11 @@
                                     <DataGridTextColumn Binding="{Binding TotalPhysicalReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="110">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalPhysicalReads" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Physical Reads" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding TotalSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Spills" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding TotalSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Spilled Pages" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding AvgSpills, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="90">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Spills" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding AvgSpills, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Spilled Pages" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding MinCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Min CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -1300,11 +1300,11 @@
                                     <DataGridTextColumn Binding="{Binding MaxLogicalWrites, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxLogicalWrites" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Max Writes" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding MinSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Min Spills" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding MinSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MinSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Min Spilled Pages" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding MaxSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Max Spills" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding MaxSpills, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MaxSpills" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Max Spilled Pages" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding PlanHandle}" Width="140">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PlanHandle" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Plan Handle" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>

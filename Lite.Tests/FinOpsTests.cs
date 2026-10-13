@@ -97,7 +97,7 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
 
         var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal)
                                          || r.Finding.StartsWith("CPU: reduce", StringComparison.Ordinal));
-        Assert.StartsWith("CPU: reduce from 32 to 8 cores", cpu.Finding, StringComparison.Ordinal);
+        Assert.StartsWith("CPU: reduce from 32 to 8 logical CPUs", cpu.Finding, StringComparison.Ordinal);
         // The memory row beside it is not a CPU row and stays.
         Assert.Contains(recs, r => r.Finding.StartsWith("Memory: reduce from 256GB", StringComparison.Ordinal));
     }
@@ -111,8 +111,8 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
 
         var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal)
                                          || r.Finding.StartsWith("CPU: reduce", StringComparison.Ordinal));
-        Assert.StartsWith("CPU over-provisioned (8 cores", cpu.Finding, StringComparison.Ordinal);
-        Assert.Contains("Consider reducing to ~4 cores", cpu.Detail, StringComparison.Ordinal);
+        Assert.StartsWith("CPU over-provisioned (8 logical CPUs", cpu.Finding, StringComparison.Ordinal);
+        Assert.Contains("Consider reducing to ~4 logical CPUs", cpu.Detail, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -148,17 +148,6 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         });
 
         Assert.DoesNotContain(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
-    }
-
-    [Theory]
-    [InlineData(0, false)]
-    [InlineData(4 * 60, false)]          // the four minutes (here four hours) of a first collect
-    [InlineData(23 * 3600, false)]
-    [InlineData(24 * 3600, true)]
-    [InlineData(9 * 24 * 3600, true)]
-    public void CpuSamplesSpanEnough_NeedsAFullDay(int seconds, bool enough)
-    {
-        Assert.Equal(enough, LocalDataService.CpuSamplesSpanEnough(TimeSpan.FromSeconds(seconds)));
     }
 
     /* ── No licensing advice for a free edition ── */
@@ -205,6 +194,7 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         Assert.Contains("across 32 vCores. Consider reducing to ~", cpu.Detail, StringComparison.Ordinal);
         Assert.EndsWith(" vCores.", cpu.Detail, StringComparison.Ordinal);
         Assert.DoesNotContain(" cores", cpu.Finding + cpu.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("logical CPUs", cpu.Finding + cpu.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -216,7 +206,7 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         PrintRecommendations("AZURE SQL DATABASE, NO VCORES", recs);
 
         Assert.DoesNotContain(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
-        Assert.DoesNotContain(recs, r => r.Finding.Contains("32 cores", StringComparison.Ordinal));
+        Assert.DoesNotContain(recs, r => r.Finding.Contains("32 logical CPUs", StringComparison.Ordinal) || r.Finding.Contains("32 cores", StringComparison.Ordinal));
         Assert.DoesNotContain(recs, r => r.Category == "Hardware");
     }
 
@@ -233,7 +223,7 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal)
                                          || r.Finding.StartsWith("CPU: reduce", StringComparison.Ordinal));
         Assert.Equal("Hardware", cpu.Category);
-        Assert.StartsWith("CPU: reduce from 32 to 8 cores (P95 CPU ", cpu.Finding, StringComparison.Ordinal);
+        Assert.StartsWith("CPU: reduce from 32 to 8 logical CPUs (P95 CPU ", cpu.Finding, StringComparison.Ordinal);
         Assert.DoesNotContain("vCores", cpu.Finding + cpu.Detail, StringComparison.Ordinal);
         Assert.Contains(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
         Assert.Contains(recs, r => r.Category == "Hardware" && r.Finding.StartsWith("Memory: reduce from 256GB", StringComparison.Ordinal));
@@ -543,29 +533,36 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task VmRightSizing_AWeekOfSamples_StatesTheWholeDaysObserved_NeverMore()
+    public async Task VmRightSizing_AWeekOfSamples_CpuDetailNamesTheUtilizationWindow_NotTheSevenDaysObserved()
     {
-        // 17 samples fall inside the 7-day read: 160 hours = 6 days 16 hours, which reads as 6 whole days (never rounded up to 7).
-        var recs = await RunRecommendationsAsync(RightSizingSeed(262_144, 20, 10 * 60));
-
-        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
-        Assert.StartsWith("From 17 samples over 6 days, P95 CPU", cpu.Detail, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task VmRightSizing_TwoClustersFourDaysApart_NamesTheCountAndSpan_NeverTheLast()
-    {
-        // Five samples now and five 4 days earlier: the 4 days between them were never observed, so the text
-        // says "10 samples over 4 days" and does not claim "the last 4 days".
+        // A week of sparse samples plus a covered 24-hour window. The CPU row reads the Utilization view's own window (the last 24
+        // hours) and says so; it no longer carries the old "From 17 samples over 6 days" detail of a separate 7-day read (#5633).
         var recs = await RunRecommendationsAsync(async s =>
         {
-            await RightSizingSeed(262_144, 5, 15)(s);
-            await s.SeedFinOpsCpuUtilizationAsync(8, 2, 5, 15, daysBack: 4);
+            await RightSizingSeed(262_144, 20, 10 * 60)(s);
+            await s.SeedFinOpsCpuUtilizationAsync(8, 2, samples: 48, spacingMinutes: 30);
         });
 
         var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
-        Assert.StartsWith("From 10 samples over 4 days, P95 CPU", cpu.Detail, StringComparison.Ordinal);
-        Assert.DoesNotContain("the last", cpu.Detail, StringComparison.Ordinal);
+        Assert.StartsWith("From the last 24 hours, P95 CPU", cpu.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("samples over", cpu.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task VmRightSizing_BusyClusterFourDaysAgo_DoesNotMoveTheTwentyFourHourP95_SoItCannotDisagreeWithTheUtilizationView()
+    {
+        // Four days ago the CPU sat at 90%; the last 24 hours sit at 8%. The Utilization view's P95 is 8%, so the advice must quote
+        // 8%. A separate 7-day read would have blended in the busy cluster and quoted a different P95 (or stayed silent).
+        var recs = await RunRecommendationsAsync(async s =>
+        {
+            await RightSizingSeed(262_144, 5, 15)(s);
+            await s.SeedFinOpsCpuUtilizationAsync(8, 2, samples: 48, spacingMinutes: 30);
+            await s.SeedFinOpsCpuUtilizationAsync(90, 2, 20, 15, daysBack: 4);
+        });
+
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
+        Assert.EndsWith("(P95 CPU 8.0%)", cpu.Finding, StringComparison.Ordinal);
+        Assert.StartsWith("From the last 24 hours, P95 CPU utilization was 8.0%", cpu.Detail, StringComparison.Ordinal);
     }
 
     [Theory]

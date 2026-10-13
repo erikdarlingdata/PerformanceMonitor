@@ -112,12 +112,6 @@ public static class FinOpsRecommendationFigures
         && !edition.Contains("Evaluation", StringComparison.OrdinalIgnoreCase)
         && !edition.Contains("Express", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>How long the 7-day CPU right-sizing rule's samples must span before it may speak: its window is 7 days, and a first collect backfills only minutes.</summary>
-    public static readonly TimeSpan CpuRightSizingMinSpan = TimeSpan.FromHours(24);
-
-    /// <summary>True when the 7-day rule's CPU samples spanning <paramref name="span"/> are enough for advice: a full day, so the advice is not read off the minutes a first collect backfills.</summary>
-    public static bool CpuSamplesSpanEnough(TimeSpan span) => span >= CpuRightSizingMinSpan;
-
     /// <summary>How old the oldest CPU sample inside the last 24 hours must be before the 24-hour rule (CPU over-provisioned) may speak.</summary>
     public static readonly TimeSpan Cpu24HourRuleMinOldestAge = TimeSpan.FromHours(23);
 
@@ -137,23 +131,30 @@ public static class FinOpsRecommendationFigures
     public static bool PrescriptiveCpuRowWins(int? computeTargetCores, int prescriptiveTargetCores) =>
         computeTargetCores is not int compute || prescriptiveTargetCores > compute;
 
+    /// <summary>
+    /// True when the Utilization view's own verdict for this server is OVER_PROVISIONED. Both CPU right-sizing rows start from this one
+    /// verdict, read off the same 24-hour window and the same P95 the Utilization view shows, so the recommendations cannot say
+    /// "over-provisioned" about a server the view calls RIGHT_SIZED (#5633 item 11, #5644 W18). A window with no CPU sample has no verdict.
+    /// </summary>
+    public static bool CpuVerdictAllowsDownsizing(UtilizationEfficiencyDto? util) =>
+        util != null && FinOpsUtilizationFigures.HasCpuSample(util) && util.ProvisioningStatus == ProvisioningVerdict.OverProvisioned;
+
     /// <summary>The cores the compute row (<see cref="CpuRightSizing"/>) advises, or null when it advises nothing for this row.</summary>
     public static int? CpuRightSizingTargetCores(UtilizationEfficiencyDto? util)
     {
-        if (util == null || !FinOpsUtilizationFigures.HasCpuSample(util) || util.P95CpuPct >= 30 || util.CpuCount <= 4
-            || util.ProvisioningStatus == ProvisioningVerdict.NotApplicable)
+        if (!CpuVerdictAllowsDownsizing(util) || util!.P95CpuPct >= 30 || util.CpuCount <= 4)
             return null;
         return Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
     }
 
     /// <summary>The cores the prescriptive CPU row (<see cref="VmRightSizing"/>) advises, or null when it advises nothing.</summary>
-    public static int? VmCpuTargetCores(decimal p95Cpu7d, int cpuCount)
+    public static int? VmCpuTargetCores(decimal p95Cpu24h, int cpuCount)
     {
         if (cpuCount < 4) return null;
         int targetCores = 0;
-        if (p95Cpu7d < 15)
+        if (p95Cpu24h < 15)
             targetCores = Math.Max(2, cpuCount / 4);
-        else if (p95Cpu7d < 30)
+        else if (p95Cpu24h < 30)
             targetCores = Math.Max(2, cpuCount / 2);
         return targetCores > 0 && targetCores < cpuCount ? targetCores : null;
     }
@@ -320,7 +321,7 @@ public static class FinOpsRecommendationFigures
 
         var totalGb = candidates.Sum(c => c.ReservedMb ?? 0m) / 1024m;
         var topItems = candidates.Take(5)
-            .Select(c => $"{c.SchemaName}.{c.TableName} ({(c.ReservedMb ?? 0m) / 1024m:N1}GB)")
+            .Select(c => $"{(string.IsNullOrEmpty(c.DatabaseName) ? "" : c.DatabaseName + ".")}{c.SchemaName}.{c.TableName} ({(c.ReservedMb ?? 0m) / 1024m:N1}GB)")
             .ToList();
 
         return new FinOpsRecommendation
@@ -388,21 +389,21 @@ public static class FinOpsRecommendationFigures
     }
 
     /// <summary>The VM right-sizing advice: up to two rows, one for the cores and one for the memory, each only when its own prescription qualifies.</summary>
-    public static List<FinOpsRecommendation> VmRightSizing(decimal p95Cpu7d, string cpuWindow, int cpuCount, int physMb,
+    public static List<FinOpsRecommendation> VmRightSizing(decimal p95Cpu24h, string cpuWindow, int cpuCount, int physMb,
         int p95MemMb, long memSampleCount, string memWindow, decimal monthlyCost, bool includeCpuRow = true)
     {
         var recommendations = new List<FinOpsRecommendation>();
         // CPU prescription: only if >= 4 cores. includeCpuRow is false when the compute row (or too short a window) already settled the CPU advice.
-        if (includeCpuRow && VmCpuTargetCores(p95Cpu7d, cpuCount) is int targetCores)
+        if (includeCpuRow && VmCpuTargetCores(p95Cpu24h, cpuCount) is int targetCores)
         {
             recommendations.Add(new FinOpsRecommendation
             {
                 Category = "Hardware",
                 Severity = "Medium",
                 Confidence = "Medium",
-                Finding = $"CPU: reduce from {cpuCount} to {targetCores} cores (P95 CPU {p95Cpu7d:N1}%)",
-                Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
-                         $"Current allocation of {cpuCount} cores can safely be reduced to {targetCores} cores.",
+                Finding = $"CPU: reduce from {cpuCount} to {targetCores} logical CPUs (P95 CPU {p95Cpu24h:N1}%)",
+                Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu24h:N1}%. " +
+                         $"Current allocation of {cpuCount} logical CPUs can safely be reduced to {targetCores} logical CPUs.",
                 EstMonthlySavings = monthlyCost > 0
                     ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
                     : null

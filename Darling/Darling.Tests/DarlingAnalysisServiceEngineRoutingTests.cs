@@ -101,7 +101,7 @@ public sealed class DarlingAnalysisServiceEngineRoutingTests
 
         foreach (var entryPoint in new[]
         {
-            "public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context)",
+            "public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context",
             "CollectAndScoreFactsAsync(",
             "ComparePeriodsAsync(",
             /* #4192: audit_config's own narrow read - a fourth entry point that resolves the engine off the
@@ -121,7 +121,7 @@ public sealed class DarlingAnalysisServiceEngineRoutingTests
         /* Exactly four, one per entry point; the pass resolves ahead of its span gate, because the gate is
            engine-specific. */
         Assert.Equal(4, Regex.Matches(service, @"await ResolveEngineAsync\(").Count);
-        var pass = service.IndexOf("public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context)", StringComparison.Ordinal);
+        var pass = service.IndexOf("public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context", StringComparison.Ordinal);
         var resolveInPass = service.IndexOf("await ResolveEngineAsync(", pass, StringComparison.Ordinal);
         var gate = service.IndexOf("await GetTotalDataSpanHoursAsync(engine,", pass, StringComparison.Ordinal);
         Assert.True(resolveInPass < gate);

@@ -299,7 +299,10 @@ SELECT
     MAX(wait_time_ms) AS max_wait_time_ms,
     COUNT(DISTINCT blocking_spid) AS distinct_head_blockers,
     COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count,
-    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count
+    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count,
+    /* #5644: the report rows before they collapse to waits, the unit the health band's per-hour count tiers were
+       measured in. Appended last so every ordinal above is where it was; the fleet tile and the viewer band read it. */
+    (SELECT COUNT(*) FROM waits_marked) AS report_count
 FROM reports";
 
     public static string BlockingSql => BuildBlockingSql(@"

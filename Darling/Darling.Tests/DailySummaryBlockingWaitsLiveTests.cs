@@ -10,10 +10,13 @@ using System;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -46,17 +49,17 @@ public sealed class DailySummaryBlockingWaitsLiveTests
     /* One wait as SQL Server reports it: a report every 5 s while the session stays blocked, the k-th carrying
        wait_time_ms = k * 5 s. */
     private static async Task PlantWaitAsync(
-        NpgsqlConnection c, DateTime start, int blocked, int blocker, int reports, string database, bool dmv, CancellationToken ct)
+        NpgsqlConnection c, DateTime start, int blocked, int blocker, int reports, string database, bool dmv, CancellationToken ct, int spacingMs = 5000)
     {
         for (var k = 1; k <= reports; k++)
         {
-            var at = start.AddSeconds(5 * k);
+            var at = start.AddMilliseconds(spacingMs * k);
             if (dmv)
                 await ExecAsync(c, "INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid, wait_time_ms, blocking_status) VALUES ($1,$2,$3,$4,$2,$5,$6,$7,$8,'suspended')",
-                    ct, CollectionIdGenerator.Next(), at, ServerId, ServerName, database, blocked, blocker, (long)(5000 * k));
+                    ct, CollectionIdGenerator.Next(), at, ServerId, ServerName, database, blocked, blocker, (long)(spacingMs * k));
             else
                 await ExecAsync(c, "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name) VALUES ($1,$2,$3,$4,$2,$5,$6,$7,'suspended',$8)",
-                    ct, CollectionIdGenerator.Next(), at, ServerId, ServerName, (long)(5000 * k), blocker, blocked, database);
+                    ct, CollectionIdGenerator.Next(), at, ServerId, ServerName, (long)(spacingMs * k), blocker, blocked, database);
         }
     }
 
@@ -64,7 +67,7 @@ public sealed class DailySummaryBlockingWaitsLiveTests
     /// 2 waits, on a quiet UTC day (as DMV snapshots when <paramref name="dmv"/>), then reads that day's
     /// <c>blocking_events</c> through the statement, or the master-scoped one with the sibling list at $5 when
     /// <paramref name="scoped"/>.</summary>
-    private static async Task<long> DayBlockingEventsAsync(bool dmv, bool scoped)
+    private static async Task<(long Events, long Reports)> DayBlockingCountsAsync(bool dmv, bool scoped)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
@@ -86,16 +89,19 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             await PlantWaitAsync(connection, day.AddHours(3), blocked: 53, blocker: 51, reports: 6, "GP", dmv, ct);
 
             var sql = scoped ? DailySummaryAzureMasterScope.Scope(DailySummarySql.RangeSql) : DailySummarySql.RangeSql;
-            using var read = new NpgsqlCommand("SELECT blocking_events FROM (" + sql + ") AS calendar", connection);
+            using var read = new NpgsqlCommand("SELECT blocking_events, blocking_reports FROM (" + sql + ") AS calendar", connection);
             read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
             read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = day });
             read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = day.AddDays(1) });
             read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(day) });
             if (scoped)
                 read.Parameters.Add(new NpgsqlParameter { Value = new[] { "GP" }, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-            var count = Convert.ToInt64(await read.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+            using var reader = await read.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            var counts = (Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+                Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture));
             bodySucceeded = true;
-            return count;
+            return counts;
         }
         finally
         {
@@ -107,20 +113,85 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
     [Fact]
     public async Task TheDay_CountsBlockedProcessWaits_NotReports()
     {
-        Assert.Equal(2, await DayBlockingEventsAsync(dmv: false, scoped: false));
+        var (events, reports) = await DayBlockingCountsAsync(dmv: false, scoped: false);
+        Assert.Equal(2, events);
+        Assert.Equal(15, reports);       // #5644: the band's input stays the report rows
     }
 
     [Fact]
     public async Task TheDay_CountsDmvSnapshotWaits_NotSnapshots_WhenThereAreNoReports()
     {
-        Assert.Equal(2, await DayBlockingEventsAsync(dmv: true, scoped: false));
+        var (events, reports) = await DayBlockingCountsAsync(dmv: true, scoped: false);
+        Assert.Equal(2, events);
+        Assert.Equal(15, reports);       // the DMV fallback's rows, as the band counted them before waits
     }
 
     [Fact]
     public async Task TheAzureMasterScope_StillSkipsTheSiblingDatabase_AndCountsWaits()
     {
         /* The GP wait belongs to a database monitored as its own target: the master's day keeps the one master wait. */
-        Assert.Equal(1, await DayBlockingEventsAsync(dmv: false, scoped: true));
+        var (events, reports) = await DayBlockingCountsAsync(dmv: false, scoped: true);
+        Assert.Equal(1, events);
+        Assert.Equal(9, reports);        // the same scope filter reaches the report count
+    }
+
+    /// <summary>#5644 review: one long wait written as 130 reports (a report every 50 ms, so the longest block is 6.5 s and
+    /// the wait arm stays out of it) is ONE blocking event, which every display and MCP count shows, but the band's count
+    /// tiers (5 and 20 per server-hour) were measured in reports, so the day bands Warning on 130 / 24 h = 5.4 per hour.
+    /// Read through the reader the calendar and the MCP tools use. On the waits-banded head the day read 1 event over 24 h
+    /// and came out Healthy.</summary>
+    [Fact]
+    public async Task TheBand_ReadsTheReportCount_WhileTheDisplayedCountStaysWaits()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(cs!));
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(connection, @"
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
+VALUES ($1, $2, $2, TRUE, 16, now()::timestamp, now()::timestamp)
+ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerName);
+
+            var day = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-3), DateTimeKind.Unspecified);
+            await ExecAsync(connection, "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status) VALUES ($1,$2,$3,'wait_stats',$4,'SUCCESS')",
+                ct, CollectionIdGenerator.Next(), ServerId, ServerName, day.AddHours(1));
+            await PlantWaitAsync(connection, day.AddHours(2), blocked: 52, blocker: 51, reports: 130, "master", dmv: false, ct, spacingMs: 50);
+
+            DarlingHealthReader.ResetRangeCacheForTests();
+            var rows = (await DarlingHealthReader.GetDailySummaryRangeAsync(
+                postgres, ServerId, day, day.AddDays(1), separatelyMonitored: null, logger: NullLogger.Instance, cancellationToken: ct)).Rows;
+            var row = Assert.Single(rows);
+
+            Assert.Equal(1, row.BlockingEvents);
+            Assert.Equal(130, row.BlockingReports);
+            Assert.Equal(6_500, row.MaxBlockDurationMs);
+            Assert.Equal(DailyHealthBand.Warning, row.HealthBand);
+            Assert.Equal(1, row.ToSignals().BlockingEvents);
+            Assert.Equal(130, row.ToSignals().BlockingReports);
+
+            /* The fleet sweep reads the same rows (#5644): its signals carry the report count its blocking band reads,
+               and the wait count it shows. */
+            var sweep = await FleetSweepEngine.ReadServerSignalsAsync(postgres, ServerId, ServerName, day, day.AddDays(1), ct);
+            Assert.Null(sweep.ReadFault);
+            Assert.Equal(1, sweep.Signals.BlockingEvents);
+            Assert.Equal(130, sweep.Signals.BlockingReports);
+            Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(
+                sweep.Signals.BlockingReports, sweep.Signals.PeakBlockWaitMs / 1000.0, sweep.Signals.Window));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            DarlingHealthReader.ResetRangeCacheForTests();
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
     }
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -128,6 +199,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM blocked_process_reports WHERE server_id = {ServerId}; " +
             $"DELETE FROM dmv_blocking_snapshots WHERE server_id = {ServerId}; " +
+            $"DELETE FROM collection_log WHERE server_id = {ServerId}; " +
             $"DELETE FROM servers WHERE server_id = {ServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }

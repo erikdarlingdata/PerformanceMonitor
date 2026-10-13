@@ -137,6 +137,8 @@ internal static class DarlingTriageEndpoint
            to grow (a NEW store family needs its alias here, but no section mapping). */
         (DarlingSelfAlertEvaluator.RetentionHoldClearedMetric, DarlingSelfAlertEvaluator.RetentionHoldMetric),
         (DarlingSelfAlertEvaluator.CustomRuleHealthResolvedMetric, DarlingSelfAlertEvaluator.CustomRuleHealthMetric),
+        /* #5654: the external-alert delivery check's recovery. */
+        (DarlingSelfAlertEvaluator.ExternalAlertsDeliveredAgainMetric, DarlingSelfAlertEvaluator.ExternalAlertsUndeliveredMetric),
         (DarlingSelfAlertEvaluator.ToastSlackClearedMetric, DarlingSelfAlertEvaluator.ToastSlackMetric),
         (DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric, DarlingSelfAlertEvaluator.CheckpointerPressureMetric),
         (DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, DarlingSelfAlertEvaluator.StoreSettingsMetric),
@@ -325,6 +327,15 @@ internal static class DarlingTriageEndpoint
                 F("Mute rules in force", "get_mute_rules", ("enabled_only", "false")),
                 /* 168 hours because that is StaleMuteAge, and it is also this read's own ceiling. */
                 F("Recent alerts (a muted alert is still recorded here)", "get_alert_history", ("hours", "168"), ("limit", "50")),
+            },
+
+            /* #5654: undelivered external alerts are a delivery problem, not a store-volume one, so get_store_metrics
+               answers nothing about them. A give-up is recorded nowhere but the queue, so the history is the trail:
+               what DID reach a channel, from the same sources, over the last day. The counts per source and status
+               are in the alert detail. */
+            [DarlingSelfAlertEvaluator.ExternalAlertsUndeliveredMetric] = new[]
+            {
+                F("Recent alerts (the sources and counts of what was not delivered are in the alert detail)", "get_alert_history", ("hours", "24"), ("limit", "50")),
             },
 
             /* #3514: the web-dashboard TLS certificate expiry alert is config/host-shaped like the stale-mute
@@ -898,6 +909,8 @@ internal static class DarlingTriageEndpoint
         ["detail_text"] = row.DetailText,
         /* #5642: the fire-time age of the newest sample, read from the persisted context. */
         ["newest_sample"] = AlertNotebookEndpoint.NewestSampleNode(row.ContextJson),
+        /* #5654: the source an external alert came from, read from the persisted context; null for every built-in alert. */
+        ["external_source"] = AlertContextSerializer.TryReadExternalSource(row.ContextJson),
     };
 
     /// <summary>The first non-empty value for a query key, or null — the read surface's binding rule, which this

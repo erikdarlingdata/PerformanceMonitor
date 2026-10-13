@@ -352,6 +352,54 @@ public sealed class ViewerConfigChangesDiffTests
         Assert.Equal("Trace flag 3226 scope changed", modified.ChangeDescription);
     }
 
+    /* #5633 item 19: a successful trace_flags run that stores no row is an EMPTY snapshot at that run's time. */
+
+    [Fact]
+    public void TraceFlagChanges_FlagOnThenSuccessfulEmptyRun_IsTurnedOffAtTheEmptyRun()
+    {
+        var snapshots = new List<Snap.TraceFlagSnapshot> { new(T0, 3226, true, true, false) };
+
+        var change = Assert.Single(ConfigChangeDiff.DiffTraceFlagChanges(snapshots, [T2], T0, T3));
+
+        Assert.Equal(3226, change.TraceFlag);
+        Assert.Equal("disabled", change.ChangeType);
+        Assert.Equal(T2, change.ChangeTime);
+        /* The rows alone (the old shape) never showed it. */
+        Assert.Empty(ConfigChangeDiff.DiffTraceFlagChanges(snapshots, T0, T3));
+    }
+
+    [Fact]
+    public void TraceFlagChanges_FlagOnThenNoEmptyRun_IsNoChange()
+    {
+        /* A failed or missing run is never passed as an empty snapshot, so the callers hand an empty list. */
+        var snapshots = new List<Snap.TraceFlagSnapshot> { new(T0, 3226, true, true, false) };
+
+        Assert.Empty(ConfigChangeDiff.DiffTraceFlagChanges(snapshots, [], T0, T3));
+    }
+
+    [Fact]
+    public void TraceFlagChanges_SuccessfulEmptyRunThenFlagOn_IsTurnedOnAtTheCapture()
+    {
+        var snapshots = new List<Snap.TraceFlagSnapshot> { new(T2, 1117, true, true, false) };
+
+        var change = Assert.Single(ConfigChangeDiff.DiffTraceFlagChanges(snapshots, [T0], T0, T3));
+
+        Assert.Equal("enabled", change.ChangeType);
+        Assert.Equal(T2, change.ChangeTime);
+    }
+
+    [Fact]
+    public void TraceFlagChanges_AnEmptyRunAtACaptureThatHasRows_IsIgnored_AndRepeatedEmptyRunsAddNothing()
+    {
+        var snapshots = new List<Snap.TraceFlagSnapshot> { new(T0, 3226, true, true, false), new(T1, 3226, true, true, false) };
+
+        /* T1 holds the flag's row, so the "empty" run stamped T1 cannot contradict it; two empties after it report ONE turn-off. */
+        var change = Assert.Single(ConfigChangeDiff.DiffTraceFlagChanges(snapshots, [T1, T2, T3], T0, T3));
+
+        Assert.Equal("disabled", change.ChangeType);
+        Assert.Equal(T2, change.ChangeTime);
+    }
+
     [Fact]
     public void TraceFlagChanges_StableYieldsNothing_AndWindowBoundsBothSides()
     {

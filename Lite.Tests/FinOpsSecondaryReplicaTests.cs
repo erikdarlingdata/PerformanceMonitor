@@ -142,6 +142,52 @@ public sealed class FinOpsSecondaryReplicaTests : IClassFixture<SharedDuckDbFixt
         Assert.Equal(AgReplicaScope.SkippedNote(1), note);
     }
 
+    /// <summary>Seeds one <c>database_states</c> snapshot naming <paramref name="databases"/>, <paramref name="age"/> old.</summary>
+    private async Task SeedSnapshotAsync(TimeSpan age, params string[] databases)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        var at = DateTime.UtcNow - age;
+        await ExecAsync(connection, "DELETE FROM database_states WHERE server_id = $1", TestDataSeeder.TestServerId);
+        const string Sql = "INSERT INTO database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) VALUES ($1,$2,$3,'n',$4,5,'ONLINE',false)";
+        foreach (var database in databases)
+            await ExecAsync(connection, Sql, Interlocked.Decrement(ref s_id), at, TestDataSeeder.TestServerId, database);
+    }
+
+    /// <summary>Review M3: Darling leaves a dropped database out of its idle rule; Lite read DuckDB history with no current-database
+    /// filter and still listed it, with a cost-saving estimate.</summary>
+    [Fact]
+    public async Task ADroppedDatabase_LeavesTheIdleList_ButAnUnknownSetKeepsEverything()
+    {
+        var (rows, _) = await RunAsync(s => s.SeedIdleDatabasesAsync(),
+            () => SeedSnapshotAsync(TimeSpan.FromMinutes(5), "ArchiveDB"));
+
+        var detail = Idle(rows);
+        Assert.DoesNotContain("OldReportsDB", detail, StringComparison.Ordinal);
+        Assert.Contains("ArchiveDB", detail, StringComparison.Ordinal);
+        var finding = Assert.Single(rows, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+        Assert.StartsWith("1 idle database(s)", finding.Finding, StringComparison.Ordinal);
+
+        /* A snapshot older than the horizon is unknown: nothing is filtered. */
+        var (stale, _) = await RunAsync(s => s.SeedIdleDatabasesAsync(),
+            () => SeedSnapshotAsync(LocalDataService.CurrentDatabasesHorizon + TimeSpan.FromHours(1), "ArchiveDB"));
+        Assert.Contains("OldReportsDB", Idle(stale), StringComparison.Ordinal);
+    }
+
+    /// <summary>Review M3: the storage-tier rule reads v_file_io_stats history, where a dropped database keeps its rows.</summary>
+    [Fact]
+    public async Task ADroppedDatabase_LeavesTheLowIoLatencyList()
+    {
+        var (gone, _) = await RunAsync(s => s.SeedLowIoLatencyAsync(),
+            () => SeedSnapshotAsync(TimeSpan.FromMinutes(5), "SomeOtherDb"));
+        Assert.DoesNotContain(gone, r => r.Category == "Storage");
+
+        var (kept, _) = await RunAsync(s => s.SeedLowIoLatencyAsync(),
+            () => SeedSnapshotAsync(TimeSpan.FromMinutes(5), "UserDB", "SomeOtherDb"));
+        Assert.Contains("UserDB", Assert.Single(kept, r => r.Category == "Storage").Detail, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheFilterHelper_DropsOnlyTheSecondaries_ThatTheDevTestTdeAndCompressionRulesShare()
     {

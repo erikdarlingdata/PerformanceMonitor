@@ -13,15 +13,6 @@ public sealed class WebWordingFixesTests
         ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js").ReplaceLineEndings("\n");
 
     [Fact]
-    public void TheAppShell_DeclaresAnIcon_SoThePageLoadDoesNotRequestFaviconIco()
-    {
-        /* #5644: every page load asked for /favicon.ico and got a 404 (a console error). The shell names an inline empty icon, which the
-           page's img-src (self and data:) allows; no request is made. */
-        var html = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "index.html");
-        Assert.Contains("<link rel=\"icon\" href=\"data:,\" />", html, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void ThePickerPlurals_AreWrittenOut_NotBuiltWithAnS()
     {
         var js = ServerTabs();

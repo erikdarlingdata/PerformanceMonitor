@@ -60,9 +60,6 @@ public sealed partial class ViewerDataService
     /// <summary>7-day P95 of Total Server Memory (MB) + sample count, for the memory right-sizing checks. $1 server_id, $2 cutoff (naive UTC).</summary>
     public const string RecommendationsMemoryP95Sql = DarlingFinOpsRecommendationsReader.MemoryP95Sql;
 
-    /// <summary>7-day P95 of SQL Server CPU utilization, for the VM right-sizing CPU prescription. $1 server_id, $2 cutoff (naive UTC).</summary>
-    public const string RecommendationsCpuP95Sql = DarlingFinOpsRecommendationsReader.CpuP95Sql;
-
     /// <summary>SQL Agent jobs that ran long at least 3 times in the window (maintenance-window efficiency). $1 server_id, $2 cutoff (naive UTC).</summary>
     public const string RecommendationsMaintenanceWindowSql = DarlingFinOpsRecommendationsReader.MaintenanceWindowSql;
 

@@ -96,11 +96,11 @@ VALUES (1, now() - INTERVAL 30 HOUR, 1, 'S1', 'SOS_SCHEDULER_YIELD')";
         var delete = typeof(ArchiveService).GetMethod("DeleteArchivedRowsAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
         var before = initializer.ArchiveViewGeneration;
-        var none = await (Task<int>)delete.Invoke(service, ["wait_stats", "collection_time", DateTime.UtcNow.AddDays(-30)])!;
+        var none = await (Task<int>)delete.Invoke(service, ["wait_stats", "collection_time", DateTime.UtcNow.AddDays(-30), false])!;
         Assert.Equal(0, none);
         Assert.Equal(before, initializer.ArchiveViewGeneration);
 
-        var deleted = await (Task<int>)delete.Invoke(service, ["wait_stats", "collection_time", DateTime.Now])!;
+        var deleted = await (Task<int>)delete.Invoke(service, ["wait_stats", "collection_time", DateTime.Now, false])!;
         Assert.True(deleted > 0);
         Assert.True(initializer.ArchiveViewGeneration > before);
     }

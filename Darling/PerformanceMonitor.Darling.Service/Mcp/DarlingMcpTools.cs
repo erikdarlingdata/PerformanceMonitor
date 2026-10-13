@@ -450,13 +450,13 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "compare_analysis"), Description("Compares two windows: comparison (hours_back long, ends at as_of/now) vs an earlier same-length baseline, baseline_hours_back back (must exceed hours_back, else refused). Verdicts band worse/better/stable: sigma where a per-server baseline exists, else ladder position; band_source/band_rules say which. Grouped by physical cause; BAD_ACTOR_<hash> is plan_cache_churn, never new/resolved. N=1 vs N=1: never proves causation. unavailable = BOTH windows had zero facts, not \"unchanged\". coverage_caveat flags a partly-collected side. For 30-day anomaly baselines use analyze_server. <<GUIDE>> Compares two time periods by running the inference engine's fact collection and scoring on each, then showing what changed. Use this to compare peak vs off-peak, yesterday vs today, or the windows around a change. Returns facts from both periods side-by-side, each banded worse / better / stable by how far the VALUE moved on the server's own scale, not by the severity formula's slope: a key with a stored per-server baseline (SQL Server: CPU %, read latency, connections; PostgreSQL: transactions/sec, session count, deadlocks/hour, CPU as % of capacity, read latency, replay lag bytes, WAL bytes/sec) is banded in that baseline's robust sigma for the comparison hour (delta_sigma, band_source \"baseline\"); every other key changes status only when the value moved at least a quarter of the larger side AND registers at least a quarter of the way up its own severity ladder (band_source \"absolute\"); the rules are stated in band_rules. Rows are grouped into physical-cause families (one I/O stall is one family row, not four worse keys), and BAD_ACTOR_<hash> appearances are reported as plan_cache_churn rather than as new or resolved issues. What \"worse\" does NOT mean: this is one window against one window — same-hour-yesterday at N=1 vs N=1 cannot show that a change CAUSED anything (DB time on an unchanged server routinely varies severalfold day to day), and a partly collected side flags every verdict with coverage_caveat. Note: for routine anomaly detection, use analyze_server instead — it automatically compares against 30-day time-bucketed baselines (hour-of-day x day-of-week). This tool is for explicit window-to-window comparisons. baseline_hours_back also fixes the baseline period's length: it is always the same duration as the comparison period.")]
+    [McpServerTool(Name = "compare_analysis"), Description("Compares two windows: comparison (hours_back long, ends at as_of/now) vs an earlier same-length baseline, baseline_hours_back back (>= 2 x hours_back, else refused). Verdicts band worse/better/stable: sigma where a per-server baseline exists, else ladder position; band_source/band_rules say which. Grouped by physical cause; BAD_ACTOR_<hash> is plan_cache_churn, never new/resolved. N=1 vs N=1: never proves causation. unavailable = BOTH windows had zero facts, not \"unchanged\". coverage_caveat flags a partly-collected side. For 30-day anomaly baselines use analyze_server. <<GUIDE>> Compares two time periods by running the inference engine's fact collection and scoring on each, then showing what changed. Use this to compare peak vs off-peak, yesterday vs today, or the windows around a change. Returns facts from both periods side-by-side, each banded worse / better / stable by how far the VALUE moved on the server's own scale, not by the severity formula's slope: a key with a stored per-server baseline (SQL Server: CPU %, read latency, connections; PostgreSQL: transactions/sec, session count, deadlocks/hour, CPU as % of capacity, read latency, replay lag bytes, WAL bytes/sec) is banded in that baseline's robust sigma for the comparison hour (delta_sigma, band_source \"baseline\"); every other key changes status only when the value moved at least a quarter of the larger side AND registers at least a quarter of the way up its own severity ladder (band_source \"absolute\"); the rules are stated in band_rules. Rows are grouped into physical-cause families (one I/O stall is one family row, not four worse keys), and BAD_ACTOR_<hash> appearances are reported as plan_cache_churn rather than as new or resolved issues. What \"worse\" does NOT mean: this is one window against one window — same-hour-yesterday at N=1 vs N=1 cannot show that a change CAUSED anything (DB time on an unchanged server routinely varies severalfold day to day), and a partly collected side flags every verdict with coverage_caveat. Note: for routine anomaly detection, use analyze_server instead — it automatically compares against 30-day time-bucketed baselines (hour-of-day x day-of-week). This tool is for explicit window-to-window comparisons. baseline_hours_back also fixes the baseline period's length: it is always the same duration as the comparison period.")]
     public static async Task<string> CompareAnalysis(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours back for the comparison (recent) period. Default 4.")] int hours_back = 4,
-        [Description("Hours back for the baseline period start, measured from the end of the comparison window (now, or as_of). Default 28 (yesterday same time).")] int baseline_hours_back = 28,
+        [Description("Baseline start, hours back from the comparison's end. Default hours_back + 24; at least 2 x hours_back.")] int? baseline_hours_back = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
     {
@@ -465,11 +465,10 @@ public sealed class DarlingMcpTools
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
-        validation = McpHelpers.ValidateHoursBack(baseline_hours_back);
+        /* #5633 item 12: an omitted baseline follows hours_back, and an explicit one must leave the two windows
+           disjoint (baseline_hours_back >= 2 x hours_back); one shared check, so both products refuse alike. */
+        validation = McpHelpers.ValidateBaselineWindow(hours_back, baseline_hours_back, out var baselineHoursBack);
         if (validation != null) return validation;
-
-        if (baseline_hours_back <= hours_back)
-            return McpHelpers.Refusal("baseline_hours_back", "baseline_hours_back must be greater than hours_back. The baseline period must be earlier than the comparison period.");
 
         try
         {
@@ -478,8 +477,8 @@ public sealed class DarlingMcpTools
                silently change what the two windows are relative to each other. */
             var comparisonEnd = windowEnd;
             var comparisonStart = windowEnd.AddHours(-hours_back);
-            var baselineEnd = windowEnd.AddHours(-baseline_hours_back + hours_back);
-            var baselineStart = windowEnd.AddHours(-baseline_hours_back);
+            var baselineEnd = windowEnd.AddHours(-baselineHoursBack + hours_back);
+            var baselineStart = windowEnd.AddHours(-baselineHoursBack);
 
             var (baselineFacts, comparisonFacts, baselineCoverage, comparisonCoverage, dispersion, baselineSecondaries, comparisonSecondaries) = await analysisService.ComparePeriodsAsync(
                 resolved.ServerId, resolved.ServerName,
@@ -799,7 +798,11 @@ public sealed class DarlingMcpTools
             var totalMemoryMb = factsByKey.TryGetValue("MEMORY_TOTAL_PHYSICAL_MB", out var memFact) ? memFact.Value : 0;
             var totalDbSizeMb = factsByKey.TryGetValue("DATABASE_TOTAL_SIZE_MB", out var dbFact) ? dbFact.Value : 0;
 
-            var editionName = AuditEditionName(edition);
+            /* #5633 item 10: the Edition property the store already holds (what get_server_properties reports), so a
+               Developer or Evaluation server is not called Enterprise. The engine-edition label is only the fallback
+               for a store with no properties snapshot, and then edition_note says so. */
+            var propertiesRow = await DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId, cancellationToken);
+            var (editionName, editionNote) = AuditEditionLabel(propertiesRow?.Edition, edition);
             /* The recommended MAXDOP follows the cores per socket the SERVER_HARDWARE fact carries. On an Azure SQL Database the fact carries its vCores instead, because the stored
                cores_per_socket is the host's (see FactRemediation.MaxdopBasisFrom). */
             var maxdopBasis = FactRemediation.MaxdopBasisFrom(factsByKey);
@@ -965,6 +968,7 @@ public sealed class DarlingMcpTools
             {
                 server = resolved.ServerName,
                 edition = editionName,
+                edition_note = editionNote,
                 total_physical_memory_mb = totalMemoryMb > 0 ? totalMemoryMb : (double?)null,
                 total_database_size_mb = totalDbSizeMb > 0 ? totalDbSizeMb : (double?)null,
                 summary = new
@@ -1001,6 +1005,26 @@ public sealed class DarlingMcpTools
         engineEdition == CollectorEngineCapability.UnknownEngineEdition
             ? "Unknown"
             : CollectorEngineCapability.DescribeEngineEdition(engineEdition);
+
+    /// <summary>
+    /// The <c>edition</c> and <c>edition_note</c> audit_config echoes (#5633 item 10). The stored <c>Edition</c> property
+    /// ("Developer Edition (64-bit)", "Enterprise Evaluation Edition ...") is reported as is, exactly as
+    /// <c>get_server_properties</c> does; the note is null. Engine edition 3 covers Enterprise, Developer and Evaluation, so
+    /// the engine label ("Enterprise") is only the fallback when the store holds no Edition string, and the note then says
+    /// the word is the engine edition, not the SKU. No audit rule keys on the label.
+    /// </summary>
+    internal static (string Name, string? Note) AuditEditionLabel(string? storedEdition, int engineEdition)
+    {
+        if (!string.IsNullOrWhiteSpace(storedEdition))
+        {
+            return (storedEdition.Trim(), null);
+        }
+
+        var label = AuditEditionName(engineEdition);
+        return label == "Unknown"
+            ? (label, "No server properties snapshot holds the Edition string yet, and the engine edition is unknown.")
+            : (label, "This is the engine edition, not the SKU: no server properties snapshot holds the Edition string yet, and engine edition 3 covers Enterprise, Developer and Evaluation alike.");
+    }
 
     /// <summary>
     /// A <c>CONFIG_PG_*</c> fact's value as an operator would read it in <c>pg_settings</c> — with its unit,

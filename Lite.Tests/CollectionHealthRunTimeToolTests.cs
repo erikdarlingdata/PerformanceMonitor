@@ -285,13 +285,14 @@ public sealed class CollectionHealthRunTimeToolTests : IClassFixture<SharedDuckD
 
         var (rows, _) = await CallAsync(RunTimes((Daily, 1440, text, true), (Frequent, 1, null, true)), fullDetail: false);
 
-        /* The partial row of a collector with a run time carries all three keys, the note null because nothing was skipped. A
-           partial row for a collector with none has no key at all, so the shape costs a collector without a run time no bytes. */
+        /* The partial row of a collector with a run time carries run_at and next_run_utc. Its note is null because nothing
+           was skipped, and #5748's rule leaves a null key out of a partial row, so there is no run_time_note key either. A
+           partial row for a collector with no run time has no key at all, so the shape costs it no bytes. */
         var daily = rows[Daily];
         Assert.True(daily.GetProperty("partial_detail").GetBoolean());
         Assert.Equal(text, daily.GetProperty("run_at").GetString());
         Assert.Equal(JsonValueKind.String, daily.GetProperty("next_run_utc").ValueKind);
-        Assert.Equal(JsonValueKind.Null, daily.GetProperty("run_time_note").ValueKind);
+        Assert.False(daily.TryGetProperty("run_time_note", out _));
 
         var minute = rows[Frequent];
         Assert.True(minute.GetProperty("partial_detail").GetBoolean());

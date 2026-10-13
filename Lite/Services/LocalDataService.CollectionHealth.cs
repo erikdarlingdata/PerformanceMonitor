@@ -227,6 +227,9 @@ WITH health AS
     FROM v_collection_log
     WHERE server_id = $1
     AND   collection_time >= $2
+    -- #5643: the loop's skipped-slots row is not a collector run; as a collector it would show a row here and its
+    -- SKIPPED status would count as a healthy run (last_success_time).
+    AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
     GROUP BY collector_name
 )
 SELECT
@@ -698,10 +701,11 @@ ORDER BY h.collector_name";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = @"
+        command.CommandText = $@"
 SELECT 1
 FROM v_collection_log
 WHERE server_id = $1
+AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
 LIMIT 1";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -763,6 +767,9 @@ LIMIT 1";
             ? "ORDER BY collection_time DESC, duration_ms DESC NULLS LAST"
             : "ORDER BY duration_ms DESC NULLS LAST, collection_time DESC";
 
+        /* #5731: no collection_cycle exclusion predicate, on purpose. This is the log as ROWS (the grid and
+           get_collection_log), where a late cycle's collection_cycle/SKIPPED row belongs; status = SKIPPED finds it.
+           get_collection_log counts it apart from the runs (skipped_cycle_rows). */
         command.CommandText = @"
 SELECT
     collector_name,
@@ -902,6 +909,7 @@ ORDER BY 1, 2";
 SELECT 1
 FROM v_collection_log
 WHERE server_id IN ({string.Join(",", serverIds)})
+AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
 LIMIT 1";
 
         return await command.ExecuteScalarAsync() is not null and not DBNull;
@@ -929,6 +937,7 @@ LIMIT 1";
             ? "ORDER BY collection_time DESC, duration_ms DESC NULLS LAST"
             : "ORDER BY duration_ms DESC NULLS LAST, collection_time DESC";
 
+        /* #5731: no collection_cycle exclusion predicate here either, on purpose: the fleet form of the log as rows. */
         command.CommandText = $@"
 SELECT
     collector_name,

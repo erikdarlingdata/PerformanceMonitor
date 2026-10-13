@@ -877,6 +877,71 @@ public sealed class DarlingWebEndpointsTests
         Assert.Contains("logger: logger", line, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #5644 (review of W22): /api/fleet refuses an out-of-range window or a negative worst_count with the
+    /// {"status":"invalid"} envelope, naming the spelling the caller sent, and still answers the in-range requests
+    /// (the bare route, hours=24, the edges 1 and 168, worst_count=0) with no refusal. It used to clamp
+    /// (hours=500 answered 200 over 168 hours, worst_count=-3 over zero).
+    /// </summary>
+    [Theory]
+    [InlineData("hours", 500, "hours")]
+    [InlineData("hours", 0, "hours")]
+    [InlineData("hours", -5, "hours")]
+    [InlineData("hours", 169, "hours")]
+    [InlineData("hours_back", 500, "hours_back")]
+    [InlineData("hours_back", 0, "hours_back")]
+    public void FleetParamRefusal_RefusesAnOutOfRangeWindow_NamingTheParameterSent(string key, int value, string expectedParameter)
+    {
+        var refusal = DarlingWebEndpoints.FleetParamRefusal(value, 3, k => k == key ? value.ToString() : null);
+
+        Assert.NotNull(refusal);
+        Assert.True(McpHelpers.IsRefusalEnvelope(refusal));
+        var envelope = JsonNode.Parse(refusal)!;
+        Assert.Equal("invalid", (string?)envelope["status"]);
+        Assert.Equal(expectedParameter, (string?)envelope["hints"]!["parameter"]);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(-3)]
+    public void FleetParamRefusal_RefusesANegativeWorstCount(int worstCount)
+    {
+        var refusal = DarlingWebEndpoints.FleetParamRefusal(24, worstCount, k => k == "worst_count" ? worstCount.ToString() : null);
+
+        Assert.NotNull(refusal);
+        var envelope = JsonNode.Parse(refusal)!;
+        Assert.Equal("invalid", (string?)envelope["status"]);
+        Assert.Equal("worst_count", (string?)envelope["hints"]!["parameter"]);
+    }
+
+    [Theory]
+    [InlineData(1, 0)]
+    [InlineData(1, 5)]
+    [InlineData(24, 5)]
+    [InlineData(168, 5)]
+    public void FleetParamRefusal_AnswersInRangeRequests(int hours, int worstCount)
+    {
+        Assert.Null(DarlingWebEndpoints.FleetParamRefusal(hours, worstCount, k => k == "hours" ? hours.ToString() : null));
+    }
+
+    /// <summary>The /api/fleet route runs that refusal before it reads, and no longer clamps the window or the count.</summary>
+    [Fact]
+    public void FleetRoute_RefusesBeforeReading_AndDoesNotClamp()
+    {
+        var source = ReadSource(WebEndpointsSourcePath);
+        var start = source.IndexOf("app.MapGet(\"/api/fleet\"", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the /api/fleet route has moved; update this pin.");
+        var end = source.IndexOf("app.MapGet(", start + 10, StringComparison.Ordinal);
+        var route = source[start..end];
+
+        Assert.Contains("FleetParamRefusal(", route, StringComparison.Ordinal);
+        Assert.DoesNotContain("Math.Clamp", route, StringComparison.Ordinal);
+        Assert.DoesNotContain("Math.Max", route, StringComparison.Ordinal);
+        Assert.True(
+            route.IndexOf("FleetParamRefusal(", StringComparison.Ordinal) < route.IndexOf("GetFleetOverviewAsync", StringComparison.Ordinal),
+            "the refusal must come before the read");
+    }
+
     private static string ReadSource(string relative)
     {
         var path = Path.Combine(RepoRoot(), relative);

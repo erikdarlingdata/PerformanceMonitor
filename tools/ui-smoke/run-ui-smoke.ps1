@@ -1,0 +1,122 @@
+<#
+.SYNOPSIS
+    Runs the web UI smoke check (#5701): service on a throwaway store, seed, then the browser walk. CI and local entry.
+
+.DESCRIPTION
+    1. Builds the Darling service (Release) unless -NoBuild.
+    2. Writes darling.json from darling.ui-smoke.json (ports filled in) into -WorkDir and starts the service on it, with
+       its output in -WorkDir. The store is a throwaway PostgreSQL the caller has started and made a database
+       "darling" in (CI does; tools/ui-smoke/README.md says how to do it by hand).
+    3. Waits for /api/ping and for the config seed, applies seed.sql with psql, then runs smoke.mjs.
+    4. Stops the service it started (by its own process id) and leaves logs, failure screenshots and traces in -WorkDir.
+       The caller stops the cluster.
+
+    Locally:  start a throwaway cluster by hand (README.md), then
+              tools/ui-smoke/run-ui-smoke.ps1 -PgBin <...>\pgsql\bin -PgPort <port> -Channel msedge
+    In CI:    the workflow starts the cluster on 5541 first, then runs this with -PgBin only.
+
+.PARAMETER PgBin       Folder holding psql.exe - the pgsql\bin of pg-runtime.
+.PARAMETER PgPort      Port of the store (CI: 5541).
+.PARAMETER WebPort     Port of the web host.
+.PARAMETER WorkDir     Scratch folder for the config, logs, cluster and screenshots. Made if missing.
+.PARAMETER NoBuild     Skip dotnet build (the caller already built the Release service).
+.PARAMETER Channel     Browser channel for playwright-core: chrome (the runner's) or msedge.
+.PARAMETER SeedOnly    Stop after seed.sql is applied: no npm, no browser walk. The WPF smoke check (#5745, wpf-smoke.yml) uses this to
+                       get a migrated, seeded store for the Darling viewer; the service is stopped, and the caller keeps the cluster
+                       and the config in -WorkDir\cfg\darling.json (the viewer reads it through DARLING_CONFIG).
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)] [string] $PgBin,
+    [int] $PgPort = 5541,
+    [int] $WebPort = 5153,
+    [string] $WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) 'darling-ui-smoke'),
+    [switch] $NoBuild,
+    [string] $Channel = 'chrome',
+    [switch] $SeedOnly
+)
+
+$ErrorActionPreference = 'Stop'
+$here = $PSScriptRoot
+$repo = (Resolve-Path (Join-Path $here '..\..')).Path
+$csproj = Join-Path $repo 'Darling\PerformanceMonitor.Darling.Service\PerformanceMonitor.Darling.Service.csproj'
+$psql = Join-Path $PgBin 'psql.exe'
+New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
+$serviceProc = $null
+
+function Invoke-Psql([string[]] $PsqlArgs) {
+    & $psql -h 127.0.0.1 -p $PgPort -U darling -d darling -v ON_ERROR_STOP=1 -X -q -t -A @PsqlArgs
+    if ($LASTEXITCODE -ne 0) { throw "psql failed ($LASTEXITCODE)" }
+}
+
+try {
+    if (-not $NoBuild) {
+        & dotnet build $csproj -c Release --nologo -v q
+        if ($LASTEXITCODE -ne 0) { throw "dotnet build failed ($LASTEXITCODE)" }
+    }
+    $outDir = Join-Path (Split-Path $csproj) 'bin\Release\net10.0'
+    $dll = Join-Path $outDir 'PerformanceMonitor.Darling.Service.dll'
+    if (-not (Test-Path $dll)) { throw "service build output not found: $dll" }
+
+    # The config: ports filled in, written beside the files the service makes next to its config.
+    $cfgDir = Join-Path $WorkDir 'cfg'
+    New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+    $cfg = (Get-Content -Raw (Join-Path $here 'darling.ui-smoke.json')).Replace('__PG_PORT__', "$PgPort").Replace('__WEB_PORT__', "$WebPort")
+    $cfgPath = Join-Path $cfgDir 'darling.json'
+    Set-Content -Path $cfgPath -Value $cfg -Encoding utf8
+
+    $env:DARLING_CONFIG = $cfgPath
+    $serviceProc = Start-Process -FilePath 'dotnet' -ArgumentList @("`"$dll`"") -WorkingDirectory $outDir -PassThru `
+        -RedirectStandardOutput (Join-Path $WorkDir 'service.out.log') -RedirectStandardError (Join-Path $WorkDir 'service.err.log') -WindowStyle Hidden
+    Remove-Item Env:\DARLING_CONFIG
+
+    # Up when /api/ping answers; seeded when the registry row for ui-sql exists (the service writes it after the migrations).
+    $base = "http://127.0.0.1:$WebPort"
+    $deadline = (Get-Date).AddSeconds(90)
+    $up = $false
+    while ((Get-Date) -lt $deadline) {
+        if ($serviceProc.HasExited) { throw "the service exited early (code $($serviceProc.ExitCode)); see service.out.log" }
+        try { if ((Invoke-WebRequest -Uri "$base/api/ping" -UseBasicParsing -TimeoutSec 3).StatusCode -eq 200) { $up = $true; break } } catch { }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $up) { throw "the service did not answer $base/api/ping in 90 s" }
+    # Its own budget, not what the ping wait left over: the registry row is written only after the migrations have walked the
+    # whole ladder against an empty store, which is the slower of the two waits. Probes at least once, and stops at once if the
+    # service dies during the migrations rather than spending the budget and blaming registration.
+    $registered = $false
+    $regDeadline = (Get-Date).AddSeconds(120)
+    do {
+        if ($serviceProc.HasExited) { throw "the service exited early (code $($serviceProc.ExitCode)); see service.out.log" }
+        $n = & $psql -h 127.0.0.1 -p $PgPort -U darling -d darling -X -q -t -A -c "SELECT count(*) FROM config.config_monitored_servers WHERE name = 'ui-sql'" 2>$null
+        if ($n -eq '1') { $registered = $true; break }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $regDeadline)
+    if (-not $registered) { throw "the service did not register ui-sql in the store in 120 s (migrations still running? see service.out.log)" }
+
+    Invoke-Psql @('-f', (Join-Path $here 'seed.sql'))
+
+    if ($SeedOnly) {
+        Write-Host "store seeded; config is $cfgPath"
+        return
+    }
+
+    Push-Location $here
+    try {
+        & npm ci --no-audit --no-fund --ignore-scripts
+        if ($LASTEXITCODE -ne 0) { throw "npm ci failed ($LASTEXITCODE)" }
+        $env:UI_SMOKE_URL = $base
+        $env:UI_SMOKE_OUT = Join-Path $WorkDir 'out'
+        $env:UI_SMOKE_CHANNEL = $Channel
+        & node smoke.mjs
+        $smokeExit = $LASTEXITCODE
+    }
+    finally { Pop-Location }
+    if ($smokeExit -ne 0) { throw "ui-smoke found problems (exit $smokeExit); screenshots and report.json are in $WorkDir\out" }
+    Write-Host 'ui-smoke passed.'
+}
+finally {
+    if ($serviceProc -and -not $serviceProc.HasExited) {
+        # Only the process this script started, with its children.
+        & taskkill /PID $serviceProc.Id /T /F | Out-Null
+    }
+}

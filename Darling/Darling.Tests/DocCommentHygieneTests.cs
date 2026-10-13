@@ -734,6 +734,10 @@ public sealed class DocCommentHygieneTests
             ["tools/SliceRepairRepro"] =
                 "The second repro rig, same reasoning.",
 
+            ["tools/ui-smoke-wpf"] =
+                "The WPF smoke harness (#5745), run by the wpf-smoke workflow rather than a test shard, and kept "
+                + "out of the solution on purpose.",
+
             ["Darling/tools/generate-ladder-fixture"] =
                 "A one-shot generator for a test fixture, run by hand and outside the solution. Nested "
                 + "inside a tree the floor DOES cover, which is why the comparison is over project "

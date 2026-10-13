@@ -1064,7 +1064,8 @@ WHERE NOT is_compressed";
         long ramBytesForDerivation, long freeDiskBytesForDerivation)
     {
         var memory = DarlingManagedPostgres.DeriveMemorySettings(DarlingManagedPostgres.QuantizeRam(ramBytesForDerivation));
-        var workers = DarlingManagedPostgres.DeriveWorkerSettings(TimescaleSupport.HypertableCount);
+        var workers = DarlingManagedPostgres.DeriveWorkerSettings(
+            TimescaleSupport.HypertableCount, DarlingManagedPostgres.QuantizeRam(ramBytesForDerivation));
         var wal = DarlingManagedPostgres.DeriveWalSettings(freeDiskBytesForDerivation);
 
         return

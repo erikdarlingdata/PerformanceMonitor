@@ -207,6 +207,10 @@ public sealed class FinOpsOptimizationViewLiveTests
         /* Waits: Locks and Memory tie on 700. Other holds 100 inside 24 hours and 5100 inside 48. */
         await Wait(c, ct, now.AddHours(-2), "CXPACKET", 1000, 10);
         await Wait(c, ct, now.AddHours(-3), "CXPACKET ", 500, 5);
+        /* The hash waits belong to Parallelism too (#5633 item 22): 1500 + 300 + 200 + 100 = 2100. */
+        await Wait(c, ct, now.AddHours(-2), "HTBUILD", 300, 3);
+        await Wait(c, ct, now.AddHours(-2), "HTREPARTITION", 200, 2);
+        await Wait(c, ct, now.AddHours(-2), "HTDELETE", 100, 1);
         await Wait(c, ct, now.AddHours(-2), "SOS_SCHEDULER_YIELD", 800, 20);
         await Wait(c, ct, now.AddHours(-2), "PAGEIOLATCH_SH", 700, 7);
         await Wait(c, ct, now.AddHours(-2), "WRITELOG", 300, 3);
@@ -309,16 +313,20 @@ public sealed class FinOpsOptimizationViewLiveTests
         var waits = Section(tool, "wait_categories");
         Assert.Equal("ok", waits.GetProperty("status").GetString());
         Assert.Equal(24, waits.GetProperty("window_hours").GetInt32());
-        Assert.Equal(new[] { "CPU", "Storage", "Locks", "Memory", "Other" },
+        /* CXPACKET (1500) and the HT* waits are Parallelism, not CPU or Other: CPU holds only SOS_SCHEDULER_YIELD (800) (#5633 item 22). */
+        Assert.Equal(new[] { "Parallelism", "Storage", "CPU", "Locks", "Memory", "Other" },
             waits.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("category").GetString()).ToArray());
-        var cpu = waits.GetProperty("rows")[0];
-        Assert.Equal(2300L, cpu.GetProperty("total_wait_time_ms").GetInt64());
-        Assert.Equal(35L, cpu.GetProperty("waiting_tasks").GetInt64());
-        Assert.Equal(47.9m, cpu.GetProperty("pct_of_total").GetDecimal());
-        Assert.Equal("CXPACKET", cpu.GetProperty("top_wait_type").GetString());
-        Assert.Equal(1500L, cpu.GetProperty("top_wait_time_ms").GetInt64());
-        Assert.Equal(15.75m, cpu.GetProperty("est_cost_usd").GetDecimal());
-        Assert.Equal(4.79m, waits.GetProperty("rows")[2].GetProperty("est_cost_usd").GetDecimal());
+        var parallelism = waits.GetProperty("rows")[0];
+        Assert.Equal(2100L, parallelism.GetProperty("total_wait_time_ms").GetInt64());
+        Assert.Equal(21L, parallelism.GetProperty("waiting_tasks").GetInt64());
+        Assert.Equal(38.9m, parallelism.GetProperty("pct_of_total").GetDecimal());
+        Assert.Equal("CXPACKET", parallelism.GetProperty("top_wait_type").GetString());
+        Assert.Equal(1500L, parallelism.GetProperty("top_wait_time_ms").GetInt64());
+        Assert.Equal(12.79m, parallelism.GetProperty("est_cost_usd").GetDecimal());
+        var cpu = waits.GetProperty("rows")[2];
+        Assert.Equal(800L, cpu.GetProperty("total_wait_time_ms").GetInt64());
+        Assert.Equal("SOS_SCHEDULER_YIELD", cpu.GetProperty("top_wait_type").GetString());
+        Assert.Equal(4.26m, waits.GetProperty("rows")[3].GetProperty("est_cost_usd").GetDecimal());
 
         var queries = Section(tool, "expensive_queries");
         Assert.Equal("ok", queries.GetProperty("status").GetString());
@@ -406,7 +414,8 @@ public sealed class FinOpsOptimizationViewLiveTests
         Assert.Equal(19.73m, queries.GetProperty("rows")[0].GetProperty("est_cost_usd").GetDecimal());
         Assert.Equal(13.15m, queries.GetProperty("rows")[1].GetProperty("est_cost_usd").GetDecimal());
         Assert.Equal(2, Section(tool, "idle_databases").GetProperty("rows").GetArrayLength());
-        Assert.Equal(5, Section(tool, "wait_categories").GetProperty("rows").GetArrayLength());
+        /* Six categories since the hash waits joined CXPACKET as Parallelism (#5633 item 22). */
+        Assert.Equal(6, Section(tool, "wait_categories").GetProperty("rows").GetArrayLength());
     }
 
     [Fact]
@@ -514,7 +523,7 @@ public sealed class FinOpsOptimizationViewLiveTests
         Assert.Equal("monthly cost not set", tool.RootElement.GetProperty("cost_reason").GetString());
         var rows = Section(tool, "wait_categories").GetProperty("rows").EnumerateArray()
             .Concat(Section(tool, "expensive_queries").GetProperty("rows").EnumerateArray()).ToList();
-        Assert.Equal(9, rows.Count);
+        Assert.Equal(10, rows.Count); // six wait categories (Parallelism is its own since #5633 item 22) and four queries
         Assert.All(rows, r => Assert.Equal(JsonValueKind.Null, r.GetProperty("est_cost_usd").ValueKind));
     }
 

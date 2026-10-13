@@ -111,7 +111,7 @@ public sealed class FinOpsIndexAnalysisViewLiveTests
         await using var pg = NpgsqlDataSource.Create(scratch.ConnectionString);
         var id = ServerIdHelper.GetDeterministicHashCode(server);
 
-        var withTimes = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(pg, id, 30, ct);
+        var withTimes = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(pg, id, 30, cancellationToken: ct);
         var read = withTimes.Result;
         using var doc = await ToolAsync(pg, server, limit: 50, ct: ct);
         var root = doc.RootElement;

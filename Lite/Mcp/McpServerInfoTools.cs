@@ -203,6 +203,9 @@ public sealed class McpServerInfoTools
         if (r.IsAzureSiblingRow)
             file[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;
         file["auto_growth_mb"] = r.AutoGrowthMb;
+        /* #5633 item 6: a file that grows by a percentage has no fixed MB step; is_percent_growth says which, growth_pct is the step. */
+        file["is_percent_growth"] = r.IsPercentGrowth;
+        file["growth_pct"] = r.GrowthPct;
         file["max_size_mb"] = r.MaxSizeMb;
         file["volume_mount_point"] = r.VolumeMountPoint;
         file["volume_total_mb"] = r.VolumeTotalMb;

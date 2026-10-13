@@ -100,7 +100,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("get_alert_history", "server_name,hours_back,limit,as_of,include_dismissed")]
     [InlineData("get_mute_rules", "enabled_only")]
     [InlineData("update_alert_settings", "settings_json")]
-    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id")]
+    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id,client_app_pattern,external_source")]
     [InlineData("delete_mute_rule", "rule_id")]
     [InlineData("set_mute_rule_enabled", "rule_id,enabled")]
     [InlineData("update_mute_rule", "rule_id,changes_json")]
@@ -1095,6 +1095,55 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         }
     }
 
+    /// <summary>#5640 (V179): the Client Timeouts switch and its two per-minute bars are reported under <c>client_timeouts</c>
+    /// through the engine's own clamp, written under the engine's own floor, and a Critical below Warning is refused when both
+    /// are sent. (A lone bar against the stored other is checked inside the write transaction, like Runnable Queue's.)</summary>
+    [Fact]
+    public void ClientTimeouts_IsReportedThroughTheClamp_AndWrittenWithTheEnginesValidation()
+    {
+        var payload = SerializedSettingsPayload(SampleSettingsRow());
+        var ct = payload["client_timeouts"]!;
+        Assert.True(ct["enabled"]!.GetValue<bool>());
+        Assert.Equal(4, ct["warning_per_minute"]!.GetValue<int>());
+        Assert.Equal(25, ct["critical_per_minute"]!.GetValue<int>());
+        Assert.Equal(new[] { "enabled", "warning_per_minute", "critical_per_minute" }, ct.AsObject().Select(p => p.Key).ToArray());
+
+        /* A stored pair the engine would rewrite is reported the way the engine reads it. */
+        var crossed = SampleSettingsRow() with { ClientTimeoutsWarningPerMinute = 9, ClientTimeoutsCriticalPerMinute = 3 };
+        var crossedCt = SerializedSettingsPayload(crossed)["client_timeouts"]!;
+        Assert.Equal(9, crossedCt["warning_per_minute"]!.GetValue<int>());
+        Assert.Equal(9, crossedCt["critical_per_minute"]!.GetValue<int>());
+        var belowFloor = SampleSettingsRow() with { ClientTimeoutsWarningPerMinute = 0, ClientTimeoutsCriticalPerMinute = 0 };
+        Assert.Equal(1, SerializedSettingsPayload(belowFloor)["client_timeouts"]!["warning_per_minute"]!.GetValue<int>());
+
+        var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+            "{\"client_timeouts\":{\"enabled\":true,\"warning_per_minute\":6,\"critical_per_minute\":6}}")!);
+        Assert.Null(error);
+        Assert.Equal(
+            new[]
+            {
+                (DarlingMcpAlertTools.AlertSettingsTable, "client_timeouts_enabled"),
+                (DarlingMcpAlertTools.AlertSettingsTable, "client_timeouts_warning_per_minute"),
+                (DarlingMcpAlertTools.AlertSettingsTable, "client_timeouts_critical_per_minute"),
+            },
+            targets.ToArray());
+
+        foreach (var body in new[]
+        {
+            "{\"client_timeouts\":{\"warning_per_minute\":0}}",
+            "{\"client_timeouts\":{\"critical_per_minute\":0}}",
+            "{\"client_timeouts\":{\"warning_per_minute\":\"10\"}}",
+            "{\"client_timeouts\":{\"enabled\":\"yes\"}}",
+            "{\"client_timeouts\":{\"warning_per_minute\":10,\"critical_per_minute\":9}}",
+            "{\"client_timeouts\":{\"critical_per_minute\":9,\"warning_per_minute\":10}}",
+            "{\"client_timeouts\":{\"nope\":1}}",
+        })
+        {
+            var (_, refusedError) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(body)!);
+            Assert.NotNull(refusedError);
+        }
+    }
+
     /// <summary>The columns the parser would write to one table.</summary>
     private static IReadOnlyList<string> ColumnsFor(
         IReadOnlyList<(string Table, string Column)> targets, string table) =>
@@ -1178,7 +1227,10 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #5641 (V177): deliberately NOT the shipped true / 8 / 16 -- a sample equal to the DEFAULTs would let a payload that
            dropped the columns and fell back to the engine defaults still match. Warning is 1 or more and Critical is at
            least Warning, so the pair is one the writer accepts. */
-        RunnableQueueEnabled: false, RunnableQueueWarningPerScheduler: 5, RunnableQueueCriticalPerScheduler: 11);
+        RunnableQueueEnabled: false, RunnableQueueWarningPerScheduler: 5, RunnableQueueCriticalPerScheduler: 11,
+        /* #5640 (V179): deliberately NOT the shipped false / 10 / 60 -- enabled TRUE against the shipped OFF, and a pair of 4 and 25 -- for
+           the same reason: a payload that dropped the columns and fell back to the engine defaults would not match. */
+        ClientTimeoutsEnabled: true, ClientTimeoutsWarningPerMinute: 4, ClientTimeoutsCriticalPerMinute: 25);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()
@@ -2142,7 +2194,7 @@ internal sealed class SlowInsertMuteRuleStore : IMuteRuleStore
 /// the sibling write tools already answer a repeat (<c>conflict</c> for custom rules and views, <c>already_muted</c>
 /// for an analysis mute). The MCP tool (<c>CreateMuteRuleOver</c>, the body <c>CreateMuteRule</c> hands the
 /// Postgres-backed store) and the web route (<c>CreateMuteRuleCore</c>) share one insert, so a rule either path made
-/// is a repeat to the other. The identity is the six scope and pattern fields plus the expiry, against rules that are
+/// is a repeat to the other. The identity is the seven scope and pattern fields plus the expiry, against rules that are
 /// enabled and unexpired.
 /// </summary>
 public sealed class RepeatedCreateMuteRuleTests

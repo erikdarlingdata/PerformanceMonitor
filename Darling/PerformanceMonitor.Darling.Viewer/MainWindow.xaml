@@ -436,7 +436,7 @@
                            TextWrapping="Wrap"
                            Margin="2,8,2,0"
                            Visibility="Collapsed"/>
-                <ListBox x:Name="ServerList"
+                <ListBox x:Name="ServerList" AutomationProperties.AutomationId="ServerPicker"
                          Background="{DynamicResource BackgroundDarkBrush}"
                          BorderBrush="{DynamicResource BorderBrush}"
                          BorderThickness="1"
@@ -1028,7 +1028,7 @@
                                         <Grid>
                                             <StackPanel Margin="16">
                                                 <DockPanel Margin="0,0,0,4">
-                                                    <TextBlock Text="{Binding DisplayName}" FontSize="16" FontWeight="SemiBold"
+                                                    <TextBlock Text="{Binding DisplayName}" AutomationProperties.AutomationId="OverviewServerCardName" FontSize="16" FontWeight="SemiBold"
                                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                                     <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}"
                                                              ToolTip="{Binding StatusTooltip}"

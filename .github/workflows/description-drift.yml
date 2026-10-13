@@ -79,11 +79,12 @@ jobs:
 
       - name: Compare the description against the diff
         if: github.event_name == 'pull_request'
-        env:
-          # Through the environment, never through a workflow expression inside `run`. On a
-          # public repo the body is author-controlled text, and `${{ }}` interpolation into a
-          # shell would make a backticked "symbol" a command-substitution seam.
-          PR_BODY: ${{ github.event.pull_request.body }}
+        # The script reads the body from the event payload file ($GITHUB_EVENT_PATH), so it
+        # never passes through a shell, a workflow expression or an environment string. An
+        # `env:` entry for it is a defect, not a convenience: Linux caps one environment string
+        # at 128 KB, so a larger body stopped this step before it started (#5737). `${{ }}`
+        # interpolation into `run` is worse still -- on a public repo the body is
+        # author-controlled text, a command-substitution seam.
         # No `continue-on-error` and no `|| true` needed: the script always exits 0 by design.
         # A description is not a build failure, and a mark that goes red on prose is one people
         # learn to ignore -- which costs more than it catches (the #2229 lesson, same repo).

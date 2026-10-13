@@ -242,7 +242,7 @@ public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
         return rig;
     }
 
-    private static readonly AlwaysOnXeSessionKind[] Kinds = { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess };
+    private static readonly AlwaysOnXeSessionKind[] Kinds = { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess, AlwaysOnXeSessionKind.Attention };
 
     /* ── A registration with read-only intent ── */
 

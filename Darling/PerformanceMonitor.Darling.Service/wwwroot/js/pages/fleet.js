@@ -142,11 +142,14 @@ export function silenceBody(card) {
    which is also what the card's bell (is_silenced) tests. The reason is NOT part of the test: a rule made over MCP,
    by hand or with an edited reason still silences the whole server, so Unsilence has to remove it too. */
 function noPatterns(rule) {
+  /* #5654: a rule limited to one external source mutes only that source's alerts, so it is not a whole-server silence. */
   return rule.metric_name == null
+    && rule.external_source == null
     && rule.database_pattern == null
     && rule.query_text_pattern == null
     && rule.wait_type_pattern == null
-    && rule.job_name_pattern == null;
+    && rule.job_name_pattern == null
+    && rule.client_app_pattern == null;
 }
 
 /** A whole-server silence keyed on this server's id. Enabled/expiry are not part of the match (as on the desktop). */

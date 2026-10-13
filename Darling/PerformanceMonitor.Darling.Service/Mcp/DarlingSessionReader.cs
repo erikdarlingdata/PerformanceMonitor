@@ -86,7 +86,8 @@ internal static class DarlingSessionReader
     /// <summary>One waiting-task snapshot row.</summary>
     public sealed record WaitingTaskRow(
         DateTime CollectionTime, int SessionId, string? WaitType, long WaitDurationMs,
-        int? BlockingSessionId, string? ResourceDescription, string? DatabaseName);
+        int? BlockingSessionId, string? ResourceDescription, string? DatabaseName,
+        int ThreadCount = 1, bool IntraQueryParallelism = false, IReadOnlyList<int>? BlockingSessionIds = null);
 
     /* ─────────────────────────── session stats (latest snapshot, per application) ─────────────────────────── */
 
@@ -374,6 +375,24 @@ internal static class DarlingSessionReader
     /// <c>text[]</c> (#5244, <see cref="DatabaseFilter.Clause"/>): SQL NULL is every database, otherwise only the named databases'
     /// rows. The predicate sits in the WHERE, ahead of the cap, so the page is the newest N of the chosen databases.
     ///
+    /// <para><b>One row per session and wait type (#5633 item 18).</b> The collector stores one row per waiting TASK (thread), so a
+    /// parallel query's exchange waits came back as dozens of identical-looking rows, all blocked by their own session id.
+    /// The read rolls the threads of one session and wait type up within a snapshot: <c>thread_count</c> says how many, the
+    /// duration is the longest, and a blocker equal to the session itself is not reported as a blocker (it is the query's own
+    /// threads waiting on each other) but flagged <c>intra_query_parallelism</c>. A different session blocking any of the threads
+    /// is kept as <c>blocking_session_id</c>. The cap applies to the rolled-up rows.</para>
+    ///
+    /// <para><b>The row is one thread's wait, not a blend (#5633 review L-a).</b> <c>wait_duration_ms</c>, <c>resource_description</c>
+    /// and <c>blocking_session_id</c> all come from the LONGEST-waiting thread of the group (an ordered <c>array_agg</c>), where they used
+    /// to be three independent <c>MAX</c>es: the alphabetically greatest resource text printed beside another thread's duration, and
+    /// a lower-numbered second blocker was hidden. When that thread waits on its own session (parallelism) the blocker is the
+    /// longest-waiting thread blocked by another session, so a real blocker is never dropped. <c>blocking_session_ids</c> lists every
+    /// distinct blocker other than the session itself, only when the threads have more than one.</para>
+    ///
+    /// <para><b>The wait type is grouped and projected trimmed (#5633 review).</b> Rows written before #4884 carry a trailing space
+    /// (<c>'LCK_M_X '</c>), and a raw <c>GROUP BY wait_type</c> split one wait into two rows; <c>rtrim(wait_type)</c> is what Lite and
+    /// <c>ViewerDataService.BlockingTrends</c> already group on.</para>
+    ///
     /// <para>The cap is a PARAMETER, not a literal (#3541 A3). It was <c>LIMIT 500</c> under a tool that
     /// advertised <c>limit</c>, applied it with <c>Take(limit)</c>, and then published a bare envelope with no
     /// window, no count and no bound — so a caller could not tell thirty tasks from thirty of five thousand.</para>
@@ -382,18 +401,28 @@ internal static class DarlingSessionReader
         SELECT
             collection_time,
             session_id,
-            wait_type,
-            wait_duration_ms,
-            blocking_session_id,
-            resource_description,
-            database_name
+            rtrim(wait_type) AS wait_type,
+            MAX(wait_duration_ms) AS wait_duration_ms,
+            COALESCE(
+                (array_agg(CASE WHEN blocking_session_id <> session_id THEN blocking_session_id END
+                           ORDER BY wait_duration_ms DESC NULLS LAST, blocking_session_id NULLS LAST))[1],
+                (array_agg(blocking_session_id ORDER BY wait_duration_ms DESC NULLS LAST, blocking_session_id)
+                    FILTER (WHERE blocking_session_id <> session_id))[1]) AS blocking_session_id,
+            (array_agg(resource_description ORDER BY wait_duration_ms DESC NULLS LAST, blocking_session_id NULLS LAST, resource_description DESC NULLS LAST))[1] AS resource_description,
+            database_name,
+            COUNT(*) AS thread_count,
+            COALESCE(BOOL_OR(blocking_session_id = session_id), FALSE) AS intra_query_parallelism,
+            CASE WHEN COUNT(DISTINCT blocking_session_id) FILTER (WHERE blocking_session_id <> session_id) > 1
+                 THEN array_agg(DISTINCT blocking_session_id ORDER BY blocking_session_id) FILTER (WHERE blocking_session_id <> session_id)
+            END AS blocking_session_ids
         FROM waiting_tasks
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
         {{DatabaseFilter.All.Clause("database_name", 5)}}
-        ORDER BY collection_time DESC, wait_duration_ms DESC
+        GROUP BY collection_time, session_id, rtrim(wait_type), database_name
+        ORDER BY collection_time DESC, MAX(wait_duration_ms) DESC
         LIMIT $4
         """;
 
@@ -427,7 +456,10 @@ internal static class DarlingSessionReader
                 reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 reader.IsDBNull(4) ? null : reader.GetInt32(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6)));
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? 1 : (int)reader.GetInt64(7),
+                !reader.IsDBNull(8) && reader.GetBoolean(8),
+                reader.IsDBNull(9) ? null : reader.GetFieldValue<int[]>(9)));
         }
 
         return rows;

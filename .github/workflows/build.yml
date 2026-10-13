@@ -651,6 +651,8 @@ jobs:
               # DmvResourceDatabaseSentinelTests reads install/56). A PR that edits only an install script fires `installer`
               # and `sql-validation`, neither of which runs Lite.Tests, so the nightly would be the first to catch drift.
               - 'install/**/!(*.md)'
+              # #5669: the Lite path gate the shard legs and lite-scope read; see that file's header.
+              - '.github/lite-paths-filter.yml'
               # #2489, changed by Erik's 2026-09-24 ruling that docs-only changes skip CI:
               # README.md and Lite/README.md used to sit here so LiteRuntimePrerequisiteDocsTests
               # (which reads these two READMEs against the built runtimeconfig and this file's
@@ -735,10 +737,14 @@ jobs:
               - 'Lite.Tests/LiteTimeRangeGapTests.cs'
               # #5641: Darling.Tests compiles this Lite.Tests file in (Linked\AlertLegendParityTests.cs), so an edit to it has to reach the Darling suite.
               - 'Lite.Tests/AlertLegendParityTests.cs'
+              # #5644: Darling.Tests compiles this Lite.Tests file in (Linked\DefaultTraceEventSequenceWatermarkTests.cs), so an edit to it has to reach the Darling suite.
+              - 'Lite.Tests/DefaultTraceEventSequenceWatermarkTests.cs'
               # #5596: Darling.Tests' WpfExitSwitchPinTests reads this project file for the WPF exit switch, so an edit to it has to reach the Darling suite.
               - 'Lite.Tests/Lite.Tests.csproj'
               # #5616: the two shard scripts are run by the shard jobs and parsed by Darling.Tests pins.
               - '.github/scripts/run-darling-pg-shard.ps1'
+              - '.github/scripts/darling-shard-pack.py'
+              - '.github/scripts/darling-shard-weights.json'
               - '.github/scripts/run-lite-shard.ps1'
             # #5459 cut 3a: the part of `darling` that is NOT a Lite file. A diff that reaches `darling` through
             # these (or core, root, a release) runs the whole Darling suite; a diff that reaches it only through the
@@ -750,6 +756,8 @@ jobs:
               - '.github/workflows/nightly.yml'
               # #5616: the two shard scripts are run by the shard jobs and parsed by Darling.Tests pins.
               - '.github/scripts/run-darling-pg-shard.ps1'
+              - '.github/scripts/darling-shard-pack.py'
+              - '.github/scripts/darling-shard-weights.json'
               - '.github/scripts/run-lite-shard.ps1'
             # The DOCUMENTATION allowlist: files that cannot affect a build under any
             # job in this workflow. Deliberately an allowlist of non-executable content,
@@ -911,6 +919,7 @@ jobs:
           dotnet restore deprecated/Dashboard.Tests/Dashboard.Tests.csproj --locked-mode
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
           dotnet restore Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj --locked-mode
+          dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --locked-mode
 
       - name: Build Lite.Tests
         if: steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
@@ -1491,6 +1500,10 @@ jobs:
     # has NO timeout: on release it waits on SignPath's manual approval gate, which can
     # legitimately take hours.
     timeout-minutes: 30
+    # #5669: the cut is no longer the class-name hash described below. run-darling-pg-shard.ps1 asks
+    # .github/scripts/darling-shard-pack.py, which packs classes longest-first into the least-loaded shard by the
+    # committed per-class weights in darling-shard-weights.json (the hash is its fallback when the table is unusable).
+    # The hash left the slowest shard 24 to 31 percent over the mean in the modelled load of four full dev runs.
     # SIX shards cut by CLASS-NAME HASH (#3890 made it three, #5433 six), the machinery #3887 proved on
     # the Lite suite. #3890 measured ~190s fixed plus 266s of tests; the suite has since grown to
     # about 2,060 classes and 27,000 tests, and the three shards of eight merge-train and dev runs on
@@ -1592,6 +1605,14 @@ jobs:
             echo "::notice title=Darling PG tests skipped::None of the ${ALL_COUNT:-0} changed files are in the Darling gate (.github/darling-paths-filter.yml), so the TimescaleDB suite did not run on this commit."
             echo "Changed files, none of them in the gate: ${ALL_FILES:-[]}"
           fi
+
+      # #5669: the shard cut balances by recorded class duration (.github/scripts/darling-shard-pack.py). Its self-test
+      # (the cut loses and repeats no class, is the same in any order, falls back to the hash cut without a usable
+      # table) runs in one leg; it takes under a second and needs nothing from the build.
+      - name: Shard packer self-test
+        if: matrix.shard == 0 && steps.filter.outputs.darling == 'true'
+        shell: bash
+        run: python .github/scripts/darling-shard-pack.py --self-test
 
       # Shared build (#5459 change 2): this run's Guard job already built this test project in Release and uploaded
       # it before running its tests (see the header on that job). Fetch it instead of restoring and building again.
@@ -2535,6 +2556,90 @@ jobs:
           $guardFilter = @($scopeArgs) + @($guardFilter)
           dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @guardFilter
 
+  # #5669: the Lite scope of a pull request, decided once from the files it changes, so the four Lite shards are not
+  # started (a Windows runner each, about two minutes of checkout and filtering) when the diff touches nothing the
+  # Lite suite depends on. Two engines evaluate ONE pattern file, .github/lite-paths-filter.yml, over the pull
+  # request's files: dorny/paths-filter (picomatch), the very step each shard leg runs, and ci-select.py's `lite-mode`
+  # (the Python matcher). `none` needs BOTH to say nothing matched. If they disagree (a pattern one engine matches and
+  # the other does not), or either gives no answer, `mode` is `unknown`, the shards run as before, and a disagreement
+  # is reported as a warning naming both answers. It decides only `none`: the `reads` mode runs shard 0 alone, and a
+  # matrix leg cannot be skipped by its index in a job-level `if`.
+  # It never blocks and never fails the run: any problem (no file list, a failed API call, a failed step) leaves
+  # `mode` unknown or empty, and the shards then decide for themselves, exactly as before. Pull requests only; a push,
+  # a merge-queue run and a release have no skip. Lite tests (result) reads `mode` to tell this planned skip from an
+  # unplanned one.
+  lite-scope:
+    name: Lite scope
+    needs: [gate]
+    if: github.event_name == 'pull_request' && needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      mode: ${{ steps.scope.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The dorny answer: the same step, version and file the shard legs run, over the same pull request files. Its
+      # failure is not this job's failure (the scope step below reads an empty answer as unknown).
+      - name: Detect changed paths (dorny/paths-filter)
+        id: filter
+        continue-on-error: true
+        uses: dorny/paths-filter@v4
+        with:
+          filters: .github/lite-paths-filter.yml
+
+      - name: Decide the Lite scope from the changed files
+        id: scope
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DORNY_LITE: ${{ steps.filter.outputs.lite_shard }}
+          DORNY_CORE: ${{ steps.filter.outputs.core_shard }}
+          DORNY_ROOT: ${{ steps.filter.outputs.root_shard }}
+          DORNY_READS: ${{ steps.filter.outputs.darling_reads_shard }}
+          DORNY_LINKED: ${{ steps.filter.outputs.lite_linked_shard }}
+        run: |
+          set -uo pipefail
+
+          # Answer one: ci-select.py over the pull request files API list, the same list dorny reads on a pull request.
+          pyans=unknown
+          if gh api --paginate "repos/${GH_REPO}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[].filename' > changed.txt; then
+            pyans=$(python .github/scripts/ci-select.py lite-mode --event pull_request --files-from changed.txt | sed -n 's/^mode=//p')
+          fi
+          [ -n "${pyans}" ] || pyans=unknown
+
+          # Answer two: dorny/paths-filter over the one pattern file. `none` when every filter answered false, `matched`
+          # when any answered true, `unknown` when any answer is missing (a failed step leaves them empty).
+          dorny=none
+          for answer in "${DORNY_LITE}" "${DORNY_CORE}" "${DORNY_ROOT}" "${DORNY_READS}" "${DORNY_LINKED}"; do
+            if [ "${answer}" = "true" ]; then
+              dorny=matched
+            elif [ "${answer}" != "false" ] && [ "${dorny}" != "matched" ]; then
+              dorny=unknown
+            fi
+          done
+
+          # Both engines must agree to skip. Anything else runs the shards, as before this job existed.
+          mode=unknown
+          if [ "${pyans}" = "none" ] && [ "${dorny}" = "none" ]; then
+            mode=none
+          elif [ "${pyans}" != "unknown" ] && [ "${dorny}" != "unknown" ]; then
+            if [ "${pyans}" = "none" ] || [ "${dorny}" = "none" ]; then
+              echo "::warning title=Lite scope engines disagree::ci-select.py lite-mode says '${pyans}' and dorny/paths-filter says '${dorny}' for the same files, so the Lite shards run. A pattern in .github/lite-paths-filter.yml is matched by one engine and not the other."
+            else
+              mode=${pyans}
+            fi
+          fi
+          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Lite scope::mode=${mode} (ci-select.py: ${pyans}, dorny/paths-filter: ${dorny})$([ "${mode}" = "none" ] && echo ', so the Lite shards are not started')"
+          exit 0
+
   # The Lite suite on pull requests and pushes: four shards cut over CLASS NAMES (#3887), balanced
   # by recorded duration since #5208. The build job's single "Run Lite tests" step had grown to
   # ~9½ minutes of a ~15-minute job — 62% of the PR wall's critical path over the eight runs
@@ -2576,15 +2681,18 @@ jobs:
   #
   # Each shard pays its own checkout/setup/restore/build (~2½ minutes measured on a warm NuGet
   # cache) — the price of taking ~10 minutes off the PR wall. They run in parallel with the build
-  # job, off its critical path. The filter predicates below are BYTE-FOR-BYTE copies of
-  # the build job's lite/core/root (renamed *_shard so the census can find each set unambiguously);
+  # job, off its critical path. The filter predicates live in ONE file, .github/lite-paths-filter.yml (#5669),
+  # which this job's step, the lite-scope job's dorny step and ci-select.py all read. They are BYTE-FOR-BYTE
+  # copies of the build job's lite/core/root (renamed *_shard so the census can find each set unambiguously);
   # CrossAppGuardCiGateTests pins the copies equal, so they cannot drift apart silently.
   lite-tests:
     name: Lite tests
     # Fail fast on a pull request (#5459), exactly as the Darling PG shards: see the comment on that job. The same
     # goes for test-map-select: see there.
-    needs: [gate, guard-tests, test-map-select]
-    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}
+    # #5669: lite-scope is a need so its answer exists before the shards start; `mode == 'none'` skips all four legs
+    # (nothing the Lite suite depends on changed), and an empty or unknown answer runs them as before.
+    needs: [gate, guard-tests, test-map-select, lite-scope]
+    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') && needs.lite-scope.outputs.mode != 'none' }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -2623,64 +2731,10 @@ jobs:
         uses: dorny/paths-filter@v4
         with:
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
-          filters: |
-            # COPIES of the build job's root/core/lite predicates, generated from them and pinned
-            # byte-equal by CrossAppGuardCiGateTests.TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs
-            # (the build job's `lite` set is carried here as lite_shard plus darling_reads_shard).
-            # The REASONING for every entry lives at the build job's own filter block and is not
-            # duplicated here — duplicated prose is prose that rots out of step. What matters is that
-            # the sets stay identical: the shards must run the Lite suite in exactly the cases the
-            # build job's step used to, or the split loses coverage silently. That includes the
-            # entries that look foreign to Lite (the two READMEs, the three Darling trees) — Lite.Tests
-            # reads those files in its cross-app and docs guards, so an edit there has to reach this
-            # suite. A hand-typed copy of this block dropped two of them and was caught by the pin
-            # above before CI ever ran (#3887).
-            root_shard:
-              - 'PerformanceMonitor.sln'
-              - 'Directory.Build.props'
-              - 'global.json'
-              - 'nuget.config'
-              - 'NuGet.config'
-              - '.github/workflows/build.yml'
-            core_shard:
-              - 'PerformanceMonitor.Alerting/**/!(*.md)'
-              - 'PerformanceMonitor.Analysis/**/!(*.md)'
-              - 'PerformanceMonitor.Collectors/**/!(*.md)'
-              - 'PerformanceMonitor.Common/**/!(*.md)'
-              - 'PerformanceMonitor.Notifications/**/!(*.md)'
-              - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
-              - 'PerformanceMonitor.Ui/**/!(*.md)'
-            lite_shard:
-              - 'Lite/**/!(*.md)'
-              - 'Lite.Tests/**/!(*.md)'
-              # #5616: the Lite shard script and its packer are test inputs (Lite.Tests CrossAppGuardCiGateTests parses the script), so an edit to either has to reach the Lite suite.
-              - '.github/scripts/run-lite-shard.ps1'
-              - '.github/scripts/lite-shard-pack.py'
-              # #5656: Lite.Tests pins read install/ scripts as source (CpuSchedulerStatsCollectorDefinitionTests reads install/17,
-              # DmvResourceDatabaseSentinelTests reads install/56). A PR that edits only an install script fires `installer`
-              # and `sql-validation`, neither of which runs Lite.Tests, so the nightly would be the first to catch drift.
-              - 'install/**/!(*.md)'
-            # The rest of the build job's `lite` set: the three Darling trees Lite.Tests reads as source.
-            # A diff that reaches ONLY these (no lite_shard, core_shard or root_shard entry) runs just the
-            # Lite.Tests classes tagged [Trait("Reads", "Darling")], in one shard; see the scope step below.
-            # lite_shard followed by darling_reads_shard is the build job's `lite` set, entry for entry.
-            darling_reads_shard:
-              - 'Darling/PerformanceMonitor.Darling.Viewer/**/!(*.md)'
-              - 'Darling/Darling.Tests/**/!(*.md)'
-              - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
-            # Darling.Tests files that Lite.Tests.csproj COMPILES into its own assembly. An edit to one
-            # changes code that dozens of Lite.Tests classes run, not just text they read, so it takes the
-            # whole suite. Not part of the build job's `lite` set (those entries are covered there by the
-            # Darling.Tests tree); DarlingReadsTraitGuardTests pins this list to the project's linked compiles.
-            lite_linked_shard:
-              - 'Darling/Darling.Tests/CSharpSourceWalker.cs'
-              - 'Darling/Darling.Tests/McpInProcessHost.cs'
-              - 'Darling/Darling.Tests/McpArgumentTypeRows.cs'
-              - 'Darling/Darling.Tests/StatementScrubCanary.cs'
-              - 'Darling/Darling.Tests/GuardStageScanner.cs'
-              - 'Darling/Darling.Tests/StaTestThread.cs'
-              - 'Darling/Darling.Tests/TimingTestScanner.cs'
-              - 'Darling/Darling.Tests/WpfExitSwitchTests.cs'
+          # ONE file, .github/lite-paths-filter.yml, read here, by the lite-scope job and by ci-select.py (#5669). It holds the
+          # root_shard / core_shard / lite_shard / darling_reads_shard / lite_linked_shard sets; the header there says how they relate
+          # to the build job's own root / core / lite sets and which tests pin them.
+          filters: .github/lite-paths-filter.yml
       # How much of the Lite suite THIS leg runs, decided from the filter answers alone (no build needed):
       #   full  - a Lite, Lite.Tests, core or root path changed, or a Darling.Tests file that Lite.Tests
       #           compiles into itself, or the event is not a pull request (a push
@@ -3025,7 +3079,7 @@ jobs:
   # (result)" for the shards to gate merges — noted on #3887.)
   lite-tests-result:
     name: Lite tests (result)
-    needs: [gate, guard-tests, lite-tests]
+    needs: [gate, guard-tests, lite-scope, lite-tests]
     if: ${{ !cancelled() && github.event_name != 'release' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -3039,6 +3093,7 @@ jobs:
           GATE_RESULT: ${{ needs.gate.result }}
           GATE_RUN: ${{ needs.gate.outputs.run }}
           EVENT_NAME: ${{ github.event_name }}
+          LITE_SCOPE_MODE: ${{ needs.lite-scope.outputs.mode }}
         run: |
           set -euo pipefail
           # A gate that did not succeed leaves every job it feeds skipped, which would read as green here.
@@ -3063,7 +3118,17 @@ jobs:
             fi
             exit 1
           fi
+          # #5669: the one planned skip of the whole matrix. The lite-scope job found nothing the Lite suite depends on in
+          # this pull request's files, so the shards were not started. It is checked AFTER the gate and guard arms above
+          # (a declined run or a failed guard never reaches it) and needs all three facts: a pull request, a matrix that
+          # is `skipped`, and the scope job's own `none`. Anything else still lands on the `skipped` error below.
+          if [ "${RESULT}" = "skipped" ] && [ "${EVENT_NAME}" = "pull_request" ] && [ "${LITE_SCOPE_MODE}" = "none" ]; then
+            RESULT="not-selected"
+          fi
           case "${RESULT}" in
+            not-selected)
+              echo "::notice title=No Lite tests selected::The Lite scope job found no changed file the Lite suite depends on, so the Lite shards were not started."
+              echo "No Lite tests were selected for this pull request: none of its changed files is one the Lite suite depends on, so the four Lite shards were not started." >> "$GITHUB_STEP_SUMMARY" ;;
             success)
               echo "::notice title=Lite shards green::All four shards succeeded (or every leg's filters said the Lite suite is untouched by this diff)." ;;
             skipped)

@@ -162,6 +162,8 @@ public sealed class StatementCutSourceScanTests
             "an identity hash of the raw graph, compared with latest_hash and never shown"),
         new("Darling/PerformanceMonitor.Darling.Analysis/PgTargetDrillDownCollector.Deadlocks.cs", "lines.take", 1,
             "BoundGraphText bounds a graph its caller already judged whole (graphNormalized = SensitiveStatements.Text(...)); it cuts whole lines of judged text and never sees raw"),
+        new("PerformanceMonitor.Alerting/AlertContextBuilders.cs", "window.topstatements.take", 1,
+            "the Client Timeouts card lists the first AttentionTopListCap items of window.TopStatements (#5640): Take counts LIST ITEMS (top fingerprints), it cuts no statement text. Each item's SampleText was judged whole by the statement filter before it was stored (AttentionCollector: filter, then fingerprint, then the 4000-char cut), a text the filter withheld has no fingerprint and so no item, and the card prints it through TruncateStatement, which judges again before it cuts"),
     };
 
     // ------------------------------------------------------------------ the scanner
