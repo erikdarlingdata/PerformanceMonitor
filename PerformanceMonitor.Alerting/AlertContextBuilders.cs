@@ -713,6 +713,70 @@ public static class AlertContextBuilders
     /// snapshot holds no request. <paramref name="readHitCap"/> says the read returned a full page, so the count of
     /// omitted requests is a floor and the trailer reads "at least N more request(s)".
     /// </summary>
+    public static IReadOnlyList<AlertDetailItem> BuildClientTimeoutItems(
+        AttentionEvaluator.Finding finding, AttentionWindow window)
+    {
+        var items = new List<AlertDetailItem>();
+
+        /* 1. The reading: the exact rate and count, the span, and (only when the mute proportion changed the count) the estimate line. */
+        var reading = new AlertDetailItem { Heading = "Client timeouts", Fields = new() };
+        reading.Fields.Add(("Rate", string.Create(CultureInfo.InvariantCulture, $"{finding.TotalCount / finding.CoveredMinutes:N1} per minute")));
+        reading.Fields.Add(("Count", string.Create(CultureInfo.InvariantCulture, $"{finding.TotalCount:N0} exact, from the session's event counter")));
+        reading.Fields.Add(("Minutes Covered", string.Create(CultureInfo.InvariantCulture, $"{finding.CoveredMinutes:N0} ({finding.RunCount} collector run{(finding.RunCount == 1 ? "" : "s")})")));
+        if (finding.Estimated)
+        {
+            reading.Fields.Add(("Estimate", string.Create(CultureInfo.InvariantCulture,
+                $"estimated from {finding.SampledEvents:N0} sampled events: {finding.JudgedCount / finding.CoveredMinutes:N1} per minute is not muted")));
+        }
+
+        items.Add(reading);
+
+        /* 2. The top statements (the statement filter judges each sample text before it is cut), the sampled events a statement
+           appears in, not the count of timeouts. */
+        var rank = 0;
+        foreach (var statement in window.TopStatements.Take(AttentionTopListCap))
+        {
+            rank++;
+            var item = new AlertDetailItem
+            {
+                Heading = string.Create(CultureInfo.InvariantCulture, $"Top statement {rank}: {statement.Samples:N0} sampled event{(statement.Samples == 1 ? "" : "s")}"),
+                Fields = new() { ("Fingerprint", statement.Name) },
+            };
+            if (!string.IsNullOrEmpty(statement.SampleText))
+            {
+                item.Fields.Add(("Statement", TruncateStatement(statement.SampleText)));
+            }
+
+            items.Add(item);
+        }
+
+        /* 3. Databases and client applications, the top first. The FIRST "Database" and "Client Application" lines are what the
+           mute dialogs pre-fill (AlertMuteContext.PopulateFromDetailText), so those two labels are used for the top entry only. */
+        AddTopList(items, "Top databases (sampled events)", "Database", window.TopDatabases);
+        AddTopList(items, "Top client applications (sampled events)", "Client Application", window.TopApplications);
+        return items;
+    }
+
+    /// <summary>How many statements, databases and applications the Client Timeouts card lists.</summary>
+    public const int AttentionTopListCap = 5;
+
+    private static void AddTopList(List<AlertDetailItem> items, string heading, string label, IReadOnlyList<AttentionTopItem> top)
+    {
+        if (top.Count == 0)
+        {
+            return;
+        }
+
+        var item = new AlertDetailItem { Heading = heading, Fields = new() };
+        for (var i = 0; i < Math.Min(top.Count, AttentionTopListCap); i++)
+        {
+            item.Fields.Add((i == 0 ? label : $"{label} {i + 1}", top[i].Name));
+            item.Fields.Add(("Sampled Events", top[i].Samples.ToString("N0", CultureInfo.InvariantCulture)));
+        }
+
+        items.Add(item);
+    }
+
     public static IReadOnlyList<AlertDetailItem> BuildRunnableQueueRequestItems(IReadOnlyList<LongRunningQueryInfo> sessions, bool readHitCap = false)
     {
         if (sessions.Count == 0) return Array.Empty<AlertDetailItem>();
