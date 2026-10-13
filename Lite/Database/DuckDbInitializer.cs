@@ -188,6 +188,10 @@ public partial class DuckDbInitializer : IDisposable
        to know a read has reached the lock wait, instead of sleeping and hoping the pool started it. */
     internal static int WaitingReadCountForTests => s_dbLock.WaitingReadCount;
 
+    /* Test seam (#5691): how many threads are parked waiting for the write lock right now. A test that queues a writer while
+       a read hold is open reads it to know the writer has reached the lock wait before the hold ends. */
+    internal static int WaitingWriteCountForTests => s_dbLock.WaitingWriteCount;
+
     /* Fires in ResetDatabaseCoreAsync after the database and WAL files are deleted and before the schema is
        recreated: a test throws from it to stand in for a process kill with no database file on disk. */
     internal static Action? AfterDatabaseFilesDeletedForTests { get; set; }

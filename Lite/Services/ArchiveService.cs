@@ -912,7 +912,7 @@ public class ArchiveService
             }
             else
             {
-                MergeExportSlices(slicePaths, tempPath);
+                MergeExportSlices(table, slicePaths, tempPath);
             }
 
             return exported;
@@ -1016,10 +1016,26 @@ COPY (
         }
     }
 
+    /* #5691: the sliced export's merge settings and COPY: compaction's memory cap, thread count and row-group options
+       for the table, and every column. A test pins both against ParquetCompaction. */
+    internal static string BuildExportSliceMergePragma(string table, string spillDirSql) =>
+        ParquetCompaction.BuildPragma(ParquetCompaction.DefaultMemoryLimit, ParquetCompaction.ThreadsFor(table), spillDirSql);
+
+    internal static string BuildExportSliceMergeCopy(string table, IEnumerable<string> slicePaths, string outputPath)
+    {
+        var pathList = string.Join(", ", slicePaths.Select(p => $"'{EscapeSqlPath(p.Replace("\\", "/"))}'"));
+        return $"COPY (SELECT * FROM read_parquet([{pathList}])) TO '{EscapeSqlPath(outputPath)}' ({ParquetCompaction.BuildArchiveCopyOptions(ParquetCompaction.ArchiveRowGroupSize, ParquetCompaction.RowGroupBytesFor(table))})";
+    }
     /* #5691: joins a sliced export's files into the one file the pass promotes, on an in-memory DuckDB of its own, so
-       it holds no store lock. The export's COPY options, so the file is the one a single COPY would have written; the
-       settings are compaction's (ParquetCompaction.MergeBatchToFile), which streams parquet files this way. */
-    private void MergeExportSlices(List<string> slicePaths, string outputPath)
+       it holds no store lock. Compaction's settings for the table (ParquetCompaction.BuildPragma, ThreadsFor and
+       RowGroupBytesFor), but every column: a sliced table is by construction one that did not fit a hold, which for the
+       plan-heavy tables means far more than the input #5393 measured running out of memory without the row-group byte
+       bound (ParquetCompaction.cs, the DailyBatchInputBytes measurements), so the bound and one thread are what keep this
+       merge under the cap. DuckDB takes ROW_GROUP_SIZE_BYTES only with preserve_insertion_order = false, so this file
+       has compaction's shape, not the archiver's: row groups that mix times, and for the plan-heavy tables 32 MiB groups
+       written on one thread. It prunes like a compacted file until the next compaction pass rewrites it; the memory
+       bound wins over read pruning on the one file that did not fit a hold. */
+    private void MergeExportSlices(string table, List<string> slicePaths, string outputPath)
     {
         var spillDir = Path.Combine(_archivePath, "duckdb_tmp");
         Directory.CreateDirectory(spillDir);
@@ -1028,15 +1044,12 @@ COPY (
         connection.Open();
         using (var pragma = connection.CreateCommand())
         {
-            pragma.CommandText =
-                $"SET memory_limit = '{ParquetCompaction.DefaultMemoryLimit}'; SET threads = {ParquetCompaction.DefaultThreads}; " +
-                $"SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDir.Replace("\\", "/"))}';";
+            pragma.CommandText = BuildExportSliceMergePragma(table, spillDir.Replace("\\", "/"));
             pragma.ExecuteNonQuery();
         }
 
-        var pathList = string.Join(", ", slicePaths.Select(p => $"'{EscapeSqlPath(p.Replace("\\", "/"))}'"));
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"COPY (SELECT * FROM read_parquet([{pathList}])) TO '{EscapeSqlPath(outputPath)}' ({ParquetCompaction.ArchiveCopyOptions})";
+        cmd.CommandText = BuildExportSliceMergeCopy(table, slicePaths, outputPath);
         cmd.ExecuteNonQuery();
     }
 

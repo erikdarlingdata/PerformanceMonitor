@@ -135,6 +135,20 @@ SELECT i, TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'W' ||
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
     }
 
+    /* Signalled, not slept: the hold stays open until the store counts the queued writer, so the writer is known to be
+       parked on the lock before the export releases it. Counted from before the writer was queued: the lock is the whole
+       process's, and another class's writer may be waiting too. A fixed delay let a slow runner start the writer after the hold
+       ended, and it then queued behind the next one. */
+    private static void WaitUntilWriterQueued(int waitingBefore)
+    {
+        /* Counted in polls, not timed: up to about 30 s, a hang guard only. */
+        for (var polls = 0; DuckDbInitializer.WaitingWriteCountForTests <= waitingBefore; polls++)
+        {
+            Assert.True(polls < 6000, "the writer never reached the lock wait");
+            Thread.Sleep(5);
+        }
+    }
+
     private static void RecordInto(ArchiveService service, List<HoldEvent> events, Action<HoldEvent>? onEvent = null)
     {
         service.ExportReadHoldForTests = (table, slice, entered) =>
@@ -187,9 +201,10 @@ SELECT i, TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'W' ||
         {
             if (writer is null && e.Table == first && e.Entered)
             {
-                /* Queue the writer while this table's export holds the read lock, and give it time to queue. */
+                /* Queue the writer while this table's export holds the read lock, and wait until it is parked on the lock. */
+                var waitingBefore = DuckDbInitializer.WaitingWriteCountForTests;
                 writer = QueueWriter(initializer, events);
-                Thread.Sleep(300);
+                WaitUntilWriterQueued(waitingBefore);
             }
         });
 
@@ -233,8 +248,9 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         {
             if (writer is null && e.Table == "collection_log" && e.Slice == 1 && e.Entered)
             {
+                var waitingBefore = DuckDbInitializer.WaitingWriteCountForTests;
                 writer = QueueWriter(initializer, events);
-                Thread.Sleep(300);
+                WaitUntilWriterQueued(waitingBefore);
             }
         });
 
@@ -279,6 +295,7 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         {
             if (writer is null && e.Table == order[0] && e.Entered)
             {
+                var waitingBefore = DuckDbInitializer.WaitingWriteCountForTests;
                 writer = QueueWriter(initializer, events, async () =>
                 {
                     await ExecAsync(@"
@@ -291,7 +308,7 @@ VALUES (TIMESTAMP '2026-08-15 00:00:00', 1, 'S1', 'Blocking Detected', 51, 10)")
 INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type)
 VALUES (51, TIMESTAMP '2026-08-15 00:00:00', 1, 'S1', 'W51')");
                 });
-                Thread.Sleep(300);
+                WaitUntilWriterQueued(waitingBefore);
             }
         });
 
@@ -339,10 +356,11 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         {
             if (writer is null && e.Table == "collection_log" && e.Slice == 1 && e.Entered)
             {
+                var waitingBefore = DuckDbInitializer.WaitingWriteCountForTests;
                 writer = QueueWriter(initializer, events, () => ExecAsync(@"
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status)
 VALUES (2001, 1, 'S1', 'wait_stats', TIMESTAMP '2026-08-01 00:00:00', 'SUCCESS')"));
-                Thread.Sleep(300);
+                WaitUntilWriterQueued(waitingBefore);
             }
         });
 
@@ -362,5 +380,24 @@ VALUES (2001, 1, 'S1', 'wait_stats', TIMESTAMP '2026-08-01 00:00:00', 'SUCCESS')
         Assert.Equal(2001, await ScalarAsync($"SELECT COUNT(*) FROM read_parquet('{ArchiveGlob("collection_log")}')"));
         Assert.Equal(2001, await ScalarAsync($"SELECT COUNT(DISTINCT log_id) FROM read_parquet('{ArchiveGlob("collection_log")}')"));
         Assert.Equal(0, await ScalarAsync("SELECT COUNT(*) FROM collection_log"));
+    }
+
+    [Theory]
+    [InlineData("query_snapshots")]
+    [InlineData("wait_stats")]
+    public void TheSlicedExportsMerge_UsesCompactionsThreadsAndCopyOptionsForTheTable(string table)
+    {
+        /* query_snapshots is a plan-heavy daily table (one thread, 32 MiB row-group byte bound); wait_stats a plain one. */
+        Assert.Equal(
+            ParquetCompaction.BuildPragma(ParquetCompaction.DefaultMemoryLimit, ParquetCompaction.ThreadsFor(table), "C:/spill"),
+            ArchiveService.BuildExportSliceMergePragma(table, "C:/spill"));
+
+        var copy = ArchiveService.BuildExportSliceMergeCopy(table, ["C:/a/x.parquet.tmp.001.tmp", "C:/a/x.parquet.tmp.002.tmp"], "C:/a/x.parquet.tmp");
+        Assert.EndsWith(
+            $"({ParquetCompaction.BuildArchiveCopyOptions(ParquetCompaction.ArchiveRowGroupSize, ParquetCompaction.RowGroupBytesFor(table))})",
+            copy, StringComparison.Ordinal);
+
+        /* Every column: the export keeps query_plan_text, which compaction's CompactionExcludeColumns would drop. */
+        Assert.StartsWith("COPY (SELECT * FROM read_parquet([", copy, StringComparison.Ordinal);
     }
 }

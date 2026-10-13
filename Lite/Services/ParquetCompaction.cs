@@ -239,7 +239,7 @@ public static class ParquetCompaction
         cmd.ExecuteNonQuery();
     }
 
-    private static string BuildPragma(string memoryLimit, int threads, string spillDirSql) =>
+    internal static string BuildPragma(string memoryLimit, int threads, string spillDirSql) =>
         $"SET memory_limit = '{memoryLimit}'; SET threads = {threads}; " +
         $"SET preserve_insertion_order = false; SET temp_directory = '{EscapeSqlPath(spillDirSql)}';";
 
