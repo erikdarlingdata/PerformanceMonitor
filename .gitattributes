@@ -32,3 +32,5 @@ Darling/Darling.Tests/Fixtures/ManagedConf/rehearsal-postgresql.conf text eol=lf
 tools/pg-verification-rig/Dockerfile text eol=lf
 tools/pg-verification-rig/*.yml text eol=lf
 tools/pg-verification-rig/*.sql text eol=lf
+# Screenshot baselines for the web UI check (#5744): PNGs, never diffed or converted as text.
+tools/ui-smoke/baselines/*.png binary

@@ -4,7 +4,8 @@
 --   psql -h 127.0.0.1 -p <port> -U darling -d darling -v ON_ERROR_STOP=1 -f seed.sql
 --
 -- Rules, so the assertions in pages.json can be exact:
---   * Every time is relative to the store's own clock: now() AT TIME ZONE 'UTC', cut to the minute. Nothing is dated.
+--   * Every time is relative to ONE anchor: the store's own clock in UTC, cut to the minute, or the psql variable `anchor` when the
+--     caller sets it (-v anchor=...; run-ui-smoke.ps1 does, so the screenshot step knows it, #5744). Nothing is dated.
 --   * Every count is fixed: the same rows on every run, whatever the minute.
 --   * The targets are the two servers the config registers: "ui-sql" (SQL Server) and "ui-pg" (PostgreSQL), both at an
 --     address nothing listens on, so the service never collects and never overwrites what is seeded here.
@@ -22,6 +23,12 @@
 --   pg_statement_text 6 | collection_log 3 collectors x 72
 
 \set ON_ERROR_STOP on
+-- The anchor, as UTC text. Set by the caller (-v anchor='2026-01-01 12:00:00'), else taken once here, from the store's clock.
+\if :{?anchor}
+\else
+SELECT to_char(date_trunc('minute', now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS') AS anchor
+\gset
+\endif
 BEGIN;
 
 -- The registry row the config seed made. server_name in every collect table is the STORAGE name (the host, for a SQL
@@ -34,14 +41,14 @@ WHERE name = 'ui-sql'
 -- The observed-registry row (the service writes it on a first connect, which never happens here).
 INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date)
 VALUES (:sid, :'sname', 'ui-sql', TRUE, 3, 16, 'sqlserver',
-        (now() AT TIME ZONE 'UTC') - interval '7 days', now() AT TIME ZONE 'UTC')
+        (:'anchor'::timestamp) - interval '7 days', :'anchor'::timestamp)
 ON CONFLICT (server_id) DO UPDATE SET
     server_name = EXCLUDED.server_name, display_name = EXCLUDED.display_name, is_enabled = TRUE,
     sql_engine_edition = 3, sql_major_version = 16, engine_kind = 'sqlserver', modified_date = EXCLUDED.modified_date;
 
 -- The minutes: m = 0 is the current minute, m = 359 is six hours earlier.
 CREATE TEMP TABLE ui_minutes ON COMMIT DROP AS
-SELECT m, date_trunc('minute', now() AT TIME ZONE 'UTC') - make_interval(mins => m) AS t
+SELECT m, :'anchor'::timestamp - make_interval(mins => m) AS t
 FROM generate_series(0, 359) AS m;
 
 -- cpu_utilization_stats: Overview and CPU tabs. collection_id 1000000 + m.
@@ -94,7 +101,7 @@ SELECT 5000000 + 1000 * q.n + c.c, c.t, :sid, :'sname', q.db, '0x' || lpad(to_he
        q.cpu_us / 2, q.cpu_us * 3, q.cpu_us, q.cpu_us * 6,
        q.query_text, '0x02' || lpad(to_hex(q.n), 8, '0'), '0x06' || lpad(to_hex(q.n), 8, '0'),
        q.execs, q.execs * q.cpu_us, q.execs * q.cpu_us * 2, q.execs * q.reads, q.execs / 10, q.execs / 50, q.execs * 3, 600
-FROM (SELECT cc AS c, date_trunc('minute', now() AT TIME ZONE 'UTC') - make_interval(mins => cc * 10) AS t FROM generate_series(0, 35) AS cc) c
+FROM (SELECT cc AS c, :'anchor'::timestamp - make_interval(mins => cc * 10) AS t FROM generate_series(0, 35) AS cc) c
 CROSS JOIN (VALUES
     (1,  'SalesDb',     'SELECT TOP (100) o.OrderId, o.Total FROM dbo.Orders AS o WHERE o.CustomerId = @CustomerId ORDER BY o.OrderDate DESC;', 600, 4200, 900),
     (2,  'SalesDb',     'UPDATE dbo.Orders SET Status = @Status WHERE OrderId = @OrderId;', 900, 800, 120),
@@ -130,7 +137,7 @@ CROSS JOIN (VALUES (1, 'ROWS', '.mdf', 'D:\data\', 20480), (2, 'LOG', '_log.ldf'
 -- collection_log: Health and Collection Health. 5 collectors, every 5 minutes, all success. log_id 8000000 + 1000 * collector + k.
 INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
 SELECT 8000000 + 1000 * cl.n + k.k, :sid, :'sname', cl.name,
-       date_trunc('minute', now() AT TIME ZONE 'UTC') - make_interval(mins => k.k * 5), 120 + k.k, 'SUCCESS', cl.rows_collected
+       :'anchor'::timestamp - make_interval(mins => k.k * 5), 120 + k.k, 'SUCCESS', cl.rows_collected
 FROM generate_series(0, 71) AS k(k)
 CROSS JOIN (VALUES (1, 'wait_stats', 4), (2, 'cpu_utilization_stats', 1), (3, 'memory_stats', 1), (4, 'file_io_stats', 2), (5, 'query_stats', 12))
     AS cl(n, name, rows_collected);
@@ -206,7 +213,7 @@ WHERE name = 'ui-pg'
 
 INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, engine_kind, postgres_major_version, created_date, modified_date)
 VALUES (:pgid, :'pgname', 'ui-pg', TRUE, 'postgres', 16,
-        (now() AT TIME ZONE 'UTC') - interval '7 days', now() AT TIME ZONE 'UTC')
+        (:'anchor'::timestamp) - interval '7 days', :'anchor'::timestamp)
 ON CONFLICT (server_id) DO UPDATE SET
     server_name = EXCLUDED.server_name, display_name = EXCLUDED.display_name, is_enabled = TRUE,
     engine_kind = 'postgres', postgres_major_version = 16, modified_date = EXCLUDED.modified_date;
@@ -235,7 +242,7 @@ CROSS JOIN (VALUES (1, 'IO', 'DataFileRead', 50, 400000), (2, 'Lock', 'transacti
 -- collections each (every 10 minutes); the read groups on (queryid, database_id), so the grid has exactly 6 rows.
 -- collection_id 22000000 + 1000 * query + c.
 INSERT INTO collect.pg_statement_text (server_id, queryid, query_text, first_seen, last_seen)
-SELECT :pgid, q.n, q.query_text, (now() AT TIME ZONE 'UTC') - interval '2 days', now() AT TIME ZONE 'UTC'
+SELECT :pgid, q.n, q.query_text, (:'anchor'::timestamp) - interval '2 days', :'anchor'::timestamp
 FROM (VALUES
     (1, 'SELECT id, total FROM orders WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 100'),
     (2, 'UPDATE orders SET status = $1 WHERE id = $2'),
@@ -253,13 +260,13 @@ SELECT 22000000 + 1000 * q.n + c.c, c.t, :pgid, :'pgname', q.n, CASE WHEN q.n <=
        (36 - c.c) * q.calls * 40, (36 - c.c) * q.calls, (36 - c.c) * q.calls / 20, (36 - c.c) * q.calls / 40, 0, (36 - c.c) * q.calls / 100,
        (36 - c.c) * q.calls / 10, (36 - c.c) * q.calls / 500, (36 - c.c) * q.calls * 64,
        q.calls, q.calls * q.ms, q.calls * 3, 600
-FROM (SELECT cc AS c, date_trunc('minute', now() AT TIME ZONE 'UTC') - make_interval(mins => cc * 10) AS t FROM generate_series(0, 35) AS cc) c
+FROM (SELECT cc AS c, :'anchor'::timestamp - make_interval(mins => cc * 10) AS t FROM generate_series(0, 35) AS cc) c
 CROSS JOIN (VALUES (1, 800, 3), (2, 1200, 2), (3, 40, 250), (4, 1500, 1), (5, 90, 120), (6, 2, 4000)) AS q(n, calls, ms);
 
 -- collection_log (ui-pg): 3 collectors, every 5 minutes, all success. log_id 23000000 + 1000 * collector + k.
 INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
 SELECT 23000000 + 1000 * cl.n + k.k, :pgid, :'pgname', cl.name,
-       date_trunc('minute', now() AT TIME ZONE 'UTC') - make_interval(mins => k.k * 5), 90 + k.k, 'SUCCESS', cl.rows_collected
+       :'anchor'::timestamp - make_interval(mins => k.k * 5), 90 + k.k, 'SUCCESS', cl.rows_collected
 FROM generate_series(0, 71) AS k(k)
 CROSS JOIN (VALUES (1, 'pg_database_stats', 2), (2, 'pg_wait_stats', 3), (3, 'pg_statement_stats', 6)) AS cl(n, name, rows_collected);
 
