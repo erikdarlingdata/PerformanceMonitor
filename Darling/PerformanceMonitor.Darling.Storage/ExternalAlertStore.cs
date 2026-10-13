@@ -217,6 +217,8 @@ WHERE source_id = $1 AND alert_key = $2 AND server_id = $3
   AND firing
 RETURNING fired_severity";
 
+    private const int MaxReasonLength = 500;
+
     private readonly NpgsqlDataSource _dataSource;
     private readonly int _commandTimeoutSeconds;
 
@@ -412,6 +414,13 @@ RETURNING fired_severity";
     };
 
     /// <summary>The reason column is free text a log line fills; keep a runaway message out of the row.</summary>
-    private static string? Truncate(string? reason) =>
-        reason is { Length: > 500 } ? reason[..500] : reason;
+    private static string? Truncate(string? reason)
+    {
+        if (reason is null || reason.Length <= MaxReasonLength)
+        {
+            return reason;
+        }
+
+        return reason.Substring(0, MaxReasonLength);
+    }
 }

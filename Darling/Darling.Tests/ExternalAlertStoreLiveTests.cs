@@ -87,6 +87,12 @@ public sealed class ExternalAlertStoreLiveTests
                     }
 
                     taken.AddRange(batch.Select(r => r.PendingId));
+
+                    /* A claim that hands a row out twice would never run dry; the count assertion below reports it. */
+                    if (taken.Count > Rows)
+                    {
+                        return taken;
+                    }
                 }
             }
 
