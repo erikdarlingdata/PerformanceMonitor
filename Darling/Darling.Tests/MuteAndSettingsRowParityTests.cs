@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// from the alert was dropped on save; this pins the metric item, both visibility gates and the save path in both,
 /// and the web page's side of the same click.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class MuteDialogClientTimeoutsParityTests
 {
     private static readonly DateTime Now = new(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
@@ -40,8 +41,8 @@ public sealed class MuteDialogClientTimeoutsParityTests
 
         foreach (var (app, xamlPath, codePath) in Dialogs)
         {
-            var xaml = RepoFile.ReadRepoFileLf(xamlPath);
-            var code = RepoFile.ReadRepoFileLf(codePath);
+            var xaml = RepoFile.ReadRepoFile(xamlPath);
+            var code = RepoFile.ReadRepoFile(codePath);
 
             Assert.Contains("xmlns:n=\"clr-namespace:PerformanceMonitor.Notifications;assembly=PerformanceMonitor.Notifications\"", xaml, StringComparison.Ordinal);
             var runnable = xaml.IndexOf("<ComboBoxItem Content=\"Runnable Queue\"/>", StringComparison.Ordinal);
@@ -58,7 +59,7 @@ public sealed class MuteDialogClientTimeoutsParityTests
     {
         foreach (var (app, _, codePath) in Dialogs)
         {
-            var code = RepoFile.ReadRepoFileLf(codePath);
+            var code = RepoFile.ReadRepoFile(codePath);
 
             Assert.True(Regex.IsMatch(code, @"bool showDatabase = [^;]*or AlertFamily\.ClientTimeoutsMetric;"), $"{app}: showDatabase lists the metric");
             Assert.Contains("bool showClientApp = metric is null or \"(any)\" or AlertFamily.ClientTimeoutsMetric;", code, StringComparison.Ordinal);
@@ -94,11 +95,11 @@ public sealed class MuteDialogClientTimeoutsParityTests
     [Fact]
     public void TheWebPage_SavesTheSameTwoPatterns_ForTheSameAlert()
     {
-        var context = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "mute-context.js");
+        var context = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "mute-context.js");
         Assert.Contains("database_pattern: d.database,", context, StringComparison.Ordinal);
         Assert.Contains("client_app_pattern: d.clientApp,", context, StringComparison.Ordinal);
 
-        var rules = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "mute-rules.js");
+        var rules = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "mute-rules.js");
         Assert.Contains("key: \"database_pattern\"", rules, StringComparison.Ordinal);
         Assert.Contains("key: \"client_app_pattern\"", rules, StringComparison.Ordinal);
     }
@@ -109,6 +110,7 @@ public sealed class MuteDialogClientTimeoutsParityTests
 /// the same label wording and the same per-box tooltips. Ground-truth wording, the unit said once, no "attentions"
 /// jargon in visible text (the tooltip is where the sqlserver.attention event is named).
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class SettingsRowParityTests
 {
     private static readonly string[] Lite = { "Lite", "Windows", "SettingsWindow.xaml" };
@@ -136,8 +138,8 @@ public sealed class SettingsRowParityTests
     [InlineData("AlertClientTimeoutsCriticalBox", "ToolTip")]
     public void LiteAndTheViewer_SayTheSameThing_OnTheRowsControls(string control, string attr)
     {
-        var lite = Attr(RepoFile.ReadRepoFileLf(Lite), control, attr);
-        var viewer = Attr(RepoFile.ReadRepoFileLf(Viewer), control, attr);
+        var lite = Attr(RepoFile.ReadRepoFile(Lite), control, attr);
+        var viewer = Attr(RepoFile.ReadRepoFile(Viewer), control, attr);
 
         Assert.False(string.IsNullOrWhiteSpace(lite), $"Lite {control} has a {attr}");
         Assert.Equal(lite, viewer);
@@ -148,7 +150,7 @@ public sealed class SettingsRowParityTests
     {
         foreach (var path in new[] { Lite, Viewer })
         {
-            var xaml = RepoFile.ReadRepoFileLf(path);
+            var xaml = RepoFile.ReadRepoFile(path);
             var label = Attr(xaml, "AlertClientTimeoutsCheckBox", "Content")!;
             Assert.Equal("Client timeouts and cancels per minute — Warning at", label);
             Assert.DoesNotContain("attention", label, StringComparison.OrdinalIgnoreCase);
@@ -166,7 +168,7 @@ public sealed class SettingsRowParityTests
     [Fact]
     public void TheViewersClientTimeoutsCheckBox_IsVerticallyCentred_LikeItsNeighbours()
     {
-        var xaml = RepoFile.ReadRepoFileLf(Viewer);
+        var xaml = RepoFile.ReadRepoFile(Viewer);
         Assert.Equal("Center", Attr(xaml, "AlertClientTimeoutsCheckBox", "VerticalAlignment"));
         Assert.Equal("Center", Attr(xaml, "AlertRunnableQueueCheckBox", "VerticalAlignment"));
     }
