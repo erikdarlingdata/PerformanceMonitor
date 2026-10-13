@@ -1197,23 +1197,135 @@ REVOKE ALL ON FUNCTION config.submit_external_alert(text, text, text, text, text
 -- The two trigger functions need no EXECUTE to fire, so PUBLIC (and with it a source login) gets none.
 REVOKE EXECUTE ON FUNCTION config.config_bump_version(), config.config_service_bump() FROM PUBLIC;
 -- pg_stat_statements gives PUBLIC its views and functions; Darling reads them through its own SECURITY DEFINER functions.
--- pg_read_all_stats (part of pg_monitor) keeps them, so a monitoring login that watches this database as a PostgreSQL target still reads them.
+-- pg_read_all_stats (part of pg_monitor) keeps them, so a monitoring login that watches this database as a PostgreSQL target
+-- still reads them, and so does each store owner that is not a superuser (the owner of config.config_monitored_servers and
+-- of the reader functions), which those functions run as. Only the owner of the extension or a superuser may revoke them:
+-- for any other role this block changes nothing. When PUBLIC still holds them afterwards (the extension belongs to a
+-- superuser and this script runs as the store owner), it raises a WARNING naming the owner of the extension and the
+-- statements that owner runs; the service logs the same text.
 DO $do$
 DECLARE
-   ext_schema text := (SELECT n.nspname FROM pg_catalog.pg_extension AS e JOIN pg_catalog.pg_namespace AS n ON n.oid = e.extnamespace
-                       WHERE e.extname = 'pg_stat_statements');
+   v_pass integer;
+   v_may_change boolean;
+   v_statements text;
+   v_warning text;
 BEGIN
-   IF ext_schema IS NOT NULL THEN
-      EXECUTE pg_catalog.format('REVOKE SELECT ON %I.pg_stat_statements FROM PUBLIC', ext_schema);
-      EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_stat_statements(boolean) FROM PUBLIC', ext_schema);
-      EXECUTE pg_catalog.format('GRANT SELECT ON %I.pg_stat_statements TO pg_read_all_stats', ext_schema);
-      EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_stat_statements(boolean) TO pg_read_all_stats', ext_schema);
-      IF pg_catalog.to_regclass(pg_catalog.format('%I.pg_stat_statements_info', ext_schema)) IS NOT NULL THEN
-         EXECUTE pg_catalog.format('REVOKE SELECT ON %I.pg_stat_statements_info FROM PUBLIC', ext_schema);
-         EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_stat_statements_info() FROM PUBLIC', ext_schema);
-         EXECUTE pg_catalog.format('GRANT SELECT ON %I.pg_stat_statements_info TO pg_read_all_stats', ext_schema);
-         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_stat_statements_info() TO pg_read_all_stats', ext_schema);
+   -- The first pass revokes when this role may; the second reads the grants as they are now.
+   FOR v_pass IN 1..2 LOOP
+      SELECT q.may_change, q.sql_text, q.warning INTO v_may_change, v_statements, v_warning
+      FROM (
+      WITH ext AS
+      (
+          SELECT
+              n.nspname,
+              e.extowner,
+              e.extnamespace,
+              (
+                  SELECT c.oid
+                  FROM pg_catalog.pg_class AS c
+                  WHERE c.relnamespace = e.extnamespace
+                  AND   c.relname OPERATOR(pg_catalog.=) 'pg_stat_statements'
+              ) AS view_oid,
+              (
+                  SELECT c.oid
+                  FROM pg_catalog.pg_class AS c
+                  WHERE c.relnamespace = e.extnamespace
+                  AND   c.relname OPERATOR(pg_catalog.=) 'pg_stat_statements_info'
+              ) AS info_oid
+          FROM pg_catalog.pg_extension AS e
+          JOIN pg_catalog.pg_namespace AS n
+            ON n.oid = e.extnamespace
+          WHERE e.extname = 'pg_stat_statements'
+      ),
+      facts AS
+      (
+          SELECT
+              ext.*,
+              (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = ext.view_oid) AS view_owner,
+              (
+                  SELECT pg_catalog.string_agg(pg_catalog.quote_ident(r.rolname), ', ' ORDER BY r.rolname)
+                  FROM pg_catalog.pg_roles AS r
+                  WHERE NOT r.rolsuper
+                  AND   r.oid IS DISTINCT FROM (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = ext.view_oid)
+                  AND   r.oid IN
+                        (
+                            SELECT c.relowner
+                            FROM pg_catalog.pg_class AS c
+                            JOIN pg_catalog.pg_namespace AS cn
+                              ON cn.oid = c.relnamespace
+                            WHERE cn.nspname OPERATOR(pg_catalog.=) 'config'
+                            AND   c.relname OPERATOR(pg_catalog.=) 'config_monitored_servers'
+                            UNION ALL
+                            SELECT p.proowner
+                            FROM pg_catalog.pg_proc AS p
+                            JOIN pg_catalog.pg_namespace AS pn
+                              ON pn.oid = p.pronamespace
+                            WHERE pn.nspname OPERATOR(pg_catalog.=) 'config'
+                            AND   p.proname IN ('store_statement_stats', 'store_statement_stats_info')
+                        )
+              ) AS owners,
+              (
+                  EXISTS
+                  (
+                      SELECT 1
+                      FROM pg_catalog.pg_class AS c
+                      CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) AS a
+                      WHERE c.oid IN (ext.view_oid, ext.info_oid)
+                      AND   a.grantee = 0
+                      AND   a.privilege_type = 'SELECT'
+                  )
+                  OR EXISTS
+                  (
+                      SELECT 1
+                      FROM pg_catalog.pg_proc AS p
+                      CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) AS a
+                      WHERE p.pronamespace = ext.extnamespace
+                      AND   p.proname IN ('pg_stat_statements', 'pg_stat_statements_info')
+                      AND   a.grantee = 0
+                      AND   a.privilege_type = 'EXECUTE'
+                  )
+              ) AS public_reads
+          FROM ext
+      ),
+      built AS
+      (
+          SELECT
+              f.*,
+              'pg_read_all_stats' || COALESCE(', ' || f.owners, '') AS grantees
+          FROM facts AS f
+      ),
+      statements AS
+      (
+          SELECT
+              b.*,
+              pg_catalog.format('REVOKE SELECT ON %1$I.pg_stat_statements FROM PUBLIC; REVOKE EXECUTE ON FUNCTION %1$I.pg_stat_statements(boolean) FROM PUBLIC; GRANT SELECT ON %1$I.pg_stat_statements TO %2$s; GRANT EXECUTE ON FUNCTION %1$I.pg_stat_statements(boolean) TO %2$s;', b.nspname, b.grantees)
+              || CASE
+                     WHEN b.info_oid IS NULL THEN ''
+                     ELSE pg_catalog.format(' REVOKE SELECT ON %1$I.pg_stat_statements_info FROM PUBLIC; REVOKE EXECUTE ON FUNCTION %1$I.pg_stat_statements_info() FROM PUBLIC; GRANT SELECT ON %1$I.pg_stat_statements_info TO %2$s; GRANT EXECUTE ON FUNCTION %1$I.pg_stat_statements_info() TO %2$s;', b.nspname, b.grantees)
+                 END AS sql_text
+          FROM built AS b
+      )
+      SELECT
+          COALESCE((SELECT r.rolsuper FROM pg_catalog.pg_roles AS r WHERE r.rolname OPERATOR(pg_catalog.=) current_user), false)
+              OR (s.view_owner IS NOT NULL AND pg_catalog.pg_has_role(current_user, s.view_owner, 'USAGE')) AS may_change,
+          s.sql_text,
+          CASE
+              WHEN s.public_reads THEN pg_catalog.format(
+                  'Statement statistics: PUBLIC can still read %s.pg_stat_statements, so every login that may connect to this database reads the statement statistics of every role, the external alert source logins included. Only the owner of the extension, %s, or a superuser can revoke that. Have %s run, in this database: %s',
+                  pg_catalog.quote_ident(s.nspname),
+                  pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(s.extowner)),
+                  pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(s.extowner)),
+                  s.sql_text)
+          END AS warning
+      FROM statements AS s
+      WHERE s.view_oid IS NOT NULL
+      ) AS q;
+      IF v_pass = 1 AND v_may_change AND v_statements IS NOT NULL THEN
+         EXECUTE v_statements;
       END IF;
+   END LOOP;
+   IF v_warning IS NOT NULL THEN
+      RAISE WARNING '%', v_warning;
    END IF;
 END $do$;
 
@@ -1224,6 +1336,7 @@ DECLARE
    membership record;
    attribute text;
    group_oid oid;
+   reset_failed boolean;
 BEGIN
    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'darling_alert_sources') THEN
       CREATE ROLE darling_alert_sources NOLOGIN NOINHERIT;
@@ -1362,9 +1475,14 @@ BEGIN
          CONTINUE;
       END IF;
 
+      -- A login whose reset below does not complete (an attribute or a membership this role may not take back) gets no
+      -- grant and no membership in the group, as the service's add verb does: it is not admitted until a superuser runs
+      -- this script, or the add verb's statements, for it.
+      reset_failed := false;
       BEGIN
          EXECUTE pg_catalog.format('ALTER ROLE %I LOGIN NOINHERIT CONNECTION LIMIT 5', source_login.role_name);
       EXCEPTION WHEN insufficient_privilege THEN
+         reset_failed := true;
          RAISE WARNING 'Login "%" could not be set to LOGIN NOINHERIT CONNECTION LIMIT 5: this needs CREATEROLE, and from PostgreSQL 16 ADMIN OPTION on the role.', source_login.role_name;
       END;
       FOREACH attribute IN ARRAY pg_catalog.array_remove(ARRAY[
@@ -1377,6 +1495,7 @@ BEGIN
          BEGIN
             EXECUTE pg_catalog.format('ALTER ROLE %I NO%s', source_login.role_name, attribute);
          EXCEPTION WHEN insufficient_privilege THEN
+            reset_failed := true;
             RAISE WARNING 'Login "%" still has the % attribute: switching it off needs a superuser, or, from PostgreSQL 16, an owner that holds % itself.', source_login.role_name, attribute, attribute;
          END;
       END LOOP;
@@ -1394,12 +1513,24 @@ BEGIN
                        THEN pg_catalog.format(' GRANTED BY %I', membership.grantor) ELSE '' END
                || ' CASCADE';
          EXCEPTION WHEN insufficient_privilege THEN
+            reset_failed := true;
             RAISE WARNING 'Login "%" is still a member of "%": revoking that needs a superuser, or ADMIN OPTION on it.', source_login.role_name, membership.granted;
          END;
       END LOOP;
 
       EXECUTE pg_catalog.format('REVOKE ALL ON ALL TABLES IN SCHEMA config, collect FROM %I', source_login.role_name);
       EXECUTE pg_catalog.format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA config, collect FROM %I', source_login.role_name);
+      IF reset_failed THEN
+         EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION config.submit_external_alert(%s) FROM %I',
+            'text, text, text, text, text, text, double precision', source_login.role_name);
+         BEGIN
+            EXECUTE pg_catalog.format('REVOKE darling_alert_sources FROM %I', source_login.role_name);
+         EXCEPTION WHEN insufficient_privilege THEN
+            NULL;
+         END;
+         RAISE WARNING 'External alert source login "%" is not admitted: this script could not finish its reset (see the warnings above), so it gets no grant and no membership in "darling_alert_sources". A superuser runs this script again, or the add verb''s statements, to admit it.', source_login.role_name;
+         CONTINUE;
+      END IF;
       EXECUTE pg_catalog.format('GRANT CONNECT ON DATABASE %I TO %I', pg_catalog.current_database(), source_login.role_name);
       EXECUTE pg_catalog.format('GRANT USAGE ON SCHEMA config TO %I', source_login.role_name);
       EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION config.submit_external_alert(%s) TO %I',
@@ -1437,7 +1568,16 @@ BEGIN
       RAISE WARNING 'Role "%" is a member of "darling_alert_sources" (directly or through a source login)%, so a pg_hba line for +darling_alert_sources admits it too. Put this line ABOVE that one: hostssl % % <range> reject',
          membership.member_name,
          CASE WHEN membership.member_name = current_user THEN ', and it is the role running this script' ELSE '' END,
-         pg_catalog.quote_ident(pg_catalog.current_database()), pg_catalog.quote_ident(membership.member_name);
+         -- pg_hba quoting: a name is bare only when it is plain lower-case letters, digits and underscores and not a
+         -- pg_hba keyword, so a role named all is that one role and never every role (the service quotes the same way).
+         CASE WHEN pg_catalog.current_database() ~ '^[a-z0-9_]+$'
+                   AND pg_catalog.current_database() NOT IN ('all', 'sameuser', 'samerole', 'samegroup', 'replication')
+              THEN pg_catalog.current_database()::text
+              ELSE '"' || pg_catalog.replace(pg_catalog.current_database(), '"', '""') || '"' END,
+         CASE WHEN membership.member_name ~ '^[a-z0-9_]+$'
+                   AND membership.member_name NOT IN ('all', 'sameuser', 'samerole', 'samegroup', 'replication')
+              THEN membership.member_name::text
+              ELSE '"' || pg_catalog.replace(membership.member_name, '"', '""') || '"' END;
    END LOOP;
 END $do$;
 

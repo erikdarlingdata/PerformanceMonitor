@@ -6535,13 +6535,22 @@ public static class DarlingCliCommands
             }
         }
 
-        return PrintAlertSourceResult(verb, result, sourceName!, storeConnectionString, output, error, postgres, groupExtras);
+        /* On the managed store the alert sources line written at the last service start is taken out of pg_hba.conf now,
+           and the server reloads it, rather than staying live until the next start. */
+        string? lineDropFailure = null;
+        if (postgres is { Managed: true } && groupExtras is { Count: > 0 })
+        {
+            lineDropFailure = await DarlingManagedPostgres.DropAlertSourcePgHbaLineAsync(
+                DarlingManagedPostgres.ResolveDataDirectory(postgres), connection, cancellationToken);
+        }
+
+        return PrintAlertSourceResult(verb, result, sourceName!, storeConnectionString, output, error, postgres, groupExtras, lineDropFailure);
     }
 
     /// <summary>Prints what an add, rotate or remove did, and returns the exit code. The only place a password is written, and only inside the connection string.</summary>
     internal static int PrintAlertSourceResult(
         string verb, ExternalAlertSourceAdmin.Result result, string sourceName, string storeConnectionString, TextWriter output, TextWriter error,
-        PostgresConfig? postgres = null, IReadOnlyList<string>? groupExtras = null)
+        PostgresConfig? postgres = null, IReadOnlyList<string>? groupExtras = null, string? lineDropFailure = null)
     {
         switch (result.Outcome)
         {
@@ -6609,7 +6618,7 @@ public static class DarlingCliCommands
                 output.WriteLine("\"Root Certificate\" at the copy. Host must be a name or address the certificate carries.");
             }
 
-            foreach (var line in BuildAlertSourceNetworkNote(postgres, groupExtras))
+            foreach (var line in BuildAlertSourceNetworkNote(postgres, groupExtras, lineDropFailure))
             {
                 output.WriteLine(line);
             }
@@ -6700,10 +6709,12 @@ public static class DarlingCliCommands
     /// pg_hba.conf decides, so the note names the line to add there. Pure.
     /// <para><paramref name="groupExtras"/> are the roles besides the source logins that are members of the group at any depth
     /// (<see cref="DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync"/>), which a <c>+</c> line admits too. Each is named:
-    /// on the managed store the pg_hba block leaves the alert source line out while any remain, and a bring-your-own store
-    /// gets a <c>reject</c> line for each, to go above the group line.</para>
+    /// on the managed store the verb has just taken the alert source line out of pg_hba.conf and reloaded the server
+    /// (<see cref="DarlingManagedPostgres.DropAlertSourcePgHbaLineAsync"/>), or, when <paramref name="lineDropFailure"/> says
+    /// it could not, the note says the line written at the last start stays live until the service restarts. A
+    /// bring-your-own store gets a <c>reject</c> line for each, to go above the group line.</para>
     /// </summary>
-    internal static IReadOnlyList<string> BuildAlertSourceNetworkNote(PostgresConfig? postgres, IReadOnlyList<string>? groupExtras = null)
+    internal static IReadOnlyList<string> BuildAlertSourceNetworkNote(PostgresConfig? postgres, IReadOnlyList<string>? groupExtras = null, string? lineDropFailure = null)
     {
         var lines = BuildAlertSourceNetworkNoteCore(postgres);
         if (groupExtras is not { Count: > 0 })
@@ -6719,7 +6730,9 @@ public static class DarlingCliCommands
         };
         if (postgres is { Managed: true })
         {
-            all.Add($"While any of them remains, the managed pg_hba block leaves out the +{group} line, so no source connects from another machine. A superuser revokes the membership; each service start checks again.");
+            all.Add(lineDropFailure is null
+                ? $"The managed pg_hba block now holds no +{group} line (the verb took it out and reloaded pg_hba.conf if it was there), so no source connects from another machine. A superuser revokes the membership; each service start checks again and writes the line back only when no such role remains."
+                : $"The +{group} line could not be taken out of the live pg_hba rules here ({lineDropFailure}). The line written at the last service start stays live, and admits these roles from the allowed range, until the service restarts: restart it now, or have a superuser revoke the membership.");
         }
         else
         {
@@ -6730,9 +6743,7 @@ public static class DarlingCliCommands
         return all;
     }
 
-    /// <summary>A role name as a pg_hba user field: double-quoted when it is not plain lower-case letters, digits and underscores.</summary>
-    private static string QuotePgHbaRole(string role)
-        => role.All(c => c is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_') ? role : "\"" + role.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+    private static string QuotePgHbaRole(string role) => DarlingManagedPostgres.QuotePgHbaName(role);
 
     private static IReadOnlyList<string> BuildAlertSourceNetworkNoteCore(PostgresConfig? postgres)
     {

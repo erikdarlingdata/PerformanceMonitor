@@ -487,14 +487,95 @@ public sealed class ExternalAlertSourceVerbTests
     }
 
     [Fact]
-    public void TheNetworkNote_ForTheManagedStore_SaysTheLineIsLeftOut_WhileAnExtraMemberRemains()
+    public void TheNetworkNote_ForTheManagedStore_SaysTheLineIsOutNow_OrWhenItStopsBeingAdmitted()
     {
         var postgres = new PostgresConfig { Managed = true, Network = new PostgresNetworkConfig { Listen = "192.0.2.10", AllowFrom = "192.0.2.0/24", Role = "viewer,sources" } };
         var note = string.Join("\n", DarlingCliCommands.BuildAlertSourceNetworkNote(postgres, ["store_owner"]));
         Assert.Contains("'store_owner'", note, StringComparison.Ordinal);
-        Assert.Contains("leaves out the +darling_alert_sources line", note, StringComparison.Ordinal);
+        Assert.Contains("now holds no +darling_alert_sources line", note, StringComparison.Ordinal);
         Assert.DoesNotContain("reject", note, StringComparison.Ordinal);
         Assert.Single(DarlingCliCommands.BuildAlertSourceNetworkNote(postgres, []));
+
+        /* When the verb could not take the line out, the note says it stays live until the service restarts. */
+        var failed = string.Join("\n", DarlingCliCommands.BuildAlertSourceNetworkNote(postgres, ["store_owner"], "permission denied for function pg_reload_conf"));
+        Assert.Contains("(permission denied for function pg_reload_conf)", failed, StringComparison.Ordinal);
+        Assert.Contains("stays live, and admits these roles from the allowed range, until the service restarts", failed, StringComparison.Ordinal);
+        Assert.DoesNotContain("now holds no", failed, StringComparison.Ordinal);
+    }
+
+    /* #5654: pg_hba reads all, sameuser, samerole, samegroup and replication as keywords unless they are quoted, so every name
+       the service writes or prints into a pg_hba line is quoted when it is one of them, or is not plain lower case. */
+    [Theory]
+    [InlineData("viewer", "viewer")]
+    [InlineData("store_owner2", "store_owner2")]
+    [InlineData("all", "\"all\"")]
+    [InlineData("sameuser", "\"sameuser\"")]
+    [InlineData("samerole", "\"samerole\"")]
+    [InlineData("samegroup", "\"samegroup\"")]
+    [InlineData("replication", "\"replication\"")]
+    [InlineData("Mixed Case", "\"Mixed Case\"")]
+    [InlineData("+group", "\"+group\"")]
+    public void APgHbaName_IsQuoted_WhenItIsAKeywordOrNotPlain(string name, string expected)
+        => Assert.Equal(expected, DarlingManagedPostgres.QuotePgHbaName(name));
+
+    [Fact]
+    public void TheNetworkNote_ForABringYourOwnStore_QuotesARoleNamedAll_InItsRejectLine()
+    {
+        var note = string.Join("\n", DarlingCliCommands.BuildAlertSourceNetworkNote(new PostgresConfig { Managed = false }, ["all"]));
+        Assert.Contains("  hostssl <database> \"all\" <range> reject", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("<database> all <range>", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheManagedLines_KeepTheirFixedNames()
+    {
+        Assert.Equal("hostssl darling viewer 192.0.2.0/24 scram-sha-256", DarlingManagedPostgres.BuildNetworkPgHbaLine("viewer", "192.0.2.0/24"));
+        Assert.Equal("hostssl darling admin 192.0.2.0/24 scram-sha-256", DarlingManagedPostgres.BuildNetworkPgHbaLine("admin", "192.0.2.0/24"));
+        Assert.Equal("hostssl darling +darling_alert_sources 192.0.2.0/24 scram-sha-256", DarlingManagedPostgres.BuildNetworkPgHbaLine("sources", "192.0.2.0/24"));
+    }
+
+    /* #5654: the add and rotate verbs take the alert sources line out of the managed block at once; the other lines stay, and a
+       block left with no line is removed. */
+    [Fact]
+    public void RemovingTheAlertSourceLine_KeepsTheOtherManagedLines_AndRemovesAnEmptyBlock()
+    {
+        var both = DarlingManagedPostgres.ReconcilePgHba("local all all trust\n",
+            DarlingManagedPostgres.BuildNetworkPgHbaLines(["viewer", "sources"], "192.0.2.0/24"));
+        var (text, removed) = DarlingManagedPostgres.RemoveAlertSourcePgHbaLine(both);
+        Assert.True(removed);
+        Assert.Contains("hostssl darling viewer 192.0.2.0/24 scram-sha-256", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("+darling_alert_sources", text, StringComparison.Ordinal);
+        Assert.Contains("local all all trust", text, StringComparison.Ordinal);
+        Assert.Equal(DarlingManagedPostgres.ReconcilePgHba(both, DarlingManagedPostgres.BuildNetworkPgHbaLines(["viewer"], "192.0.2.0/24")), text);
+
+        var only = DarlingManagedPostgres.ReconcilePgHba("local all all trust\n",
+            DarlingManagedPostgres.BuildNetworkPgHbaLines(["sources"], "192.0.2.0/24"));
+        var (emptied, removedOnly) = DarlingManagedPostgres.RemoveAlertSourcePgHbaLine(only);
+        Assert.True(removedOnly);
+        Assert.DoesNotContain(DarlingManagedPostgres.PgHbaBeginMarker, emptied, StringComparison.Ordinal);
+        Assert.Equal("local all all trust\n", emptied);
+
+        var (unchanged, none) = DarlingManagedPostgres.RemoveAlertSourcePgHbaLine(text);
+        Assert.False(none);
+        Assert.Equal(text, unchanged);
+    }
+
+    /* #5654: with only "sources" configured and another member in the group, the start admits no role, so the managed block is
+       removed; the check of the live rules then looks for the left-out line instead of passing on zero of zero. */
+    [Fact]
+    public void ASourcesOnlyStore_WithAnExtraMember_RemovesTheBlock_AndTheCheckFailsWhileTheLineIsLive()
+    {
+        string[] configured = [DarlingManagedPostgres.AlertSourcesNetworkToken];
+        var admitted = DarlingManagedPostgres.AdmittedNetworkRoles(configured, ["store_owner"]);
+        Assert.Empty(admitted);
+        var current = DarlingManagedPostgres.ReconcilePgHba("local all all trust\n", DarlingManagedPostgres.BuildNetworkPgHbaLines(configured, "192.0.2.0/24"));
+        var updated = DarlingManagedPostgres.ReconcilePgHba(current, DarlingManagedPostgres.BuildNetworkPgHbaLines(admitted, "192.0.2.0/24"));
+        Assert.DoesNotContain(DarlingManagedPostgres.PgHbaBeginMarker, updated, StringComparison.Ordinal);
+
+        Assert.Equal(DarlingManagedPostgres.PgHbaVerdict.LeftOutRoleLive, DarlingManagedPostgres.ExposedPgHbaVerdict(admitted.Count, 0, 1, 1));
+        Assert.Equal(DarlingManagedPostgres.PgHbaVerdict.Ok, DarlingManagedPostgres.ExposedPgHbaVerdict(admitted.Count, 0, 1, 0));
+        Assert.Equal(DarlingManagedPostgres.PgHbaVerdict.AdmittedRoleMissing, DarlingManagedPostgres.ExposedPgHbaVerdict(2, 1, 0, 0));
+        Assert.Equal(DarlingManagedPostgres.PgHbaVerdict.Ok, DarlingManagedPostgres.ExposedPgHbaVerdict(2, 2, 0, 0));
     }
 
     /* #5654: the managed pg_hba block writes the alert source line only when the group's members were read and are exactly the

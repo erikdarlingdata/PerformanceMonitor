@@ -56,7 +56,10 @@ public sealed class ExternalAlertSourceGroupLiveTests
 
     private static readonly string RoleName = ExternalAlertSourceAdmin.RoleNameFor(SourceName);
 
-    private static readonly string[] CleanupRoles = ["admin", "viewer", "mcp", GroupName, RoleName, OtherName, OwnerName, MonitorName];
+    /* A role named all: pg_hba reads the bare word as every role, so each pg_hba line that names it must quote it. */
+    private const string KeywordRoleName = "all";
+
+    private static readonly string[] CleanupRoles = ["admin", "viewer", "mcp", GroupName, RoleName, OtherName, OwnerName, MonitorName, KeywordRoleName];
 
     private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
@@ -131,6 +134,35 @@ END $do$", CleanupRoles, cleanupCt));
         var error = new StringWriter();
         var exit = await DarlingCliCommands.RunAlertSourceVerbAsync(verb, owner, name, connectionString, output, error, ct, postgres);
         return (exit, output.ToString(), error.ToString());
+    }
+
+    /// <summary>
+    /// Gives <c>config.config_monitored_servers</c> back to the scratch superuser, so the cleanup's DROP OWNED BY on the owner
+    /// does not have to drop a table other tables reference.
+    /// </summary>
+    private static async Task GiveTheServerTableBackAsync(ScratchPostgres scratch)
+    {
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(CancellationToken.None);
+            await ExecAsync(connection, "ALTER TABLE config.config_monitored_servers OWNER TO SESSION_USER", CancellationToken.None);
+        }
+        catch (PostgresException)
+        {
+            /* The table is missing or the body never got that far; the cleanup reports any residue. */
+        }
+    }
+
+    /// <summary>The shipped script's DO block that takes pg_stat_statements from PUBLIC.</summary>
+    private static string ScriptStatementStatsBlock()
+    {
+        var script = RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql").Replace("\r\n", "\n", StringComparison.Ordinal);
+        var comment = script.IndexOf("-- pg_stat_statements gives PUBLIC its views and functions;", StringComparison.Ordinal);
+        Assert.True(comment > 0, "provision-roles.sql has the pg_stat_statements block.");
+        var start = script.IndexOf("DO $do$\n", comment, StringComparison.Ordinal);
+        var end = script.IndexOf("END $do$;", start, StringComparison.Ordinal) + "END $do$;".Length;
+        return script[start..end];
     }
 
     /// <summary>The alert source block of the shipped script: the DO block that makes the group.</summary>
@@ -741,5 +773,275 @@ RESET ROLE", ct);
         Assert.Matches(@"\n\s+_alertSourceLineRerun = \(binDirectory, fullPlan, ownerConnectionString\);", body);
         Assert.Contains("await ReconcileNetworkAsync(rerun.BinDirectory, rerun.Plan, rerun.OwnerConnectionString, cancellationToken);", postgres, StringComparison.Ordinal);
     }
-}
 
+    /// <summary>
+    /// A bring-your-own store whose pg_stat_statements a superuser created (the README's step): the non-superuser owner may
+    /// not take it from PUBLIC, so service setup and the script both warn, with the same text, naming the owner of the
+    /// extension and the statements it runs; once it runs them, PUBLIC holds nothing, the store owner's reader still reads,
+    /// and neither warns again (#5654).
+    /// </summary>
+    [Fact]
+    public async Task ASuperuserOwnedStatementStatsExtension_TheServiceAndTheScriptNameItsOwner_AndTheStatementsThatTakeItFromPublic()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres (+TimescaleDB) connection string, owner/superuser, to run the alert source group live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var superuser = new NpgsqlConnection(scratch.ConnectionString);
+            await superuser.OpenAsync(ct);
+            await using var owner = await PrepareAsync(scratch, superuser, ct);
+            Assert.SkipWhen(owner is null,
+                "This needs PostgreSQL 16 or later (a creator's implicit membership) and no cluster-wide admin/viewer/mcp role.");
+            Assert.SkipWhen(
+                await SettingOrNullAsync(superuser, "pg_stat_statements.track", ct) is null,
+                "pg_stat_statements must be in shared_preload_libraries on this cluster.");
+
+            await ExecAsync(superuser, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements WITH SCHEMA public", ct);
+            await ExecAsync(superuser, $"ALTER TABLE config.config_monitored_servers OWNER TO {OwnerName}; CREATE ROLE {OtherName} NOLOGIN", ct);
+            var extensionOwner = await ScalarAsync<string>(superuser,
+                "SELECT pg_get_userbyid(extowner)::text FROM pg_extension WHERE extname = 'pg_stat_statements'", ct);
+
+            StoreStatementStats.ResetPublicReadsWarning();
+            var log = new CapturingTestLogger();
+            await StoreStatementStats.EnsureAsync(owner!, "config", [], log, ct);
+            Assert.Contains("Warning: Statement statistics: PUBLIC can still read public.pg_stat_statements", log.Joined, StringComparison.Ordinal);
+            Assert.Contains($"Only the owner of the extension, {extensionOwner}, or a superuser can revoke that. Have {extensionOwner} run, in this database: "
+                + "REVOKE SELECT ON public.pg_stat_statements FROM PUBLIC;", log.Joined, StringComparison.Ordinal);
+            Assert.Contains($"GRANT SELECT ON public.pg_stat_statements TO pg_read_all_stats, {OwnerName};", log.Joined, StringComparison.Ordinal);
+            Assert.True(await ScalarAsync<bool>(superuser, $"SELECT has_table_privilege('{OtherName}', 'public.pg_stat_statements', 'SELECT')", ct));
+
+            var notices = new List<string>();
+            owner!.Notice += (_, e) => notices.Add(e.Notice.MessageText);
+            await ExecAsync(owner, ScriptStatementStatsBlock(), ct);
+            var warning = Assert.Single(notices, n => n.StartsWith("Statement statistics: PUBLIC can still read", StringComparison.Ordinal));
+            Assert.Contains("Warning: " + warning, log.Joined, StringComparison.Ordinal);
+
+            const string marker = "in this database: ";
+            await ExecAsync(superuser, warning[(warning.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..], ct);
+            Assert.False(await ScalarAsync<bool>(superuser, $"SELECT has_table_privilege('{OtherName}', 'public.pg_stat_statements', 'SELECT')", ct));
+
+            StoreStatementStats.ResetPublicReadsWarning();
+            var after = new CapturingTestLogger();
+            await StoreStatementStats.EnsureAsync(owner, "config", [], after, ct);
+            Assert.DoesNotContain("PUBLIC can still read", after.Joined, StringComparison.Ordinal);
+            Assert.True(await ScalarAsync<long>(owner, "SELECT count(*) FROM config.store_statement_stats()", ct) >= 0);
+            notices.Clear();
+            await ExecAsync(owner, ScriptStatementStatsBlock(), ct);
+            Assert.DoesNotContain(notices, n => n.Contains("PUBLIC can still read", StringComparison.Ordinal));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await GiveTheServerTableBackAsync(scratch);
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// The script run by a superuser takes pg_stat_statements from PUBLIC and grants it to the store owner that is not a
+    /// superuser, so that owner's service setup then runs without an error and its reader reads the view (#5654).
+    /// </summary>
+    [Fact]
+    public async Task TheScriptRunByASuperuser_LeavesANonSuperuserOwnersStatementStatsSetupWorking()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres (+TimescaleDB) connection string, owner/superuser, to run the alert source group live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var superuser = new NpgsqlConnection(scratch.ConnectionString);
+            await superuser.OpenAsync(ct);
+            await using var owner = await PrepareAsync(scratch, superuser, ct);
+            Assert.SkipWhen(owner is null,
+                "This needs PostgreSQL 16 or later (a creator's implicit membership) and no cluster-wide admin/viewer/mcp role.");
+            Assert.SkipWhen(
+                await SettingOrNullAsync(superuser, "pg_stat_statements.track", ct) is null,
+                "pg_stat_statements must be in shared_preload_libraries on this cluster.");
+
+            await ExecAsync(superuser, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements WITH SCHEMA public", ct);
+            await ExecAsync(superuser, $"ALTER TABLE config.config_monitored_servers OWNER TO {OwnerName}; CREATE ROLE {OtherName} NOLOGIN", ct);
+
+            var notices = new List<string>();
+            superuser.Notice += (_, e) => notices.Add(e.Notice.MessageText);
+            await ExecAsync(superuser, ScriptStatementStatsBlock(), ct);
+            Assert.DoesNotContain(notices, n => n.Contains("PUBLIC can still read", StringComparison.Ordinal));
+            Assert.False(await ScalarAsync<bool>(superuser, $"SELECT has_table_privilege('{OtherName}', 'public.pg_stat_statements', 'SELECT')", ct));
+            Assert.True(await ScalarAsync<bool>(superuser, $"SELECT has_table_privilege('{OwnerName}', 'public.pg_stat_statements', 'SELECT')", ct));
+
+            StoreStatementStats.ResetPublicReadsWarning();
+            for (var start = 0; start < 2; start++)
+            {
+                var log = new CapturingTestLogger();
+                await StoreStatementStats.EnsureAsync(owner!, "config", [], log, ct);
+                Assert.DoesNotContain("PUBLIC can still read", log.Joined, StringComparison.Ordinal);
+                Assert.True(await ScalarAsync<long>(owner!, "SELECT count(*) FROM config.store_statement_stats()", ct) >= 0);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await GiveTheServerTableBackAsync(scratch);
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// A role named all that is a member of the group through the owner is named by the service and the script, and every
+    /// reject line for it quotes the name, so it is that one role and not every role (#5654).
+    /// </summary>
+    [Fact]
+    public async Task ARoleNamedAll_InTheGroup_GetsAQuotedRejectLine_FromTheVerbAndTheScript()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres (+TimescaleDB) connection string, owner/superuser, to run the alert source group live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var superuser = new NpgsqlConnection(scratch.ConnectionString);
+            await superuser.OpenAsync(ct);
+            await using var owner = await PrepareAsync(scratch, superuser, ct);
+            Assert.SkipWhen(owner is null,
+                "This needs PostgreSQL 16 or later (a creator's implicit membership) and no cluster-wide admin/viewer/mcp role.");
+            var ownerConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = OwnerName }.ConnectionString;
+
+            var add = await RunVerbAsync(owner!, ownerConnectionString, "--add-alert-source", SourceName, new PostgresConfig { Managed = false }, ct);
+            Assert.True(add.Exit == 0, add.Error);
+            await ExecAsync(superuser, $"CREATE ROLE \"{KeywordRoleName}\" NOLOGIN; GRANT {OwnerName} TO \"{KeywordRoleName}\"", ct);
+
+            var rotate = await RunVerbAsync(owner!, ownerConnectionString, "--rotate-alert-source", SourceName, new PostgresConfig { Managed = false }, ct);
+            Assert.True(rotate.Exit == 0, rotate.Error);
+            Assert.Contains("  hostssl <database> \"all\" <range> reject", rotate.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain("<database> all <range>", rotate.Output, StringComparison.Ordinal);
+
+            await ExecAsync(superuser, "CREATE ROLE admin NOLOGIN; CREATE ROLE viewer NOLOGIN; CREATE ROLE mcp NOLOGIN", ct);
+            var notices = new List<string>();
+            owner!.Notice += (_, e) => notices.Add(e.Notice.MessageText);
+            await ExecAsync(owner, ScriptAlertSourceBlock(), ct);
+            Assert.Contains(notices, n => n.Contains($"hostssl {scratch.DatabaseName} \"all\" <range> reject", StringComparison.Ordinal));
+            Assert.DoesNotContain(notices, n => n.Contains($"hostssl {scratch.DatabaseName} all <range>", StringComparison.Ordinal));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// The script, run by a non-superuser owner, meets a source login with a membership it may not revoke: it gives that login
+    /// no EXECUTE and no membership in the group, and names it, as the add verb does (#5654).
+    /// </summary>
+    [Fact]
+    public async Task TheScript_DoesNotAdmitASourceLogin_WhoseResetItCouldNotFinish()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres (+TimescaleDB) connection string, owner/superuser, to run the alert source group live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var superuser = new NpgsqlConnection(scratch.ConnectionString);
+            await superuser.OpenAsync(ct);
+            await using var owner = await PrepareAsync(scratch, superuser, ct);
+            Assert.SkipWhen(owner is null,
+                "This needs PostgreSQL 16 or later (a creator's implicit membership) and no cluster-wide admin/viewer/mcp role.");
+            var ownerConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = OwnerName }.ConnectionString;
+
+            var add = await RunVerbAsync(owner!, ownerConnectionString, "--add-alert-source", SourceName, new PostgresConfig { Managed = false }, ct);
+            Assert.True(add.Exit == 0, add.Error);
+            Assert.True(await ScalarAsync<bool>(superuser, $"SELECT pg_has_role('{RoleName}', '{GroupName}', 'MEMBER')", ct));
+
+            await ExecAsync(superuser, $"GRANT pg_monitor TO \"{RoleName}\"", ct);
+            await ExecAsync(superuser, "CREATE ROLE admin NOLOGIN; CREATE ROLE viewer NOLOGIN; CREATE ROLE mcp NOLOGIN", ct);
+            var notices = new List<string>();
+            owner!.Notice += (_, e) => notices.Add(e.Notice.MessageText);
+            await ExecAsync(owner, ScriptAlertSourceBlock(), ct);
+
+            Assert.Contains(notices, n => n.Contains($"Login \"{RoleName}\" is still a member of \"pg_monitor\"", StringComparison.Ordinal));
+            Assert.Contains(notices, n => n.Contains($"External alert source login \"{RoleName}\" is not admitted", StringComparison.Ordinal));
+            Assert.False(await ScalarAsync<bool>(superuser, $"SELECT pg_has_role('{RoleName}', '{GroupName}', 'MEMBER')", ct));
+            Assert.False(await ScalarAsync<bool>(superuser,
+                $"SELECT has_function_privilege('{RoleName}', 'config.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature})', 'EXECUTE')", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// On the managed store the add and rotate verbs take the alert sources line out of pg_hba.conf at once when the group has
+    /// another member: the store owner (a superuser there) rewrites the file and reloads it. An owner that may not reload is
+    /// told the line stays live until the service restarts (#5654).
+    /// </summary>
+    [Fact]
+    public async Task OnTheManagedStore_TheVerbTakesTheAlertSourceLineOut_OrSaysWhenItStopsBeingAdmitted()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres (+TimescaleDB) connection string, owner/superuser, to run the alert source group live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var dataDirectory = Directory.CreateTempSubdirectory("darling-5654-hba-");
+        var bodySucceeded = false;
+        try
+        {
+            await using var superuser = new NpgsqlConnection(scratch.ConnectionString);
+            await superuser.OpenAsync(ct);
+            await using var owner = await PrepareAsync(scratch, superuser, ct);
+            Assert.SkipWhen(owner is null,
+                "This needs PostgreSQL 16 or later (a creator's implicit membership) and no cluster-wide admin/viewer/mcp role.");
+            var ownerConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = OwnerName }.ConnectionString;
+            var hbaPath = Path.Combine(dataDirectory.FullName, "pg_hba.conf");
+            var written = DarlingManagedPostgres.ReconcilePgHba("local all all trust\n",
+                DarlingManagedPostgres.BuildNetworkPgHbaLines(["viewer", DarlingManagedPostgres.AlertSourcesNetworkToken], "192.0.2.0/24"));
+            await File.WriteAllTextAsync(hbaPath, written, ct);
+            var postgres = new PostgresConfig
+            {
+                Managed = true,
+                DataDirectory = dataDirectory.FullName,
+                Network = new PostgresNetworkConfig { Listen = "192.0.2.10", AllowFrom = "192.0.2.0/24", Role = "viewer,sources" },
+            };
+
+            /* The owner here is not a superuser (PostgreSQL 16 makes it a member of the group it creates, so the group has an
+               extra member) and may not call pg_reload_conf(): the note says the line stays live until the service restarts. */
+            var add = await RunVerbAsync(owner!, ownerConnectionString, "--add-alert-source", SourceName, postgres, ct);
+            Assert.True(add.Exit == 0, add.Error);
+            Assert.Contains("could not be taken out of the live pg_hba rules here", add.Output, StringComparison.Ordinal);
+            Assert.Contains("until the service restarts", add.Output, StringComparison.Ordinal);
+
+            /* The managed store's owner is a superuser: the line comes out of the file, the viewer line stays, the server reloads. */
+            await File.WriteAllTextAsync(hbaPath, written, ct);
+            Assert.Null(await DarlingManagedPostgres.DropAlertSourcePgHbaLineAsync(dataDirectory.FullName, superuser, ct));
+            var after = await File.ReadAllTextAsync(hbaPath, ct);
+            Assert.DoesNotContain("+" + GroupName, after, StringComparison.Ordinal);
+            Assert.Contains("hostssl darling viewer 192.0.2.0/24 scram-sha-256", after, StringComparison.Ordinal);
+            Assert.Null(await DarlingManagedPostgres.DropAlertSourcePgHbaLineAsync(dataDirectory.FullName, superuser, ct));
+            Assert.Equal(after, await File.ReadAllTextAsync(hbaPath, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(dataDirectory.FullName);
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+}

@@ -6085,11 +6085,27 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     internal static string PgHbaRoleField(string token) => token switch
     {
-        ViewerRoleName => ViewerRoleName,
-        AdminRoleName => AdminRoleName,
+        ViewerRoleName => QuotePgHbaName(ViewerRoleName),
+        AdminRoleName => QuotePgHbaName(AdminRoleName),
         AlertSourcesNetworkToken => "+" + DarlingManagedRoles.AlertSourceGroupRoleName,
         _ => throw new ArgumentOutOfRangeException(nameof(token), token, "Not a postgres.network.role token."),
     };
+
+    /// <summary>
+    /// A role or database name as a pg_hba field (#5654): bare when it is plain lower-case letters, digits and underscores
+    /// and not one of pg_hba's keywords (<c>all</c>, <c>sameuser</c>, <c>samerole</c>, <c>samegroup</c>,
+    /// <c>replication</c>), double-quoted otherwise. pg_hba reads a quoted word as a name, never as a keyword, so a role
+    /// named <c>all</c> is that one role and not every role. The same rule as the reject lines of
+    /// <c>tools/provision-roles.sql</c>. Pure.
+    /// </summary>
+    internal static string QuotePgHbaName(string name)
+        => name.Length > 0
+           && name.All(c => c is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_')
+           && !PgHbaKeywords.Contains(name)
+            ? name
+            : "\"" + name.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+
+    private static readonly HashSet<string> PgHbaKeywords = new(StringComparer.Ordinal) { "all", "sameuser", "samerole", "samegroup", "replication" };
 
     /// <summary>The <c>postgres.network.role</c> token that admits every external alert source login (#5654).</summary>
     internal const string AlertSourcesNetworkToken = "sources";
@@ -6206,6 +6222,87 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
+    /// <paramref name="existing"/> pg_hba text with the alert sources line (user field <c>+darling_alert_sources</c>) taken
+    /// out of the managed block (#5654); the block's other lines stay, and a block left empty is removed. Text outside the
+    /// block is kept as <see cref="ReconcilePgHba"/> keeps it. <c>Removed</c> is false, and the text unchanged, when the
+    /// block holds no such line. Pure.
+    /// </summary>
+    internal static (string Text, bool Removed) RemoveAlertSourcePgHbaLine(string existing)
+    {
+        existing ??= string.Empty;
+        var field = PgHbaRoleField(AlertSourcesNetworkToken);
+        var kept = new List<string>();
+        var removed = false;
+        var insideBlock = false;
+        foreach (var line in existing.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (string.Equals(trimmed, PgHbaBeginMarker, StringComparison.Ordinal))
+            {
+                insideBlock = true;
+                continue;
+            }
+
+            if (string.Equals(trimmed, PgHbaEndMarker, StringComparison.Ordinal))
+            {
+                insideBlock = false;
+                continue;
+            }
+
+            if (insideBlock && trimmed.Length > 0)
+            {
+                var fields = trimmed.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                if (fields.Length > 2 && string.Equals(fields[2], field, StringComparison.Ordinal))
+                {
+                    removed = true;
+                }
+                else
+                {
+                    kept.Add(trimmed);
+                }
+            }
+        }
+
+        return removed ? (ReconcilePgHba(existing, kept.Count == 0 ? null : string.Join("\n", kept)), true) : (existing, false);
+    }
+
+    /// <summary>
+    /// Takes the alert sources line out of the managed store's live pg_hba.conf at once (#5654), for the add and rotate
+    /// verbs when <c>darling_alert_sources</c> has members besides the source logins: rewrites the file without it
+    /// (<see cref="RemoveAlertSourcePgHbaLine"/>) and has the server reload it (<c>pg_reload_conf()</c> on
+    /// <paramref name="connection"/>, the store owner). Returns null when the line is out of the file and the server was
+    /// told to reload (or the line was not there), else why it could not be done: the line written at the last service
+    /// start then stays live until the next start.
+    /// </summary>
+    internal static async Task<string?> DropAlertSourcePgHbaLineAsync(string dataDirectory, NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var hbaPath = Path.Combine(dataDirectory, "pg_hba.conf");
+            if (!File.Exists(hbaPath))
+            {
+                return $"{hbaPath} was not found";
+            }
+
+            var current = await File.ReadAllTextAsync(hbaPath, cancellationToken);
+            var (updated, removed) = RemoveAlertSourcePgHbaLine(current);
+            if (!removed)
+            {
+                return null;
+            }
+
+            await File.WriteAllTextAsync(hbaPath, updated, cancellationToken);
+            await using var reload = new NpgsqlCommand("SELECT pg_catalog.pg_reload_conf()", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+            await reload.ExecuteScalarAsync(cancellationToken);
+            return null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return ex.Message;
+        }
+    }
+
+    /// <summary>
     /// #5654: runs the network reconcile once more, after the role provisioning that follows the bootstrap, when this
     /// start's first pass left the alert sources pg_hba line out because <c>darling_alert_sources</c> had extra
     /// members. Provisioning revokes the extras it can, so a line left out for those members is written (and the
@@ -6246,6 +6343,7 @@ public sealed class DarlingManagedPostgres
                while those members are exactly the registered, marked source logins. Any other member (one the provisioning
                step could not revoke, or one that could not be read) leaves the line out, and the rest of the block stays. */
             _alertSourceLineRerun = null;
+            IReadOnlyList<string> leftOut = Array.Empty<string>();
             if (exposed && plan.Roles!.Contains(AlertSourcesNetworkToken, StringComparer.Ordinal))
             {
                 var fullPlan = plan;
@@ -6255,7 +6353,7 @@ public sealed class DarlingManagedPostgres
                     await using var connection = new NpgsqlConnection(DarlingStoreConnection.WithApplicationName(
                         DarlingStoreConnection.PinSessionTimeZoneUtc(ownerConnectionString), ServiceApplicationName));
                     await connection.OpenAsync(cancellationToken);
-                    extras =await DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync(connection, cancellationToken);
+                    extras = await DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync(connection, cancellationToken);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -6273,6 +6371,7 @@ public sealed class DarlingManagedPostgres
                 }
 
                 plan = plan with { Roles = AdmittedNetworkRoles(plan.Roles!, extras) };
+                leftOut = fullPlan.Roles!.Where(role => !plan.Roles!.Contains(role, StringComparer.Ordinal)).ToArray();
             }
 
             var desiredLine = exposed ? BuildNetworkPgHbaLines(plan.Roles!, plan.Cidr!) : null;
@@ -6323,7 +6422,7 @@ public sealed class DarlingManagedPostgres
             }
 
             /* Verify the live rules match intent (reload can report success on a rejected malformed file). */
-            await VerifyPgHbaAsync(ownerConnectionString, plan, changed, cancellationToken);
+            await VerifyPgHbaAsync(ownerConnectionString, plan, leftOut, changed, cancellationToken);
 
             /* Adopted server: we did not start it, so the -o listen_addresses/ssl override never applied.
                If its live listener cannot satisfy the desired exposure, say so loud and do not claim exposed. */
@@ -6351,13 +6450,38 @@ public sealed class DarlingManagedPostgres
         }
     }
 
+    /// <summary>What the exposed-store check of the live pg_hba rules found (#2665, #5654).</summary>
+    internal enum PgHbaVerdict
+    {
+        /// <summary>Every admitted role has a live rule and no left-out role has one.</summary>
+        Ok,
+
+        /// <summary>An admitted role has no live rule.</summary>
+        AdmittedRoleMissing,
+
+        /// <summary>A role this start left out of the block (the alert sources line) still has a live rule.</summary>
+        LeftOutRoleLive,
+    }
+
+    /// <summary>
+    /// The exposed-store verdict from the counts <see cref="VerifyPgHbaAsync"/> reads (#5654): distinct admitted roles with a
+    /// live rule against how many were admitted, and distinct left-out roles with a live rule. A left-out role that is
+    /// live fails first, so a block reduced to no line at all (only <c>sources</c> configured, and the group has other
+    /// members) is checked for the line it must not have rather than passing on zero of zero. Pure.
+    /// </summary>
+    internal static PgHbaVerdict ExposedPgHbaVerdict(int admitted, long admittedLive, int leftOut, long leftOutLive)
+        => leftOut > 0 && leftOutLive > 0 ? PgHbaVerdict.LeftOutRoleLive
+            : admittedLive < admitted ? PgHbaVerdict.AdmittedRoleMissing
+            : PgHbaVerdict.Ok;
+
     /// <summary>
     /// Confirms the live pg_hba rules match intent via <c>pg_hba_file_rules</c>: no rule has a parse error,
     /// and a Darling hostssl rule exists for EVERY admitted network role when exposed / for none of them
     /// when loopback (#2665). A mismatch is logged critical (a reload delivers a SIGHUP that Postgres may
     /// then reject). Best-effort — a query failure degrades to a warning, not a throw.
     /// </summary>
-    private async Task VerifyPgHbaAsync(string ownerConnectionString, NetworkPlan plan, bool reloaded, CancellationToken cancellationToken)
+    private async Task VerifyPgHbaAsync(
+        string ownerConnectionString, NetworkPlan plan, IReadOnlyList<string> leftOut, bool reloaded, CancellationToken cancellationToken)
     {
         var exposed = plan.Mode == NetworkMode.Exposed;
         try
@@ -6399,7 +6523,26 @@ public sealed class DarlingManagedPostgres
                 command.Parameters.AddWithValue(plan.Roles!.Select(PgHbaRoleField).ToArray());
                 present = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
 
-                if (present < plan.Roles!.Count)
+                /* #5654: a role this start left out (the alert sources line, while the group has other members) must have
+                   no live rule. With every configured role left out the admitted count is zero, so this is the check that
+                   says something there. */
+                long leftOutLive = 0;
+                if (leftOut.Count > 0)
+                {
+                    command.Parameters[1].Value = leftOut.Select(PgHbaRoleField).ToArray();
+                    leftOutLive = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
+                }
+
+                var verdict = ExposedPgHbaVerdict(plan.Roles!.Count, present, leftOut.Count, leftOutLive);
+                if (verdict == PgHbaVerdict.LeftOutRoleLive)
+                {
+                    _logger.LogCritical(
+                        "pg_hba verification: a live 'hostssl {Db} <role> {Cidr}' rule still admits '{Roles}', which this start left out of the managed block — check {Path} for a line outside the markers",
+                        DatabaseName, plan.Cidr, string.Join(", ", leftOut), Path.Combine(_dataDirectory, "pg_hba.conf"));
+                    return;
+                }
+
+                if (verdict == PgHbaVerdict.AdmittedRoleMissing)
                 {
                     _logger.LogCritical(
                         "pg_hba verification: only {Present} of the {Expected} configured role(s) '{Roles}' have a live 'hostssl {Db} <role> {Cidr} scram-sha-256' rule after reload — the store is not accepting network clients as intended",
