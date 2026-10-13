@@ -122,7 +122,8 @@ jobs:
         env:
           UPDATE_BASELINES: ${{ github.event_name == 'workflow_dispatch' && inputs.update_baselines }}
         run: |
-          $update = if ($env:UPDATE_BASELINES -eq 'true') { @('-UpdateBaselines') } else { @() }
+          $update = @{ }
+          if ($env:UPDATE_BASELINES -eq 'true') { $update.UpdateBaselines = $true }
           ./tools/ui-smoke/run-ui-smoke.ps1 -PgBin "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin" -PgPort 5541 -WorkDir "$env:RUNNER_TEMP\ui-smoke" -NoBuild -Channel chrome @update
 
       - name: Logs tail
