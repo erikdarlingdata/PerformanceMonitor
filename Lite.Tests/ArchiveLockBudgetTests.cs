@@ -328,7 +328,7 @@ SELECT TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'Blocking
         Assert.Equal(0, counts[only]);
         var untouched = counts.Single(kv => kv.Key != only);
         Assert.Equal(untouched.Key == "collection_log" ? 50L : 20L, untouched.Value);
-        Assert.Single(ArchiveFiles().Where(f => f.EndsWith(".parquet", StringComparison.Ordinal)));
+        Assert.Single(ArchiveFiles(), f => f.EndsWith(".parquet", StringComparison.Ordinal));
     }
 
     [Fact]

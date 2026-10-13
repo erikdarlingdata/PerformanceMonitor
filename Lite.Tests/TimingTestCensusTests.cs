@@ -40,6 +40,7 @@ public sealed class TimingTestCensusTests
 
     private static readonly Dictionary<string, string> s_allowed = new(StringComparer.Ordinal)
     {
+        ["ArchiveLockBudgetTests.cs"] = OwnCollection + " (CollectionResetGate); the clock bounds are hang guards (20 s for a pass whose unbounded wait lasts as long as the held read), not a tight limit",
         ["CollectionResetGateTests.cs"] = OwnCollection + "; the 200 ms bound is a lower bound (the reset waited for the gate), which load only lengthens",
         ["DuckDbSentinelConnectionTests.cs"] = OwnCollection + " (CollectionResetGate)",
         ["PostCollectionCheckpointBudgetTests.cs"] = OwnCollection + " (CollectionResetGate)",
