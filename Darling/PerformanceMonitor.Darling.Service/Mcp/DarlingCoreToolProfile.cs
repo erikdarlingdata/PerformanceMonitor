@@ -85,8 +85,8 @@ internal static class DarlingCoreToolProfile
     /// it an agent on <c>/core</c> is told about tools that fail here as unknown.</summary>
     internal static string CoreNote =>
         $"## This is the /core endpoint\n\nIt serves {Closure.Count} of this server's tools: {string.Join(", ", EntryTools)}, " +
-        "plus every tool an analysis finding's next_tools can name. The tool count and the tool notes below " +
-        "describe the full set on /. A tool this endpoint does not serve fails as an unknown tool, even though " +
+        "plus every tool an analysis finding's next_tools can name. The tool count below describes the full " +
+        "set on /. A tool this endpoint does not serve fails as an unknown tool, even though " +
         "get_tool_guide can still describe it. Connect to / for the rest, including every tool that writes to " +
         "the monitoring store.";
 

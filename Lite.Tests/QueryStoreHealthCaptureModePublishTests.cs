@@ -231,6 +231,7 @@ public sealed class QueryStoreHealthCaptureModePublishTests : IClassFixture<Shar
             Assert.Contains(sentence, description, StringComparison.Ordinal);
         }
 
-        Assert.Contains("`query_capture_mode` ALL / AUTO / CUSTOM / NONE — ALL is the plan-churn factory; `wait_stats_capture_mode` ON / OFF; null = pre-rung row or pre-2017 engine", McpInstructions.Text, StringComparison.Ordinal);
+        /* #5779: the server instructions no longer repeat the capture modes; the description above is the one copy. */
+        Assert.DoesNotContain("`get_query_store_health` |", McpInstructions.Text, StringComparison.Ordinal);
     }
 }

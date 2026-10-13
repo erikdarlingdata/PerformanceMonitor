@@ -178,7 +178,7 @@ public sealed class PgWaitInstrumentDisclosureTests
         Assert.Contains("`extension_sampled`", text, StringComparison.Ordinal);
         Assert.Contains("`service_sampled`", text, StringComparison.Ordinal);
         Assert.Contains("Aurora native > the `pg_wait_sampling` extension > the service-side sampler", text, StringComparison.Ordinal);
-        Assert.Contains("FLOOR, not parity", text, StringComparison.Ordinal);
+        Assert.Contains("floor, not parity", text, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── the service-side seams ───────────────────────── */

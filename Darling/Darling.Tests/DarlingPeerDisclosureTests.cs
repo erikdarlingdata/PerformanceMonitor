@@ -448,7 +448,7 @@ public sealed class DarlingPeerDisclosureTests
 
         /* Placement is load-bearing: an agent must learn WHICH store it is talking to before it reads the
            tool census and starts planning. */
-        var readOnly = text.IndexOf("## CRITICAL: What this server can and cannot do", StringComparison.Ordinal);
+        var readOnly = text.IndexOf("## What this server can and cannot do", StringComparison.Ordinal);
         var coverage = text.IndexOf("## Fleet Coverage", StringComparison.Ordinal);
         var census = text.IndexOf("This server exposes", StringComparison.Ordinal);
         Assert.True(readOnly >= 0 && coverage > readOnly && census > coverage,

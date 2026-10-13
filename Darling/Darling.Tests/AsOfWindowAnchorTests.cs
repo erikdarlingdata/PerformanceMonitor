@@ -197,7 +197,7 @@ public sealed class AsOfWindowAnchorTests
     /// END, a bare date is 00:00 UTC (the start of that day), omitting it means now, and the span is never
     /// widened instead. The 200-character ceiling is the ruled parameter budget.</para>
     ///
-    /// <para>The reason the rule holds lives once, in each SKU's "Asking about a PAST window" section, which
+    /// <para>The reason the rule holds lives once, in each SKU's "Asking about a past window" section, which
     /// is pinned here too: Darling's through its compiled text, Lite's off its source, since this project does
     /// not load the Lite assembly.</para>
     /// </summary>
@@ -224,7 +224,7 @@ public sealed class AsOfWindowAnchorTests
         foreach (var (sku, instructions) in new[] { ("Darling", DarlingMcpInstructions.Text), ("Lite", lite) })
         {
             Assert.True(
-                instructions.Contains("do NOT substitute a wider `hours_back`: for an aggregate read a wider window is a DIFFERENT answer, not the same answer with more rows", StringComparison.Ordinal),
+                instructions.Contains("do not substitute a wider `hours_back`: for an aggregate read a wider window is a different answer, not the same answer with more rows", StringComparison.Ordinal),
                 $"{sku}'s server instructions no longer say why a wider hours_back is not an anchor; the shared as_of description relies on them for it (#3898)");
             Assert.True(
                 instructions.Contains("`2026-08-19` (midnight UTC)", StringComparison.Ordinal),

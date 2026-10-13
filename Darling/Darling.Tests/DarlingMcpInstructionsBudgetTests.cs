@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -46,10 +48,9 @@ public sealed class DarlingMcpInstructionsBudgetTests
 
     /// <summary>The defect this whole phase fixes: a "Tool Reference" table restates what a tool's own
     /// description already says, and nothing enforces that the copies agree (#3696, #3821). This fails if
-    /// either the old family headings or the old three-column table shape comes back wholesale — the one
-    /// deliberately-kept single-row "Notes" table (<c>get_query_store_health</c>'s capture-mode footnote,
-    /// <c>DarlingMcpConfigHistoryToolsTests</c>' pin) is two columns and carries no "Key Parameters" header, so
-    /// it does not trip this.</summary>
+    /// either the old family headings or the old three-column table shape comes back wholesale. #5779 also
+    /// dropped the last single-row "Notes" table (<c>get_query_store_health</c>'s capture modes, which its own
+    /// description carries), so no tool table of any shape is left.</summary>
     [Fact]
     public void Instructions_CarryNoPerFamilyToolReferenceTable()
     {
@@ -58,5 +59,26 @@ public sealed class DarlingMcpInstructionsBudgetTests
         Assert.DoesNotContain("### Core data-read tools", text, StringComparison.Ordinal);
         Assert.DoesNotContain("### Trend data-read tools", text, StringComparison.Ordinal);
         Assert.DoesNotContain("| Tool | Purpose | Key Parameters |", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("| Tool | Note |", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>The emphasis words the instructions and descriptions use instead of saying the thing plainly
+    /// (#5779), and the phrase that cites a measurement by the place it was taken. "CRITICAL" alone stays
+    /// legal: it is also a severity value some tools return.</summary>
+    internal static readonly Regex ShoutedEmphasis = new(@"CRITICAL( on |:| —| for )|IMPORTANT|on this fleet", RegexOptions.CultureInvariant);
+
+    /// <summary>#5779: neither the server instructions nor any served tool description shouts CRITICAL or
+    /// IMPORTANT, or says "on this fleet".</summary>
+    [Fact]
+    public void InstructionsAndToolDescriptions_UsePlainEmphasis()
+    {
+        Assert.DoesNotMatch(ShoutedEmphasis, DarlingMcpInstructions.Text);
+        Assert.DoesNotMatch(ShoutedEmphasis, DarlingCoreToolProfile.CoreNote);
+
+        var offenders = McpToolsListBudgetTests.Measure().Tools
+            .Where(t => t.Description is not null && ShoutedEmphasis.IsMatch(t.Description))
+            .Select(t => $"{t.Name}: \"{ShoutedEmphasis.Match(t.Description!).Value}\"")
+            .ToList();
+        Assert.True(offenders.Count == 0, "tool descriptions with shouted emphasis: " + string.Join("; ", offenders));
     }
 }

@@ -42,7 +42,7 @@ public sealed class McpToolGuideHeadsPlatformTests
         ("get_store_log", "capture denominator"),
         ("get_collector_cost", "no server_name"),
         ("get_collector_cost", "sql_ms is a DURATION"),
-        ("get_collector_cost", "CRITICAL on query_store"),
+        ("get_collector_cost", "On query_store, sql_ms includes the STORE's own probe/write"),
         ("get_collector_cost", "never read it as server-slowness"),
     ];
 

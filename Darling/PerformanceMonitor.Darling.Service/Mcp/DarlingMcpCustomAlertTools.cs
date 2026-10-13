@@ -311,7 +311,7 @@ public sealed class DarlingMcpCustomAlertTools
         "(and at which severity tier) right now - WITHOUT delivering a notification, writing history, or touching " +
         "any per-server streak state. Pass EXACTLY ONE of rule_id or definition (definition is validated but not " +
         "saved, same shape as validate_custom_alert_rule). Returns per-server {server, current_value, breaching, " +
-        "severity}. IMPORTANT: this is the INSTANTANEOUS predicate only - a real alert also requires the " +
+        "severity}. This is the INSTANTANEOUS predicate only - a real alert also requires the " +
         "condition to persist across the rule's hysteresis (breachSamples/clearSamples) and per-server streak, " +
         "which a one-shot cannot reproduce, so breaching:true means 'true right now', not 'has fired'. A null " +
         "current_value is no-data (an empty window, or a measure that is NULL for that server) and never breaches. " +

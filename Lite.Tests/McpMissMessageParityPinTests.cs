@@ -179,7 +179,7 @@ public sealed class McpMissMessageParityPinTests
         /* The instructions' miss-vocabulary paragraph (#2511). The engine-gap MESSAGE itself is built by
            CollectorEngineCapability and is byte-identical by construction rather than by pinning; what lives
            twice, and therefore belongs here, is the paragraph that teaches a caller how to read it. */
-        "`not_collected` means this server does not collect that at all — and when the reason is the ENGINE, the gap is PERMANENT",
+        "`not_collected` means this server does not collect that at all — and when the reason is the engine, the gap is permanent",
 
         /* The PostgreSQL half of the same paragraph (#2532). An agent over MCP has no tabs: it asks a
            read by name, so the instructions are the only place it can be told which family answers on
@@ -192,15 +192,15 @@ public sealed class McpMissMessageParityPinTests
            on — and specifically that it is re-derived per read, so doing what it asks is enough. An agent
            told to restart the monitoring service instead would be back at the defect the word exists to
            close. */
-        "`precondition` is the one that IS worth acting on: this server could have that data, the collector is running, and a setup step on the monitored server is in the way",
-        "It is re-derived on EVERY read rather than decided when the connection was made, so once somebody does the thing it asked for the next call answers with data",
+        "`precondition` is the one that is worth acting on: this server could have that data, the collector is running, and a setup step on the monitored server is in the way",
+        "It is re-derived on every read rather than decided when the connection was made, so once somebody does the thing it asked for the next call answers with data",
 
         /* #2559. The paragraph above USED to end "there is nothing to restart on the monitoring side" as a
            flat promise, and for connect-scoped preconditions that is false — the fact that gates them is read
            once at connect and cached for the connection's life, so an agent following the general case sends
            the user round a loop that never terminates. The correction has to be identical on both SKUs or one
            of them keeps teaching the wrong rule, which is exactly what this pin is for. */
-        "A few preconditions are the exception and SAY SO IN THEIR OWN MESSAGE: the fact that gates them is read once when the service connects to that server and cached for the connection's life",
+        "A few preconditions are the exception and say so in their own message: the fact that gates them is read once when the service connects to that server and cached for the connection's life",
         "telling somebody to retry a connect-scoped one without reconnecting sends them round a loop that never terminates",
 
         /* The confidence DEFINITION (#3538 A6). The confidence_basis STRING itself is built by the shared
@@ -219,7 +219,7 @@ public sealed class McpMissMessageParityPinTests
            get_analysis_facts description. A SKU whose description dropped it would send its callers back to
            analyze_server for gate metadata the facts read now carries. */
         "The anomaly detector runs on this read too, so the ANOMALY_* facts the full pass would score are here with the gate metadata the pass scored them on (deviation_sigma against fire_threshold, baseline_samples, baseline_tier, baseline_low_quality), including the ones that fired but stayed under the finding floor; the cost is the detector's baseline reads on top of the collector's.",
-        "Each finding's `confidence` is an EVIDENCE score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens — a lone uncorroborated symptom is 0.20, never 1.0) and `confidence_basis` says in words what it rests on",
+        "Each finding's `confidence` is an evidence score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens — a lone uncorroborated symptom is 0.20, never 1.0) and `confidence_basis` says in words what it rests on",
         "(an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`)",
 
         /* #3541 A9 / A13. The purged-day refusal (get_daily_summary), the filtered-miss sentences
@@ -261,7 +261,7 @@ public sealed class McpMissMessageParityPinTests
            twice is the sentence teaching an agent to branch on `status` rather than on prose, and a SKU that
            reworded it alone would teach one client to read a failure as text again. The example envelope is
            pinned byte-for-byte because it is the one place the shape is spelled out for a reader. */
-        "Every tool FAILURE — an exception the tool caught while reading — is the same envelope with `status` = `error`: `{\"status\":\"error\",\"message\":\"Error during <tool_name>: <what went wrong>\",\"hints\":{\"operation\":\"<tool_name>\"}}`.",
+        "Every tool failure — an exception the tool caught while reading — is the same envelope with `status` = `error`: `{\"status\":\"error\",\"message\":\"Error during <tool_name>: <what went wrong>\",\"hints\":{\"operation\":\"<tool_name>\"}}`.",
         "It is the fifth `status` word and the only one that is not an answer about the data: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry it or report it rather than reading it as an all-clear. Branch on `status`, not on the message text. Data results keep their own shape and never carry a top-level `message`, which is how the envelope is told apart from data without a schema.",
 
         /* #3739 — refusals one shape. The sentences that teach a caller the SIXTH status word: a refusal (a
@@ -272,7 +272,7 @@ public sealed class McpMissMessageParityPinTests
            Darling: "a handful of the PostgreSQL reads wrap that sentence in the same `error` envelope") because
            the two said different true things; now they say the same true thing and the whole paragraph is
            shared. The example envelope is pinned byte-for-byte for the reason the failure's is. */
-        "A REFUSAL — a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a required parameter that was not sent — is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{\"status\":\"invalid\",\"message\":\"<what was refused, and what is accepted>\",\"hints\":{\"parameter\":\"<parameter_name>\"}}`.",
+        "A refusal — a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a required parameter that was not sent — is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{\"status\":\"invalid\",\"message\":\"<what was refused, and what is accepted>\",\"hints\":{\"parameter\":\"<parameter_name>\"}}`.",
         "The read did not run because the request as given cannot be served; `hints.parameter` names the knob to change and the message says what it accepts, so fix that and call again — retrying it unchanged answers the same way. It is the word the write tools already use for a body that will not parse, and it means the same thing there. Six `status` words, then: four kinds of nothing, one failure (`error`: retry or report), one refusal (`invalid`: correct the call).",
     };
 

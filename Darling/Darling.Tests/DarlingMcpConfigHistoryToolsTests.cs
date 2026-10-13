@@ -294,10 +294,11 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
             Assert.Contains(sentence, darling, StringComparison.Ordinal);
         }
 
-        /* The instructions rows and the web catalogue row name the fields too, so a client reading either
-           index rather than the tool list learns the row grew. */
-        Assert.Contains("`get_query_store_health` | Per-database Query Store health (latest hourly snapshot) — actual vs desired state, readonly_reason decoded, storage vs cap, cleanup thresholds, and the two capture modes (`query_capture_mode` ALL / AUTO / CUSTOM / NONE — ALL is the plan-churn factory; `wait_stats_capture_mode` ON / OFF; null = pre-rung row or pre-2017 engine) |", DarlingMcpInstructions.Text, StringComparison.Ordinal);
-        Assert.Contains("`get_query_store_health` | Per-database Query Store health (latest hourly snapshot) — actual vs desired state, readonly_reason decoded, storage vs cap, cleanup thresholds, and the two capture modes (`query_capture_mode` ALL / AUTO / CUSTOM / NONE — ALL is the plan-churn factory; `wait_stats_capture_mode` ON / OFF; null = pre-rung row or pre-2017 engine) |", RepoFile.ReadRepoFile("Lite", "Mcp", "McpInstructions.cs"), StringComparison.Ordinal);
+        /* The web catalogue row names the fields too, so a client reading that index rather than the tool list
+           learns the row grew. The server instructions carry no per-tool row (#5779): the tool's own
+           description is the one copy, pinned above. */
+        Assert.DoesNotContain("`get_query_store_health` |", DarlingMcpInstructions.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("`get_query_store_health` |", RepoFile.ReadRepoFile("Lite", "Mcp", "McpInstructions.cs"), StringComparison.Ordinal);
         Assert.Contains("[\"get_query_store_health\"] = R(CatConfig, \"Per-database Query Store health: actual vs desired state, readonly_reason, storage vs cap, and the two capture modes (query_capture_mode ALL / AUTO / CUSTOM / NONE, wait_stats_capture_mode ON / OFF; null on a pre-rung row or a pre-2017 engine).\"", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"), StringComparison.Ordinal);
     }
 

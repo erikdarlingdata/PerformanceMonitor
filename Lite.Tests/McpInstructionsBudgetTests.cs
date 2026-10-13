@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitorLite.Mcp;
 using Xunit;
 
@@ -39,5 +41,27 @@ public sealed class McpInstructionsBudgetTests
         Assert.DoesNotContain("### Query Performance Tools", text, StringComparison.Ordinal);
         Assert.DoesNotContain("### Blocking & Deadlock Tools", text, StringComparison.Ordinal);
         Assert.DoesNotContain("| Tool | Purpose | Key Parameters |", text, StringComparison.Ordinal);
+        /* #5779: the last single-row table (get_query_store_health's capture modes) and the memory-pressure
+           section went too; those tools' own descriptions carry both. */
+        Assert.DoesNotContain("| Tool | Note |", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("## Memory pressure signals", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>Twin of Darling's <c>DarlingMcpInstructionsBudgetTests.ShoutedEmphasis</c> (#5779). "CRITICAL"
+    /// alone stays legal: it is also a severity value some tools return.</summary>
+    private static readonly Regex ShoutedEmphasis = new(@"CRITICAL( on |:| —| for )|IMPORTANT|on this fleet", RegexOptions.CultureInvariant);
+
+    /// <summary>#5779: neither the server instructions nor any served tool description shouts CRITICAL or
+    /// IMPORTANT, or says "on this fleet".</summary>
+    [Fact]
+    public void InstructionsAndToolDescriptions_UsePlainEmphasis()
+    {
+        Assert.DoesNotMatch(ShoutedEmphasis, McpInstructions.Text);
+
+        var offenders = global::Lite.Tests.McpToolsListBudgetTests.Measure().Tools
+            .Where(t => t.Description is not null && ShoutedEmphasis.IsMatch(t.Description))
+            .Select(t => $"{t.Name}: \"{ShoutedEmphasis.Match(t.Description!).Value}\"")
+            .ToList();
+        Assert.True(offenders.Count == 0, "tool descriptions with shouted emphasis: " + string.Join("; ", offenders));
     }
 }
