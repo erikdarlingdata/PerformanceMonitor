@@ -240,11 +240,11 @@ public sealed class DarlingTlsKeyFileScriptTests
 
     /// <summary>
     /// Older retained backups, made under a parent that grants Users read: the folder and the files in it end limited to SYSTEM
-    /// and Administrators (an explicit entry the file had is cleared too); a file with a second name is left alone and named in
-    /// the warning; a backup folder that is a junction is not followed, so what it points at keeps its permissions.
+    /// and Administrators (an explicit entry the file had is cleared too); a backup folder that is a junction is not followed,
+    /// so what it points at keeps its permissions.
     /// </summary>
     [Fact]
-    public void TheRetainedBackups_AreRestricted_ALinkIsNotFollowed_AndAHardLinkedFileIsNamed()
+    public void TheRetainedBackups_AreRestricted_AndALinkedBackupFolderIsNotFollowed()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -273,9 +273,6 @@ public sealed class DarlingTlsKeyFileScriptTests
                     $explicit.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'Allow')))
                 }
                 Set-Acl -LiteralPath (Join-Path $old 'darling.json') -AclObject $explicit
-                $outsideFile = Join-Path $base 'outside.txt'
-                Set-Content -LiteralPath $outsideFile -Value 'placeholder'
-                New-Item -ItemType HardLink -Path (Join-Path $old 'linked.txt') -Value $outsideFile | Out-Null
                 'beforePfxUsers=' + (Test-UsersAce (Join-Path $old 'web.pfx'))
 
                 $problem = Protect-DarlingRollbackBackupFolder $old -ResetChildren
@@ -308,8 +305,7 @@ public sealed class DarlingTlsKeyFileScriptTests
         var all = string.Join("\n", RunWindowsPowerShell(probe.ToString()));
 
         Assert.Contains("beforePfxUsers=True", all, StringComparison.Ordinal);
-        Assert.True(Regex.IsMatch(all, @"oldProblem=.*linked\.txt"), all);
-        Assert.DoesNotMatch(@"oldProblem=.*(web\.pfx|darling\.json)", all);
+        Assert.Contains("oldProblem=none", all, StringComparison.Ordinal);
         Assert.Contains("oldProtected=True", all, StringComparison.Ordinal);
         Assert.Contains("oldFolderSids=S-1-5-18,S-1-5-32-544", all, StringComparison.Ordinal);
         Assert.Contains("pfxUsers=False", all, StringComparison.Ordinal);
@@ -318,6 +314,171 @@ public sealed class DarlingTlsKeyFileScriptTests
         Assert.Matches(@"linkProblem=The rollback backup .* is a link", all);
         Assert.Contains("targetSame=True", all, StringComparison.Ordinal);
         Assert.Contains("secretSame=True", all, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A retained backup that holds a file with a second name is not changed at all: setting the folder's DACL would rewrite the
+    /// inherited entries of the file's other name too. The folder, the files in it and the other name keep their descriptors,
+    /// and the warning names the file and the commands to run by hand.
+    /// </summary>
+    [Fact]
+    public void ARetainedBackup_WithAHardLinkedFile_IsLeftUnchanged_AndTheOtherNameKeepsItsPermissions()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("DACLs and Windows PowerShell are Windows'.");
+            return;
+        }
+
+        var script = Script("upgrade-darling.ps1");
+        var probe = new StringBuilder();
+        foreach (var name in new[] { "Get-DarlingFileNameCount", "Protect-DarlingRollbackBackupFolder" })
+        {
+            probe.AppendLine(ExtractFunction(script, name, "upgrade-darling.ps1"));
+        }
+
+        probe.AppendLine(FixturePreamble);
+        probe.AppendLine("""
+            try {
+                $old = Join-Path $base '_rollback_old'
+                New-Item -ItemType Directory -Path $old | Out-Null
+                Set-Content -LiteralPath (Join-Path $old 'web.pfx') -Value 'placeholder'
+                $outsideFile = Join-Path $base 'outside.txt'
+                Set-Content -LiteralPath $outsideFile -Value 'placeholder'
+                New-Item -ItemType HardLink -Path (Join-Path $old 'linked.txt') -Value $outsideFile | Out-Null
+                $folderBefore = (Get-Acl -LiteralPath $old).Sddl
+                $pfxBefore = (Get-Acl -LiteralPath (Join-Path $old 'web.pfx')).Sddl
+                $outsideBefore = (Get-Acl -LiteralPath $outsideFile).Sddl
+                'outsideUsersBefore=' + ((Get-AceSids $outsideFile) -contains $users.Value)
+
+                $problem = Protect-DarlingRollbackBackupFolder $old -ResetChildren
+                'problem=' + $(if ($problem) { $problem } else { 'none' })
+                'folderSame=' + ((Get-Acl -LiteralPath $old).Sddl -eq $folderBefore)
+                'pfxSame=' + ((Get-Acl -LiteralPath (Join-Path $old 'web.pfx')).Sddl -eq $pfxBefore)
+                'outsideSame=' + ((Get-Acl -LiteralPath $outsideFile).Sddl -eq $outsideBefore)
+            }
+            finally { Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue }
+            """);
+
+        var all = string.Join("\n", RunWindowsPowerShell(probe.ToString()));
+
+        Assert.Contains("outsideUsersBefore=True", all, StringComparison.Ordinal);
+        Assert.Matches(@"problem=The rollback backup '.*_rollback_old' was not changed.*linked\.txt.*fsutil hardlink list.*icacls ", all);
+        Assert.Contains("folderSame=True", all, StringComparison.Ordinal);
+        Assert.Contains("pfxSame=True", all, StringComparison.Ordinal);
+        Assert.Contains("outsideSame=True", all, StringComparison.Ordinal);
+    }
+
+    /// <summary>A retained backup with a junction anywhere inside is not changed, and nothing the junction points at is touched.</summary>
+    [Fact]
+    public void ARetainedBackup_WithAJunctionInside_IsLeftUnchanged_AndTheTargetIsNotTouched()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("DACLs and Windows PowerShell are Windows'.");
+            return;
+        }
+
+        var script = Script("upgrade-darling.ps1");
+        var probe = new StringBuilder();
+        foreach (var name in new[] { "Get-DarlingFileNameCount", "Protect-DarlingRollbackBackupFolder" })
+        {
+            probe.AppendLine(ExtractFunction(script, name, "upgrade-darling.ps1"));
+        }
+
+        probe.AppendLine(FixturePreamble);
+        probe.AppendLine("""
+            $junction = $null
+            try {
+                $old = Join-Path $base '_rollback_old'
+                $inner = Join-Path $old 'inner'
+                New-Item -ItemType Directory -Path $inner | Out-Null
+                Set-Content -LiteralPath (Join-Path $old 'web.pfx') -Value 'placeholder'
+                $target = Join-Path $base 'target'
+                New-Item -ItemType Directory -Path $target | Out-Null
+                Set-Content -LiteralPath (Join-Path $target 'secret.txt') -Value 'placeholder'
+                $junction = Join-Path $inner 'pointer'
+                New-Item -ItemType Junction -Path $junction -Value $target | Out-Null
+                $folderBefore = (Get-Acl -LiteralPath $old).Sddl
+                $pfxBefore = (Get-Acl -LiteralPath (Join-Path $old 'web.pfx')).Sddl
+                $targetBefore = (Get-Acl -LiteralPath $target).Sddl
+                $secretBefore = (Get-Acl -LiteralPath (Join-Path $target 'secret.txt')).Sddl
+
+                $problem = Protect-DarlingRollbackBackupFolder $old -ResetChildren
+                'problem=' + $(if ($problem) { $problem } else { 'none' })
+                'folderSame=' + ((Get-Acl -LiteralPath $old).Sddl -eq $folderBefore)
+                'pfxSame=' + ((Get-Acl -LiteralPath (Join-Path $old 'web.pfx')).Sddl -eq $pfxBefore)
+                'targetSame=' + ((Get-Acl -LiteralPath $target).Sddl -eq $targetBefore)
+                'secretSame=' + ((Get-Acl -LiteralPath (Join-Path $target 'secret.txt')).Sddl -eq $secretBefore)
+            }
+            finally {
+                if ($junction -and (Test-Path -LiteralPath $junction)) { [System.IO.Directory]::Delete($junction) }
+                Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        var all = string.Join("\n", RunWindowsPowerShell(probe.ToString()));
+
+        Assert.Matches(@"problem=The rollback backup '.*_rollback_old' was not changed.*pointer' is a link", all);
+        Assert.Contains("folderSame=True", all, StringComparison.Ordinal);
+        Assert.Contains("pfxSame=True", all, StringComparison.Ordinal);
+        Assert.Contains("targetSame=True", all, StringComparison.Ordinal);
+        Assert.Contains("secretSame=True", all, StringComparison.Ordinal);
+    }
+
+    /// <summary>When the DACL of a new backup folder cannot be set (Set-Acl stubbed to fail), the function returns the problem and
+    /// leaves the folder as it was; the upgrade script stops with Fail before the first file is copied, and does not go on with a
+    /// warning.</summary>
+    [Fact]
+    public void ANewBackupFolder_ThatCannotBeRestricted_StopsTheUpgradeBeforeTheCopy()
+    {
+        var upgrade = Script("upgrade-darling.ps1");
+        var protect = upgrade.IndexOf("Protect-DarlingRollbackBackupFolder $backupPath\n", StringComparison.Ordinal);
+        var failAt = upgrade.IndexOf("Fail \"The new rollback backup folder could not be restricted", protect, StringComparison.Ordinal);
+        var copy = upgrade.IndexOf("Copy-Item -Destination $backupPath -Force", StringComparison.Ordinal);
+        Assert.True(protect > 0 && failAt > protect && copy > failAt, $"order: protect {protect}, fail {failAt}, copy {copy}");
+        Assert.Contains("if ($backupProblem) {", upgrade[protect..failAt], StringComparison.Ordinal);
+        Assert.DoesNotContain("Warn $backupProblem", upgrade, StringComparison.Ordinal);
+        Assert.Contains("NOTHING has been copied or overwritten", upgrade[failAt..copy], StringComparison.Ordinal);
+
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("DACLs and Windows PowerShell are Windows'.");
+            return;
+        }
+
+        var probe = new StringBuilder();
+        foreach (var name in new[] { "Get-DarlingFileNameCount", "Protect-DarlingRollbackBackupFolder" })
+        {
+            probe.AppendLine(ExtractFunction(upgrade, name, "upgrade-darling.ps1"));
+        }
+
+        probe.AppendLine(FixturePreamble);
+        probe.AppendLine("""
+            function Set-Acl { throw 'stubbed failure' }
+            try {
+                $backup = Join-Path $base '_rollback_new'
+                New-Item -ItemType Directory -Path $backup | Out-Null
+                $problem = Protect-DarlingRollbackBackupFolder $backup
+                'problem=' + $(if ($problem) { $problem } else { 'none' })
+                'protected=' + (Get-AccessSection $backup).AreAccessRulesProtected
+            }
+            finally { Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue }
+            """);
+
+        var all = string.Join("\n", RunWindowsPowerShell(probe.ToString()));
+
+        Assert.Matches(@"problem=The rollback backup '.*_rollback_new' could not be limited to SYSTEM and Administrators \(stubbed failure\)", all);
+        Assert.Contains("protected=False", all, StringComparison.Ordinal);
+    }
+
+    /// <summary>The per-file reset acts on a link itself and never on what it points to.</summary>
+    [Fact]
+    public void TheRetainedBackupReset_CarriesTheLinkSwitch()
+    {
+        var upgrade = Script("upgrade-darling.ps1");
+        Assert.Contains("& icacls.exe $child.FullName /reset /L 2>&1", upgrade, StringComparison.Ordinal);
+        Assert.DoesNotContain("/reset 2>&1", upgrade, StringComparison.Ordinal);
     }
 
     private static string ExtractFunction(string script, string name, string scriptName)

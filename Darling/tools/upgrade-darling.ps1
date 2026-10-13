@@ -921,12 +921,14 @@ function Invoke-DarlingTlsKeyFileHardening([string]$exe) {
 # Gives a rollback backup folder a DACL of its own (#5700): inheritance off, SYSTEM and Administrators with full control that the
 # files in it inherit, and nobody else. On a folder made for a new backup it is applied BEFORE the files are copied in, so every
 # copy is born with only that. On an older retained backup, -ResetChildren also clears every explicit entry on the files in it
-# so they inherit the folder's. A backup folder that is a link is not followed, and a file in it that is a link or has more than
-# one name is left alone and named. Each folder and file is read back, and one that still grants anyone else is a problem.
-# Returns $null when all of it held, otherwise one sentence to warn with. It never throws, so an upgrade is never failed over it.
+# so they inherit the folder's. A backup folder that is a link is not followed. A retained backup is walked first, and one that
+# holds a link anywhere in it, or a file with more than one name, is not changed at all and is named, because setting a folder's
+# DACL also rewrites the inherited entries of a file's other name. Each folder and file is read back, and one that still grants
+# anyone else is a problem. Returns $null when all of it held, otherwise one sentence to warn with. It never throws; the caller
+# decides what a problem means (the upgrade stops on a new backup folder it could not restrict, and warns on a retained one).
 function Protect-DarlingRollbackBackupFolder([string]$path, [switch]$ResetChildren) {
     $ErrorActionPreference = 'Continue'
-    $fix = "icacls `"$path`" /inheritance:r /grant:r `"*S-1-5-18:(OI)(CI)F`" `"*S-1-5-32-544:(OI)(CI)F`" /T"
+    $fix = "icacls `"$path`" /inheritance:r /grant:r `"*S-1-5-18:(OI)(CI)F`" `"*S-1-5-32-544:(OI)(CI)F`" /T /L"
     try {
         $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
         if ((-not $item.PSIsContainer) -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
@@ -942,6 +944,32 @@ function Protect-DarlingRollbackBackupFolder([string]$path, [switch]$ResetChildr
                 -not ($aceSid.Equals($systemSid) -or $aceSid.Equals($adminsSid))
             })
         }
+        # A retained backup is walked before anything in it is changed (links are listed, never entered). Setting the folder's DACL
+        # pushes the inherited entries onto every child, and onto the OTHER name of a file with more than one name, so a backup
+        # holding either is left exactly as it is and the warning says what to run.
+        if ($ResetChildren) {
+            $blocked = @()
+            $pending = New-Object System.Collections.Generic.Stack[string]
+            $pending.Push($path)
+            while ($pending.Count -gt 0) {
+                foreach ($entry in @(Get-ChildItem -LiteralPath $pending.Pop() -Force -ErrorAction Stop)) {
+                    if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $blocked += [pscustomobject]@{ Path = $entry.FullName; Name = $entry.Name; Link = $true } }
+                    elseif ($entry.PSIsContainer) { $pending.Push($entry.FullName) }
+                    elseif ((Get-DarlingFileNameCount $entry.FullName) -ne 1) { $blocked += [pscustomobject]@{ Path = $entry.FullName; Name = $entry.Name; Link = $false } }
+                }
+            }
+            if ($blocked.Count -gt 0) {
+                $first = $blocked[0]
+                $more = if ($blocked.Count -gt 1) { " (and $($blocked.Count - 1) more like it)" } else { '' }
+                if ($first.Link) {
+                    $why = "'$($first.Path)' is a link$more, and setting the folder's permissions could reach what it points to. To see where it points: fsutil reparsepoint query `"$($first.Path)`". Delete the link, then run this script again, or restrict the backup by hand: $fix"
+                }
+                else {
+                    $why = "'$($first.Path)' has more than one name (or its names could not be counted)$more, and setting the folder's permissions would also change the other name's permissions. To list the other names: fsutil hardlink list `"$($first.Path)`". Delete this name if it is not part of the backup (that leaves the other name as it is), then run this script again, or restrict the backup by hand: $fix"
+                }
+                return "The rollback backup '$path' was not changed, so it may still be readable by accounts other than SYSTEM and Administrators: $why"
+            }
+        }
         # The files are reset to inherit BEFORE the folder's DACL is set, so the folder's protected DACL then reaches them as it is set.
         $reset = @()
         $left = @()
@@ -951,9 +979,9 @@ function Protect-DarlingRollbackBackupFolder([string]$path, [switch]$ResetChildr
                     $left += $child.Name
                     continue
                 }
-                # icacls /reset: the file's own entries are dropped and it inherits again. Its exit code is judged, with the error
+                # icacls /reset /L: the file's own entries are dropped and it inherits again, on the file itself and never on a link's target. Its exit code is judged, with the error
                 # preference local to this function, because Windows PowerShell 5.1 turns redirected native stderr into a stop.
-                & icacls.exe $child.FullName /reset 2>&1 | Out-Null
+                & icacls.exe $child.FullName /reset /L 2>&1 | Out-Null
                 if ($LASTEXITCODE -ne 0) { $left += $child.Name; continue }
                 $reset += $child
             }
@@ -3391,8 +3419,13 @@ else {
         New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
         # The folder is restricted to SYSTEM and Administrators BEFORE anything is copied into it (#5700), so every copy is born
         # with only that DACL instead of the install root's inherited one, and no file in it is ever readable by another account.
+        # A folder that could not be restricted is never copied into: the upgrade stops here, with nothing copied or overwritten.
         $backupProblem = Protect-DarlingRollbackBackupFolder $backupPath
-        if ($backupProblem) { Warn $backupProblem }
+        if ($backupProblem) {
+            # The empty folder is removed too, so a re-run does not take it for a backup that was taken.
+            try { [System.IO.Directory]::Delete($backupPath) } catch { $null = $_ }
+            Fail "The new rollback backup folder could not be restricted to SYSTEM and Administrators, so no file was copied into it. The service is STOPPED and NOTHING has been copied or overwritten, so the install is intact: start it with 'Start-Service ''$serviceName''', or fix the cause and re-run from an elevated prompt. Cause: $backupProblem"
+        }
         # FILES only, not subdirectories - the shape the documented procedure has always used, and the
         # reason a backup is ~120 MB rather than ~1 GB. pg-runtime is the bundled PostgreSQL (extracted on
         # first run, and hundreds of megabytes of it), and viewer\ / wwwroot\ / runtimes\ all come back
