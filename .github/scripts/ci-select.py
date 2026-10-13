@@ -34,6 +34,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -709,7 +710,8 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                *, event: str = "pull_request", keep_full: "tuple[str, ...] | list[str]" = KEEP_FULL,
                doc_patterns: "tuple[str, ...] | list[str]" = DOC_PATTERNS,
                now: "datetime.datetime | None" = None, max_age_days: "float | None" = MAP_MAX_AGE_DAYS,
-               max_drift: int = MAP_MAX_DRIFT, base_ref: str = "") -> dict:
+               max_drift: int = MAP_MAX_DRIFT, base_ref: str = "",
+               named: "dict[str, set[str]] | None" = None) -> dict:
     """Which test classes a pull request runs, from a class-to-file map. Pure: no file, git or clock access
     (`now` is the clock; `max_age_days=None` turns the age check off, for a replay of old runs).
 
@@ -724,11 +726,14 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
 
     Arguments: `changed` is the pull request's files; `drift` the files changed between the map's commit and the
     merge base (None when they could not be computed); `discovered` is `{suite: {Class: {"Key=Value", ...}}}` as
-    scan_classes() returns it, which is how a class the map has never seen is found.
+    scan_classes() returns it, which is how a class the map has never seen is found. `named` is `{suite: {Class, ...}}`:
+    the test classes whose source names a symbol the pull request declares or changes (symbol_classes(), tight tokens
+    only, #5776); None or empty adds nothing.
 
     A class is selected when it carries Stage=Guard, its own file changed, it covers a changed file, a text pattern
-    of it matches a changed file, it reads the whole tree and any non-documentation file changed, or the map has
-    never seen it. A file changed since the map counts as changed too (it may have grown new call edges).
+    of it matches a changed file, it reads the whole tree and any non-documentation file changed, the map has
+    never seen it, or its source names a changed symbol (`named`). The last reason only adds classes, so a selection
+    never shrinks for it. A file changed since the map counts as changed too (it may have grown new call edges).
     A keep-full file forces FULL only when the pull request's own change holds it: one that changed on dev since
     the map goes through the class links like any other drifted file.
 
@@ -849,6 +854,13 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                 reasons.setdefault(cls, "guard stage")
             if GATE_TRAIT in traits:
                 reasons.setdefault(cls, "gated on an environment the map shards lack")
+        # #5776: a class whose source names a symbol the change declares or edits runs too. The map links a class to
+        # the files it RAN; a class that only reads a source file as text, or reflects over a catalog, has no such
+        # link, and a small pull request whose files the map knows would leave it out. Last, with setdefault, so a
+        # class keeps the reason it already had and the selection only grows.
+        for cls in sorted((named or {}).get(suite, ())):
+            if cls in mapped or cls in found:
+                reasons.setdefault(cls, "names a changed symbol")
         selected[suite] = sorted(reasons)
         why[suite] = {c: reasons[c] for c in sorted(reasons)}
         seconds[suite] = round(sum(_seconds(classes[suite][c]) for c in reasons if c in mapped), 3)
@@ -1081,6 +1093,339 @@ def shadow_row(selection: "dict | None", failed: "dict[str, set[str]]", seen: "d
 # CLI.
 # ---------------------------------------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------------------------------------
+# Changed symbols: the test classes whose source names what a change declares or edits (#5776).
+# ---------------------------------------------------------------------------------------------------------
+#
+# Most test classes that went red on a lane's pull request after it passed the lane's own runs named a symbol the
+# change declared or edited: a source scan that greps for `_fleetGateStats?.RecordSlot(`, a pin on a constant's
+# value, a census over a method's callers. The class-to-file map does not link them (they read the file as text or
+# reflect over it), and on a big change its coverage answer picks 80% or more of every class, which no lane runs.
+# `local-classes` lists the classes that name a changed symbol, most specific first, for a lane to run before it
+# pushes; map_select() takes the same answer (tight tokens only) as one more reason to select a class.
+#
+# Tokens. TIGHT: the names a changed .cs/.js/.xaml line declares (class, record, struct, enum, interface, const,
+# method, property, field), the member a C# hunk sits in (its hunk header, with git's csharp driver), and SQL object
+# names (v_* anywhere, CREATE/ALTER TABLE/VIEW/FUNCTION/PROCEDURE in .sql). WIDE adds every identifier of 6 or more
+# characters on a changed line. A token taken only from test files is dropped (a test's own names select nothing
+# else), and so is a stop word or a name shorter than 4 characters. A token named in more than `cap` test files says
+# too little to choose by: it is dropped and printed as NOISY. A class declared in a changed test file is listed too.
+#
+# What it cannot see: a class that names no changed symbol at all (it reflects over the whole tool catalog or the
+# collector set); those carry Stage=Guard and run in the guard stage. Matching is per test FILE and case-sensitive on
+# whole words, so every class of a file that names the token is listed.
+
+SYMBOL_EXTENSIONS = (".cs", ".sql", ".js", ".xaml")
+SYMBOL_SUITES = ("darling", "lite")
+SYMBOL_CAP = 25
+SYMBOL_MIN_LEN = 4
+WIDE_MIN_LEN = 6
+LOCAL_CLASS_LIMIT = 300
+RIG_LITERAL = '"DARLING_TEST_PG"'  # the quoted variable name a live class reads to skip without a store
+
+_CS_KEYWORDS = frozenset("""
+abstract as base bool break byte case catch char checked class const continue decimal default delegate do double else
+enum event explicit extern false finally fixed float for foreach goto if implicit in int interface internal is lock
+long namespace new null object operator out override params private protected public readonly ref return sbyte sealed
+short sizeof stackalloc static string struct switch this throw true try typeof uint ulong unchecked unsafe ushort using
+virtual void volatile while add alias and ascending async await by descending dynamic equals from get global group
+init into join let managed nameof nint not notnull nuint on or orderby partial record remove required scoped select set
+unmanaged value var when where with yield function export import const let undefined
+""".split())
+_TEST_API_WORDS = frozenset("""
+Assert Equal NotEqual True False Null NotNull Contains DoesNotContain Empty NotEmpty Single Throws ThrowsAsync ThrowsAny
+ThrowsAnyAsync Same NotSame InRange IsType IsAssignableFrom StartsWith EndsWith Matches DoesNotMatch Fact Theory
+InlineData MemberData ClassData Trait Skip SkipUnless Collection CollectionDefinition IClassFixture ICollectionFixture
+IAsyncLifetime IDisposable IAsyncDisposable Dispose DisposeAsync InitializeAsync Xunit ITestOutputHelper Fixture
+TestContext Task ValueTask CancellationToken ToString Equals GetHashCode Length Count Any All First Select Where
+ToList ToArray String Exception Console Regex
+""".split())
+_COMMON_WORDS = frozenset("""
+Server Servers Collector Collectors Query Queries Name Names Value Values Type Data Result Results Text Message Error
+Errors Status Time Start Stop Read Write Item Items List Keys Source Target Path File Files Line Lines Store Service
+Options Settings Config Connection Command Database Table Index Logger Test Tests Main Helper Model State Info Context
+Default Event Events Window View Builder Reader Writer Parse Format Create Update Delete Execute Build Check Close Open
+""".split())
+STOP_WORDS = _CS_KEYWORDS | _TEST_API_WORDS | _COMMON_WORDS
+
+_MODIFIERS = (r"(?:public|private|protected|internal|static|readonly|const|async|override|virtual|sealed|abstract|"
+              r"partial|new|extern|unsafe|volatile|required|file|event|implicit|explicit)")
+_DECL_TYPE = re.compile(r"\b(?:class|record|struct|enum|interface)\s+(?:class\s+|struct\s+)?([A-Za-z_]\w*)")
+_DECL_CONST = re.compile(r"\bconst\s+[\w<>\[\]?,.\s]+?\s([A-Za-z_]\w*)\s*=")
+_DECL_MEMBER = re.compile(r"^\s*(?:\[[^\]]*\]\s*)*(?:" + _MODIFIERS + r"\s+)+[\w<>\[\]?,.()\s]*?([A-Za-z_]\w*)\s*"
+                          r"(?:<[^>]*>\s*)?(?:\(|\{|=>|=|;)")
+# A method without a modifier (`Task<int> ReadAsync(`): the first word must be a type, not a statement keyword, and
+# the line must not end a statement (`return Foo(x);` calls, it does not declare).
+_DECL_BARE = re.compile(r"^\s*([\w.]+(?:<[^>]*>)?(?:\[\])?\??)\s+([A-Za-z_]\w*)\s*(?:<[^>]*>\s*)?\((?!.*;\s*$)")
+_BARE_NOT_TYPE = frozenset("return await new throw else yield case goto using in is as not and or when var typeof "
+                           "nameof if while for foreach switch lock catch".split())
+_JS_DECL = re.compile(r"\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)|\b(?:const|let|var|class)\s+([A-Za-z_$][\w$]*)"
+                      r"|^\s*(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{|([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?function")
+_XAML_DECL = re.compile(r'x:Name="(\w+)"|x:Class="[\w.]*?(\w+)"|\{Binding\s+(?:Path=)?(\w+)')
+_SQL_OBJECT = re.compile(r"\b(?:CREATE|ALTER)\s+(?:OR\s+(?:REPLACE|ALTER)\s+)?(?:MATERIALIZED\s+)?"
+                         r"(?:TABLE|VIEW|FUNCTION|PROCEDURE|PROC)\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w\[\]\".]+)", re.I)
+_SQL_VIEW = re.compile(r"\bv_\w+")
+_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@ ?(.*)$")
+
+
+def _git(root: str, *args: str) -> "str | None":
+    try:
+        return subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=120, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def symbol_diff_text(root: str, *revs: str) -> "str | None":
+    """`git diff -U0 --no-renames <revs>` over the symbol file types, plus the .cs part a second time for its hunk
+    headers. The repository's .gitattributes sets no diff driver, so a C# hunk header is the last column-0 line
+    above it: the type of a file-scoped namespace. The first pass uses git's built-in csharp driver, whose header is
+    the member the hunk sits in; the second keeps the default, so both the member and its type are read. None when
+    git fails."""
+    fd, attrs = tempfile.mkstemp(suffix=".gitattributes")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("*.cs diff=csharp\n")
+        members = _git(root, "-c", f"core.attributesFile={attrs}", "diff", "-U0", "--no-renames", *revs, "--",
+                       *[f"*{e}" for e in SYMBOL_EXTENSIONS])
+    finally:
+        os.remove(attrs)
+    types = _git(root, "diff", "-U0", "--no-renames", *revs, "--", "*.cs")
+    if members is None or types is None:
+        return None
+    headers = [ln for ln in types.split("\n") if ln.startswith(("diff --git ", "--- ", "+++ ", "@@ "))]
+    return members + "\n" + "\n".join(headers)
+
+
+def symbol_diff(root: str, base: str, untracked: bool = True) -> "tuple[str, str, list[str]] | None":
+    """(merge base, symbol_diff_text() of the WORKING TREE against it, every changed path) for `base`, so it answers
+    before a commit too. With `untracked`, a new file git does not track yet joins as all added lines. None when git
+    fails."""
+    mb = _git(root, "merge-base", base, "HEAD")
+    if mb is None or not mb.strip():
+        return None
+    mb = mb.strip()
+    text = symbol_diff_text(root, mb)
+    names = _git(root, "diff", "--name-only", "--no-renames", mb)
+    if text is None or names is None:
+        return None
+    paths = [ln.strip() for ln in names.split("\n") if ln.strip()]
+    if untracked:
+        extra = _git(root, "ls-files", "--others", "--exclude-standard") or ""
+        for rel in (ln.strip() for ln in extra.split("\n")):
+            if not rel or rel in paths:
+                continue
+            paths.append(rel)
+            if not rel.endswith(SYMBOL_EXTENSIONS):
+                continue
+            try:
+                with open(os.path.join(root, rel), encoding="utf-8-sig", errors="replace") as fh:
+                    body = fh.read().split("\n")
+            except OSError:
+                continue
+            text += f"diff --git a/{rel} b/{rel}\n--- /dev/null\n+++ b/{rel}\n@@ -0,0 +1,{len(body)} @@\n"
+            text += "".join(f"+{ln}\n" for ln in body)
+    return mb, text, paths
+
+
+def _declared(path: str, line: str) -> set[str]:
+    """The names a line of `path` declares (the TIGHT tokens of one line)."""
+    out = set(_SQL_VIEW.findall(line))
+    if path.endswith(".sql"):
+        out.update(m.split(".")[-1].strip('[]"') for m in _SQL_OBJECT.findall(line))
+    elif path.endswith(".js"):
+        out.update(g for m in _JS_DECL.findall(line) for g in m if g)
+    elif path.endswith(".xaml"):
+        out.update(g for m in _XAML_DECL.findall(line) for g in m if g)
+    elif path.endswith(".cs"):
+        out.update(_DECL_TYPE.findall(line))
+        out.update(_DECL_CONST.findall(line))
+        m = _DECL_MEMBER.match(line)
+        if m:
+            out.add(m.group(1))
+        m = _DECL_BARE.match(line)
+        if m and m.group(1) not in _BARE_NOT_TYPE:
+            out.add(m.group(2))
+    return out
+
+
+def changed_symbols(diff_text: str, wide: bool = False) -> "tuple[dict[str, set[str]], set[str]]":
+    """({token: {paths it came from}}, {changed test files}) from symbol_diff()'s text. Removed lines count as
+    changed (a renamed or deleted name is what a stale test still names). Tokens from test files only are dropped."""
+    found: dict[str, set[str]] = {}
+    test_files: set[str] = set()
+    path = ""
+    for raw in diff_text.split("\n"):
+        line = raw.rstrip("\r")
+        if line.startswith("diff --git "):
+            path = ""
+            continue
+        if line.startswith("--- "):
+            if line[4:] != "/dev/null":
+                path = line[6:] if line.startswith("--- a/") else line[4:]
+            continue
+        if line.startswith("+++ "):
+            if line[4:] != "/dev/null":
+                path = line[6:] if line.startswith("+++ b/") else line[4:]
+            if path and _TEST_PROJECT_FILE.search(path):
+                test_files.add(path)
+            continue
+        if not path:
+            continue
+        hunk = _HUNK.match(line)
+        if hunk:
+            words = _declared(path, hunk.group(1))
+        elif line[:1] in ("+", "-"):
+            body = line[1:]
+            words = _declared(path, body)
+            if wide:
+                words |= {w for w in _WORD.findall(body) if len(w) >= WIDE_MIN_LEN}
+        else:
+            continue
+        for w in words:
+            found.setdefault(w, set()).add(path)
+    tokens = {w: paths for w, paths in found.items()
+              if len(w) >= SYMBOL_MIN_LEN and w not in STOP_WORDS
+              and any(not _TEST_PROJECT_FILE.search(p) for p in paths)}
+    return tokens, test_files
+
+
+def test_file_index(root: str = ROOT) -> "list[tuple[str, str, list[str], bool, set[str]]]":
+    """(suite, repo path, [class names], needs a PostgreSQL rig, {words}) for every test source file of SYMBOL_SUITES."""
+    out = []
+    for suite in SYMBOL_SUITES:
+        base = os.path.join(root, SUITE_DIRS[suite])
+        for dp, dn, fn in os.walk(base):
+            dn[:] = [d for d in dn if d not in ("bin", "obj")]
+            for f in fn:
+                if not f.endswith(".cs"):
+                    continue
+                path = os.path.join(dp, f)
+                try:
+                    with open(path, encoding="utf-8-sig", errors="replace") as fh:
+                        text = fh.read()
+                except OSError:
+                    continue
+                classes = [m.group(1) for m in (_CLASS_DECL.match(ln) for ln in text.split("\n")) if m]
+                if classes:
+                    out.append((suite, os.path.relpath(path, root).replace(os.sep, "/"), classes,
+                                RIG_LITERAL in text, set(_WORD.findall(text))))
+    return out
+
+
+def symbol_matches(tokens: "dict[str, set[str]]", test_files: set[str], index: list, cap: int = SYMBOL_CAP) -> dict:
+    """Match tokens to test classes. Returns {"hits": {(suite, Class): {"tokens": set, "rig": bool, "own": bool}},
+    "counts": {token: test files naming it}, "noisy": {token: count}} (a token over `cap` files is noisy and unused)."""
+    counts = {t: 0 for t in tokens}
+    for _suite, _rel, _classes, _rig, words in index:
+        for t in tokens.keys() & words:
+            counts[t] += 1
+    noisy = {t: n for t, n in counts.items() if n > cap}
+    usable = {t for t, n in counts.items() if 0 < n <= cap}
+    hits: dict[tuple[str, str], dict] = {}
+    for suite, rel, classes, rig, words in index:
+        named = usable & words
+        own = rel in test_files
+        if not named and not own:
+            continue
+        for cls in classes:
+            h = hits.setdefault((suite, cls), {"tokens": set(), "rig": False, "own": False})
+            h["tokens"] |= named
+            h["rig"] = h["rig"] or rig
+            h["own"] = h["own"] or own
+    return {"hits": hits, "counts": counts, "noisy": noisy}
+
+
+def ordered_hits(match: dict) -> "list[tuple[str, str, dict]]":
+    """Most specific first: a changed test file's own classes, then by the fewest test files that name the class's
+    rarest token, then by more tokens, then by name."""
+    counts = match["counts"]
+
+    def key(item):
+        (suite, cls), h = item
+        rarest = min((counts[t] for t in h["tokens"]), default=10 ** 9)
+        return (0 if h["own"] else 1, rarest, -len(h["tokens"]), suite, cls)
+
+    return [(s, c, h) for (s, c), h in sorted(match["hits"].items(), key=key)]
+
+
+def symbol_classes(root: str, base: str, cap: int = SYMBOL_CAP) -> "dict[str, set[str]] | None":
+    """map_select()'s `named`: {suite: {Class, ...}} whose source names a TIGHT token of the change against `base`
+    (tracked files only). None when git cannot say, so the selection is what it was without this reason."""
+    diff = symbol_diff(root, base, untracked=False)
+    if diff is None:
+        return None
+    tokens, _tests = changed_symbols(diff[1])
+    match = symbol_matches(tokens, set(), test_file_index(root), cap)
+    out: dict[str, set[str]] = {}
+    for (suite, cls), h in match["hits"].items():
+        if h["tokens"]:
+            out.setdefault(suite, set()).add(cls)
+    return out
+
+
+def _class_args(names: list[str]) -> list[str]:
+    """`-class` argument lines for an MTP test executable, 40 classes a line."""
+    return [" ".join(f'-class "*.{c}"' for c in names[i:i + 40]) for i in range(0, len(names), 40)]
+
+
+def local_classes(root: str, base: str, map_path: "str | None" = None, wide: bool = False, cap: int = SYMBOL_CAP,
+                  limit: int = LOCAL_CLASS_LIMIT) -> "tuple[int, list[str]]":
+    """The `local-classes` report as (exit code, lines). See the section comment above."""
+    diff = symbol_diff(root, base)
+    if diff is None:
+        return 2, [f"local-classes: git could not diff the working tree against the merge base of {base} and HEAD"]
+    mb, text, paths = diff
+    tokens, test_files = changed_symbols(text, wide)
+    match = symbol_matches(tokens, test_files, test_file_index(root), cap)
+    rows = ordered_hits(match)
+    usable = sum(1 for t, n in match["counts"].items() if 0 < n <= cap)
+    lines = [f"local-classes: merge base {mb[:10]} of {base}, {len(paths)} changed files, "
+             f"{len(tokens)} {'wide' if wide else 'tight'} tokens ({usable} named in 1 to {cap} test files), "
+             f"{len(rows)} classes"]
+    for t in sorted(match["noisy"], key=lambda t: (-match["noisy"][t], t)):
+        lines.append(f"NOISY {t} {match['noisy'][t]}")
+    if len(rows) > limit:
+        lines.append(f"{len(rows)} classes: CI will run FULL; run the first {limit} below")
+        rows = rows[:limit]
+    if not rows:
+        lines.append("no test class names a changed symbol")
+    for suite, cls, h in rows:
+        why = ", ".join(sorted(h["tokens"], key=lambda t: (match["counts"][t], t)))
+        if h["own"]:
+            why = "own file changed" + (f"; {why}" if why else "")
+        lines.append(f"{suite} {cls} {why}" + ("  needs rig" if h["rig"] else ""))
+    for suite in SYMBOL_SUITES:
+        for rig in (False, True):
+            names = [c for s, c, h in rows if s == suite and h["rig"] == rig]
+            label = f"{suite} (needs rig, DARLING_TEST_PG)" if rig else suite
+            for args in _class_args(names):
+                lines.append(f"RUN {label}: {args}")
+    if map_path:
+        test_map = load_map(map_path)
+        sha = test_map.get("sha") if isinstance(test_map, dict) else None
+        drift = git_drift(sha, mb, root) if isinstance(sha, str) else None
+        discovered = scan_classes(root)
+        if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
+            discovered = {s: v for s, v in discovered.items() if s in test_map["classes"]}
+        named: dict[str, set[str]] = {}
+        for (suite, cls), h in match["hits"].items():
+            if h["tokens"]:
+                named.setdefault(suite, set()).add(cls)
+        sel = map_select(test_map, paths, drift, discovered, named=named, **selection_args(Rules()))
+        lines.append(f"MAP coverage answer ({map_path}):")
+        if sel["full"]:
+            lines.append(f"MAP FULL: {sel['reason']}")
+        for suite in sorted(sel["selected"]):
+            reasons: dict[str, int] = {}
+            for r in sel["why"][suite].values():
+                reasons[r] = reasons.get(r, 0) + 1
+            lines.append(f"MAP {suite}: {len(sel['selected'][suite])} of {sel['total'][suite]} classes ("
+                         + ", ".join(f"{k} {v}" for k, v in sorted(reasons.items())) + ")")
+    return 0, lines
+
+
 def _bool(s: str) -> bool:
     return s.strip().lower() == "true"
 
@@ -1139,6 +1484,13 @@ def main(argv: list[str]) -> int:
     ms.add_argument("--summary", help="also write the shadow step-summary markdown to this file")
     ms.add_argument("files", nargs="*")
 
+    lc = sub.add_parser("local-classes", help="the test classes whose source names a symbol the change declares or edits (#5776)")
+    lc.add_argument("--base", default="origin/dev", help="diff the working tree against the merge base of this and HEAD")
+    lc.add_argument("--map", help="also print this test map's coverage answer for the changed files (JSON, or .gz)")
+    lc.add_argument("--wide", action="store_true", help="also match every identifier of 6+ characters on a changed line")
+    lc.add_argument("--cap", type=int, default=SYMBOL_CAP, help="drop (and print as NOISY) a token named in more test files")
+    lc.add_argument("--root", default=ROOT, help="the repository (default: this one)")
+
     mk = sub.add_parser("map-keep", help="the classes a shard keeps from a selection; FULL when it cannot be trusted (workflow step)")
     mk.add_argument("--selection", required=True, help="the JSON map-select --out wrote; missing or unreadable counts as FULL")
     mk.add_argument("--suite", required=True, choices=("darling", "lite"))
@@ -1179,8 +1531,10 @@ def main(argv: list[str]) -> int:
             # The map holds the suites the nightly instruments (darling, lite). The deprecated suites in the tree
             # are not in it and no shard runs them as a test-map class, so they are not "new classes".
             discovered = {s: v for s, v in discovered.items() if s in test_map["classes"]}
+        # #5776: with the base, the classes that name a changed symbol are one more reason (it only adds classes).
+        named = symbol_classes(args.root, args.base) if args.base else None
         result = map_select(test_map, files, drift, discovered, event=args.event, base_ref=args.base_ref,
-                            **selection_args(Rules()))
+                            named=named, **selection_args(Rules()))
         if result["full"]:
             print(f"::notice::test map: running everything ({result['reason']})")
         print(json.dumps(result, indent=1))
@@ -1191,6 +1545,10 @@ def main(argv: list[str]) -> int:
             with open(args.summary, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(shadow_summary(result))
         return 0
+    if args.cmd == "local-classes":
+        code, lines = local_classes(args.root, args.base, args.map, args.wide, args.cap)
+        print("\n".join(lines))
+        return code
     if args.cmd == "map-keep":
         # Line 1 is `SELECTED <n>` (then one class name per line) or `FULL <reason>`; the exit code is always 0, so a
         # caller that cannot read the answer runs everything.
