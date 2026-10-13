@@ -271,14 +271,18 @@ public static class ComposeCompiler
 
         /* #5738: the Default Trace readers (MCP get_default_trace_events, the viewer, Lite) collapse stored copies of one event by
            s_defaultTracePartitionKey, so a measure over default_trace_events counts a copy once too. Same shape as the Query Store raw
-           dedupe below: one ROW_NUMBER per key inside the window, newest collection first. Every key column is a partition column, so
+           dedupe below: one ROW_NUMBER per key inside the window, EARLIEST collection first (first wins, #5742): the same rule as the stored-copy
+           dedupe in Lite (StoredEventCopies keeps the first batch that stored each identity), and the survivor's collection_time is
+           the x position every time-bucketed panel gives the event, so the earliest copy, the one closest to the event's real
+           time, keeps it in its own bucket rather than moving it to the hour a state reset re-stored it. The id breaks a tie
+           between copies stored in one batch. (The Query Store dedupe below ranks DESC because its rows are cumulative snapshots.) Every key column is a partition column, so
            the outer server scope and dimension filters (event_name, database_name, object_name, login_name, server) push into this
            subquery, below the WindowAgg, and no partition restriction is needed. */
         if (string.Equals(sourceTable, DefaultTraceTable, StringComparison.Ordinal))
         {
             return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY "
                 + string.Join(", ", s_defaultTracePartitionKey)
-                + $" ORDER BY {timeColumn} DESC, default_trace_event_id DESC) AS dte_rn "
+                + $" ORDER BY {timeColumn} ASC, default_trace_event_id ASC) AS dte_rn "
                 + $"FROM {PgSchemaGenerator.CollectSchema}.{DefaultTraceTable} "
                 + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam}"
                 + ") AS dte_ranked WHERE dte_rn = 1)";

@@ -66,7 +66,7 @@ public sealed class ComposeDefaultTraceDedupeLiveTests
         var sql = CompileSql(Plan("count", null), Context(null));
         Assert.Contains(
             "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY " + string.Join(", ", ComposeCompiler.s_defaultTracePartitionKey)
-            + " ORDER BY collection_time DESC, default_trace_event_id DESC) AS dte_rn "
+            + " ORDER BY collection_time ASC, default_trace_event_id ASC) AS dte_rn "
             + "FROM collect.default_trace_events WHERE collection_time >= $1 AND collection_time <= $2) AS dte_ranked WHERE dte_rn = 1)",
             sql, StringComparison.Ordinal);
     }
@@ -117,6 +117,36 @@ public sealed class ComposeDefaultTraceDedupeLiveTests
         /* the same event on another server is its own event: the fleet counts server A's 2 plus server B's 1 */
         var fleet = await RunAsync(connection, Plan("count", "[{\"dimension\":\"event_name\",\"op\":\"eq\",\"value\":\"Object:Altered\"}]"), Context(null), ct);
         Assert.Equal(3m, decimal.Parse(Assert.Single(fleet)[^1], CultureInfo.InvariantCulture));
+    }
+
+    [Fact]
+    public async Task HourlyPanel_PutsAStoredCopyInTheHourOfItsFirstCollection()
+    {
+        var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5742 default trace first-copy live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerA, NameA, ct);
+
+        /* One event stored twice: first at hour 1, then again at hour 4 after a collector state reset re-stored the backlog.
+           The LATER copy is planted first, so it holds the smaller default_trace_event_id: the survivor is chosen by
+           collection_time, not by the id tiebreak. */
+        var e = T0.AddMinutes(10);
+        await PlantAsync(connection, ServerA, NameA, T0.AddHours(3).AddMinutes(5), e, "Object:Altered", 1000, 10, "ALTER TABLE t", ct);
+        await PlantAsync(connection, ServerA, NameA, T0.AddMinutes(11), e, "Object:Altered", 1000, 10, "ALTER TABLE t", ct);
+
+        const string json = "{\"source\":\"default_trace_events\",\"measure\":\"deftrace_duration_us\",\"aggregate\":\"count\",\"timeBucket\":\"hour\",\"viz\":\"line\"}";
+        var (plan, error) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(json)!, Array.Empty<string>());
+        Assert.True(error is null, error);
+        var rows = await RunAsync(connection, plan!, Context(new[] { NameA }), ct);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(T0, DateTime.Parse(row[0], CultureInfo.InvariantCulture, DateTimeStyles.None));
+        Assert.Equal(1m, decimal.Parse(row[^1], CultureInfo.InvariantCulture));
     }
 
     [Fact]
