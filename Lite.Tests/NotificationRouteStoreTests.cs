@@ -36,8 +36,7 @@ public sealed class NotificationRouteStoreTests : IDisposable
     private readonly string _tempDir;
     private readonly string _dbPath;
     private readonly DuckDbInitializer _initializer;
-    private readonly Dictionary<string, string> _secrets = new();
-    private readonly object _secretsLock = new();
+    private readonly FakeRouteSecrets _secrets = new();
     private IReadOnlyCollection<int> _knownServers = new[] { 7101, 7102, 7103 };
     private readonly DuckDbNotificationRouteStore _store;
 
@@ -51,8 +50,7 @@ public sealed class NotificationRouteStoreTests : IDisposable
         _store = new DuckDbNotificationRouteStore(
             _initializer,
             () => _knownServers,
-            key => { lock (_secretsLock) { return _secrets.TryGetValue(key, out var v) ? v : ""; } },
-            (key, value) => { lock (_secretsLock) { if (string.IsNullOrWhiteSpace(value)) _secrets.Remove(key); else _secrets[key] = value; } return true; });
+            _secrets.Access);
     }
 
     public void Dispose()
@@ -165,7 +163,7 @@ public sealed class NotificationRouteStoreTests : IDisposable
         Assert.Equal("Blocking", updated.MetricMatch);
         Assert.Equal("", updated.SlackUrl);
         Assert.False(updated.Enabled);
-        Assert.False(_secrets.ContainsKey(DuckDbNotificationRouteStore.SecretKey(id1, "Slack")), "clearing a channel removes its credential");
+        Assert.False(_secrets.Has(id1, "Slack"), "clearing a channel removes its credential");
 
         Assert.True(await _store.SetEnabledAsync(id1, true));
         Assert.True((await _store.GetAsync(id1))!.Enabled);
@@ -194,7 +192,7 @@ public sealed class NotificationRouteStoreTests : IDisposable
             while (await reader.ReadAsync()) columns.Add(reader.GetString(0));
         }
 
-        Assert.Equal(10, columns.Count);
+        Assert.Equal(14, columns.Count);
         var needles = new[] { "r3-secret", "R3PAGERDUTY", "hooks.slack", "https://", "hook/abc123" };
         foreach (var column in columns)
         {
@@ -206,8 +204,8 @@ public sealed class NotificationRouteStoreTests : IDisposable
         }
 
         /* And the destinations did land in the credential seam, under the documented keys. */
-        Assert.Equal(TeamsUrl + "/v2", _secrets[$"NotificationRoute_{id}_Teams"]);
-        Assert.Equal(PagerKey, _secrets[$"NotificationRoute_{id}_PagerDuty"]);
+        Assert.Equal(TeamsUrl + "/v2", _secrets.ValueOf(id, "Teams"));
+        Assert.Equal(PagerKey, _secrets.ValueOf(id, "PagerDuty"));
     }
 
     [Fact]
@@ -219,14 +217,15 @@ public sealed class NotificationRouteStoreTests : IDisposable
 
         Assert.True(await _store.DeleteAsync(doomed));
 
-        Assert.Equal(new[] { $"NotificationRoute_{keep}_Teams" }, _secrets.Keys.ToArray());
+        Assert.Single(_secrets.Keys);
+        Assert.True(_secrets.Has(keep, "Teams"));
     }
 
     [Fact]
     public async Task ACredentialThatCannotBeRead_TurnsThatChannelOff_InsteadOfInheriting()
     {
         var id = await _store.InsertAsync(Route("High CPU", TeamsUrl, server: 7101, slack: SlackUrl));
-        _secrets.Remove(DuckDbNotificationRouteStore.SecretKey(id, "Teams"));
+        _secrets.Lose(id, "Teams");
 
         var route = (await _store.GetAsync(id))!;
 

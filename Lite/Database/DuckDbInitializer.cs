@@ -2959,6 +2959,10 @@ public partial class DuckDbInitializer : IDisposable
             {
                 _logger?.LogWarning("Migration to v69 encountered an error (non-fatal): {Error}", ex.Message);
             }
+
+            /* #5775: a table that an earlier build of this unreleased step already created has no generation columns; the
+               shared list adds them (a fresh table has them from the CREATE). */
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(69));
         }
     }
 
@@ -2989,6 +2993,12 @@ public partial class DuckDbInitializer : IDisposable
         (65, "ag_database_replica_states", "group_id", "VARCHAR"),
         (66, "query_store_stats", "interval_end_time_utc", "TIMESTAMP"),
         (68, "config_mute_rules", "client_app_pattern", "VARCHAR"),
+        /* #5775: the generation token of each route channel's Credential Manager key. Version 69 is unreleased, so these ride
+           with its table rather than a new step; a file that already ran the first v69 gets them from this list on its next start. */
+        (69, "notification_routes", "teams_secret_gen", "VARCHAR"),
+        (69, "notification_routes", "slack_secret_gen", "VARCHAR"),
+        (69, "notification_routes", "generic_secret_gen", "VARCHAR"),
+        (69, "notification_routes", "pagerduty_secret_gen", "VARCHAR"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

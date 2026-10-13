@@ -24,9 +24,10 @@ namespace PerformanceMonitorLite.Tests;
 /// #5750 security review, round 1, for Lite's route secrets. Credential Manager can refuse a value (the wrapper stops at 512
 /// characters) and the old store ignored that: <c>UpdateAsync</c> committed the row (new scope, has-value flag set) and then
 /// saved secrets through a delegate that swallowed the result, so a route moved to another server with a long URL kept sending
-/// to the OLD URL while the dialog reported success. These pin the new order (secrets first, then the row, previous
-/// credentials put back on any failure), the inline message, the delete and reused-id cases, and the rule that an unreadable
-/// saved destination keeps its flag unless the user removes it.
+/// to the OLD URL while the dialog reported success. These pin the order (#5775: new keys under a new generation first, then
+/// the row, with the new keys removed on any failure), the inline message, the delete and reused-id cases, and the rule that
+/// an unreadable saved destination keeps its flag unless the user removes it. The crash and fault cases are in
+/// <see cref="NotificationRouteSecretGenerationTests"/>.
 /// </summary>
 [Collection("app-alert-statics")]
 public sealed class NotificationRouteSecretSaveTests : IDisposable
@@ -38,13 +39,8 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
     private readonly string _tempDir;
     private readonly string _dbPath;
     private readonly DuckDbInitializer _initializer;
-    private readonly Dictionary<string, string> _secrets = new();
+    private readonly FakeRouteSecrets _secrets = new();
     private readonly DuckDbNotificationRouteStore _store;
-
-    /* Return false to refuse a save, like CredentialStore.SaveCredential does. */
-    private Func<string, string, bool> _gate = (_, _) => true;
-    /* What Credential Manager actually keeps for a value, for the read-back check. */
-    private Func<string, string> _keeps = v => v;
 
     public NotificationRouteSecretSaveTests()
     {
@@ -56,25 +52,7 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
         _store = new DuckDbNotificationRouteStore(
             _initializer,
             () => new[] { 7101, 7102 },
-            key => _secrets.TryGetValue(key, out var v) ? v : "",
-            (key, value) =>
-            {
-                if (!_gate(key, value))
-                {
-                    return false;
-                }
-
-                if (string.IsNullOrWhiteSpace(value))
-                {
-                    _secrets.Remove(key);
-                }
-                else
-                {
-                    _secrets[key] = _keeps(value);
-                }
-
-                return true;
-            });
+            _secrets.Access);
     }
 
     public void Dispose()
@@ -89,10 +67,8 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
     private static NotificationRoute Route(string match, int? server = null, string teams = "", string slack = "") =>
         new(0, match, teams, slack, "", "", "", true) { ScopeServerId = server };
 
-    private static string Key(int id, string channel) => DuckDbNotificationRouteStore.SecretKey(id, channel);
-
     /// <summary>A refusal like the wrapper's: nothing over the limit is stored.</summary>
-    private void RefuseOverLimit() => _gate = (_, value) => value.Length <= StorableLength;
+    private void RefuseOverLimit() => _secrets.WriteGate = (_, value) => value.Length <= StorableLength;
 
     private async Task<bool> FlagAsync(int id, string column)
     {
@@ -121,14 +97,15 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
         var after = (await _store.GetAsync(id))!;
         Assert.Equal(7101, after.ScopeServerId);
         Assert.Equal(OldTeams, after.TeamsUrl);
-        Assert.Equal(OldTeams, _secrets[Key(id, "Teams")]);
+        Assert.Equal(OldTeams, _secrets.ValueOf(id, "Teams"));
+        Assert.Single(_secrets.Keys);
     }
 
     [Fact]
     public async Task ARefusedValueUnderTheLimit_GetsNoLengthHint()
     {
         var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams));
-        _gate = (_, value) => value.Length == 0 || value == OldTeams;
+        _secrets.WriteGate = (_, value) => value == OldTeams;
         var saved = (await _store.GetAsync(id))!;
 
         var ex = await Assert.ThrowsAsync<RouteSecretException>(() =>
@@ -139,10 +116,10 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
     }
 
     [Fact]
-    public async Task ASecondChannelThatFails_PutsTheFirstChannelBack()
+    public async Task ASecondChannelThatFails_RemovesTheFirstChannelsNewKey_AndKeepsBothOldOnes()
     {
         var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams, slack: OldSlack));
-        _gate = (key, value) => !key.EndsWith("_Slack", StringComparison.Ordinal) || value.Length == 0 || value == OldSlack;
+        _secrets.WriteGate = (key, value) => !key.Contains("_Slack_", StringComparison.Ordinal) || value == OldSlack;
         var saved = (await _store.GetAsync(id))!;
 
         await Assert.ThrowsAsync<RouteSecretException>(() => _store.UpdateAsync(saved with
@@ -152,22 +129,23 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
             SlackUrl = "https://hooks.slack.second-secret.test/new"
         }));
 
-        _gate = (_, _) => true;
+        _secrets.WriteGate = (_, _) => true;
         var after = (await _store.GetAsync(id))!;
         Assert.Equal(7101, after.ScopeServerId);
         Assert.Equal(OldTeams, after.TeamsUrl);
         Assert.Equal(OldSlack, after.SlackUrl);
+        Assert.Equal(2, _secrets.Count);
     }
 
     [Fact]
     public async Task AValueThatReadsBackDifferently_IsRefused()
     {
-        _keeps = v => v.Length > 20 ? v[..20] : v;
+        _secrets.Keeps = v => v.Length > 20 ? v[..20] : v;
 
         await Assert.ThrowsAsync<RouteSecretException>(() => _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams)));
 
         Assert.Empty(await _store.ListAsync());
-        Assert.Empty(_secrets);
+        Assert.Equal(0, _secrets.Count);
     }
 
     [Fact]
@@ -181,14 +159,14 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
 
         Assert.Contains("512 characters", ex.Message);
         Assert.Empty(await _store.ListAsync());
-        Assert.Empty(_secrets);
+        Assert.Equal(0, _secrets.Count);
     }
 
     [Fact]
     public async Task ADeleteWhoseCredentialWillNotGo_StillDeletesTheRow()
     {
         var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams));
-        _gate = (_, value) => value.Length > 0;
+        _secrets.DeleteGate = _ => false;
 
         Assert.True(await _store.DeleteAsync(id));
 
@@ -199,24 +177,25 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
     public async Task AReusedRouteId_DoesNotInheritACredentialLeftByAFailedDelete()
     {
         var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams, slack: OldSlack));
-        _gate = (_, value) => value.Length > 0;
+        _secrets.DeleteGate = _ => false;
         await _store.DeleteAsync(id);
-        Assert.True(_secrets.ContainsKey(Key(id, "Slack")), "precondition: the failed delete left the credential");
-        _gate = (_, _) => true;
+        Assert.True(_secrets.Has(id, "Slack"), "precondition: the failed delete left the credential");
+        _secrets.DeleteGate = _ => true;
 
         var reused = await _store.InsertAsync(Route("Blocking", server: 7102, teams: "https://teams.fresh-secret.test/h"));
 
+        /* The leftover is under another generation than anything the new row points at, so it is never read (#5775). */
         Assert.Equal(id, reused);
-        Assert.False(_secrets.ContainsKey(Key(reused, "Slack")), "the new route does not set Slack, so no Slack credential may remain");
         Assert.False(await FlagAsync(reused, "slack_set"));
         Assert.Equal("", (await _store.GetAsync(reused))!.SlackUrl);
+        Assert.Equal("https://teams.fresh-secret.test/h", (await _store.GetAsync(reused))!.TeamsUrl);
     }
 
     [Fact]
     public async Task AnUnreadableDestinationLeftAlone_KeepsItsFlag_AndTheChannelStaysOff()
     {
         var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams, slack: OldSlack));
-        _secrets.Remove(Key(id, "Teams"));
+        _secrets.Lose(id, "Teams");
         var loaded = (await _store.GetAsync(id))!;
         Assert.True(loaded.IsOffFor(NotificationRouter.TeamsChannel));
 
@@ -234,7 +213,7 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
     public async Task AnUnreadableDestinationTheUserRemoves_ClearsItsFlag()
     {
         var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams));
-        _secrets.Remove(Key(id, "Teams"));
+        _secrets.Lose(id, "Teams");
         var loaded = (await _store.GetAsync(id))!;
 
         Assert.True(await _store.UpdateAsync(loaded with { OffChannels = null }));

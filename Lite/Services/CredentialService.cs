@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System.Collections.Generic;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Common;
 
@@ -66,4 +67,11 @@ public class CredentialService
     /// </summary>
     public bool UpdateCredential(string serverId, string username, string password)
         => _store.UpdateCredential(serverId, username, password);
+
+    /// <summary>
+    /// Lists the keys of the stored credentials that start with <paramref name="keyPrefix"/>, without the
+    /// <c>PerformanceMonitorLite_</c> prefix (#5775). Empty when nothing matches or the list cannot be read.
+    /// </summary>
+    public IReadOnlyList<string> ListKeys(string keyPrefix)
+        => _store.ListKeys(keyPrefix);
 }

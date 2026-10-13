@@ -254,6 +254,10 @@ CREATE TABLE IF NOT EXISTS server_tag_map (
        the PagerDuty key are secrets and live in Windows Credential Manager keyed by route id and channel, exactly
        like the app-wide webhook URLs; the *_set columns only record that one was saved, so a credential that cannot
        be read later turns that channel OFF for the route instead of falling through to the app-wide URL (#5366).
+       The *_secret_gen columns (#5775) hold, per channel, the random generation token of the Credential Manager key the
+       row reads (NotificationRoute_<id>_<Channel>_<gen>). A save writes the new value under a new token first and moves the
+       row to it with one UPDATE, so a crash between the two leaves the row and the key it points at in agreement; a key no
+       row points at is swept at start. NULL with the flag set means the destination is unreadable.
        smtp_recipients is a plain list of addresses, not a secret, and is stored as the app-wide recipients are
        (a plain setting). Ids are assigned in C# (max + 1) under the write lock, like server_tags.
        Two CHECKs, which DuckDB enforces at INSERT/UPDATE: at most one scope, and the '*' (every metric) match is legal
@@ -271,6 +275,10 @@ CREATE TABLE IF NOT EXISTS notification_routes (
     pagerduty_set BOOLEAN NOT NULL DEFAULT false,
     smtp_recipients VARCHAR NOT NULL DEFAULT '',
     enabled BOOLEAN NOT NULL DEFAULT true,
+    teams_secret_gen VARCHAR,
+    slack_secret_gen VARCHAR,
+    generic_secret_gen VARCHAR,
+    pagerduty_secret_gen VARCHAR,
     CHECK (scope_server_id IS NULL OR scope_tag_id IS NULL),
     CHECK (metric_match <> '*' OR scope_server_id IS NOT NULL OR scope_tag_id IS NOT NULL)
 )";

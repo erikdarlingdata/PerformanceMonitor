@@ -33,23 +33,33 @@ public sealed record NotificationRouteScopeInputs(
 /// the destinations kept in Windows Credential Manager.
 ///
 /// <para><b>Secrets (ruling 6).</b> A route's Teams, Slack and Generic URLs and its PagerDuty key never reach DuckDB.
-/// Each goes to Credential Manager under <c>NotificationRoute_&lt;routeId&gt;_&lt;Teams|Slack|Generic|PagerDuty&gt;</c>
-/// (Lite's <c>CredentialService</c> prefixes it with <c>PerformanceMonitorLite_</c>), through two delegates (a
-/// read, and a save that reports whether it worked), so a test passes an in-memory pair and never touches the real Credential
-/// Manager. A save is checked: the old credential is deleted, the new one written and read back, and a refusal throws
-/// <see cref="RouteSecretException"/> with the route unchanged (secrets are written before the row, and put back if the row
-/// write fails). The table keeps a has-value flag per channel: a
-/// flag that says "saved" with no readable credential turns that channel OFF for the route
-/// (<see cref="NotificationRoute.OffChannels"/>, #5366) rather than falling through to the app-wide URL, which would send
-/// the alert somewhere it was not configured to go. SMTP recipients are not secrets and are stored in the table, the way
-/// the app-wide recipients are a plain setting. Generic headers and the body template stay app-wide (ruling 7).</para>
+/// Each goes to Credential Manager under <c>NotificationRoute_&lt;routeId&gt;_&lt;Teams|Slack|Generic|PagerDuty&gt;_&lt;gen&gt;</c>
+/// (Lite's <c>CredentialService</c> prefixes it with <c>PerformanceMonitorLite_</c>), through a <see cref="RouteSecretAccess"/>
+/// (read, write, delete, list), so a test passes an in-memory fake and never touches the real Credential Manager.</para>
+///
+/// <para><b>Generations (#5775).</b> The row cannot be changed in the same step as Credential Manager, so the two are tied
+/// together by a token, not by order of writes. Each channel has a nullable <c>*_secret_gen</c> column holding the token
+/// of the key the row currently reads; every write of a value goes to a NEW random token, and only the row's one UPDATE
+/// moves the route to it. A crash at any point therefore leaves the row and the key it points at in agreement: before the
+/// UPDATE the old row reads the old keys, after it the new row reads the new keys, and whichever keys the row does not
+/// point at are harmless leftovers that <see cref="SweepOrphanedSecretsAsync"/> removes at start. A random token also means
+/// a reused route id can never inherit a leftover key. The order is: (1) write each changed value under a new token and
+/// read it back; (2) one UPDATE (or INSERT) of scope, flags and tokens; (3) delete the old tokens' keys, leniently. A channel
+/// the user left alone because it was unreadable is never copied: it keeps its token and its (missing) key.</para>
+///
+/// <para>The table keeps a has-value flag per channel: a flag that says "saved" with no readable credential at its token turns
+/// that channel OFF for the route (<see cref="NotificationRoute.OffChannels"/>, #5366) rather than falling through to the
+/// app-wide URL, which would send the alert somewhere it was not configured to go. SMTP recipients are not secrets and are
+/// stored in the table, the way the app-wide recipients are a plain setting. Generic headers and the body template stay
+/// app-wide (ruling 7).</para>
 ///
 /// <para><b>Validation is in the store as well as in the table's CHECKs</b> (DuckDB enforces both): a route with both
 /// scopes, or the <c>*</c> match without a scope, is refused with an <see cref="ArgumentException"/> before the
 /// statement runs, so the caller gets a message instead of a constraint error.</para>
 ///
-/// <para><b>Locks.</b> Modeled on <see cref="DuckDbMuteRuleStore"/>: every write takes the write lock and refuses while a
-/// restore of the table is pending, every read takes the read lock. The rule and the measurements are in #2463 and on
+/// <para><b>Locks.</b> Modeled on <see cref="DuckDbMuteRuleStore"/>: every write takes the write lock (and holds it across
+/// the secret writes and the sweep, so none can interleave) and refuses while a restore of the table is pending, every read
+/// takes the read lock, the secret reads of a load included. The rule and the measurements are in #2463 and on
 /// <c>DuckDbInitializer.s_dbLock</c>. Ids are max + 1 under that lock, like <c>server_tags</c>.</para>
 ///
 /// <para><b>Reload.</b> Every write here calls <see cref="NotificationRouteCache.Invalidate"/>; so do the tag writers and
@@ -59,6 +69,9 @@ public sealed class DuckDbNotificationRouteStore
 {
     internal const string TableName = "notification_routes";
 
+    /// <summary>Every Credential Manager key this store writes starts with this.</summary>
+    internal const string KeyPrefix = "NotificationRoute_";
+
     private static readonly string[] s_channels =
     [
         NotificationRouter.TeamsChannel,
@@ -67,59 +80,120 @@ public sealed class DuckDbNotificationRouteStore
         NotificationRouter.PagerDutyChannel
     ];
 
+    private const string RowColumns =
+        "route_id, metric_match, scope_server_id, scope_tag_id, teams_set, slack_set, generic_set, pagerduty_set, "
+        + "smtp_recipients, enabled, teams_secret_gen, slack_secret_gen, generic_secret_gen, pagerduty_secret_gen";
+
     private readonly DuckDbInitializer _dbInitializer;
     private readonly Func<IReadOnlyCollection<int>> _knownServerIds;
-    private readonly Func<string, string> _getSecret;
-    private readonly Func<string, string, bool> _saveSecret;
+    private readonly RouteSecretAccess _secrets;
+
+    /// <summary>Test seam (#5775): runs just before the one statement that writes the row, inside the try that decides whether
+    /// a throw means "not committed" or "committed". Null in the app.</summary>
+    internal Action? BeforeRowWriteForTests { get; set; }
+
+    /// <summary>Test seam (#5775): runs just after that statement, in the same try. Null in the app.</summary>
+    internal Action? AfterRowWriteForTests { get; set; }
 
     /* Route and channel pairs already warned about (#5750): a saved destination Credential Manager cannot give back is logged
-       once per process per route and channel, not on every reload. The key is the credential name, which carries the route id
-       and the channel and never the destination. The one store instance lives for the process. */
+       once per process per route, channel and token, not on every reload. The key is the credential name, which carries the
+       route id, the channel and the token and never the destination. The one store instance lives for the process. */
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _warnedUnreadable = new();
 
     /// <param name="dbInitializer">The Lite database.</param>
     /// <param name="knownServerIds">The configured servers' hash ids (the ids the alert path and server_tag_map use).</param>
-    /// <param name="getSecret">Reads a credential by key; empty when absent or unreadable (<c>App.GetWebhookUrl</c> in the app).</param>
-    /// <param name="saveSecret">Saves a credential by key and says whether it worked; an empty value deletes it. The app wires it
-    /// straight to <c>CredentialService</c> in <c>MainWindow</c>, not through <c>App.SaveWebhookUrl</c>, which swallows the result
-    /// (that method and the 512-character limit are #5772). Required, so nothing falls back to a path that ignores a failed save.</param>
+    /// <param name="secrets">Where the destinations live: <see cref="RouteSecretAccess.CredentialManager"/> in the app. Required,
+    /// so nothing falls back to a path that ignores a failed save (that path and the 512-character limit are #5772).</param>
     public DuckDbNotificationRouteStore(
         DuckDbInitializer dbInitializer,
         Func<IReadOnlyCollection<int>> knownServerIds,
-        Func<string, string> getSecret,
-        Func<string, string, bool> saveSecret)
+        RouteSecretAccess secrets)
     {
         _dbInitializer = dbInitializer;
         _knownServerIds = knownServerIds;
-        _getSecret = getSecret;
-        _saveSecret = saveSecret;
+        _secrets = secrets;
     }
 
-    /// <summary>The save delegate the app uses: straight to <see cref="CredentialService"/>, so a refused save is reported (an
-    /// empty value deletes). <c>App.SaveWebhookUrl</c> ignores the result, and it and the 512-character limit are #5772.</summary>
-    public static bool SaveToCredentialManager(string key, string value)
+    /// <summary>The Credential Manager key for one destination of one route at one generation (#5775).</summary>
+    public static string SecretKey(int routeId, string channel, string gen) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{KeyPrefix}{routeId}_{channel}_{gen}");
+
+    /// <summary>A fresh generation token. Random, so a reused route id can never collide with a leftover key.</summary>
+    private static string NewGeneration() => Guid.NewGuid().ToString("N");
+
+    /// <summary>Removes every key this store wrote that no row points at (#5775): keys a crash left between writing a new token
+    /// and committing the row, and old tokens whose delete failed. Run once after the database is initialized (the constructor
+    /// cannot: the file is not open yet). It holds the write lock for the whole pass so a save cannot interleave, does nothing
+    /// when a restore of the table is pending (the rows are not back yet, and every key would look orphaned) or when the rows
+    /// cannot be read, and logs only the count. Returns how many keys it removed.</summary>
+    public async Task<int> SweepOrphanedSecretsAsync()
     {
-        var credentials = new CredentialService();
-        return string.IsNullOrEmpty(value)
-            ? credentials.DeleteCredential(key)
-            : credentials.SaveCredential(key, "webhook", value);
-    }
+        try
+        {
+            using var writeLock = _dbInitializer.AcquireWriteLock();
+            PreservedTableRestore.ThrowIfRestorePending(_dbInitializer.ArchivePath, TableName);
 
-    /// <summary>The Credential Manager key for one destination of one route.</summary>
-    public static string SecretKey(int routeId, string channel) =>
-        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"NotificationRoute_{routeId}_{channel}");
+            var keys = _secrets.ListKeys(KeyPrefix);
+            if (keys.Count == 0)
+            {
+                return 0;
+            }
+
+            using var connection = _dbInitializer.CreateConnection();
+            await connection.OpenAsync();
+            var pointedAt = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var row in await ReadAllRowsAsync(connection))
+            {
+                for (var i = 0; i < s_channels.Length; i++)
+                {
+                    if (row.Set[i] && row.Gens[i] is { Length: > 0 } gen)
+                    {
+                        pointedAt.Add(SecretKey(row.RouteId, s_channels[i], gen));
+                    }
+                }
+            }
+
+            var removed = 0;
+            var failed = 0;
+            foreach (var key in keys)
+            {
+                if (pointedAt.Contains(key))
+                {
+                    continue;
+                }
+
+                if (SafeDelete(key))
+                {
+                    removed++;
+                }
+                else
+                {
+                    failed++;
+                }
+            }
+
+            if (removed > 0 || failed > 0)
+            {
+                AppLogger.Info("NotificationRoutes", $"Removed {removed} leftover notification route credential(s) from Credential Manager"
+                    + (failed > 0 ? $"; {failed} could not be removed and are tried again at the next start." : "."));
+            }
+
+            return removed;
+        }
+        catch (Exception ex)
+        {
+            /* Nothing is deleted when the rows could not be read: an unreadable table is never taken for "no routes". */
+            AppLogger.Warn("NotificationRoutes", $"The leftover notification route credential check was skipped: {ex.Message}");
+            return 0;
+        }
+    }
 
     /// <summary>Every route with its destinations read from Credential Manager and its scope expanded. Callers must not
     /// log the URLs. A tag-read failure is logged and leaves only the tag-scoped routes unexpanded, so they match nothing;
     /// server-scoped and fleet-wide routes still work, as in Darling's loader (#5750).</summary>
     public async Task<IReadOnlyList<NotificationRoute>> ListAsync(CancellationToken cancellationToken = default)
     {
-        var rows = await ReadRowsAsync(cancellationToken);
-        var routes = new List<NotificationRoute>(rows.Count);
-        foreach (var row in rows)
-        {
-            routes.Add(Hydrate(row));
-        }
+        var routes = await ReadRoutesAsync(cancellationToken);
 
         NotificationRouteScopeInputs inputs;
         try
@@ -221,7 +295,10 @@ public sealed class DuckDbNotificationRouteStore
             serverTags.ToDictionary(kv => kv.Key, kv => (IReadOnlyCollection<int>)kv.Value));
     }
 
-    /// <summary>Saves a new route and returns its id (the route's own <see cref="NotificationRoute.RouteId"/> is ignored).</summary>
+    /// <summary>Saves a new route and returns its id (the route's own <see cref="NotificationRoute.RouteId"/> is ignored).
+    /// Order (#5775): each destination goes to Credential Manager under a new generation and is read back; then the one INSERT
+    /// writes the row with those generations. A destination that cannot be stored removes the ones already written and throws
+    /// <see cref="RouteSecretException"/> with no row. An INSERT that throws removes the new keys only if the row is absent.</summary>
     public async Task<int> InsertAsync(NotificationRoute route)
     {
         var normalized = Validate(route);
@@ -238,26 +315,31 @@ public sealed class DuckDbNotificationRouteStore
                 id = Convert.ToInt32(await next.ExecuteScalarAsync());
             }
 
-            /* Secrets BEFORE the row (#5750): a secret that cannot be stored throws here and no row is written, so a route never
-               exists whose has-value flag points at a destination that was not saved. A channel the new route does not set has
-               any credential already under this id deleted: a delete that failed on an earlier route with the reused id must not
-               be inherited. If the row insert then fails, the credentials just written are put back as they were. */
-            var undo = SaveSecrets(id, normalized, keep: NoChannels, strictClear: false);
+            /* The keys are written before the row, under tokens no row points at yet, so a route never exists whose has-value
+               flag points at a destination that was not saved. A leftover key from an earlier route with this id is under a
+               different token and is never read. */
+            var plans = BuildPlans(null, normalized, NoChannels);
+            var written = WriteNewKeys(id, plans);
             try
             {
+                BeforeRowWriteForTests?.Invoke();
                 using var cmd = connection.CreateCommand();
                 cmd.CommandText = $@"
                 INSERT INTO {TableName}
                     (route_id, metric_match, scope_server_id, scope_tag_id,
-                     teams_set, slack_set, generic_set, pagerduty_set, smtp_recipients, enabled)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
-                AddWriteParameters(cmd, id, normalized, NoChannels);
+                     teams_set, slack_set, generic_set, pagerduty_set, smtp_recipients, enabled,
+                     teams_secret_gen, slack_secret_gen, generic_secret_gen, pagerduty_secret_gen)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
+                AddWriteParameters(cmd, id, normalized, plans);
                 await cmd.ExecuteNonQueryAsync();
+                AfterRowWriteForTests?.Invoke();
             }
-            catch
+            catch (Exception ex)
             {
-                RestoreSecrets(id, undo);
-                throw;
+                if (!await RowCommittedAsync(connection, id, normalized, plans, written, ex))
+                {
+                    throw;
+                }
             }
         }
 
@@ -267,10 +349,15 @@ public sealed class DuckDbNotificationRouteStore
 
     /// <summary>Replaces a route's match, scope, destinations and enabled flag. An empty destination removes that channel's
     /// credential, except a channel named in <see cref="NotificationRoute.OffChannels"/> whose saved flag is still set: that
-    /// destination was unreadable when the route was loaded, so leaving it alone keeps the flag (the channel stays off for the
-    /// route, #5366) instead of letting an untouched save clear it into the fleet-wide route or the app-wide URL. Returns false
-    /// when no such route exists. A destination Credential Manager refuses throws <see cref="RouteSecretException"/> and the
-    /// route is unchanged.</summary>
+    /// destination was unreadable when the route was loaded, so leaving it alone keeps the flag and the generation (the channel
+    /// stays off for the route, #5366) instead of letting an untouched save clear it into the fleet-wide route or the app-wide
+    /// URL. Returns false when no such route exists. A destination Credential Manager refuses throws
+    /// <see cref="RouteSecretException"/> and the route is unchanged.
+    /// <para>Order (#5775): (1) every CHANGED destination is written under a new generation and read back (a failure removes
+    /// the new keys and throws, row and old keys untouched); (2) one UPDATE writes scope, flags and generations (if it throws,
+    /// the row is read again: new generations mean it committed and the save goes on, otherwise the new keys are removed and
+    /// the exception is rethrown); (3) the old generations of the changed and cleared channels are deleted, leniently, since an
+    /// orphaned key is harmless.</para></summary>
     public async Task<bool> UpdateAsync(NotificationRoute route)
     {
         var normalized = Validate(route);
@@ -281,51 +368,44 @@ public sealed class DuckDbNotificationRouteStore
             using var connection = _dbInitializer.CreateConnection();
             await connection.OpenAsync();
 
-            var savedFlags = new List<string>();
-            using (var probe = connection.CreateCommand())
+            var current = await ReadRowAsync(connection, route.RouteId);
+            found = current is not null;
+            if (current is not null)
             {
-                probe.CommandText = $"SELECT teams_set, slack_set, generic_set, pagerduty_set FROM {TableName} WHERE route_id = $1";
-                probe.Parameters.Add(new DuckDBParameter { Value = route.RouteId });
-                using var reader = await probe.ExecuteReaderAsync();
-                found = await reader.ReadAsync();
-                if (found)
-                {
-                    for (var i = 0; i < s_channels.Length; i++)
-                    {
-                        if (reader.GetBoolean(i))
-                        {
-                            savedFlags.Add(s_channels[i]);
-                        }
-                    }
-                }
-            }
-
-            if (found)
-            {
-                var keep = (normalized.OffChannels ?? []).Where(savedFlags.Contains).ToHashSet(StringComparer.Ordinal);
-
-                /* Order (#5750): secrets first, then the row, with the previous credentials put back if either step fails.
-                   The row (scope, flags) therefore never commits ahead of a secret that did not save: a route moved to
-                   another server with a destination Credential Manager refuses keeps its old row AND its old destination,
-                   and the caller is told. */
-                var undo = SaveSecrets(route.RouteId, normalized, keep, strictClear: true);
+                var keep = (normalized.OffChannels ?? [])
+                    .Where(c => { var i = Array.IndexOf(s_channels, c); return i >= 0 && current.Set[i]; })
+                    .ToHashSet(StringComparer.Ordinal);
+                var plans = BuildPlans(current, normalized, keep);
+                var written = WriteNewKeys(route.RouteId, plans);
                 try
                 {
+                    BeforeRowWriteForTests?.Invoke();
                     using var cmd = connection.CreateCommand();
                     cmd.CommandText = $@"
                 UPDATE {TableName} SET
                     metric_match = $2, scope_server_id = $3, scope_tag_id = $4,
                     teams_set = $5, slack_set = $6, generic_set = $7, pagerduty_set = $8,
-                    smtp_recipients = $9, enabled = $10
+                    smtp_recipients = $9, enabled = $10,
+                    teams_secret_gen = $11, slack_secret_gen = $12, generic_secret_gen = $13, pagerduty_secret_gen = $14
                 WHERE route_id = $1";
-                    AddWriteParameters(cmd, route.RouteId, normalized, keep);
+                    AddWriteParameters(cmd, route.RouteId, normalized, plans);
                     await cmd.ExecuteNonQueryAsync();
+                    AfterRowWriteForTests?.Invoke();
                 }
-                catch
+                catch (Exception ex)
                 {
-                    RestoreSecrets(route.RouteId, undo);
-                    throw;
+                    if (!await RowCommittedAsync(connection, route.RouteId, normalized, plans, written, ex))
+                    {
+                        throw;
+                    }
                 }
+
+                /* (3) The row points at the new generations now: the old ones are garbage. A key that will not go is logged and
+                   left; no row points at it, and the sweep at the next start tries again. */
+                DeleteKeysLeniently(
+                    route.RouteId,
+                    plans.Where(p => p.OldGen is not null && p.Gen != p.OldGen).Select(p => (p.Channel, SecretKey(route.RouteId, p.Channel, p.OldGen!))),
+                    "old");
             }
         }
 
@@ -353,9 +433,10 @@ public sealed class DuckDbNotificationRouteStore
         return found;
     }
 
-    /// <summary>Deletes a route and its four credentials. Returns false when no such route exists (the credentials are
-    /// still cleared, so a half-deleted route cannot leave a secret behind). A credential Credential Manager will not remove
-    /// is logged and does not undo the delete.</summary>
+    /// <summary>Deletes a route and its credentials. Returns false when no such route exists (the credentials under that id are
+    /// still cleared, so a half-deleted route cannot leave a secret behind). The row goes first; then the keys at the
+    /// generations it pointed at and any other key under the route id, leniently: a key Credential Manager will not remove
+    /// is logged and does not undo the delete, since no row points at it (#5775) and the sweep at the next start retries it.</summary>
     public async Task<bool> DeleteAsync(int routeId)
     {
         bool found;
@@ -364,74 +445,122 @@ public sealed class DuckDbNotificationRouteStore
             PreservedTableRestore.ThrowIfRestorePending(_dbInitializer.ArchivePath, TableName);
             using var connection = _dbInitializer.CreateConnection();
             await connection.OpenAsync();
+
+            var current = await ReadRowAsync(connection, routeId);
             using var cmd = connection.CreateCommand();
             cmd.CommandText = $"DELETE FROM {TableName} WHERE route_id = $1";
             cmd.Parameters.Add(new DuckDBParameter { Value = routeId });
             found = await cmd.ExecuteNonQueryAsync() > 0;
 
-            /* The row is gone whatever happens next. A credential that will not delete is logged (the channel, never the
-               value) and left: it has no row to point at, and an insert that reuses this id deletes it again. */
-            foreach (var channel in s_channels)
+            /* The row is gone whatever happens next. */
+            var keys = new Dictionary<string, string>(StringComparer.Ordinal);
+            for (var i = 0; i < s_channels.Length; i++)
             {
-                ClearSecret(routeId, channel, strict: false);
+                if (current?.Gens[i] is { Length: > 0 } gen)
+                {
+                    keys[SecretKey(routeId, s_channels[i], gen)] = s_channels[i];
+                }
             }
+
+            try
+            {
+                /* The trailing underscore keeps route 1 from matching route 12. */
+                var routePrefix = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{KeyPrefix}{routeId}_");
+                foreach (var key in _secrets.ListKeys(routePrefix))
+                {
+                    keys.TryAdd(key, ChannelOfKey(key));
+                }
+            }
+            catch (Exception)
+            {
+                /* The listing is a second net under the row's own generations; the sweep is the third. */
+            }
+
+            DeleteKeysLeniently(routeId, keys.Select(kv => (kv.Value, kv.Key)), "route");
         }
 
         NotificationRouteCache.Invalidate();
         return found;
     }
 
+    /// <summary>One row of the table. <see cref="Set"/> and <see cref="Gens"/> are in channel order (<c>s_channels</c>).</summary>
     private sealed record Row(
         int RouteId, string MetricMatch, int? ScopeServerId, int? ScopeTagId,
-        bool TeamsSet, bool SlackSet, bool GenericSet, bool PagerDutySet, string SmtpRecipients, bool Enabled);
+        bool[] Set, string SmtpRecipients, bool Enabled, string?[] Gens);
 
-    private async Task<List<Row>> ReadRowsAsync(CancellationToken cancellationToken)
+    private static Row ReadRowFrom(System.Data.Common.DbDataReader reader) =>
+        new(
+            reader.GetInt32(0),
+            reader.GetString(1),
+            reader.IsDBNull(2) ? null : reader.GetInt32(2),
+            reader.IsDBNull(3) ? null : reader.GetInt32(3),
+            [reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7)],
+            reader.IsDBNull(8) ? "" : reader.GetString(8),
+            reader.GetBoolean(9),
+            [reader.IsDBNull(10) ? null : reader.GetString(10),
+             reader.IsDBNull(11) ? null : reader.GetString(11),
+             reader.IsDBNull(12) ? null : reader.GetString(12),
+             reader.IsDBNull(13) ? null : reader.GetString(13)]);
+
+    private static async Task<List<Row>> ReadAllRowsAsync(DuckDBConnection connection, CancellationToken cancellationToken = default)
     {
         var rows = new List<Row>();
-        using var readLock = _dbInitializer.AcquireReadLock(cancellationToken);
-        using var connection = _dbInitializer.CreateConnection();
-        await connection.OpenAsync(cancellationToken);
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = $@"
-            SELECT route_id, metric_match, scope_server_id, scope_tag_id,
-                   teams_set, slack_set, generic_set, pagerduty_set, smtp_recipients, enabled
-            FROM {TableName}
-            ORDER BY route_id";
+        cmd.CommandText = $"SELECT {RowColumns} FROM {TableName} ORDER BY route_id";
         using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new Row(
-                reader.GetInt32(0),
-                reader.GetString(1),
-                reader.IsDBNull(2) ? null : reader.GetInt32(2),
-                reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                reader.GetBoolean(4),
-                reader.GetBoolean(5),
-                reader.GetBoolean(6),
-                reader.GetBoolean(7),
-                reader.IsDBNull(8) ? "" : reader.GetString(8),
-                reader.GetBoolean(9)));
+            rows.Add(ReadRowFrom(reader));
         }
 
         return rows;
     }
 
+    private static async Task<Row?> ReadRowAsync(DuckDBConnection connection, int routeId)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"SELECT {RowColumns} FROM {TableName} WHERE route_id = $1";
+        cmd.Parameters.Add(new DuckDBParameter { Value = routeId });
+        using var reader = await cmd.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadRowFrom(reader) : null;
+    }
+
+    /// <summary>The rows hydrated from Credential Manager, all under ONE read lock: a save (write lock) cannot delete an old
+    /// generation between the row being read and its key being read (#5775).</summary>
+    private async Task<List<NotificationRoute>> ReadRoutesAsync(CancellationToken cancellationToken)
+    {
+        using var readLock = _dbInitializer.AcquireReadLock(cancellationToken);
+        using var connection = _dbInitializer.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        var rows = await ReadAllRowsAsync(connection, cancellationToken);
+        var routes = new List<NotificationRoute>(rows.Count);
+        foreach (var row in rows)
+        {
+            routes.Add(Hydrate(row));
+        }
+
+        return routes;
+    }
+
     private NotificationRoute Hydrate(Row row)
     {
         var off = new List<string>();
-        string Read(bool saved, string channel)
+        string Read(int index)
         {
-            if (!saved)
+            if (!row.Set[index])
             {
                 return "";
             }
 
-            var value = _getSecret(SecretKey(row.RouteId, channel)) ?? "";
+            var channel = s_channels[index];
+            var gen = row.Gens[index];
+            var value = string.IsNullOrEmpty(gen) ? "" : SafeRead(SecretKey(row.RouteId, channel, gen));
             if (string.IsNullOrWhiteSpace(value))
             {
-                /* Saved, but Credential Manager gave nothing back: off, not inherited (#5366). Say so once; never the URL. */
+                /* Saved, but there is no key at its generation (or none was recorded) or Credential Manager gave nothing back:
+                   off, not inherited (#5366). Say so once; never the URL. */
                 off.Add(channel);
-                if (_warnedUnreadable.TryAdd(SecretKey(row.RouteId, channel), 0))
+                if (_warnedUnreadable.TryAdd($"{row.RouteId}_{channel}_{gen}", 0))
                 {
                     AppLogger.Warn("NotificationRoutes", $"Notification route {row.RouteId} has a saved {channel} destination that could not be read from Credential Manager, so that channel is off for the route until the destination is entered again.");
                 }
@@ -442,10 +571,10 @@ public sealed class DuckDbNotificationRouteStore
             return value;
         }
 
-        var teams = Read(row.TeamsSet, NotificationRouter.TeamsChannel);
-        var slack = Read(row.SlackSet, NotificationRouter.SlackChannel);
-        var generic = Read(row.GenericSet, NotificationRouter.GenericChannel);
-        var pagerDuty = Read(row.PagerDutySet, NotificationRouter.PagerDutyChannel);
+        var teams = Read(0);
+        var slack = Read(1);
+        var generic = Read(2);
+        var pagerDuty = Read(3);
 
         return new NotificationRoute(
             row.RouteId, row.MetricMatch, teams, slack, generic, pagerDuty, row.SmtpRecipients, row.Enabled)
@@ -485,75 +614,181 @@ public sealed class DuckDbNotificationRouteStore
             SmtpRecipients = (route.SmtpRecipients ?? "").Trim()
         };
     }
+    private static readonly IReadOnlySet<string> NoChannels = new HashSet<string>(StringComparer.Ordinal);
 
-    private static void AddWriteParameters(DuckDBCommand cmd, int id, NotificationRoute r, IReadOnlySet<string> keep)
+    /// <summary>What a save does with one channel (#5775). <see cref="Gen"/> is the generation the row will hold, null when the
+    /// channel is not set; <see cref="OldGen"/> is the one it holds now. <see cref="Replace"/> is true only when a value is
+    /// written under a new generation: a kept channel and a value equal to the one already stored keep their generation, so
+    /// <see cref="Gen"/> equals <see cref="OldGen"/>.</summary>
+    private sealed record ChannelPlan(string Channel, string Value, bool Replace, string? OldGen, string? Gen, bool Flag);
+
+    private List<ChannelPlan> BuildPlans(Row? current, NotificationRoute r, IReadOnlySet<string> keep)
+    {
+        string[] values = [r.TeamsUrl, r.SlackUrl, r.GenericUrl, r.PagerDutyRoutingKey];
+        var plans = new List<ChannelPlan>(s_channels.Length);
+        for (var i = 0; i < s_channels.Length; i++)
+        {
+            var channel = s_channels[i];
+            var value = values[i];
+            var oldSet = current?.Set[i] ?? false;
+            var oldGen = current?.Gens[i];
+            if (value.Length == 0)
+            {
+                /* Left alone because it was unreadable: no copy is possible, so it keeps its flag and generation. */
+                plans.Add(keep.Contains(channel)
+                    ? new ChannelPlan(channel, "", false, oldGen, oldGen, true)
+                    : new ChannelPlan(channel, "", false, oldGen, null, false));
+            }
+            else if (current is not null && oldSet && !string.IsNullOrEmpty(oldGen)
+                && string.Equals(SafeRead(SecretKey(current.RouteId, channel, oldGen)), value, StringComparison.Ordinal))
+            {
+                /* The stored value already is this one: nothing to write, nothing to delete. */
+                plans.Add(new ChannelPlan(channel, value, false, oldGen, oldGen, true));
+            }
+            else
+            {
+                plans.Add(new ChannelPlan(channel, value, true, oldGen, NewGeneration(), true));
+            }
+        }
+
+        return plans;
+    }
+
+    /// <summary>Step 1 (#5775): writes each replaced value under its new generation and reads it back. On any failure the keys
+    /// written so far (the failing one included, since a partial write can leave an entry) are deleted leniently and a
+    /// <see cref="RouteSecretException"/> naming the channel is thrown; the row and the old keys are untouched. Returns the
+    /// keys written so a failed row write can remove them.</summary>
+    private List<(string Channel, string Key)> WriteNewKeys(int routeId, List<ChannelPlan> plans)
+    {
+        var written = new List<(string Channel, string Key)>();
+        foreach (var plan in plans.Where(p => p.Replace))
+        {
+            var key = SecretKey(routeId, plan.Channel, plan.Gen!);
+            written.Add((plan.Channel, key));
+            bool ok;
+            try
+            {
+                ok = _secrets.Write(key, plan.Value)
+                    && string.Equals(_secrets.Read(key), plan.Value, StringComparison.Ordinal);
+            }
+            catch (Exception)
+            {
+                ok = false;
+            }
+
+            if (!ok)
+            {
+                DeleteKeysLeniently(routeId, written, "new");
+                throw new RouteSecretException(plan.Channel, plan.Value.Length);
+            }
+        }
+
+        return written;
+    }
+
+    /// <summary>Step 2 failed with <paramref name="error"/> (#5775). Reads the row again to learn whether the statement
+    /// committed. Committed (the row holds what was meant to be written): returns true, the caller goes on to delete the old
+    /// keys, and nothing is rolled back. Not committed: deletes the new keys and returns false, and the caller rethrows. The
+    /// row cannot be read: returns false and deletes nothing, because neither side is known to be garbage; the sweep at the
+    /// next start keeps whichever keys the row points at.</summary>
+    private async Task<bool> RowCommittedAsync(
+        DuckDBConnection connection, int routeId, NotificationRoute r, List<ChannelPlan> plans,
+        List<(string Channel, string Key)> written, Exception error)
+    {
+        bool? committed;
+        try
+        {
+            var row = await ReadRowAsync(connection, routeId);
+            committed = row is not null && RowHolds(row, r, plans);
+        }
+        catch (Exception)
+        {
+            committed = null;
+        }
+
+        if (committed == true)
+        {
+            AppLogger.Warn("NotificationRoutes", $"Notification route {routeId}: the row write reported an error but the row holds the new values, so the save is kept: {error.Message}");
+            return true;
+        }
+
+        if (committed == false)
+        {
+            DeleteKeysLeniently(routeId, written, "new");
+        }
+        else
+        {
+            AppLogger.Warn("NotificationRoutes", $"Notification route {routeId}: the row write failed and the row could not be read again, so the new credentials are left for the next start to sort out: {error.Message}");
+        }
+
+        return false;
+    }
+
+    private static bool RowHolds(Row row, NotificationRoute r, List<ChannelPlan> plans)
+    {
+        if (row.MetricMatch != r.MetricMatch || row.ScopeServerId != r.ScopeServerId || row.ScopeTagId != r.ScopeTagId
+            || row.SmtpRecipients != r.SmtpRecipients || row.Enabled != r.Enabled)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < plans.Count; i++)
+        {
+            if (row.Set[i] != plans[i].Flag || !string.Equals(row.Gens[i], plans[i].Gen, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void AddWriteParameters(DuckDBCommand cmd, int id, NotificationRoute r, List<ChannelPlan> plans)
     {
         cmd.Parameters.Add(new DuckDBParameter { Value = id });
         cmd.Parameters.Add(new DuckDBParameter { Value = r.MetricMatch });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)r.ScopeServerId ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)r.ScopeTagId ?? DBNull.Value });
-        cmd.Parameters.Add(new DuckDBParameter { Value = r.TeamsUrl.Length > 0 || keep.Contains(NotificationRouter.TeamsChannel) });
-        cmd.Parameters.Add(new DuckDBParameter { Value = r.SlackUrl.Length > 0 || keep.Contains(NotificationRouter.SlackChannel) });
-        cmd.Parameters.Add(new DuckDBParameter { Value = r.GenericUrl.Length > 0 || keep.Contains(NotificationRouter.GenericChannel) });
-        cmd.Parameters.Add(new DuckDBParameter { Value = r.PagerDutyRoutingKey.Length > 0 || keep.Contains(NotificationRouter.PagerDutyChannel) });
+        foreach (var plan in plans)
+        {
+            cmd.Parameters.Add(new DuckDBParameter { Value = plan.Flag });
+        }
+
         cmd.Parameters.Add(new DuckDBParameter { Value = r.SmtpRecipients });
         cmd.Parameters.Add(new DuckDBParameter { Value = r.Enabled });
+        foreach (var plan in plans)
+        {
+            cmd.Parameters.Add(new DuckDBParameter { Value = (object?)plan.Gen ?? DBNull.Value });
+        }
     }
 
-    private static readonly IReadOnlySet<string> NoChannels = new HashSet<string>(StringComparer.Ordinal);
-
-    /// <summary>Where a credential stood before a save changed it, so a failure can put it back.</summary>
-    private sealed record PreviousSecret(string Channel, string Value);
-
-    /// <summary>Saves the four destinations. For a channel with a value: delete the old credential, write the new one, read it
-    /// back and compare. For a channel without one: delete it (a channel in <paramref name="keep"/> is left alone). On any
-    /// failure the credentials already changed are put back and a <see cref="RouteSecretException"/> is thrown; on success the
-    /// list of previous values is returned so the caller can undo them if the row write then fails.</summary>
-    private List<PreviousSecret> SaveSecrets(int routeId, NotificationRoute r, IReadOnlySet<string> keep, bool strictClear)
+    /// <summary>Deletes keys one by one; a key that will not go is counted, not thrown. One warning names the channels (never a
+    /// value or a key): what is left is not read by any route and is removed by the sweep at the next start.</summary>
+    private void DeleteKeysLeniently(int routeId, IEnumerable<(string Channel, string Key)> keys, string which)
     {
-        var changed = new List<PreviousSecret>();
-        var destinations = new[]
+        var failed = new List<string>();
+        foreach (var (channel, key) in keys)
         {
-            (NotificationRouter.TeamsChannel, r.TeamsUrl),
-            (NotificationRouter.SlackChannel, r.SlackUrl),
-            (NotificationRouter.GenericChannel, r.GenericUrl),
-            (NotificationRouter.PagerDutyChannel, r.PagerDutyRoutingKey)
-        };
-
-        try
-        {
-            foreach (var (channel, value) in destinations)
+            if (!SafeDelete(key))
             {
-                if (value.Length == 0 && keep.Contains(channel))
-                {
-                    continue;
-                }
-
-                changed.Add(new PreviousSecret(channel, ReadSecret(routeId, channel)));
-                if (value.Length == 0)
-                {
-                    ClearSecret(routeId, channel, strictClear);
-                }
-                else
-                {
-                    WriteSecret(routeId, channel, value);
-                }
+                failed.Add(channel);
             }
         }
-        catch
-        {
-            RestoreSecrets(routeId, changed);
-            throw;
-        }
 
-        return changed;
+        if (failed.Count > 0)
+        {
+            AppLogger.Warn("NotificationRoutes", $"Notification route {routeId}: the {which} {string.Join(", ", failed.Distinct())} credential(s) could not be removed from Credential Manager. No route reads them, and they are removed at the next start.");
+        }
     }
 
-    private string ReadSecret(int routeId, string channel)
+    private static string ChannelOfKey(string key) =>
+        s_channels.FirstOrDefault(c => key.Contains("_" + c + "_", StringComparison.Ordinal)) ?? "unknown";
+
+    private string SafeRead(string key)
     {
         try
         {
-            return _getSecret(SecretKey(routeId, channel)) ?? "";
+            return _secrets.Read(key) ?? "";
         }
         catch (Exception)
         {
@@ -561,74 +796,19 @@ public sealed class DuckDbNotificationRouteStore
         }
     }
 
-    private void WriteSecret(int routeId, string channel, string value)
+    private bool SafeDelete(string key)
     {
-        var key = SecretKey(routeId, channel);
-        bool ok;
         try
         {
-            /* Delete the old one first, so a value that cannot be stored never leaves the previous destination in place. */
-            _saveSecret(key, "");
-            ok = _saveSecret(key, value) && string.Equals(_getSecret(key), value, StringComparison.Ordinal);
+            return _secrets.Delete(key);
         }
         catch (Exception)
         {
-            ok = false;
-        }
-
-        if (!ok)
-        {
-            throw new RouteSecretException(channel, value.Length);
-        }
-    }
-
-    private void ClearSecret(int routeId, string channel, bool strict)
-    {
-        var key = SecretKey(routeId, channel);
-        bool ok;
-        try
-        {
-            /* A delete of something that is not there may report false; what matters is that nothing is left to read. */
-            ok = _saveSecret(key, "") || string.IsNullOrWhiteSpace(_getSecret(key));
-        }
-        catch (Exception)
-        {
-            ok = false;
-        }
-
-        if (ok)
-        {
-            return;
-        }
-
-        if (strict)
-        {
-            throw new RouteSecretException(channel, removing: true);
-        }
-
-        AppLogger.Warn("NotificationRoutes", $"Notification route {routeId}: the {channel} credential could not be removed from Credential Manager.");
-    }
-
-    /// <summary>Best effort: puts each changed credential back to its previous value (an empty one deletes it). A failure here
-    /// is logged, with the channel and never the value.</summary>
-    private void RestoreSecrets(int routeId, List<PreviousSecret> changed)
-    {
-        foreach (var previous in changed)
-        {
-            try
-            {
-                if (!_saveSecret(SecretKey(routeId, previous.Channel), previous.Value) && previous.Value.Length > 0)
-                {
-                    AppLogger.Warn("NotificationRoutes", $"Notification route {routeId}: the previous {previous.Channel} credential could not be put back in Credential Manager.");
-                }
-            }
-            catch (Exception)
-            {
-                AppLogger.Warn("NotificationRoutes", $"Notification route {routeId}: the previous {previous.Channel} credential could not be put back in Credential Manager.");
-            }
+            return false;
         }
     }
 }
+
 
 /// <summary>Windows Credential Manager would not store (or remove) a route destination, so the route was not saved (#5750). The
 /// message names the channel and never the value. The edit dialog shows it inline.</summary>

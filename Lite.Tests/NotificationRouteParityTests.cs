@@ -31,8 +31,7 @@ public sealed class NotificationRouteParityTests : IDisposable
 {
     private readonly string _tempDir;
     private readonly DuckDbInitializer _initializer;
-    private readonly Dictionary<string, string> _secrets = new();
-    private readonly object _secretsLock = new();
+    private readonly FakeRouteSecrets _secrets = new();
     private readonly HashSet<string> _registry = new(NotificationRouteParityFixture.Servers, StringComparer.Ordinal);
 
     public NotificationRouteParityTests()
@@ -68,8 +67,7 @@ public sealed class NotificationRouteParityTests : IDisposable
         var store = new DuckDbNotificationRouteStore(
             _initializer,
             () => _registry.Select(IdOf).ToArray(),
-            key => { lock (_secretsLock) { return _secrets.TryGetValue(key, out var v) ? v : ""; } },
-            (key, value) => { lock (_secretsLock) { if (string.IsNullOrWhiteSpace(value)) _secrets.Remove(key); else _secrets[key] = value; } return true; });
+            _secrets.Access);
         var tags = new LocalDataService(_initializer);
 
         /* The tag tree, in creation order, so a parent exists before its child. */

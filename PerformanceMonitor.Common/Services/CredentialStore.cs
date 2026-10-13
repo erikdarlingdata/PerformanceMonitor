@@ -225,4 +225,46 @@ public class CredentialStore
     {
         return $"{_credentialPrefix}{serverId}";
     }
+
+    /// <summary>
+    /// Lists the keys of this store's Generic credentials whose key starts with <paramref name="keyPrefix"/> (#5775). A key is
+    /// what <see cref="SaveCredential"/> took as <c>serverId</c>: the Credential Manager target without this store's prefix, so
+    /// the result feeds <see cref="DeleteCredential"/> and <see cref="GetCredential"/> as it is. Only this store's own prefix is
+    /// searched, so another app's credentials (Dashboard's <c>PerformanceMonitor_</c> against Lite's
+    /// <c>PerformanceMonitorLite_</c>) never appear. A failure to enumerate is logged and returns an empty list: the caller
+    /// then does nothing, which is the safe outcome for a cleanup.
+    /// </summary>
+    /// <param name="keyPrefix">The start of the key to look for; may not be empty.</param>
+    public System.Collections.Generic.IReadOnlyList<string> ListKeys(string keyPrefix)
+    {
+        if (string.IsNullOrWhiteSpace(keyPrefix))
+        {
+            throw new ArgumentException("Key prefix cannot be null or empty", nameof(keyPrefix));
+        }
+
+        var keys = new System.Collections.Generic.List<string>();
+        try
+        {
+            using var set = new CredentialSet(GetCredentialTarget(keyPrefix) + "*");
+            set.Load();
+            foreach (var credential in set)
+            {
+                var target = credential.Target ?? "";
+                if (credential.Type == CredentialType.Generic
+                    && target.StartsWith(_credentialPrefix + keyPrefix, StringComparison.Ordinal))
+                {
+                    keys.Add(target[_credentialPrefix.Length..]);
+                }
+
+                credential.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to list credentials starting with {KeyPrefix}: {Error}", keyPrefix, ex.Message);
+            return Array.Empty<string>();
+        }
+
+        return keys;
+    }
 }

@@ -39,7 +39,7 @@ public sealed class NotificationRoutesMcpTests : IDisposable
 
     private readonly string _tempDir;
     private readonly DuckDbInitializer _initializer;
-    private readonly Dictionary<string, string> _secrets = new();
+    private readonly FakeRouteSecrets _secrets = new();
     private readonly List<ServerConnection> _servers;
     private readonly int _serverA;
     private readonly int _serverB;
@@ -66,8 +66,7 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         _store = new DuckDbNotificationRouteStore(
             _initializer,
             () => ids,
-            key => _secrets.TryGetValue(key, out var v) ? v : "",
-            (key, value) => { if (string.IsNullOrWhiteSpace(value)) _secrets.Remove(key); else _secrets[key] = value; return true; });
+            _secrets.Access);
     }
 
     public void Dispose()
@@ -227,8 +226,7 @@ public sealed class NotificationRoutesMcpTests : IDisposable
     public async Task Delete_RemovesTheRouteAndItsCredentials_AndNotFoundTheSecondTime()
     {
         var ids = await SeedAsync();
-        var key = DuckDbNotificationRouteStore.SecretKey(ids.Fleet, NotificationRouter.TeamsChannel);
-        Assert.True(_secrets.ContainsKey(key));
+        Assert.True(_secrets.Has(ids.Fleet, NotificationRouter.TeamsChannel));
 
         using (var gone = JsonDocument.Parse(await McpAlertTools.DeleteRouteAsync(_store, ids.Fleet)))
         {
@@ -236,7 +234,7 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         }
 
         Assert.Null(await _store.GetAsync(ids.Fleet));
-        Assert.False(_secrets.ContainsKey(key));
+        Assert.False(_secrets.Has(ids.Fleet, NotificationRouter.TeamsChannel));
 
         using var second = JsonDocument.Parse(await McpAlertTools.DeleteRouteAsync(_store, ids.Fleet));
         Assert.Equal("not_found", second.RootElement.GetProperty("status").GetString());

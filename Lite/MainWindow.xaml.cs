@@ -154,13 +154,12 @@ public partial class MainWindow : Window
         /* #5750: the scoped notification routes. Any route, tag or server edit invalidates the cache, which starts one
            background reload (see NotificationRouteCache); a read that still finds it stale reloads on the calling thread.
            Task.Run keeps that reload off the UI thread's synchronization context. */
-        /* The route secrets go straight to CredentialService (SaveToCredentialManager) so a refused save is reported (#5750);
+        /* The route secrets go straight to CredentialService (RouteSecretAccess) so a refused save is reported (#5750);
            App.SaveWebhookUrl ignores the result, and it and the 512-character limit are #5772. */
         NotificationRouteStore = new DuckDbNotificationRouteStore(
             _databaseInitializer,
             _serverManager.GetKnownServerIds,
-            App.GetWebhookUrl,
-            DuckDbNotificationRouteStore.SaveToCredentialManager);
+            RouteSecretAccess.CredentialManager());
         var routeStore = NotificationRouteStore;
         NotificationRouteCache.Configure(() => Task.Run(() => routeStore.ListAsync()).GetAwaiter().GetResult());
         /* The edition comes from _engineEditions, the same as the alert sweep's: the live status when it has read
@@ -231,6 +230,11 @@ public partial class MainWindow : Window
 
             // Initialize the DuckDB database
             await _databaseInitializer.InitializeAsync();
+
+            /* #5775: remove route credentials no route points at (a crash between writing a new generation and the row, or a
+               delete that failed). Off the UI thread and not awaited: the sweep takes the write lock briefly, logs only a count
+               and never throws. It runs once the file is open, which the store's constructor above cannot wait for. */
+            _ = Task.Run(() => NotificationRouteStore.SweepOrphanedSecretsAsync());
 
             /* The stored engine editions, for the Azure master scope. Awaited here, before anything below that reads
                the scope starts, so the first alert sweep and the first analysis already have them. The wait is

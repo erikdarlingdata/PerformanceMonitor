@@ -34,8 +34,7 @@ public sealed class NotificationRouteTruthfulnessTests : IDisposable
     private readonly string _tempDir;
     private readonly string _dbPath;
     private readonly DuckDbInitializer _initializer;
-    private readonly Dictionary<string, string> _secrets = new();
-    private readonly object _secretsLock = new();
+    private readonly FakeRouteSecrets _secrets = new();
     private readonly DuckDbNotificationRouteStore _store;
 
     public NotificationRouteTruthfulnessTests()
@@ -48,8 +47,7 @@ public sealed class NotificationRouteTruthfulnessTests : IDisposable
         _store = new DuckDbNotificationRouteStore(
             _initializer,
             () => new[] { 7101, 7102 },
-            key => { lock (_secretsLock) { return _secrets.TryGetValue(key, out var v) ? v : ""; } },
-            (key, value) => { lock (_secretsLock) { if (string.IsNullOrWhiteSpace(value)) _secrets.Remove(key); else _secrets[key] = value; } return true; });
+            _secrets.Access);
     }
 
     public void Dispose()
@@ -69,17 +67,14 @@ public sealed class NotificationRouteTruthfulnessTests : IDisposable
     public async Task ASavedSecretCredentialManagerCannotRead_IsLoggedOncePerRouteAndChannel_NeverWithTheUrl()
     {
         var id = await _store.InsertAsync(Route("High CPU", teams: TeamsUrl, pager: PagerKey));
-        lock (_secretsLock)
-        {
-            _secrets.Remove(DuckDbNotificationRouteStore.SecretKey(id, NotificationRouter.TeamsChannel));
-            _secrets.Remove(DuckDbNotificationRouteStore.SecretKey(id, NotificationRouter.PagerDutyChannel));
-        }
+        _secrets.Lose(id, NotificationRouter.TeamsChannel);
+        _secrets.Lose(id, NotificationRouter.PagerDutyChannel);
 
         AppLogger.DrainBufferedLines();
         await _store.ListAsync();
         await _store.ListAsync();
         await _store.GetAsync(id);
-        var lines = AppLogger.DrainBufferedLines().Where(l => l.Contains("[NotificationRoutes]", StringComparison.Ordinal)).ToList();
+        var lines = AppLogger.DrainBufferedLines().Where(l => l.Contains("[NotificationRoutes]", StringComparison.Ordinal) && l.Contains("could not be read from Credential Manager", StringComparison.Ordinal)).ToList();
 
         /* Two channels, three reloads: two warnings, one each. */
         Assert.Equal(2, lines.Count);
@@ -102,7 +97,7 @@ public sealed class NotificationRouteTruthfulnessTests : IDisposable
         AppLogger.DrainBufferedLines();
         await _store.ListAsync();
 
-        Assert.DoesNotContain(AppLogger.DrainBufferedLines(), l => l.Contains("[NotificationRoutes]", StringComparison.Ordinal));
+        Assert.DoesNotContain(AppLogger.DrainBufferedLines(), l => l.Contains("[NotificationRoutes]", StringComparison.Ordinal) && l.Contains("could not be read from Credential Manager", StringComparison.Ordinal));
     }
 
     // ---- (b) a failed tag read is "not active", not "OK" ---------------------------------------
