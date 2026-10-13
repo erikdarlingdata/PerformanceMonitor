@@ -105,6 +105,16 @@ public static class DarlingManagedRoles
     public const string RoleMarker = "darling-managed";
 
     /// <summary>
+    /// The marker comment on a login role that belongs to an external alert source (#5654). The batch re-asserts the
+    /// grants of a registered source role only when the role carries this marker, so a registry row that names some
+    /// other role (a typo, or the owner) changes nothing about that role.
+    /// </summary>
+    public const string AlertSourceRoleMarker = "darling-alert-source";
+
+    /// <summary>The argument types of <c>config.submit_external_alert</c> (#5654), in order. The one place the signature is written, so the grant and the revoke cannot drift from the function.</summary>
+    internal const string ExternalAlertSubmitSignature = "text, text, text, text, text, text, double precision";
+
+    /// <summary>
     /// The marker on the roles the service provisions on the compose distribution's own store (#3914) — a
     /// second value rather than <see cref="RoleMarker"/> because <c>tools/provision-roles.sql</c> stamps that one
     /// too, and the service re-keys the roles it owns from its own credential files on every start. Sharing the
@@ -1607,6 +1617,22 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLeg
 --     self-managed store gets the same function and trigger from tools/provision-roles.sql.
 {BuildServerPasswordRulesSql(config)}
 
+-- 10b. External alert submit (#5654): another service raises an alert through Darling's channels, routes and mute rules
+--     by calling {config}.submit_external_alert, as its OWN login (one login per source, created by the add-alert-source
+--     verb). The function is the only way in: a source login holds no table privilege anywhere. It looks the caller
+--     up by session_user in {config}.external_alert_source, so the source name comes from the login the connection
+--     was opened as and there is no argument that names it; session_user is used rather than current_user because
+--     inside a SECURITY DEFINER function current_user is the owner. A non-superuser cannot change session_user, and
+--     SET ROLE moves only current_user, so a source cannot record an alert under another source's name. The
+--     limits sit in the function: severity list, key/title/detail/server-name caps, a per-source rate per minute
+--     (DL429) and a per-source cap on rows waiting for delivery (DL429), a fixed 15 minute expiry. Same pattern as
+--     the section 10 function: owned by the store owner, pinned search_path with pg_temp last, every table named by
+--     its schema, fully parameterized with NO dynamic SQL, created and REVOKEd from PUBLIC by the shared builder,
+--     rebuilt on every start. NOT a versioned migration, for the section 10 reason. EXECUTE goes to the registered
+--     source logins only (section 10c); the three Darling roles hold none.
+{BuildExternalAlertSubmitFunctionSql(config)}
+REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {admin}, {viewer}, {mcp};
+
 -- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
 --     and it runs after EVERY blanket grant above (the schema-wide SELECT and write grants and the mcp column ACL), so
@@ -1660,6 +1686,21 @@ BEGIN
 END
 $do$;
 
+-- 10c. External alert tables and source logins (#5654). The three tables (V180) are written only by the store owner and
+--     by the section 10b function. The blanket grants above gave admin INSERT/UPDATE/DELETE on every config table (section
+--     3 and its default privileges), and with that admin could insert a pending row under any source, so the same
+--     REVOKE ALL ... CASCADE as 10a takes every privilege from PUBLIC and the three roles, and SELECT is granted back
+--     to the three roles (an operator reads the queue and the registry). It runs after every blanket grant above.
+--     Then, for each registered source login that carries the '{AlertSourceRoleMarker}' marker: every attribute that widens
+--     a role off, NOINHERIT, every role membership revoked (a source holds none), and exactly three grants -- CONNECT on this
+--     database, USAGE on the {config} schema, EXECUTE on the 10b function. A registry row naming a role with no
+--     marker, or no role at all, is skipped with a WARNING.
+REVOKE ALL ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
+   FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+GRANT SELECT ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
+   TO {admin}, {viewer}, {mcp};
+{BuildExternalAlertSourceRolesSql(config)}
+
 -- 11. Role memberships (#3914): the three roles hold none. Nothing above grants one, so every membership in which
 --     admin, viewer or mcp is the MEMBER was given by someone else, and each outranks the grants above -- a
 --     pg_read_all_data undoes the secret-column carve, and membership in the owner is every privilege the owner
@@ -1689,6 +1730,151 @@ BEGIN
 END $do$;
 ";
     }
+
+    /// <summary>
+    /// The <c>SECURITY DEFINER</c> function (#5654) a registered external alert source calls to queue a fire or a clear:
+    /// the <c>CREATE OR REPLACE FUNCTION</c> plus the <c>REVOKE ALL ... FROM PUBLIC</c> (a new function is EXECUTE-able
+    /// by PUBLIC by default); the caller adds the narrow <c>GRANT EXECUTE</c> (section 10c). Shared so the live tests run
+    /// the identical function. Built after <see cref="BuildCustomAlertResolveFunctionSql"/>:
+    /// <list type="bullet">
+    /// <item>owned by whoever runs it (the store owner, which holds the INSERT and the row lock the body needs);</item>
+    /// <item><c>SET search_path = pg_catalog, pg_temp</c>, pg_temp last, and every table named by its schema, so no
+    /// temporary object a caller creates can stand in for a table or for <c>now()</c>;</item>
+    /// <item>no dynamic SQL: the only values that reach a statement are the seven parameters, bound as parameters;</item>
+    /// <item>the source is <c>session_user</c> looked up in the registry (a non-superuser cannot change it), never an
+    /// argument; a login with no enabled registry row gets SQLSTATE <c>DL403</c>;</item>
+    /// <item>a bad kind, severity, key or an over-long text gets <c>DL400</c>; a source over its per-minute rate or its
+    /// waiting-row cap gets <c>DL429</c> with a HINT. The registry row is locked <c>FOR UPDATE</c>, so the count and
+    /// the insert are atomic for one source. A clear without a severity is stored as 'warning'; a fire needs one;</item>
+    /// <item>carriage returns and line feeds in the title, detail and server name become spaces, so a text cannot forge
+    /// lines in the mute pre-fill that quotes it.</item>
+    /// </list>
+    /// The caller never supplies the context JSON, the source, the expiry or the status: Darling builds those.
+    /// </summary>
+    internal static string BuildExternalAlertSubmitFunctionSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.submit_external_alert(
+   p_kind text,
+   p_alert_key text,
+   p_severity text,
+   p_title text,
+   p_detail text,
+   p_server_name text,
+   p_value double precision)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_source_id integer;
+   v_max_per_minute integer;
+   v_max_pending integer;
+   v_severity text;
+   v_pending_id bigint;
+BEGIN
+   SELECT s.source_id, s.max_per_minute, s.max_pending
+   INTO v_source_id, v_max_per_minute, v_max_pending
+   FROM {config}.external_alert_source AS s
+   WHERE s.role_name = session_user::text
+     AND s.enabled
+   FOR UPDATE OF s;
+
+   IF NOT FOUND THEN
+      RAISE EXCEPTION 'This login is not a registered external alert source.' USING ERRCODE = 'DL403';
+   END IF;
+
+   v_severity := CASE WHEN p_severity IS NULL AND p_kind = 'clear' THEN 'warning' ELSE p_severity END;
+
+   IF p_kind IS NULL OR p_kind NOT IN ('fire', 'clear') THEN
+      RAISE EXCEPTION 'kind must be fire or clear.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_severity IS NULL OR v_severity NOT IN ('warning', 'critical') THEN
+      RAISE EXCEPTION 'severity must be warning or critical.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_alert_key IS NULL OR char_length(p_alert_key) NOT BETWEEN 1 AND 128 OR p_alert_key !~ '^[A-Za-z0-9._:-]+$' THEN
+      RAISE EXCEPTION 'alert_key must be 1 to 128 characters from A-Z a-z 0-9 . _ : -.' USING ERRCODE = 'DL400';
+   END IF;
+   IF char_length(p_title) > 200 THEN
+      RAISE EXCEPTION 'title is longer than 200 characters.' USING ERRCODE = 'DL400';
+   END IF;
+   IF char_length(p_detail) > 2000 THEN
+      RAISE EXCEPTION 'detail is longer than 2000 characters.' USING ERRCODE = 'DL400';
+   END IF;
+   IF char_length(p_server_name) > 128 THEN
+      RAISE EXCEPTION 'server_name is longer than 128 characters.' USING ERRCODE = 'DL400';
+   END IF;
+
+   IF (SELECT count(*) FROM {config}.external_alert_pending AS p
+       WHERE p.source_id = v_source_id AND p.submitted_at > now() - interval '1 minute') >= v_max_per_minute THEN
+      RAISE EXCEPTION 'This source has reached its limit of % alerts per minute.', v_max_per_minute
+         USING ERRCODE = 'DL429', HINT = 'Send fewer alerts, or ask the Darling operator to raise max_per_minute for this source.';
+   END IF;
+   IF (SELECT count(*) FROM {config}.external_alert_pending AS p
+       WHERE p.source_id = v_source_id AND p.status IN ('pending', 'claimed')) >= v_max_pending THEN
+      RAISE EXCEPTION 'This source already has % alerts waiting for delivery.', v_max_pending
+         USING ERRCODE = 'DL429', HINT = 'Darling has not delivered the earlier alerts yet. Retry later.';
+   END IF;
+
+   INSERT INTO {config}.external_alert_pending
+      (source_id, kind, alert_key, severity, title, detail, server_name, value, expires_at)
+   VALUES
+      (v_source_id, p_kind, p_alert_key, v_severity,
+       regexp_replace(p_title, '[\r\n]+', ' ', 'g'),
+       regexp_replace(p_detail, '[\r\n]+', ' ', 'g'),
+       regexp_replace(p_server_name, '[\r\n]+', ' ', 'g'),
+       p_value, now() + interval '15 minutes')
+   RETURNING pending_id INTO v_pending_id;
+
+   RETURN v_pending_id;
+END;
+$fn$;
+REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM PUBLIC;";
+
+    /// <summary>
+    /// The block (#5654, section 10c) that re-asserts the grants of every registered external alert source login, on
+    /// every start. A login is touched only when the registry names it AND the role exists AND it carries
+    /// <see cref="AlertSourceRoleMarker"/>. Per role: LOGIN, every widening attribute off, NOINHERIT, every
+    /// membership revoked (GRANTED BY the recorded grantor, CASCADE: section 11's rule), then CONNECT on the current
+    /// database, USAGE on the config schema and EXECUTE on the submit function, nothing else (a table or sequence privilege
+    /// found on the login in the config or collect schema is revoked first).
+    /// </summary>
+    internal static string BuildExternalAlertSourceRolesSql(string config) => $@"
+DO $do$
+DECLARE
+   source_login record;
+   membership record;
+BEGIN
+   FOR source_login IN
+      SELECT s.role_name, r.oid AS role_oid, (shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}') AS marked
+      FROM {config}.external_alert_source AS s
+      LEFT JOIN pg_catalog.pg_roles AS r ON r.rolname = s.role_name
+   LOOP
+      IF source_login.role_oid IS NULL OR NOT source_login.marked THEN
+         RAISE WARNING 'External alert source login ""%"" was skipped: it does not exist or does not carry the ''{AlertSourceRoleMarker}'' marker comment.', source_login.role_name;
+         CONTINUE;
+      END IF;
+
+      EXECUTE format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS NOINHERIT', source_login.role_name);
+
+      FOR membership IN
+         SELECT g.rolname AS granted, b.rolname AS grantor
+         FROM pg_catalog.pg_auth_members AS a
+         JOIN pg_catalog.pg_roles AS g ON g.oid = a.roleid
+         LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
+         WHERE a.member = source_login.role_oid
+      LOOP
+         EXECUTE format('REVOKE %I FROM %I', membership.granted, source_login.role_name)
+            || CASE WHEN membership.grantor IS NULL THEN '' ELSE format(' GRANTED BY %I', membership.grantor) END
+            || ' CASCADE';
+      END LOOP;
+
+      EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA {config}, {PgSchemaGenerator.CollectSchema} FROM %I', source_login.role_name);
+      EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA {config}, {PgSchemaGenerator.CollectSchema} FROM %I', source_login.role_name);
+      EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), source_login.role_name);
+      EXECUTE format('GRANT USAGE ON SCHEMA {config} TO %I', source_login.role_name);
+      EXECUTE format('GRANT EXECUTE ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) TO %I', source_login.role_name);
+   END LOOP;
+END $do$;";
 
     /// <summary>
     /// The <c>SECURITY DEFINER</c> function (#3334) that lets the least-privilege viewer/mcp roles write the ONE
