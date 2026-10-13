@@ -34,17 +34,30 @@ namespace Darling.Tests;
 [Collection("pg-cluster-roles")]
 public sealed class ExternalAlertGrantLiveTests
 {
-    /* #1776 own-store: each test mints its own scratch database through ScratchPostgres and per-run login names; the
+    /* #1776 own-store: each test mints its own scratch database through ScratchPostgres and its own login names; the
        fixed admin/viewer/mcp roles are why the class sits in the pg-cluster-roles collection. */
-    private static readonly string RunSuffix = Guid.NewGuid().ToString("N")[..8];
+    private readonly string RunSuffix;
 
-    private static readonly string RoleA = "ea_src_a_" + RunSuffix;
+    private readonly string RoleA;
 
-    private static readonly string RoleB = "ea_src_b_" + RunSuffix;
+    private readonly string RoleB;
 
-    private static readonly string RoleUnmarked = "ea_plain_" + RunSuffix;
+    private readonly string RoleUnmarked;
 
-    private static readonly string RoleSuper = "ea_su_" + RunSuffix;
+    private readonly string RoleSuper;
+
+    private readonly string[] CleanupRoles;
+
+    /* The names are instance fields: xUnit builds a new instance per test, so no test sees another's roles. */
+    public ExternalAlertGrantLiveTests()
+    {
+        RunSuffix = Guid.NewGuid().ToString("N")[..8];
+        RoleA = "ea_src_a_" + RunSuffix;
+        RoleB = "ea_src_b_" + RunSuffix;
+        RoleUnmarked = "ea_plain_" + RunSuffix;
+        RoleSuper = "ea_su_" + RunSuffix;
+        CleanupRoles = ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked, RoleSuper, DarlingManagedRoles.AlertSourceGroupRoleName];
+    }
 
     private const string SourcePassword = "ExtAlertSrcPw0123456789abcdef01";
 
@@ -139,7 +152,7 @@ public sealed class ExternalAlertGrantLiveTests
             ct);
 
     /// <summary>Migrates a scratch store, makes the two source logins, registers them, and runs the whole batch. Returns the source ids.</summary>
-    private static async Task<(int IdA, int IdB)> SetUpAsync(NpgsqlConnection owner, ScratchPostgres scratch, CancellationToken ct)
+    private async Task<(int IdA, int IdB)> SetUpAsync(NpgsqlConnection owner, ScratchPostgres scratch, CancellationToken ct)
     {
         await PgMigrations.MigrateAsync(owner, ct);
         Assert.SkipWhen(
@@ -153,18 +166,13 @@ public sealed class ExternalAlertGrantLiveTests
         return (idA, idB);
     }
 
-    private static async Task CleanUpAsync(ScratchPostgres scratch, bool bodySucceeded) =>
+    /// <summary>
+    /// Takes every role this test made, and the fixed-name ones, out of the cluster; see <see cref="LiveCleanupBatch.RemoveRolesAsync"/>.
+    /// A role that cannot be dropped fails the cleanup naming it, and no role ending in this test's suffix is left.
+    /// </summary>
+    private async Task CleanUpAsync(ScratchPostgres scratch, bool bodySucceeded) =>
         await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
-            await new LiveCleanupBatch(cleanup).DropRolesAsync($@"
-DO $do$
-DECLARE
-   r text;
-BEGIN
-   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{RoleA}', '{RoleB}', '{RoleUnmarked}', '{RoleSuper}', '{DarlingManagedRoles.AlertSourceGroupRoleName}') LOOP
-      EXECUTE format('DROP OWNED BY %I', r);
-      EXECUTE format('DROP ROLE %I', r);
-   END LOOP;
-END $do$", ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked, RoleSuper, DarlingManagedRoles.AlertSourceGroupRoleName], cleanupCt));
+            await new LiveCleanupBatch(cleanup).RemoveRolesAsync(CleanupRoles, RunSuffix, cleanupCt));
 
     /// <summary>The roles <paramref name="role"/> is a member of, by name (#5654: a source login's only one is the alert source group).</summary>
     private static async Task<string> MembershipsOfAsync(NpgsqlConnection owner, string role, CancellationToken ct) =>

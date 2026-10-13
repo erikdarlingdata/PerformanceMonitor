@@ -37,11 +37,22 @@ public sealed class ExternalAlertSourceVerbLiveTests
 {
     /* #1776 own-store: the test mints its own scratch database through ScratchPostgres and a per-run source name; the fixed
        admin/viewer/mcp roles are why the class sits in the pg-cluster-roles collection. */
-    private static readonly string SourceName = "live_" + Guid.NewGuid().ToString("N")[..8];
+    private readonly string RunSuffix;
 
-    private static readonly string RoleName = ExternalAlertSourceAdmin.RoleNameFor(SourceName);
+    private readonly string SourceName;
 
-    private static readonly string StrayName = "stray_" + Guid.NewGuid().ToString("N")[..8];
+    private readonly string RoleName;
+
+    private readonly string StrayName;
+
+    /* Instance fields: xUnit builds a new instance per test, so no test sees another's roles. */
+    public ExternalAlertSourceVerbLiveTests()
+    {
+        RunSuffix = Guid.NewGuid().ToString("N")[..8];
+        SourceName = "live_" + RunSuffix;
+        RoleName = ExternalAlertSourceAdmin.RoleNameFor(SourceName);
+        StrayName = "stray_" + RunSuffix;
+    }
 
     private const string GroupName = DarlingManagedRoles.AlertSourceGroupRoleName;
 
@@ -93,11 +104,11 @@ public sealed class ExternalAlertSourceVerbLiveTests
     }
 
     /// <summary>The statements pg_stat_statements recorded that carry this run's login name and a SCRAM verifier, so a failure shows them.</summary>
-    private static async Task<string> RecordedVerifierStatementsAsync(NpgsqlConnection owner, CancellationToken ct) =>
+    private async Task<string> RecordedVerifierStatementsAsync(NpgsqlConnection owner, CancellationToken ct) =>
         await ScalarAsync<string>(owner,
             $"SELECT COALESCE(pg_catalog.string_agg(pg_catalog.left(query, 300), ' | '), '') FROM pg_stat_statements WHERE query LIKE '%{RoleName}%' AND query LIKE '%SCRAM-SHA-256$%'", ct);
 
-    private static async Task<string?> VerifierOfAsync(NpgsqlConnection owner, CancellationToken ct)
+    private async Task<string?> VerifierOfAsync(NpgsqlConnection owner, CancellationToken ct)
     {
         try
         {
@@ -145,16 +156,7 @@ public sealed class ExternalAlertSourceVerbLiveTests
         finally
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
-                await new LiveCleanupBatch(cleanup).DropRolesAsync($@"
-DO $do$
-DECLARE
-   r text;
-BEGIN
-   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{GroupName}') LOOP
-      EXECUTE format('DROP OWNED BY %I', r);
-      EXECUTE format('DROP ROLE %I', r);
-   END LOOP;
-END $do$", ["admin", "viewer", "mcp", GroupName], cleanupCt));
+                await new LiveCleanupBatch(cleanup).RemoveRolesAsync(["admin", "viewer", "mcp", GroupName], RunSuffix, cleanupCt));
         }
     }
 
@@ -353,16 +355,7 @@ END $do$", ["admin", "viewer", "mcp", GroupName], cleanupCt));
         finally
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
-                await new LiveCleanupBatch(cleanup).DropRolesAsync($@"
-DO $do$
-DECLARE
-   r text;
-BEGIN
-   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{RoleName}', '{StrayName}', '{GroupName}') LOOP
-      EXECUTE format('DROP OWNED BY %I', r);
-      EXECUTE format('DROP ROLE %I', r);
-   END LOOP;
-END $do$", ["admin", "viewer", "mcp", RoleName, StrayName, GroupName], cleanupCt));
+                await new LiveCleanupBatch(cleanup).RemoveRolesAsync(["admin", "viewer", "mcp", RoleName, StrayName, GroupName], RunSuffix, cleanupCt));
         }
     }
 }

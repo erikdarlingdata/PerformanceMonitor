@@ -38,28 +38,40 @@ namespace Darling.Tests;
 [Collection("pg-cluster-roles")]
 public sealed class ExternalAlertSourceGroupLiveTests
 {
-    /* #1776 own-store: each test mints its own scratch database through ScratchPostgres and per-run role names; the
-       cluster-wide group and admin/viewer/mcp roles are why the class sits in the pg-cluster-roles collection. */
+    /* #1776 own-store: each test mints its own scratch database through ScratchPostgres and its own role names (instance
+       fields: xUnit builds a new instance per test, so no test sees another's roles); the cluster-wide group and
+       admin/viewer/mcp roles are why the class sits in the pg-cluster-roles collection. */
     private const string GroupName = DarlingManagedRoles.AlertSourceGroupRoleName;
 
-    private static readonly string Suffix = Guid.NewGuid().ToString("N")[..8];
-
-    private static readonly string OwnerName = "byo_owner_" + Suffix;
-
-    private static readonly string OtherName = "other_" + Suffix;
-
-    private static readonly string MonitorName = "mon_" + Suffix;
-
     private const string MonitorPassword = "Mon5654Probe";
-
-    private static readonly string SourceName = "grp_" + Suffix;
-
-    private static readonly string RoleName = ExternalAlertSourceAdmin.RoleNameFor(SourceName);
 
     /* A role named all: pg_hba reads the bare word as every role, so each pg_hba line that names it must quote it. */
     private const string KeywordRoleName = "all";
 
-    private static readonly string[] CleanupRoles = ["admin", "viewer", "mcp", GroupName, RoleName, OtherName, OwnerName, MonitorName, KeywordRoleName];
+    private readonly string Suffix;
+
+    private readonly string OwnerName;
+
+    private readonly string OtherName;
+
+    private readonly string MonitorName;
+
+    private readonly string SourceName;
+
+    private readonly string RoleName;
+
+    private readonly string[] CleanupRoles;
+
+    public ExternalAlertSourceGroupLiveTests()
+    {
+        Suffix = Guid.NewGuid().ToString("N")[..8];
+        OwnerName = "byo_owner_" + Suffix;
+        OtherName = "other_" + Suffix;
+        MonitorName = "mon_" + Suffix;
+        SourceName = "grp_" + Suffix;
+        RoleName = ExternalAlertSourceAdmin.RoleNameFor(SourceName);
+        CleanupRoles = ["admin", "viewer", "mcp", GroupName, RoleName, OtherName, OwnerName, MonitorName, KeywordRoleName];
+    }
 
     private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
@@ -78,7 +90,7 @@ public sealed class ExternalAlertSourceGroupLiveTests
     /// the store's objects WITH GRANT OPTION (what an owner needs) but owns none of them, so it acts as a bring-your-own owner.
     /// No admin, viewer or mcp role exists (a store the script never ran on).
     /// </summary>
-    private static async Task<NpgsqlConnection?> PrepareAsync(ScratchPostgres scratch, NpgsqlConnection superuser, CancellationToken ct, bool mayTurnTrackingOff = true)
+    private async Task<NpgsqlConnection?> PrepareAsync(ScratchPostgres scratch, NpgsqlConnection superuser, CancellationToken ct, bool mayTurnTrackingOff = true)
     {
         await PgMigrations.MigrateAsync(superuser, ct);
         if (await ScalarAsync<bool>(superuser, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct)
@@ -110,22 +122,13 @@ GRANT ALL ON FUNCTION config.submit_external_alert({DarlingManagedRoles.External
         return owner;
     }
 
-    private static Task CleanUpAsync(ScratchPostgres scratch, bool bodySucceeded) =>
+    /// <summary>
+    /// Takes every role this test made, and the fixed-name ones, out of the cluster; see <see cref="LiveCleanupBatch.RemoveRolesAsync"/>.
+    /// A role that cannot be dropped fails the cleanup naming it, and no role ending in this test's suffix is left.
+    /// </summary>
+    private Task CleanUpAsync(ScratchPostgres scratch, bool bodySucceeded) =>
         LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
-            await new LiveCleanupBatch(cleanup).DropRolesAsync($@"
-DO $do$
-DECLARE
-   r text;
-BEGIN
-   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ({string.Join(", ", CleanupRoles.Select(n => $"'{n}'"))}) LOOP
-      /* The SET grant on a parameter PrepareAsync gives is cluster-wide, and DROP OWNED BY in this database does not take it. */
-      IF pg_catalog.current_setting('server_version_num')::int >= 150000 THEN
-         EXECUTE format('REVOKE ALL ON PARAMETER pg_stat_statements.track_utility FROM %I', r);
-      END IF;
-      EXECUTE format('DROP OWNED BY %I', r);
-      EXECUTE format('DROP ROLE %I', r);
-   END LOOP;
-END $do$", CleanupRoles, cleanupCt));
+            await new LiveCleanupBatch(cleanup).RemoveRolesAsync(CleanupRoles, Suffix, cleanupCt));
 
     private static async Task<(int Exit, string Output, string Error)> RunVerbAsync(
         NpgsqlConnection owner, string connectionString, string verb, string name, PostgresConfig postgres, CancellationToken ct)
