@@ -285,6 +285,14 @@ The service reports the set once per start with a count, a total and that comman
 
 **The install is not verified when the service reaches Running.** That means the process started, not that it collects. The script prints the post-start checklist; work it about 10–15 minutes later against the store, and hold the upgrade unverified until every line passes.
 
+##### Rolling back to an older build
+
+A rollback restores the install files, not the store ([#5773](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5773)). The store keeps every migration the newer build applied, and the older build runs against it: migrations are additive, so it starts and collects. When it starts, the service logs one warning that names the migrations it does not know, for example: *"The store is at V183; this build knows up to V180, so V181-V183 are unknown to it."*
+
+An older build ignores what those migrations added, so it can read some newer data differently. The list below names each migration that changes what an older build reads, and what to do before you roll back past it. A migration not listed here has no known effect on what an older build reads.
+
+- **V181**: scoped notification routes read as fleet-wide; disable or delete them before rolling back to a build older than V181.
+
 #### Upgrading from a build that predates the script
 
 `upgrade-darling.ps1` was added after 3.5.0, so upgrading **from 3.5.0 or earlier** is a manual
