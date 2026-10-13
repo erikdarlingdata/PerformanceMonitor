@@ -108,7 +108,8 @@ public sealed class AttentionCollectorDefinitionTests
         Assert.Contains("@execution_count <> @last_execution_count", gateText, StringComparison.Ordinal);
         Assert.Contains("@event_count <> @last_event_count", gateText, StringComparison.Ordinal);
         Assert.Contains("@last_event_count IS NULL", gateText, StringComparison.Ordinal);
-        Assert.Contains("> @cutoff_time", text, StringComparison.Ordinal);
+        /* The cutoff filters on the attribute without shredding every event first (XeTimeFilterSweepTests), strictly after it. */
+        Assert.Contains("evt.exist('@timestamp[. > sql:variable(\"@cutoff_time\")]') = 1", text, StringComparison.Ordinal);
     }
 
     [Fact]

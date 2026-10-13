@@ -419,13 +419,16 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
            EIGHT since #4200. blocked_process_report and deadlocks each persist the dedicated XE ring-buffer
            session's own execution_count (server-scoped, or per database via XeShredGate.KeyFor on Azure SQL
            DB) so the next cycle can tell "nothing arrived" from a stale watermark and skip the cast+shred.
-           Also no host code: change-only, generic wiring. */
+           Also no host code: change-only, generic wiring.
+
+           NINE with the attention collector (#5640): it keeps the prior event_counter value, the one reading that a
+           MAX() over attention_events cannot recover (a quiet run writes no count row), so the next run can take the delta. */
         var declaring = CollectorCatalog.All
             .Where(c => c.StateKeys.Count > 0)
             .Select(c => c.Name)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(new[] { "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" }, declaring);
+        Assert.Equal(new[] { "attention", "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" }, declaring);
     }
 
     [Fact]

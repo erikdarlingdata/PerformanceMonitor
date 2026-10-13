@@ -32,9 +32,11 @@ namespace PerformanceMonitor.Collectors;
 /// case the counter read is staged for the next run. The alert and any rate read <c>count</c> rows and
 /// nothing else, so the sum of <c>attention_count</c> equals what the session counted (#5640).</para>
 ///
-/// <para><b>ring_buffer is the samples, and only the samples.</b> It keeps at most max_events_limit events (1,000 by
-/// default) and receives them up to MAX_DISPATCH_LATENCY (5 s) after the counter counts them, so it can never be summed
-/// against the counter: an event can sit in one but not yet the other, or fall between the two reads of a run. The rows
+/// <para><b>ring_buffer is the samples, and only the samples.</b> It keeps at most 1,000 events: the target's documented
+/// MAX_EVENTS_LIMIT default (Microsoft Learn, "Ring Buffer Target"), which the session does not override. Its
+/// <c>max_memory = 1024</c> KB is the second cap and binds first only when the events average over about 1 KB each (a long
+/// sql_text), so the buffer holds 1,000 events or fewer, never more. It receives them up to MAX_DISPATCH_LATENCY (5 s) after the counter counts them, so it can
+/// never be summed against the counter: an event can sit in one but not yet the other, or fall between the two reads of a run. The rows
 /// newer than the stored watermark become one <c>sample</c> row each (attention_count 0, event_time set), deduplicated by
 /// that watermark. A sample never moves a count and a count never moves the watermark (a count row's event_time is
 /// NULL), so no event is counted twice and a storm lost from the ring buffer is still counted.</para>
@@ -102,7 +104,7 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
     /// <summary>
     /// A plain table on every store (#5640). The 73rd hypertable is a grid decision (#3035, #3044, #3107: the compression
     /// band, the worker sizing and the refresh watch lines all derive from the hypertable count), and attention rows are
-    /// low volume: the ring buffer caps the detail at about 1,800 events per read, and a healthy server reads near zero.
+    /// low volume: the ring buffer caps the detail at 1,000 events per read (its MAX_EVENTS_LIMIT default), and a healthy server reads near zero.
     /// The 30-day retention is the time-sliced DELETE the sweep runs for any table that is not a hypertable. The only
     /// holder of this opt-out; <c>AttentionPlainTableTests</c> pins it.
     /// </summary>
@@ -225,7 +227,7 @@ SELECT
     statement_text = evt.value('(action[@name=""sql_text""]/value)[1]', 'nvarchar(max)')
 FROM @PerformanceMonitor_Attention AS pma
 CROSS APPLY pma.ring_buffer.nodes('RingBufferTarget/event[@name=""attention""]') AS e(evt)
-WHERE evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time
+WHERE evt.exist('@timestamp[. > sql:variable(""@cutoff_time"")]') = 1
 ORDER BY
     evt.value('(@timestamp)[1]', 'datetime2')
 OPTION(RECOMPILE);
