@@ -219,6 +219,45 @@ public sealed class RunnableQueueEscalationTests
 
     /* ---------------- the shared cooldown and the repeat ceiling ---------------- */
 
+    private static AlertDelivery FailedByWebhook() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.Failed, WebhookSendError: "Teams: 429 Too Many Requests", AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    [Fact]
+    public async Task AnEscalationWhoseEveryChannelFailed_BacksOffLikeAnyFailedSend_AndADeliveredSendEndsTheStreak()
+    {
+        /* #5715 part A: the escalation skipped the cooldown stamp a failed send back-dates (#4752), so a Critical went out at
+           every evaluation while every channel was down. While the family and key have an open streak it waits for the stamp. */
+        var (h, engine) = Engine();
+
+        Assert.Equal(1, await EvaluateAsync(h, engine, T0, 9, 9, 9));
+
+        h.Deliverer.Report = _ => FailedByWebhook();
+        Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(1), 9, 9, 9, 60));      /* failure 1: retry in 1 minute */
+        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(1).AddSeconds(30), 9, 9, 9, 60));
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(1).AddSeconds(59), 9, 9, 9, 60));
+
+        Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(2), 9, 9, 9, 60));      /* failure 2: retry in 2 minutes */
+        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(3), 9, 9, 60, 60));
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(3).AddSeconds(59), 9, 60, 60, 60));
+
+        h.Deliverer.Report = null;
+        Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(4), 60, 60, 60, 60));   /* delivered: the streak ends */
+        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(4).AddSeconds(30), 60, 60, 60, 60, 60));
+
+        /* A later incident's escalation goes at once again, inside the cooldown. */
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(5), 0, 0, 0, 0, 0));
+        var later = T0.AddMinutes(4).Add(TimeSpan.FromMinutes(h.Settings.CooldownMinutes)).AddMinutes(1);
+        Assert.Equal(1, await EvaluateAsync(h, engine, later, 9, 9, 9));
+        Assert.Equal(1, await EvaluateAsync(h, engine, later.AddMinutes(1), 9, 9, 9, 60));
+        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
+    }
+
     [Fact]
     public async Task TheSharedCooldown_LetsTheFlaggedEscalationThroughInsideTheWindow_AndTheStampRestartsIt()
     {

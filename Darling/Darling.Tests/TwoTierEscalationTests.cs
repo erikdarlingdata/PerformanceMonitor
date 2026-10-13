@@ -246,6 +246,49 @@ public sealed class TwoTierEscalationTests
 
     [Theory]
     [MemberData(nameof(Alerts))]
+    public async Task AnEscalationWhoseEveryChannelFailed_BacksOffLikeAnyFailedSend_AndADeliveredSendEndsTheStreak(string metric)
+    {
+        /* #5715 part A: Restore keeps the next evaluation an escalation, and an escalation used to skip the cooldown stamp the
+           failure back-dated (#4752), so a Critical went out at every evaluation while every channel was down. While the
+           family and key have an open failure streak, the escalation now waits for the back-dated stamp. */
+        var h = Armed(metric);
+        var engine = h.Build();
+
+        Assert.Equal(1, await StepAsync(metric, h, engine, T0, Level.Warning, 0));
+        Assert.False(Flag(metric, h));
+
+        /* The Critical inside the cooldown: every channel fails (failure 1, retry in 1 minute). */
+        h.Deliverer.Report = _ => FailedByWebhook();
+        Assert.Equal(1, await StepAsync(metric, h, engine, T0.AddMinutes(1), Level.Critical, 1, cpuSamples: 1));
+        Assert.True(Flag(metric, h));
+
+        /* Before the retry delay: nothing, though the incident is still an escalation. */
+        Assert.Equal(0, await StepAsync(metric, h, engine, T0.AddMinutes(1).AddSeconds(30), Level.Critical, 2, cpuSamples: 1));
+        Assert.Equal(0, await StepAsync(metric, h, engine, T0.AddMinutes(1).AddSeconds(59), Level.Critical, 3, cpuSamples: 1));
+
+        /* After the delay: the Critical goes out again with the flag, and fails again (failure 2, retry in 2 minutes). */
+        Assert.Equal(1, await StepAsync(metric, h, engine, T0.AddMinutes(2), Level.Critical, 4, cpuSamples: 1));
+        Assert.True(Flag(metric, h));
+        Assert.Equal(0, await StepAsync(metric, h, engine, T0.AddMinutes(3), Level.Critical, 5, cpuSamples: 1));
+        Assert.Equal(0, await StepAsync(metric, h, engine, T0.AddMinutes(3).AddSeconds(59), Level.Critical, 6, cpuSamples: 1));
+
+        /* The second failure waited 2 minutes. This send is delivered, which ends the streak. */
+        h.Deliverer.Report = null;
+        Assert.Equal(1, await StepAsync(metric, h, engine, T0.AddMinutes(4), Level.Critical, 7, cpuSamples: 1));
+        Assert.True(Flag(metric, h));
+        Assert.Equal(0, await StepAsync(metric, h, engine, T0.AddMinutes(4).AddSeconds(30), Level.Critical, 8, cpuSamples: 1));
+
+        /* A later incident's escalation goes at once again, inside the cooldown, with no wait. */
+        await StepAsync(metric, h, engine, T0.AddMinutes(5), Level.Clear, 9);
+        var later = T0.AddMinutes(4).Add(TimeSpan.FromMinutes(h.Settings.CooldownMinutes)).AddMinutes(1);
+        Assert.Equal(1, await StepAsync(metric, h, engine, later, Level.Warning, 10));
+        Assert.Equal(1, await StepAsync(metric, h, engine, later.AddMinutes(1), Level.Critical, 11));
+        Assert.Equal(AlertSeverityLevel.Critical, Last(metric, h).Severity);
+        Assert.True(Flag(metric, h));
+    }
+
+    [Theory]
+    [MemberData(nameof(Alerts))]
     public async Task ACriticalThatOpensTheIncident_IsAnOrdinaryFirstFire_NotAnEscalation(string metric)
     {
         var h = Armed(metric);

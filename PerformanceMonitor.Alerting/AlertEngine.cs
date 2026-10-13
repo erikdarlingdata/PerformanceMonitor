@@ -140,7 +140,9 @@ public sealed class AlertEngine
     private readonly TierEscalation _runnableQueueEscalation = new();
 
     /* #5715: the same Warning-to-Critical escalation for the four older two-tier alerts, one instance each, keyed like the
-       alert's own cooldown dictionary (per server; per volume for Volume Free Space). */
+       alert's own cooldown dictionary (per server; Volume Free Space is one alert per server, for its worst volume, so its escalation
+       is keyed per server too). A failed escalation (#4752) backs off like any failed send: EscalationOpensGate holds it for the
+       retry delay while the family and key have an open failure streak. */
     private readonly TierEscalation _cpuEscalation = new();
     private readonly TierEscalation _deadlockEscalation = new();
     private readonly TierEscalation _poisonWaitEscalation = new();
@@ -998,7 +1000,7 @@ public sealed class AlertEngine
         var cpuGrade = GradeCpuFire(alertCpuValue);
         var escalation = _cpuEscalation.IsEscalation(key, cpuGrade);
 
-        if (!suppressed && (escalation || CooldownElapsed(_lastCpuAlert, key, now, alertCooldown))) /* :72 */
+        if (!suppressed && EscalationOpensGate("High CPU", key, escalation, _lastCpuAlert, now, alertCooldown)) /* :72 */
         {
             var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "High CPU" }; /* :74 */
             bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
@@ -1765,7 +1767,7 @@ public sealed class AlertEngine
            the watermark the Warning fire left is below it. */
         var deadlockTier = GradeDeadlockFire(effectiveDeadlockCount, _settings.DeadlockRateThresholds);
         var deadlockEscalation = _settings.DeadlockEnabled && _deadlockEscalation.IsEscalation(key, deadlockTier);
-        bool deadlockCooldownElapsed = deadlockEscalation || CooldownElapsed(_lastDeadlockAlert, key, now, alertCooldown); /* :217 */
+        bool deadlockCooldownElapsed = EscalationOpensGate("Deadlocks Detected", key, deadlockEscalation, _lastDeadlockAlert, now, alertCooldown); /* :217 */
         var deadlockDecision = _settings.DeadlockEnabled
             ? RollingCountAlertGate.Evaluate(effectiveDeadlockCount, _settings.DeadlockCountThreshold, deadlockWatermark, deadlockCooldownElapsed, suppressed)
             : new RollingCountAlertGate.Decision(false, false, 0);                  /* :218-220 */
@@ -1932,7 +1934,7 @@ public sealed class AlertEngine
                 var worst = findings[0];                                            /* :285 — worst-first from the evaluator */
                 var escalation = _poisonWaitEscalation.IsEscalation(key, worst.Severity);
 
-                if (!suppressed && hasFreshCollection && (escalation || CooldownElapsed(_lastPoisonWaitAlert, key, now, alertCooldown))) /* :283 */
+                if (!suppressed && hasFreshCollection && EscalationOpensGate("Poison Wait", key, escalation, _lastPoisonWaitAlert, now, alertCooldown)) /* :283 */
                 {
                     var allWaitNames = string.Join(", ", findings.ConvertAll(f => f.CurrentValueClause)); /* :286 */
 
@@ -2115,7 +2117,7 @@ public sealed class AlertEngine
                 var escalation = _runnableQueueEscalation.IsEscalation(key, finding.Severity);
 
                 if (!suppressed && hasFreshCollection
-                    && (escalation || CooldownElapsed(_lastRunnableQueueAlert, key, now, alertCooldown)))
+                    && EscalationOpensGate(RunnableQueueEvaluator.MetricName, key, escalation, _lastRunnableQueueAlert, now, alertCooldown))
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = RunnableQueueEvaluator.MetricName };
                     bool isMuted = _isAlertMuted(muteCtx);
@@ -2305,7 +2307,7 @@ public sealed class AlertEngine
                 var escalation = !finding.Muted && _attentionEscalation.IsEscalation(key, finding.Severity);
 
                 if (!suppressed && hasFreshRun
-                    && (escalation || CooldownElapsed(stamps, key, now, alertCooldown)))
+                    && EscalationOpensGate(AttentionEvaluator.MetricName, key, escalation, stamps, now, alertCooldown))
                 {
                     stamps[key] = now;
                     runTimes[key] = finding.NewestRunTime;
@@ -2798,9 +2800,8 @@ public sealed class AlertEngine
                 var escalation = _lowDiskEscalation.IsEscalation(key, lowDiskTier);
 
                 if (!suppressed
-                    && (escalation
-                        || (LowDiskAlertGate.ShouldAlert(worst.FreePercent, lastLowDiskPercent)
-                            && CooldownElapsed(_lastLowDiskAlert, key, now, alertCooldown))))
+                    && EscalationOpensGate("Volume Free Space", key, escalation, _lastLowDiskAlert, now, alertCooldown)
+                    && (escalation || LowDiskAlertGate.ShouldAlert(worst.FreePercent, lastLowDiskPercent)))
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Volume Free Space" }; /* :499 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :500 */
@@ -3969,6 +3970,30 @@ public sealed class AlertEngine
         var exponent = Math.Clamp(consecutiveFailures - 1, 0, 20);
         var delay = TimeSpan.FromMinutes(1L << exponent);
         return delay < cooldown ? delay : (cooldown < TimeSpan.Zero ? TimeSpan.Zero : cooldown);
+    }
+
+    /// <summary>
+    /// The cooldown gate of a family that lets a Warning-to-Critical escalation (#5715) skip the cooldown, written
+    /// once for every such site. An escalation opens the gate at once only while the family and key have NO open
+    /// failure streak in <c>_failedSends</c>. While a streak is open (the escalation's last send reached no
+    /// channel, #4752), the gate waits for <see cref="CooldownElapsed"/>: <see cref="AfterFire"/> back-dated the
+    /// stamp, so that is the retry delay (1, 2, 4, 8 ... minutes). Without this, <c>Restore</c> keeps the next
+    /// evaluation an escalation and a Critical retried at every evaluation while every channel was down. The fire
+    /// that goes after the wait still carries <c>EscalationBypassesCooldown</c>, so the email and webhook cooldowns
+    /// let it through. <paramref name="family"/> is the string the site passes to <see cref="AfterFire"/>.
+    /// </summary>
+    private bool EscalationOpensGate<TKey>(
+        string family, TKey key, bool escalation, ConcurrentDictionary<TKey, DateTime> stamps, DateTime now,
+        TimeSpan cooldown)
+        where TKey : notnull
+    {
+        if (escalation
+            && !_failedSends.HasOpenStreak(family, Convert.ToString(key, CultureInfo.InvariantCulture) ?? string.Empty, now))
+        {
+            return true;
+        }
+
+        return CooldownElapsed(stamps, key, now, cooldown);
     }
 
     /// <summary>
