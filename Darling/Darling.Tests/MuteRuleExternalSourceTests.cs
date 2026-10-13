@@ -138,11 +138,11 @@ public sealed class MuteRuleExternalSourceTests
     {
         Assert.Contains("external_source", ViewerDataService.MuteRulesSelectSql, StringComparison.Ordinal);
         Assert.Contains("external_source", ViewerDataService.MuteRuleInsertSql, StringComparison.Ordinal);
-        Assert.Contains("external_source = $12", ViewerDataService.MuteRuleUpdateSql, StringComparison.Ordinal);
+        Assert.Contains("external_source = $13", ViewerDataService.MuteRuleUpdateSql, StringComparison.Ordinal);
 
         var store = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "PgMuteRuleStore.cs");
-        Assert.Contains("job_name_pattern, server_id, external_source", store, StringComparison.Ordinal);
-        Assert.Contains("external_source = $12", store, StringComparison.Ordinal);
+        Assert.Contains("client_app_pattern, external_source", store, StringComparison.Ordinal);
+        Assert.Contains("external_source = $13", store, StringComparison.Ordinal);
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(store, @"AddNullableText\(command, rule\.ExternalSource\)").Count);
     }
 

@@ -1088,6 +1088,8 @@ ALTER TABLE config.config_alert_settings
     /// watermark read.</para>
     /// </summary>
     private const string V178Sql = QueryStoreWatermarks.CreateSql;
+
+    /// <summary>
     /// V180 (#5654) — the tables for alerts that another service raises through Darling's channels, routes and mute rules:
     /// <c>config.external_alert_source</c> (the registry that maps a login role to a source name), <c>config.external_alert_pending</c>
     /// (the queue the provisioned function appends to and the service drains) and <c>config.external_alert_state</c> (which keys are

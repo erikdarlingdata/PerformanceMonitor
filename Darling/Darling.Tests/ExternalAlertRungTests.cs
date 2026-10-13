@@ -33,7 +33,7 @@ public sealed class ExternalAlertRungTests
 {
     public const string RungName = "external-alerts";
 
-    private const int ProbeOrdinal = 151;
+    private const int ProbeOrdinal = 155;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -117,10 +117,10 @@ public sealed class ExternalAlertRungTests
         var parameters = method.GetParameters();
         Assert.Equal(ProbeOrdinal, parameters.Length - 1);
         Assert.Equal("hasExternalAlerts", parameters[ProbeOrdinal].Name);
-        Assert.Equal("hasPlanRegressionDailyRowcount", parameters[ProbeOrdinal - 1].Name);
+        Assert.Equal("hasClientTimeoutSettings", parameters[ProbeOrdinal - 1].Name);
 
         var thisArm = viewer.IndexOf("if (hasExternalAlerts)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasPlanRegressionDailyRowcount)", StringComparison.Ordinal);
+        var previousArm = viewer.IndexOf("if (hasClientTimeoutSettings)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0 && previousArm > thisArm, "the V180 arm sits above the next rung down");
 
         /* Every sentinel present: maps to this rung. This sentinel absent: a rung back, never this one. */
