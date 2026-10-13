@@ -1886,7 +1886,7 @@ REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignat
 DO $do$
 DECLARE
    name_grantor boolean := (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user)
-                           OR current_setting('server_version_num')::int >= 160000;
+                           OR pg_catalog.current_setting('server_version_num')::int >= 160000;
    source_login record;
    membership record;
    attribute text;
@@ -1897,13 +1897,13 @@ BEGIN
       SELECT rolname FROM pg_catalog.pg_roles
       WHERE rolname IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
    LOOP
-      EXECUTE format('REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM %I', own_role);
+      EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM %I', own_role);
    END LOOP;
 
    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '{AlertSourceGroupRoleName}') THEN
       CREATE ROLE {AlertSourceGroupRoleName} NOLOGIN NOINHERIT;
       COMMENT ON ROLE {AlertSourceGroupRoleName} IS '{AlertSourceGroupRoleMarker}';
-   ELSIF shobj_description((SELECT oid FROM pg_catalog.pg_roles WHERE rolname = '{AlertSourceGroupRoleName}'), 'pg_authid') IS DISTINCT FROM '{AlertSourceGroupRoleMarker}' THEN
+   ELSIF pg_catalog.shobj_description((SELECT oid FROM pg_catalog.pg_roles WHERE rolname = '{AlertSourceGroupRoleName}'), 'pg_authid') IS DISTINCT FROM '{AlertSourceGroupRoleMarker}' THEN
       RAISE EXCEPTION 'The group role ""{AlertSourceGroupRoleName}"" already exists and was not created by Darling (missing the ''{AlertSourceGroupRoleMarker}'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated role.';
    END IF;
 
@@ -1912,14 +1912,14 @@ BEGIN
    SELECT oid, rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls INTO group_role
    FROM pg_catalog.pg_roles WHERE rolname = '{AlertSourceGroupRoleName}';
    ALTER ROLE {AlertSourceGroupRoleName} NOLOGIN NOINHERIT;
-   FOREACH attribute IN ARRAY array_remove(ARRAY[
+   FOREACH attribute IN ARRAY pg_catalog.array_remove(ARRAY[
          CASE WHEN group_role.rolsuper THEN 'SUPERUSER' END,
          CASE WHEN group_role.rolcreaterole THEN 'CREATEROLE' END,
          CASE WHEN group_role.rolcreatedb THEN 'CREATEDB' END,
          CASE WHEN group_role.rolreplication THEN 'REPLICATION' END,
          CASE WHEN group_role.rolbypassrls THEN 'BYPASSRLS' END], NULL)
    LOOP
-      EXECUTE format('ALTER ROLE %I NO%s', '{AlertSourceGroupRoleName}', attribute);
+      EXECUTE pg_catalog.format('ALTER ROLE %I NO%s', '{AlertSourceGroupRoleName}', attribute);
    END LOOP;
 
    FOR membership IN
@@ -1929,15 +1929,15 @@ BEGIN
       LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
       WHERE a.member = group_role.oid
    LOOP
-      EXECUTE format('REVOKE %I FROM %I', membership.granted, '{AlertSourceGroupRoleName}')
-         || CASE WHEN name_grantor AND membership.grantor IS NOT NULL THEN format(' GRANTED BY %I', membership.grantor) ELSE '' END
+      EXECUTE pg_catalog.format('REVOKE %I FROM %I', membership.granted, '{AlertSourceGroupRoleName}')
+         || CASE WHEN name_grantor AND membership.grantor IS NOT NULL THEN pg_catalog.format(' GRANTED BY %I', membership.grantor) ELSE '' END
          || ' CASCADE';
    END LOOP;
 
-   EXECUTE format('REVOKE CONNECT, CREATE, TEMPORARY ON DATABASE %I FROM {AlertSourceGroupRoleName}', current_database());
+   EXECUTE pg_catalog.format('REVOKE CONNECT, CREATE, TEMPORARY ON DATABASE %I FROM {AlertSourceGroupRoleName}', pg_catalog.current_database());
    REVOKE ALL ON SCHEMA {config}, {PgSchemaGenerator.CollectSchema} FROM {AlertSourceGroupRoleName};
-   EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I, %I FROM %I', '{config}', '{PgSchemaGenerator.CollectSchema}', '{AlertSourceGroupRoleName}');
-   EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I, %I FROM %I', '{config}', '{PgSchemaGenerator.CollectSchema}', '{AlertSourceGroupRoleName}');
+   EXECUTE pg_catalog.format('REVOKE ALL ON ALL TABLES IN SCHEMA %I, %I FROM %I', '{config}', '{PgSchemaGenerator.CollectSchema}', '{AlertSourceGroupRoleName}');
+   EXECUTE pg_catalog.format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I, %I FROM %I', '{config}', '{PgSchemaGenerator.CollectSchema}', '{AlertSourceGroupRoleName}');
    REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM {AlertSourceGroupRoleName};
 
    /* Every grant of the group to a role that is not a registered, marked source login, and every grant of a source login to
@@ -1949,8 +1949,8 @@ BEGIN
 {AlertSourceGroupSweepSql(config, "group_role.oid")}
    LOOP
       BEGIN
-         EXECUTE format('REVOKE %I FROM %I', membership.granted, membership.member_name)
-            || CASE WHEN name_grantor AND membership.grantor IS NOT NULL THEN format(' GRANTED BY %I', membership.grantor) ELSE '' END
+         EXECUTE pg_catalog.format('REVOKE %I FROM %I', membership.granted, membership.member_name)
+            || CASE WHEN name_grantor AND membership.grantor IS NOT NULL THEN pg_catalog.format(' GRANTED BY %I', membership.grantor) ELSE '' END
             || ' CASCADE';
       EXCEPTION WHEN insufficient_privilege THEN
          RAISE WARNING 'Role ""%"" is still a member of ""%"": revoking that needs a superuser, or ADMIN OPTION on it and the rights of the role that granted it.', membership.member_name, membership.granted;
@@ -1959,11 +1959,11 @@ BEGIN
 
    FOR source_login IN
       SELECT s.role_name, r.oid AS role_oid, r.rolsuper, r.rolcreaterole, r.rolcreatedb, r.rolreplication, r.rolbypassrls,
-             (shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}') AS marked,
+             (pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}') AS marked,
              (r.rolname IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
               OR r.rolname = current_user
               OR r.rolsuper
-              OR r.oid = (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = current_database())) AS reserved
+              OR r.oid = (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())) AS reserved
       FROM {config}.external_alert_source AS s
       LEFT JOIN pg_catalog.pg_roles AS r ON r.rolname = s.role_name
    LOOP
@@ -1975,20 +1975,20 @@ BEGIN
       IF source_login.role_oid IS NULL OR NOT source_login.marked THEN
          RAISE WARNING 'External alert source login ""%"" was skipped: it does not exist or does not carry the ''{AlertSourceRoleMarker}'' marker comment.', source_login.role_name;
          IF source_login.role_oid IS NOT NULL THEN
-            EXECUTE format('REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM %I', source_login.role_name);
+            EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM %I', source_login.role_name);
          END IF;
          CONTINUE;
       END IF;
 
-      EXECUTE format('ALTER ROLE %I LOGIN NOINHERIT CONNECTION LIMIT {AlertSourceConnectionLimit}', source_login.role_name);
-      FOREACH attribute IN ARRAY array_remove(ARRAY[
+      EXECUTE pg_catalog.format('ALTER ROLE %I LOGIN NOINHERIT CONNECTION LIMIT {AlertSourceConnectionLimit}', source_login.role_name);
+      FOREACH attribute IN ARRAY pg_catalog.array_remove(ARRAY[
             CASE WHEN source_login.rolsuper THEN 'SUPERUSER' END,
             CASE WHEN source_login.rolcreaterole THEN 'CREATEROLE' END,
             CASE WHEN source_login.rolcreatedb THEN 'CREATEDB' END,
             CASE WHEN source_login.rolreplication THEN 'REPLICATION' END,
             CASE WHEN source_login.rolbypassrls THEN 'BYPASSRLS' END], NULL)
       LOOP
-         EXECUTE format('ALTER ROLE %I NO%s', source_login.role_name, attribute);
+         EXECUTE pg_catalog.format('ALTER ROLE %I NO%s', source_login.role_name, attribute);
       END LOOP;
 
       FOR membership IN
@@ -1998,20 +1998,20 @@ BEGIN
          LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
          WHERE a.member = source_login.role_oid
       LOOP
-         EXECUTE format('REVOKE %I FROM %I', membership.granted, source_login.role_name)
-            || CASE WHEN name_grantor AND membership.grantor IS NOT NULL THEN format(' GRANTED BY %I', membership.grantor) ELSE '' END
+         EXECUTE pg_catalog.format('REVOKE %I FROM %I', membership.granted, source_login.role_name)
+            || CASE WHEN name_grantor AND membership.grantor IS NOT NULL THEN pg_catalog.format(' GRANTED BY %I', membership.grantor) ELSE '' END
             || ' CASCADE';
       END LOOP;
 
-      EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I, %I FROM %I', '{config}', '{PgSchemaGenerator.CollectSchema}', source_login.role_name);
-      EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I, %I FROM %I', '{config}', '{PgSchemaGenerator.CollectSchema}', source_login.role_name);
-      EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), source_login.role_name);
-      EXECUTE format('GRANT USAGE ON SCHEMA {config} TO %I', source_login.role_name);
-      EXECUTE format('GRANT EXECUTE ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) TO %I', source_login.role_name);
-      IF current_setting('server_version_num')::int >= 160000 THEN
-         EXECUTE format('GRANT %I TO %I WITH INHERIT FALSE, SET FALSE', '{AlertSourceGroupRoleName}', source_login.role_name);
+      EXECUTE pg_catalog.format('REVOKE ALL ON ALL TABLES IN SCHEMA %I, %I FROM %I', '{config}', '{PgSchemaGenerator.CollectSchema}', source_login.role_name);
+      EXECUTE pg_catalog.format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I, %I FROM %I', '{config}', '{PgSchemaGenerator.CollectSchema}', source_login.role_name);
+      EXECUTE pg_catalog.format('GRANT CONNECT ON DATABASE %I TO %I', pg_catalog.current_database(), source_login.role_name);
+      EXECUTE pg_catalog.format('GRANT USAGE ON SCHEMA {config} TO %I', source_login.role_name);
+      EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) TO %I', source_login.role_name);
+      IF pg_catalog.current_setting('server_version_num')::int >= 160000 THEN
+         EXECUTE pg_catalog.format('GRANT %I TO %I WITH INHERIT FALSE, SET FALSE', '{AlertSourceGroupRoleName}', source_login.role_name);
       ELSE
-         EXECUTE format('GRANT %I TO %I', '{AlertSourceGroupRoleName}', source_login.role_name);
+         EXECUTE pg_catalog.format('GRANT %I TO %I', '{AlertSourceGroupRoleName}', source_login.role_name);
       END IF;
    END LOOP;
 END $do$;";
@@ -2028,11 +2028,11 @@ END $do$;";
          SELECT r.oid
          FROM {config}.external_alert_source AS s
          JOIN pg_catalog.pg_roles AS r ON r.rolname = s.role_name
-         WHERE shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}'
+         WHERE pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}'
            AND r.rolname NOT IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
            AND r.rolname <> current_user
            AND NOT r.rolsuper
-           AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = current_database())
+           AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())
       ), walk (roleid, member) AS (
          SELECT a.roleid, a.member FROM pg_catalog.pg_auth_members AS a WHERE a.roleid = {groupOid}
          UNION
@@ -2062,10 +2062,10 @@ END $do$;";
     {
         var isSource = registryExists
             ? $@"EXISTS (SELECT 1 FROM {config}.external_alert_source AS s WHERE s.role_name = r.rolname)
-              AND shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}'
+              AND pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '{AlertSourceRoleMarker}'
               AND r.rolname NOT IN ('{DarlingManagedPostgres.AdminRoleName}', '{DarlingManagedPostgres.ViewerRoleName}', '{DarlingManagedPostgres.McpRoleName}')
               AND NOT r.rolsuper
-              AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = current_database())"
+              AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())"
             : "false";
         return $@"
 WITH RECURSIVE closure (oid) AS (
@@ -2076,7 +2076,7 @@ WITH RECURSIVE closure (oid) AS (
    UNION
    SELECT a.member FROM pg_catalog.pg_auth_members AS a JOIN closure AS c ON a.roleid = c.oid
 )
-SELECT COALESCE(array_agg(x.rolname ORDER BY x.rolname COLLATE ""C""), ARRAY[]::text[])
+SELECT COALESCE(pg_catalog.array_agg(x.rolname ORDER BY x.rolname COLLATE ""C""), ARRAY[]::text[])
 FROM (
    SELECT r.rolname::text AS rolname
    FROM closure AS c
@@ -2094,16 +2094,34 @@ FROM (
     /// </summary>
     internal static async Task<IReadOnlyList<string>> ReadAlertSourceGroupExtrasAsync(NpgsqlConnection connection, CancellationToken ct)
     {
+        /* Its own short transaction with search_path set to pg_catalog, pg_temp, as the verbs' own transactions are: the add and
+           rotate verbs run this as the store owner right after they commit, and no function another role made in a schema on
+           the session's path (public on a store whose PUBLIC still holds CREATE there) can stand in for a catalog one. */
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await using (var path = new NpgsqlCommand("SET LOCAL search_path = pg_catalog, pg_temp", connection, transaction))
+        {
+            await path.ExecuteNonQueryAsync(ct);
+        }
+
         bool registryExists;
-        await using (var probe = new NpgsqlCommand(
-            $"SELECT to_regclass('{PgSchemaGenerator.ConfigSchema}.external_alert_source') IS NOT NULL", connection))
+        await using (var probe = new NpgsqlCommand(AlertSourceRegistryProbeSql, connection, transaction))
         {
             registryExists = (bool)(await probe.ExecuteScalarAsync(ct))!;
         }
 
-        await using var command = new NpgsqlCommand(AlertSourceGroupExtrasSql(PgSchemaGenerator.ConfigSchema, registryExists), connection);
-        return (string[])(await command.ExecuteScalarAsync(ct))!;
+        string[] extras;
+        await using (var command = new NpgsqlCommand(AlertSourceGroupExtrasSql(PgSchemaGenerator.ConfigSchema, registryExists), connection, transaction))
+        {
+            extras = (string[])(await command.ExecuteScalarAsync(ct))!;
+        }
+
+        await transaction.CommitAsync(ct);
+        return extras;
     }
+
+    /// <summary>Whether the store holds the external alert source registry yet (#5654), read before <see cref="AlertSourceGroupExtrasSql"/>.</summary>
+    internal static readonly string AlertSourceRegistryProbeSql =
+        $"SELECT pg_catalog.to_regclass('{PgSchemaGenerator.ConfigSchema}.external_alert_source') IS NOT NULL";
 
     /// <summary>
     /// The <c>SECURITY DEFINER</c> function (#3334) that lets the least-privilege viewer/mcp roles write the ONE

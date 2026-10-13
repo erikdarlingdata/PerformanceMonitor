@@ -75,7 +75,7 @@ public sealed class ExternalAlertSourceGroupLiveTests
     /// the store's objects WITH GRANT OPTION (what an owner needs) but owns none of them, so it acts as a bring-your-own owner.
     /// No admin, viewer or mcp role exists (a store the script never ran on).
     /// </summary>
-    private static async Task<NpgsqlConnection?> PrepareAsync(ScratchPostgres scratch, NpgsqlConnection superuser, CancellationToken ct)
+    private static async Task<NpgsqlConnection?> PrepareAsync(ScratchPostgres scratch, NpgsqlConnection superuser, CancellationToken ct, bool mayTurnTrackingOff = true)
     {
         await PgMigrations.MigrateAsync(superuser, ct);
         if (await ScalarAsync<bool>(superuser, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct)
@@ -94,6 +94,14 @@ GRANT ALL ON ALL TABLES IN SCHEMA config, collect TO {OwnerName} WITH GRANT OPTI
 GRANT ALL ON ALL SEQUENCES IN SCHEMA config, collect TO {OwnerName} WITH GRANT OPTION;
 GRANT ALL ON FUNCTION config.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) TO {OwnerName} WITH GRANT OPTION;", ct);
 
+        /* With pg_stat_statements loaded and utility tracking on, the verbs send no password statement for an owner that may
+           not turn the tracking off (#5654), so the owner gets SET on it, as tools/provision-roles.sql tells a DBA to do; a test of that
+           refusal passes false. */
+        if (mayTurnTrackingOff && await SettingOrNullAsync(superuser, "pg_stat_statements.track_utility", ct) is not null)
+        {
+            await ExecAsync(superuser, $"GRANT SET ON PARAMETER pg_stat_statements.track_utility TO {OwnerName}", ct);
+        }
+
         var owner = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = OwnerName, Pooling = false }.ConnectionString);
         await owner.OpenAsync(ct);
         return owner;
@@ -107,6 +115,10 @@ DECLARE
    r text;
 BEGIN
    FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ({string.Join(", ", CleanupRoles.Select(n => $"'{n}'"))}) LOOP
+      /* The SET grant on a parameter PrepareAsync gives is cluster-wide, and DROP OWNED BY in this database does not take it. */
+      IF pg_catalog.current_setting('server_version_num')::int >= 150000 THEN
+         EXECUTE format('REVOKE ALL ON PARAMETER pg_stat_statements.track_utility FROM %I', r);
+      END IF;
       EXECUTE format('DROP OWNED BY %I', r);
       EXECUTE format('DROP ROLE %I', r);
    END LOOP;
@@ -339,11 +351,82 @@ WHERE nspname NOT IN ('pg_catalog', 'information_schema')
 
     /// <summary>
     /// With <c>pg_stat_statements</c> loaded and utility tracking on, a CREATEROLE owner cannot turn the tracking off (the
-    /// setting needs a superuser or a grant to SET it), so the add verb says the statistics may hold the login's password
-    /// verifier and prints the statement that clears them (#5654).
+    /// setting needs a superuser or a grant to SET it), so the add verb sends no password statement: the source is registered,
+    /// the login is not made, nothing in the statement statistics carries a verifier, and the text says why and prints the
+    /// statements for a database administrator. Those statements begin with the guards: run as a superuser on a session that
+    /// logs every statement and tracks utility statements, they make the login, and neither the statistics nor the session's
+    /// log setting keeps the password statement (#5654).
     /// </summary>
     [Fact]
-    public async Task ACreateroleOwner_WhoCannotTurnTrackingOff_GetsTheStatisticsWarning_AndTheResetStatement()
+    public async Task ACreateroleOwner_WhoCannotTurnTrackingOff_SendsNoPasswordStatement_AndTheDbaStatementsCarryTheGuards()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres (+TimescaleDB) connection string, owner/superuser, to run the alert source group live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var superuser = new NpgsqlConnection(scratch.ConnectionString);
+            await superuser.OpenAsync(ct);
+            await using var owner = await PrepareAsync(scratch, superuser, ct, mayTurnTrackingOff: false);
+            Assert.SkipWhen(owner is null,
+                "This needs PostgreSQL 16 or later (a creator's implicit membership) and no cluster-wide admin/viewer/mcp role.");
+            var tracking = await SettingOrNullAsync(superuser, "pg_stat_statements.track_utility", ct);
+            Assert.SkipWhen(tracking is null || !string.Equals(tracking, "on", StringComparison.OrdinalIgnoreCase),
+                "pg_stat_statements must be in shared_preload_libraries with track_utility on (its default) on this cluster.");
+            Assert.False(await ScalarAsync<bool>(superuser, $"SELECT rolsuper FROM pg_roles WHERE rolname = '{OwnerName}'", ct));
+            await ExecAsync(superuser, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
+            var recorded = $"SELECT count(*) FROM pg_stat_statements WHERE query LIKE '%SCRAM-SHA-256%' AND query LIKE '%{RoleName}%'";
+            var ownerConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = OwnerName }.ConnectionString;
+
+            var add = await RunVerbAsync(owner!, ownerConnectionString, "--add-alert-source", SourceName, new PostgresConfig { Managed = false }, ct);
+            Assert.True(add.Exit == 0, add.Error);
+            Assert.Contains($"its login '{RoleName}' does not exist yet", add.Output, StringComparison.Ordinal);
+            Assert.Contains("pg_stat_statements.track_utility is on", add.Output, StringComparison.Ordinal);
+            Assert.Contains("No password statement was sent.", add.Output, StringComparison.Ordinal);
+            Assert.False(await ScalarAsync<bool>(superuser, $"SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RoleName}')", ct));
+            Assert.True(await ScalarAsync<bool>(superuser, $"SELECT EXISTS (SELECT 1 FROM config.external_alert_source WHERE role_name = '{RoleName}')", ct));
+            Assert.Equal(0L, await ScalarAsync<long>(superuser, recorded, ct));
+
+            /* The printed statements, as a database administrator runs them on a session that logs every statement, once the
+               group the script makes exists. */
+            await ExecAsync(superuser, DarlingManagedRoles.BuildExternalAlertSourceRolesSql("config"), ct);
+            var start = add.Output.IndexOf("-- Run these", StringComparison.Ordinal);
+            var endMarker = "WITH INHERIT FALSE, SET FALSE;";
+            var end = add.Output.IndexOf(endMarker, start, StringComparison.Ordinal) + endMarker.Length;
+            Assert.True(start >= 0 && end > start, add.Output);
+            var dbaSql = add.Output[start..end];
+            Assert.True(dbaSql.IndexOf("SET pg_stat_statements.track_utility = off;", StringComparison.Ordinal)
+                < dbaSql.IndexOf("CREATE ROLE", StringComparison.Ordinal));
+            await using (var dba = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Pooling = false }.ConnectionString))
+            {
+                await dba.OpenAsync(ct);
+                await ExecAsync(dba, "SET log_statement = 'all'", ct);
+                await ExecAsync(dba, dbaSql, ct);
+                Assert.Equal("none", await SettingOrNullAsync(dba, "log_statement", ct));
+                Assert.Equal("off", await SettingOrNullAsync(dba, "pg_stat_statements.track_utility", ct));
+            }
+
+            Assert.True(await ScalarAsync<bool>(superuser, $"SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RoleName}')", ct));
+            Assert.Equal(0L, await ScalarAsync<long>(superuser, recorded, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// On a store where PUBLIC still holds CREATE on schema public, a source login plants
+    /// <c>public.shobj_description(oid, text)</c>, which an unqualified call with a text literal would pick over the catalog
+    /// function. The rotate verb and the group read after it, run as the store owner (whose search path has public), do not run
+    /// it; the same unqualified call on that owner session does, so the planted function is live (#5654).
+    /// </summary>
+    [Fact]
+    public async Task AFunctionASourceLoginPlantsInPublic_IsNotRunByTheVerbs()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -358,19 +441,89 @@ WHERE nspname NOT IN ('pg_catalog', 'information_schema')
             await using var owner = await PrepareAsync(scratch, superuser, ct);
             Assert.SkipWhen(owner is null,
                 "This needs PostgreSQL 16 or later (a creator's implicit membership) and no cluster-wide admin/viewer/mcp role.");
-            var tracking = await SettingOrNullAsync(superuser, "pg_stat_statements.track_utility", ct);
-            Assert.SkipWhen(tracking is null || !string.Equals(tracking, "on", StringComparison.OrdinalIgnoreCase),
-                "pg_stat_statements must be in shared_preload_libraries with track_utility on (its default) on this cluster.");
-            Assert.False(await ScalarAsync<bool>(superuser, $"SELECT rolsuper FROM pg_roles WHERE rolname = '{OwnerName}'", ct));
+            await ExecAsync(superuser, "GRANT CREATE ON SCHEMA public TO PUBLIC", ct);
             var ownerConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = OwnerName }.ConnectionString;
+            var postgres = new PostgresConfig { Managed = false };
 
-            var add = await RunVerbAsync(owner!, ownerConnectionString, "--add-alert-source", SourceName, new PostgresConfig { Managed = false }, ct);
+            var add = await RunVerbAsync(owner!, ownerConnectionString, "--add-alert-source", SourceName, postgres, ct);
             Assert.True(add.Exit == 0, add.Error);
-            Assert.Contains($"created (login '{RoleName}')", add.Output, StringComparison.Ordinal);
-            Assert.Contains("cannot turn utility statement tracking off", add.Output, StringComparison.Ordinal);
-            Assert.Contains("statement statistics may hold", add.Output, StringComparison.Ordinal);
-            Assert.Contains("the login's password verifier", add.Output, StringComparison.Ordinal);
-            Assert.Contains("SELECT pg_stat_statements_reset();", add.Output, StringComparison.Ordinal);
+            Assert.True(await ScalarAsync<bool>(superuser, $"SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RoleName}')", ct), add.Output);
+
+            await ExecAsync(superuser, $@"
+SET ROLE {RoleName};
+CREATE FUNCTION public.shobj_description(oid, text) RETURNS text LANGUAGE plpgsql AS $f$
+BEGIN
+   PERFORM pg_catalog.set_config('darling_test.planted', 'ran', false);
+   RETURN pg_catalog.shobj_description($1, $2::name);
+END $f$;
+RESET ROLE", ct);
+            Assert.Contains("public", await SettingOrNullAsync(owner!, "search_path", ct), StringComparison.Ordinal);
+
+            var rotate = await RunVerbAsync(owner!, ownerConnectionString, "--rotate-alert-source", SourceName, postgres, ct);
+            Assert.True(rotate.Exit == 0, rotate.Error);
+            Assert.Contains("new password set", rotate.Output, StringComparison.Ordinal);
+            await DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync(owner!, ct);
+            Assert.True(string.IsNullOrEmpty(await SettingOrNullAsync(owner!, "darling_test.planted", ct)),
+                "The store owner's verbs ran a function a source login made in public.");
+
+            /* The control: an unqualified call on the same owner session runs the planted function. */
+            await ScalarAsync<object>(owner!, "SELECT shobj_description(0::oid, 'pg_authid')", ct);
+            Assert.Equal("ran", await SettingOrNullAsync(owner!, "darling_test.planted", ct));
+            await ExecAsync(superuser, "DROP FUNCTION public.shobj_description(oid, text)", ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// A step that fails after add or rotate has committed (here the group read after the commit, made to throw) is reported
+    /// after the committed result: the exit code is success, the one-time connection string is printed, the text never says
+    /// the sources could not be changed, and the login holds the change (#5654).
+    /// </summary>
+    [Fact]
+    public async Task AFailureAfterTheCommit_KeepsTheResultAndThePassword_AndSaysWhichStepFailed()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres (+TimescaleDB) connection string, owner/superuser, to run the alert source group live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var superuser = new NpgsqlConnection(scratch.ConnectionString);
+            await superuser.OpenAsync(ct);
+            await using var owner = await PrepareAsync(scratch, superuser, ct);
+            Assert.SkipWhen(owner is null,
+                "This needs PostgreSQL 16 or later (a creator's implicit membership) and no cluster-wide admin/viewer/mcp role.");
+            var ownerConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = OwnerName }.ConnectionString;
+            static Task<IReadOnlyList<string>> Fail(NpgsqlConnection connection, CancellationToken token) =>
+                throw new NpgsqlException("connection lost after the commit");
+            string verifier = string.Empty;
+
+            foreach (var verb in new[] { "--add-alert-source", "--rotate-alert-source" })
+            {
+                var output = new StringWriter();
+                var error = new StringWriter();
+                var exit = await DarlingCliCommands.RunAlertSourceVerbAsync(verb, owner!, SourceName, ownerConnectionString, output, error, ct,
+                    new PostgresConfig { Managed = false }, Fail);
+
+                Assert.True(exit == 0, error.ToString());
+                Assert.Contains("Connection string (shown ONCE", output.ToString(), StringComparison.Ordinal);
+                Assert.Contains($"Username={RoleName}", output.ToString(), StringComparison.Ordinal);
+                Assert.Contains("Password=", output.ToString(), StringComparison.Ordinal);
+                Assert.Contains("The change above is committed, but the read of which other roles are members of", error.ToString(), StringComparison.Ordinal);
+                Assert.Contains("connection lost after the commit", error.ToString(), StringComparison.Ordinal);
+                Assert.DoesNotContain("Could not change", output.ToString() + error.ToString(), StringComparison.Ordinal);
+
+                var now = await ScalarAsync<string>(superuser, $"SELECT rolpassword FROM pg_authid WHERE rolname = '{RoleName}'", ct);
+                Assert.NotEqual(verifier, now);
+                verifier = now;
+            }
+
             bodySucceeded = true;
         }
         finally

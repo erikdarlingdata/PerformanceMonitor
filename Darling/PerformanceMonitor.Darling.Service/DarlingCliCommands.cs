@@ -6502,7 +6502,8 @@ public static class DarlingCliCommands
     /// <summary>The verb on an open owner connection, so a live test drives exactly what the command line does.</summary>
     internal static async Task<int> RunAlertSourceVerbAsync(
         string verb, NpgsqlConnection connection, string? sourceName, string storeConnectionString,
-        TextWriter output, TextWriter error, CancellationToken cancellationToken, PostgresConfig? postgres = null)
+        TextWriter output, TextWriter error, CancellationToken cancellationToken, PostgresConfig? postgres = null,
+        Func<NpgsqlConnection, CancellationToken, Task<IReadOnlyList<string>>>? readGroupExtras = null)
     {
         if (IsListAlertSourcesVerb(verb))
         {
@@ -6514,12 +6515,24 @@ public static class DarlingCliCommands
             : await ExternalAlertSourceAdmin.RemoveAsync(connection, sourceName!, cancellationToken);
 
         /* The roles besides the source logins that a +darling_alert_sources pg_hba line would admit (#5654): what the
-           provisioning step could not revoke, read after it ran. The add and rotate text name each one. */
+           provisioning step could not revoke, read after it ran. The add and rotate text name each one. The verb has
+           committed by now, so a failure here is reported after the result (and its one-time password), never in its place. */
         IReadOnlyList<string>? groupExtras = null;
         if (!IsRemoveAlertSourceVerb(verb)
             && result.Outcome is ExternalAlertSourceAdmin.Outcome.Done or ExternalAlertSourceAdmin.Outcome.NeedsDbaSql)
         {
-            groupExtras = await DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync(connection, cancellationToken);
+            try
+            {
+                groupExtras = await (readGroupExtras ?? DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync)(connection, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                var group = DarlingManagedRoles.AlertSourceGroupRoleName;
+                var failure = $"The change above is committed, but the read of which other roles are members of {group} failed ({ex.Message}), "
+                    + $"so none is named above. Before a +{group} pg_hba line admits the group, list them as the store owner with:"
+                    + Environment.NewLine + DarlingManagedRoles.AlertSourceGroupExtrasSql(PgSchemaGenerator.ConfigSchema, registryExists: true).Trim();
+                result = result with { FollowUpFailure = result.FollowUpFailure is null ? failure : result.FollowUpFailure + Environment.NewLine + failure };
+            }
         }
 
         return PrintAlertSourceResult(verb, result, sourceName!, storeConnectionString, output, error, postgres, groupExtras);
@@ -6609,7 +6622,7 @@ public static class DarlingCliCommands
             output.WriteLine();
             output.WriteLine(result.DbaReason is null
                 ? "This store's owner cannot make, change or drop logins (it lacks CREATEROLE)."
-                : $"The store refused the login step for this store's owner: {result.DbaReason}");
+                : $"The login step was not completed as this store's owner: {result.DbaReason}");
             output.WriteLine(IsRotateAlertSourceVerb(verb)
                 ? "Nothing is applied yet. Have a database administrator run:"
                 : "The registry is updated and nothing of the login is applied yet. Have a database administrator run:");
@@ -6617,16 +6630,23 @@ public static class DarlingCliCommands
             output.WriteLine(result.DbaSql);
         }
 
-        if (result.StatementStatisticsResetSql is not null)
+        if (result.ServerLogSettingsOn is not null)
         {
+            /* #5654: the same warning step 0 of tools/provision-roles.sql gives when it may not turn the server log off. */
             output.WriteLine();
-            output.WriteLine("This store's owner cannot turn utility statement tracking off, and it is on, so the store's statement statistics may hold");
-            output.WriteLine("the login's password verifier (the statement that set it). Have a database administrator clear them:");
-            output.WriteLine();
-            output.WriteLine(result.StatementStatisticsResetSql);
+            output.WriteLine($"The server log records this store owner's statements ({result.ServerLogSettingsOn}), and this owner may not turn that off for its");
+            output.WriteLine("transaction, so the statement that set the login's password verifier was written to the server log.");
         }
 
         output.WriteLine();
+
+        /* #5654: a step after the commit that did not complete. The change and the password above stand; this says which step
+           and what to run, and the exit code stays success because the change itself is in effect. */
+        if (result.FollowUpFailure is not null)
+        {
+            error.WriteLine(result.FollowUpFailure);
+        }
+
         return CollectorToggleExitCode.Success;
     }
 

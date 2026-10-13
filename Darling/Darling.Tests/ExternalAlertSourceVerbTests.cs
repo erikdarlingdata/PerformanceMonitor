@@ -219,18 +219,40 @@ public sealed class ExternalAlertSourceVerbTests
             ExternalAlertSourceAdmin.BuildRemoveSqlForDba("darling_src_orders", "darling"), StringComparison.Ordinal);
     }
 
-    /// <summary>#5654: when the owner cannot turn utility statement tracking off, the text says the statistics may hold the
-    /// verifier and prints the reset statement for a database administrator.</summary>
+    /// <summary>#5654: when the server log still records the owner's statements, the text says the password statement was written
+    /// to it and names the settings, as the script's step 0 warning does.</summary>
     [Fact]
-    public void TheResultText_PrintsTheStatisticsReset_WhenTrackingCouldNotBeTurnedOff()
+    public void TheResultText_NamesTheServerLogSettings_ThatStillRecordTheStatement()
     {
         var output = new StringWriter();
         DarlingCliCommands.PrintAlertSourceResult("--add-alert-source",
             new ExternalAlertSourceAdmin.Result(ExternalAlertSourceAdmin.Outcome.Done, "darling_src_orders", "Pw0123456789",
-                StatementStatisticsResetSql: "SELECT pg_stat_statements_reset();"),
+                ServerLogSettingsOn: "log_statement = ddl"),
             "orders", "Host=127.0.0.1", output, new StringWriter());
-        Assert.Contains("may hold", output.ToString(), StringComparison.Ordinal);
-        Assert.Contains("SELECT pg_stat_statements_reset();", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("(log_statement = ddl)", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("written to the server log", output.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5654: a step after the commit that did not complete is reported after the committed result: the password is printed,
+    /// the exit code is success, and the text never says the sources could not be changed.
+    /// </summary>
+    [Theory]
+    [InlineData("--add-alert-source")]
+    [InlineData("--rotate-alert-source")]
+    public void AFollowUpFailure_IsReportedAfterTheCommittedResult(string verb)
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var exit = DarlingCliCommands.PrintAlertSourceResult(verb,
+            new ExternalAlertSourceAdmin.Result(ExternalAlertSourceAdmin.Outcome.Done, "darling_src_orders", "PwForTheTest0123456789abcdefgh",
+                FollowUpFailure: "The change above is committed, but ending the open sessions failed (boom)."),
+            "orders", "Host=127.0.0.1;Port=5432;Database=darling", output, error);
+
+        Assert.Equal(0, exit);
+        Assert.Contains("PwForTheTest0123456789abcdefgh", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("committed, but ending the open sessions failed (boom)", error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("Could not change", output.ToString() + error.ToString(), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -252,16 +274,125 @@ public sealed class ExternalAlertSourceVerbTests
         var code = source;
 
         var unqualified = Regex.Matches(code,
-                @"(?<![\w.])(count|max|min|shobj_description|current_database|current_setting|to_regclass|format|lower|pg_terminate_backend|has_\w+_privilege)\s*\(")
+                @"(?<![\w.])(count|max|min|shobj_description|current_database|current_setting|to_regclass|format|lower|upper|replace|length|"
+                + @"array_\w+|string_\w+|set_config|quote_\w+|regexp_\w+|now|pg_\w+|has_\w+_privilege)\s*\(")
             .Select(m => m.Value).ToArray();
         Assert.Empty(unqualified);
         Assert.Matches(new Regex(@"\bFROM pg_catalog\.pg_roles\b"), code);
-        Assert.DoesNotMatch(new Regex(@"\bFROM (pg_roles|pg_stat_activity|pg_authid)\b"), code);
+        Assert.DoesNotMatch(new Regex(@"\bFROM (pg_roles|pg_stat_activity|pg_authid|pg_settings)\b"), code);
 
         /* One raw BeginTransactionAsync, inside the helper that pins the search path; every verb calls the helper. */
         Assert.Single(Regex.Matches(code, @"\.BeginTransactionAsync\("));
         Assert.Contains("\"SET LOCAL search_path = pg_catalog, pg_temp\"", code, StringComparison.Ordinal);
         Assert.Equal(3, Regex.Matches(code, @"await BeginOwnerTransactionAsync\(owner, ct\)").Count);
+    }
+
+    /// <summary>
+    /// #5654: the SQL the store owner runs from the shared role code (the provisioning block the add verb runs, its group sweep,
+    /// and the group read the add and rotate verbs make after their commit) and the statement guards of the verbs call no
+    /// function by a bare name. String literals and comments are taken out first; what is left is SQL, and every
+    /// <c>name(</c> in it is a keyword or a column list, or is written <c>pg_catalog.name(</c> or <c>config.name(</c>. A new
+    /// call without the schema fails this.
+    /// </summary>
+    [Fact]
+    public void TheOwnerRunRoleSql_CallsNoFunctionByABareName()
+    {
+        string[] sql =
+        [
+            DarlingManagedRoles.BuildExternalAlertSourceRolesSql("config"),
+            DarlingManagedRoles.AlertSourceGroupSweepSql("config", "group_role.oid"),
+            DarlingManagedRoles.AlertSourceGroupExtrasSql("config", registryExists: true),
+            DarlingManagedRoles.AlertSourceGroupExtrasSql("config", registryExists: false),
+            DarlingManagedRoles.AlertSourceRegistryProbeSql,
+            ExternalAlertSourceAdmin.BuildSettingsBlockSql(ExternalAlertSourceAdmin.ServerLogSettings, local: true),
+            ExternalAlertSourceAdmin.DbaStatementTextGuardSql,
+        ];
+        var allowed = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "in", "exists", "coalesce", "as", "not", "or", "and", "from", "join", "on", "where", "when", "then", "else", "filter", "values",
+            "any", "all", "walk", "closure", "v", "t",
+        };
+
+        foreach (var text in sql)
+        {
+            /* Comments first (their prose may hold an apostrophe), then literals. */
+            var code = Regex.Replace(text, @"/\*.*?\*/", " ", RegexOptions.Singleline);
+            code = Regex.Replace(code, @"(?m)^\s*--.*$", " ");
+            code = Regex.Replace(code, @"'(?:[^']|'')*'", "''");
+            var bare = Regex.Matches(code, @"(?<![\w.$""])([A-Za-z_]\w*)\s*\(")
+                .Select(m => m.Groups[1].Value)
+                .Where(name => !allowed.Contains(name))
+                .ToArray();
+            Assert.True(bare.Length == 0, "Called by a bare name: " + string.Join(", ", bare) + Environment.NewLine + text);
+        }
+
+        /* The group read after the commit runs in its own transaction with the same search path as the verbs'. */
+        var roles = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedRoles.cs"));
+        var read = roles[roles.IndexOf("ReadAlertSourceGroupExtrasAsync(NpgsqlConnection connection", StringComparison.Ordinal)..];
+        read = read[..read.IndexOf("return extras;", StringComparison.Ordinal)];
+        Assert.Contains("BeginTransactionAsync(ct)", read, StringComparison.Ordinal);
+        Assert.Contains("\"SET LOCAL search_path = pg_catalog, pg_temp\"", read, StringComparison.Ordinal);
+        Assert.Equal(3, Regex.Matches(read, @"new NpgsqlCommand\([^;]*connection, transaction\)").Count);
+    }
+
+    private static string RepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "PerformanceMonitor.sln")))
+        {
+            dir = dir.Parent;
+        }
+
+        return dir!.FullName;
+    }
+
+    /// <summary>
+    /// #5654: the statements printed for a database administrator that carry a verifier (add and rotate) begin with the guards:
+    /// utility statement tracking off, the server log settings off, and the check that stops while tracking is still on, all
+    /// before the password statement.
+    /// </summary>
+    [Fact]
+    public void TheDbaStatementsWithAVerifier_BeginWithTheStatementTextGuards()
+    {
+        foreach (var dba in new[]
+                 {
+                     ExternalAlertSourceAdmin.BuildAddSqlForDba("darling_src_orders", "SCRAM-SHA-256$v", "darling", 17),
+                     ExternalAlertSourceAdmin.BuildRotateSqlForDba("darling_src_orders", "SCRAM-SHA-256$v"),
+                 })
+        {
+            var password = dba.IndexOf("PASSWORD 'SCRAM-SHA-256$v'", StringComparison.Ordinal);
+            Assert.True(password > 0);
+            var guards = dba[..password];
+            Assert.StartsWith("-- ", dba, StringComparison.Ordinal);
+            Assert.Contains("SET pg_stat_statements.track_utility = off;", guards, StringComparison.Ordinal);
+            Assert.Contains("SET pg_stat_monitor.pgsm_track_utility = off;", guards, StringComparison.Ordinal);
+            foreach (var (setting, value) in ExternalAlertSourceAdmin.ServerLogSettings)
+            {
+                Assert.Contains($"('{setting}', '{value}')", guards, StringComparison.Ordinal);
+            }
+
+            Assert.Contains("('log_statement', 'none')", guards, StringComparison.Ordinal);
+            Assert.Contains("pg_catalog.set_config(one.name, one.value, false)", guards, StringComparison.Ordinal);
+            Assert.Contains("RAISE EXCEPTION", guards, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("SET pg_stat", ExternalAlertSourceAdmin.BuildRemoveSqlForDba("darling_src_orders", "darling"), StringComparison.Ordinal);
+    }
+
+    /// <summary>#5654: the server log settings the verbs turn off are the list step 0 of the shipped script turns off.</summary>
+    [Fact]
+    public void TheServerLogSettings_AreTheScriptsStepZeroList()
+    {
+        var script = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "tools", "provision-roles.sql"));
+        foreach (var (setting, value) in ExternalAlertSourceAdmin.ServerLogSettings)
+        {
+            Assert.Contains($"('{setting}', '{value}')", script, StringComparison.Ordinal);
+        }
+
+        foreach (var setting in ExternalAlertSourceAdmin.StatementTrackingSettings)
+        {
+            Assert.Contains($"SET {setting} = off;", script, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

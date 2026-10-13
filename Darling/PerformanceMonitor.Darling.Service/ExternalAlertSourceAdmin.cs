@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -94,7 +95,8 @@ internal static class ExternalAlertSourceAdmin
         string? DbaReason = null,
         long? SessionsEnded = null,
         string? EndSessionsSqlForDba = null,
-        string? StatementStatisticsResetSql = null);
+        string? ServerLogSettingsOn = null,
+        string? FollowUpFailure = null);
 
     /// <summary>One line of <c>--list-alert-sources</c>. No secret: the registry does not hold one.</summary>
     internal sealed record SourceRow(
@@ -152,11 +154,17 @@ internal static class ExternalAlertSourceAdmin
         var password = DarlingManagedPostgres.GeneratePassword();
         var verifier = ScramSha256Verifier.Create(password);
         var canManageLogins = await CanManageLoginsAsync(owner, transaction, ct);
+        var database = await ScalarAsync<string>(owner, transaction, "SELECT pg_catalog.current_database()", ct);
         string? reason = null;
-        if (canManageLogins)
+        var (trackingOn, loggingOn) = canManageLogins ? await GuardStatementTextAsync(owner, transaction, ct) : (null, null);
+        if (trackingOn is not null)
         {
-            var statisticsReset = await StopStatementTrackingAsync(owner, transaction, ct);
-
+            /* #5654: the CREATE ROLE would be recorded with its verifier, so it is not sent; a database administrator runs the
+               statements instead, after the guards that begin them. */
+            reason = StatementTrackingReason(trackingOn);
+        }
+        else if (canManageLogins)
+        {
             /* The shared step also makes the login a member of darling_alert_sources (the group the pg_hba line for
                postgres.network.role "sources" names), in this transaction, so the new source is admitted from the network as
                soon as the verb returns wherever that line is written. A CREATEROLE owner that is not a superuser may still be
@@ -170,7 +178,7 @@ internal static class ExternalAlertSourceAdmin
                 await ExecAsync(owner, transaction, $"INSERT INTO {Schema}.external_alert_source (source_name, role_name) VALUES ($1, $2)", ct, name, role);
                 await ExecAsync(owner, transaction, DarlingManagedRoles.BuildExternalAlertSourceRolesSql(Schema), ct);
                 await transaction.CommitAsync(ct);
-                return new Result(Outcome.Done, role, password, StatementStatisticsResetSql: statisticsReset);
+                return new Result(Outcome.Done, role, password, ServerLogSettingsOn: loggingOn);
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
             {
@@ -180,9 +188,10 @@ internal static class ExternalAlertSourceAdmin
         }
 
         await ExecAsync(owner, transaction, $"INSERT INTO {Schema}.external_alert_source (source_name, role_name) VALUES ($1, $2)", ct, name, role);
+        /* The statements are built before the commit, so nothing after it can fail and lose the password. */
+        var addSql = BuildAddSqlForDba(role, verifier, database, owner.PostgreSqlVersion.Major);
         await transaction.CommitAsync(ct);
-        return new Result(Outcome.NeedsDbaSql, role, password, BuildAddSqlForDba(role, verifier, await DatabaseNameAsync(owner, ct), owner.PostgreSqlVersion.Major),
-            DbaReason: reason);
+        return new Result(Outcome.NeedsDbaSql, role, password, addSql, DbaReason: reason);
     }
 
     private const string LoginSavepoint = "alert_source_login";
@@ -201,7 +210,7 @@ internal static class ExternalAlertSourceAdmin
             return new Result(Outcome.NoTables, role);
         }
 
-        string? statisticsReset;
+        string? loggingOn;
         string registered;
         string password;
         await using (var transaction = await BeginOwnerTransactionAsync(owner, ct))
@@ -220,14 +229,19 @@ internal static class ExternalAlertSourceAdmin
 
             password = DarlingManagedPostgres.GeneratePassword();
             var verifier = ScramSha256Verifier.Create(password);
+            var dbaSql = BuildRotateSqlForDba(registered, verifier);
             if (!await CanManageLoginsAsync(owner, transaction, ct))
             {
-                return new Result(Outcome.NeedsDbaSql, registered, password,
-                    string.Join(Environment.NewLine, $"ALTER ROLE {Quote(registered)} PASSWORD '{verifier}';", BuildEndSessionsSqlForDba(registered)));
+                return new Result(Outcome.NeedsDbaSql, registered, password, dbaSql);
             }
 
-            var dbaSql = string.Join(Environment.NewLine, $"ALTER ROLE {Quote(registered)} PASSWORD '{verifier}';", BuildEndSessionsSqlForDba(registered));
-            statisticsReset = await StopStatementTrackingAsync(owner, transaction, ct);
+            (var trackingOn, loggingOn) = await GuardStatementTextAsync(owner, transaction, ct);
+            if (trackingOn is not null)
+            {
+                /* #5654: the ALTER ROLE would be recorded with its verifier, so it is not sent. */
+                return new Result(Outcome.NeedsDbaSql, registered, password, dbaSql, DbaReason: StatementTrackingReason(trackingOn));
+            }
+
             try
             {
                 await ExecAsync(owner, transaction, $"ALTER ROLE {Quote(registered)} PASSWORD '{verifier}'", ct);
@@ -243,9 +257,9 @@ internal static class ExternalAlertSourceAdmin
 
         /* #5654: a new password governs new connections only, so the sessions the login already holds are ended once the new
            password is committed (ending them first would let a client log straight back in with the old one before the commit). */
-        var (ended, endSql) = await EndSessionsAsync(owner, "a.usename = $1", registered, BuildEndSessionsSqlForDba(registered), ct);
+        var (ended, endSql, failure) = await EndSessionsAfterCommitAsync(owner, "a.usename = $1", registered, BuildEndSessionsSqlForDba(registered), registered, ct);
         return new Result(Outcome.Done, registered, password,
-            SessionsEnded: ended, EndSessionsSqlForDba: endSql, StatementStatisticsResetSql: statisticsReset);
+            SessionsEnded: ended, EndSessionsSqlForDba: endSql, ServerLogSettingsOn: loggingOn, FollowUpFailure: failure);
     }
 
     /// <summary>
@@ -319,15 +333,16 @@ internal static class ExternalAlertSourceAdmin
            let a client log back in while the login still existed. */
         long? ended = null;
         string? endSql = null;
+        string? failure = null;
         if (dropped)
         {
-            (ended, endSql) = await EndSessionsAsync(owner, "a.usesysid = $1::pg_catalog.oid", (long)loginOid,
-                $"SELECT pg_catalog.pg_terminate_backend(a.pid) FROM pg_catalog.pg_stat_activity AS a WHERE a.usesysid = {loginOid};", ct);
+            (ended, endSql, failure) = await EndSessionsAfterCommitAsync(owner, "a.usesysid = $1::pg_catalog.oid", (long)loginOid,
+                $"SELECT pg_catalog.pg_terminate_backend(a.pid) FROM pg_catalog.pg_stat_activity AS a WHERE a.usesysid = {loginOid};", registered, ct);
         }
 
         return new Result(dbaSql is null ? Outcome.Done : Outcome.NeedsDbaSql, registered, DbaSql: dbaSql,
             RemovedRows: rows, RemovedUndelivered: undelivered, LoginDropped: dropped, DbaReason: reason,
-            SessionsEnded: ended, EndSessionsSqlForDba: endSql);
+            SessionsEnded: ended, EndSessionsSqlForDba: endSql, FollowUpFailure: failure);
     }
 
     /// <summary>Every registered source, oldest first. The last submit and the undelivered count come from the queue rows the store still keeps.</summary>
@@ -368,6 +383,7 @@ ORDER BY s.source_id", owner);
     {
         var quoted = Quote(role);
         return string.Join(Environment.NewLine,
+            DbaStatementTextGuardSql,
             $"CREATE ROLE {quoted} {s_loginAttributes} PASSWORD '{verifier}';",
             $"COMMENT ON ROLE {quoted} IS '{DarlingManagedRoles.AlertSourceRoleMarker}';",
             $"GRANT CONNECT ON DATABASE {Quote(database)} TO {quoted};",
@@ -375,6 +391,14 @@ ORDER BY s.source_id", owner);
             $"GRANT EXECUTE ON FUNCTION {Schema}.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) TO {quoted};",
             $"GRANT {Quote(DarlingManagedRoles.AlertSourceGroupRoleName)} TO {quoted}{(serverMajorVersion >= 16 ? " WITH INHERIT FALSE, SET FALSE" : string.Empty)};");
     }
+
+    /// <summary>
+    /// The statements a database administrator runs to give a source's login a new password when the store owner cannot or may
+    /// not (#5654): the guards of <see cref="DbaStatementTextGuardSql"/>, the ALTER ROLE that carries the verifier, then the
+    /// statement that ends the sessions the login already holds.
+    /// </summary>
+    internal static string BuildRotateSqlForDba(string role, string verifier) =>
+        string.Join(Environment.NewLine, DbaStatementTextGuardSql, $"ALTER ROLE {Quote(role)} PASSWORD '{verifier}';", BuildEndSessionsSqlForDba(role));
 
     /// <summary>The statements a database administrator runs to drop a source's login when the store owner cannot.</summary>
     internal static string BuildRemoveSqlForDba(string role, string database)
@@ -396,46 +420,138 @@ ORDER BY s.source_id", owner);
     /// The settings through which a statement statistics extension records utility statements, the role DDL that carries a
     /// verifier among them: the pair <c>tools/provision-roles.sql</c> turns off before its own password statements (#5654).
     /// </summary>
-    internal static readonly (string Setting, string ResetSql)[] StatementTrackingSettings =
+    internal static readonly string[] StatementTrackingSettings =
     [
-        ("pg_stat_statements.track_utility", "SELECT pg_stat_statements_reset();"),
-        ("pg_stat_monitor.pgsm_track_utility", "SELECT pg_stat_monitor_reset();"),
+        "pg_stat_statements.track_utility",
+        "pg_stat_monitor.pgsm_track_utility",
     ];
 
     /// <summary>
-    /// Turns utility statement tracking off for the rest of <paramref name="transaction"/>, as <c>tools/provision-roles.sql</c>
-    /// does, so the CREATE ROLE or ALTER ROLE that follows (its verifier is statement text) is not recorded. A setting this owner
-    /// may not change (PGC_SUSET without a GRANT SET) is left alone; when it is on, the reset statement a database administrator
-    /// runs afterwards is returned. Null when nothing that is on was left alone.
+    /// The settings through which the server log records a statement's text, and the value that stops it: the list step 0 of
+    /// <c>tools/provision-roles.sql</c> sets before its own password statements (#5654). log_min_error_statement goes to panic
+    /// so a statement that fails is not written with its text.
     /// </summary>
-    private static async Task<string?> StopStatementTrackingAsync(NpgsqlConnection owner, NpgsqlTransaction transaction, CancellationToken ct)
+    internal static readonly (string Setting, string Value)[] ServerLogSettings =
+    [
+        ("log_statement", "none"),
+        ("log_min_duration_statement", "-1"),
+        ("log_min_duration_sample", "-1"),
+        ("log_transaction_sample_rate", "0"),
+        ("log_min_error_statement", "panic"),
+        ("debug_print_parse", "off"),
+        ("debug_print_rewritten", "off"),
+        ("debug_print_plan", "off"),
+        ("pgaudit.log_statement", "off"),
+    ];
+
+    /// <summary>
+    /// A DO block that sets each of <paramref name="settings"/>, for the transaction when <paramref name="local"/> is true and
+    /// for the session otherwise, and passes over one this role may not change or this server does not have, as step 0 of
+    /// <c>tools/provision-roles.sql</c> does (#5654).
+    /// </summary>
+    internal static string BuildSettingsBlockSql(IEnumerable<(string Setting, string Value)> settings, bool local) =>
+        "DO $settings$" + "\n"
+        + "DECLARE" + "\n"
+        + "   one record;" + "\n"
+        + "BEGIN" + "\n"
+        + "   FOR one IN SELECT v.name, v.value FROM (VALUES "
+        + string.Join(", ", settings.Select(s => $"('{s.Setting}', '{s.Value}')"))
+        + ") AS v (name, value) LOOP" + "\n"
+        + "      BEGIN" + "\n"
+        + $"         PERFORM pg_catalog.set_config(one.name, one.value, {(local ? "true" : "false")});" + "\n"
+        + "      EXCEPTION WHEN insufficient_privilege OR undefined_object THEN" + "\n"
+        + "         NULL;" + "\n"
+        + "      END;" + "\n"
+        + "   END LOOP;" + "\n"
+        + "END $settings$";
+
+    /// <summary>
+    /// What begins every statement list printed for a database administrator that carries a verifier (#5654), built as step 0
+    /// of <c>tools/provision-roles.sql</c> is: utility statement tracking off for the session, the server log settings of
+    /// <see cref="ServerLogSettings"/> off where that role may change them, and a guard that raises an error while tracking is
+    /// still on, so the password statement after it is not recorded.
+    /// </summary>
+    internal static readonly string DbaStatementTextGuardSql = string.Join(Environment.NewLine,
+        "-- Run these in one session, in this order, and stop at the first error: the first four keep the password statement out of the statement statistics and the server log.",
+        string.Join(Environment.NewLine, StatementTrackingSettings.Select(s => $"SET {s} = off;")),
+        BuildSettingsBlockSql(ServerLogSettings, local: false).Replace("\n", Environment.NewLine, StringComparison.Ordinal) + ";",
+        "DO $guard$ BEGIN IF " + StatementTrackingOnSql() + " THEN RAISE EXCEPTION 'Utility statement tracking is still on for this session, so the password statement would be recorded. Stop here and run these as a role that may turn it off.'; END IF; END $guard$;");
+
+    /// <summary>A condition that is true while any of <see cref="StatementTrackingSettings"/> is on for this session.</summary>
+    private static string StatementTrackingOnSql() =>
+        string.Join(" OR ", StatementTrackingSettings.Select(s => $"pg_catalog.lower(pg_catalog.current_setting('{s}', true)) IN ('on', 'yes', 'true', '1')"));
+
+    /// <summary>The names of the tracking settings still on for this transaction, comma-separated; null when none is.</summary>
+    private static readonly string s_trackingStillOnSql =
+        "SELECT pg_catalog.string_agg(t.name, ', ' ORDER BY t.name) FROM (VALUES "
+        + string.Join(", ", StatementTrackingSettings.Select(s => $"('{s}')"))
+        + ") AS t (name) WHERE pg_catalog.lower(pg_catalog.current_setting(t.name, true)) IN ('on', 'yes', 'true', '1')";
+
+    /// <summary>
+    /// The server log settings that still write this transaction's statements to the log, each with its value, comma-separated;
+    /// null when none does. The same test as the WARNING after step 0 of <c>tools/provision-roles.sql</c> (#5654).
+    /// </summary>
+    private const string LoggingStillOnSql = @"SELECT pg_catalog.string_agg(s.name || ' = ' || s.setting
+          || CASE s.name
+                WHEN 'log_min_duration_sample' THEN ' with log_statement_sample_rate = '
+                   || (SELECT r.setting FROM pg_catalog.pg_settings AS r WHERE r.name = 'log_statement_sample_rate')
+                WHEN 'pgaudit.log' THEN ' with pgaudit.log_statement = on'
+                ELSE ''
+             END, ', ' ORDER BY s.name)
+FROM pg_catalog.pg_settings AS s
+WHERE CASE s.name
+         WHEN 'log_statement' THEN s.setting IN ('ddl', 'mod', 'all')
+         WHEN 'log_min_duration_statement' THEN s.setting::bigint >= 0
+         WHEN 'log_transaction_sample_rate' THEN s.setting::numeric > 0
+         WHEN 'log_min_duration_sample' THEN s.setting::bigint >= 0
+            AND (SELECT r.setting::numeric FROM pg_catalog.pg_settings AS r WHERE r.name = 'log_statement_sample_rate') > 0
+         WHEN 'pgaudit.log' THEN (SELECT r.setting FROM pg_catalog.pg_settings AS r WHERE r.name = 'pgaudit.log_statement') = 'on'
+            AND (pg_catalog.string_to_array(pg_catalog.replace(pg_catalog.lower(s.setting), ' ', ''), ',') && ARRAY['role', 'all'])
+            AND NOT ('-role' = ANY (pg_catalog.string_to_array(pg_catalog.replace(pg_catalog.lower(s.setting), ' ', ''), ',')))
+         ELSE false
+      END";
+
+    /// <summary>
+    /// Turns utility statement tracking and the server log's statement text off for the rest of <paramref name="transaction"/>,
+    /// as step 0 of <c>tools/provision-roles.sql</c> does, before the CREATE ROLE or ALTER ROLE that carries a verifier (#5654).
+    /// A setting this owner may not change (PGC_SUSET without a GRANT SET) stays as it is. TrackingOn names the tracking settings
+    /// still on: the caller then sends no password statement, as the script stops. LoggingOn names the log settings that still
+    /// write the statement to the server log, which the result reports, as the script's WARNING does.
+    /// </summary>
+    private static async Task<(string? TrackingOn, string? LoggingOn)> GuardStatementTextAsync(
+        NpgsqlConnection owner, NpgsqlTransaction transaction, CancellationToken ct)
     {
-        var resets = new List<string>();
-        foreach (var (setting, resetSql) in StatementTrackingSettings)
+        await ExecAsync(owner, transaction,
+            BuildSettingsBlockSql(StatementTrackingSettings.Select(s => (s, "off")).Concat(ServerLogSettings), local: true), ct);
+        var trackingOn = await ScalarAsync<string?>(owner, transaction, s_trackingStillOnSql, ct);
+        var loggingOn = await ScalarAsync<string?>(owner, transaction, LoggingStillOnSql, ct);
+        return (trackingOn, loggingOn);
+    }
+
+    /// <summary>Why no password statement was sent while utility statement tracking stays on (#5654).</summary>
+    private static string StatementTrackingReason(string settings) =>
+        $"{settings} is on, and this store's owner may not turn it off for its own transaction (a superuser can allow it with GRANT SET ON PARAMETER, PostgreSQL 15 and later), "
+        + "so the statement that sets the login's password would be recorded with its verifier. No password statement was sent.";
+
+    /// <summary>
+    /// <see cref="EndSessionsAsync"/> after a verb's commit (#5654): a failure there is returned as text that says the change is
+    /// in effect, which step did not run, and the statement to run, so the caller still reports the committed result (and its
+    /// one-time password).
+    /// </summary>
+    private static async Task<(long? Ended, string? DbaSql, string? Failure)> EndSessionsAfterCommitAsync(
+        NpgsqlConnection owner, string predicate, object key, string dbaSql, string role, CancellationToken ct)
+    {
+        try
         {
-            /* Absent (the extension is not loaded): nothing records statements through it. */
-            if (await ScalarAsync<string?>(owner, transaction, "SELECT pg_catalog.current_setting($1, true)", ct, setting) is null)
-            {
-                continue;
-            }
-
-            await transaction.SaveAsync("darling_statement_tracking", ct);
-            try
-            {
-                await ExecAsync(owner, transaction, $"SET LOCAL {setting} = off", ct);
-                await transaction.ReleaseAsync("darling_statement_tracking", ct);
-            }
-            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
-            {
-                await transaction.RollbackAsync("darling_statement_tracking", ct);
-                if (await ScalarAsync<bool>(owner, transaction, "SELECT pg_catalog.lower(pg_catalog.current_setting($1, true)) IN ('on', 'yes', 'true', '1')", ct, setting))
-                {
-                    resets.Add(resetSql);
-                }
-            }
+            var (ended, sql) = await EndSessionsAsync(owner, predicate, key, dbaSql, ct);
+            return (ended, sql, null);
         }
-
-        return resets.Count == 0 ? null : string.Join(Environment.NewLine, resets);
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (null, null,
+                $"The change above is committed, but ending the open sessions of login '{role}' failed ({ex.Message}), so any it holds stay connected. "
+                + "End them with:" + Environment.NewLine + "  " + dbaSql);
+        }
     }
 
     /// <summary>

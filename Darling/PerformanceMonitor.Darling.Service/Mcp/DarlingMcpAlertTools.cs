@@ -1137,12 +1137,22 @@ public sealed class DarlingMcpAlertTools
     {
         try
         {
-            /* #5654: a source name the registry could never hold would key a rule that mutes nothing. Blank folds
-               to omitted here, like every other optional dimension of this tool. */
-            var externalSource = Trimmed(external_source);
-            if (externalSource != null && (HasControlCharacter(external_source) || !MuteRule.IsValidExternalSource(externalSource)))
+            /* #5654: a source name the registry could never hold would key a rule that mutes nothing. A value that is blank
+               or holds a control character is refused, never read as "any source" (that would widen the rule to every
+               source's alerts); only an omitted field means any source, as on the web create and PATCH. */
+            string? externalSource = null;
+            if (external_source is not null)
             {
-                return Outcome("invalid", MuteRule.InvalidExternalSourceMessage(externalSource));
+                externalSource = external_source.Trim();
+                if (externalSource.Length == 0 || HasControlCharacter(external_source))
+                {
+                    return Outcome("invalid", "'external_source' is blank or holds a control character. Omit it for any source, or pass a source name.");
+                }
+
+                if (!MuteRule.IsValidExternalSource(externalSource))
+                {
+                    return Outcome("invalid", MuteRule.InvalidExternalSourceMessage(externalSource));
+                }
             }
 
             DateTime? expiresAtUtc = null;

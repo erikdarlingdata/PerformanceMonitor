@@ -86,13 +86,46 @@ public sealed class MuteRuleExternalSourceSurfaceTests
         Assert.Equal(0, store.Count);
     }
 
+    /// <summary>
+    /// #5654: a source that is empty after trimming, or holds only control characters, is refused with <c>invalid</c> on every
+    /// entry point (MCP create, the web create body, and the update parser MCP update and web PATCH share), and no rule is
+    /// written or changed: it is never read as "any source". Omitting the field on create still means any source.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\n")]
+    [InlineData("\t")]
+    [InlineData("\r\n")]
+    [InlineData("\u0001")]
+    [InlineData(" \u001f ")]
+    public async Task ABlankOrControlOnlySource_IsRefused_OnEveryEntryPoint(string source)
+    {
+        var mcpStore = new FakeMuteRuleStore();
+        var mcp = await DarlingMcpAlertTools.CreateMuteRuleOver(mcpStore, "SQL01", null, null, null, null, null, null, null,
+            external_source: source);
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(mcp));
+        Assert.Contains("external_source", JsonNode.Parse(mcp)!["message"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Equal(0, mcpStore.Count);
+
+        var body = new JsonObject { ["server_name"] = "SQL01", ["external_source"] = source }.ToJsonString();
+        var webStore = new FakeMuteRuleStore();
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.CreateMuteRuleCore(webStore, body)));
+        Assert.Equal(0, webStore.Count);
+
+        var seeded = Seeded("nagios");
+        var update = new JsonObject { ["external_source"] = source }.ToJsonString();
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateMuteRuleCore(seeded, "r1", update)));
+        Assert.Equal("nagios", seeded.Row("r1")!.ExternalSource);
+    }
+
     [Fact]
-    public async Task CreateOverMcp_FoldsABlankSourceToNone_LikeEveryOtherOptionalField()
+    public async Task CreateOverMcp_WithTheSourceOmitted_MutesAnySource()
     {
         var store = new FakeMuteRuleStore();
 
         var json = await DarlingMcpAlertTools.CreateMuteRuleOver(store, "SQL01", null, null, null, null, null, null, null,
-            external_source: "   ");
+            external_source: null);
 
         Assert.Equal("created", DarlingMcpTestData.StatusOf(json));
         Assert.Equal(JsonValueKind.Null, JsonDocument.Parse(json).RootElement.GetProperty("mute_rule").GetProperty("external_source").ValueKind);
