@@ -565,6 +565,23 @@ public class CollectionBackgroundService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// How soon a time-due archival pass that skipped a unit of work retries (#5731). The pass skips a table, a
+    /// compaction group or a swap-journal replay when the store's write lock was not free within its budget; the
+    /// rows stay where they were, so waiting out the whole <see cref="ArchiveInterval"/> would leave them there for
+    /// an hour. Long enough that a retry does not hammer a lock a long read is holding.
+    /// </summary>
+    internal static readonly TimeSpan ArchiveRetryDelay = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// The value <c>_lastArchiveTime</c> takes when an archival pass ends (#5731). A complete pass stamps the clock, so
+    /// the next one is a full <see cref="ArchiveInterval"/> away. An incomplete one stamps
+    /// <see cref="ArchiveRetryDelay"/> short of due: <see cref="HousekeepingIsDue"/> then reads it as due that long
+    /// from now, through the same rule every other job uses.
+    /// </summary>
+    internal static DateTime ArchiveStampAfterRun(bool complete, DateTime nowUtc) =>
+        complete ? nowUtc : nowUtc - (ArchiveInterval - ArchiveRetryDelay);
+
     private async Task RunArchivalIfDueAsync()
     {
         if (_archiveService == null)
@@ -582,6 +599,7 @@ public class CollectionBackgroundService : BackgroundService
 
         try
         {
+            var complete = true;
             if (sizeDue)
             {
                 _logger?.LogInformation("Database size ({SizeMb:F0} MB) exceeds {Threshold} MB — archiving all data and resetting database",
@@ -590,9 +608,9 @@ public class CollectionBackgroundService : BackgroundService
             }
             else
             {
-                await _archiveService.ArchiveOldDataAsync(hotDataDays: ArchiveService.HotDataDays);
+                complete = await _archiveService.ArchiveOldDataAsync(hotDataDays: ArchiveService.HotDataDays);
             }
-            _lastArchiveTime = DateTime.UtcNow;
+            _lastArchiveTime = ArchiveStampAfterRun(complete, DateTime.UtcNow);
         }
         catch (Exception ex)
         {
