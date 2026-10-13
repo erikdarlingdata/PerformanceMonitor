@@ -146,6 +146,29 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         Assert.Contains("client timeouts >=", code, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void TheMuteDialog_OffersClientTimeouts_ShowingDatabaseAndClientApp_FromTheSharedMetricConstant()
+    {
+        var xaml = File.ReadAllText(FindRepoFile(Path.Combine("Lite", "Windows", "MuteRuleDialog.xaml"))).Replace("\r\n", "\n", StringComparison.Ordinal);
+        var code = File.ReadAllText(FindRepoFile(Path.Combine("Lite", "Windows", "MuteRuleDialog.xaml.cs"))).Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        /* The item takes its text from the one declaration the engine's evaluator also takes, so the dialog cannot drift from the alert's name. */
+        Assert.Equal(AttentionEvaluator.MetricName, PerformanceMonitor.Notifications.AlertFamily.ClientTimeoutsMetric);
+        Assert.Contains("xmlns:n=\"clr-namespace:PerformanceMonitor.Notifications;assembly=PerformanceMonitor.Notifications\"", xaml, StringComparison.Ordinal);
+        var runnable = xaml.IndexOf("<ComboBoxItem Content=\"Runnable Queue\"/>", StringComparison.Ordinal);
+        var item = xaml.IndexOf("<ComboBoxItem Content=\"{x:Static n:AlertFamily.ClientTimeoutsMetric}\"/>", StringComparison.Ordinal);
+        Assert.True(runnable >= 0 && item > runnable, "the metric list names Client Timeouts after Runnable Queue");
+        Assert.DoesNotContain("\"Client Timeouts\"", code, StringComparison.Ordinal);
+
+        /* Both pattern fields show for it, so the alert's top database and top client application (the pre-fill) are saved, not dropped by the visibility gate. */
+        Assert.Matches(@"bool showDatabase = [^;]*or AlertFamily\.ClientTimeoutsMetric;", code);
+        Assert.Contains("bool showClientApp = metric is null or \"(any)\" or AlertFamily.ClientTimeoutsMetric;", code, StringComparison.Ordinal);
+        Assert.Contains("DatabasePatternBox.Text = context.DatabaseName;", code, StringComparison.Ordinal);
+        Assert.Contains("ClientAppPatternBox.Text = context.ClientAppName;", code, StringComparison.Ordinal);
+        Assert.Contains("Rule.DatabasePattern = DatabasePatternBox.Visibility == Visibility.Visible", code, StringComparison.Ordinal);
+        Assert.Contains("Rule.ClientAppPattern = ClientAppPatternBox.Visibility == Visibility.Visible", code, StringComparison.Ordinal);
+    }
+
     /* ---------------- the engine's view of the statics ---------------- */
 
     [Fact]

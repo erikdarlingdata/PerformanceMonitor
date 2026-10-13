@@ -79,37 +79,45 @@ public sealed class RunnableQueueSettingsRungTests
     }
 
     [Fact]
-    public void TheProbeNamesTheFirstColumn_AndMapsToThisRungAsTheTop()
+    public void TheProbeNamesTheFirstColumn_AndMapsToThisRungBelowV178()
     {
         Assert.Contains("attname = 'runnable_queue_enabled'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        /* V179's (#5640) sentinel is appended after this one, so this rung is no longer the top. */
+        /* V178's (#5684) and V179's (#5640) sentinels are appended after this one, so this rung is no longer the top. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
+        Assert.Equal("hasQueryStoreWatermarks", parameters[ProbeOrdinal + 1].Name);
+        Assert.Equal("hasClientTimeoutSettings", parameters[^1].Name);
         Assert.Equal("hasRunnableQueueSettings", parameters[ProbeOrdinal].Name);
-        Assert.Equal(ProbeOrdinal + 1, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 2, parameters.Length - 1);
         Assert.Equal("hasProcedureStatsTotals", parameters[ProbeOrdinal - 1].Name);
 
-        /* The sentinel resolves to 177 and is the top arm: every sentinel present answers 177 (this build's version),
-           and with only the sentinel below it (V176's procedure totals table) the answer is 176. */
+        /* Every sentinel present answers this build's version (V179's). With the later sentinels absent this rung is the answer, 177; with
+           this sentinel absent too, only the one below it (V176's procedure totals table) is left and the answer is 176. The
+           newest-first order means V178's sentinel alone still answers 178. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        /* With V179's sentinel (the top, appended after this one) absent, this rung is the answer. */
-        var withoutTop = (object[])all.Clone();
-        withoutTop[ProbeOrdinal + 1] = false;
-        Assert.Equal(RungVersion, (int)method.Invoke(null, withoutTop)!);
+        /* With V179's sentinel (the top) absent the answer is V178's, 178; with V178's absent too, this rung is the answer. */
+        var withoutV179 = (object[])all.Clone();
+        withoutV179[ProbeOrdinal + 2] = false;
+        Assert.Equal(178, (int)method.Invoke(null, withoutV179)!);
 
-        var withoutThis = (object[])withoutTop.Clone();
+        var withoutV178 = (object[])withoutV179.Clone();
+        withoutV178[ProbeOrdinal + 1] = false;
+        Assert.Equal(RungVersion, (int)method.Invoke(null, withoutV178)!);
+
+        var withoutThis = (object[])withoutV178.Clone();
         withoutThis[ProbeOrdinal] = false;
         Assert.Equal(176, (int)method.Invoke(null, withoutThis)!);
 
-        /* In the source the arm is the first one, above V176's, and returns 177. */
+        /* In the source the arm sits above V176's (and below V178's) and returns 177. */
         var thisArm = viewer.IndexOf("if (hasRunnableQueueSettings)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasProcedureStatsTotals)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0 && previousArm > thisArm, "the V177 arm sits above V176's");

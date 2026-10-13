@@ -1,0 +1,407 @@
+{
+  "_comment": [
+    "Pages the web UI smoke check loads (#5701). Every page gets the same checks (smoke.mjs): no console error, page error, failed request or /api/* answer >= 400; #main fills; the sidebar lists the seeded servers; the nav link for the route is active; no .strip.error or [role=alert]; no panel still loading or in error.",
+    "Per page, 'expect' adds what the seed guarantees. A panel is found by its data-panel (the read name) or its data-title; data-panel is unambiguous only for a read that feeds one card, so key a fanout panel (several cards sharing one read) by title; 'state' is data (draws rows, a chart or tiles) or empty (shows its documented empty text); 'minRows' counts the rows of the first [data-grid] inside it. 'grids' does the same for the whole page (an Admin tab has no panel cards): 'minRows' or 'exactRows' on the Nth [data-grid] in #main.",
+    "allowList: a console or request message that is known and harmless. Each entry needs an 'issue' number and a 'match' substring. It starts empty."
+  ],
+  "allowList": [],
+  "servers": [
+    "ui-sql",
+    "ui-pg"
+  ],
+  "pages": [
+    {
+      "name": "fleet",
+      "hash": "#/fleet",
+      "nav": "fleet",
+      "heading": "Fleet Overview"
+    },
+    {
+      "name": "ui-sql-overview",
+      "hash": "#/server/ui-sql",
+      "server": "ui-sql",
+      "expect": {
+        "panels": [
+          {
+            "title": "CPU Utilization",
+            "state": "data"
+          },
+          {
+            "title": "Memory",
+            "state": "data"
+          },
+          {
+            "title": "Server Properties",
+            "state": "data"
+          },
+          {
+            "title": "Analysis Findings",
+            "state": "data"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-sql-waits",
+      "hash": "#/server/ui-sql/waits",
+      "server": "ui-sql",
+      "expect": {
+        "panels": [
+          {
+            "title": "Wait Stats",
+            "state": "data",
+            "minRows": 4
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-sql-cpu",
+      "hash": "#/server/ui-sql/cpu",
+      "server": "ui-sql",
+      "expect": {}
+    },
+    {
+      "name": "ui-sql-memory",
+      "hash": "#/server/ui-sql/memory",
+      "server": "ui-sql",
+      "expect": {}
+    },
+    {
+      "name": "ui-sql-io",
+      "hash": "#/server/ui-sql/io",
+      "server": "ui-sql",
+      "expect": {}
+    },
+    {
+      "name": "ui-sql-queries",
+      "hash": "#/server/ui-sql/queries",
+      "server": "ui-sql",
+      "expect": {
+        "panels": [
+          {
+            "panel": "get_top_queries_by_cpu",
+            "state": "data",
+            "minRows": 12
+          }
+        ]
+      }
+    },
+    {
+      "name": "admin-servers",
+      "hash": "#/admin/servers",
+      "nav": "admin",
+      "expect": {
+        "grids": [
+          {
+            "index": 0,
+            "exactRows": 2
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-sql-blocking",
+      "hash": "#/server/ui-sql/blocking",
+      "server": "ui-sql",
+      "expect": {
+        "panels": [
+          {
+            "title": "Blocking",
+            "state": "data",
+            "minRows": 2
+          },
+          {
+            "title": "Lock Waits",
+            "state": "data"
+          },
+          {
+            "title": "Blocked Process Reports",
+            "state": "empty"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-sql-config",
+      "hash": "#/server/ui-sql/config",
+      "server": "ui-sql",
+      "expect": {
+        "panels": [
+          {
+            "title": "Server Properties",
+            "state": "data"
+          },
+          {
+            "title": "Trace Flags",
+            "state": "empty"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-sql-changes",
+      "hash": "#/server/ui-sql/changes",
+      "server": "ui-sql",
+      "expect": {
+        "panels": [
+          {
+            "title": "Trace Flag Changes",
+            "state": "empty"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-sql-activity",
+      "hash": "#/server/ui-sql/activity",
+      "server": "ui-sql",
+      "expect": {
+        "panels": [
+          {
+            "title": "Sessions",
+            "state": "empty"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-sql-events",
+      "hash": "#/server/ui-sql/events",
+      "server": "ui-sql",
+      "expect": {
+        "panels": [
+          {
+            "title": "Severe Errors",
+            "state": "empty"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-sql-health",
+      "hash": "#/server/ui-sql/health",
+      "server": "ui-sql",
+      "expect": {
+        "panels": [
+          {
+            "title": "Collectors",
+            "state": "data",
+            "minRows": 5
+          },
+          {
+            "title": "Collection Log",
+            "state": "data",
+            "minRows": 5
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-pg-overview",
+      "hash": "#/server/ui-pg",
+      "server": "ui-pg",
+      "expect": {}
+    },
+    {
+      "name": "ui-pg-activity",
+      "hash": "#/server/ui-pg/activity",
+      "server": "ui-pg",
+      "expect": {
+        "panels": [
+          {
+            "title": "Top Query Shapes",
+            "state": "data",
+            "minRows": 6
+          },
+          {
+            "title": "By Database",
+            "state": "data",
+            "minRows": 2
+          },
+          {
+            "title": "Database Activity",
+            "state": "data"
+          },
+          {
+            "title": "Deadlocks",
+            "state": "empty"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-pg-vacuum",
+      "hash": "#/server/ui-pg/vacuum",
+      "server": "ui-pg",
+      "expect": {
+        "panels": [
+          {
+            "title": "Autovacuum Backlog",
+            "state": "empty"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-pg-waits",
+      "hash": "#/server/ui-pg/waits",
+      "server": "ui-pg",
+      "expect": {
+        "panels": [
+          {
+            "title": "Wait Events",
+            "state": "data",
+            "minRows": 3
+          },
+          {
+            "title": "Wait Trend",
+            "state": "empty"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-pg-io",
+      "hash": "#/server/ui-pg/io",
+      "server": "ui-pg",
+      "expect": {
+        "panels": [
+          {
+            "title": "I/O Summary",
+            "state": "empty"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-pg-replication",
+      "hash": "#/server/ui-pg/replication",
+      "server": "ui-pg",
+      "expect": {
+        "panels": [
+          {
+            "title": "Slots",
+            "state": "empty"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-pg-storage",
+      "hash": "#/server/ui-pg/storage",
+      "server": "ui-pg",
+      "expect": {
+        "panels": [
+          {
+            "title": "By Table",
+            "state": "empty"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ui-pg-config",
+      "hash": "#/server/ui-pg/config",
+      "server": "ui-pg",
+      "expect": {
+        "panels": [
+          {
+            "title": "Settings",
+            "state": "empty"
+          }
+        ]
+      }
+    },
+    {
+      "name": "alerts",
+      "hash": "#/alerts",
+      "nav": "alerts",
+      "expect": {
+        "grids": [
+          {
+            "index": 0,
+            "minRows": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "alert-rules",
+      "hash": "#/alert-rules",
+      "nav": "alert-rules",
+      "expect": {}
+    },
+    {
+      "name": "admin-routes",
+      "hash": "#/admin/routes",
+      "nav": "admin",
+      "expect": {}
+    },
+    {
+      "name": "admin-settings",
+      "hash": "#/admin/settings",
+      "nav": "admin",
+      "expect": {}
+    },
+    {
+      "name": "finops",
+      "hash": "#/finops",
+      "nav": "finops",
+      "expect": {}
+    },
+    {
+      "name": "sweeps",
+      "hash": "#/sweeps",
+      "nav": "sweeps",
+      "expect": {}
+    },
+    {
+      "name": "views",
+      "hash": "#/views",
+      "nav": "views",
+      "expect": {}
+    },
+    {
+      "name": "mute-rules",
+      "hash": "#/mute-rules",
+      "nav": "mute-rules",
+      "expect": {}
+    },
+    {
+      "name": "manage-tags",
+      "hash": "#/manage-tags",
+      "nav": "manage-tags",
+      "expect": {}
+    },
+    {
+      "name": "job-history",
+      "hash": "#/job-history",
+      "nav": "job-history",
+      "expect": {}
+    },
+    {
+      "name": "ag",
+      "hash": "#/ag",
+      "nav": "ag",
+      "heading": "Availability Groups",
+      "expect": {
+        "grids": [
+          { "index": 0, "exactRows": 4 }
+        ]
+      }
+    },
+    {
+      "name": "triage",
+      "hash": "#/triage?server=ui-sql&metric=High%20CPU",
+      "heading": "Triage",
+      "expect": {
+        "panels": [
+          { "panel": "get_top_queries_by_cpu", "state": "data", "minRows": 10 },
+          { "panel": "get_top_procedures_by_cpu", "state": "empty" },
+          { "panel": "get_cpu_scheduler_pressure", "state": "empty" }
+        ]
+      }
+    }
+  ]
+}

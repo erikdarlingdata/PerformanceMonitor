@@ -61,8 +61,8 @@ public sealed class ViewerCollectorCoverageTests
 
         // STORE-ONLY BY DESIGN (#5640): attention_events (client timeouts) is read by the Client Timeouts alert
         // (AttentionWindowSql through the alert read adapter) and by the get_client_timeouts MCP read, and by nothing
-        // else. Lite has no attention grid and this viewer is a copy of Lite's front end, so there is no tab to
-        // build here; a client-timeouts grid is tracked in #5736. Remove this entry the day a viewer read names the
+        // else. Neither app has a client-timeouts grid: Lite has none and this viewer is a copy of Lite's front end,
+        // so there is no tab to build here and none is planned. Remove this entry the day a viewer read names the
         // table (the ratchet above deletes it for you).
         "attention_events",
     };

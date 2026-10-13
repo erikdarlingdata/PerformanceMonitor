@@ -824,23 +824,26 @@ public class ServerWatermarkReadFloorTests
     }
 
     /// <summary>
-    /// #4749: the Query Store cache's seed read returns the value and its witness in one statement. The witness
-    /// is the newest <c>collection_time</c> among the rows AT the maximum value, so the outer query is limited
-    /// to those rows by an inner <c>MAX</c> over the same bounded predicates, and the unaliased
-    /// <c>MAX(last_execution_time)</c> stays in the text for the tests that count watermark reads by it.
+    /// #4749 / #5684: the Query Store cache's seed read returns the value and its witness in ONE pass: the newest
+    /// row by (<c>last_execution_time</c> DESC, <c>collection_time</c> DESC) among the non-NULL rows inside the
+    /// bound. The leading marker is what the read-counting live tests match.
     /// </summary>
     [Fact]
-    public void TheWatermarkWithWitnessForDatabaseSql_TakesTheNewestStampAmongTheRowsAtTheMaximumValue()
+    public void TheWatermarkWithWitnessForDatabaseSql_IsOneOrderedPass_ThatSkipsNullsAndCarriesTheSeedMarker()
     {
         var sql = DarlingCollectorRunner.BuildServerWatermarkWithWitnessForDatabaseSql("query_store_stats", "last_execution_time", "database_name");
-        const string Predicates = "WHERE server_id = $1 AND database_name = $2 AND collection_time > $3";
 
-        Assert.StartsWith("SELECT MAX(last_execution_time), MAX(collection_time) FROM query_store_stats ", sql, StringComparison.Ordinal);
-        Assert.Equal(2, sql.Split(Predicates).Length - 1);
-        Assert.EndsWith(
-            "AND last_execution_time = (SELECT MAX(last_execution_time) FROM query_store_stats " + Predicates + ")",
-            sql,
-            StringComparison.Ordinal);
+        Assert.Equal(
+            "/* pm:qs-watermark-seed */ SELECT last_execution_time, collection_time FROM query_store_stats "
+            + "WHERE server_id = $1 AND database_name = $2 AND collection_time > $3 "
+            + "AND last_execution_time IS NOT NULL "
+            + "ORDER BY last_execution_time DESC, collection_time DESC LIMIT 1",
+            sql);
+        Assert.Equal("/* pm:qs-watermark-seed */", QueryStoreWatermarkReader.SeedMarker);
+        Assert.StartsWith(QueryStoreWatermarkReader.SeedMarker, sql, StringComparison.Ordinal);
+        /* One scan: no MAX, and the predicates appear once. */
+        Assert.DoesNotContain("MAX(", sql, StringComparison.Ordinal);
+        Assert.Equal(1, sql.Split("server_id = $1").Length - 1);
     }
 
     /// <summary>

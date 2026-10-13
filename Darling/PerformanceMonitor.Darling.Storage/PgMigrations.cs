@@ -1075,6 +1075,21 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS runnable_queue_critical_per_scheduler integer NOT NULL DEFAULT 16;";
 
     /// <summary>
+    /// V178 (#5684) - <c>collect.query_store_watermarks</c> and <c>collect.query_store_watermarks_coverage</c>: one row per
+    /// (server, database, collection_time) with that key's <c>MAX(last_execution_time)</c>, so the Query Store per-database watermark
+    /// seed read touches about thirty-six rows instead of every <c>query_store_stats</c> row of the pair's last three hours. The
+    /// collector writes it on the COPY's own transaction behind a savepoint (<c>QueryStoreWatermarks.TryUpsertBatchAsync</c>); the grain,
+    /// the types, the only-up upsert, the coverage start and the two-day retention are on <see cref="QueryStoreWatermarks"/>, which the
+    /// rung embeds.
+    ///
+    /// <para><b>Empty when created, no backfill</b> (the data-moving census therefore has nothing to declare), except the one coverage row
+    /// the rung inserts: the store's own clock at the moment the rung ran, kept on a re-run. A reader treats everything before it as raw's.
+    /// A plain table, not a collector, so no catalog, hypertable or grant change. No Lite twin: Lite's store is DuckDB with its own
+    /// watermark read.</para>
+    /// </summary>
+    private const string V178Sql = QueryStoreWatermarks.CreateSql;
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1363,6 +1378,7 @@ $rung$;";
         new Migration(175, "plan-regression-daily-rowcount", V175Sql),
         new Migration(176, "procedure-stats-totals", V176Sql),
         new Migration(177, "runnable-queue-alert-settings", V177Sql),
+        new Migration(178, "query-store-watermarks", V178Sql),
         new Migration(179, "client-timeouts-alert", V179Sql),
     };
 
