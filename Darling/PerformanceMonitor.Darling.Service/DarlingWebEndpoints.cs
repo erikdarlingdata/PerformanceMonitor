@@ -4646,6 +4646,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_collection_health"] = R(CatData, "Per-collector collection health for a server.", PServer()),
             ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first — or slowest first when min_duration_ms is supplied.", PServer(), PHours(24), PLimit(200), PAsOf(), PText("collector_name"), PDouble("min_duration_ms"), PText("status")),
             ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time.", PServer(), PHours(4), PDatabases(), PAsOf()),
+            ["get_client_timeouts"] = R(CatData, "Client-timeout (attention) counts, rate and top databases, applications and statements over the window, with the newest sampled events (#5640).", PServer(), PHours(1), PLimit(20), PAsOf()),
             ["get_blocking_stats"] = R(CatData, "Blocking duration and deadlock severity per minute.", PServer(), PHours(24), PDatabases(), PAsOf()),
             ["get_cpu_utilization"] = R(CatData, "CPU utilization over time.", PServer(), PHours(4), PAsOf(), PInt("bucket_minutes")),
             ["get_file_io_stats"] = R(CatData, "Per-file IO stall/throughput stats.", PServer(), PDatabases()),
@@ -5622,6 +5623,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_current_waits_trend"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), databases, AsOf(c), c.RequestAborted)
                 : DatabaseNamesRefusal(c),
+            ["get_client_timeouts"] = (c, pg, an) => DarlingMcpClientTimeoutTools.GetClientTimeouts(pg, Server(c), Hours(c, 1), Rows(c, "limit", 20), AsOf(c), logger, c.RequestAborted),
             ["get_blocking_stats"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpDataTools.GetBlockingStats(pg, Server(c), Hours(c, 24), databases, AsOf(c), logger, c.RequestAborted)
                 : DatabaseNamesRefusal(c),

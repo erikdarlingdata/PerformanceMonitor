@@ -44,8 +44,9 @@ public sealed class ClientTimeoutsToolLiveTests
     private const int OneRunId = -5640107;
     private const int LeakId = -5640108;
     private const int TieId = -5640109;
+    private const int MissingSessionId = -5640110;
 
-    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId };
+    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId };
 
     private static string Name(int id) => "ct-live" + (-id).ToString(CultureInfo.InvariantCulture);
 
@@ -149,6 +150,36 @@ public sealed class ClientTimeoutsToolLiveTests
             Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(json));
             Assert.Contains("has not observed", json, StringComparison.Ordinal);
             Assert.DoesNotContain("client_timeouts", json, StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>
+    /// The precondition arm of the tool (#5640): the collector's catalog name is what the question is asked about, so a latest run that recorded
+    /// SESSION_MISSING replaces the generic "has not observed" sentence, while a collector with no newer failure keeps the unavailable one.
+    /// </summary>
+    [Fact]
+    public async Task AMissingCaptureSession_OnTheLatestRun_IsAPrecondition_NotTheGenericUnavailable()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            var now = Now();
+            await RegisterAsync(connection, MissingSessionId, "sqlserver", ct);
+
+            /* Stale successes (freshness window 10 minutes, newest 25 minutes ago), then a newer run that found the session gone. */
+            await SeedRunsAsync(connection, MissingSessionId, now.AddMinutes(-25), 12, TimeSpan.FromMinutes(1), ct);
+
+            var before = await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(MissingSessionId), 1, cancellationToken: ct);
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(before));
+
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message) VALUES ($1, $2, $3, $4, $5, 5, 'SESSION_MISSING', 'The specified object PerformanceMonitor_Attention could not be found.')",
+                Math.Abs((long)MissingSessionId) * 1000 + 500, MissingSessionId, Name(MissingSessionId), AttentionWindowSql.CollectorName, now.AddMinutes(-1));
+
+            var json = await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(MissingSessionId), 1, cancellationToken: ct);
+
+            Assert.Equal("precondition", DarlingMcpTestData.StatusOf(json));
+            Assert.Contains("attention collector", json, StringComparison.Ordinal);
+            Assert.Contains("ALTER ANY EVENT SESSION", json, StringComparison.Ordinal);
         });
     }
 

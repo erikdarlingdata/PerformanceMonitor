@@ -50,7 +50,17 @@ public static class AttentionWindowSql
     /// groups (#5640), so a top list or a sampled event can never come from outside the rows the count came from.</summary>
     public static string SpanFloor(bool bounded) => bounded ? "collection_time > $2" : "collection_time >= $2";
 
-    /// <summary>Successful run times, newest first. Column 0 = collection_time. DISTINCT: an Azure SQL Database server logs one run per monitored database.</summary>
+    /// <summary>
+    /// Successful run times, newest first. Column 0 = collection_time.
+    /// <para><b>The guarantee this read leans on</b>: the attention collector runs per database on Azure SQL Database, but both runners write ONE
+    /// blended <c>collection_log</c> row for the whole collector run, not one per database (Darling: <c>DarlingWorker</c> logs the run's single
+    /// <c>CollectorRunResult</c>, the per-database cost rides on that row's fan-out rollup; Lite: <c>RemoteCollectorService</c> logs once after
+    /// <c>RunDefinitionAsync</c> returns). So the run list is one time per cycle even on an Azure SQL DB server. If per-database runs ever logged separate
+    /// rows, the times would differ by the database loop's seconds, <c>AttentionEvaluator.OldestTaken</c> would collapse the span to those seconds and
+    /// the rate would inflate; <c>AttentionRunLogCardinalityPinTests</c> pins the one-row-per-run shape on both runners.</para>
+    /// <para><b>The DISTINCT is not that guarantee</b>: with one row per run it removes nothing. It is kept as a free guard against two rows stamped
+    /// with the exact same time (it cannot merge rows with different times, so it would not save the span from per-database rows).</para>
+    /// </summary>
     public static string Runs(string logRelation, bool bounded = false) => $"""
 SELECT DISTINCT collection_time
 FROM {logRelation}

@@ -14,6 +14,7 @@ using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -158,6 +159,50 @@ public sealed class ClientTimeoutsReadTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(ClientTimeoutsKind.NotObserved, kind);
         Assert.Null(reading);
         Assert.Contains("not observed", ClientTimeoutsRead.UnavailableMessage("sql01", window, now, 2).Replace("has not observed", "not observed"));
+    }
+
+    /// <summary>
+    /// The precondition arm get_client_timeouts reaches when the window is not observed (#5640): the SAME call the tool makes, with the attention
+    /// collector's catalog name. A missing capture session on the collector's latest run replaces the generic "has not observed" sentence, and a
+    /// collector with no log row at all (disabled, never run) falls through to null so the tool's own unavailable sentence stands.
+    /// </summary>
+    [Fact]
+    public async Task AMissingSession_OnTheLatestRun_IsAPreconditionSentence_AndNoLogRowFallsThrough()
+    {
+        var now = DateTime.UtcNow;
+        var dataService = new LocalDataService(_duckDb);
+
+        /* Never ran at all (a disabled collector writes nothing): the tool's own unavailable sentence stands. */
+        Assert.Null(await McpRuntimePrecondition.StatusAsync(dataService, StormServer, "sql01", AttentionWindowSql.CollectorName));
+
+        for (var i = 0; i < 5; i++)
+        {
+            await LogAsync(700 + i, StaleServer, now.AddMinutes(-45).AddMinutes(-i));
+        }
+
+        /* Ran, and the latest run succeeded: still nothing to say about a setup step. */
+        Assert.Null(await McpRuntimePrecondition.StatusAsync(dataService, StaleServer, "sql01", AttentionWindowSql.CollectorName));
+
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message)
+VALUES (799, $1, 'test-server', $2, $3, 5, $4, 'The specified object PerformanceMonitor_Attention could not be found.')";
+            command.Parameters.Add(new DuckDBParameter { Value = StaleServer });
+            command.Parameters.Add(new DuckDBParameter { Value = AttentionWindowSql.CollectorName });
+            command.Parameters.Add(new DuckDBParameter { Value = now.AddMinutes(-1) });
+            command.Parameters.Add(new DuckDBParameter { Value = "SESSION_MISSING" });
+            await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        var json = await McpRuntimePrecondition.StatusAsync(dataService, StaleServer, "sql01", AttentionWindowSql.CollectorName);
+
+        Assert.NotNull(json);
+        Assert.Contains("\"precondition\"", json, StringComparison.Ordinal);
+        Assert.Contains("attention collector", json, StringComparison.Ordinal);
+        Assert.Contains("ALTER ANY EVENT SESSION", json, StringComparison.Ordinal);
     }
 
     [Fact]
