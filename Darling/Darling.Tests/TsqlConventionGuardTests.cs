@@ -1452,6 +1452,9 @@ public sealed class TsqlConventionGuardTests
            no census reads a site of that kind here. */
         "PerformanceMonitor.Common/SystemHealthParser.cs MbFromBytes",
         "PerformanceMonitor.Notifications/WebhookAlertService.cs DeriveResourceDatabase",
+        /* #5654: an expression-bodied title helper whose conditional strands only its own interpolated format string,
+           not T-SQL or a tempdb label, so no census reads a site of that kind here. */
+        "PerformanceMonitor.Notifications/WebhookAlertService.cs ExternalTitle",
         "Darling/PerformanceMonitor.Darling.Analysis/PgBaselineProvider.cs IsCommandTimeout",
         /* #4276: the same expression-bodied classifier shape as IsCommandTimeout just above — it strands
            only its own SqlState literal ("57014"), not T-SQL or a tempdb label, so no census reads a site
