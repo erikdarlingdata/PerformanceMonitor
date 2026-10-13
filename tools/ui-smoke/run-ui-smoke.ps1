@@ -21,6 +21,11 @@
 .PARAMETER WorkDir     Scratch folder for the config, logs, cluster and screenshots. Made if missing.
 .PARAMETER NoBuild     Skip dotnet build (the caller already built the Release service).
 .PARAMETER Channel     Browser channel for playwright-core: chrome (the runner's) or msedge.
+.PARAMETER UpdateBaselines
+                       Screenshot step (#5744): render the pages marked "screenshot" in pages.json and write new PNGs to
+                       <WorkDir>\out\new-baselines, comparing nothing. Without it the step compares with tools/ui-smoke/baselines.
+                       Baselines come from the CI image only (the workflow's update_baselines input), never from a laptop.
+.PARAMETER NoShots     Skip the screenshot step (the smoke walk still runs).
 .PARAMETER SeedOnly    Stop after seed.sql is applied: no npm, no browser walk. The WPF smoke check (#5745, wpf-smoke.yml) uses this to
                        get a migrated, seeded store for the Darling viewer; the service is stopped, and the caller keeps the cluster
                        and the config in -WorkDir\cfg\darling.json (the viewer reads it through DARLING_CONFIG).
@@ -33,7 +38,9 @@ param(
     [string] $WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) 'darling-ui-smoke'),
     [switch] $NoBuild,
     [string] $Channel = 'chrome',
-    [switch] $SeedOnly
+    [switch] $SeedOnly,
+    [switch] $UpdateBaselines,
+    [switch] $NoShots
 )
 
 $ErrorActionPreference = 'Stop'
@@ -93,7 +100,10 @@ try {
     } while ((Get-Date) -lt $regDeadline)
     if (-not $registered) { throw "the service did not register ui-sql in the store in 120 s (migrations still running? see service.out.log)" }
 
-    Invoke-Psql @('-f', (Join-Path $here 'seed.sql'))
+    # One anchor for every seeded time, taken here so the screenshot step (smoke.mjs, shots.mjs) knows it: the store's clock, UTC, to the minute.
+    $anchor = (Invoke-Psql @('-c', "SELECT to_char(date_trunc('minute', now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')") | Select-Object -First 1).Trim()
+    if ($anchor -notmatch '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$') { throw "unexpected seed anchor: '$anchor'" }
+    Invoke-Psql @('-v', "anchor=$anchor", '-f', (Join-Path $here 'seed.sql'))
 
     if ($SeedOnly) {
         Write-Host "store seeded; config is $cfgPath"
@@ -107,6 +117,13 @@ try {
         $env:UI_SMOKE_URL = $base
         $env:UI_SMOKE_OUT = Join-Path $WorkDir 'out'
         $env:UI_SMOKE_CHANNEL = $Channel
+        $env:UI_SMOKE_ANCHOR = $anchor
+        $env:UI_SMOKE_SHOTS = if ($NoShots) { 'off' } elseif ($UpdateBaselines) { 'update' } else { 'compare' }
+        if (-not $NoShots) {
+            # The screenshot pages use Playwright's own Chromium, pinned by the playwright-core version (the runner's Chrome updates with the image).
+            & npx --no-install playwright-core install chromium
+            if ($LASTEXITCODE -ne 0) { throw "playwright install chromium failed ($LASTEXITCODE)" }
+        }
         & node smoke.mjs
         $smokeExit = $LASTEXITCODE
     }

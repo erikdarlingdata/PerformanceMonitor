@@ -4,8 +4,12 @@
   "private": true,
   "description": "Web UI smoke check for the Darling viewer pages and Web Admin (#5701). Not shipped.",
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "playwright-core": "1.64.0"
+    "pixelmatch": "7.1.0",
+    "playwright-core": "1.64.0",
+    "pngjs": "7.0.0"
   }
 }

@@ -1,8 +1,8 @@
 // Web UI smoke check for the Darling viewer pages and Web Admin (#5701).
 //
 // Loads every page in pages.json in a real Chrome (playwright-core, the browser already on the machine) against a
-// running service seeded by seed.sql, and fails when a page shows a problem. No screenshots are compared; a screenshot
-// is taken only of a page that failed. Run it through run-ui-smoke.ps1, which starts the store and the service.
+// running service seeded by seed.sql, and fails when a page shows a problem. A screenshot is kept of a page that failed, and the
+// pages marked "screenshot" in pages.json are compared with their baselines (shots.mjs, #5744). Run it through run-ui-smoke.ps1, which starts the store and the service.
 //
 //   UI_SMOKE_URL      base address of the web host   (default http://127.0.0.1:5153)
 //   UI_SMOKE_OUT      folder for report.json and failure screenshots   (default ./out)
@@ -20,6 +20,7 @@ import { chromium } from "playwright-core";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runShots } from "./shots.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const baseUrl = (process.env.UI_SMOKE_URL || "http://127.0.0.1:5153").replace(/\/+$/, "");
@@ -215,11 +216,24 @@ for (const spec of config.pages) {
 }
 await browser.close();
 
-writeFileSync(join(outDir, "report.json"), JSON.stringify(results, null, 2));
+/* The walk's result lands first (report.json is { pages, screenshotProblems }), so nothing the screenshot stage does can lose it. */
+writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: [] }, null, 2));
+
+/* Screenshot baselines (#5744): the pages marked "screenshot" in pages.json, in Playwright's own pinned Chromium. A throw out of the
+   stage (Chromium not installed, an unwritable folder) is a screenshot problem like any other: it fails the run, it does not crash it. */
+let shotProblems;
+try {
+  shotProblems = await runShots({ config, baseUrl, outDir, only, settle });
+} catch (e) {
+  shotProblems = [`screenshots: the stage threw: ${e && e.message ? e.message.split("\n")[0] : e}`];
+}
+for (const p of shotProblems) console.log(`       PROBLEM ${p}`);
+
+writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: shotProblems }, null, 2));
 const failed = results.filter((r) => r.problems.length);
 console.log(`\nui-smoke: ${results.length - failed.length}/${results.length} pages clean, ${results.filter((r) => r.flaked).length} flaked`);
 if (results.length === 0) {
   console.log("ui-smoke: no page ran.");
   process.exit(1);
 }
-process.exit(failed.length ? 1 : 0);
+process.exit(failed.length || shotProblems.length ? 1 : 0);

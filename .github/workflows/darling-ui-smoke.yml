@@ -2,7 +2,8 @@ name: Darling UI smoke
 
 # #5701 phase 1: loads the Darling web pages and Web Admin in a real Chrome against a service on a throwaway,
 # seeded PostgreSQL store, and fails on a console error, a failed request, an error strip, or a panel or grid that
-# the seed says must have data and does not. No screenshots are compared. See tools/ui-smoke/ (run-ui-smoke.ps1 is
+# the seed says must have data and does not. #5744 (phase 2): four pages are also compared with screenshot baselines
+# (tools/ui-smoke/baselines/*.png, in Playwright's own pinned Chromium). See tools/ui-smoke/ (run-ui-smoke.ps1 is
 # the entry, locally and here).
 #
 # Triggers: a pull request touching the web files, the harness or this workflow (a draft pull request is skipped
@@ -20,7 +21,15 @@ on:
       - '.github/workflows/darling-ui-smoke.yml'
   # The nightly runs it as a reusable workflow (nightly.yml, outside publish's needs).
   workflow_call:
+  # update_baselines: render the four screenshot pages and upload new PNGs as the artifact "darling-ui-smoke-new-baselines"
+  # (nothing is compared and nothing is committed). Baselines come from this CI image only: download the artifact and commit
+  # the PNGs to tools/ui-smoke/baselines/ on the pull request, where GitHub's image diff is the review.
   workflow_dispatch:
+    inputs:
+      update_baselines:
+        description: 'Write new screenshot baselines (artifact darling-ui-smoke-new-baselines) instead of comparing'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,8 +44,13 @@ jobs:
     # Skip a draft pull request; a dispatch has no pull request and always runs.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: windows-latest
-    # Expected 8 to 10 minutes warm (service build 2, PostgreSQL 1, browser walk 2 to 3); 3 more on a cold pg-runtime cache.
+    # Measured (#5744, five green runs with both caches warm): 3.4 to 5.8 minutes in all. A typical run: checkout and .NET 0.5, service build
+    # 1 to 1.2, PostgreSQL 0.2, browser walk and the stale wait 1.7, four screenshots 0.1. A cold pg-runtime cache adds 3. The 20 stays: over 3 times the slowest run.
     timeout-minutes: 20
+    # One explicit home for Playwright's Chromium. The `env` context holds only variables declared in an env: map (never the runner's
+    # own LOCALAPPDATA), so the cache step and the install in run-ui-smoke.ps1 both use this path, not Playwright's default.
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\.playwright-browsers
     steps:
       - uses: actions/checkout@v7
 
@@ -101,10 +115,22 @@ jobs:
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
           if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
 
+      # Playwright's own Chromium for the screenshot pages, pinned by the playwright-core version in package-lock.json and cached by it,
+      # at PLAYWRIGHT_BROWSERS_PATH (job env above), which `playwright-core install chromium` and chromium.launch() both honour.
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('tools/ui-smoke/package-lock.json') }}
+
       - name: Run the web UI smoke check
         shell: pwsh
+        env:
+          UPDATE_BASELINES: ${{ github.event_name == 'workflow_dispatch' && inputs.update_baselines }}
         run: |
-          ./tools/ui-smoke/run-ui-smoke.ps1 -PgBin "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin" -PgPort 5541 -WorkDir "$env:RUNNER_TEMP\ui-smoke" -NoBuild -Channel chrome
+          $update = @{ }
+          if ($env:UPDATE_BASELINES -eq 'true') { $update.UpdateBaselines = $true }
+          ./tools/ui-smoke/run-ui-smoke.ps1 -PgBin "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin" -PgPort 5541 -WorkDir "$env:RUNNER_TEMP\ui-smoke" -NoBuild -Channel chrome @update
 
       - name: Logs tail
         if: always()
@@ -126,6 +152,26 @@ jobs:
             ${{ runner.temp }}\ui-smoke\out\*
             ${{ runner.temp }}\darling-pg.log
           retention-days: 7
+          if-no-files-found: ignore
+
+      # An update_baselines dispatch: the new PNGs, one per screenshot page, to download and commit.
+      - name: Upload new screenshot baselines
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.update_baselines
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-ui-smoke-new-baselines
+          path: ${{ runner.temp }}\ui-smoke\out\new-baselines\*.png
+          retention-days: 14
+          if-no-files-found: warn
+
+      # A compare that failed: for each page that differs, the baseline, the new screenshot and the difference image.
+      - name: Upload screenshot differences
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-ui-smoke-screenshot-diffs
+          path: ${{ runner.temp }}\ui-smoke\out\shot-failures\*.png
+          retention-days: 14
           if-no-files-found: ignore
 
       - name: Stop throwaway PostgreSQL

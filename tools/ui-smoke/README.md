@@ -2,8 +2,8 @@
 
 Loads every Darling web page and Web Admin tab in a real Chrome against a service running on a throwaway, seeded
 PostgreSQL store. It fails the job on a console error, a page error, a failed request, an answer of 400 or more, an
-error strip, or a panel or grid that the seed says must have data and does not. No screenshots are compared: a screenshot
-and a trace are kept only for a page that failed.
+error strip, or a panel or grid that the seed says must have data and does not. A screenshot and a trace are kept for a
+page that failed. Four pages are also compared with screenshot baselines (see "Screenshot baselines" below).
 
 It runs in `.github/workflows/darling-ui-smoke.yml` ("Darling web UI smoke") on a pull request that touches
 `Darling/PerformanceMonitor.Darling.Service/wwwroot/**`, `tools/ui-smoke/**` or the workflow (draft pull requests are
@@ -19,6 +19,8 @@ reports and does not stop publishing). It is not a required check: a path-filter
 | `seed.sql` | The rows. Every time is relative to the store's own clock and every count is fixed, so the assertions are exact. |
 | `pages.json` | The pages and what each must show. |
 | `smoke.mjs` | The browser walk (`playwright-core`, the installed Chrome or Edge). |
+| `shots.mjs` | The screenshot step (`playwright-core`'s own Chromium, `pixelmatch`, `pngjs`). |
+| `baselines/*.png` | The baseline screenshots, one per page marked `screenshot` in `pages.json`. |
 
 ## What it checks, per page
 
@@ -51,6 +53,46 @@ tools/ui-smoke/run-ui-smoke.ps1 -PgBin $bin -PgPort 55401 -Channel msedge     # 
 Logs, `report.json`, failure screenshots and traces land in `-WorkDir` (default `%TEMP%\darling-ui-smoke`). Open a
 trace with `npx playwright show-trace <page>.trace.zip`. `UI_SMOKE_PAGES=ui-pg-waits,alerts` runs only those pages when
 you call `node smoke.mjs` yourself.
+
+## Screenshot baselines
+
+Four pages have a baseline PNG in `baselines/`: `fleet`, `ui-sql-overview`, `ui-sql-queries` and `admin-servers`. After the
+smoke walk, `shots.mjs` renders each one at 1280 by 800 and compares it with its baseline. The check fails when any pixel
+differs by more than a small color threshold. The renders are the same from run to run, so there is no allowance. A page is marked by a `screenshot` key in `pages.json`.
+The key lists CSS selectors to paint over, for text that changes from run to run.
+
+How the page is kept the same on every run:
+
+- The browser is Playwright's own Chromium, pinned by the `playwright-core` version. It is not the runner's Chrome, which
+  updates with the runner image.
+- The viewport, scale (1), color scheme, locale (en-US), time zone (UTC) and reduced motion are fixed. Animations are off and
+  the caret is hidden.
+- The seed dates every row from one anchor, the minute `run-ui-smoke.ps1` ran it. The service must keep its real clock, so the
+  browser is moved instead. Every `/api` answer has its timestamps shifted to a fixed date. Every windowed read gets an
+  `as_of` of anchor plus one minute. The page clock is pinned to the same fixed date plus one minute.
+- A screenshot is taken again until two in a row are identical. If that does not happen in 8 tries, the page fails.
+- The service marks the two unreachable servers "collection stale" a couple of minutes after the seed anchor, and "offline"
+  after 30. The shots wait until `/api/fleet` shows every card stale. They give up after 4 minutes with one message if the
+  cards never got there, and with another if the cards are already past stale.
+- The database size in the status bar is not the same on every run. Its width changes when it gains a digit (99 MB to 100 MB).
+  In one run the item was missing, because the read of the size had not finished. A mask hides the text, not the box. For the
+  shots, `shots.mjs` adds a style that hides the item and the separator before it, so the bar is the same either way.
+- `report.json` is `{ pages, screenshotProblems }`. The page walk is written first, then rewritten with the screenshot
+  problems, so a failure in the screenshot step cannot lose the walk.
+- Playwright's Chromium lives in the folder named by `PLAYWRIGHT_BROWSERS_PATH`. The workflow sets it and caches that folder.
+
+To refresh the baselines (after a change to the page that you want to keep):
+
+1. Start the workflow "Darling UI smoke" by hand on your branch, with `update_baselines` set. For example:
+   `gh workflow run darling-ui-smoke.yml --ref <branch> -f update_baselines=true`.
+2. Download the artifact `darling-ui-smoke-new-baselines` from that run.
+3. Copy the PNGs into `tools/ui-smoke/baselines/` and commit them on the pull request.
+4. Review GitHub's image diff of each PNG. Never commit a PNG that you rendered on your own machine. Fonts and the browser
+   differ, so most pixels differ in CI.
+
+When a compare fails, the job uploads the artifact `darling-ui-smoke-screenshot-diffs`. For each page that differs, it holds
+`<page>.baseline.png`, `<page>.actual.png` and `<page>.diff.png` (the changed pixels). If the change is wanted, refresh the
+baselines as above. If a runner image update moved the pixels, refresh them the same way.
 
 ## Add a page or a seeded table
 
