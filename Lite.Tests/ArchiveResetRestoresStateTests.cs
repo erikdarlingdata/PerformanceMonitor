@@ -277,7 +277,7 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
     [
         "config_mute_rules", "dismissed_archive_alerts", "config_edge_trigger_watermarks",
         "config_incident_occurrences", "config_alert_persistence_state", "config_database_state_expected",
-        "collector_state", "analysis_muted", "server_tags", "server_tag_map"
+        "collector_state", "analysis_muted", "server_tags", "server_tag_map", "notification_routes"
     ];
 
     /// <summary>Rows seeded per preserved table; two in the two tables the pins also count by value.</summary>
@@ -292,7 +292,8 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         ["collector_state"] = 1,
         ["analysis_muted"] = 1,
         ["server_tags"] = 1,
-        ["server_tag_map"] = 1
+        ["server_tag_map"] = 1,
+        ["notification_routes"] = 1
     };
 
     private Task SeedAllPreservedTablesAsync() => SeedAsync(
@@ -308,7 +309,8 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         $"INSERT INTO collector_state (server_id, collector_name, state_key, state_value, updated_at) VALUES (1, 'default_trace_events', 'last_file', 'log_42.trc', {Ts(T3)})",
         "INSERT INTO analysis_muted (mute_id, server_id, database_name, story_path_hash, story_path, reason) VALUES (41, 1, 'DbA', 'hash41', 'a>b>c', 'noise')",
         "INSERT INTO server_tags (id, name, parent_id, sort_order, colour) VALUES (7, 'Prod', NULL, 3, '#ff0000')",
-        "INSERT INTO server_tag_map (server_id, tag_id) VALUES (1, 7)");
+        "INSERT INTO server_tag_map (server_id, tag_id) VALUES (1, 7)",
+        "INSERT INTO notification_routes (route_id, metric_match, scope_tag_id, teams_set, smtp_recipients, enabled) VALUES (3, '*', 7, true, 'ops@example.test', true)");
 
     private async Task AssertAllPreservedRowsBackAsync()
     {
@@ -328,6 +330,7 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM analysis_muted WHERE mute_id = 41 AND story_path_hash = 'hash41' AND reason = 'noise'"));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM server_tags WHERE id = 7 AND name = 'Prod' AND sort_order = 3 AND colour = '#ff0000'"));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM server_tag_map WHERE server_id = 1 AND tag_id = 7"));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM notification_routes WHERE route_id = 3 AND metric_match = '*' AND scope_tag_id = 7 AND teams_set AND smtp_recipients = 'ops@example.test'"));
     }
 
     private void AssertNoRestoreMarkerOrPreserveDirectory()

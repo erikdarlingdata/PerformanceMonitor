@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -79,7 +80,7 @@ public partial class MainWindow
            ItemsSource behind the model's back (which is how the bound list and the fleet drifted apart). */
         var selected = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
         _fleet.SetAll(SortWithFavorites(_fleet.All.ToList()));
-        ServerList.ItemsSource = _fleet.Visible;
+        ServerListKeyboard.Rebind(ServerList, _fleet.Visible);
 
         /* A re-sort is not the user choosing a server, so the restore leaves the Recommendations and FinOps
            pickers where they are. */

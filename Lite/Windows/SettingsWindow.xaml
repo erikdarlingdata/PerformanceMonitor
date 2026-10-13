@@ -790,6 +790,15 @@
                     </Hyperlink>
                 </TextBlock>
 
+                <!-- Notification routes (#5750): scoped destinations layered over the app-wide ones above -->
+                <TextBlock Text="Notification Routes" FontSize="14" FontWeight="SemiBold"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="0,20,0,0"/>
+                <TextBlock Text="Send one server's or one tag's alerts to their own Teams, Slack, generic webhook, PagerDuty or email destinations. A route replaces the destinations above for the channels it fills in; everything else keeps using them."
+                           FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                <Button x:Name="ManageNotificationRoutesButton" Content="Manage Notification _Routes..."
+                        Click="ManageNotificationRoutesButton_Click" HorizontalAlignment="Left"
+                        Padding="12,4" Margin="0,8,0,0"/>
+
                 <!-- Severity Color Reference -->
                 <TextBlock Text="Alert Severity Colors" FontWeight="SemiBold" FontSize="12"
                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,16,0,4"/>

@@ -5906,13 +5906,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <c>idx_collection_log_time (server_id, collection_time)</c> per server, each stopping at its first row,
     /// so it never scans or sorts the table, on a hypertable or on plain PostgreSQL.
     /// </summary>
-    internal const string NewestCollectionTimeSql = @"
+    internal const string NewestCollectionTimeSql = $@"
 SELECT max(n.collection_time)
 FROM config.config_monitored_servers c
 CROSS JOIN LATERAL (
     SELECT l.collection_time
     FROM collect.collection_log l
     WHERE l.server_id = c.server_id
+    AND   l.{CollectionCycleRow.NotCycleRowSql}
     ORDER BY l.collection_time DESC
     LIMIT 1) n
 WHERE c.is_enabled";
@@ -8312,16 +8313,17 @@ WHERE c.is_enabled";
         NpgsqlDataSource postgres, int serverId, int recentWindow, CancellationToken cancellationToken)
     {
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(@"
+        using var command = new NpgsqlCommand($@"
 SELECT
     (SELECT MAX(collection_time)
      FROM collection_log
      WHERE server_id = $1
+     AND   {CollectionCycleRow.NotCycleRowSql}
      AND   status IN ('SUCCESS', 'SKIPPED'))                                        AS last_success,
     (SELECT COUNT(*)
-     FROM (SELECT log_id FROM collection_log WHERE server_id = $1 ORDER BY collection_time DESC, log_id DESC LIMIT $2) r) AS recent_runs,
+     FROM (SELECT log_id FROM collection_log WHERE server_id = $1 AND {CollectionCycleRow.NotCycleRowSql} ORDER BY collection_time DESC, log_id DESC LIMIT $2) r) AS recent_runs,
     (SELECT COUNT(*)
-     FROM (SELECT status FROM collection_log WHERE server_id = $1 ORDER BY collection_time DESC, log_id DESC LIMIT $2) r
+     FROM (SELECT status FROM collection_log WHERE server_id = $1 AND {CollectionCycleRow.NotCycleRowSql} ORDER BY collection_time DESC, log_id DESC LIMIT $2) r
      WHERE r.status IN ('SUCCESS', 'SKIPPED'))                                       AS recent_success", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(recentWindow);

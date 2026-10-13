@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 
@@ -235,7 +236,7 @@ ON CONFLICT (server_id) DO UPDATE SET
     /// stand in for a success site that forgot, and the whole point of the columns is that a blended number
     /// stops being the only thing recorded.
     /// </param>
-    public static async Task LogCollectionAsync(
+    public static Task LogCollectionAsync(
         NpgsqlDataSource postgres,
         ServerRuntime server,
         string collectorName,
@@ -243,6 +244,52 @@ ON CONFLICT (server_id) DO UPDATE SET
         int rowsCollected,
         long sqlMs,
         long storageMs,
+        string? errorMessage,
+        FanoutCost? fanout,
+        ServerPhaseCost? phases,
+        DrainForensics? drain,
+        FetchPhaseCost? fetchPhases,
+        int? sweepPeerMaxMs,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+        => WriteCollectionLogRowAsync(postgres, server, collectorName, DateTime.UtcNow, status, rowsCollected,
+            (int)(sqlMs + storageMs), (int)sqlMs, (int)storageMs, errorMessage, fanout, phases, drain, fetchPhases,
+            sweepPeerMaxMs, logger, cancellationToken);
+
+    /// <summary>
+    /// #5735: records the collection slots a server's loop stepped over as one <c>collection_log</c> row, through the
+    /// same insert every collector row uses. The row is not a collector run: <c>collector_name</c> is
+    /// <see cref="CollectionCycleRow.CollectorName"/>, <c>status</c> is <see cref="CollectionCycleRow.Status"/>,
+    /// <c>fanout_item_count</c> carries the slots skipped, <c>slowest_item</c>/<c>slowest_item_ms</c> the cause,
+    /// <c>duration_ms</c> the cause's length (NULL when none was measured), and both timing splits are NULL with no rows collected. Stamped
+    /// <paramref name="stampUtc"/> (when the late run noticed the gap), not the clock at insert, so the caller names
+    /// the moment. Failure-isolated like the other observability writes; returns whether the row landed so the caller
+    /// keeps its pending counts when it did not.
+    /// </summary>
+    internal static Task<bool> LogCycleSkipAsync(
+        NpgsqlDataSource postgres,
+        ServerRuntime server,
+        DateTime stampUtc,
+        CycleSkipReport report,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+        => WriteCollectionLogRowAsync(postgres, server, CollectionCycleRow.CollectorName, stampUtc,
+            CollectionCycleRow.Status, 0, report.DurationMs, null, null, report.Message,
+            new FanoutCost(report.SlotsSkipped, report.SlowestItem, report.SlowestItemMs),
+            null, null, null, null, logger, cancellationToken);
+
+    /// <summary>The one binding of <see cref="InsertCollectionLogSql"/>: collector rows and #5735's skipped-slots row
+    /// share it, so a parameter added to the insert is bound once. Returns false when the write failed (Debug-logged).</summary>
+    private static async Task<bool> WriteCollectionLogRowAsync(
+        NpgsqlDataSource postgres,
+        ServerRuntime server,
+        string collectorName,
+        DateTime stampUtc,
+        string status,
+        int rowsCollected,
+        int? durationMs,
+        int? sqlMs,
+        int? storageMs,
         string? errorMessage,
         FanoutCost? fanout,
         ServerPhaseCost? phases,
@@ -268,13 +315,13 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.AddWithValue(server.StorageName);
             command.Parameters.AddWithValue(collectorName);
             /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
-            command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
-            command.Parameters.AddWithValue((int)(sqlMs + storageMs));
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(stampUtc, DateTimeKind.Unspecified));
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = durationMs.HasValue ? durationMs.Value : (object)DBNull.Value });
             command.Parameters.AddWithValue(status);
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)message ?? DBNull.Value });
             command.Parameters.AddWithValue(rowsCollected);
-            command.Parameters.AddWithValue((int)sqlMs);
-            command.Parameters.AddWithValue((int)storageMs);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = sqlMs.HasValue ? sqlMs.Value : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = storageMs.HasValue ? storageMs.Value : (object)DBNull.Value });
 
             /* All three NULL together or all three set: a slowest item with no count cannot be turned into
                the dominance ratio the columns exist for, so half an answer is worse than none. */
@@ -354,12 +401,14 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.IdsAttempted : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.ProbeIds : (object)DBNull.Value });
             await command.ExecuteNonQueryAsync(cancellationToken);
+            return true;
         }
         catch (Exception ex)
         {
             /* Failure-isolated by design — an observability write must never break the collection loop. */
             logger?.LogDebug("Observability: collection_log write for '{Server}' / {Collector} failed: {Message}",
                 server.Config.DisplayName, collectorName, ex.Message);
+            return false;
         }
     }
 

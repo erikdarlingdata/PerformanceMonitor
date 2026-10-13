@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -86,7 +87,7 @@ public partial class MainWindow
             try
             {
                 _fleet.SetTags(tags, assignments);
-                ServerList.ItemsSource = _fleet.Visible;
+                ServerListKeyboard.Rebind(ServerList, _fleet.Visible);
                 ServerList.SelectedItem = _fleet.ResolveSelection(previous);
             }
             finally

@@ -1,0 +1,113 @@
+<Window x:Class="PerformanceMonitorLite.Windows.NotificationRouteEditDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Add Notification Route"
+        SizeToContent="Height" Width="620"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        Icon="/EDD.ico"
+        Background="{DynamicResource BackgroundBrush}">
+    <!-- #5750: one route. What it matches, which server or tag it covers, and a destination per channel.
+         Shape of MuteRuleDialog; the save happens in the dialog so the store's own validation message shows inline. -->
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Add Notification Route" FontSize="18" FontWeight="Bold"
+                   Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,5"/>
+        <TextBlock Grid.Row="1" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundDimBrush}" Margin="0,0,0,15"
+                   Text="Alerts that match go to the destinations below. A destination replaces the app-wide one for that channel only; leave a channel empty to keep using the app-wide setting for it."/>
+
+        <TextBlock Grid.Row="2" Text="Scope" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <ComboBox Grid.Row="3" x:Name="ScopeCombo" Margin="0,0,0,4" SelectionChanged="ScopeCombo_SelectionChanged"
+                  ToolTip="All servers, one server, or one tag. A tag covers every server under it and under its sub-tags."/>
+        <TextBlock Grid.Row="4" Foreground="{DynamicResource ForegroundDimBrush}" TextWrapping="Wrap" Margin="0,0,0,12"
+                   Text="A server route beats a tag route, and a tag route beats an all-servers route. Under nested tags the deeper tag wins."/>
+
+        <TextBlock Grid.Row="5" Text="Matches" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <Grid Grid.Row="6" Margin="0,0,0,4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="220"/>
+                <ColumnDefinition Width="8"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <ComboBox Grid.Column="0" x:Name="MatchCombo" SelectionChanged="MatchCombo_SelectionChanged"
+                      ToolTip="A family covers every alert in it. Choose 'Exact metric name' to route one alert by its metric name, as shown in Alert History. Exact names win over families, and a family wins over 'Every metric'."/>
+            <TextBox Grid.Column="2" x:Name="ExactMetricBox" IsEnabled="False"
+                     ToolTip="The exact metric name, e.g. Deadlocks or Server Unreachable. Not case-sensitive."/>
+        </Grid>
+        <TextBlock Grid.Row="7" x:Name="MatchDescriptionText" Foreground="{DynamicResource ForegroundDimBrush}"
+                   TextWrapping="Wrap" Margin="0,0,0,12"/>
+
+        <TextBlock Grid.Row="8" Text="Destinations (empty = use the app-wide setting)" FontSize="14" FontWeight="SemiBold"
+                   Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"/>
+        <Grid Grid.Row="9" Margin="0,0,0,4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="150"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Teams webhook URL" VerticalAlignment="Center"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,6"/>
+            <PasswordBox Grid.Row="0" Grid.Column="1" x:Name="TeamsUrlBox" Margin="0,0,0,6" GotKeyboardFocus="SecretBox_GotKeyboardFocus"/>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Slack webhook URL" VerticalAlignment="Center"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,6"/>
+            <PasswordBox Grid.Row="1" Grid.Column="1" x:Name="SlackUrlBox" Margin="0,0,0,6" GotKeyboardFocus="SecretBox_GotKeyboardFocus"/>
+
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="Generic webhook URL" VerticalAlignment="Center"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,6"/>
+            <PasswordBox Grid.Row="2" Grid.Column="1" x:Name="GenericUrlBox" Margin="0,0,0,6" GotKeyboardFocus="SecretBox_GotKeyboardFocus"/>
+
+            <TextBlock Grid.Row="3" Grid.Column="0" Text="PagerDuty routing key" VerticalAlignment="Center"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,6"/>
+            <PasswordBox Grid.Row="3" Grid.Column="1" x:Name="PagerDutyKeyBox" Margin="0,0,0,6" GotKeyboardFocus="SecretBox_GotKeyboardFocus"/>
+
+            <TextBlock Grid.Row="4" Grid.Column="0" Text="Email recipients" VerticalAlignment="Center"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,6"/>
+            <TextBox Grid.Row="4" Grid.Column="1" x:Name="SmtpRecipientsBox" Margin="0,0,0,6"
+                     ToolTip="Comma-separated. Redirects email only: the SMTP server, from-address and credentials stay in the app-wide email settings."/>
+        </Grid>
+        <TextBlock Grid.Row="10" Foreground="{DynamicResource ForegroundDimBrush}" TextWrapping="Wrap" Margin="0,0,0,8"
+                   Text="A saved destination is never shown. Leave the dots to keep it, type to replace it, or clear the box to remove it. Generic webhook headers, the generic body template, and the proxy and region settings stay app-wide."/>
+
+        <CheckBox Grid.Row="11" x:Name="EnabledCheckBox" Content="Enabled" IsChecked="True" Margin="0,4,0,8"
+                  Foreground="{DynamicResource ForegroundBrush}"
+                  ToolTip="A disabled route is skipped as if it did not exist; its alerts fall to the next less specific route."/>
+
+        <Grid Grid.Row="12" Margin="0,4,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="ErrorText" Grid.Column="0" Foreground="{DynamicResource ErrorBrush}" TextWrapping="Wrap"
+                       VerticalAlignment="Center" Margin="0,0,12,0" Visibility="Collapsed"/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                <!-- No IsDefault: a multi-field form, where Enter-to-submit is a surprise. -->
+                <Button x:Name="SaveButton" Content="Save" Width="90" Height="28" Margin="0,0,8,0"
+                        Style="{StaticResource AccentButton}" Click="Save_Click"/>
+                <Button Content="Cancel" Width="90" Height="28" IsCancel="True" Click="Cancel_Click"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

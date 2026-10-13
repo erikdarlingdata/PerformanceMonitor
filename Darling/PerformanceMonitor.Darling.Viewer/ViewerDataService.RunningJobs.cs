@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -222,7 +223,7 @@ public sealed partial class ViewerDataService
     /// seen the collector run (<c>ViewerServerTab.ReadEngineGapStateAsync</c>).
     /// $1 server_id, $2 collector.
     /// </summary>
-    public const string CollectorLastRunSql = """
+    public const string CollectorLastRunSql = $"""
         SELECT (
                    SELECT collection_time
                    FROM collection_log
@@ -235,11 +236,13 @@ public sealed partial class ViewerDataService
                    SELECT MAX(collection_time)
                    FROM collection_log
                    WHERE server_id = $1
+                   AND   {CollectionCycleRow.NotCycleRowSql}
                ) AS server_last_collected,
                (
                    SELECT collection_time
                    FROM collection_log
                    WHERE server_id = $1
+                   AND   {CollectionCycleRow.NotCycleRowSql}
                    ORDER BY collection_time ASC
                    LIMIT 1
                ) AS server_first_collected

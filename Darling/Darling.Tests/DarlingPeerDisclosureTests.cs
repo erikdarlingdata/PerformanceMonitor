@@ -458,7 +458,12 @@ public sealed class DarlingPeerDisclosureTests
            (Lite.Tests/CrossAppMcpToolInventoryPinTests) lives in it, and the workflow section (#3898 Phase 2
            trimmed the old tool tables, not the body's tail) still ends the text. */
         Assert.Contains("are unique to Darling", text, StringComparison.Ordinal);
-        Assert.EndsWith("`mute_analysis_finding` to silence an accepted pattern.", text.TrimEnd(), StringComparison.Ordinal);
+        /* #5735 appended the skipped_cycles sentence to the Workflow line (byte-identical to Lite's, #5730), so the text now ends on
+           it; the workflow line still carries its whole chain and is still the last thing in the text. */
+        Assert.EndsWith(
+            "`mute_analysis_finding` to silence an accepted pattern. `skipped_cycles`: late cycles (log: `collection_cycle`).",
+            text.TrimEnd(), StringComparison.Ordinal);
+        Assert.True(text.LastIndexOf("## Workflow", StringComparison.Ordinal) > census, "the workflow section no longer follows the census");
     }
 
     [Fact]

@@ -64,4 +64,9 @@ public sealed class AppAlertSettings : IAlertSettings
     /* #2710: Lite serves no web dashboard, so there is no triage page to link to — empty is the honest
        constant, and the shared webhook service omits the link on every channel because of it. */
     public string TriageBaseUrl => "";
+
+    /// <summary>#5750: the scoped notification routes, expanded to server-id sets, from the static cache that the route
+    /// store, the tag writers and the server writers invalidate. Empty until the main window installs the loader, which is
+    /// the state before the feature (every alert goes to the app-wide destinations).</summary>
+    public IReadOnlyList<NotificationRoute> NotificationRoutes => NotificationRouteCache.Current;
 }

@@ -35,13 +35,17 @@ public partial class SettingsWindow : Window
     private readonly CollectionBackgroundService? _backgroundService;
     private readonly McpHostService? _mcpService;
     private readonly MuteRuleService? _muteRuleService;
+    private readonly DuckDbNotificationRouteStore? _routeStore;
+    private readonly LocalDataService? _dataService;
 
     public SettingsWindow(
         ScheduleManager scheduleManager,
         ServerManager serverManager,
         CollectionBackgroundService? backgroundService = null,
         McpHostService? mcpService = null,
-        MuteRuleService? muteRuleService = null)
+        MuteRuleService? muteRuleService = null,
+        DuckDbNotificationRouteStore? routeStore = null,
+        LocalDataService? dataService = null)
     {
         InitializeComponent();
         /* The window asks for 750 DIPs of height; on a work area shorter than that (a small laptop screen with the taskbar up)
@@ -54,6 +58,8 @@ public partial class SettingsWindow : Window
         _backgroundService = backgroundService;
         _mcpService = mcpService;
         _muteRuleService = muteRuleService;
+        _routeStore = routeStore;
+        _dataService = dataService;
 
         LoadServerScheduleSummary();
         UpdateCollectionStatus();
@@ -1057,6 +1063,13 @@ public partial class SettingsWindow : Window
     {
         if (_muteRuleService == null) return;
         var window = new ManageMuteRulesWindow(_muteRuleService) { Owner = this };
+        window.ShowDialog();
+    }
+
+    private void ManageNotificationRoutesButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_routeStore == null || _dataService == null) return;
+        var window = new NotificationRoutesWindow(_routeStore, _dataService, _serverManager) { Owner = this };
         window.ShowDialog();
     }
 

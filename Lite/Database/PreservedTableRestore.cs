@@ -50,7 +50,7 @@ internal static class PreservedTableRestore
     /// start puts back.
     /// </summary>
     internal static readonly string[] UserChoiceTables =
-        ["config_mute_rules", "dismissed_archive_alerts", "analysis_muted", "server_tags", "server_tag_map"];
+        ["config_mute_rules", "dismissed_archive_alerts", "analysis_muted", "server_tags", "server_tag_map", "notification_routes"];
 
     /// <summary>Prefix of the marker line that carries the database file's identity.</summary>
     internal const string IdentityLinePrefix = "identity:";

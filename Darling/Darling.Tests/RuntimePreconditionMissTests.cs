@@ -495,7 +495,7 @@ public sealed class CollectorRuntimePreconditionTests
     {
         var sql = Regex.Replace(DarlingRuntimePrecondition.CollectorLastRunSql, @"\s+", " ");
         Assert.Contains(
-            "( SELECT collection_time FROM collection_log WHERE server_id = $1 ORDER BY collection_time ASC LIMIT 1 ) AS server_first_collected",
+            "( SELECT collection_time FROM collection_log WHERE server_id = $1 AND " + CollectionCycleRow.NotCycleRowSql + " ORDER BY collection_time ASC LIMIT 1 ) AS server_first_collected",
             sql, StringComparison.Ordinal);
         Assert.DoesNotContain("MIN(", sql, StringComparison.OrdinalIgnoreCase);
 

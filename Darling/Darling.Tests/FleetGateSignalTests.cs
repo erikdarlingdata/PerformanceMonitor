@@ -352,8 +352,15 @@ public sealed class FleetGateStatsTests
         var source = ServerConnectBackoffTests.ReadWorkerSource();
 
         /* #5597: the count also starts at the end of the server's seeding (SeedFinishedTicks), not only at the loop's floor. */
-        Assert.Contains("_fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan, seeded));", source, StringComparison.Ordinal);
-        Assert.Contains("_fleetGateStats?.RecordQueueWait(Stopwatch.GetElapsedTime(gateWaitStarted));", source, StringComparison.Ordinal);
+        /* #5735: the floored count is held in a local so the stepped-over-slot row (CycleSkips.AddGrid) tallies the SAME number the
+           gate stats record; the count still comes from the floor, and the wait is still the measured gate wait. */
+        const string floored = "var gridSkipped = _skipCreditFloor.Skipped(due, now, intervalSpan, seeded);";
+        var flooredAt = source.IndexOf(floored, StringComparison.Ordinal);
+        Assert.True(flooredAt >= 0, "the slot count no longer comes from the skip-credit floor");
+        var recordedAt = source.IndexOf("_fleetGateStats?.RecordSlot(gridSkipped);", flooredAt, StringComparison.Ordinal);
+        Assert.True(recordedAt > flooredAt && recordedAt - flooredAt < 200, "the floored count is not recorded straight after the floor yields it");
+        Assert.Contains("var gateWaited = Stopwatch.GetElapsedTime(gateWaitStarted);", source, StringComparison.Ordinal);
+        Assert.Contains("_fleetGateStats?.RecordQueueWait(gateWaited);", source, StringComparison.Ordinal);
 
         /* Every place that advances a COLLECTOR's due time on the grid is preceded by the count. The store
            maintenance loops advance their own stamps through NextGridStamp and are not slots. */

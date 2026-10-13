@@ -89,7 +89,12 @@ public partial class LocalDataService
         int id;
         using (var next = connection.CreateCommand())
         {
-            next.CommandText = "SELECT COALESCE(MAX(id), 0) + 1 FROM server_tags";
+            /* #5750: never hand out an id a notification route is still scoped to. A route whose tag was deleted stays
+               (orphaned, matching nothing); if the next id reused the deleted tag's id the route would silently attach to
+               an unrelated new tag. */
+            next.CommandText = @"
+SELECT GREATEST(COALESCE(MAX(id), 0), COALESCE((SELECT MAX(scope_tag_id) FROM notification_routes), 0)) + 1
+FROM server_tags";
             id = Convert.ToInt32(await next.ExecuteScalarAsync());
         }
 
@@ -142,6 +147,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     {
         using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfTagRestorePending();
+        NotificationRouteCache.Invalidate();
         using var command = connection.CreateCommand();
         command.CommandText = "UPDATE server_tags SET parent_id = $2 WHERE id = $1";
         command.Parameters.Add(new DuckDBParameter { Value = tagId });
@@ -159,6 +165,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     {
         using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfTagRestorePending();
+        NotificationRouteCache.Invalidate();
 
         var subtree = new List<int> { tagId };
         using (var walk = connection.CreateCommand())
@@ -209,6 +216,7 @@ SELECT id FROM subtree WHERE id <> $1";
     {
         using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfTagRestorePending();
+        NotificationRouteCache.Invalidate();
         foreach (var serverId in serverIds)
         {
             using var command = connection.CreateCommand();
@@ -224,6 +232,7 @@ SELECT id FROM subtree WHERE id <> $1";
     {
         using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfTagRestorePending();
+        NotificationRouteCache.Invalidate();
         foreach (var serverId in serverIds)
         {
             using var command = connection.CreateCommand();
@@ -241,6 +250,7 @@ SELECT id FROM subtree WHERE id <> $1";
     {
         using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfTagRestorePending();
+        NotificationRouteCache.Invalidate();
         using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM server_tag_map WHERE server_id = $1";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

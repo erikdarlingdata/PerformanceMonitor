@@ -172,8 +172,8 @@ public sealed class ViewerDisabledListBoxThemeTests
         return (ResourceDictionary)XamlReader.Load(stream);
     }
 
-    /// <summary>The real <c>ServerList</c> element, minus what only the window can supply: the two handler
-    /// attributes, and the row templates in <c>ListBox.Resources</c> / <c>ListBox.ItemTemplateSelector</c>
+    /// <summary>The real <c>ServerList</c> element, minus what only the window can supply: the three handler
+    /// attributes (SelectionChanged, MouseDoubleClick, KeyDown), and the row templates in <c>ListBox.Resources</c> / <c>ListBox.ItemTemplateSelector</c>
     /// (they name code-behind handlers and Window-level resources). Everything else, the Background /
     /// BorderBrush / BorderThickness attributes included, is parsed as shipped.</summary>
     private static ListBox ParseServerList()
@@ -184,6 +184,7 @@ public sealed class ViewerDisabledListBoxThemeTests
             .Single(e => (string?)e.Attribute(X + "Name") == "ServerList"));
         element.Attribute("SelectionChanged")?.Remove();
         element.Attribute("MouseDoubleClick")?.Remove();
+        element.Attribute("KeyDown")?.Remove();
         element.Element(Wpf + "ListBox.Resources")?.Remove();
         element.Element(Wpf + "ListBox.ItemTemplateSelector")?.Remove();
         element.SetAttributeValue(XNamespace.Xmlns + "x", X.NamespaceName);

@@ -437,6 +437,34 @@ PagerDuty alerts include the metric name, server, current value, threshold, and 
 
 The setting **Auto-resolve the incident when the alert's condition clears** is off by default. When it is on, a recovery sends a resolve event, which closes the incident that the outage alert opened. A recovery is a server coming back or an Availability Group replica reconnecting. When it is off, the recovery is sent as an info-level alert and the incident stays open. Both Lite and the Darling viewer have this setting.
 
+### Notification Routes (Lite)
+
+A notification route sends some alerts to their own destinations. By default every alert goes to the app-wide Teams, Slack, generic webhook, PagerDuty and email settings. A route lets one server, or one group of servers, use different ones.
+
+To add a route, open **Settings** and select **Manage Notification Routes**. Each route has these parts:
+
+- **Matches.** An exact metric name, a family such as `performance`, or `*` for every metric. The `*` match is offered only when the route has a server or tag scope.
+- **Scope.** All servers, one server, or one tag. A tag covers every server assigned to it and to any of its sub-tags.
+- **Destinations.** A Teams URL, a Slack URL, a generic webhook URL, a PagerDuty routing key, and email recipients.
+
+A route replaces the app-wide setting for each channel that it fills in. A channel that the route leaves empty keeps using the app-wide setting. An alert never goes to both the route destination and the app-wide destination for the same channel.
+
+When several routes match an alert, Lite picks one in this order:
+
+1. A server route, then a tag route, then an all-servers route.
+2. Within one of those, an exact metric, then a family, then `*`.
+3. Among tag routes, the tag that is deeper in the tag tree. If the depth is the same, the route with the lowest number.
+
+Each channel is chosen on its own. A route with no Teams URL does not block a less specific route that has one.
+
+Lite stores the URLs and the PagerDuty key in Windows Credential Manager, not in the database. The routes window shows only whether each one is set. The edit dialog never shows a saved value. Leave the dots in a box to keep the value, type to replace it, or clear the box to remove it. Sometimes Windows cannot read a saved value. Then the Status column shows **Saved, unreadable**, and that channel stays off for the route until you enter a new value.
+
+The generic webhook headers, the generic body template, the proxy addresses and the PagerDuty region stay app-wide. A route cannot change them.
+
+If you remove a server or delete a tag, a route that names it stays in the list. Its status is **Orphaned: server removed** or **Orphaned: tag deleted**. An orphaned route matches nothing. Edit it to pick a new scope, or delete it.
+
+While a saved-settings restore is pending, Lite refuses changes to routes and says why.
+
 ### Email Alerts
 
 Alert emails include:
