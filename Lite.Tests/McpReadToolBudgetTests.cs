@@ -132,20 +132,9 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
     /// twin): its old ~30-field fallback shape used to keep every field on every row this fixture's mixed
     /// SUCCESS/ERROR collectors could not compact away, and now the rows that need a look carry the leaner
     /// partial_detail shape instead.</para>
-    ///
-    /// <para>#5640: get_collection_health is back on the list for a reason that is not a defaults bug. This
-    /// fixture seeds mixed SUCCESS/ERROR history for every collector so no row can compact, so each collector
-    /// costs a fixed ~512 B partial_detail row. origin/dev answered 32,572 B for 42 collectors, 196 B under the
-    /// 32,768 B budget; the new Client Timeouts "attention" collector is the 43rd row and makes it 33,084 B
-    /// (+512 B: the new row, plus a few bytes in sweep_pressure). The row is not needlessly long: it carries the same
-    /// fields as its 42 neighbours. A store whose collectors are mostly healthy still answers under 80% of the
-    /// budget, which CollectionHealthPayloadBudgetToolTests pins. The value is the size measured when the row
-    /// was added; the stale-exemption check fails if the tool ever fits the budget again. #5748 tracks keeping the
-    /// worst case under the budget as collectors are added.</para>
     /// </summary>
     private static readonly Dictionary<string, int> ExemptOffenders = new(StringComparer.Ordinal)
     {
-        ["get_collection_health"] = 33_084,
     };
 
     [Fact]
@@ -210,6 +199,54 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
 
         var allNames = AllToolMethods().Select(x => x.Name).ToHashSet(StringComparer.Ordinal);
         Assert.All(WriteToolRoster, w => Assert.Contains(w, allNames));
+    }
+
+    /// <summary>
+    /// #5748: the worst case for get_collection_health, every collector with mixed SUCCESS/ERROR runs so no row can
+    /// compact, must keep its headroom as collectors are added. The 75% line (24,576 B) is the ruling's target:
+    /// at 43 collectors the partial_detail rows used to answer 33,084 B, over the budget, because each row spelled out
+    /// ~20 keys including the null, false and 0 ones. A partial row now omits those, so a collector costs far fewer
+    /// bytes. Lite's twin of Darling's McpReadToolBudgetLiveTests check.
+    /// </summary>
+    [Fact]
+    public async Task CollectionHealthWorstCaseAnswersUnder75PercentOfTheBudget()
+    {
+        await SeedAsync();
+
+        var json = await McpHealthTools.GetCollectionHealth(_dataService, _serverManager);
+        var bytes = Encoding.UTF8.GetByteCount(json);
+        TestContext.Current.TestOutputHelper?.WriteLine(CollectionHealthBreakdown(json));
+
+        Assert.True(bytes <= McpResponseBudget.DefaultBytes * 3 / 4,
+            $"get_collection_health's worst case answered {bytes:N0} B, over 75% of the {McpResponseBudget.DefaultBytes:N0} B budget (#5748). " + CollectionHealthBreakdown(json));
+    }
+
+    /// <summary>The byte breakdown #5748 asked for: partial rows, split into key names, null/false/0 values and the
+    /// rest, and the bytes outside the rows.</summary>
+    private static string CollectionHealthBreakdown(string json)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        long rows = 0, keyNames = 0, defaultKeys = 0, defaults = 0, other = 0;
+        string? sample = null;
+        var count = 0;
+        foreach (var row in doc.RootElement.GetProperty("collectors").EnumerateArray())
+        {
+            if (!row.TryGetProperty("partial_detail", out _)) continue;
+            count++;
+            rows += Encoding.UTF8.GetByteCount(row.GetRawText());
+            sample ??= row.GetRawText();
+            foreach (var prop in row.EnumerateObject())
+            {
+                var value = prop.Value;
+                keyNames += Encoding.UTF8.GetByteCount(prop.Name) + 4;
+                var raw = Encoding.UTF8.GetByteCount(value.GetRawText());
+                var isDefault = value.ValueKind is System.Text.Json.JsonValueKind.Null or System.Text.Json.JsonValueKind.False
+                    || (value.ValueKind == System.Text.Json.JsonValueKind.Number && value.GetDouble() == 0);
+                if (isDefault) { defaults += raw; defaultKeys += Encoding.UTF8.GetByteCount(prop.Name) + 4; } else other += raw;
+            }
+        }
+        var total = Encoding.UTF8.GetByteCount(json);
+        return $"total {total:N0} B; {count} partial rows {rows:N0} B (key names+punctuation {keyNames:N0}, of which on null/false/0 values {defaultKeys:N0}; null/false/0 values {defaults:N0}; other values {other:N0}); outside the rows {total - rows:N0} B; sample row {sample}";
     }
 
     /* ═══════════════════════════ reflection: enumerate, exclude, bind, invoke ═══════════════════════════ */
