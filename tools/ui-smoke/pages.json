@@ -1,0 +1,66 @@
+{
+  "_comment": [
+    "Pages the web UI smoke check loads (#5701). Every page gets the same checks (smoke.mjs): no console error, page error, failed request or /api/* answer >= 400; #main fills; the sidebar lists the seeded servers; the nav link for the route is active; no .strip.error or [role=alert]; no panel still loading or in error.",
+    "Per page, 'expect' adds what the seed guarantees. A panel is found by its data-panel (the read name) or its data-title; 'state' is data (draws rows, a chart or tiles) or empty (shows its documented empty text); 'minRows' counts the rows of the first [data-grid] inside it. 'grids' does the same for the whole page (an Admin tab has no panel cards): 'minRows' or 'exactRows' on the Nth [data-grid] in #main.",
+    "allowList: a console or request message that is known and harmless. Each entry needs an 'issue' number and a 'match' substring. It starts empty."
+  ],
+  "allowList": [],
+  "servers": ["ui-sql"],
+  "pages": [
+    {
+      "name": "fleet",
+      "hash": "#/fleet",
+      "nav": "fleet",
+      "heading": "Fleet Overview"
+    },
+    {
+      "name": "ui-sql-overview",
+      "hash": "#/server/ui-sql",
+      "server": "ui-sql",
+      "expect": {
+        "panels": [
+          { "title": "CPU Utilization", "state": "data" },
+          { "title": "Memory", "state": "data" },
+          { "title": "Server Properties", "state": "data" },
+          { "title": "Analysis Findings", "state": "empty" }
+        ]
+      }
+    },
+    {
+      "name": "ui-sql-waits",
+      "hash": "#/server/ui-sql/waits",
+      "server": "ui-sql",
+      "expect": { "panels": [{ "title": "Wait Stats", "state": "data", "minRows": 4 }] }
+    },
+    {
+      "name": "ui-sql-cpu",
+      "hash": "#/server/ui-sql/cpu",
+      "server": "ui-sql",
+      "expect": {}
+    },
+    {
+      "name": "ui-sql-memory",
+      "hash": "#/server/ui-sql/memory",
+      "server": "ui-sql",
+      "expect": {}
+    },
+    {
+      "name": "ui-sql-io",
+      "hash": "#/server/ui-sql/io",
+      "server": "ui-sql",
+      "expect": {}
+    },
+    {
+      "name": "ui-sql-queries",
+      "hash": "#/server/ui-sql/queries",
+      "server": "ui-sql",
+      "expect": { "panels": [{ "panel": "get_top_queries_by_cpu", "state": "data", "minRows": 10 }] }
+    },
+    {
+      "name": "admin-servers",
+      "hash": "#/admin/servers",
+      "nav": "admin",
+      "expect": { "grids": [{ "index": 0, "exactRows": 1 }] }
+    }
+  ]
+}
