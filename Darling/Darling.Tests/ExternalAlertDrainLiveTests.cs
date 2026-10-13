@@ -374,6 +374,28 @@ public sealed class ExternalAlertDrainLiveTests
     }
 
     [Fact]
+    public async Task TheReap_MatchesHistoryRowsByTheCallersPattern_SoTheSerializerHelperIsTheOnlyDefinition()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            var id = await rig.SubmitAsync("fire", "k");
+            await rig.ExecAsync($"UPDATE config.external_alert_pending SET status = 'claimed', claimed_at = now() - interval '10 minutes' WHERE pending_id = {id}");
+            var context = AlertContextSerializer.Serialize(new AlertContext { External = new AlertExternalOrigin("nagios", "k", id) });
+            await rig.History.RecordAlertAsync(new AlertHistoryRecord(
+                "7", "SQL01", "External:nagios:k", "1", "", 1, null,
+                AlertDelivery.FromLegacyStoredColumns(true, "webhook", null), false, "x", context));
+
+            /* A pattern that matches nothing finds no history row, so the row is interrupted: the SQL carries no pattern of its own. */
+            Assert.Equal((0, 1), await rig.Store.ReapWithHistoryAsync(TimeSpan.Zero, _ => "%no such history row%", rig.Ct));
+            Assert.Equal("interrupted", await rig.StatusAsync(id));
+
+            await rig.ExecAsync($"UPDATE config.external_alert_pending SET status = 'claimed', completed_at = NULL WHERE pending_id = {id}");
+            Assert.Equal((1, 0), await rig.Store.ReapWithHistoryAsync(TimeSpan.Zero, AlertContextSerializer.BuildPendingIdLikePattern, rig.Ct));
+            Assert.Equal("delivered", await rig.StatusAsync(id));
+        });
+    }
+
+    [Fact]
     public async Task AFireWithAValue_IsSentMeasured_AndAFireWithoutOne_IsSentAsAState()
     {
         await WithDrainAsync(async rig =>
@@ -510,8 +532,9 @@ public sealed class ExternalAlertDrainLiveTests
             _seed = seed;
             Ct = ct;
             History = new PgAlertHistoryStore(dataSource, NullLogger.Instance);
+            Store = new ExternalAlertStore(dataSource, 30);
             Drain = new ExternalAlertDrain(
-                new ExternalAlertStore(dataSource, 30),
+                Store,
                 () => Enabled,
                 async (outcome, token) =>
                 {
@@ -538,6 +561,7 @@ public sealed class ExternalAlertDrainLiveTests
 
         public CancellationToken Ct { get; }
         public PgAlertHistoryStore History { get; }
+        public ExternalAlertStore Store { get; }
         public ExternalAlertDrain Drain { get; }
         public List<AlertOutcome> Sent { get; } = new();
         public List<string> PagerDutyResolves { get; } = new();
