@@ -435,6 +435,7 @@ _BUILD_INPUT_NAMES = {"directory.build.props", "directory.build.targets", "direc
                       "nuget.config", "packages.lock.json"}
 _BUILD_INPUT_PATHS = {".github/workflows/build.yml", ".github/scripts/ci-select.py", ".github/darling-paths-filter.yml",
                       ".github/scripts/run-darling-pg-shard.ps1", ".github/scripts/run-lite-shard.ps1",
+                      ".github/scripts/darling-shard-pack.py", ".github/scripts/darling-shard-weights.json",
                       ".github/scripts/lite-shard-pack.py"}
 _BUILD_INPUT_SUFFIXES = (".csproj", ".props", ".targets", ".sln", ".slnx")
 _WEB_SUFFIXES = (".js", ".mjs", ".css", ".html")
@@ -1092,6 +1093,10 @@ def main(argv: list[str]) -> int:
     for k in ("lite", "core", "root", "reads", "linked"):
         ls.add_argument(f"--{k}", default="false")
 
+    lm = sub.add_parser("lite-mode", help="the Lite scope of a pull request from the files it changes (lite-scope job, #5669)")
+    lm.add_argument("--event", default="pull_request")
+    lm.add_argument("--files-from", required=True, help="one changed path per line; a missing or empty list prints mode=unknown")
+
     ds = sub.add_parser("darling-scope", help="what the build job's no-store Darling pass runs (workflow step)")
     ds.add_argument("--event", required=True)
     ds.add_argument("--gate", default="false", help="the Darling PostgreSQL gate's answer (darling-paths-filter.yml)")
@@ -1222,6 +1227,18 @@ def main(argv: list[str]) -> int:
         run = mode == "full" or (mode == "reads" and args.shard == "0")
         print(f"mode={mode}")
         print(f"run={'true' if run else 'false'}")
+        return 0
+    if args.cmd == "lite-mode":
+        # The same answer the Lite shard legs reach from their own path filters (decide() reads the lite-tests job's
+        # filter copies), made once before the shards start so a diff the Lite suite does not depend on (mode=none)
+        # does not take four Windows runners. Anything but a clean answer prints unknown, and the shards then run
+        # their own scope step as before.
+        try:
+            with open(args.files_from, encoding="utf-8") as fh:
+                changed = [ln.strip() for ln in fh if ln.strip()]
+        except OSError:
+            changed = []
+        print(f"mode={decide(changed, args.event, Rules())['lite_mode'] if changed else 'unknown'}")
         return 0
     if args.cmd == "darling-scope":
         scope = darling_scope(args.event, True, args.event != "release" and _bool(args.gate),
