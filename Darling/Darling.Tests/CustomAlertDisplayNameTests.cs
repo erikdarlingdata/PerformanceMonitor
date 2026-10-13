@@ -88,7 +88,12 @@ public class CustomAlertDisplayNameTests
     [InlineData("a‮b", "ab")]       // right-to-left override
     [InlineData("a‪b‫c‬d‭e", "abcde")]
     [InlineData("a⁦b⁧c⁨d⁩e", "abcde")] // isolates
-    [InlineData("a​b‌c‍d‎e‏f", "abcdef")] // zero-width and direction marks
+    [InlineData("a\u200Bb\u200Ec\u200Fd", "abcd")] // zero-width space and direction marks
+    [InlineData("a\u061Cb\u2061c\u2064d\u206Fe\uFFF9f\uFFFBg\u180Eh\u00ADi", "abcdefghi")] // other format characters
+    [InlineData("a\U000E0001b\U000E0041c\U000E007Fd", "abcd")] // tag characters, which are surrogate pairs
+    [InlineData("\U000E0001\U000E0049\U000E0067\U000E006E\U000E007Fhello", "hello")] // a tag-character run hiding text
+    [InlineData("\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645", "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645")] // a Persian name keeps its zero-width non-joiner
+    [InlineData("\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67", "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67")] // a joined emoji sequence is unchanged
     [InlineData("a⁠b﻿c", "abc")] // word joiner, byte-order mark
     [InlineData("a\u0080b\u009Fc\u0090d", "abcd")] // C1 controls
     [InlineData("a\u0085b", "a b")]      // NEL stays a break
@@ -96,6 +101,17 @@ public class CustomAlertDisplayNameTests
     public void Sanitize_DropsReorderingAndInvisibleCharacters(string input, string expected)
     {
         Assert.Equal(expected, CustomAlertEvaluator.SanitizeDisplayText(input, 200));
+    }
+
+    [Fact]
+    public void Sanitize_TheCap_NeverSplitsASurrogatePair()
+    {
+        const string face = "\U0001F600";
+
+        /* Three code points of two UTF-16 units each: a cap of 5 holds two of them, and a cap of 1 holds none. */
+        Assert.Equal(face + face, CustomAlertEvaluator.SanitizeDisplayText(face + face + face, 5));
+        Assert.Equal(string.Empty, CustomAlertEvaluator.SanitizeDisplayText(face, 1));
+        Assert.Equal("a", CustomAlertEvaluator.SanitizeDisplayText("a" + face, 2));
     }
 
     [Fact]

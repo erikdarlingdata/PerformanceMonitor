@@ -58,8 +58,10 @@ public enum ExternalAlertOutcome
 
 /// <summary>
 /// A state write waited longer than <see cref="ExternalAlertStore.StateWriteLockTimeoutMilliseconds"/> for a lock another
-/// session holds (#5654). Nothing was written and nothing was sent, so the drain gives the row back to the queue for a
-/// later attempt rather than closing it.
+/// session holds (#5654). That write was not made. For a fire nothing was sent either, because its state comes before the
+/// send. For a clear the PagerDuty resolve may already have posted, because the resolve comes before the clear's state
+/// write. The drain gives the row back to the queue for a later attempt rather than closing it; a repeated clear resolves
+/// again and clears the state again, and both steps can be repeated safely.
 /// </summary>
 public sealed class ExternalAlertStateLockTimeoutException : Exception
 {
@@ -604,7 +606,7 @@ RETURNING fired_severity";
     /// Runs one state write in a transaction that waits at most <see cref="StateWriteLockTimeoutMilliseconds"/> for a lock.
     /// The state table's foreign key to the source registry takes a share lock on the source's row, and a session that holds
     /// that row (a submit left open in a transaction) would otherwise stall every write until the command deadline. A wait
-    /// that runs out surfaces as <see cref="ExternalAlertStateLockTimeoutException"/>: nothing was written.
+    /// that runs out surfaces as <see cref="ExternalAlertStateLockTimeoutException"/>: that write was not made.
     /// </summary>
     private async Task<T> InStateWriteAsync<T>(
         Func<NpgsqlConnection, NpgsqlTransaction, Task<T>> write, CancellationToken cancellationToken)

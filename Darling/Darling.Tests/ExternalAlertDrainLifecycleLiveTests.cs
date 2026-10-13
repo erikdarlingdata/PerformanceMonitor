@@ -332,6 +332,63 @@ public sealed class ExternalAlertDrainLifecycleLiveTests
     }
 
     [Fact]
+    public async Task AStopRightAfterAFireFailedOnEveryChannel_KeepsTheRetry()
+    {
+        /* The release that records the retry runs with no token: the stop that cancels the pass must not leave the row claimed. */
+        await WithRigAsync(async rig =>
+        {
+            rig.Answer = AlertDelivery.FromLegacyStoredColumns(false, "webhook", "refused");
+            var id = await rig.SubmitAsync("fire", "disk", server: "SQL01");
+
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(rig.Ct);
+            rig.AfterSend = _ =>
+            {
+                stop.Cancel();
+                return Task.CompletedTask;
+            };
+
+            try
+            {
+                await rig.Drain.RunPassAsync(stop.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                /* A stop may end the pass with the exception or let it finish the row; the row is the same either way. */
+            }
+
+            Assert.Equal("pending", await rig.StatusAsync(id));
+            Assert.Equal("1", await rig.ScalarAsync($"SELECT attempts::text FROM config.external_alert_pending WHERE pending_id = {id}"));
+            Assert.Null(await rig.ScalarAsync($"SELECT claimed_at::text FROM config.external_alert_pending WHERE pending_id = {id}"));
+            Assert.Equal("true", await rig.ScalarAsync(
+                $"SELECT (next_attempt_at > now())::text FROM config.external_alert_pending WHERE pending_id = {id}"));
+        });
+    }
+
+    [Fact]
+    public async Task AMuteOnTheEpisodesKeptServerIdentity_SilencesARepeatFire_AfterTheServersNameChanged()
+    {
+        await WithRigAsync(async rig =>
+        {
+            var first = await rig.SubmitAsync("fire", "disk", server: "SQL01");
+            var firstPass = await rig.Drain.RunPassAsync(rig.Ct);
+            Assert.Equal(1, firstPass.Delivered);
+            Assert.Equal("delivered", await rig.StatusAsync(first));
+
+            /* The server is renamed, and the operator mutes the name the episode went out under. */
+            rig.Sql01DisplayName = "SQL01-renamed";
+            rig.IsMuted = context => string.Equals(context.ServerName, "SQL01", StringComparison.Ordinal) && context.ServerId == 7;
+            var repeat = await rig.SubmitAsync("fire", "disk", server: "SQL01");
+
+            var repeatPass = await rig.Drain.RunPassAsync(rig.Ct);
+
+            Assert.Equal(1, repeatPass.Muted);
+            Assert.Equal("muted", await rig.StatusAsync(repeat));
+            Assert.Equal("SQL01", rig.Sent[^1].ServerName);
+            Assert.True(rig.Sent[^1].Muted);
+        });
+    }
+
+    [Fact]
     public async Task APartialFanOut_OneChannelDeliveredAndOneFailed_IsDelivered_AndNeverRetried()
     {
         await WithRigAsync(async rig =>
@@ -453,8 +510,8 @@ public sealed class ExternalAlertDrainLifecycleLiveTests
                 },
                 (_, _, _, _, _) => Task.FromResult(PagerDutyAnswer),
                 History,
-                _ => false,
-                name => string.Equals(name, "SQL01", StringComparison.OrdinalIgnoreCase) ? new ExternalAlertServer(7, "SQL01") : null,
+                context => IsMuted(context),
+                name => string.Equals(name, "SQL01", StringComparison.OrdinalIgnoreCase) ? new ExternalAlertServer(7, Sql01DisplayName) : null,
                 "test:1",
                 NullLogger.Instance);
         }
@@ -468,6 +525,8 @@ public sealed class ExternalAlertDrainLifecycleLiveTests
         public List<AlertOutcome> Sent { get; } = new();
         public Func<AlertOutcome, Task>? BeforeSend { get; set; }
         public Func<AlertOutcome, Task>? AfterSend { get; set; }
+        public Func<AlertMuteContext, bool> IsMuted { get; set; } = _ => false;
+        public string Sql01DisplayName { get; set; } = "SQL01";
         public AlertChannelOutcome PagerDutyAnswer { get; set; } = AlertChannelOutcome.Delivered;
         public AlertDelivery Answer { get; set; } = AlertDelivery.FromLegacyStoredColumns(true, "webhook", null);
 

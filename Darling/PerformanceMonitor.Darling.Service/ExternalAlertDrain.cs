@@ -40,7 +40,12 @@ public sealed record ExternalAlertDrainResult(
 /// for a state write that timed out on a lock, a fire every channel failed to send, a PagerDuty resolve that failed, and the
 /// rows of a stopping pass that were never attempted. A fire that every channel failed to send waits 1, 2 and 4 minutes
 /// and is marked <c>failed</c> on the fourth attempt. A send that timed out after its request left can post twice:
-/// PagerDuty drops a repeat trigger with the same dedup key, but Slack, Teams, a webhook and email can show a duplicate.</para>
+/// PagerDuty drops a repeat trigger with the same dedup key, but Slack, Teams, a webhook and email can show a duplicate.
+/// A row goes back to <c>pending</c> with no cancellation token and a short timeout, so a stop right after a failed send
+/// keeps the retry. Two cases still end a row <c>interrupted</c>: a release that fails because the store is unreachable
+/// (the rows stay claimed until the reap takes them, and the reap cannot tell whether they were attempted), and two
+/// services on one store, where a batch whose sends run past <see cref="ReapClaimsOlderThan"/> has its remaining rows
+/// reaped by the other service.</para>
 ///
 /// <para><b>Order.</b> The store's claim hands out at most one row per source and key per call, and none while an earlier
 /// row of the key is still pending or claimed, so a fire and its clear are handled in the order they were submitted. A fire
@@ -175,9 +180,11 @@ public sealed class ExternalAlertDrain
                 }
                 catch (ExternalAlertStateLockTimeoutException ex)
                 {
-                    /* The state write comes before the send, so nothing went out: the row goes back for a later attempt. */
+                    /* A fire writes its state before the send, so nothing went out. A clear may have posted the PagerDuty
+                       resolve before its state write: the row goes back for a later attempt, and the repeat resolves again
+                       and clears the state again, which both steps allow. */
                     _logger.LogWarning(ex, "External alert {PendingId} ({Source}/{Key}) waited on a lock held by another session", row.PendingId, row.SourceName, row.AlertKey);
-                    outcome = await RetryOrFailAsync(row, "a state write waited on a lock held by another session", cancellationToken);
+                    outcome = await RetryOrFailAsync(row, "a state write waited on a lock held by another session");
                 }
                 catch (Exception ex)
                 {
@@ -251,14 +258,21 @@ public sealed class ExternalAlertDrain
         }
 
         var detail = Clean(row.Detail, MaxDetailLength);
-        var muted = _isMuted(new AlertMuteContext { ServerName = server.Label, ServerId = server.MuteId, MetricName = metric });
-
         /* The firing state is written before the send, so a clear that follows pairs with this fire even when the send
            has to be retried or a stopped run never marked it. A repeat fire only refreshes it. */
         var fired = await _store.RecordFireAsync(
             row.SourceId, row.AlertKey, server.StateLabel, server.BucketId, server.Key, server.Label, row.Severity, cancellationToken);
         var wasFiring = fired.WasFiring;
         var previousSeverity = fired.PreviousSeverity;
+
+        /* The mute check names the server the send names: the episode's kept identity, which a repeat fire carries over from
+           the first fire of the episode even when the server's name has changed since. */
+        var muted = _isMuted(new AlertMuteContext
+        {
+            ServerName = fired.ServerName,
+            ServerId = int.TryParse(fired.ServerKey, NumberStyles.None, CultureInfo.InvariantCulture, out var keptId) ? keptId : null,
+            MetricName = metric,
+        });
 
         var context = new AlertContext { External = new AlertExternalOrigin(row.SourceName, row.AlertKey, row.PendingId) };
         var currentText = row.Value is { } value
@@ -295,7 +309,7 @@ public sealed class ExternalAlertDrain
                that no request left the process (a webhook that timed out after its request was sent reads the same as a
                refused connection), so a repeat can post twice. PagerDuty drops a repeat trigger that carries the same dedup
                key, and the key is derived from the server and the metric name, so every attempt of this row sends the same one. */
-            return await RetryOrFailAsync(row, "every channel failed; the alert history row has the error", cancellationToken);
+            return await RetryOrFailAsync(row, "every channel failed; the alert history row has the error");
         }
 
         if (delivery.Sent)
@@ -344,7 +358,7 @@ public sealed class ExternalAlertDrain
         var pagerDuty = await _resolvePagerDuty(firingMetric, firedLabel, firedKey, message, cancellationToken);
         if (pagerDuty == AlertChannelOutcome.Failed)
         {
-            return await RetryOrFailAsync(row, "the PagerDuty resolve failed", cancellationToken);
+            return await RetryOrFailAsync(row, "the PagerDuty resolve failed");
         }
 
         var firedSeverity = await _store.RecordClearAsync(row.SourceId, row.AlertKey, server.StateLabel, cancellationToken);
@@ -370,8 +384,10 @@ public sealed class ExternalAlertDrain
     }
 
     /// <summary>A row whose handling sent nothing (or whose send a repeat leaves unchanged): wait 1, 2, 4 minutes and try
-    /// again, then give up as failed. Null means the row went back to the queue.</summary>
-    private async Task<ExternalAlertOutcome?> RetryOrFailAsync(ExternalAlertPendingRow row, string reason, CancellationToken cancellationToken)
+    /// again, then give up as failed. Null means the row went back to the queue. The release runs with no cancellation
+    /// token and <see cref="ReleaseOnStopTimeout"/>, like the release of a stopping pass: a stop right after the failed
+    /// send must not leave the row claimed.</summary>
+    private async Task<ExternalAlertOutcome?> RetryOrFailAsync(ExternalAlertPendingRow row, string reason)
     {
         var attempt = row.Attempts + 1;
         if (attempt >= MaxSendAttempts)
@@ -381,7 +397,9 @@ public sealed class ExternalAlertDrain
         }
 
         var next = _utcNow() + AlertEngine.ChannelFailureRetryDelay(attempt, RetryDelayCap);
-        if (!await _store.ReleaseForRetryAsync(row.PendingId, next, Trim($"{reason} (attempt {attempt} of {MaxSendAttempts})"), cancellationToken))
+        /* A release that fails (the store is unreachable) throws to the pass's handler, which closes the row as interrupted. */
+        using var timeout = new CancellationTokenSource(ReleaseOnStopTimeout);
+        if (!await _store.ReleaseForRetryAsync(row.PendingId, next, Trim($"{reason} (attempt {attempt} of {MaxSendAttempts})"), timeout.Token))
         {
             _logger.LogWarning("External alert {PendingId} was no longer claimed when its retry was recorded", row.PendingId);
         }
