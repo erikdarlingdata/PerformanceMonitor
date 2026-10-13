@@ -30,7 +30,7 @@ tool get_alert_settings 607
 tool get_mute_rules 274
 param get_mute_rules.enabled_only 54
 
-tool get_notification_routes 580
+tool get_notification_routes 555
 
 tool set_mute_rule_enabled 483
 param set_mute_rule_enabled.enabled 88

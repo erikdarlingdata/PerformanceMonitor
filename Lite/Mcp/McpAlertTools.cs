@@ -636,7 +636,7 @@ public sealed class McpAlertTools
         foreach (var s in servers)
         {
             var id = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s));
-            names[id] = string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName;
+            names[id] = ServerManager.NameForMessage(s);
         }
 
         return names;

@@ -58,7 +58,7 @@ public partial class NotificationRoutesWindow : Window
         try
         {
             var routes = await _store.ListAsync();
-            var tags = await _dataService.GetServerTagsAsync();
+            var tags = await Task.Run(() => _dataService.GetServerTagsAsync());
             var servers = _serverManager.GetAllServers()
                 .Select(s => (Id: RemoteCollectorService.GetServerId(s), Name: ServerManager.NameForMessage(s)))
                 .GroupBy(s => s.Id)

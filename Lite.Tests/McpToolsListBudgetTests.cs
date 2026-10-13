@@ -168,9 +168,9 @@ public sealed class McpToolsListBudgetTests
        359 -> 422 bytes, the measured total went to 96,233 bytes. */
     /* #5750: Lite gains set_notification_route_enabled (231-byte head, two parameters) and delete_notification_route (222-byte head,
        one parameter), the route disable and delete the Darling twins already had, and get_notification_routes' head is rewritten to describe
-       Lite's routes (502 -> 480). Measured total on this tree: 96,233 -> 97,247 bytes. The two writes are served only when mcp_allow_writes is on, so a default
+       Lite's routes (502 -> 555; the head now carries the shared Darling wording, byte-identical per D6). The write heads are Darling's too (set 512, delete 663 with no guide split, as on Darling). Measured total on this tree: 96,233 -> 98,089 bytes. The two writes are served only when mcp_allow_writes is on, so a default
        install's tools/list grows by none of their bytes (the test counts every registered tool). */
-    private const int TotalCeilingBytes = 97_247;
+    private const int TotalCeilingBytes = 98_089;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
