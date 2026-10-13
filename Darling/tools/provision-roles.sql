@@ -1197,6 +1197,7 @@ REVOKE ALL ON FUNCTION config.submit_external_alert(text, text, text, text, text
 -- The two trigger functions need no EXECUTE to fire, so PUBLIC (and with it a source login) gets none.
 REVOKE EXECUTE ON FUNCTION config.config_bump_version(), config.config_service_bump() FROM PUBLIC;
 -- pg_stat_statements gives PUBLIC its views and functions; Darling reads them through its own SECURITY DEFINER functions.
+-- pg_read_all_stats (part of pg_monitor) keeps them, so a monitoring login that watches this database as a PostgreSQL target still reads them.
 DO $do$
 DECLARE
    ext_schema text := (SELECT n.nspname FROM pg_catalog.pg_extension AS e JOIN pg_catalog.pg_namespace AS n ON n.oid = e.extnamespace
@@ -1205,9 +1206,13 @@ BEGIN
    IF ext_schema IS NOT NULL THEN
       EXECUTE pg_catalog.format('REVOKE SELECT ON %I.pg_stat_statements FROM PUBLIC', ext_schema);
       EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_stat_statements(boolean) FROM PUBLIC', ext_schema);
+      EXECUTE pg_catalog.format('GRANT SELECT ON %I.pg_stat_statements TO pg_read_all_stats', ext_schema);
+      EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_stat_statements(boolean) TO pg_read_all_stats', ext_schema);
       IF pg_catalog.to_regclass(pg_catalog.format('%I.pg_stat_statements_info', ext_schema)) IS NOT NULL THEN
          EXECUTE pg_catalog.format('REVOKE SELECT ON %I.pg_stat_statements_info FROM PUBLIC', ext_schema);
          EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_stat_statements_info() FROM PUBLIC', ext_schema);
+         EXECUTE pg_catalog.format('GRANT SELECT ON %I.pg_stat_statements_info TO pg_read_all_stats', ext_schema);
+         EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_stat_statements_info() TO pg_read_all_stats', ext_schema);
       END IF;
    END IF;
 END $do$;

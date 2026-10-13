@@ -327,19 +327,25 @@ REVOKE ALL ON FUNCTION {config}.{InfoFunctionName}() FROM PUBLIC;";
     /// <summary>
     /// Takes from PUBLIC the SELECT the extension's install script gives on its views, and EXECUTE on the functions behind them
     /// (#5654), so a login that holds nothing else (an external alert source login) cannot read every role's statement
-    /// statistics. The readers are the SECURITY DEFINER functions above, run as their owner, so they are unaffected. A role
-    /// that may not revoke them (not the extension's owner) gets a warning from the server and changes nothing.
+    /// statistics, then gives the same SELECT and EXECUTE to <c>pg_read_all_stats</c>, which <c>pg_monitor</c> includes. A
+    /// login with that role keeps reading the statistics of the database this store lives in when it monitors that database as
+    /// a PostgreSQL target. The readers are the SECURITY DEFINER functions above, run as their owner, so they are unaffected. A
+    /// role that may not revoke or grant them (not the extension's owner) gets a warning from the server and changes nothing.
     /// </summary>
     public static string BuildRevokePublicSql(string extensionSchema, bool withInfoView)
     {
         var schema = "\"" + extensionSchema.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
         var sql = $@"
 REVOKE SELECT ON {schema}.pg_stat_statements FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION {schema}.pg_stat_statements(boolean) FROM PUBLIC;";
+REVOKE EXECUTE ON FUNCTION {schema}.pg_stat_statements(boolean) FROM PUBLIC;
+GRANT SELECT ON {schema}.pg_stat_statements TO pg_read_all_stats;
+GRANT EXECUTE ON FUNCTION {schema}.pg_stat_statements(boolean) TO pg_read_all_stats;";
         return withInfoView
             ? sql + $@"
 REVOKE SELECT ON {schema}.pg_stat_statements_info FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION {schema}.pg_stat_statements_info() FROM PUBLIC;"
+REVOKE EXECUTE ON FUNCTION {schema}.pg_stat_statements_info() FROM PUBLIC;
+GRANT SELECT ON {schema}.pg_stat_statements_info TO pg_read_all_stats;
+GRANT EXECUTE ON FUNCTION {schema}.pg_stat_statements_info() TO pg_read_all_stats;"
             : sql;
     }
 
