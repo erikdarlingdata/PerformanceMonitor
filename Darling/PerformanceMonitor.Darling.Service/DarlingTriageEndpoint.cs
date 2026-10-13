@@ -901,6 +901,8 @@ internal static class DarlingTriageEndpoint
         ["detail_text"] = row.DetailText,
         /* #5642: the fire-time age of the newest sample, read from the persisted context. */
         ["newest_sample"] = AlertNotebookEndpoint.NewestSampleNode(row.ContextJson),
+        /* #5654: the source an external alert came from, read from the persisted context; null for every built-in alert. */
+        ["external_source"] = AlertContextSerializer.TryReadExternalSource(row.ContextJson),
     };
 
     /// <summary>The first non-empty value for a query key, or null — the read surface's binding rule, which this
