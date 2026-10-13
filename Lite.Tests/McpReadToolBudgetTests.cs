@@ -140,7 +140,8 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
     /// (+512 B: the new row, plus a few bytes in sweep_pressure). The row is not needlessly long: it carries the same
     /// fields as its 42 neighbours. A store whose collectors are mostly healthy still answers under 80% of the
     /// budget, which CollectionHealthPayloadBudgetToolTests pins. The value is the size measured when the row
-    /// was added; the stale-exemption check fails if the tool ever fits the budget again.</para>
+    /// was added; the stale-exemption check fails if the tool ever fits the budget again. #5748 tracks keeping the
+    /// worst case under the budget as collectors are added.</para>
     /// </summary>
     private static readonly Dictionary<string, int> ExemptOffenders = new(StringComparer.Ordinal)
     {
