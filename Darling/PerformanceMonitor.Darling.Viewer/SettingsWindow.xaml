@@ -382,6 +382,22 @@
                              ToolTip="Critical bar: average runnable tasks per scheduler (same window as the Warning bar). Never below the Warning bar. Default 16."/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <!-- #5640: the Client Timeouts alert grades client attentions (a client cancelled or timed out a query) per minute over the
+                         covered span of the attention collector's last runs (about 3 minutes). OFF by default: no measured normal rate exists yet, and #5736
+                         sets the bars from field data. The two bars are whole numbers; Critical never below Warning. -->
+                    <CheckBox x:Name="AlertClientTimeoutsCheckBox" Content="Client timeouts (attentions per minute) — Warning at"
+                              ToolTip="The Client Timeouts alert counts attentions (a client cancelled a query or its timeout expired) per minute over the attention collector's last runs (about 3 minutes). It fires WARNING at the first bar and CRITICAL at the second; a Warning that worsens to Critical is delivered at once. Off by default because no measured normal rate exists yet."
+                              Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertClientTimeoutsWarningBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
+                             ToolTip="Warning bar: client attentions per minute over the covered span. At least 1. Default 10."/>
+                    <TextBlock Text="Critical at" VerticalAlignment="Center" Margin="8,0,0,0"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBox x:Name="AlertClientTimeoutsCriticalBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"
+                             ToolTip="Critical bar: client attentions per minute (same span as the Warning bar). Never below the Warning bar. Default 60."/>
+                    <TextBlock Text="per minute" VerticalAlignment="Center" Margin="6,0,0,0"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertLongRunningQueryCheckBox" Content="Long-running queries over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertLongRunningQueryThresholdBox" Width="45" Text="30" Margin="6,0,0,0" VerticalAlignment="Center"/>
@@ -981,10 +997,10 @@
                 <TextBlock Text="Alert Severity Colors" FontWeight="SemiBold" FontSize="12"
                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,16,0,4"/>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                    <Run Foreground="#DC2626" FontWeight="Bold" Text="&#x25A0; Red" /> — Critical (Deadlocks, Poison Waits, Runnable Queue at the Critical bar, Server Unreachable)
+                    <Run Foreground="#DC2626" FontWeight="Bold" Text="&#x25A0; Red" /> — Critical (Deadlocks, Poison Waits, Runnable Queue and Client Timeouts at the Critical bar, Server Unreachable)
                 </TextBlock>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                    <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" /> — Alert / Warning (Blocking, Long-Running Queries, Runnable Queue, tempdb, Jobs)
+                    <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" /> — Alert / Warning (Blocking, Long-Running Queries, Runnable Queue, Client Timeouts, tempdb, Jobs)
                 </TextBlock>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
                     <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" /> — Warning (High CPU)

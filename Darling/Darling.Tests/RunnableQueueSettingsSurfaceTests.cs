@@ -55,23 +55,23 @@ public sealed class RunnableQueueSettingsSurfaceTests
             Assert.Contains(column + " = EXCLUDED." + column, ViewerDataService.AlertSettingsUpsertSql, StringComparison.Ordinal);
         }
 
-        // Appended last, so every older ordinal keeps its place: the select ends with the three columns in order.
-        Assert.EndsWith(
-            "runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler FROM config_alert_settings WHERE id = 1",
+        // Appended, so every older ordinal keeps its place: the select carries the three columns in order, and V179's
+        // three (#5640) follow them (ClientTimeoutsSettingsSurfaceTests pins that tail and the total).
+        Assert.Contains(
+            "runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler, client_timeouts_enabled",
             ViewerDataService.AlertSettingsSelectSql, StringComparison.Ordinal);
         Assert.Contains("$73,", ViewerDataService.AlertSettingsUpsertSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$74", ViewerDataService.AlertSettingsUpsertSql, StringComparison.Ordinal);
     }
 
     /// <summary>
     /// V177's three columns sit at the FIXED ordinals 70, 71 and 72 (parameters $71 to $73) on every settings-row
-    /// surface that is positional, and the row is 73 columns wide. This rung is the newest append, so it owns the
-    /// total: the earlier knobs pin their own column's ordinal and no longer claim the end
-    /// (<c>UncorroboratedRouteStoreKnobTests</c>, whose column is 69). The next rung to append moves this total on
-    /// purpose and pins its own columns the same way.
+    /// surface that is positional. The newest append owns the row's total: the earlier knobs pin their own column's
+    /// ordinal and no longer claim the end (<c>UncorroboratedRouteStoreKnobTests</c>, whose column is 69), and V179
+    /// moved the total to 76 when it appended the Client Timeouts columns
+    /// (<c>ClientTimeoutsSettingsSurfaceTests</c> owns it now). The next rung to append moves that total on purpose.
     /// </summary>
     [Fact]
-    public void TheThreeColumns_SitAtOrdinals70To72_OnEveryPositionalSurface_OfA73ColumnRow()
+    public void TheThreeColumns_SitAtOrdinals70To72_OnEveryPositionalSurface()
     {
         var expected = new[] { "runnable_queue_enabled", "runnable_queue_warning_per_scheduler", "runnable_queue_critical_per_scheduler" };
 
@@ -79,8 +79,7 @@ public sealed class RunnableQueueSettingsSurfaceTests
         var viewerColumns = ViewerDataService.AlertSettingsSelectSql
             .Replace("SELECT ", "", StringComparison.Ordinal).Split(" FROM ")[0]
             .Split(',').Select(c => c.Trim()).ToList();
-        Assert.Equal(73, viewerColumns.Count); /* the viewer upsert gains V179 columns in lane E of #5640 */
-        Assert.Equal(expected, viewerColumns.Skip(70).ToArray());
+        Assert.Equal(expected, viewerColumns.Skip(70).Take(3).ToArray());
 
         var service = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "StoreConfigProvider.cs"));
         var start = service.IndexOf("ReadAlertSettingsAsync(NpgsqlConnection connection", StringComparison.Ordinal);
@@ -88,8 +87,7 @@ public sealed class RunnableQueueSettingsSurfaceTests
         var select = service[start..];
         select = select[(select.IndexOf("SELECT", StringComparison.Ordinal) + 6)..select.IndexOf("FROM config_alert_settings WHERE id = 1", StringComparison.Ordinal)];
         var serviceColumns = select.Split(',').Select(c => c.Trim()).Where(c => c.Length > 0).ToList();
-        Assert.Equal(76, serviceColumns.Count); /* V179 (#5640) appends three more */
-        Assert.Equal(expected, serviceColumns.Skip(70).ToArray());
+        Assert.Equal(expected, serviceColumns.Skip(70).Take(3).ToArray());
         Assert.Contains("RunnableQueueEnabled = reader.GetBoolean(70),", service, StringComparison.Ordinal);
         Assert.Contains("RunnableQueueWarningPerScheduler = reader.GetInt32(71),", service, StringComparison.Ordinal);
         Assert.Contains("RunnableQueueCriticalPerScheduler = reader.GetInt32(72),", service, StringComparison.Ordinal);
@@ -98,22 +96,19 @@ public sealed class RunnableQueueSettingsSurfaceTests
         var mcpColumns = DarlingAlertReader.AlertSettingsSelectSql
             .Split("FROM config_alert_settings")[0].Replace("SELECT", "", StringComparison.Ordinal)
             .Split(',').Select(c => c.Trim()).Where(c => c.Length > 0).ToList();
-        Assert.Equal(73, mcpColumns.Count);
-        Assert.Equal(expected, mcpColumns.Skip(70).ToArray());
+        Assert.Equal(expected, mcpColumns.Skip(70).Take(3).ToArray());
         var parameters = typeof(DarlingAlertReader.AlertSettingsReadRow).GetConstructors().Single().GetParameters();
-        Assert.Equal(73, parameters.Length);
         Assert.Equal(new[] { "RunnableQueueEnabled", "RunnableQueueWarningPerScheduler", "RunnableQueueCriticalPerScheduler" },
-            parameters.Skip(70).Select(p => p.Name!).ToArray());
+            parameters.Skip(70).Take(3).Select(p => p.Name!).ToArray());
         Assert.Equal(typeof(bool), parameters[70].ParameterType);
         Assert.Equal(typeof(int), parameters[71].ParameterType);
         Assert.Equal(typeof(int), parameters[72].ParameterType);
 
-        /* The viewer's bind supplies $71 to $73 at indexes 70 to 72, in column order, and nothing after them. */
+        /* The viewer's bind supplies $71 to $73 at indexes 70 to 72, in column order. */
         var bind = typeof(ViewerDataService).GetMethod("BindAlertSettings", BindingFlags.NonPublic | BindingFlags.Static)!;
         var row = new AlertSettingsRow { RunnableQueueEnabled = false, RunnableQueueWarningPerScheduler = 5, RunnableQueueCriticalPerScheduler = 11 };
         using var command = new NpgsqlCommand();
         bind.Invoke(null, new object[] { command, row });
-        Assert.Equal(73, command.Parameters.Count);
         Assert.Equal(false, command.Parameters[70].Value);
         Assert.Equal(5, command.Parameters[71].Value);
         Assert.Equal(11, command.Parameters[72].Value);
