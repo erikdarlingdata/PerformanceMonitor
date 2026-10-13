@@ -310,6 +310,32 @@ if (args.Length > 0 && DarlingCliCommands.IsAddServerVerb(args[0]))
         addServerConfigPath, Console.In, Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verbs: --add-alert-source / --rotate-alert-source / --remove-alert-source <name> and --list-alert-sources, each with an
+   optional --config <path> (#5654) - the logins external systems use to send alerts. Each runs as the store owner, like
+   --add-server, and owns no grant SQL of its own: the grants are the ones the service re-asserts on every start. Same
+   platform posture as --add-server: NO Windows guard here, because Windows is needed only for a MANAGED store credential
+   (DPAPI), which the verb checks itself. The password is never an argument or a statement: it is generated, its SCRAM-SHA-256
+   verifier is what the server receives, and the connection string that holds it is printed once. */
+if (args.Length > 0 && DarlingCliCommands.IsAddAlertSourceVerb(args[0]))
+{
+    return await DarlingCliCommands.AddAlertSourceAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+if (args.Length > 0 && DarlingCliCommands.IsRotateAlertSourceVerb(args[0]))
+{
+    return await DarlingCliCommands.RotateAlertSourceAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+if (args.Length > 0 && DarlingCliCommands.IsRemoveAlertSourceVerb(args[0]))
+{
+    return await DarlingCliCommands.RemoveAlertSourceAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+if (args.Length > 0 && DarlingCliCommands.IsListAlertSourcesVerb(args[0]))
+{
+    return await DarlingCliCommands.ListAlertSourcesAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verbs: --enable-collector / --disable-collector <name> [--server <name>] [--config <path>] (#3752) — flip one
    collector's enabled flag in config.config_collector_schedules, fleet-wide or for one server, and print the rows
    read back from the store. The one collector that ships OFF (long_query_completions, whose enabling is what

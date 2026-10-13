@@ -973,6 +973,26 @@ A server that is no longer configured has no definition and no credentials left 
 
 Both modes print one warning, before they list or drop anything: a Lite app, a deprecated Full Dashboard install or another Darling service that still monitors the server uses the same names and creates a missing session again (Lite on its next collection cycle, the Dashboard on its next collection run, Darling on its next connect to the server or, for the long query completions session, within an hour; the long query completions session only where that collector is turned on, and never by the Dashboard), so run this only once nothing else monitors it. A run that drops at least one session also prints one `NOTE:` line after the drops: capture of deadlocks and blocked processes on that server stops until this service reconnects to it, so remove the server next. The line names only the captures whose session was dropped (`long query completions` when that session went too). `--dry-run` and `--print-sql` do not print it.
 
+### Make a login for a system that sends alerts (`--add-alert-source` and friends)
+
+A system outside Darling can hand Darling an alert to deliver through your email, webhook and PagerDuty channels. Each such system is a **source**: a registry entry and a database login of its own. The login can do one thing, call `config.submit_external_alert`, and Darling takes the source name from the login that made the call, so one source cannot send under another's name. These four verbs make and manage the logins. They run as the store owner, the way `--add-server` does, and each takes an optional `--config <path>`.
+
+```
+PerformanceMonitor.Darling.Service.exe --add-alert-source orders
+PerformanceMonitor.Darling.Service.exe --rotate-alert-source orders
+PerformanceMonitor.Darling.Service.exe --list-alert-sources
+PerformanceMonitor.Darling.Service.exe --remove-alert-source orders
+```
+
+- `--add-alert-source <name>` makes the login `darling_src_<name>`, registers it and gives it the grants, then prints its connection string. **The connection string is shown once.** Darling keeps no copy of the password and the password is never sent to the server as text: the server receives only a SCRAM-SHA-256 verifier. Save the string where the sending system can read it. A name is 2 to 31 characters: a lower-case letter, then lower-case letters, digits or underscores.
+- `--rotate-alert-source <name>` sets a new password and prints the new connection string once. The old password stops working at once, for new connections. Use it when a string is lost or leaves the people who should have it.
+- `--list-alert-sources` prints each source's name, state, when it was created, when it last sent an alert and how many alerts of its are waiting for delivery. It shows no password, because none is stored. The last-sent time and the waiting count come from the queue rows the store still keeps.
+- `--remove-alert-source <name>` removes the source and drops its login. The alerts it has queued but Darling has not yet delivered are removed with it, and the verb says how many. Alerts it already sent stay in the alert history.
+
+The source then sends an alert with one statement, for example `SELECT config.submit_external_alert('fire', 'disk-full', 'warning', 'Disk almost full', '93 percent used', 'web01', 93.5);`. The first argument is `fire` or `clear`, the second is a key of your choosing that pairs a clear with its fire, and the third is `warning` or `critical`.
+
+The host in the printed string is the address this service uses for its store. A source on another machine needs the address it reaches the store at, and a pg_hba rule that lets the login in from there. If the store's owner cannot create logins (a bring-your-own store whose owner lacks CREATEROLE), the verb changes the registry and prints the statements a database administrator runs to make, re-key or drop the login.
+
 ---
 
 ## PostgreSQL Targets

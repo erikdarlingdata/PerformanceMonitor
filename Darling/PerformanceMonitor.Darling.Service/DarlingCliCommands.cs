@@ -162,6 +162,22 @@ public static class DarlingCliCommands
         string.Equals(arg, "--add-server", StringComparison.OrdinalIgnoreCase)
         || string.Equals(arg, "--add-servers", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="AddAlertSourceAsync"/> handles: make a source for external alerts, a login of its own that can submit alerts and nothing else (#5654).</summary>
+    public static bool IsAddAlertSourceVerb(string arg) =>
+        string.Equals(arg, "--add-alert-source", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="RotateAlertSourceAsync"/> handles: give a source a new password (#5654).</summary>
+    public static bool IsRotateAlertSourceVerb(string arg) =>
+        string.Equals(arg, "--rotate-alert-source", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="RemoveAlertSourceAsync"/> handles: drop a source's login and its registry row (#5654).</summary>
+    public static bool IsRemoveAlertSourceVerb(string arg) =>
+        string.Equals(arg, "--remove-alert-source", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="ListAlertSourcesAsync"/> handles: list the sources and how they are doing (#5654).</summary>
+    public static bool IsListAlertSourcesVerb(string arg) =>
+        string.Equals(arg, "--list-alert-sources", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The verb <see cref="ToggleCollectorAsync"/> handles with <c>enable: true</c> — turn one collector ON in the
     /// store's schedule overrides, fleet-wide or for one server (#3752). Until this verb the only writer of that
     /// flag was the WPF Viewer's Collector Schedules window, which needs an interactive desktop and the
@@ -295,6 +311,10 @@ public static class DarlingCliCommands
         || IsCollapseLegacySlicesVerb(arg)
         || IsRecompressPlanDimVerb(arg)
         || IsAddServerVerb(arg)
+        || IsAddAlertSourceVerb(arg)
+        || IsRotateAlertSourceVerb(arg)
+        || IsRemoveAlertSourceVerb(arg)
+        || IsListAlertSourcesVerb(arg)
         || IsEnableCollectorVerb(arg)
         || IsDisableCollectorVerb(arg)
         || IsSetCollectorRunAtVerb(arg)
@@ -379,6 +399,10 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --add-alert-source <name> [--config <path>]      Make a source for external alerts: a login that can send alerts and do nothing else. Prints its connection string ONCE; Darling keeps no copy. <name> is 2-31 characters: a letter, then lower-case letters, digits or underscores." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --rotate-alert-source <name> [--config <path>]   Give a source a new password and print its connection string once. The old password stops working." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --remove-alert-source <name> [--config <path>]   Drop a source's login and remove it, along with any alerts of its that are still queued. Alerts it already sent stay in the history." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --list-alert-sources [--config <path>]           List the sources: name, created, last alert sent and alerts not yet delivered. Never shows a password." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --set-collector-run-at <collector> <HH:MM|none|default> [--server <server>] [--config <path>]   Set the time of day (the monitored server's own clock) a collector that runs once a day or less often starts; none stops a fixed time, default clears the row's time so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the run time changes. The running service applies it within one sweep." + Environment.NewLine +
@@ -5799,6 +5823,236 @@ public static class DarlingCliCommands
         }
 
         return exitCode;
+    }
+
+    /* ───────────────────── --add / --rotate / --remove / --list -alert-source (#5654) ───────────────────── */
+
+    /// <summary>
+    /// Parses the alert source verbs' arguments STRICTLY (the posture <see cref="TryParseCollectorToggleArgs"/> takes): one
+    /// bare argument, the source name, for the three verbs that need one, none for <c>--list-alert-sources</c>; <c>--config
+    /// &lt;path&gt;</c> takes a value; anything else starting with '-' is refused rather than taken as a name. Pure so the
+    /// grammar pins. Returns false with a ready-to-print <paramref name="errorMessage"/>.
+    /// </summary>
+    /// <param name="verb">The verb as typed (for the messages).</param>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    /// <param name="takesName">Whether the verb takes a source name.</param>
+    public static bool TryParseAlertSourceArgs(
+        string verb, string[] rest, bool takesName, out string? sourceName, out string? configPath, out string? errorMessage)
+    {
+        sourceName = null;
+        configPath = null;
+        errorMessage = null;
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (string.Equals(arg, "--config", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                {
+                    errorMessage = $"--config needs a path: {verb}{(takesName ? " <name>" : string.Empty)} --config <path to darling.json>";
+                    return false;
+                }
+
+                configPath = rest[++i];
+                continue;
+            }
+
+            if (arg.StartsWith('-'))
+            {
+                errorMessage = $"Unknown option for {verb}: {arg}";
+                return false;
+            }
+
+            if (!takesName)
+            {
+                errorMessage = $"{verb} takes no name; got '{arg}'.";
+                return false;
+            }
+
+            if (sourceName is not null)
+            {
+                errorMessage = $"{verb} takes ONE source name; got '{sourceName}' and '{arg}'.";
+                return false;
+            }
+
+            sourceName = arg;
+        }
+
+        if (takesName && string.IsNullOrWhiteSpace(sourceName))
+        {
+            errorMessage = $"{verb} needs a source name.";
+            return false;
+        }
+
+        if (takesName && !ExternalAlertSourceAdmin.IsValidName(sourceName))
+        {
+            errorMessage = $"'{sourceName}' is not a valid source name: use 2 to 31 characters, a lower-case letter first, then lower-case letters, digits or underscores.";
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary><c>--add-alert-source &lt;name&gt;</c>: see <see cref="ExternalAlertSourceAdmin.AddAsync"/>. Prints the connection string once.</summary>
+    public static Task<int> AddAlertSourceAsync(string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken) =>
+        RunAlertSourceVerbAsync("--add-alert-source", rest, takesName: true, output, error, cancellationToken);
+
+    /// <summary><c>--rotate-alert-source &lt;name&gt;</c>: see <see cref="ExternalAlertSourceAdmin.RotateAsync"/>. Prints the new connection string once.</summary>
+    public static Task<int> RotateAlertSourceAsync(string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken) =>
+        RunAlertSourceVerbAsync("--rotate-alert-source", rest, takesName: true, output, error, cancellationToken);
+
+    /// <summary><c>--remove-alert-source &lt;name&gt;</c>: see <see cref="ExternalAlertSourceAdmin.RemoveAsync"/>.</summary>
+    public static Task<int> RemoveAlertSourceAsync(string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken) =>
+        RunAlertSourceVerbAsync("--remove-alert-source", rest, takesName: true, output, error, cancellationToken);
+
+    /// <summary><c>--list-alert-sources</c>: see <see cref="ExternalAlertSourceAdmin.ListAsync"/>.</summary>
+    public static Task<int> ListAlertSourcesAsync(string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken) =>
+        RunAlertSourceVerbAsync("--list-alert-sources", rest, takesName: false, output, error, cancellationToken);
+
+    /// <summary>
+    /// The one body behind the four alert source verbs: parse, open the store as its owner (the connection
+    /// <see cref="ToggleCollectorAsync"/> opens, so a refusal reads the same), run the verb on one connection and print the outcome.
+    /// Exit codes are <see cref="CollectorToggleExitCode"/>'s: 1 for a usage, configuration or name problem, 2 when the store
+    /// cannot be reached or refuses the change.
+    /// </summary>
+    private static async Task<int> RunAlertSourceVerbAsync(
+        string verb, string[] rest, bool takesName, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        if (!TryParseAlertSourceArgs(verb, rest, takesName, out var sourceName, out var configPath, out var parseError))
+        {
+            error.WriteLine(parseError);
+            output.WriteLine($"Usage: {verb}{(takesName ? " <name>" : string.Empty)} [--config <path to darling.json>]");
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        var created = TryCreateCollectorStoreDataSource(verb, configPath, error);
+        if (created is null)
+        {
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        await using var dataSource = created;
+        try
+        {
+            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            return await RunAlertSourceVerbAsync(verb, connection, sourceName, dataSource.ConnectionString, output, error, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not change the alert sources in the store: {ex.Message}");
+            return CollectorToggleExitCode.StoreUnavailable;
+        }
+    }
+
+    /// <summary>The verb on an open owner connection, so a live test drives exactly what the command line does.</summary>
+    internal static async Task<int> RunAlertSourceVerbAsync(
+        string verb, NpgsqlConnection connection, string? sourceName, string storeConnectionString,
+        TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        if (IsListAlertSourcesVerb(verb))
+        {
+            return PrintAlertSourceList(await ExternalAlertSourceAdmin.ListAsync(connection, cancellationToken), output, error);
+        }
+
+        var result = IsAddAlertSourceVerb(verb) ? await ExternalAlertSourceAdmin.AddAsync(connection, sourceName!, cancellationToken)
+            : IsRotateAlertSourceVerb(verb) ? await ExternalAlertSourceAdmin.RotateAsync(connection, sourceName!, cancellationToken)
+            : await ExternalAlertSourceAdmin.RemoveAsync(connection, sourceName!, cancellationToken);
+        return PrintAlertSourceResult(verb, result, sourceName!, storeConnectionString, output, error);
+    }
+
+    /// <summary>Prints what an add, rotate or remove did, and returns the exit code. The only place a password is written, and only inside the connection string.</summary>
+    internal static int PrintAlertSourceResult(
+        string verb, ExternalAlertSourceAdmin.Result result, string sourceName, string storeConnectionString, TextWriter output, TextWriter error)
+    {
+        switch (result.Outcome)
+        {
+            case ExternalAlertSourceAdmin.Outcome.InvalidName:
+                error.WriteLine($"'{sourceName}' is not a valid source name: use 2 to 31 characters, a lower-case letter first, then lower-case letters, digits or underscores.");
+                return CollectorToggleExitCode.UsageOrConfig;
+            case ExternalAlertSourceAdmin.Outcome.NoTables:
+                error.WriteLine("This store has no external alert tables yet. Start the Darling service once so it upgrades the store, then run this again.");
+                return CollectorToggleExitCode.UsageOrConfig;
+            case ExternalAlertSourceAdmin.Outcome.AlreadyRegistered:
+                error.WriteLine($"A source named '{sourceName}' already exists. Use --rotate-alert-source {sourceName} for a new password, or --remove-alert-source {sourceName} first.");
+                return CollectorToggleExitCode.UsageOrConfig;
+            case ExternalAlertSourceAdmin.Outcome.LoginExists:
+                error.WriteLine($"A database login named '{result.RoleName}' already exists and is not a registered source, so it was left alone. Pick another name, or drop that login first.");
+                return CollectorToggleExitCode.UsageOrConfig;
+            case ExternalAlertSourceAdmin.Outcome.NotRegistered:
+                error.WriteLine($"No source named '{sourceName}'. --list-alert-sources shows the sources there are.");
+                return CollectorToggleExitCode.UsageOrConfig;
+            case ExternalAlertSourceAdmin.Outcome.LoginNotManaged:
+                error.WriteLine($"The login '{result.RoleName}' is missing or was not made by --add-alert-source, so its password was not changed.");
+                return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        output.WriteLine();
+        if (IsRemoveAlertSourceVerb(verb))
+        {
+            output.WriteLine($"Source '{sourceName}' removed. It can no longer send alerts.");
+            output.WriteLine(result.LoginDropped
+                ? $"  Login '{result.RoleName}' dropped."
+                : $"  Login '{result.RoleName}' was not dropped: it is missing, or it was not made by --add-alert-source, or the statements below drop it.");
+            output.WriteLine($"  Removed with it: {result.RemovedRows} queued alert row(s), {result.RemovedUndelivered} of them not yet delivered. Alerts it already sent stay in the alert history.");
+        }
+        else
+        {
+            output.WriteLine(IsRotateAlertSourceVerb(verb)
+                ? $"Source '{sourceName}': new password set. The old password no longer works."
+                : $"Source '{sourceName}' created (login '{result.RoleName}').");
+            output.WriteLine();
+            output.WriteLine("Connection string (shown ONCE; Darling keeps no copy, so save it now. If it is lost, --rotate-alert-source makes a new one):");
+            output.WriteLine();
+            output.WriteLine("  " + ExternalAlertSourceAdmin.BuildSourceConnectionString(storeConnectionString, result.RoleName, result.Password!));
+            output.WriteLine();
+            output.WriteLine("The host above is the address this service uses for its store. A source on another machine needs the address it reaches the store at, and a pg_hba rule that lets this login in from there.");
+            output.WriteLine("The source sends an alert with:  SELECT config.submit_external_alert('fire', 'key', 'warning', 'title', 'detail', 'server name', 1);");
+        }
+
+        if (result.Outcome == ExternalAlertSourceAdmin.Outcome.NeedsDbaSql)
+        {
+            output.WriteLine();
+            output.WriteLine("This store's owner cannot make, change or drop logins (it lacks CREATEROLE). The registry is updated; have a database administrator run:");
+            output.WriteLine();
+            output.WriteLine(result.DbaSql);
+        }
+
+        output.WriteLine();
+        return CollectorToggleExitCode.Success;
+    }
+
+    /// <summary>Prints the source table. No secret is in it.</summary>
+    internal static int PrintAlertSourceList(IReadOnlyList<ExternalAlertSourceAdmin.SourceRow>? rows, TextWriter output, TextWriter error)
+    {
+        if (rows is null)
+        {
+            error.WriteLine("This store has no external alert tables yet. Start the Darling service once so it upgrades the store, then run this again.");
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        output.WriteLine();
+        if (rows.Count == 0)
+        {
+            output.WriteLine("No alert sources. --add-alert-source <name> makes one.");
+            output.WriteLine();
+            return CollectorToggleExitCode.Success;
+        }
+
+        var nameWidth = Math.Max("SOURCE".Length, rows.Max(r => r.Name.Length));
+        output.WriteLine($"{"SOURCE".PadRight(nameWidth)}  {"STATE",-8}  {"CREATED (UTC)",-16}  {"LAST ALERT SENT (UTC)",-21}  UNDELIVERED");
+        foreach (var row in rows)
+        {
+            output.WriteLine(
+                $"{row.Name.PadRight(nameWidth)}  {(row.Enabled ? "enabled" : "disabled"),-8}  "
+                + $"{row.CreatedAt.UtcDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture),-16}  "
+                + $"{(row.LastSubmit is { } last ? last.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) : "never"),-21}  {row.Undelivered}");
+        }
+
+        output.WriteLine();
+        output.WriteLine("The last alert sent and the undelivered count come from the queue rows the store still keeps.");
+        output.WriteLine();
+        return CollectorToggleExitCode.Success;
     }
 
     /* ───────────────────── --enable-collector / --disable-collector (#3752) ───────────────────── */
