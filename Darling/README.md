@@ -291,7 +291,7 @@ A rollback restores the install files, not the store ([#5773](https://github.com
 
 An older build ignores what those migrations added, so it can read some newer data differently. The list below names each migration that changes what an older build reads, and what to do before you roll back past it. A migration not listed here has no known effect on what an older build reads.
 
-- **V181**: scoped notification routes read as fleet-wide; disable or delete them before rolling back to a build older than V181.
+No migration so far changes what an older build reads, so the list is empty.
 
 #### Upgrading from a build that predates the script
 

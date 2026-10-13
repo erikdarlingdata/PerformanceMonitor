@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -88,15 +90,29 @@ public sealed class NewerStoreWarningTests
         Assert.Contains("WarnIfStoreNewerThanBuild(logger, storeVersion, Scripts[^1].Version);", source, StringComparison.Ordinal);
     }
 
-    /// <summary>The warning names a README section; the section has to exist, with at least one rung in its list.</summary>
+    /// <summary>
+    /// The warning names a README section, so the section has to exist. Its list is bound to the ladder: every
+    /// <c>- **V&lt;N&gt;**</c> bullet must name a rung this build ships (1 through <c>Scripts[^1].Version</c>), so a
+    /// bullet written ahead of its migration, or with a guessed number, fails here. An empty list passes: it means no
+    /// rung so far changes what an older build reads, and the PR that adds such a rung adds its bullet.
+    /// </summary>
     [Fact]
-    public void The_readme_carries_the_rollback_section_the_warning_names()
+    public void The_readme_rollback_list_names_only_rungs_the_ladder_ships()
     {
         var readme = RepoFile.ReadRepoFile("Darling", "README.md");
         var lines = readme.Split('\n').Select(l => l.TrimEnd('\r')).ToList();
 
-        var heading = lines.FindIndex(l => l.TrimStart('#').Trim() == "Rolling back to an older build" && l.StartsWith('#'));
+        var heading = lines.FindIndex(l => l.StartsWith('#') && l.TrimStart('#').Trim() == "Rolling back to an older build");
         Assert.True(heading >= 0, "Darling/README.md has no \"Rolling back to an older build\" heading");
-        Assert.Contains(lines.Skip(heading + 1).TakeWhile(l => !l.StartsWith('#')), l => l.StartsWith("- **V", StringComparison.Ordinal));
+
+        var top = PgMigrations.Scripts[^1].Version;
+        var bullets = lines.Skip(heading + 1).TakeWhile(l => !l.StartsWith('#')).Where(l => l.StartsWith("- **V", StringComparison.Ordinal));
+        foreach (var bullet in bullets)
+        {
+            var match = Regex.Match(bullet, @"^- \*\*V(\d+)\*\*");
+            Assert.True(match.Success, $"rollback bullet does not open with \"- **V<N>**\": {bullet}");
+            var rung = int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+            Assert.True(rung >= 1 && rung <= top, $"rollback bullet names V{rung}, but the ladder's top rung is V{top}: {bullet}");
+        }
     }
 }

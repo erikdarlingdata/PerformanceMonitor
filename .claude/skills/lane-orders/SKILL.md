@@ -209,8 +209,8 @@ renumber if dev moved. A version bump also obliges:
 - the `GetBoolean` list in `GetStoreSchemaVersionAsync`, plus `ViewerSchemaVersionGateTests`;
 - "newest migration" tests written as `Scripts[^1]`;
 - a rung that changes how an older build reads existing data: its line in Darling/README.md's "Rolling back to an
-  older build" list, saying what the older build reads differently and what to do before rolling back past it
-  (#5773).
+  older build" list, added in the same PR as the rung, with the rung's real number, saying what the older build
+  reads differently and what to do before rolling back past it (#5773).
 
 Never edit an existing migration.
 
