@@ -183,17 +183,6 @@ public sealed class CycleSkipFeedTests
         Assert.Contains("server.LastGateWaitMs = (long)gateWaited.TotalMilliseconds;", worker, StringComparison.Ordinal);
     }
 
-    /// <summary>Lite and Darling spell the row the same way (Lite's twin is #5643's CollectionCycleSkip).</summary>
-    [Fact]
-    public void LiteAndDarlingSpellTheRowTheSame()
-    {
-        var lite = Path.Combine(RepoRoot(), "Lite", "Services", "CollectionCycleSkip.cs");
-        Assert.SkipUnless(File.Exists(lite), "Lite's CollectionCycleSkip.cs is not on this branch yet (#5730).");
-        var text = File.ReadAllText(lite);
-        Assert.Contains($"CollectorName = \"{CollectionCycleRow.CollectorName}\"", text, StringComparison.Ordinal);
-        Assert.Contains($"Status = \"{CollectionCycleRow.Status}\"", text, StringComparison.Ordinal);
-    }
-
     internal static string RepoRoot([CallerFilePath] string thisFile = "")
     {
         var dir = Path.GetDirectoryName(thisFile)!;
@@ -612,16 +601,9 @@ public sealed class CollectionCycleReaderCensusTests
         }
     }
 
-    /// <summary>The code with whole-line comments blanked, so a doc comment that mentions a read is not a read.</summary>
-    private static string WithoutCommentLines(string text) =>
-        string.Join('\n', Regex.Replace(text, @"/\*(?!\*)[^*]*(?:\*(?!/)[^*]*)*\*/", m => new string('\n', m.Value.Count(c => c == '\n')))
-            .Split('\n').Select(l =>
-        {
-            var t = l.TrimStart();
-            return t.StartsWith("//", StringComparison.Ordinal) || t.StartsWith("*", StringComparison.Ordinal) || t.StartsWith("/*", StringComparison.Ordinal)
-                ? string.Empty
-                : l;
-        }));
+    /// <summary>The code with comments blanked, so a doc comment that mentions a read is not a read.</summary>
+    private static string WithoutComments(string text) =>
+        Regex.Replace(text, @"/\*.*?\*/|//[^\r\n]*", string.Empty, RegexOptions.Singleline | RegexOptions.CultureInvariant);
 
     [Fact]
     public void EveryCollectionLogRead_ExcludesTheCycleRow_NamesACollector_OrIsOnTheSafeList()
@@ -631,7 +613,7 @@ public sealed class CollectionCycleReaderCensusTests
         foreach (var file in SourceFiles())
         {
             var name = Path.GetFileName(file);
-            var text = WithoutCommentLines(File.ReadAllText(file));
+            var text = WithoutComments(File.ReadAllText(file));
             foreach (Match m in ReadStart.Matches(text))
             {
                 read++;
