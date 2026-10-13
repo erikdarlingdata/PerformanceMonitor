@@ -319,7 +319,9 @@ SELECT
     COALESCE(xe.cnt, 0) AS xe_count,
     COALESCE(xe.max_wait, 0) AS xe_max_wait,
     COALESCE(dmv.cnt, 0) AS dmv_count,
-    COALESCE(dmv.max_wait, 0) AS dmv_max_wait
+    COALESCE(dmv.max_wait, 0) AS dmv_max_wait,
+    COALESCE(xe.cnt, 0) AS xe_reports,
+    COALESCE(dmv.cnt, 0) AS dmv_reports
 FROM
 (
     SELECT server_id, COUNT(*) AS cnt, MAX(wait_time_ms) AS max_wait
