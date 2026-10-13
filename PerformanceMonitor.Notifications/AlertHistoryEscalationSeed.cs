@@ -19,12 +19,20 @@ public static class AlertHistoryEscalationSeed
     /// puts the tier back (<c>TierEscalation.Restore</c>), so the history must not seed it. A row with no send error
     /// and no delivery (unconfigured, throttled, muted, folded) was not a failed send and stays: the engine recorded its
     /// tier. A legacy <c>undelivered</c> row (a webhook that came back unsuccessful, with a null error) cannot be told
-    /// apart from those and is counted, which is the safe direction: it can only deliver a Critical sooner.
+    /// apart from those and is counted. That is harmless: only a Warning seeds (the engine drops any other tier), so such a row can
+    /// only make the next Critical an escalation, delivered sooner, never held.
     /// </summary>
     public const string KeepUnlessEveryChannelFailedFilter = "\nAND   (alert_sent OR send_error IS NULL)";
 
     /// <summary>SQL that drops muted rows, for a family whose engine fire site does not record a muted fire's tier.</summary>
     public const string ExcludeMutedFilter = "\nAND   NOT muted";
+
+    /// <summary>
+    /// Truncates <paramref name="value"/> to the microsecond both stores keep (a .NET tick is 100 ns and is not stored).
+    /// Both window bounds go through it, so a bound and a stored row compare at one precision and the tie rule
+    /// (<see cref="Resolve"/>) is decided by stored instants alone.
+    /// </summary>
+    public static DateTime TruncateToMicroseconds(DateTime value) => new(value.Ticks - (value.Ticks % 10), value.Kind);
 
     /// <summary>
     /// The tier to seed: the tier of the newest fire row (<paramref name="fireAtUtc"/>, read from its
@@ -34,8 +42,9 @@ public static class AlertHistoryEscalationSeed
     /// for an incident that is over. Both values come back from the same column type, so equal stored instants compare
     /// equal, microsecond for microsecond.
     /// <para>A fire row can carry no tier: Volume Free Space persists one only when the fire is Critical, so its Warning
-    /// rows have none. <paramref name="tierWhenRowCarriesNone"/> is what such a row means, the host passing the same
-    /// answer the row grids give it (the metric name's own tier); null seeds nothing for it.</para>
+    /// rows have none. <paramref name="tierWhenRowCarriesNone"/> is what such a row means, the engine's family table
+    /// passing Warning for that one family and null for every other (a tierless Deadlocks or Poison Wait row seeds
+    /// nothing; the metric name no longer decides it).</para>
     /// </summary>
     public static AlertSeverityLevel? Resolve(
         DateTime? fireAtUtc, string? contextJson, DateTime? resolvedAtUtc, AlertSeverityLevel? tierWhenRowCarriesNone = null)

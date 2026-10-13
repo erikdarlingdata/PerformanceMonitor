@@ -347,7 +347,7 @@ AND   metric_name = $2"
     /// </summary>
     public async Task<AlertSeverityLevel?> GetLastFiredTierAsync(
         string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true,
-        AlertSeverityLevel? tierWhenRowCarriesNone = null)
+        AlertSeverityLevel? tierWhenRowCarriesNone = null, DateTime? untilUtc = null)
     {
         /* Same identity scope as GetLastEmailSentUtcAsync (#3456). */
         var sid = AlertHistoryServerIdentity.SeedScope(serverId);
@@ -373,12 +373,18 @@ FROM v_config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2
 AND   alert_time >= $3"
+            + (untilUtc is null ? "" : "\nAND   alert_time < $4")
             + AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter
             + (countMuted ? "" : AlertHistoryEscalationSeed.ExcludeMutedFilter)
             + "\nORDER BY alert_time DESC\nLIMIT 1";
         fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
         fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
-        fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sinceUtc });
+        fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertHistoryEscalationSeed.TruncateToMicroseconds(sinceUtc) });
+        if (untilUtc is { } until)
+        {
+            /* #5715 round 1: exclusive, microsecond like the column; a row at or after the engine start is this process's own. */
+            fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertHistoryEscalationSeed.TruncateToMicroseconds(until) });
+        }
 
         DateTime? fireAt = null;
         string? contextJson = null;

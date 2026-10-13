@@ -172,7 +172,7 @@ AND   notification_type IN ('webhook', 'email+webhook')", "WebhookAlert");
     /// </summary>
     public async Task<AlertSeverityLevel?> GetLastFiredTierAsync(
         string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true,
-        AlertSeverityLevel? tierWhenRowCarriesNone = null)
+        AlertSeverityLevel? tierWhenRowCarriesNone = null, DateTime? untilUtc = null)
     {
         /* Same identity scope as GetLastEmailSentUtcAsync (#3456). */
         var sid = AlertHistoryServerIdentity.SeedScope(serverId);
@@ -191,13 +191,19 @@ FROM config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2
 AND   alert_time >= $3"
+            + (untilUtc is null ? "" : "\nAND   alert_time < $4")
             + AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter
             + (countMuted ? "" : AlertHistoryEscalationSeed.ExcludeMutedFilter)
             + "\nORDER BY alert_time DESC\nLIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds })
         {
             fireCommand.Parameters.AddWithValue(sid.Value);
             fireCommand.Parameters.AddWithValue(metricName);
-            fireCommand.Parameters.AddWithValue(DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified));
+            fireCommand.Parameters.AddWithValue(DateTime.SpecifyKind(AlertHistoryEscalationSeed.TruncateToMicroseconds(sinceUtc), DateTimeKind.Unspecified));
+            if (untilUtc is { } until)
+            {
+                /* #5715 round 1: exclusive, microsecond like the column; a row at or after the engine start is this process's own. */
+                fireCommand.Parameters.AddWithValue(DateTime.SpecifyKind(AlertHistoryEscalationSeed.TruncateToMicroseconds(until), DateTimeKind.Unspecified));
+            }
             await using var reader = await fireCommand.ExecuteReaderAsync();
             if (await reader.ReadAsync())
             {

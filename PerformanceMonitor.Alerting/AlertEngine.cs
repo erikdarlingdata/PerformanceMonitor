@@ -371,7 +371,8 @@ public sealed class AlertEngine
     /// #5715 part B: the alert-history read that seeds the six <see cref="TierEscalation"/> instances across a restart
     /// (<see cref="EscalationSeed.ReaderFor"/> over the host's <see cref="IAlertHistoryStore"/>). Called once per server key
     /// and family per process, at the start of that server's sweep. A throw is logged and counted, seeds nothing and is
-    /// retried on the next sweep; null leaves the tier in memory only.
+    /// retried on the next sweep until the seed ends (a read succeeds, the process touches the key, or one cooldown passes
+    /// since the engine was built); null leaves the tier in memory only.
     /// </param>
     public AlertEngine(
         IAlertEngineSettings settings,
@@ -399,23 +400,32 @@ public sealed class AlertEngine
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
         _readFailures = readFailures;
         _escalationSeedReader = escalationSeedReader;
+        /* #5715 round 1: the restart seed counts only history rows from before this engine existed; construction is the
+           process start for both hosts, which build the engine once at startup. */
+        _engineStartUtc = _utcNow();
         /* #5715 part B: the six opted-in families, each with the resolution title its history row is stored under. */
-        _escalationSeedFamilies = new (string Metric, string ResolutionTitle, bool CountMuted, TierEscalation Escalation)[]
+        _escalationSeedFamilies = new (string Metric, string ResolutionTitle, bool CountMuted, bool TierlessRowIsWarning, TierEscalation Escalation)[]
         {
-            (CpuPersistenceMetric, EscalationSeed.CpuResolvedTitle, true, _cpuEscalation),
-            (DeadlockWatermarkMetric, EscalationSeed.DeadlocksClearedTitle, true, _deadlockEscalation),
-            (PostgresAlertEvaluator.PoisonWaitMetric, EscalationSeed.PoisonWaitsClearedTitle, true, _poisonWaitEscalation),
-            (RunnableQueueEvaluator.MetricName, EscalationSeed.RunnableQueueClearedTitle, true, _runnableQueueEscalation),
+            (CpuPersistenceMetric, EscalationSeed.CpuResolvedTitle, true, false, _cpuEscalation),
+            (DeadlockWatermarkMetric, EscalationSeed.DeadlocksClearedTitle, true, false, _deadlockEscalation),
+            (PostgresAlertEvaluator.PoisonWaitMetric, EscalationSeed.PoisonWaitsClearedTitle, true, false, _poisonWaitEscalation),
+            (RunnableQueueEvaluator.MetricName, EscalationSeed.RunnableQueueClearedTitle, true, false, _runnableQueueEscalation),
             /* A muted Client Timeouts fire is tracked on its own stamp and does not record the tier (see CheckAttentionAsync). */
-            (AttentionEvaluator.MetricName, EscalationSeed.ClientTimeoutsClearedTitle, false, _attentionEscalation),
-            (VolumeFreeSpaceWatermarkMetric, EscalationSeed.VolumeFreeSpaceResolvedTitle, true, _lowDiskEscalation),
+            (AttentionEvaluator.MetricName, EscalationSeed.ClientTimeoutsClearedTitle, false, false, _attentionEscalation),
+            /* Volume Free Space persists a tier only for a Critical fire, so its Warning rows are tierless by design: the
+               only family where a tierless history row means Warning. */
+            (VolumeFreeSpaceWatermarkMetric, EscalationSeed.VolumeFreeSpaceResolvedTitle, true, true, _lowDiskEscalation),
         };
     }
 
     /// <summary>#5715 part B: the history reader that seeds <see cref="TierEscalation"/> across a restart; null leaves the tier in-memory only.</summary>
     private readonly Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? _escalationSeedReader;
 
-    private readonly (string Metric, string ResolutionTitle, bool CountMuted, TierEscalation Escalation)[] _escalationSeedFamilies;
+    private readonly (string Metric, string ResolutionTitle, bool CountMuted, bool TierlessRowIsWarning, TierEscalation Escalation)[] _escalationSeedFamilies;
+
+    /// <summary>#5715 round 1: when this engine was built. History rows at or after it are this process's own; the seed reads
+    /// only rows before it, and a family's seed ends one cooldown after it (every earlier row is then outside the window).</summary>
+    private readonly DateTime _engineStartUtc;
 
     /// <summary>(server key, metric) pairs whose seed read has completed, so each is read once per process. A failed read is not added.</summary>
     private readonly ConcurrentDictionary<(string Key, string Metric), bool> _escalationSeeded = new();
@@ -610,7 +620,9 @@ public sealed class AlertEngine
     /// of an incident the engine would otherwise not know a Warning was delivered, and the email and webhook cooldowns
     /// (seeded from the same history) would hold the first Critical for the rest of the Warning's window.
     /// <para>The window is the family's cooldown: older than that the bypass changes nothing, so nothing older is read.
-    /// A tier is restored only when the instance has no entry for the key yet, so a fire this process already made wins.</para>
+    /// Only rows from before the engine started count (<c>_engineStartUtc</c>, exclusive), only a Warning seeds, and the
+    /// seed for a key ends when a read succeeds, when this process has touched the key (<see cref="TierEscalation.IsTouched"/>),
+    /// or one cooldown after the engine started. A fire this process already made therefore always wins.</para>
     /// <para>A failed read is an annotation, never a suppression: it is logged and counted, seeds nothing, and does not
     /// stop the sweep; that family is read again on the next sweep. Only cancellation propagates.</para>
     /// </summary>
@@ -622,20 +634,36 @@ public sealed class AlertEngine
         }
 
         var sinceUtc = now - alertCooldown;
-        foreach (var (metric, resolutionTitle, countMuted, escalation) in _escalationSeedFamilies)
+        foreach (var (metric, resolutionTitle, countMuted, tierlessRowIsWarning, escalation) in _escalationSeedFamilies)
         {
             if (_escalationSeeded.ContainsKey((key, metric)))
             {
                 continue;
             }
 
+            /* The seed for (key, family) ends at the first of: a read succeeds; this process Recorded or Closed the key
+               (an incident it already ran or finished, which a late success must not reach into); one cooldown since the
+               engine started (every row from before it is now outside the window, so a read could only return nothing).
+               That also bounds the retry when the store is unreachable. */
+            if (escalation.IsTouched(key) || now - _engineStartUtc >= alertCooldown)
+            {
+                _escalationSeeded[(key, metric)] = true;
+                continue;
+            }
+
             var readClock = Stopwatch.StartNew();
             try
             {
-                var tier = await _escalationSeedReader(new EscalationSeedQuery(key, metric, resolutionTitle, sinceUtc, countMuted), ct);
-                if (tier is { } seeded && escalation.Highest(key) is null)
+                var tier = await _escalationSeedReader(
+                    new EscalationSeedQuery(key, metric, resolutionTitle, sinceUtc, _engineStartUtc, countMuted, tierlessRowIsWarning), ct);
+
+                /* Only a Warning seeds: a seeded Critical never creates an escalation (IsEscalation is tier > highest) and,
+                   because Record keeps the higher tier, could only cancel the NEXT incident's Warning-to-Critical one. A
+                   repeated Critical after a restart is a plain first fire, which the history-seeded email and webhook
+                   cooldowns already hold. The engine drops anything else here, whatever the reader hands back. */
+                if (tier == AlertSeverityLevel.Warning && !escalation.IsTouched(key))
                 {
-                    escalation.Restore(key, seeded);
+                    escalation.Restore(key, AlertSeverityLevel.Warning);
                 }
 
                 _escalationSeeded[(key, metric)] = true;

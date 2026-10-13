@@ -32,12 +32,21 @@ namespace PerformanceMonitor.Alerting;
 /// hold the first Critical for the rest of the Warning's window. The engine therefore seeds each instance from the
 /// history: once per server key per process, at the start of that server's sweep, it asks
 /// <c>IAlertHistoryStore.GetLastFiredTierAsync</c> for the tier of the newest fire of each family's metric inside that
-/// family's cooldown, and <see cref="Restore"/>s it when the instance holds no entry for the key yet. The read returns
-/// null (nothing seeded) when no such fire exists, when a resolution row for the metric is as new as the fire or
-/// newer, and for a fire whose every channel failed (in process that tier is put back too). A muted fire counts, as
-/// it does in process. A failed read seeds nothing, is logged and counted as a read failure, and is retried on the next
-/// sweep; it never blocks a fire. Lite writes no resolution rows, so there a Warning whose incident cleared inside the
-/// window still seeds: the cost is a Critical delivered sooner than the cooldown would have, never a held one.</para>
+/// family's cooldown, and <see cref="Restore"/>s it when this process has not touched the key yet
+/// (<see cref="IsTouched"/>). The read returns null (nothing seeded) when no such fire exists, when a resolution row for
+/// the metric is as new as the fire or newer, and for a fire whose every channel failed (in process that tier is put
+/// back too). A muted fire counts, as it does in process. A failed read seeds nothing, is logged and counted as a read
+/// failure, and is retried on the next sweep; it never blocks a fire.</para>
+///
+/// <para><b>Only a Warning seeds (round 1 of #5715).</b> A seeded Critical can never create an escalation
+/// (<see cref="IsEscalation"/> is <c>tier &gt; highest</c>) and, since <see cref="Record"/> keeps the higher tier, it
+/// could only cancel the NEXT incident's Warning-to-Critical escalation. So the engine seeds nothing unless the history
+/// tier is Warning; a repeated Critical after a restart is a plain first fire, which the history-seeded email and
+/// webhook cooldowns already hold. Only rows from BEFORE this engine started count (the engine passes its start instant as an
+/// exclusive upper bound; a later row is this process's own and already in memory), and the seed for a key stops at the
+/// first of: a read succeeds, this process touches the key, or one cooldown has passed since the engine started.
+/// Lite writes no resolution rows, so there a Warning whose incident cleared inside the window still seeds: the cost is
+/// that the next incident's first Critical inside the cooldown goes out at once, as an escalation would.</para>
 ///
 /// <para><b>Opt-in.</b> One instance per alert family, held by the engine; the fire site calls
 /// <see cref="IsEscalation"/> before its cooldown test, <see cref="Record"/> when it fires and <see cref="Close"/>
@@ -69,6 +78,18 @@ public sealed class TierEscalation
 
     private readonly ConcurrentDictionary<string, AlertSeverityLevel> _highestDelivered = new(StringComparer.Ordinal);
 
+    /// <summary>The keys this process has <see cref="Record"/>ed or <see cref="Close"/>d (round 1 of #5715), which is
+    /// what tells "never seen" from "seen and finished": <see cref="Highest"/> is null for both.</summary>
+    private readonly ConcurrentDictionary<string, bool> _touched = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// True once this process has <see cref="Record"/>ed or <see cref="Close"/>d a tier for <paramref name="key"/>.
+    /// <c>Highest(key) is null</c> is not enough for the restart seed: it is also true after <see cref="Close"/>, and a
+    /// seed read that failed first and succeeded later would then bring history rows into an incident this process
+    /// already finished. The seed stops for a key once it is touched.
+    /// </summary>
+    public bool IsTouched(string key) => _touched.ContainsKey(key);
+
     /// <summary>
     /// True when <paramref name="tier"/> is higher than anything delivered for the open incident at
     /// <paramref name="key"/>. False when nothing was delivered yet (the ordinary first fire follows the normal
@@ -82,8 +103,11 @@ public sealed class TierEscalation
         _highestDelivered.TryGetValue(key, out var highest) ? highest : null;
 
     /// <summary>Records a fire at <paramref name="tier"/> for the open incident; the highest tier wins.</summary>
-    public void Record(string key, AlertSeverityLevel tier) =>
+    public void Record(string key, AlertSeverityLevel tier)
+    {
+        _touched[key] = true;
         _highestDelivered.AddOrUpdate(key, tier, (_, highest) => tier > highest ? tier : highest);
+    }
 
     /// <summary>
     /// Puts the tier back to <paramref name="prior"/> (the value <see cref="Highest"/> returned before the fire) after
@@ -105,5 +129,9 @@ public sealed class TierEscalation
     }
 
     /// <summary>Ends the incident at <paramref name="key"/>: the next fire starts from nothing delivered.</summary>
-    public void Close(string key) => _highestDelivered.TryRemove(key, out _);
+    public void Close(string key)
+    {
+        _touched[key] = true;
+        _highestDelivered.TryRemove(key, out _);
+    }
 }

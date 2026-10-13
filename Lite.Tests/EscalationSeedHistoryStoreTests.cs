@@ -62,8 +62,10 @@ VALUES ($1, $2, 'Srv', $3, 0, 0, $4, $5, $6, $7, $8)";
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private Task<AlertSeverityLevel?> ReadAsync(string serverId = "7", TimeSpan? window = null, bool countMuted = true) =>
-        _store.GetLastFiredTierAsync(serverId, Fire, Resolution, Now - (window ?? TimeSpan.FromMinutes(15)), countMuted);
+    private Task<AlertSeverityLevel?> ReadAsync(
+        string serverId = "7", TimeSpan? window = null, bool countMuted = true, DateTime? until = null) =>
+        _store.GetLastFiredTierAsync(
+            serverId, Fire, Resolution, Now - (window ?? TimeSpan.FromMinutes(15)), countMuted, untilUtc: until);
 
     [Fact]
     public void TheStoreOverridesTheInterfaceDefault()
@@ -111,6 +113,45 @@ VALUES ($1, $2, 'Srv', $3, 0, 0, $4, $5, $6, $7, $8)";
 
         await InsertAsync(Now.AddMinutes(-15), Fire, Warning);
         Assert.Equal(AlertSeverityLevel.Warning, await ReadAsync(window: TimeSpan.FromMinutes(15)));
+    }
+
+    [Fact]
+    public async Task TheUpperBound_IsExclusive_SoARowAtOrAfterTheEngineStartIsNotRead()
+    {
+        // #5715 round 1: a row at or after the engine start is this process's own, already in memory.
+        var start = Now.AddMinutes(-2);
+        await InsertAsync(Now.AddMinutes(-6), Fire, Warning);
+        await InsertAsync(start, Fire, Critical);
+        await InsertAsync(Now.AddMinutes(-1), Fire, Critical);
+
+        Assert.Equal(AlertSeverityLevel.Warning, await ReadAsync(until: start));
+        Assert.Equal(AlertSeverityLevel.Critical, await ReadAsync());
+
+        // Only rows at or after the bound exist: nothing is read.
+        Assert.Null(await ReadAsync(until: Now.AddMinutes(-6)));
+    }
+
+    [Fact]
+    public async Task TheUpperBound_IsMicrosecondPrecise_AndAMicrosecondBeforeIsStillRead()
+    {
+        var start = Now.AddMinutes(-2);
+        await InsertAsync(start.AddTicks(-10), Fire, Warning);
+        await InsertAsync(start, Fire, Critical);
+
+        // The engine's clock has a tick (100 ns) the column does not keep: the bound truncates to the microsecond.
+        Assert.Equal(AlertSeverityLevel.Warning, await ReadAsync(until: start.AddTicks(7)));
+        Assert.Equal(AlertSeverityLevel.Warning, await ReadAsync(until: start));
+        Assert.Equal(AlertSeverityLevel.Critical, await ReadAsync(until: start.AddTicks(10)));
+    }
+
+    [Fact]
+    public async Task AResolutionAfterTheUpperBound_StillClosesAFireBeforeIt()
+    {
+        var start = Now.AddMinutes(-2);
+        await InsertAsync(Now.AddMinutes(-6), Fire, Warning);
+        await InsertAsync(Now.AddMinutes(-1), Resolution, null, sent: false, type: "none");
+
+        Assert.Null(await ReadAsync(until: start));
     }
 
     [Fact]

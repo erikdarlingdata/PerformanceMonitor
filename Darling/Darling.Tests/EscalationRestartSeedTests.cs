@@ -193,6 +193,10 @@ public sealed class EscalationRestartSeedTests
         {
             Assert.Equal(expected[q.MetricName], q.ResolutionTitle);
             Assert.Equal(T0 - TimeSpan.FromMinutes(h.Settings.CooldownMinutes), q.SinceUtc);
+            /* Round 1: the engine was built at T0, and only rows before that instant are history. */
+            Assert.Equal(T0, q.UntilUtc);
+            /* Round 1: only Volume Free Space's Warning rows are tierless by design. */
+            Assert.Equal(q.MetricName == "Volume Free Space", q.TierlessRowIsWarning);
             Assert.Equal(AlertEngineTests.Harness.Snapshot().ServerKey, q.ServerKey);
             /* Only a muted Client Timeouts fire leaves the tier unrecorded in process. */
             Assert.Equal(q.MetricName != "Client Timeouts", q.CountMuted);
@@ -293,7 +297,7 @@ public sealed class EscalationRestartSeedTests
     }
 
     [Fact]
-    public async Task ASeedNeverOverwritesATierThisProcessAlreadyRecorded()
+    public async Task TheSeedStopsOnceThisProcessHasRecordedTheTier_SoALateSuccessNeverReachesIntoItsIncident()
     {
         var h = Armed("High CPU");
         var reads = 0;
@@ -304,30 +308,229 @@ public sealed class EscalationRestartSeedTests
                 throw new InvalidOperationException("transient");
             }
 
-            return Task.FromResult<AlertSeverityLevel?>(q.MetricName == "High CPU" ? AlertSeverityLevel.Critical : null);
+            return Task.FromResult<AlertSeverityLevel?>(q.MetricName == "High CPU" ? AlertSeverityLevel.Warning : null);
         };
         var engine = h.Build();
 
-        /* The first three reads fail (the CPU gate needs three samples to open), so the Warning fires in process; the
-           retry on the next sweep then reports a Critical. */
+        /* The first three reads fail (the CPU gate needs three samples to open), so the Warning fires in process. */
         Assert.Equal(1, await StepAsync("High CPU", h, engine, T0, Level.Warning, 0));
 
-        /* Had the seed overwritten the Warning with Critical, this Critical would not be an escalation. */
         Assert.Equal(1, await StepAsync("High CPU", h, engine, T0.AddMinutes(1), Level.Critical, 1));
         Assert.True(Last("High CPU", h).Context!.EscalationBypassesCooldown);
+
+        /* The process Recorded the Warning, so the fourth read never happens. */
+        Assert.Equal(3, reads);
+    }
+
+    /// <summary>A store whose only live member is the tier read, answering from rows it holds the way the real stores
+    /// do: the shared resolver, the exclusive upper bound, and the host's per-family tierless rule.</summary>
+    private sealed class RowsStore : IAlertHistoryStore
+    {
+        public List<(DateTime At, string Metric, string? Context)> Rows { get; } = new();
+        public List<(string Metric, AlertSeverityLevel? Fallback, DateTime? Until)> Asked { get; } = new();
+
+        public Task RecordAlertAsync(AlertHistoryRecord record) => Task.CompletedTask;
+        public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) => Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null) => Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) => Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
+
+        public Task<AlertSeverityLevel?> GetLastFiredTierAsync(
+            string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true,
+            AlertSeverityLevel? tierWhenRowCarriesNone = null, DateTime? untilUtc = null)
+        {
+            Asked.Add((metricName, tierWhenRowCarriesNone, untilUtc));
+            var newest = Rows
+                .Where(r => r.Metric == metricName && r.At >= sinceUtc && (untilUtc is null || r.At < untilUtc))
+                .OrderByDescending(r => r.At)
+                .Cast<(DateTime At, string Metric, string? Context)?>()
+                .FirstOrDefault();
+            return Task.FromResult(newest is { } row
+                ? AlertHistoryEscalationSeed.Resolve(row.At, row.Context, null, tierWhenRowCarriesNone)
+                : null);
+        }
     }
 
     [Fact]
-    public void BothRealStoresOverrideTheReader_NotTheInterfaceDefault()
+    public async Task OnLite_WithNoResolutionRows_ACriticalFromAClosedIncident_DoesNotCancelTheNextIncidentsEscalation()
     {
-        foreach (var type in new[] { typeof(PerformanceMonitor.Darling.Service.PgAlertHistoryStore) })
+        /* Lite writes no resolution rows, so the Critical of an incident that closed stays readable for a whole cooldown.
+           Volume Free Space closes only on a transition this process saw, so the seed is what the next incident meets. */
+        var h = Armed("Volume Free Space");
+        var before = h.Build();
+        Assert.Equal(1, await StepAsync("Volume Free Space", h, before, T0, Level.Critical, 0));
+
+        /* Restart a minute later; the disk recovered while the service was down, and the history has no resolution row. */
+        h.Now = T0.AddMinutes(1);
+        h.EscalationSeedReader = HistoryOf(h);
+        var after = h.Build();
+        await StepAsync("Volume Free Space", h, after, T0.AddMinutes(1), Level.Clear, 1);
+
+        /* A fresh incident past the cooldown: Warning, then Critical a minute on. */
+        Assert.Equal(1, await StepAsync("Volume Free Space", h, after, T0.AddMinutes(7), Level.Warning, 2));
+        /* Volume Free Space persists a tier only for a Critical fire: its Warning has none. */
+        Assert.NotEqual(AlertSeverityLevel.Critical, Last("Volume Free Space", h).Severity);
+        Assert.Equal(1, await StepAsync("Volume Free Space", h, after, T0.AddMinutes(8), Level.Critical, 3));
+        Assert.Equal(AlertSeverityLevel.Critical, Last("Volume Free Space", h).Severity);
+        Assert.True(Last("Volume Free Space", h).Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
+    public async Task ATierlessRow_SeedsNothing_ExceptVolumeFreeSpacesWhichIsAWarning()
+    {
+        var h = new AlertEngineTests.Harness { Now = T0 };
+        var store = new RowsStore();
+        foreach (var metric in TierEscalation.OptedInMetrics)
         {
-            var map = type.GetInterfaceMap(typeof(IAlertHistoryStore));
-            var method = typeof(IAlertHistoryStore).GetMethod(nameof(IAlertHistoryStore.GetLastFiredTierAsync))!;
-            var index = Array.IndexOf(map.InterfaceMethods, method);
-            Assert.True(index >= 0);
-            Assert.Equal(type, map.TargetMethods[index].DeclaringType);
+            store.Rows.Add((T0.AddMinutes(-1), metric, null));
         }
+
+        h.EscalationSeedReader = EscalationSeed.ReaderFor(store);
+        await h.Build().EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        Assert.Equal(6, store.Asked.Count);
+        /* The fallback comes from the engine's family table, not from the metric name: "Deadlocks Detected" and
+           "Poison Wait" are Critical by name, and a tierless row there used to seed Critical. */
+        Assert.All(store.Asked, a => Assert.Equal(a.Metric == "Volume Free Space" ? AlertSeverityLevel.Warning : null, a.Fallback));
+        Assert.All(store.Asked, a => Assert.Equal(T0, a.Until));
+        Assert.Null(AlertHistoryEscalationSeed.Resolve(T0.AddMinutes(-1), null, null, null));
+        Assert.Equal(AlertSeverityLevel.Warning, AlertHistoryEscalationSeed.Resolve(T0.AddMinutes(-1), null, null, AlertSeverityLevel.Warning));
+    }
+
+    [Fact]
+    public async Task ATierlessVolumeFreeSpaceRow_StillSeedsAWarning_ThroughTheReader()
+    {
+        var h = Armed("Volume Free Space");
+        var store = new RowsStore();
+        store.Rows.Add((T0.AddMinutes(-1), "Volume Free Space", null));
+        h.EscalationSeedReader = EscalationSeed.ReaderFor(store);
+        var engine = h.Build();
+
+        Assert.Equal(1, await StepAsync("Volume Free Space", h, engine, T0.AddMinutes(1), Level.Critical, 0));
+        Assert.True(Last("Volume Free Space", h).Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
+    public async Task ARowWrittenAfterTheEngineStarted_IsIgnored()
+    {
+        var h = Armed("High CPU");
+        var store = new RowsStore();
+        h.EscalationSeedReader = EscalationSeed.ReaderFor(store);
+        var engine = h.Build();
+
+        /* A Warning row at the start instant or later is this process's own, already in memory (or, here, not a row the
+           seed may read): the Critical is a plain first fire. */
+        store.Rows.Add((T0, "High CPU", "{\"Severity\":\"Warning\"}"));
+        store.Rows.Add((T0.AddSeconds(30), "High CPU", "{\"Severity\":\"Warning\"}"));
+
+        Assert.Equal(1, await StepAsync("High CPU", h, engine, T0.AddMinutes(1), Level.Critical, 0));
+        Assert.False(Last("High CPU", h).Context!.EscalationBypassesCooldown);
+
+        /* And a Warning row from BEFORE the start is history. */
+        var h2 = Armed("High CPU");
+        var store2 = new RowsStore();
+        store2.Rows.Add((T0.AddSeconds(-1), "High CPU", "{\"Severity\":\"Warning\"}"));
+        h2.EscalationSeedReader = EscalationSeed.ReaderFor(store2);
+        Assert.Equal(1, await StepAsync("High CPU", h2, h2.Build(), T0.AddMinutes(1), Level.Critical, 0));
+        Assert.True(Last("High CPU", h2).Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
+    public async Task ARead_ThatFailsAtFirst_ButSucceedsAfterThisProcessClosedAnIncident_SeedsNothing()
+    {
+        /* Deadlocks Detected closes its incident on every sweep that has none, so the first healthy sweep after a restart is
+           this process finishing one. */
+        var h = new AlertEngineTests.Harness { Now = T0 };
+        h.Settings.DeadlockEnabled = true;
+        h.Settings.DeadlockRateThresholds = new DeadlockRateThresholds(7.0, 31.0);
+        var reads = 0;
+        h.EscalationSeedReader = (q, _) =>
+        {
+            if (q.MetricName != "Deadlocks Detected")
+            {
+                return Task.FromResult<AlertSeverityLevel?>(null);
+            }
+
+            return ++reads == 1
+                ? throw new InvalidOperationException("history is down")
+                : Task.FromResult<AlertSeverityLevel?>(AlertSeverityLevel.Warning);
+        };
+        var engine = h.Build();
+
+        /* Sweep 1: the read fails and the (empty) incident is closed. Sweep 2: the store is back, and its Warning is from
+           before the incident this process just finished. */
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        h.Now = T0.AddMinutes(1);
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        Assert.Equal(1, reads);
+
+        /* A fresh incident that is Critical from its first evaluation is a plain first fire. */
+        h.Now = T0.AddMinutes(2);
+        for (var i = 0; i < 40; i++)
+        {
+            h.Adapter.Deadlocks.Add(AlertEngineTests.DeadlockRow());
+        }
+
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        var fire = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+        Assert.Equal(AlertSeverityLevel.Critical, fire.Severity);
+        Assert.False(fire.Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
+    public void TheTierEscalation_RemembersThatTheProcessRecordedOrClosedAKey_WhichHighestCannotSay()
+    {
+        var escalation = new TierEscalation();
+        Assert.False(escalation.IsTouched("1"));
+
+        escalation.Restore("1", AlertSeverityLevel.Warning);
+        Assert.False(escalation.IsTouched("1"));
+
+        escalation.Record("2", AlertSeverityLevel.Warning);
+        Assert.True(escalation.IsTouched("2"));
+
+        escalation.Close("3");
+        Assert.True(escalation.IsTouched("3"));
+        Assert.Null(escalation.Highest("3"));
+        Assert.False(escalation.IsTouched("4"));
+    }
+
+    [Fact]
+    public async Task WithTheStoreUnreachable_TheReadsStopAfterOneCooldown()
+    {
+        var h = new AlertEngineTests.Harness { Now = T0 };
+        var calls = new List<(string Metric, DateTime At)>();
+        h.EscalationSeedReader = (q, _) =>
+        {
+            calls.Add((q.MetricName, h.Now));
+            throw new InvalidOperationException("history is down");
+        };
+        var engine = h.Build();
+
+        /* A sweep every 30 s for twice the 5-minute cooldown. */
+        for (var i = 0; i < 20; i++)
+        {
+            h.Now = T0.AddSeconds(30 * i);
+            await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        }
+
+        Assert.NotEmpty(calls);
+        Assert.All(calls, c => Assert.True(c.At < T0.AddMinutes(h.Settings.CooldownMinutes), "no read once a cooldown has passed since the start"));
+        /* Ten sweeps fall inside the cooldown; a family nothing in this process touches is retried on every one of them. */
+        Assert.Contains(calls.GroupBy(c => c.Metric), g => g.Count() == 10);
+        Assert.All(calls.GroupBy(c => c.Metric), g => Assert.InRange(g.Count(), 1, 10));
+    }
+
+    [Fact]
+    public void ThePgStoreOverridesTheReader_NotTheInterfaceDefault()
+    {
+        /* Darling's half; Lite's store is pinned in Lite.Tests (EscalationSeedHistoryStoreTests.TheStoreOverridesTheInterfaceDefault). */
+        var type = typeof(PerformanceMonitor.Darling.Service.PgAlertHistoryStore);
+        var map = type.GetInterfaceMap(typeof(IAlertHistoryStore));
+        var method = typeof(IAlertHistoryStore).GetMethod(nameof(IAlertHistoryStore.GetLastFiredTierAsync))!;
+        var index = Array.IndexOf(map.InterfaceMethods, method);
+        Assert.True(index >= 0);
+        Assert.Equal(type, map.TargetMethods[index].DeclaringType);
     }
 
     [Fact]
