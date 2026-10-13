@@ -272,6 +272,8 @@ public sealed class ExternalAlertDrain
             ServerName = fired.ServerName,
             ServerId = int.TryParse(fired.ServerKey, NumberStyles.None, CultureInfo.InvariantCulture, out var keptId) ? keptId : null,
             MetricName = metric,
+            /* A mute rule can name the source (#5654): it silences this source's alerts and no other source's. */
+            ExternalSource = row.SourceName,
         });
 
         var context = new AlertContext { External = new AlertExternalOrigin(row.SourceName, row.AlertKey, row.PendingId) };
