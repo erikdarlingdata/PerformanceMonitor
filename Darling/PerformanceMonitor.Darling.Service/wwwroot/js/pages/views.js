@@ -25,7 +25,7 @@
  * descriptions) reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
-import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, fmtNum } from "../util.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum } from "../util.js";
 import { rollingHoursPicker } from "../page-range.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
 import { orderServers } from "../server-order.js";
@@ -896,7 +896,7 @@ function renderAlertHeaderCell(cell, opts) {
         )),
         /* detail_text (#4368): the same <pre class="code"> block triage.js's alertFields uses — through el()'s
            text path (textContent), never innerHTML, since this is alert/query text the server only echoes. */
-        a.detail_text ? el("pre", { class: "code", text: a.detail_text }) : null,
+        a.detail_text ? el("pre", { class: "code", text: localizeAlertDetail(a.detail_text, a.newest_sample) }) : null,
       ]
     : emptyStrip("No matching alert history row for this link.");
   return el("div", { class: "notebook-panel panel card" }, [

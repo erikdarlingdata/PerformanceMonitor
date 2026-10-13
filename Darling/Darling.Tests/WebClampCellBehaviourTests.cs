@@ -101,6 +101,43 @@ public sealed class WebClampCellBehaviourTests
     }
 
     [Fact]
+    public void EachAlertSweepAndRegressionShape_IsLocalizedInAnOptedInCell_AndPrintedAsWrittenElsewhere()
+    {
+        // #5644 W20 (H2): "until 2026-10-11 12:48:52Z", "service started 2026-10-12T23:01:13.7792072Z", "Failed At: 2026-10-12 07:00:00Z".
+        var rows = Run().GetProperty("shapes").EnumerateArray().ToList();
+        Assert.Equal(6, rows.Count);
+        var sqlZ = "SELECT * FROM t WHERE d = '2026-01-01 00:00:00Z'";
+        foreach (var r in rows)
+        {
+            Assert.Equal(sqlZ, r.GetProperty("sql").GetString());
+            Assert.Equal(r.GetProperty("raw").GetString(), r.GetProperty("notOpted").GetString());
+        }
+
+        foreach (var r in rows.Take(5))
+        {
+            var expected = r.GetProperty("expected").GetString();
+            Assert.Equal(expected, r.GetProperty("opted").GetString());
+            Assert.Equal(expected, r.GetProperty("clamped").GetString());
+            Assert.NotEqual(r.GetProperty("raw").GetString(), r.GetProperty("opted").GetString());
+        }
+
+        // A server's own wall clock (no Z, no UTC) is never shifted, even in an opted-in cell.
+        Assert.Equal("start time 2026-09-27 21:32:43 (server clock)", rows[5].GetProperty("opted").GetString());
+    }
+
+    [Fact]
+    public void TheFleetSweepReasonsAndNotes_AreOptedIn_AndTheAlertPagesLocalizeTheirBodies()
+    {
+        var sweeps = Wwwroot("js", "pages", "sweeps.js");
+        Assert.Equal(2, Regex.Matches(sweeps, "key: \"reason\", label: \"Reason\", wrap: true, localizeText: true").Count);
+        Assert.Contains("el(\"li\", { text: localizeIsoText(String(n)) })", sweeps, StringComparison.Ordinal);
+        foreach (var page in new[] { "alerts.js", "triage.js", "views.js" })
+        {
+            Assert.Contains("localizeAlertDetail(", Wwwroot("js", "pages", page), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void TheCollectionHealthMessageColumns_AreOptedIn_AndTheCustomViewAndDefaultTraceTextColumnsAreNot()
     {
         var tabs = Wwwroot("js", "pages", "server-tabs.js");

@@ -188,17 +188,48 @@ export function metricNote(text) {
 }
 
 /**
- * Rewrites every ISO-8601 instant inside a sentence (a server message, a status line) into the grids' local-time format
- * (#5644 W20): "stored at 2026-10-09T14:37:35.0158630" and "since 2026-10-12T19:18:38Z" printed raw UTC beside grids in local
- * time. A stamp with no zone is UTC, as parseUtc reads it everywhere. Text with no such stamp, and a non-string, come back as given.
+ * Rewrites every UTC instant inside a sentence (a server message, a status line, a note, an alert body) into the grids'
+ * local-time format (#5644 W20): "stored at 2026-10-09T14:37:35.0158630", "since 2026-10-12T19:18:38Z", "until
+ * 2026-10-11 12:48:52Z" (the alert text's space-separated form) and "2026-10-12 23:13:00 UTC" printed raw UTC beside grids
+ * in local time. The separator is a "T" or a space and the fraction is 0-7 digits. A "T" stamp with no zone is UTC, as
+ * parseUtc reads it everywhere; a space-separated one is rewritten ONLY with a "Z" or " UTC" after it, because the same
+ * shape without one is a monitored server's own wall clock ("2026-09-27 21:32:43 (server clock)") and shifting it would
+ * state the wrong hour. Text with no such stamp, and a non-string, come back as given.
  */
 export function localizeIsoText(text) {
   if (typeof text !== "string") return text;
-  return text.replace(/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d)?/g, (m) => {
-    const d = parseUtc(m);
+  return text.replace(/(\d{4}-\d\d-\d\d)([T ])(\d\d:\d\d:\d\d)(?:\.(\d{1,7}))?(Z(?![A-Za-z])| UTC(?![A-Za-z])|[+-]\d\d:?\d\d)?/g, (m, date, sep, time, frac, zone) => {
+    if (sep === " " && !zone) return m;
+    const iso = date + "T" + time + (frac ? "." + frac.slice(0, 3).padEnd(3, "0") : "") + (zone === " UTC" ? "Z" : zone || "");
+    const d = parseUtc(iso);
     return d ? d.toLocaleString() : m;
   });
 }
+
+/**
+ * An alert's stored body text in the grids' local-time format (#5644 W20, Alert History and Triage). The instants the alert
+ * builders write ("Incident Since: 2026-10-12 23:13:00Z", "Failed At: 2026-10-12 07:00:00Z", and the Started, Snapshot, From,
+ * To and Window lines) go through localizeIsoText. Only those labelled lines do: the same body carries "Blocked Query", "Query"
+ * and "Victim SQL" lines, and a literal such as '2026-01-01 00:00:00Z' inside a statement is data. The sample-age line ("Newest blocked process sample: 23:12:45 UTC, 5m 20s old") carries a time of day
+ * with no date, which cannot be shifted safely alone, so it takes its date from the row's own `newest_sample.instant_utc`
+ * (the carrier the engine persisted when the alert fired) and only when that instant's UTC time of day IS the one written
+ * on the line. The stored and emailed text is not changed (the same line feeds email, webhooks and Lite's windows); only
+ * what this page shows is. A copy of the text for the clipboard or CSV keeps the stored form.
+ */
+export function localizeAlertDetail(text, sample) {
+  if (typeof text !== "string") return text;
+  let out = text.replace(/^(\s*(?:Incident Since|Started|Failed At|Snapshot|From|To|Window): )(.*)$/gm,
+    (m, lead, value) => lead + localizeIsoText(value));
+  const at = sample && typeof sample.instant_utc === "string" ? parseUtc(sample.instant_utc) : null;
+  if (at) {
+    const two = (n) => String(n).padStart(2, "0");
+    const clock = two(at.getUTCHours()) + ":" + two(at.getUTCMinutes()) + ":" + two(at.getUTCSeconds());
+    out = out.replace(/^(\s*(?:Newest .+? sample|.+? reading)): (\d\d:\d\d:\d\d) UTC(?=, .* old\s*$)/gm,
+      (m, lead, time) => (time === clock ? lead + ": " + at.toLocaleString() : m));
+  }
+  return out;
+}
+
 /**
  * The two collectors the blocking reads draw from (#5244): the blocked-process-report XE session when it holds a row in the window
  * for the chosen databases, and the DMV snapshot only when it holds none. The MCP answers name the one that answered in `source`;
