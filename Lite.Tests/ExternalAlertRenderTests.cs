@@ -197,6 +197,46 @@ public class ExternalAlertRenderTests
         Assert.DoesNotContain("External", builtIn.GetProperty("summary").GetString(), StringComparison.Ordinal);
     }
 
+    /* ---------------- PagerDuty and email ---------------- */
+
+    [Fact]
+    public void PagerDuty_AnExternalAlertSummary_NamesTheSource_AndABuiltInSummaryDoesNot()
+    {
+        var external = JsonDocument.Parse(WebhookAlertService.BuildPagerDutyPayload(
+            "External:billing:queue-depth", "PROD01", "7", "", Branding, "rk",
+            context: External(), displayName: "Queue depth")).RootElement;
+        var resolve = JsonDocument.Parse(WebhookAlertService.BuildPagerDutyPayload(
+            "External:billing:queue-depth Resolved", "PROD01", "", "", Branding, "rk",
+            context: External(), displayName: "Queue depth", autoResolve: true, resolveIncident: true)).RootElement;
+        var builtIn = JsonDocument.Parse(WebhookAlertService.BuildPagerDutyPayload(
+            "Server Unreachable", "PROD01", "down", "", Branding, "rk", displayName: "Server Unreachable")).RootElement;
+
+        Assert.StartsWith("[External: billing] Queue depth on PROD01", Summary(external), StringComparison.Ordinal);
+        Assert.StartsWith("[External: billing] Queue depth on PROD01", Summary(resolve), StringComparison.Ordinal);
+        Assert.Equal("resolve", resolve.GetProperty("event_action").GetString());
+        Assert.StartsWith("Server Unreachable on PROD01", Summary(builtIn), StringComparison.Ordinal);
+        Assert.DoesNotContain("External", Summary(builtIn), StringComparison.Ordinal);
+        /* The mark is in the title only: the dedup key stays on the metric name. */
+        Assert.Equal("PROD01:External:billing:queue-depth", external.GetProperty("dedup_key").GetString());
+
+        static string Summary(JsonElement payload) => payload.GetProperty("payload").GetProperty("summary").GetString()!;
+    }
+
+    [Fact]
+    public void Email_AnExternalAlertBodyTitle_NamesTheSource_AndABuiltInBodyDoesNot()
+    {
+        var (externalHtml, externalPlain) = EmailTemplateBuilder.BuildAlertEmail(
+            "External:billing:queue-depth", "PROD01", "7", "", 15, Branding,
+            context: External(), displayName: "Queue depth");
+        var (builtInHtml, builtInPlain) = EmailTemplateBuilder.BuildAlertEmail(
+            "Server Unreachable", "PROD01", "down", "", 15, Branding, displayName: "Server Unreachable");
+
+        Assert.Contains("[External: billing] Queue depth", externalHtml, StringComparison.Ordinal);
+        Assert.Contains("[External: billing] Queue depth", externalPlain, StringComparison.Ordinal);
+        Assert.DoesNotContain("External", builtInHtml, StringComparison.Ordinal);
+        Assert.DoesNotContain("External", builtInPlain, StringComparison.Ordinal);
+    }
+
     /* ---------------- The escapes themselves ---------------- */
 
     [Theory]

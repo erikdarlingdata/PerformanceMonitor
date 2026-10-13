@@ -2768,7 +2768,7 @@ public class WebhookAlertService
         var severity = MapToPagerDutySeverity(badgeText);
         /* The PD summary (the incident title) shows the human name when present; severity above and the
            dedup_key below stay on the immutable metric name so correlation/dedup are rename-safe. */
-        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
+        var titleName = ExternalTitle(string.IsNullOrEmpty(displayName) ? metricName : displayName, context);
         var utcNow = nowUtc ?? DateTime.UtcNow;
 
         /* Auto-resolve is opt-in and PagerDuty-only: the closing edge of an edge-type pair (the
