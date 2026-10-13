@@ -111,6 +111,9 @@ public static class DarlingManagedRoles
     /// </summary>
     public const string AlertSourceRoleMarker = "darling-alert-source";
 
+    /// <summary>The number of connections one external alert source login may hold at once (#5654), set on every start. A login cannot raise its own limit.</summary>
+    public const int AlertSourceConnectionLimit = 5;
+
     /// <summary>The argument types of <c>config.submit_external_alert</c> (#5654), in order. The one place the signature is written, so the grant and the revoke cannot drift from the function.</summary>
     internal const string ExternalAlertSubmitSignature = "text, text, text, text, text, text, double precision";
 
@@ -1641,7 +1644,7 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLeg
 --     Then, for each registered source login that carries the '{AlertSourceRoleMarker}' marker: every attribute that widens
 --     a role off, NOINHERIT, every role membership revoked (a source holds none), and exactly three grants -- CONNECT on this
 --     database, USAGE on the {config} schema, EXECUTE on the 10b function. A registry row naming a role with no
---     marker, or no role at all, is skipped with a WARNING.
+--     marker, or no role at all, is skipped with a WARNING; a skipped role that exists loses EXECUTE on the 10b function.
 REVOKE ALL ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
    FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
 GRANT SELECT ON {config}.external_alert_source, {config}.external_alert_pending, {config}.external_alert_state
@@ -1741,13 +1744,15 @@ END $do$;
     /// <list type="bullet">
     /// <item>owned by whoever runs it (the store owner, which holds the INSERT and the row lock the body needs);</item>
     /// <item><c>SET search_path = pg_catalog, pg_temp</c>, pg_temp last, and every table named by its schema, so no
-    /// temporary object a caller creates can stand in for a table or for <c>now()</c>;</item>
+    /// temporary object a caller creates can stand in for a table or for <c>clock_timestamp()</c>;</item>
     /// <item>no dynamic SQL: the only values that reach a statement are the seven parameters, bound as parameters;</item>
     /// <item>the source is <c>session_user</c> looked up in the registry (a non-superuser cannot change it), never an
     /// argument; a login with no enabled registry row gets SQLSTATE <c>DL403</c>;</item>
     /// <item>a bad kind, severity, key or an over-long text gets <c>DL400</c>; a source over its per-minute rate or its
-    /// waiting-row cap gets <c>DL429</c> with a HINT. The registry row is locked <c>FOR UPDATE</c>, so the count and
-    /// the insert are atomic for one source. A clear without a severity is stored as 'warning'; a fire needs one;</item>
+    /// waiting-row cap gets <c>DL429</c> with a HINT. A value that is NaN or infinite gets <c>DL400</c>. The registry row is
+    /// locked <c>FOR NO KEY UPDATE</c>, so the count and the insert are atomic for one source while the service's writes to
+    /// the state table, whose foreign key takes only a key share on that row, are not held up by an open transaction.
+    /// The rate window, <c>submitted_at</c> and <c>expires_at</c> read <c>clock_timestamp()</c>, the time of the call. A clear without a severity is stored as 'warning'; a fire needs one;</item>
     /// <item>carriage returns and line feeds in the title, detail and server name become spaces, so a text cannot forge
     /// lines in the mute pre-fill that quotes it.</item>
     /// </list>
@@ -1779,7 +1784,7 @@ BEGIN
    FROM {config}.external_alert_source AS s
    WHERE s.role_name = session_user::text
      AND s.enabled
-   FOR UPDATE OF s;
+   FOR NO KEY UPDATE OF s;
 
    IF NOT FOUND THEN
       RAISE EXCEPTION 'This login is not a registered external alert source.' USING ERRCODE = 'DL403';
@@ -1805,9 +1810,12 @@ BEGIN
    IF char_length(p_server_name) > 128 THEN
       RAISE EXCEPTION 'server_name is longer than 128 characters.' USING ERRCODE = 'DL400';
    END IF;
+   IF p_value IN ('NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision) THEN
+      RAISE EXCEPTION 'value must be a finite number.' USING ERRCODE = 'DL400';
+   END IF;
 
    IF (SELECT count(*) FROM {config}.external_alert_pending AS p
-       WHERE p.source_id = v_source_id AND p.submitted_at > now() - interval '1 minute') >= v_max_per_minute THEN
+       WHERE p.source_id = v_source_id AND p.submitted_at > clock_timestamp() - interval '1 minute') >= v_max_per_minute THEN
       RAISE EXCEPTION 'This source has reached its limit of % alerts per minute.', v_max_per_minute
          USING ERRCODE = 'DL429', HINT = 'Send fewer alerts, or ask the Darling operator to raise max_per_minute for this source.';
    END IF;
@@ -1818,13 +1826,13 @@ BEGIN
    END IF;
 
    INSERT INTO {config}.external_alert_pending
-      (source_id, kind, alert_key, severity, title, detail, server_name, value, expires_at)
+      (source_id, kind, alert_key, severity, title, detail, server_name, value, submitted_at, expires_at)
    VALUES
       (v_source_id, p_kind, p_alert_key, v_severity,
        regexp_replace(p_title, '[\r\n]+', ' ', 'g'),
        regexp_replace(p_detail, '[\r\n]+', ' ', 'g'),
        regexp_replace(p_server_name, '[\r\n]+', ' ', 'g'),
-       p_value, now() + interval '15 minutes')
+       p_value, clock_timestamp(), clock_timestamp() + interval '15 minutes')
    RETURNING pending_id INTO v_pending_id;
 
    RETURN v_pending_id;
@@ -1835,7 +1843,7 @@ REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignat
     /// <summary>
     /// The block (#5654, section 10c) that re-asserts the grants of every registered external alert source login, on
     /// every start. A login is touched only when the registry names it AND the role exists AND it carries
-    /// <see cref="AlertSourceRoleMarker"/>. Per role: LOGIN, every widening attribute off, NOINHERIT, every
+    /// <see cref="AlertSourceRoleMarker"/>. Per role: LOGIN, every widening attribute off, NOINHERIT, CONNECTION LIMIT 5, every
     /// membership revoked (GRANTED BY the recorded grantor, CASCADE: section 11's rule), then CONNECT on the current
     /// database, USAGE on the config schema and EXECUTE on the submit function, nothing else (the function is also revoked from admin, viewer and mcp, and a table or sequence privilege
     /// found on the login in the config or collect schema is revoked first). Kept out of the statements the batch
@@ -1856,10 +1864,13 @@ BEGIN
    LOOP
       IF source_login.role_oid IS NULL OR NOT source_login.marked THEN
          RAISE WARNING 'External alert source login ""%"" was skipped: it does not exist or does not carry the ''{AlertSourceRoleMarker}'' marker comment.', source_login.role_name;
+         IF source_login.role_oid IS NOT NULL THEN
+            EXECUTE format('REVOKE ALL ON FUNCTION {config}.submit_external_alert({ExternalAlertSubmitSignature}) FROM %I', source_login.role_name);
+         END IF;
          CONTINUE;
       END IF;
 
-      EXECUTE format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS NOINHERIT', source_login.role_name);
+      EXECUTE format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS NOINHERIT CONNECTION LIMIT {AlertSourceConnectionLimit}', source_login.role_name);
 
       FOR membership IN
          SELECT g.rolname AS granted, b.rolname AS grantor

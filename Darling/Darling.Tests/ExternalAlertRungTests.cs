@@ -78,11 +78,15 @@ public sealed class ExternalAlertRungTests
         Assert.Contains("submitted_at timestamptz NOT NULL DEFAULT now()", sql, StringComparison.Ordinal);
         Assert.Contains("source_name ~ '^[a-z][a-z0-9_]{1,30}$'", sql, StringComparison.Ordinal);
 
-        /* Privileges are provisioning's (re-asserted on every start); the rung moves and grants nothing. */
+        /* The rung moves nothing and grants nothing; its one privilege statement is the guarded revoke of write privileges
+           from every non-owner grantee (inside a DO block, so no line starts with the verb). */
         foreach (var verb in new[] { "UPDATE", "DELETE", "INSERT", "GRANT", "REVOKE", "TRUNCATE", "DROP" })
         {
             Assert.DoesNotMatch(@"(?m)^\s*" + verb + @"\b", sql);
         }
+
+        Assert.Single(Regex.Matches(sql, @"EXECUTE pg_catalog\.format\('REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON %s FROM %s'"));
+        Assert.DoesNotContain("GRANT", sql, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -23,10 +23,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// removed in between. The registry column is <c>external_source</c> on the mute rule,
 /// not <c>source</c>: Lite's alert history view already has a <c>source</c> column that means live or archive.</para>
 ///
-/// <para><b>Privileges are not here.</b> The <c>config</c> schema's blanket SELECT and default privileges cover these
-/// tables for the viewer roles, as they cover every plain <c>config</c> table. Taking INSERT, UPDATE and DELETE away from
-/// the <c>admin</c> role, and giving a source role its one EXECUTE, belong to the provisioning batch that runs on every
-/// start, so they are re-asserted on every start and reach a store that was provisioned before this rung.</para>
+/// <para><b>Write privileges are taken away where the tables are made.</b> The <c>config</c> schema's default privileges
+/// would hand the <c>admin</c> role INSERT, UPDATE and DELETE on tables the rung creates, and on a store the operator
+/// provisions with <c>tools/provision-roles.sql</c> those defaults are in place before the rung runs. The last statement
+/// of <see cref="CreateSql"/> revokes every write privilege (INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER) on the
+/// three tables from every grantee other than the owner, so no role holds one between the rung and the next run of the
+/// provisioning script. The <c>config</c> schema's SELECT stays for the viewer roles, as it does for every plain
+/// <c>config</c> table. Giving a source role its one EXECUTE, and re-asserting these revokes, belong to the provisioning
+/// batch that runs on every start, so they also reach a store that was provisioned before this rung.</para>
 ///
 /// <para>The foreign keys cascade, so removing a source removes its queue and its firing state. The history it already
 /// wrote stays in <c>config.config_alert_log</c>, which carries no foreign key to the registry.</para>
@@ -107,5 +111,23 @@ CREATE TABLE IF NOT EXISTS config.external_alert_state
 );
 
 ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS external_source text;
+
+DO $do$
+DECLARE
+   held record;
+BEGIN
+   FOR held IN
+      SELECT c.oid::regclass::text AS table_name,
+             CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(r.rolname) END AS grantee_name
+      FROM pg_catalog.pg_class AS c
+      CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
+      LEFT JOIN pg_catalog.pg_roles AS r ON r.oid = a.grantee
+      WHERE c.oid IN ('config.external_alert_source'::regclass, 'config.external_alert_pending'::regclass, 'config.external_alert_state'::regclass)
+        AND a.grantee <> c.relowner
+        AND a.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER')
+   LOOP
+      EXECUTE pg_catalog.format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON %s FROM %s', held.table_name, held.grantee_name);
+   END LOOP;
+END $do$;
 ";
 }

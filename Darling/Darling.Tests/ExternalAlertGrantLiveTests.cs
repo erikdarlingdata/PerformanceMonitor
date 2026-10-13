@@ -44,6 +44,8 @@ public sealed class ExternalAlertGrantLiveTests
 
     private static readonly string RoleUnmarked = "ea_plain_" + RunSuffix;
 
+    private static readonly string RoleDefault = "ea_def_" + RunSuffix;
+
     private const string SourcePassword = "ExtAlertSrcPw0123456789abcdef01";
 
     private static string RequireLivePostgres()
@@ -158,11 +160,11 @@ DO $do$
 DECLARE
    r text;
 BEGIN
-   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{RoleA}', '{RoleB}', '{RoleUnmarked}') LOOP
+   FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp', '{RoleA}', '{RoleB}', '{RoleUnmarked}', '{RoleDefault}') LOOP
       EXECUTE format('DROP OWNED BY %I', r);
       EXECUTE format('DROP ROLE %I', r);
    END LOOP;
-END $do$", ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked], cleanupCt));
+END $do$", ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked, RoleDefault], cleanupCt));
 
     [Fact]
     public async Task ASourceLogin_CanExecuteTheFunction_AndHoldsNoOtherPrivilege()
@@ -519,6 +521,287 @@ SET search_path = pg_temp, config, public", ct);
         }
     }
 
+    /// <summary>NaN, Infinity and -Infinity are refused with DL400 (they cannot be written as JSON), and a finite value passes. Run against the managed copy.</summary>
+    [Fact]
+    public async Task ANonFiniteValue_IsRefusedWithDl400_AndWritesNothing()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await SetUpAsync(owner, scratch, ct);
+            await using var sourceA = await LoginAsync(scratch, RoleA, SourcePassword, ct);
+
+            foreach (var value in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+            {
+                var refused = await Assert.ThrowsAsync<PostgresException>(() => SubmitAsync(sourceA, ct, value: value));
+                Assert.Equal("DL400", refused.SqlState);
+            }
+
+            Assert.Equal(0, await ScalarAsync<long>(owner, "SELECT count(*) FROM config.external_alert_pending", ct));
+            Assert.True(await SubmitAsync(sourceA, ct, value: -1.5e300) > 0);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// A source that leaves a transaction open after a submit still serializes its own next submit (the registry row is
+    /// locked), but the service's write to the state table, whose foreign key takes a key share on that row, does not wait.
+    /// </summary>
+    [Fact]
+    public async Task ASourceHoldingAnOpenTransaction_DoesNotHoldUpAStateInsert_ButStillSerializesItsOwnSubmits()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            var (idA, _) = await SetUpAsync(owner, scratch, ct);
+            await using var holder = await LoginAsync(scratch, RoleA, SourcePassword, ct);
+            await using var second = await LoginAsync(scratch, RoleA, SourcePassword, ct);
+
+            await using (var open = await holder.BeginTransactionAsync(ct))
+            {
+                await SubmitAsync(holder, ct, key: "held");
+
+                /* The state insert (what the drain's first fire for a key does) returns inside the bound. */
+                await using var stateWriter = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Pooling = false }.ConnectionString);
+                await stateWriter.OpenAsync(ct);
+                await ExecAsync(stateWriter, "SET lock_timeout = '3s'", ct);
+                await ExecAsync(stateWriter,
+                    $"INSERT INTO config.external_alert_state (source_id, alert_key, server_id, firing) VALUES ({idA}, 'held', 0, true)", ct);
+
+                /* The same source's next submit waits on the open one. */
+                await ExecAsync(second, "SET lock_timeout = '500ms'", ct);
+                var waited = await Assert.ThrowsAsync<PostgresException>(() => SubmitAsync(second, ct, key: "next"));
+                Assert.Equal("55P03", waited.SqlState);
+
+                await open.RollbackAsync(ct);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>The rate window, <c>submitted_at</c> and <c>expires_at</c> are read from the clock at the call, not from the start of the caller's transaction.</summary>
+    [Fact]
+    public async Task ASubmitFromAnEarlierTransaction_IsStampedAtSubmitTime()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await SetUpAsync(owner, scratch, ct);
+            await using var sourceA = await LoginAsync(scratch, RoleA, SourcePassword, ct);
+
+            long pendingId;
+            double submittedAfterBegin;
+            await using (var open = await sourceA.BeginTransactionAsync(ct))
+            {
+                await ExecAsync(sourceA, "SELECT 1", ct);
+                var beganAt = DateTime.UtcNow;
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+                pendingId = await SubmitAsync(sourceA, ct);
+                await open.CommitAsync(ct);
+                submittedAfterBegin = (await ScalarAsync<DateTime>(owner,
+                    $"SELECT submitted_at AT TIME ZONE 'UTC' FROM config.external_alert_pending WHERE pending_id = {pendingId}", ct) - beganAt).TotalSeconds;
+            }
+
+            Assert.True(submittedAfterBegin >= 1.5, $"submitted_at was {submittedAfterBegin:F2} s after the transaction began");
+            Assert.Equal(900.0, await ScalarAsync<double>(owner,
+                $"SELECT extract(epoch FROM expires_at - submitted_at)::float8 FROM config.external_alert_pending WHERE pending_id = {pendingId}", ct), 3);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// Every start sets the source login's connection limit and takes EXECUTE from a registered role that has lost its
+    /// marker; the login connects on a database whose PUBLIC has no CONNECT, so the batch's own CONNECT grant is what lets it in.
+    /// </summary>
+    [Fact]
+    public async Task EveryStart_SetsTheConnectionLimit_TakesExecuteFromALostMarker_AndGrantsConnectWherePublicHasNone()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await SetUpAsync(owner, scratch, ct);
+
+            /* The limit comes back after someone lifts it. */
+            Assert.Equal(DarlingManagedRoles.AlertSourceConnectionLimit, await ScalarAsync<int>(owner, $"SELECT rolconnlimit FROM pg_roles WHERE rolname = '{RoleA}'", ct));
+            await ExecAsync(owner, $"ALTER ROLE {RoleA} CONNECTION LIMIT -1", ct);
+            await RunBatchAsync(owner, scratch, ct);
+            Assert.Equal(5, await ScalarAsync<int>(owner, $"SELECT rolconnlimit FROM pg_roles WHERE rolname = '{RoleA}'", ct));
+
+            /* A database whose PUBLIC has no CONNECT: the login is refused until the batch grants it. */
+            await ExecAsync(owner, $"REVOKE CONNECT ON DATABASE \"{scratch.DatabaseName}\" FROM PUBLIC; REVOKE CONNECT ON DATABASE \"{scratch.DatabaseName}\" FROM {RoleA}", ct);
+            Assert.False(await ScalarAsync<bool>(owner, $"SELECT has_database_privilege('public', '{scratch.DatabaseName}', 'CONNECT')", ct));
+            Assert.False(await ScalarAsync<bool>(owner, $"SELECT has_database_privilege('{RoleA}', '{scratch.DatabaseName}', 'CONNECT')", ct));
+            var refused = await Assert.ThrowsAsync<PostgresException>(() => LoginAsync(scratch, RoleA, SourcePassword, ct));
+            Assert.Equal("42501", refused.SqlState);
+
+            await RunBatchAsync(owner, scratch, ct);
+            await using (var sourceA = await LoginAsync(scratch, RoleA, SourcePassword, ct))
+            {
+                Assert.True(await SubmitAsync(sourceA, ct) > 0);
+            }
+
+            /* A role that loses its marker keeps its registry row and loses EXECUTE on the next start. */
+            await ExecAsync(owner, $"COMMENT ON ROLE {RoleA} IS NULL", ct);
+            await RunBatchAsync(owner, scratch, ct);
+            Assert.False(await ScalarAsync<bool>(owner,
+                $"SELECT has_function_privilege('{RoleA}', 'config.submit_external_alert(text, text, text, text, text, text, double precision)', 'EXECUTE')", ct));
+            await using (var sourceA = await LoginAsync(scratch, RoleA, SourcePassword, ct))
+            {
+                var denied = await Assert.ThrowsAsync<PostgresException>(() => SubmitAsync(sourceA, ct));
+                Assert.Equal("42501", denied.SqlState);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// The shipped <c>tools/provision-roles.sql</c>, run on a scratch store (its database-level statements retargeted, which
+    /// also leaves PUBLIC without CONNECT there): the same function behavior, the connection limit, and EXECUTE taken from a
+    /// role that lost its marker.
+    /// </summary>
+    [Fact]
+    public async Task TheByoScript_SetsTheConnectionLimit_RefusesNonFiniteValues_AndTakesExecuteFromALostMarker()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+            Assert.SkipWhen(
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct),
+                "A cluster-wide admin/viewer/mcp role already exists on this rig; the script would refuse it.");
+            Assert.SkipUnless(
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'darling')", ct),
+                "The script names the store owner 'darling', and this rig has no such role.");
+            await CreateSourceRoleAsync(owner, RoleA, marked: true, ct);
+            await RegisterAsync(owner, "src_a", RoleA, ct);
+
+            var script = ComposeStoreRolesLiveTests.WithoutPsqlMetaCommands(
+                    System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
+                .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal);
+            await ExecAsync(owner, script, ct);
+
+            Assert.Equal(5, await ScalarAsync<int>(owner, $"SELECT rolconnlimit FROM pg_roles WHERE rolname = '{RoleA}'", ct));
+            Assert.False(await ScalarAsync<bool>(owner, $"SELECT has_database_privilege('public', '{scratch.DatabaseName}', 'CONNECT')", ct));
+
+            await using (var sourceA = await LoginAsync(scratch, RoleA, SourcePassword, ct))
+            {
+                foreach (var value in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+                {
+                    var refused = await Assert.ThrowsAsync<PostgresException>(() => SubmitAsync(sourceA, ct, value: value));
+                    Assert.Equal("DL400", refused.SqlState);
+                }
+
+                Assert.True(await SubmitAsync(sourceA, ct) > 0);
+            }
+
+            await ExecAsync(owner, $"ALTER ROLE {RoleA} CONNECTION LIMIT -1; COMMENT ON ROLE {RoleA} IS NULL", ct);
+            await ExecAsync(owner, script, ct);
+            Assert.Equal(-1, await ScalarAsync<int>(owner, $"SELECT rolconnlimit FROM pg_roles WHERE rolname = '{RoleA}'", ct));
+            Assert.False(await ScalarAsync<bool>(owner,
+                $"SELECT has_function_privilege('{RoleA}', 'config.submit_external_alert(text, text, text, text, text, text, double precision)', 'EXECUTE')", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// A store whose default privileges would give a role write access to new <c>config</c> tables (the state the
+    /// provisioning script leaves) gets the three tables with no write privilege for that role, from the rung itself.
+    /// </summary>
+    [Fact]
+    public async Task TheRung_TakesWritePrivilegesFromEveryNonOwnerGrantee_OfTheThreeTables()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+            await ExecAsync(owner, $"CREATE ROLE {RoleDefault} NOLOGIN", ct);
+            await ExecAsync(owner, $@"
+ALTER DEFAULT PRIVILEGES IN SCHEMA config GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO {RoleDefault};
+ALTER DEFAULT PRIVILEGES IN SCHEMA config GRANT INSERT ON TABLES TO PUBLIC;
+DROP TABLE config.external_alert_state, config.external_alert_pending, config.external_alert_source;
+ALTER TABLE config.config_mute_rules DROP COLUMN external_source", ct);
+            try
+            {
+                await ExecAsync(owner, ExternalAlertTables.CreateSql, ct);
+
+                foreach (var table in new[] { "external_alert_source", "external_alert_pending", "external_alert_state" })
+                {
+                    Assert.False(await ScalarAsync<bool>(owner,
+                        $"SELECT has_table_privilege('{RoleDefault}', 'config.{table}', 'INSERT, UPDATE, DELETE, TRUNCATE') OR has_table_privilege('public', 'config.{table}', 'INSERT')", ct));
+                    Assert.True(await ScalarAsync<bool>(owner, $"SELECT has_table_privilege('{RoleDefault}', 'config.{table}', 'SELECT')", ct));
+                }
+            }
+            finally
+            {
+                await ExecAsync(owner, $"ALTER DEFAULT PRIVILEGES IN SCHEMA config REVOKE ALL ON TABLES FROM {RoleDefault}; ALTER DEFAULT PRIVILEGES IN SCHEMA config REVOKE ALL ON TABLES FROM PUBLIC", ct);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
     private static string NormalizeSql(string sql) =>
         Regex.Replace(Regex.Replace(sql, @"(?m)^\s*--.*$", ""), @"\s+", " ").Trim();
 
@@ -561,7 +844,15 @@ SET search_path = pg_temp, config, public", ct);
             Assert.Contains("FROM PUBLIC, admin, viewer, mcp CASCADE", sql, StringComparison.Ordinal);
             Assert.Contains(DarlingManagedRoles.AlertSourceRoleMarker, sql, StringComparison.Ordinal);
             Assert.Contains("GRANT CONNECT ON DATABASE %I TO %I", sql, StringComparison.Ordinal);
+            Assert.Contains("NOINHERIT CONNECTION LIMIT " + DarlingManagedRoles.AlertSourceConnectionLimit, sql, StringComparison.Ordinal);
+            Assert.Matches(@"REVOKE ALL ON FUNCTION config\.submit_external_alert\([^)]*\)\s+FROM %I'", sql);
         }
+
+        /* The function: a share-compatible row lock, the call-time clock, and the finite-value check, in both copies. */
+        Assert.Contains("FOR NO KEY UPDATE OF s;", function, StringComparison.Ordinal);
+        Assert.DoesNotContain("FOR UPDATE OF s", function, StringComparison.Ordinal);
+        Assert.DoesNotContain("now()", function, StringComparison.Ordinal);
+        Assert.Contains("p_value IN ('NaN'::double precision", function, StringComparison.Ordinal);
 
         /* The managed batch's table revoke runs after every blanket write grant, and before the password key tables' revoke (which stays the last of its kind) and the membership pass. */
         var tableRevokeAt = batch.IndexOf("REVOKE ALL ON config.external_alert_source", StringComparison.Ordinal);

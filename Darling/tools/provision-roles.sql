@@ -1129,7 +1129,7 @@ BEGIN
    FROM config.external_alert_source AS s
    WHERE s.role_name = session_user::text
      AND s.enabled
-   FOR UPDATE OF s;
+   FOR NO KEY UPDATE OF s;
 
    IF NOT FOUND THEN
       RAISE EXCEPTION 'This login is not a registered external alert source.' USING ERRCODE = 'DL403';
@@ -1155,9 +1155,12 @@ BEGIN
    IF char_length(p_server_name) > 128 THEN
       RAISE EXCEPTION 'server_name is longer than 128 characters.' USING ERRCODE = 'DL400';
    END IF;
+   IF p_value IN ('NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision) THEN
+      RAISE EXCEPTION 'value must be a finite number.' USING ERRCODE = 'DL400';
+   END IF;
 
    IF (SELECT count(*) FROM config.external_alert_pending AS p
-       WHERE p.source_id = v_source_id AND p.submitted_at > now() - interval '1 minute') >= v_max_per_minute THEN
+       WHERE p.source_id = v_source_id AND p.submitted_at > clock_timestamp() - interval '1 minute') >= v_max_per_minute THEN
       RAISE EXCEPTION 'This source has reached its limit of % alerts per minute.', v_max_per_minute
          USING ERRCODE = 'DL429', HINT = 'Send fewer alerts, or ask the Darling operator to raise max_per_minute for this source.';
    END IF;
@@ -1168,13 +1171,13 @@ BEGIN
    END IF;
 
    INSERT INTO config.external_alert_pending
-      (source_id, kind, alert_key, severity, title, detail, server_name, value, expires_at)
+      (source_id, kind, alert_key, severity, title, detail, server_name, value, submitted_at, expires_at)
    VALUES
       (v_source_id, p_kind, p_alert_key, v_severity,
        regexp_replace(p_title, '[\r\n]+', ' ', 'g'),
        regexp_replace(p_detail, '[\r\n]+', ' ', 'g'),
        regexp_replace(p_server_name, '[\r\n]+', ' ', 'g'),
-       p_value, now() + interval '15 minutes')
+       p_value, clock_timestamp(), clock_timestamp() + interval '15 minutes')
    RETURNING pending_id INTO v_pending_id;
 
    RETURN v_pending_id;
@@ -1212,11 +1215,15 @@ BEGIN
    LOOP
       IF source_login.role_oid IS NULL OR NOT source_login.marked THEN
          RAISE WARNING 'External alert source login "%" was skipped: it does not exist or does not carry the ''darling-alert-source'' marker comment.', source_login.role_name;
+         IF source_login.role_oid IS NOT NULL THEN
+            EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION config.submit_external_alert(%s) FROM %I',
+               'text, text, text, text, text, text, double precision', source_login.role_name);
+         END IF;
          CONTINUE;
       END IF;
 
       BEGIN
-         EXECUTE pg_catalog.format('ALTER ROLE %I LOGIN NOINHERIT', source_login.role_name);
+         EXECUTE pg_catalog.format('ALTER ROLE %I LOGIN NOINHERIT CONNECTION LIMIT 5', source_login.role_name);
       EXCEPTION WHEN insufficient_privilege THEN
          RAISE WARNING 'Login "%" could not be set to LOGIN NOINHERIT: this needs CREATEROLE, and from PostgreSQL 16 ADMIN OPTION on the role.', source_login.role_name;
       END;
