@@ -107,6 +107,9 @@ public sealed class PlanRegressionDailyBoundaryTests
 
         Assert.Contains("BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead", fact, StringComparison.Ordinal);
         Assert.Contains("SET TRANSACTION READ ONLY", fact, StringComparison.Ordinal);
+        /* #5812 bound 2: the work memory is raised for this transaction only (SET LOCAL), inside the snapshot. */
+        Assert.Contains("new NpgsqlCommand(PlanRegressionDailyWorkMemSql, connection, snapshot)", fact, StringComparison.Ordinal);
+        Assert.StartsWith("SET LOCAL work_mem = ", PgFactCollector.PlanRegressionDailyWorkMemSql, StringComparison.Ordinal);
         Assert.Contains("connection, snapshot, context.ServerId, windowFloor", fact, StringComparison.Ordinal);
         Assert.Contains("readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection, snapshot)", fact, StringComparison.Ordinal);
 

@@ -549,6 +549,16 @@ WITH plan_agg AS
 ";
 
     /// <summary>
+    /// The work memory for the PLAN_REGRESSION snapshot transaction (#5812, bound 2), set with <c>SET LOCAL</c> so it ends with
+    /// that transaction and touches no other statement on the pooled connection. The daily read groups every built day's
+    /// totals plus the live rows by plan, and the planner, which cannot see that the days repeat the same plans, sorts them
+    /// all: about 384,000 rows on a planted store at the default 4MB went to disk (an external merge of about 16MB). A
+    /// sort takes memory only as it grows, so a small server's read uses what it needs; the cap covers a busy server's
+    /// fourteen days in memory.
+    /// </summary>
+    internal const string PlanRegressionDailyWorkMemSql = "SET LOCAL work_mem = '128MB'";
+
+    /// <summary>
     /// M: the start of the day the comparison window's exact edge (<paramref name="rawWindowStart"/>) falls in (#5448).
     /// </summary>
     internal static DateTime PlanRegressionWindowFloor(DateTime rawWindowStart) =>
@@ -782,6 +792,11 @@ ORDER BY c.regression_factor DESC";
                 await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, snapshot) { CommandTimeout = FactCommandTimeoutSeconds })
                 {
                     await readOnly.ExecuteNonQueryAsync(context.CancellationToken);
+                }
+
+                await using (var workMem = new NpgsqlCommand(PlanRegressionDailyWorkMemSql, connection, snapshot) { CommandTimeout = FactCommandTimeoutSeconds })
+                {
+                    await workMem.ExecuteNonQueryAsync(context.CancellationToken);
                 }
 
                 builtDays = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
