@@ -18,7 +18,7 @@ The release package does not include this folder. Run the scripts from a clone o
 - The same PostgreSQL and TimescaleDB versions as the source store, and `psql` on the host that runs the scripts.
 - PowerShell 7, for `measure.ps1`.
 - The Darling service of the same version as the source store, configured on the copy. Turn on MCP and the web dashboard, and keep their tokens.
-- One SQL Server that is not a production server and has Query Store turned on. The service collects from it during the write step: [TODO: name the test server for the run].
+- One SQL Server that is not a production server and has Query Store turned on. The service collects from it during the write step: put its name where the steps below say `<test server>`.
 - Disk for the copy. The disk must hold the store plus N times its Query Store interval tables.
 
 This is the disk calculation for store A at N = 10:
@@ -40,7 +40,7 @@ The clones need N - 1 times the tables, so the term "N times" leaves room for on
 2. Before the service starts on the copy, disable every monitored server except the test server. The service must not connect to production servers from the copy:
 
     ```sql
-    UPDATE config.config_monitored_servers SET is_enabled = FALSE WHERE server_name <> '[TODO: test server]';
+    UPDATE config.config_monitored_servers SET is_enabled = FALSE WHERE server_name <> '<test server>';
     ```
 
 3. Remove the notification channels from the copy's service configuration. An alert from the copy must not reach anybody.
