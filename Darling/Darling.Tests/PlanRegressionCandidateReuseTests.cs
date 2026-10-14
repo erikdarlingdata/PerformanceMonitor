@@ -198,6 +198,94 @@ public sealed class PlanRegressionCandidateReuseLiveTests
         Assert.Equal(2, cache.Misses);
     }
 
+    [Fact]
+    public async Task GetAnalysisFactsAtOneHour_AfterTheScheduledPass_ReusesItsCandidates_AndReadsFreshOncePastRefreshAfter()
+    {
+        /* #5812: the scheduled pass (AnalyzeAsync with persistCollectionCaveats, as DarlingWorker calls it, hours back 4)
+           reads and fills the entry; a get_analysis_facts call (CollectAndScoreFactsAsync, the tool's own entry point) with
+           hours_back 1 and no as_of then makes no interval-table read. Proved two ways: pg_stat_statements' calls for the
+           PLAN_REGRESSION interval read in this database, and the cache's hit counter. */
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 reuse test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        var preloaded = await ScalarTextAsync(connection, "SELECT current_setting('shared_preload_libraries')", ct);
+        Assert.SkipWhen(!preloaded.Contains("pg_stat_statements", StringComparison.Ordinal),
+            "pg_stat_statements is not in shared_preload_libraries on this server; CI's darling-pg job preloads it.");
+        await ExecAsync(connection, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await SeedAndBuildAsync(connection, ct);
+
+        /* Eight days of wait_stats, so the pass clears its 24-hour history gate and collects facts. */
+        await ExecAsync(connection, $@"
+INSERT INTO collect.wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms)
+VALUES (1, now() - interval '8 days', {ServerId}, '{ServerName}', 'AN5812_WAIT', 50, 1000),
+       (2, now() - interval '3 hours', {ServerId}, '{ServerName}', 'AN5812_WAIT', 50, 1000)", ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var service = new DarlingAnalysisService(postgres);
+        var cache = new PgFactCollector.PlanRegressionCandidateCache();
+        ((PgFactCollector)service.EngineFor(null).Collector).PlanRegressionCache = cache;
+
+        var before = await IntervalReadCallsAsync(connection, ct);
+        await service.AnalyzeAsync(ServerId, ServerName, 4, ct, persistCollectionCaveats: true);
+        var afterPass = await IntervalReadCallsAsync(connection, ct);
+        Assert.Equal(before + 1, afterPass);
+        Assert.Equal(0, cache.Hits);
+
+        /* The shape carries the day the 14-day window starts on. A 1-hour call and the 4-hour pass start it on the same
+           day except in the first four hours of a UTC day; then the call is a different shape and reads live. */
+        var now = DateTime.UtcNow;
+        var sameDay = now.AddHours(-4 - 24 * PgFactCollector.PlanRegressionWindowDays).Date == now.AddHours(-1 - 24 * PgFactCollector.PlanRegressionWindowDays).Date;
+
+        var (facts, _, _) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, hoursBack: 1, cancellationToken: ct);
+        Assert.Contains(facts, f => f.Key == "PLAN_REGRESSION");
+        var afterFacts = await IntervalReadCallsAsync(connection, ct);
+        if (sameDay)
+        {
+            Assert.Equal(afterPass, afterFacts);
+            Assert.Equal(1, cache.Hits);
+        }
+        else
+        {
+            Assert.Equal(afterPass + 1, afterFacts);
+            Assert.Equal(0, cache.Hits);
+        }
+
+        /* Past RefreshAfter (set to zero, so the entry is already older than it) the same call reads fresh and refills. */
+        var hits = cache.Hits;
+        var misses = cache.Misses;
+        cache.RefreshAfter = TimeSpan.Zero;
+        var (fresh, _, _) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, hoursBack: 1, cancellationToken: ct);
+        Assert.Contains(fresh, f => f.Key == "PLAN_REGRESSION");
+        Assert.Equal(afterFacts + 1, await IntervalReadCallsAsync(connection, ct));
+        Assert.Equal(hits, cache.Hits);
+        Assert.Equal(misses + 1, cache.Misses);
+    }
+
+    /// <summary>pg_stat_statements' calls, in this database only, for the PLAN_REGRESSION read that aggregates the interval
+    /// table (the daily read's live half or the table read: both name <c>plan_agg</c> and the table).</summary>
+    private static async Task<long> IntervalReadCallsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(@"
+SELECT COALESCE(SUM(calls), 0)::bigint
+FROM pg_stat_statements
+WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+AND   query LIKE '%plan_agg%'
+AND   query LIKE '%FROM query_store_interval_latest%'
+AND   query NOT LIKE '%pg_stat_statements%'", connection);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    private static async Task<string> ScalarTextAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return (string)(await command.ExecuteScalarAsync(ct))!;
+    }
+
     private static PgFactCollector Collector(NpgsqlDataSource postgres, PgFactCollector.PlanRegressionCandidateCache cache) =>
         new(postgres) { PlanRegressionCache = cache };
 
