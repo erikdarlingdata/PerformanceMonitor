@@ -185,6 +185,11 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
   --base origin/dev`, then run its `-class` lines, plus `-class "*Census*"`, `-class "*Ratchet*"` and
   `-trait Stage=Guard`. It lists the test classes whose source names a symbol your change declares or edits, most
   specific first. A class marked `needs rig` runs only with `DARLING_TEST_PG` set.
+- **Or take CI's own filter.** Run `python .github/scripts/ci-select.py local-filter --base origin/dev`, with
+  `--map <test-map.json.gz>` when a nightly test map is at hand. Each `darling: ` or `lite: ` line is the filter for
+  that suite's test executable (40 classes a line, so one line may become several); strip the prefix and paste the
+  rest. The `<suite> classes:` line only lists them. The last line is the guard set. A note on stderr says whether
+  the classes are CI's whole answer or, when that answer is FULL or over 300 classes, the part a lane runs.
 - **Filter by every class in every test file you touch**, not by the file's name. One file can hold several classes
   (`PgPlanCaptureCollectorDefinitionTests.cs` also holds `PgPlanLogParserTests`), and filtering on one class skips
   the others, including tests you just added.

@@ -18,8 +18,10 @@ These readers use the same code:
   the filter CI's selection gives the branch: per suite, one line is the test executable's arguments
   (`darling: -class "*.A" -class "*.B"`) and the next is the class list (`darling classes: A B`), and the last line
   is the guard set (`guard: -trait Stage=Guard`). With `--map` (the nightly test map) it is map-select's own answer;
-  without one, or when that answer is FULL or over 300 classes, it is the part a lane can run: the classes that name
-  a changed symbol and those of a changed test file, which CI selects too. A note on stderr says which. Run it as
+  without one, or when that answer is FULL or over 300 classes, it is the part a lane can run, at most 300: the
+  classes of a changed test file, the map's text-pattern classes for the changed files (with `--map`) and the
+  classes that name a changed symbol, which CI selects too. A note on stderr says which. A suite with more than 40
+  classes gets one filter line per 40. Run it as
   `python .github/scripts/ci-select.py local-filter [--base origin/dev] [--map test-map.json.gz]`.
 * `--replay` reads .github/ci-history/failures.jsonl (a trimmed record of every run with a real test failure)
   and checks that each failing class would have been selected for that run's changed files. A cut to the rules
@@ -715,6 +717,38 @@ def _parse_time(text: object) -> "datetime.datetime | None":
     return t if t.tzinfo else t.replace(tzinfo=datetime.timezone.utc)
 
 
+def _pattern_hit(g: object, live: list[str], docs_changed: list[str]) -> bool:
+    """Whether a class's text patterns `g` (a glob list) match a changed file: `live` are the changed files outside
+    the documentation allowlist, `docs_changed` the rest."""
+    if not isinstance(g, list):
+        return False
+    # A class that reads a documentation file by name (the migration ladder reads CHANGELOG.md) is selected by a
+    # change to exactly that file; the documentation allowlist only keeps wildcard patterns from matching it.
+    return (any(matches(p, f) for p in g for f in live)
+            or any(p == f for p in g if "*" not in p for f in docs_changed))
+
+
+def text_pattern_classes(test_map: object, changed: list[str], doc_patterns: "tuple[str, ...] | list[str]") -> dict:
+    """{suite: {Class, ...}} of the map's classes whose text patterns (a glob list, not "tree") match a changed
+    file: the classes map_select() gives the reason "text pattern" (#5798). Read straight from the map, so it
+    answers when map_select() is FULL too; an unreadable map gives nothing."""
+    if not isinstance(test_map, dict):
+        return {}
+    classes, patterns = test_map.get("classes"), test_map.get("text_patterns")
+    if not isinstance(classes, dict) or not isinstance(patterns, dict):
+        return {}
+    live = [f for f in changed if not any(matches(p, f) for p in doc_patterns)]
+    live_names = set(live)
+    docs_changed = [f for f in changed if f not in live_names]
+    out: dict[str, set[str]] = {}
+    for suite, entries in classes.items():
+        for cls in entries if isinstance(entries, dict) else ():
+            g = patterns.get(cls)
+            if isinstance(g, list) and all(isinstance(p, str) for p in g) and _pattern_hit(g, live, docs_changed):
+                out.setdefault(suite, set()).add(cls)
+    return out
+
+
 def map_select(test_map: object, changed: list[str], drift: "list[str] | None", discovered: dict,
                *, event: str = "pull_request", keep_full: "tuple[str, ...] | list[str]" = KEEP_FULL,
                doc_patterns: "tuple[str, ...] | list[str]" = DOC_PATTERNS,
@@ -815,12 +849,7 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         g = globs.get(cls)
         if g == "tree":
             return bool(live)
-        if not isinstance(g, list):
-            return False
-        # A class that reads a documentation file by name (the migration ladder reads CHANGELOG.md) is selected by a
-        # change to exactly that file; the documentation allowlist only keeps wildcard patterns from matching it.
-        return (any(matches(p, f) for p in g for f in live)
-                or any(p == f for p in g if "*" not in p for f in docs_changed))
+        return _pattern_hit(g, live, docs_changed)
 
     new_classes = any(cls not in parsed.get(suite, {}) for suite, found in discovered.items() for cls in found)
     for f in live:
@@ -1237,9 +1266,13 @@ _SQL_OBJECT = re.compile(r"\b(?:CREATE|ALTER)\s+(?:OR\s+(?:REPLACE|ALTER)\s+)?(?
                          r"(?:TABLE|VIEW|FUNCTION|PROCEDURE|PROC)\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w\[\]\".]+)", re.I)
 _SQL_VIEW = re.compile(r"\bv_\w+")
 # #5798: a store migration is `private const string V183Sql = ...` plus `new Migration(183, ...)`; the tests name it
-# V183 (in a rung pin, a sentinel or a comment), so both declare the token V183.
+# V183 (in a rung pin, a sentinel or a comment), so both give the token V183. `V183Sql` matches a reference too
+# (`sb.Append(V183Sql)`), wanted: a line that uses a migration's SQL touches that migration. The V-number comes on
+# top of what the other rules take from the line (`new Migration(` still gives `Migration`, which so many test files
+# name that the cap drops it as noisy): a rule here may only add tokens, never take one away, or the selection
+# could run fewer classes than before. A known limit: an edit inside an existing migration's verbatim SQL body
+# (the lines between `V183Sql = @"` and its closing quote) declares nothing, so it gives no token.
 _MIGRATION = re.compile(r"\bV(\d+)Sql\b|\bnew\s+Migration\s*\(\s*(\d+)\s*,")
-_NEW_EXPRESSION = re.compile(r"^\s*new\s+[\w.]+(?:<[^>]*>)?\s*[({\[]")
 _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@ ?(.*)$")
 
@@ -1317,8 +1350,7 @@ def _declared(path: str, line: str) -> set[str]:
         out.update(_DECL_TYPE.findall(line))
         out.update(_DECL_CONST.findall(line))
         out.update(f"V{a or b}" for a, b in _MIGRATION.findall(line))
-        # `new Migration(183, ...)` creates an object; `new` is a modifier only before a member's type (#5798).
-        m = None if _NEW_EXPRESSION.match(line) else _DECL_MEMBER.match(line)
+        m = _DECL_MEMBER.match(line)
         if m:
             out.add(m.group(1))
         m = _DECL_BARE.match(line)
@@ -1557,15 +1589,17 @@ def _test_holders(root: str, index: list, files: set[str]) -> set[str]:
 
 def local_filter(root: str, base: str, map_path: "str | None" = None, cap: "int | None" = None,
                  limit: int = LOCAL_CLASS_LIMIT) -> "tuple[int, list[str], list[str]]":
-    """The `local-filter` answer (#5798) as (exit code, stdout lines, stderr notes). Per suite, one line is the
-    test executable's filter (`<suite>: -class "*.A" -class "*.B"`) and the next lists the classes
-    (`<suite> classes: A B`); the last line is the guard set, which CI's guard job runs on every pull request.
+    """The `local-filter` answer (#5798) as (exit code, stdout lines, stderr notes). Per suite, the test
+    executable's filter (`<suite>: -class "*.A" -class "*.B"`, a line per 40 classes), then a line that lists the
+    classes (`<suite> classes: A B`); the last line is the guard set, which CI's guard job runs on every pull request.
 
     The classes are CI's own selection for the branch: with `map_path`, map_select() over the changed files with the
     changed-symbol reason, exactly as the test-map-select job asks it. Without a map, or when that answer is FULL or
     over `limit` classes (a lane does not run the whole suite), they are the part of it a lane can run: the
-    classes that name a changed symbol and the classes of a changed test file, which every non-FULL answer
-    selects too. A note on stderr says which. Stage=Guard classes are left to the guard line."""
+    classes of a changed test file, then (with `map_path`) the classes whose text pattern in the map matches a
+    changed file, then the classes that name a changed symbol, most specific first and cut at `limit`. CI selects
+    each of them too. A note on stderr says which. Stage=Guard classes are left to the guard line. A suite's filter
+    takes 40 classes a line, so one line stays well under Windows' command-line limit."""
     diff = symbol_diff(root, base)
     if diff is None:
         return 2, [], [f"local-filter: git could not diff the working tree against the merge base of {base} and HEAD"]
@@ -1575,12 +1609,21 @@ def local_filter(root: str, base: str, map_path: "str | None" = None, cap: "int 
     match = symbol_matches(tokens, test_files, index, cap)
     holders = _test_holders(root, index, {rel for _s, rel, _c, _r, _w in index
                                           if rel in test_files or match["hits"].keys() & {(_s, c) for c in _c}})
-    chosen: dict[str, set[str]] = {}
-    for (suite, cls), _h in match["hits"].items():
-        if cls in holders:
-            chosen.setdefault(suite, set()).add(cls)
     discovered = scan_classes(root)
+
+    def runnable(suite: str, cls: str) -> bool:
+        # Stage=Guard classes are left to the guard line.
+        return "Stage=Guard" not in discovered.get(suite, {}).get(cls, set())
+
+    # The part a lane can run, most specific first: a changed test file's classes, then the map's text-pattern
+    # classes, then the classes that name a changed symbol (in ordered_hits' order).
+    ranked = ordered_hits(match)
+    own = [(s, c) for s, c, h in ranked if h["own"] and c in holders and runnable(s, c)]
+    named = [(s, c) for s, c, h in ranked if not h["own"] and c in holders and runnable(s, c)]
+    pattern: list[tuple[str, str]] = []
+    chosen: dict[str, set[str]] = {}
     notes = [f"local-filter: merge base {mb[:10]} of {base}, {len(paths)} changed files"]
+    fallback = True
     if map_path:
         test_map = load_map(map_path)
         sha = test_map.get("sha") if isinstance(test_map, dict) else None
@@ -1588,27 +1631,47 @@ def local_filter(root: str, base: str, map_path: "str | None" = None, cap: "int 
         mapped = discovered
         if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
             mapped = {s: v for s, v in discovered.items() if s in test_map["classes"]}
-        sel = map_select(test_map, paths, drift, mapped, named=named_classes(match), **selection_args(Rules()))
+        args = selection_args(Rules())
+        sel = map_select(test_map, paths, drift, mapped, named=named_classes(match), **args)
         count = sum(len(v) for v in sel["selected"].values())
+        part = ("the classes that name a changed symbol, sit in a changed test file or have a text pattern in the "
+                "map that matches a changed file")
         if sel["full"]:
             notes.append(f"CI's map answer is FULL ({sel['reason']}): CI runs every class; below is the part a lane "
-                         "runs (the classes that name a changed symbol or sit in a changed test file)")
+                         f"runs ({part})")
         elif count > limit:
-            notes.append(f"CI's map answer runs {count} classes, over {limit}: below is the part a lane runs (the "
-                         "classes that name a changed symbol or sit in a changed test file)")
+            notes.append(f"CI's map answer runs {count} classes, over {limit}: below is the part a lane runs ({part})")
         else:
+            fallback = False
+            for suite, cls in own + named:
+                chosen.setdefault(suite, set()).add(cls)
             for suite, names in sel["selected"].items():
-                chosen.setdefault(suite, set()).update(names)
+                chosen.setdefault(suite, set()).update(c for c in names if runnable(suite, c))
             notes.append(f"CI's map answer: {count} classes")
+        if fallback:
+            # #5798: a class that reads a source file as text (the web tests read wwwroot/js/**) names no symbol, so
+            # the symbol rule misses it; CI selects it through the map's text_patterns, and so does a lane.
+            hits = text_pattern_classes(test_map, list(dict.fromkeys(paths + (drift or []))), args["doc_patterns"])
+            pattern = [(s, c) for s in sorted(hits) for c in sorted(hits[s])
+                       if c in discovered.get(s, {}) and runnable(s, c)]
     else:
         notes.append("no --map: below are the classes that name a changed symbol or sit in a changed test file, "
                      "which CI selects too; pass the nightly test map for CI's whole answer")
+    if fallback:
+        order = list(dict.fromkeys(own + pattern + named))
+        if len(order) > limit:
+            notes.append(f"{len(order)} classes, over {limit}: below are the first {limit}, most specific first")
+            order = order[:limit]
+        for suite, cls in order:
+            chosen.setdefault(suite, set()).add(cls)
     lines: list[str] = []
     for suite in SYMBOL_SUITES:
-        names = sorted(c for c in chosen.get(suite, ())
-                       if "Stage=Guard" not in discovered.get(suite, {}).get(c, set()))
+        names = sorted(chosen.get(suite, ()))
+        # 40 classes a line, as local-classes prints them: 700 `-class "*.X"` arguments on one line come near
+        # Windows' 32,767-character command line (#5100).
+        for arg_line in _class_args(names):
+            lines.append(f"{suite}: {arg_line}")
         if names:
-            lines.append(f"{suite}: " + " ".join(f'-class "*.{c}"' for c in names))
             lines.append(f"{suite} classes: " + " ".join(names))
     if not lines:
         notes.append("no class outside the guard set is selected")

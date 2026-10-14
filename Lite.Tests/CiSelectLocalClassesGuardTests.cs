@@ -221,7 +221,12 @@ public sealed class CiSelectLocalClassesGuardTests : IDisposable
 
     /// <summary>
     /// #5798: the extractor reads declarations from C# and SQL hunks, a store migration as its V-number, and nothing
-    /// else: not a call, not a parameter, not a name only a test file declares.
+    /// else: not a call, not a parameter, not a name only a test file declares. The V-number comes on top of the
+    /// other rules, never instead of them: <c>new Migration(</c> still gives <c>Migration</c> (a token so many test
+    /// files name that the cap drops it as noisy), and a member declared with the <c>new</c> modifier
+    /// (<c>new int[] Widgets</c>) keeps its name. <c>new Migration(185, "x", Build())</c> pins the
+    /// <c>new Migration(N,</c> branch on its own (no <c>V185Sql</c> on the line), and <c>sb.Append(V183Sql)</c>
+    /// pins that a reference to a migration's SQL gives its V-number too.
     /// </summary>
     [Fact]
     public void SymbolExtractor_ReadsTheDeclarationsOfCSharpAndSqlHunks()
@@ -230,11 +235,14 @@ public sealed class CiSelectLocalClassesGuardTests : IDisposable
             "diff --git a/Darling/Store/PgMigrations.cs b/Darling/Store/PgMigrations.cs",
             "--- a/Darling/Store/PgMigrations.cs",
             "+++ b/Darling/Store/PgMigrations.cs",
-            "@@ -10,0 +11,4 @@ public static class PgMigrations",
+            "@@ -10,0 +11,7 @@ public static class PgMigrations",
             "+    private const string V184Sql = @\"",
             "+    public static int CountWidgetSpans(int limit) => limit;",
             "+        return ReadWidgetThing(limit);",
             "+        new Migration(184, \"widget-spans\", V184Sql),",
+            "+        new Migration(185, \"x\", Build()),",
+            "+    new int[] Widgets => _w;",
+            "+        sb.Append(V183Sql);",
             "diff --git a/install/52_widget.sql b/install/52_widget.sql",
             "--- a/install/52_widget.sql",
             "+++ b/install/52_widget.sql",
@@ -262,7 +270,11 @@ public sealed class CiSelectLocalClassesGuardTests : IDisposable
         var json = Json(output);
         var tokens = json.GetProperty("tokens").EnumerateArray().Select(t => t.GetString()).ToList();
         Assert.Equal(
-            new[] { "CountWidgetSpans", "PgMigrations", "V184", "V184Sql", "v_widget_rollup", "widget_spans" },
+            new[]
+            {
+                "CountWidgetSpans", "Migration", "PgMigrations", "V183", "V184", "V184Sql", "V185", "Widgets",
+                "v_widget_rollup", "widget_spans",
+            },
             tokens);
         Assert.Equal("Lite.Tests/WidgetTests.cs", Assert.Single(json.GetProperty("tests").EnumerateArray()).GetString());
     }
@@ -296,6 +308,109 @@ public sealed class CiSelectLocalClassesGuardTests : IDisposable
         Assert.DoesNotContain("WidgetGuardTests", text, StringComparison.Ordinal);
         Assert.Contains("no --map:", text, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #5798: the cap is 1% of the test files, never under 25: 30 for the 3,023 test files of 2026-10-14, 25 for 100.
+    /// </summary>
+    [Fact]
+    public void SymbolCap_IsOnePercentOfTheTestFiles_NeverUnder25()
+    {
+        var (code, output) = Run(ParitySource.RepoRoot(), "python", "-I", "-c", Loader
+            + "print(m.symbol_cap([None] * 3023), m.symbol_cap([None] * 100))\n", Script());
+
+        Assert.True(code == 0, output);
+        Assert.Equal("30 25", output.Trim());
+    }
+
+    /// <summary>
+    /// #5798: <c>local-filter</c> prints a suite's filter 40 classes a line (700 classes on one line come near
+    /// Windows' 32,767-character command line), and with no map it cuts its answer at the limit, most specific first.
+    /// </summary>
+    [Fact]
+    public void LocalFilter_Prints40ClassesALine_AndCutsTheFallbackAtTheLimit()
+    {
+        var many = new StringBuilder();
+        for (var i = 0; i < 45; i++)
+        {
+            many.Append("public class Many").Append(i).Append("Tests\n{\n    [Fact]\n    public void T() => Widgetize();\n}\n");
+        }
+
+        Write("Lite.Tests/ManyTests.cs", many.ToString());
+        Git("add", "-A");
+        Git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "many");
+        Git("tag", "-f", "base");
+        ChangeProbe("public void Widgetize() { }");
+
+        var (code, output) = Run(ParitySource.RepoRoot(), "python", "-I", "-c", Loader
+            + "for limit in (300, 42):\n"
+            + "    rc, lines, notes = m.local_filter(sys.argv[2], 'base', None, None, limit)\n"
+            + "    print(json.dumps({'limit': limit, 'code': rc, 'lines': lines, 'notes': notes}))\n",
+            Script(), _repo);
+
+        Assert.True(code == 0, output);
+        var answers = output.Replace("\r", "", StringComparison.Ordinal).Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(l => l.StartsWith('{')).Select(l => JsonDocument.Parse(l).RootElement).ToList();
+        Assert.Equal(2, answers.Count);
+        foreach (var answer in answers)
+        {
+            var limit = answer.GetProperty("limit").GetInt32();
+            Assert.Equal(0, answer.GetProperty("code").GetInt32());
+            var lines = answer.GetProperty("lines").EnumerateArray().Select(l => l.GetString()!).ToList();
+            var filters = lines.Where(l => l.StartsWith("lite: ", StringComparison.Ordinal)).ToList();
+            var expected = Math.Min(45, limit);
+            Assert.Equal(new[] { 40, expected - 40 }, filters.Select(f => f.Split("-class ").Length - 1));
+            var names = lines.Single(l => l.StartsWith("lite classes: ", StringComparison.Ordinal)).Split(' ').Skip(2).ToList();
+            Assert.Equal(expected, names.Count);
+            var notes = string.Join('\n', answer.GetProperty("notes").EnumerateArray().Select(n => n.GetString()));
+            Assert.Equal(limit < 45, notes.Contains("45 classes, over 42: below are the first 42", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// #5798: when CI's map answer is FULL (here the map's commit is unknown, so its drift is too), <c>local-filter</c>
+    /// adds the classes whose text pattern in the map matches a changed file: a web test reads
+    /// <c>wwwroot/js/**</c> as text, names no symbol, and CI selects it through the pattern. A class whose pattern
+    /// matches no changed file is not added.
+    /// </summary>
+    [Fact]
+    public void LocalFilter_WhenTheMapIsFull_AddsTheTextPatternClasses()
+    {
+        Write("Lite/wwwroot/js/app.js", "var a = 1;\n");
+        Write("Lite.Tests/WebScriptTests.cs", "public class WebScriptTests\n{\n    [Fact]\n    public void T() { }\n}\n");
+        Write("Lite.Tests/SqlScriptTests.cs", "public class SqlScriptTests\n{\n    [Fact]\n    public void T() { }\n}\n");
+        Git("add", "-A");
+        Git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "web");
+        Git("tag", "-f", "base");
+        Write("Lite/wwwroot/js/app.js", "var a = 2;\n");
+        var map = Path.Combine(_repo, "..", Path.GetFileName(_repo) + "-full-map.json");
+        File.WriteAllText(map, """
+            {"schema": 1, "sha": "0000000", "built_at": "@BUILT@", "tool": "synthetic",
+             "files": ["Lite.Tests/WebScriptTests.cs", "Lite.Tests/SqlScriptTests.cs"],
+             "classes": {"lite": {
+                "WebScriptTests": {"own": 0, "files": [], "seconds": 1.0},
+                "SqlScriptTests": {"own": 1, "files": [], "seconds": 1.0}}},
+             "text_patterns": {"WebScriptTests": ["Lite/wwwroot/js/**"], "SqlScriptTests": ["install/*.sql"]}}
+            """.Replace("@BUILT@", DateTime.UtcNow.ToString("o"), StringComparison.Ordinal));
+        try
+        {
+            var (code, output) = RunScript("local-filter", "--base", "base", "--root", _repo, "--map", map);
+
+            Assert.True(code == 0, output);
+            var text = output.Replace("\r", "", StringComparison.Ordinal);
+            Assert.Contains("CI's map answer is FULL", text, StringComparison.Ordinal);
+            Assert.Contains("lite: -class \"*.WebScriptTests\"\nlite classes: WebScriptTests\n", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("SqlScriptTests", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(map);
+        }
+    }
+
+    private const string Loader = "import importlib.util, json, sys\n"
+        + "spec = importlib.util.spec_from_file_location('ci_select', sys.argv[1])\n"
+        + "m = importlib.util.module_from_spec(spec)\n"
+        + "spec.loader.exec_module(m)\n";
 
     private static JsonElement Json(string output)
     {
