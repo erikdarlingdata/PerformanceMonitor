@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The Query Store read indexes that are built in the background after the service is up rather than by a
-/// migration rung (#4605's BRIN, #4952's and #5507's btrees), and the one piece of machinery they share: the state read,
+/// migration rung (#4605's BRIN, #4952's, #5507's and #5807's btrees), and the one piece of machinery they share: the state read,
 /// the build-or-skip decision, the invalid-leftover drop, the build and the delayed start.
 ///
 /// <para><b>Why not a migration rung.</b> Migrations run in one transaction and block startup, and
@@ -581,7 +581,9 @@ ORDER BY c.relname;";
             {
                 /* #5807: retention dropped this leaf between the leaf list and its build or ATTACH (the oldest leaf is built
                    first and is the next one retention drops). Its index went with it; the others still need theirs, and the
-                   delayed task does not run this again until the next start, so skip the leaf instead of ending the spec. */
+                   delayed task does not run this again until the next start, so skip the leaf instead of ending the spec.
+                   When the skipped leaf was the last unattached one, no further ATTACH runs and the parent index stays INVALID
+                   until the next hourly create-ahead attaches a new leaf; the leaf indexes still serve the scans. */
                 logger.LogInformation(
                     "Query Store index {Index}: leaf {Leaf} was dropped by retention before its index was built; skipping it.",
                     spec.IndexName, leaf);
