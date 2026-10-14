@@ -54,7 +54,7 @@
 -- re-running blindly are the single-table grants in steps 3b-3f: each names a table (or, for the
 -- beacon columns, a trigger dependency) a specific migration creates -- custom_views is V31,
 -- database_state_expected is V49, custom_alert_rules is V116, the mute-rule reload-beacon trigger is
--- V117, config_notification_routes is V131 (its scope_server_id and scope_tag_id columns are V181, #5750: run this script only after the store has migrated to V181, since the route column grants name them; the agent_* route columns are V184, #5632) and config_collector_run_times is V160 and the password key tables (step 3g) are V165 -- so re-run this script after upgrading past each.
+-- V117, config_notification_routes is V131 (its scope_server_id and scope_tag_id columns are V181, #5750: run this script only after the store has migrated to V181, since the route column grants name them; the agent_* route columns are V184, #5632, and are granted only once they exist) and config_collector_run_times is V160 and the password key tables (step 3g) are V165 -- so re-run this script after upgrading past each.
 --
 -- BEFORE RUNNING:
 --   1. Replace CHANGE_ME_ADMIN_PASSWORD, CHANGE_ME_VIEWER_PASSWORD and CHANGE_ME_MCP_PASSWORD with strong
@@ -570,15 +570,24 @@ GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_re
 -- the pair below is skipped (the table does not exist yet), so the rest of the carve still commits; unguarded, its
 -- error would abort the transaction and roll back the grants above with it. It runs as EXECUTE of a dollar-quoted
 -- string, so the statements are sent only when the table exists. If they fail on a store that has the table, the
--- whole transaction rolls back and the read roles keep no access.
+-- whole transaction rolls back and the read roles keep no access. The five agent_* route columns are V184 (#5632):
+-- their grant runs only when agent_level exists, so on a V181-V183 store the carve still commits without them.
 DO $$
 BEGIN
    IF to_regclass('config.config_notification_routes') IS NOT NULL THEN
       EXECUTE $v131$
 REVOKE SELECT ON config.config_notification_routes FROM viewer;
-GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at, scope_server_id, scope_tag_id, agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes)
+GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at, scope_server_id, scope_tag_id)
     ON config.config_notification_routes TO viewer;
 $v131$;
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'agent_level' AND NOT attisdropped) THEN
+         EXECUTE $v184$
+GRANT SELECT (agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes)
+    ON config.config_notification_routes TO viewer;
+$v184$;
+      END IF;
    END IF;
 END $$;
 
@@ -611,9 +620,17 @@ BEGIN
    IF to_regclass('config.config_notification_routes') IS NOT NULL THEN
       EXECUTE $v131$
 REVOKE SELECT ON config.config_notification_routes FROM mcp;
-GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at, scope_server_id, scope_tag_id, agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes)
+GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at, scope_server_id, scope_tag_id)
     ON config.config_notification_routes TO mcp;
 $v131$;
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'agent_level' AND NOT attisdropped) THEN
+         EXECUTE $v184$
+GRANT SELECT (agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes)
+    ON config.config_notification_routes TO mcp;
+$v184$;
+      END IF;
    END IF;
 END $$;
 -- The collector run times (V160, #4938): get_collection_health reads them as mcp. The blanket config SELECT above
@@ -1588,8 +1605,9 @@ END $do$;
 --     the claim and report columns of a request, inserts a report and a journal row, and proposes a note without its
 --     state column, so an agent's note stays pending until a person decides it. admin (the desktop Viewer) closes a
 --     request, writes the environment profiles, writes, decides or deletes a note, and journals what it did. The
---     service writes the rest as the owner. On a store below V184 the block warns and skips; re-run the script once
---     the service has migrated the store to V184.
+--     service writes the rest as the owner. On a store below V184 the block warns and skips, as the agent route column
+--     grants in steps 2b and 2c do, so the whole script runs clean on a V181-V183 store; re-run it once the service has
+--     migrated the store to V184.
 DO $do$
 BEGIN
    IF pg_catalog.to_regclass('config.investigation_requests') IS NULL

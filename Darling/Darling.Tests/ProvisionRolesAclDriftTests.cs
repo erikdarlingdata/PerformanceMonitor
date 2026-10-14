@@ -210,7 +210,15 @@ public sealed class ProvisionRolesAclDriftTests
                 StringComparison.Ordinal);
 
             var pair = code[at..code.IndexOf("$v131$;", at, StringComparison.Ordinal)];
-            Assert.Matches($@"^{Regex.Escape(revoke)}\s+GRANT SELECT \(route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at, scope_server_id, scope_tag_id, agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes\)\s+ON {ConfigSchema}\.config_notification_routes TO {role};\s*$", pair);
+            Assert.Matches($@"^{Regex.Escape(revoke)}\s+GRANT SELECT \(route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at, scope_server_id, scope_tag_id\)\s+ON {ConfigSchema}\.config_notification_routes TO {role};\s*$", pair);
+
+            /* The V184 agent columns (#5632 review round 1, L5): granted inside the same to_regclass block, only when
+               agent_level exists, so a V181-V183 store still commits the carve. */
+            var agentGrant = $"GRANT SELECT (agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes)\n    ON {ConfigSchema}.config_notification_routes TO {role};";
+            var agentAt = code.IndexOf(agentGrant, at, StringComparison.Ordinal);
+            Assert.True(agentAt > at, $"the V184 agent column grant to {role} must follow its V131 pair.");
+            var guard = code[code.IndexOf("$v131$;", at, StringComparison.Ordinal)..agentAt];
+            Assert.Matches(@"^\$v131\$;\s+IF EXISTS \(SELECT 1 FROM pg_catalog\.pg_attribute\s+WHERE attrelid = 'config\.config_notification_routes'::regclass\s+AND attname = 'agent_level' AND NOT attisdropped\) THEN\s+EXECUTE \$v184\$\s*$", guard);
         }
     }
 

@@ -9,6 +9,7 @@
 using System;
 using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -390,6 +391,76 @@ FROM config.investigation_journal", ct));
                 await ExecAsync(connection, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", ct);
             }
         });
+    }
+
+    /// <summary>
+    /// <c>provision-roles.sql</c> runs clean on a store one rung below V184 (#5632 review round 1, L5): every block that names
+    /// a V184 column or table (the route carves of steps 2b and 2c, and step 3i) runs on the store wound back by
+    /// <see cref="RungRewindArtifacts.DropV184SentinelAsync"/>, carves the V181 route columns and skips the agent ones; on the
+    /// full store the same blocks grant the agent columns. The blocks are retargeted at per-run roles created inside one
+    /// transaction that is rolled back, so no role or grant outlives the test and the fixed role names are never written.
+    /// </summary>
+    [Fact]
+    public async Task TheByoScriptsV184Blocks_GrantTheAgentColumnsAtV184_AndRunCleanOneRungBelow()
+    {
+        var script = RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql");
+        var blocks = Regex.Matches(script, @"(?s)DO \$\$\r?\nBEGIN\r?\n   IF to_regclass\('config\.config_notification_routes'\) IS NOT NULL THEN.*?END \$\$;")
+            .Select(m => m.Value)
+            .Concat(Regex.Matches(script, @"(?s)DO \$do\$\r?\nBEGIN\r?\n.*?END \$do\$;")
+                .Select(m => m.Value)
+                .Where(block => block.Contains("config.investigation_requests", StringComparison.Ordinal)))
+            .ToList();
+
+        /* The viewer carve, the mcp carve, and step 3i, retargeted at per-run roles. */
+        Assert.Equal(3, blocks.Count);
+        var token = Guid.NewGuid().ToString("N")[..8];
+        var (admin, viewer, mcp) = ("inv_a_" + token, "inv_v_" + token, "inv_m_" + token);
+        blocks = blocks
+            .Select(block => Regex.Replace(block, @"\b(admin|viewer|mcp)\b", m => m.Value switch
+            {
+                "admin" => admin,
+                "viewer" => viewer,
+                _ => mcp,
+            }))
+            .ToList();
+
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var privileges = $@"
+SELECT has_table_privilege('{viewer}', 'config.config_notification_routes', 'SELECT')
+       || '|' || has_column_privilege('{viewer}', 'config.config_notification_routes', 'scope_tag_id', 'SELECT')
+       || '|' || has_column_privilege('{mcp}', 'config.config_notification_routes', 'scope_tag_id', 'SELECT')
+       || '|' || coalesce(has_table_privilege('{mcp}', to_regclass('config.investigation_requests'), 'SELECT'), false)
+       || '|' || EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                         WHERE attrelid = 'config.config_notification_routes'::regclass AND attname = 'agent_level'
+                           AND NOT attisdropped
+                           AND has_column_privilege('{mcp}', attrelid, attnum, 'SELECT'))";
+            var roles = $@"
+CREATE ROLE {admin} NOLOGIN;
+CREATE ROLE {viewer} NOLOGIN;
+CREATE ROLE {mcp} NOLOGIN;
+GRANT SELECT ON ALL TABLES IN SCHEMA config TO {viewer}, {mcp};";
+
+            Assert.Equal("false|true|true|true|true", await RunBlocksRolledBackAsync(connection, roles, blocks, privileges, ct));
+
+            await RungRewindArtifacts.DropV184SentinelAsync(connection, ct);
+            Assert.Equal("false|true|true|false|false", await RunBlocksRolledBackAsync(connection, roles, blocks, privileges, ct));
+        });
+    }
+
+    private static async Task<string?> RunBlocksRolledBackAsync(NpgsqlConnection connection, string roles,
+        System.Collections.Generic.IEnumerable<string> blocks, string probe, CancellationToken ct)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await ExecAsync(connection, roles, ct);
+        foreach (var block in blocks)
+        {
+            await ExecAsync(connection, block, ct);
+        }
+
+        var result = await ScalarAsync(connection, probe, ct);
+        await transaction.RollbackAsync(ct);
+        return result;
     }
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
