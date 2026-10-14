@@ -25,7 +25,7 @@ public sealed class ReadLatencyAccumulatorTests
         var all = Enum.GetValues<ReadOutcome>();
 
         Assert.Equal(
-            new[] { "ok", "timeout", "cancelled", "error", "limit", "fallback_raw", "gate_failed" },
+            new[] { "ok", "timeout", "cancelled", "error", "limit", "fallback_raw", "gate_failed", "queue_wait", "busy" },
             all.Select(ReadLatencyAccumulator.OutcomeLabel).ToArray());
         foreach (var old in all.Where(o => o <= ReadOutcome.Limit))
         {

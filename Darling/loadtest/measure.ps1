@@ -109,8 +109,9 @@ function Invoke-Mcp {
 # The status words a Darling read puts on the wire when it did not answer the question: a name that resolves to nothing
 # is "invalid" (or "not_found"), a caught exception or a statement timeout is "error". "unavailable", "precondition"
 # and "not_collected" say that the read had no data to read. A read like that returns in milliseconds, so the step must
-# count it as a failure, not as a fast read (#5794 review rounds 1 and 2).
-$script:failureStatuses = @('error', 'invalid', 'not_found', 'ambiguous', 'conflict', 'timeout', 'unavailable', 'precondition', 'not_collected')
+# count it as a failure, not as a fast read (#5794 review rounds 1 and 2). "busy" (#5506 part 3) is a read refused because
+# the long-read slots and their queue were full: it did not run, so it fails the run too (the web answers it with HTTP 429).
+$script:failureStatuses = @('error', 'invalid', 'not_found', 'ambiguous', 'conflict', 'timeout', 'unavailable', 'precondition', 'not_collected', 'busy')
 
 # The reason a tool text or a web body is a failed read, or $null when the read answered. The text is the read's JSON,
 # or a bare sentence for a store fault (the registry read failing).

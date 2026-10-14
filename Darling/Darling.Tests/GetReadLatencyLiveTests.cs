@@ -228,14 +228,15 @@ public sealed class GetReadLatencyLiveTests
 
         try
         {
-            /* 1,000 distinct routes, all with the same 50 ms p95. The first 100 carry two samples and the rest
-               one, so the total order is: count desc (the first 100), then route ordinal within each group. */
+            /* 1,000 distinct routes, all with the same 50 ms p95. The first 50 carry two samples and the rest
+               one, so the total order is: count desc (the first 50), then route ordinal within each group. #5506 part 3's
+               admission fields made a row about 410 bytes, so about 80 fit: the page still crosses the group boundary. */
             var accumulator = new ReadLatencyAccumulator();
             for (var i = 0; i < 1000; i++)
             {
                 var route = $"route_{i:D4}";
                 accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.Ok, 50);
-                if (i < 100)
+                if (i < 50)
                 {
                     accumulator.Record(ReadSurface.Mcp, route, ReadOutcome.Ok, 50);
                 }
@@ -256,13 +257,13 @@ public sealed class GetReadLatencyLiveTests
             Assert.True(root.GetProperty("truncated").GetBoolean());
             Assert.Equal(1000, root.GetProperty("reads_total").GetInt32());
             Assert.Equal(reads.Length, root.GetProperty("reads_returned").GetInt32());
-            Assert.InRange(reads.Length, 100, 999);
+            Assert.InRange(reads.Length, 50, 999);
 
-            /* Greedy fill: the budget is nearly used (one more ~230-byte row would not have fit). */
-            Assert.True(bytes > McpResponseBudget.DefaultBytes - 400, $"only {bytes} bytes used; the page stopped early");
+            /* Greedy fill: the budget is nearly used (one more ~410-byte row would not have fit). */
+            Assert.True(bytes > McpResponseBudget.DefaultBytes - 600, $"only {bytes} bytes used; the page stopped early");
 
             var expected = Enumerable.Range(0, 1000)
-                .OrderBy(i => i < 100 ? 0 : 1)
+                .OrderBy(i => i < 50 ? 0 : 1)
                 .ThenBy(i => $"route_{i:D4}", StringComparer.Ordinal)
                 .Take(reads.Length)
                 .Select(i => $"route_{i:D4}")

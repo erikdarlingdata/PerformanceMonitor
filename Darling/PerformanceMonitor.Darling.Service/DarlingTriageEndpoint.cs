@@ -604,7 +604,8 @@ internal static class DarlingTriageEndpoint
     /// middleware like every sibling route; <paramref name="analysis"/> is the same shared instance the read
     /// dispatch receives (none of the mapped sections currently need it, but the dispatch signature does).
     /// </summary>
-    public static void Map(WebApplication app, NpgsqlDataSource postgres, DarlingAnalysisService analysis, ILogger logger, ReadAdmission? readAdmission = null)
+    public static void Map(WebApplication app, NpgsqlDataSource postgres, DarlingAnalysisService analysis, ILogger logger, ReadAdmission? readAdmission = null,
+        ReadLatencyRecorder? readLatencyRecorder = null)
     {
         var dispatch = DarlingWebEndpoints.BuildReadDispatch();
 
@@ -616,12 +617,16 @@ internal static class DarlingTriageEndpoint
             var now = DateTime.UtcNow;
             var (anchor, asOf) = ResolveAnchor(Query(context, "at"), now);
 
-            /* #5506 part 3: the page runs several section reads around its anchor; admitted as one read of its own. */
-            using var ticket = await DarlingWebEndpoints.AdmitWebRouteAsync(readAdmission, TriageRoute, ReadWindowBand.OneDay, context);
+            /* #5506 part 3: the page runs several section reads around its anchor; admitted and recorded as one read of its
+               own, so the long-read table learns it. */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await DarlingWebEndpoints.AdmitWebRouteAsync(readAdmission, TriageRoute, ReadWindowBand.OneDay, context, readLatencyRecorder, readScope.Scope);
             if (ticket.Refusal is { } refusal)
             {
                 return DarlingWebEndpoints.BusyResult(context, refusal);
             }
+
+            using var run = new DarlingWebEndpoints.WebRouteRun(readLatencyRecorder, TriageRoute, ReadWindowBand.OneDay, context, readScope.Scope);
 
             var notes = new JsonArray();
 
@@ -777,6 +782,7 @@ internal static class DarlingTriageEndpoint
             };
 
             /* #4348: the page's own body holds the alert row and every section's read, so it is swept whole. */
+            run.Complete(ReadOutcome.Ok);
             return DarlingWebStatementSweep.JsonText(body, "/api/triage", logger, 0, context.RequestAborted);
         });
     }

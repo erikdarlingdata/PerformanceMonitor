@@ -370,7 +370,7 @@ public sealed class FleetOverviewAzureMasterScopeLiveTests
         var tool = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFleetTools.cs");
 
         Assert.Contains("Str(c, \"band\"), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted)", web, StringComparison.Ordinal);
-        Assert.Contains("BuildReadDispatch(logger, postgresConfig, registryState)", web, StringComparison.Ordinal);
+        Assert.Contains("BuildReadDispatch(logger, postgresConfig, registryState, readAdmission)", web, StringComparison.Ordinal);
         Assert.Contains("separatelyMonitored: registryState is null", tool, StringComparison.Ordinal);
     }
 

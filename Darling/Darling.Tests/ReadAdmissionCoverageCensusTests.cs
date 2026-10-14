@@ -42,7 +42,8 @@ public sealed class ReadAdmissionCoverageCensusTests
     /// admission call beside it.</summary>
     private static readonly Dictionary<string, int> ScopeSites = new(StringComparer.Ordinal)
     {
-        ["DarlingWebEndpoints.cs"] = 2, // the /api/read/{name} loop and RunComposedPanelAsync
+        ["DarlingWebEndpoints.cs"] = 4, // the /api/read/{name} loop, RunComposedPanelAsync, /api/fleet and /api/alerts/test
+        ["DarlingTriageEndpoint.cs"] = 1, // /api/triage (the three dedicated routes record their own samples, #5506 part 3)
         ["McpToolLatencyFilter.cs"] = 1, // every MCP tool call but run_custom_view_panel
     };
 
@@ -68,7 +69,7 @@ public sealed class ReadAdmissionCoverageCensusTests
 
                 /* The admission call comes after the scope and the band, within the next few statements. */
                 var window = string.Join("\n", lines.Skip(i + 1).Take(25));
-                if (!window.Contains("AdmitAsync(", StringComparison.Ordinal))
+                if (!window.Contains("AdmitAsync(", StringComparison.Ordinal) && !window.Contains("AdmitWebRouteAsync(", StringComparison.Ordinal))
                 {
                     offenders.Add($"{name}:{i + 1}");
                 }

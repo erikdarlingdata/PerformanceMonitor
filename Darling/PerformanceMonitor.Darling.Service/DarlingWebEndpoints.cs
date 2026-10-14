@@ -360,12 +360,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ToHttpResult(fleetRangeRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, 0, context.RequestAborted);
             }
 
-            /* #5506 part 3: admitted under its MCP twin's name and window band. */
-            using var ticket = await AdmitWebRouteAsync(readAdmission, "get_fleet_overview", ReadWindowBand.Of(hours), context);
+            /* #5506 part 3: admitted, and recorded, under its MCP twin's name and window band, so the long-read table learns
+               this route from its own samples. */
+            using var readScope = ReadScope.Open(logger);
+            var fleetBand = ReadWindowBand.Of(hours);
+            using var ticket = await AdmitWebRouteAsync(readAdmission, "get_fleet_overview", fleetBand, context, readLatencyRecorder, readScope.Scope);
             if (ticket.Refusal is { } refusal)
             {
                 return BusyResult(context, refusal);
             }
+
+            using var run = new WebRouteRun(readLatencyRecorder, "get_fleet_overview", fleetBand, context, readScope.Scope);
 
             var now = DateTime.UtcNow;
             var result = await DarlingFleetReader.GetFleetOverviewAsync(
@@ -375,6 +380,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct),
                 logger: logger,
                 cancellationToken: context.RequestAborted);
+            run.Complete(ReadOutcome.Ok);
             return Results.Json(result, DarlingFleetReader.JsonOptions);
         });
 
@@ -403,7 +409,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         });
 
         /* One GET per read-only tool, calling the tool method directly (no SQL/projection re-implementation). */
-        foreach (var (name, handler) in BuildReadDispatch(logger, postgresConfig, registryState))
+        foreach (var (name, handler) in BuildReadDispatch(logger, postgresConfig, registryState, readAdmission))
         {
             app.MapGet("/api/read/" + name, async (HttpContext context) =>
             {
@@ -518,7 +524,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         MapCustomViews(app, postgres, logger, readLatencyRecorder);
-        MapCustomAlerts(app, postgres, logger, readAdmission);
+        MapCustomAlerts(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapMuteRules(app, postgres, logger);
         MapServerTags(app, postgres, logger);
         MapAdminServers(app, postgres);
@@ -533,7 +539,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         /* The per-alert triage page's assembly endpoint (#2710): everything it serves is already reachable
            through the /api/read mirror above — it adds assembly (alert match + anchored sections), not reach. */
-        DarlingTriageEndpoint.Map(app, postgres, analysis, logger, readAdmission);
+        DarlingTriageEndpoint.Map(app, postgres, analysis, logger, readAdmission, readLatencyRecorder);
 
         /* The alert-notebook binding endpoint (#4222 slice C): the mechanical conversion of a firing into a
            read-only notebook definition. Same reach as the triage page it sits beside - everything it
@@ -778,7 +784,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// naming the gate. The store/evaluator run on the host's least-privilege VIEWER pool (the same
     /// <paramref name="postgres"/> the reads and <c>/api/compose/run</c> use — never the owner pool).
     /// </summary>
-    private static void MapCustomAlerts(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadAdmission? readAdmission = null)
+    private static void MapCustomAlerts(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadAdmission? readAdmission = null, ReadLatencyRecorder? readLatencyRecorder = null)
     {
         var store = new CustomAlertRuleStore(postgres);
 
@@ -952,15 +958,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(bodyError, StatusCodes.Status400BadRequest);
             }
 
-            /* #5506 part 3: a rule test reads collected data like any read, admitted under its MCP twin's name. */
-            using var ticket = await AdmitWebRouteAsync(readAdmission, "test_custom_alert_rule", ReadWindowBand.None, context);
+            /* #5506 part 3: a rule test reads collected data like any read, admitted and recorded under its MCP twin's name. */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await AdmitWebRouteAsync(readAdmission, "test_custom_alert_rule", ReadWindowBand.None, context, readLatencyRecorder, readScope.Scope);
             if (ticket.Refusal is { } refusal)
             {
                 return BusyResult(context, refusal);
             }
 
+            using var run = new WebRouteRun(readLatencyRecorder, "test_custom_alert_rule", ReadWindowBand.None, context, readScope.Scope);
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule(postgres, ruleId, definitionJson);
+            run.Complete(ToolResultOutcome(result, context.RequestAborted));
             return ToHttpResult(result, "/api/alerts/test", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
         });
     }
@@ -2773,9 +2782,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>#5506 part 3: admits a dedicated web read route (<c>/api/fleet</c>, <c>/api/triage</c>,
-    /// <c>/api/alerts/test</c>) that records no read-latency sample of its own. A browser that leaves the queue ends the
-    /// request, as the read loop's #4276 arm does.</summary>
-    internal static async Task<ReadAdmissionTicket> AdmitWebRouteAsync(ReadAdmission? admission, string route, string band, HttpContext context)
+    /// <c>/api/alerts/test</c>) and, given a recorder and the route's open scope, records its admission sample under the
+    /// <c>web</c> surface and <paramref name="route"/> as the read loop does: <c>busy</c> when refused, <c>cancelled</c> when
+    /// the browser left the queue, <c>queue_wait</c> when it waited. The run itself is recorded by <see cref="WebRouteRun"/>.
+    /// A browser that leaves the queue ends the request, as the read loop's #4276 arm does.</summary>
+    internal static async Task<ReadAdmissionTicket> AdmitWebRouteAsync(ReadAdmission? admission, string route, string band, HttpContext context,
+        ReadLatencyRecorder? recorder = null, ReadScope? scope = null)
     {
         if (admission is null)
         {
@@ -2783,12 +2795,90 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         var ticket = await admission.AdmitAsync(ReadSurface.Web, route, band, context.RequestAborted);
-        if (ticket.CallerLeft)
+        if (ticket.Refusal is not null)
         {
+            RecordWebRouteSample(recorder, route, ReadOutcome.Busy, ticket.QueueMs ?? 0, band, scope, context);
+        }
+        else if (ticket.CallerLeft)
+        {
+            RecordWebRouteSample(recorder, route, ReadOutcome.Cancelled, ticket.QueueMs ?? 0, band, scope, context);
             context.RequestAborted.ThrowIfCancellationRequested();
+        }
+        else if (ticket.QueueMs is { } queueMs)
+        {
+            RecordWebRouteSample(recorder, route, ReadOutcome.QueueWait, queueMs, band, scope, context);
         }
 
         return ticket;
+    }
+
+    /// <summary>#5506 part 3: one sample of a dedicated web read route under the <c>web</c> surface. Never throws into the
+    /// request; a missing recorder or scope records nothing.</summary>
+    internal static void RecordWebRouteSample(ReadLatencyRecorder? recorder, string route, ReadOutcome outcome, long elapsedMs, string band, ReadScope? scope, HttpContext context)
+    {
+        if (recorder is null || scope is null)
+        {
+            return;
+        }
+
+        try
+        {
+            recorder.Accumulator?.Record(ReadSurface.Web, route, outcome, elapsedMs, band, scope.InFlightAtStart, scope.WaitMs, WebReadCaller(context));
+        }
+        catch (Exception ex)
+        {
+            recorder.Logger?.LogDebug(ex, "Read-latency recording failed for the web route {Route}.", route);
+        }
+    }
+
+    /// <summary>The outcome of a tool answer, as the read loop classifies it: a server-error envelope by its sentence
+    /// (a caught 57014 is a timeout), anything else <c>ok</c>.</summary>
+    internal static ReadOutcome ToolResultOutcome(string result, System.Threading.CancellationToken requestAborted) =>
+        ClassifyToolResponse(result) == ToolResponseKind.ServerError
+            ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), requestAborted)
+            : ReadOutcome.Ok;
+
+    /// <summary>
+    /// #5506 part 3: the run sample of a dedicated web read route (<c>/api/fleet</c>, <c>/api/triage</c>,
+    /// <c>/api/alerts/test</c>), so the long-read table (<see cref="ReadAdmission"/>) learns these routes from their own
+    /// p90 instead of the window-size rule alone. Created once the read may run, so the elapsed time starts after
+    /// admission (D1). Disposing records once: the outcome given to <see cref="Complete"/>, a fallback the scope noted on an
+    /// <c>ok</c>, or, when the route threw before completing, <c>cancelled</c> for a browser that left and <c>error</c>
+    /// otherwise.
+    /// </summary>
+    internal sealed class WebRouteRun : IDisposable
+    {
+        private readonly ReadLatencyRecorder? _recorder;
+        private readonly string _route;
+        private readonly string _band;
+        private readonly HttpContext _context;
+        private readonly ReadScope _scope;
+        private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
+        private ReadOutcome? _outcome;
+        private int _recorded;
+
+        internal WebRouteRun(ReadLatencyRecorder? recorder, string route, string band, HttpContext context, ReadScope scope)
+        {
+            _recorder = recorder;
+            _route = route;
+            _band = band;
+            _context = context;
+            _scope = scope;
+        }
+
+        /// <summary>The outcome the route answered with.</summary>
+        internal void Complete(ReadOutcome outcome) => _outcome = outcome;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _recorded, 1) != 0)
+            {
+                return;
+            }
+
+            var outcome = _outcome ?? (_context.RequestAborted.IsCancellationRequested ? ReadOutcome.Cancelled : ReadOutcome.Error);
+            RecordWebRouteSample(_recorder, _route, ReadScope.Resolve(outcome, _scope.Fallback), _stopwatch.ElapsedMilliseconds, _band, _scope, _context);
+        }
     }
 
     /// <summary>#5506 part 3: one admission sample of a composed-panel run (busy, cancelled in the queue, or queue_wait).</summary>
@@ -5711,8 +5801,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// touches). <see cref="MapAll"/> builds the dispatch with the web host's own config; a caller with none
     /// gets the tool's own "unavailable" envelope rather than a null-reference throw if that one entry is ever
     /// invoked without it.</para>
+    /// <para><paramref name="readAdmission"/> (#5506 part 3) reaches only the <c>get_read_latency</c> mirror, for the same live
+    /// <c>admission</c> object the MCP tool returns; a dispatch built without it answers without that object.</para>
     /// </summary>
-    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null, PostgresConfig? postgresConfig = null, MonitoredServerRegistryState? registryState = null)
+    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null, PostgresConfig? postgresConfig = null, MonitoredServerRegistryState? registryState = null, ReadAdmission? readAdmission = null)
     {
         var dispatch = new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
@@ -6002,7 +6094,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), c.RequestAborted),
             ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit), c.RequestAborted),
             ["get_slow_reads"] = (c, pg, an) => DarlingMcpSlowReadTools.GetSlowReads(pg, Hours(c, DarlingMcpSlowReadTools.DefaultHours), Server(c), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpSlowReadTools.DefaultLimit), false, c.RequestAborted),
-            ["get_read_latency"] = (c, pg, an) => DarlingMcpReadLatencyTools.GetReadLatency(pg, Hours(c, DarlingMcpReadLatencyTools.DefaultHours), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpReadLatencyTools.DefaultLimit), cancellationToken: c.RequestAborted),
+            ["get_read_latency"] = (c, pg, an) => DarlingMcpReadLatencyTools.GetReadLatency(pg, Hours(c, DarlingMcpReadLatencyTools.DefaultHours), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpReadLatencyTools.DefaultLimit), readAdmission, c.RequestAborted),
 
             /* ── latch / spinlock ── */
             ["get_latch_stats"] = (c, pg, an) => DarlingMcpLatchSpinlockTools.GetLatchStats(pg, Server(c), Hours(c, 24), Rows(c, "top", 10), as_of: AsOf(c), cancellationToken: c.RequestAborted),

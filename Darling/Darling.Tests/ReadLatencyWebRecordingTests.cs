@@ -137,6 +137,31 @@ public sealed class ReadLatencyWebRecordingTests
         Assert.Equal(1, sample.Count);
     }
 
+    /// <summary>#5506 part 3: <c>/api/fleet</c> reads outside the <c>/api/read</c> loop, and records its own sample under
+    /// the name and window band it is admitted by (<c>get_fleet_overview</c>, 1h for the bare default), so the long-read
+    /// table learns it from its own p90.</summary>
+    [Fact]
+    public async Task TheFleetRoute_RecordsOneWebSample_UnderItsAdmissionName()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the read-latency web-recording pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var readLatency = new ReadLatencyAccumulator();
+        var server = await BuildServer(postgres, readLatency);
+
+        var response = await Send(server, "/api/fleet");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var sample = Assert.Single(readLatency.Drain(), d => d.Surface == ReadSurface.Web && d.Route == "get_fleet_overview");
+        Assert.Equal((ReadOutcome.Ok, ReadWindowBand.OneHour, 1), (sample.Outcome, sample.WindowBand, sample.Count));
+    }
+
     [Fact]
     public async Task AHandlerThatThrowsTheTimeoutShape_RecordsOneWebSample_WithOutcomeTimeout()
     {

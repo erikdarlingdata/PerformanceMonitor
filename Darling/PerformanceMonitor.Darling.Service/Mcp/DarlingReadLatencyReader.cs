@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -35,9 +36,18 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para>Timeouts are counted separately (<c>run_count</c> summed WHERE <c>outcome = 'timeout'</c>, the exact
 /// lowercase spelling <see cref="ReadLatencyAccumulator.FlushAsync"/> writes) rather than folded into the
 /// outcome-blind row: a route's overall latency and its timeout rate are two different questions. The bucket
-/// histogram itself is summed across EVERY outcome (ok, timeout, cancelled, error, limit alike) because a timed-out
+/// histogram itself is summed across every outcome of a read that ran (ok, timeout, error, limit alike) because a timed-out
 /// or errored read still took real wall-clock time and belongs in the same "how long did this route take"
 /// picture — <c>get_read_latency</c>'s note says so.</para>
+///
+/// <para>#5506 part 3: the rows that are not a read running are kept OUT of <c>run_count</c>, the histogram,
+/// <c>total_ms</c>, <c>max_ms</c>, <c>max_in_flight</c> and <c>wait_total_ms</c> (<see cref="NonRunOutcomes"/>):
+/// <c>queue_wait</c> (one per read that waited for a long-read slot, its elapsed being that wait), <c>busy</c> (a
+/// refused read), <c>cache_hit</c> (an answer from memory) and <c>cancelled</c> (a caller that left). They are counted
+/// on their own instead: <c>queued</c> and <c>queue_wait_ms</c> are the queue_wait rows' run count and summed
+/// elapsed, <c>queue_wait_p95_ms</c> comes from their own summed histogram, <c>rejected</c> is the busy rows' run count
+/// and <c>cache_hits</c> the cache_hit rows'. A cache miss is a read that ran, so it is never stored as its own row.
+/// A (surface, route, band) that only has such rows still returns, with a run count of zero.</para>
 /// </summary>
 internal static class DarlingReadLatencyReader
 {
@@ -54,11 +64,23 @@ internal static class DarlingReadLatencyReader
         string WindowBand = ReadWindowBand.None,
         int MaxInFlight = 0,
         long WaitTotalMs = 0,
-        int DistinctCallers = 0)
+        int DistinctCallers = 0,
+        long Queued = 0,
+        long QueueWaitMs = 0,
+        long QueueWaitMaxMs = 0,
+        long[]? QueueWaitBucketCounts = null,
+        long Rejected = 0,
+        long CacheHits = 0,
+        long Cancelled = 0)
     {
         /// <summary>Zero when nothing ran, matching how <c>get_collector_cost</c> reports its average.</summary>
         public long MeanMs => RunCount > 0 ? TotalMs / RunCount : 0;
     }
+
+    /// <summary>#5506 part 3: the stored outcomes that are not a read running, kept out of the run count, the
+    /// percentiles and the wait total. <c>cancelled</c> covers both a caller that left while waiting in the queue and one
+    /// that left mid-read: neither finished, so neither measures what the route costs.</summary>
+    internal static readonly string[] NonRunOutcomes = ["queue_wait", "busy", "cache_hit", "cancelled"];
 
     public static async Task<List<ReadLatencyRow>> GetSummaryAsync(
         NpgsqlDataSource postgres, DateTime sinceUtc, string? surface, string? route,
@@ -72,10 +94,12 @@ internal static class DarlingReadLatencyReader
             ? (normalizedSurface is not null ? " AND route = $3" : " AND route = $2")
             : string.Empty;
 
+        var nonRunList = string.Join(", ", NonRunOutcomes.Select(o => $"'{o}'"));
         var sql = $@"
 WITH windowed AS
 (
-    SELECT surface, route, window_band, outcome, run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms, distinct_callers
+    SELECT surface, route, window_band, outcome, run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms, distinct_callers,
+           outcome IN ({nonRunList}) AS is_admission
     FROM collect.read_latency
     WHERE metric_time >= $1{surfaceFilter}{routeFilter}
 ),
@@ -85,33 +109,44 @@ totals AS
         surface,
         route,
         window_band,
-        sum(run_count)                                        AS run_count,
-        sum(total_ms)                                         AS total_ms,
-        max(max_ms)                                           AS max_ms,
+        coalesce(sum(run_count) FILTER (WHERE NOT is_admission), 0) AS run_count,
+        coalesce(sum(total_ms) FILTER (WHERE NOT is_admission), 0) AS total_ms,
+        coalesce(max(max_ms) FILTER (WHERE NOT is_admission), 0) AS max_ms,
         coalesce(sum(run_count) FILTER (WHERE outcome = 'timeout'), 0) AS timeouts,
         coalesce(sum(run_count) FILTER (WHERE outcome = 'fallback_raw'), 0) AS fallbacks,
         coalesce(sum(run_count) FILTER (WHERE outcome = 'gate_failed'), 0) AS gate_failures,
-        max(max_in_flight)                                    AS max_in_flight,
-        sum(wait_total_ms)                                    AS wait_total_ms,
-        max(distinct_callers)                                 AS distinct_callers
+        coalesce(max(max_in_flight) FILTER (WHERE NOT is_admission), 0) AS max_in_flight,
+        coalesce(sum(wait_total_ms) FILTER (WHERE NOT is_admission), 0) AS wait_total_ms,
+        max(distinct_callers)                                 AS distinct_callers,
+        coalesce(sum(run_count) FILTER (WHERE outcome = 'queue_wait'), 0) AS queued,
+        coalesce(sum(total_ms) FILTER (WHERE outcome = 'queue_wait'), 0) AS queue_wait_ms,
+        coalesce(max(max_ms) FILTER (WHERE outcome = 'queue_wait'), 0) AS queue_wait_max_ms,
+        coalesce(sum(run_count) FILTER (WHERE outcome = 'busy'), 0) AS rejected,
+        coalesce(sum(run_count) FILTER (WHERE outcome = 'cache_hit'), 0) AS cache_hits,
+        coalesce(sum(run_count) FILTER (WHERE outcome = 'cancelled'), 0) AS cancelled
     FROM windowed
     GROUP BY surface, route, window_band
 ),
 buckets AS
 (
-    SELECT surface, route, window_band, b.ord, sum(b.bucket_count)::bigint AS bucket_count
+    SELECT surface, route, window_band, b.ord,
+           coalesce(sum(b.bucket_count) FILTER (WHERE NOT is_admission), 0)::bigint AS bucket_count,
+           coalesce(sum(b.bucket_count) FILTER (WHERE outcome = 'queue_wait'), 0)::bigint AS queue_bucket_count
     FROM windowed
     CROSS JOIN LATERAL unnest(windowed.bucket_counts) WITH ORDINALITY AS b(bucket_count, ord)
     GROUP BY surface, route, window_band, b.ord
 ),
 bucket_arrays AS
 (
-    SELECT surface, route, window_band, array_agg(bucket_count ORDER BY ord) AS bucket_counts
+    SELECT surface, route, window_band,
+           array_agg(bucket_count ORDER BY ord) AS bucket_counts,
+           array_agg(queue_bucket_count ORDER BY ord) AS queue_bucket_counts
     FROM buckets
     GROUP BY surface, route, window_band
 )
 SELECT t.surface, t.route, t.run_count, t.total_ms, t.max_ms, ba.bucket_counts, t.timeouts, t.fallbacks, t.gate_failures,
-       t.window_band, t.max_in_flight, t.wait_total_ms::bigint, t.distinct_callers
+       t.window_band, t.max_in_flight, t.wait_total_ms::bigint, t.distinct_callers,
+       t.queued, t.queue_wait_ms, t.queue_wait_max_ms, ba.queue_bucket_counts, t.rejected, t.cache_hits, t.cancelled
 FROM totals AS t
 JOIN bucket_arrays AS ba ON ba.surface = t.surface AND ba.route = t.route AND ba.window_band = t.window_band
 ORDER BY t.surface, t.route, t.window_band";
@@ -145,7 +180,14 @@ ORDER BY t.surface, t.route, t.window_band";
                 reader.GetString(9),
                 reader.GetInt32(10),
                 reader.GetInt64(11),
-                reader.GetInt32(12)));
+                reader.GetInt32(12),
+                reader.GetInt64(13),
+                reader.GetInt64(14),
+                reader.GetInt64(15),
+                (long[])reader.GetValue(16),
+                reader.GetInt64(17),
+                reader.GetInt64(18),
+                reader.GetInt64(19)));
         }
 
         return rows;
