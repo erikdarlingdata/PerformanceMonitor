@@ -17,6 +17,7 @@ on:
   pull_request:
     paths:
       - '.github/scripts/verify_release_signatures.py'
+      - '.github/scripts/fixtures/**'
       - '.github/scripts/postpack_signing.py'
       - '.github/workflows/release-signatures.yml'
     branches: [dev, main]

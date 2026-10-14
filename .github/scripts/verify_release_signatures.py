@@ -17,11 +17,11 @@ WHAT IT CHECKS, AND WHAT IT DELIBERATELY DOES NOT
 
   PowerShell scripts (#5796) carry their signature as a trailing comment block instead, so a
   script counts as signed when it ENDS with that block: a `# SIG # Begin signature block` line,
-  one or more `# SIG # <base64>` lines, and the `# SIG # End signature block` line as the last
-  non-blank line of the file. The Darling zip must hold its three scripts at its root, and the
-  release guard needs a Darling zip to be there at all. The release job then asks Windows itself
-  (Get-AuthenticodeSignature) whether the three scripts' signatures are Valid, which is the check
-  this reader cannot make.
+  one or more `# <base64>` lines, and the `# SIG # End signature block` line, each ending in CRLF,
+  with nothing at all after the End line. The Darling zip must hold its three scripts at its root,
+  and the release guard needs a Darling zip to be there at all. The release job then asks Windows
+  itself (Get-AuthenticodeSignature) whether the three scripts' signatures are Valid and made with
+  the SignPath Foundation certificate, which is the check this reader cannot make.
 
   It does NOT verify the signature: not the chain, not trust, not the timestamp, not revocation,
   not whether the digest matches the file. Doing that properly needs a Windows trust store, and
@@ -91,16 +91,26 @@ HEADER_BYTES = 4096
 EOCD_SEARCH_BYTES = 66 * 1024
 
 # PowerShell scripts carry their Authenticode signature as a trailing comment block, not as a PE
-# certificate table (#5796). A signed script ENDS with the block: the Begin line, one or more body
-# lines of base64, and the End line as the last non-blank line. Each line is matched whole, so a
-# marker at the end of a code line, a block inside a here-string or a comment with code after it,
-# or a Begin/End pair with no body, does not read as signed.
+# certificate table (#5796). A signed script ENDS with the block, exactly as Set-AuthenticodeSignature
+# writes it:
+#
+#     # SIG # Begin signature block
+#     # MIIoIgYJKoZIhvcNAQcCoIIoEzCCKA8CAQExDzANBglghkgBZQMEAgEFADB5Bgor
+#     # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
+#     # SIG # End signature block
+#
+# Only the Begin and End lines carry `# SIG #`; each body line is `# ` and base64, nothing else.
+# Each line is matched whole, so a marker at the end of a code line, a block inside a here-string
+# or a comment with code after it, or a Begin/End pair with no body, does not read as signed.
+# The rest follows what Windows itself reads (pwsh 7.6 and PowerShell 5.1 both report NotSigned
+# otherwise): every line of the block ends in CRLF, the End line's CRLF is the last byte of the file
+# (no blank, whitespace or control-character line after it), and the block holds one Begin line.
 # .psm1, .psd1 and .ps1xml are Authenticode-signed too. None ships today; they are listed so one
 # that starts shipping is checked rather than skipped. A .ps1xml writes its block as XML comments,
 # which this reader does not parse, so a signed one would read as unsigned: a failure, not a pass.
 SCRIPT_SUFFIXES = (".ps1", ".psm1", ".psd1", ".ps1xml")
 SIG_BEGIN = re.compile(r"# SIG # Begin signature block")
-SIG_BODY = re.compile(r"# SIG # [A-Za-z0-9+/=]+")
+SIG_BODY = re.compile(r"# [A-Za-z0-9+/=]+")
 SIG_END = re.compile(r"# SIG # End signature block")
 # The three scripts the Darling service zip ships at its root (the service project links them
 # in). A Darling zip without all three AT ITS ROOT fails the census: a script that is not there
@@ -169,27 +179,39 @@ def is_script(name: str) -> bool:
 def script_is_signed(blob: bytes) -> bool:
     """True when the script ENDS with a well-formed signature block.
 
-    The last non-blank line must be the End line, every line above it up to the Begin line must be
-    a `# SIG # <base64>` body line, and there must be at least one. Anything else reads as
-    unsigned: a Begin with no End, code after the End line (a block inside a here-string or a
-    comment), a Begin/End pair with no body, or a marker at the end of a code line. PowerShell
-    writes the block in the file's own encoding, so a UTF-16 file (BOM FF FE or FE FF) is decoded
-    as UTF-16, and a UTF-8 BOM is dropped so it cannot hide a marker on the first line.
+    The file must end with the End line and its CRLF, every line above it up to the Begin line must
+    be a `# <base64>` body line, and there must be at least one; each of those lines ends in CRLF.
+    Anything else reads as unsigned: a Begin with no End, code after the End line (a block inside a
+    here-string or a comment), a Begin/End pair with no body, a marker at the end of a code line,
+    anything after the End line's CRLF (a blank, whitespace or control-character line, or no final
+    CRLF at all), a block with LF-only line endings, or a second Begin line inside the block.
+    Windows reports NotSigned for each of those, so a pass here never outruns what it would read.
+    PowerShell writes the block in the file's own encoding, so a UTF-16 file (BOM FF FE or FE FF) is
+    decoded as UTF-16, and a UTF-8 BOM is dropped so it cannot hide a marker on the first line.
     """
     if blob.startswith((b"\xff\xfe", b"\xfe\xff")):
         text = blob.decode("utf-16", "replace")
     else:
         text = blob.decode("utf-8-sig", "replace")
-    lines = [line.rstrip("\r") for line in text.split("\n")]
-    while lines and not lines[-1].strip():
-        lines.pop()
-    if not lines or not SIG_END.fullmatch(lines.pop()):
+    # Split on CRLF only: a line of the block that ends in a bare LF stays joined to its neighbour,
+    # and that joined line matches none of the three patterns.
+    if not text.endswith("\r\n"):
+        return False
+    lines = text[:-2].split("\r\n")
+    if not SIG_END.fullmatch(lines.pop()):
         return False
     body = 0
     while lines and SIG_BODY.fullmatch(lines[-1]):
         lines.pop()
         body += 1
-    return body > 0 and bool(lines) and SIG_BEGIN.fullmatch(lines[-1]) is not None
+    if body == 0 or not lines or not SIG_BEGIN.fullmatch(lines.pop()):
+        return False
+    # A second Begin line inside the block, which Windows reports as NotSigned: a run of body-shaped
+    # lines topped by another Begin is one block holding two. A comment line in the code above the
+    # block is body-shaped too, so the walk looks past those to the first line that is not.
+    while lines and SIG_BODY.fullmatch(lines[-1]):
+        lines.pop()
+    return not (lines and SIG_BEGIN.fullmatch(lines[-1]))
 
 
 def is_darling_zip(name: str) -> bool:
@@ -322,14 +344,17 @@ def zip_entries(url: str, size: int) -> list[tuple[str, int, int, int, int]]:
     i = tail.rfind(b"PK\x05\x06")
     if i < 0:
         raise ReadError("no end-of-central-directory record")
+    total = struct.unpack_from("<H", tail, i + 10)[0]
     cd_size, cd_off = struct.unpack_from("<II", tail, i + 12)
-    if cd_off == 0xFFFFFFFF or cd_size == 0xFFFFFFFF:
+    if cd_off == 0xFFFFFFFF or cd_size == 0xFFFFFFFF or total == 0xFFFF:
         raise ReadError("zip64 central directory: not supported by this reader")
     cd = fetch_range(url, cd_off, cd_size)
     out, p = [], 0
-    while p < len(cd) - 46:
+    # Every entry the zip says it holds is walked, or the walk is a read error (#5796): a damaged
+    # entry that ended the walk early would leave the entries after it unchecked.
+    while p + 46 <= len(cd):
         if cd[p : p + 4] != b"PK\x01\x02":
-            break
+            raise ReadError(f"central directory entry {len(out) + 1} has no entry signature")
         method = struct.unpack_from("<H", cd, p + 10)[0]
         csize, usize = struct.unpack_from("<II", cd, p + 20)
         nlen, elen, clen = struct.unpack_from("<HHH", cd, p + 28)
@@ -337,6 +362,8 @@ def zip_entries(url: str, size: int) -> list[tuple[str, int, int, int, int]]:
         name = cd[p + 46 : p + 46 + nlen].decode("utf-8", "replace")
         out.append((name, method, csize, usize, lho))
         p += 46 + nlen + elen + clen
+    if len(out) != total:
+        raise ReadError(f"central directory holds {len(out)} entries, the zip says {total}")
     return out
 
 
@@ -438,7 +465,9 @@ def verify_local_dir(directory: str) -> int:
                         findings.append(
                             Finding(rel, info.filename, info.file_size, off != 0 and length != 0)
                         )
-            except (OSError, zipfile.BadZipFile, *UNREADABLE) as exc:
+            # zipfile raises RuntimeError for an encrypted member and EOFError for one whose data
+            # ends before its recorded size (#5796): each is a read error, status 2.
+            except (OSError, zipfile.BadZipFile, RuntimeError, EOFError, *UNREADABLE) as exc:
                 print(f"GUARD: cannot read {rel}: {type(exc).__name__}: {exc}", file=sys.stderr)
                 return 2
 
@@ -555,13 +584,13 @@ def _synth_pe(*, signed: bool, plus: bool = True) -> bytes:
 
 
 SIG_BLOCK = (
-    "# SIG # Begin signature block\r\n# SIG # MIIFAKEAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n"
+    "# SIG # Begin signature block\r\n# MIIFAKEAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n"
     "# SIG # End signature block\r\n"
 )
 # Scripts that hold the markers but do not END with a well-formed block. Each must read unsigned.
 FORGED_SCRIPTS: dict[str, bytes] = {
     "a marker at the end of a code line": (
-        "Write-Output 1\r\n# SIG # Begin signature block\r\n# SIG # MIIF\r\n"
+        "Write-Output 1\r\n# SIG # Begin signature block\r\n# MIIF\r\n"
         "Write-Output 2 # SIG # End signature block\r\n"
     ).encode("ascii"),
     "a block inside a here-string": (
@@ -573,23 +602,64 @@ FORGED_SCRIPTS: dict[str, bytes] = {
     "code after the End line": ("Write-Output 1\r\n" + SIG_BLOCK + "Write-Output 2\r\n").encode("ascii"),
     "only the two markers": b"# SIG # Begin signature block\r\n# SIG # End signature block\r\n",
     "a block with a non-base64 body line": (
-        "Write-Output 1\r\n# SIG # Begin signature block\r\n# SIG # not base64!\r\n"
+        "Write-Output 1\r\n# SIG # Begin signature block\r\n# not base64!\r\n"
         "# SIG # End signature block\r\n"
     ).encode("ascii"),
     "a block with a code line in its body": (
-        "Write-Output 1\r\n# SIG # Begin signature block\r\n# SIG # MIIF\r\nWrite-Output 2\r\n"
-        "# SIG # MIIF\r\n# SIG # End signature block\r\n"
+        "Write-Output 1\r\n# SIG # Begin signature block\r\n# MIIF\r\nWrite-Output 2\r\n"
+        "# MIIF\r\n# SIG # End signature block\r\n"
     ).encode("ascii"),
     "an End line with no Begin line": (
-        "Write-Output 1\r\n# SIG # MIIF\r\n# SIG # End signature block\r\n"
+        "Write-Output 1\r\n# MIIF\r\n# SIG # End signature block\r\n"
     ).encode("ascii"),
     "a Begin marker after code on its line": (
-        "Write-Output 1 # SIG # Begin signature block\r\n# SIG # MIIF\r\n"
+        "Write-Output 1 # SIG # Begin signature block\r\n# MIIF\r\n"
         "# SIG # End signature block\r\n"
+    ).encode("ascii"),
+    # The shapes below each END with the block yet Windows reports NotSigned for them (pwsh 7.6 and
+    # PowerShell 5.1 agree), so the reader must too.
+    "a blank and a whitespace-only line after the End line": (
+        "Write-Output 1\r\n" + SIG_BLOCK + "\r\n   \r\n\t\r\n"
+    ).encode("ascii"),
+    "a form-feed line after the End line": ("Write-Output 1\r\n" + SIG_BLOCK + "\x0c\r\n").encode("ascii"),
+    "a 0x1C line after the End line": ("Write-Output 1\r\n" + SIG_BLOCK + "\x1c\r\n").encode("ascii"),
+    "spaces after the End line": ("Write-Output 1\r\n" + SIG_BLOCK[:-2] + "  \r\n").encode("ascii"),
+    "no CRLF after the End line": ("Write-Output 1\r\n" + SIG_BLOCK[:-2]).encode("ascii"),
+    "LF-only line endings": ("Write-Output 1\r\n" + SIG_BLOCK).replace("\r\n", "\n").encode("ascii"),
+    "a block with LF-only line endings": (
+        "Write-Output 1\r\n" + SIG_BLOCK.replace("\r\n", "\n")
+    ).encode("ascii"),
+    "a second Begin line at the top of the block": (
+        "Write-Output 1\r\n# SIG # Begin signature block\r\n" + SIG_BLOCK
+    ).encode("ascii"),
+    "a second Begin line inside the block's body": (
+        "Write-Output 1\r\n# SIG # Begin signature block\r\n# MIIF\r\n" + SIG_BLOCK
+    ).encode("ascii"),
+}
+# Shapes that Windows reads as a signature (Valid, or HashMismatch when the content changed), so
+# the reader must read them as signed: a mismatch is Get-AuthenticodeSignature's to report.
+SIGNED_SCRIPTS: dict[str, bytes] = {
+    "a block after code that ends in comment lines": (
+        "Write-Output 1\r\n# done\r\n# MIIF\r\n" + SIG_BLOCK
+    ).encode("ascii"),
+    "LF-only code with the CRLF block Set-AuthenticodeSignature appends": (
+        "param()\nWrite-Output 1\n\r\n" + SIG_BLOCK
+    ).encode("ascii"),
+    "a stale block at the top of the file and a fresh one at its end": (
+        SIG_BLOCK + "Write-Output 1\r\n" + SIG_BLOCK
     ).encode("ascii"),
 }
 # A layout member with this name marks its zip for a zip64 end-of-central-directory record.
 ZIP64 = "<zip64>"
+# Layout members that damage a zip's central directory after the last member is written: CD_SHORT
+# shrinks the end-of-central-directory record's size field so the last entry falls outside it, and
+# CD_BAD_SIG overwrites the last entry's signature and lowers the record's entry count to match
+# (#5796).
+CD_SHORT = "<cd-short>"
+CD_BAD_SIG = "<cd-bad-sig>"
+ZIP_MARKERS = (ZIP64, CD_SHORT, CD_BAD_SIG)
+# The fixture Set-AuthenticodeSignature signed with a throwaway self-signed certificate (#5796).
+GOLDEN_SCRIPT = "fixtures/signed-golden.ps1"
 
 
 def _synth_ps1(*, signed: bool, end: bool = True) -> bytes:
@@ -599,7 +669,7 @@ def _synth_ps1(*, signed: bool, end: bool = True) -> bytes:
     """
     text = "param()\r\nWrite-Output 'hello'\r\n"
     if signed:
-        text += "\r\n# SIG # Begin signature block\r\n# SIG # MIIFAKEAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n"
+        text += "\r\n# SIG # Begin signature block\r\n# MIIFAKEAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n"
         if end:
             text += "# SIG # End signature block\r\n"
     return text.encode("ascii")
@@ -623,10 +693,11 @@ def _release_dir(root: str, layout: dict[str, object]) -> str:
         if isinstance(content, dict):
             with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
                 for member, signed in content.items():
-                    if member == ZIP64:
+                    if member in ZIP_MARKERS:
                         continue
                     zf.writestr(member, _synth_file(member, signed))
-            if ZIP64 in content or {"corrupt", "deflate64"} & set(map(str, content.values())):
+            damaged = {"corrupt", "deflate64", "encrypted"}
+            if set(ZIP_MARKERS) & set(content) or damaged & set(map(str, content.values())):
                 _damage_zip(target, content)
         else:
             with open(target, "wb") as handle:
@@ -635,31 +706,51 @@ def _release_dir(root: str, layout: dict[str, object]) -> str:
 
 
 def _damage_zip(path: str, content: dict[str, object]) -> None:
-    """Mark a synthetic zip as zip64, overwrite a "corrupt" member's deflate stream with junk, or
-    relabel a "deflate64" member as method 9, which neither reader decodes."""
+    """Damage a synthetic zip after it is written, as its layout asks.
+
+    ZIP64 marks it zip64; CD_SHORT and CD_BAD_SIG damage its central directory (see their
+    definitions). A member's value damages that member: "corrupt" overwrites its deflate stream
+    with junk, "deflate64" relabels it as method 9, which neither reader decodes, and "encrypted"
+    sets its encryption flag.
+    """
     import zipfile
 
     with open(path, "rb") as handle:
         data = bytearray(handle.read())
-    if ZIP64 in content:
-        eocd = data.rfind(b"PK\x05\x06")
-        struct.pack_into("<II", data, eocd + 12, 0xFFFFFFFF, 0xFFFFFFFF)
     with zipfile.ZipFile(path) as zf:
         infos = zf.infolist()
         cd_offset = zf.start_dir
+    eocd = data.rfind(b"PK\x05\x06")
+    # Each member's central-directory entry, walked in order from the start of the directory.
+    entries: dict[str, int] = {}
+    p = cd_offset
+    while data[p : p + 4] == b"PK\x01\x02":
+        nlen, elen, clen = struct.unpack_from("<HHH", data, p + 28)
+        entries[data[p + 46 : p + 46 + nlen].decode("utf-8")] = p
+        p += 46 + nlen + elen + clen
     for info in infos:
-        if content.get(info.filename) == "deflate64":
-            struct.pack_into("<H", data, info.header_offset + 8, 9)
-            entry = data.find(b"PK" , cd_offset)
-            while entry >= 0:
-                nlen = struct.unpack_from("<H", data, entry + 28)[0]
-                if data[entry + 46 : entry + 46 + nlen].decode("utf-8") == info.filename:
-                    struct.pack_into("<H", data, entry + 10, 9)
-                entry = data.find(b"PK", entry + 46)
-    for info in [i for i in infos if content.get(i.filename) == "corrupt"]:
-        nlen, elen = struct.unpack_from("<HH", data, info.header_offset + 26)
-        start = info.header_offset + 30 + nlen + elen
-        data[start : start + info.compress_size] = b"\xff" * info.compress_size
+        lho, cde = info.header_offset, entries[info.filename]
+        kind = content.get(info.filename)
+        if kind == "deflate64":
+            struct.pack_into("<H", data, lho + 8, 9)
+            struct.pack_into("<H", data, cde + 10, 9)
+        elif kind == "encrypted":
+            struct.pack_into("<H", data, lho + 6, info.flag_bits | 1)
+            struct.pack_into("<H", data, cde + 8, info.flag_bits | 1)
+        elif kind == "corrupt":
+            nlen, elen = struct.unpack_from("<HH", data, lho + 26)
+            start = lho + 30 + nlen + elen
+            data[start : start + info.compress_size] = b"\xff" * info.compress_size
+    last = entries[infos[-1].filename]
+    if CD_SHORT in content:
+        struct.pack_into("<I", data, eocd + 12, last - cd_offset)
+    if CD_BAD_SIG in content:
+        # The record's entry count agrees with the entries before the damaged one, so only the
+        # signature check can catch it.
+        data[last : last + 4] = b"PK\x09\x09"
+        struct.pack_into("<HH", data, eocd + 8, len(infos) - 1, len(infos) - 1)
+    if ZIP64 in content:
+        struct.pack_into("<II", data, eocd + 12, 0xFFFFFFFF, 0xFFFFFFFF)
     with open(path, "wb") as handle:
         handle.write(bytes(data))
 
@@ -670,17 +761,20 @@ def _synth_file(name: str, signed: object) -> bytes:
             return _synth_ps1(signed=True, end=False)
         if isinstance(signed, str) and signed in FORGED_SCRIPTS:
             return FORGED_SCRIPTS[signed]
-        # "deflate64" and "corrupt" are a signed script stored in a way the readers cannot decode.
+        # "deflate64", "corrupt" and "encrypted" are a signed script stored in a way the readers
+        # cannot decode.
         return _synth_ps1(signed=bool(signed))
     return _synth_pe(signed=bool(signed))
 
 
 def self_test() -> int:
+    import base64
     import contextlib
     import io
     import os
     import pathlib
     import tempfile
+    import zipfile
 
     failures: list[str] = []
     checks = 0
@@ -893,6 +987,31 @@ def self_test() -> int:
         2,
         darling=False,
     )
+    # Members zipfile cannot read, and a central directory that ends early: each is status 2, never a
+    # traceback and never a pass (#5796).
+    guard("a Darling zip with an encrypted script", {DARLING_ZIP: darling_zip(upgrade="encrypted")}, 2)
+    # zipfile raises EOFError when a member's data ends before its recorded size. Its own overlap
+    # check (Python 3.12 and later) turns a file of that shape into BadZipFile first, so the read is
+    # made to raise it here.
+    real_read = zipfile.ZipFile.read
+
+    def short_read(self: zipfile.ZipFile, name: object, pwd: bytes | None = None) -> bytes:
+        if getattr(name, "filename", name) == "upgrade-darling.ps1":
+            raise EOFError("simulated: the member's data ended early")
+        return real_read(self, name, pwd)
+
+    zipfile.ZipFile.read = short_read
+    try:
+        guard("a Darling zip whose script's data ends early", {DARLING_ZIP: darling_zip()}, 2)
+    finally:
+        zipfile.ZipFile.read = real_read
+    late_unsigned = {**darling_zip(), "late-unsigned.exe": False}
+    guard("a Darling zip whose central directory is short", {DARLING_ZIP: {**late_unsigned, CD_SHORT: True}}, 2)
+    guard(
+        "a Darling zip whose last central-directory entry has a bad signature",
+        {DARLING_ZIP: {**late_unsigned, CD_BAD_SIG: True}},
+        2,
+    )
     guard("a release with only the Viewer's zip", {VIEWER: {"Viewer.exe": True}}, 2, darling=False)
     guard(
         "a Darling zip with a member in a compression method it cannot decode",
@@ -930,9 +1049,12 @@ def self_test() -> int:
     )
     for kind, blob in FORGED_SCRIPTS.items():
         expect(f"a script that is {kind} read as signed", not script_is_signed(blob))
+    for kind, blob in SIGNED_SCRIPTS.items():
+        expect(f"a script that is {kind} read as unsigned", script_is_signed(blob))
+    # Windows reports NotSigned for a block with blank lines after it, so the reader must too.
     expect(
-        "a signed script with trailing blank lines read as unsigned",
-        script_is_signed(_synth_ps1(signed=True) + b"\r\n  \r\n"),
+        "a signed script with trailing blank lines read as signed",
+        not script_is_signed(_synth_ps1(signed=True) + b"\r\n  \r\n"),
     )
     expect(
         "a UTF-8 BOM hid a first-line Begin marker",
@@ -955,9 +1077,67 @@ def self_test() -> int:
         script_is_signed(b"\xff\xfe" + _synth_ps1(signed=True).decode("ascii").encode("utf-16-le")),
     )
     expect(
-        "a signed LF-only script read as unsigned",
-        script_is_signed(_synth_ps1(signed=True).replace(b"\r\n", b"\n")),
+        "an LF-only signed script read as signed",
+        not script_is_signed(_synth_ps1(signed=True).replace(b"\r\n", b"\n")),
     )
+
+    # A real signature (#5796): Set-AuthenticodeSignature's own output, made with a throwaway
+    # self-signed certificate. Fixtures written from a description of the block once used the
+    # wrong body-line shape, and the reader built to match them read every real one as unsigned.
+    try:
+        golden = pathlib.Path(__file__).resolve().parent.joinpath(GOLDEN_SCRIPT).read_bytes()
+    except OSError as exc:
+        golden = b""
+        failures.append(f"the signed fixture {GOLDEN_SCRIPT} could not be read: {exc}")
+    begin = golden.rfind(b"# SIG # Begin signature block\r\n")
+    code, block = golden[:begin], golden[begin:]
+    body = block.split(b"\r\n")[1:-2]
+    der = base64.b64decode(b"".join(line[2:] for line in body)) if begin >= 0 else b""
+    expect(
+        "the signed fixture's block is not a PKCS #7 SignedData blob",
+        der[:1] == b"\x30" and b"\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x07\x02" in der[:32],
+    )
+    # What pwsh 7.6.6 and PowerShell 5.1 both report for each shape of the fixture: True where they
+    # read a signature (Valid, or HashMismatch once the content changed), False for NotSigned.
+    windows_reads = {
+        "no change": (golden, True),
+        "a blank and a whitespace-only line after the block": (golden + b"\r\n   \r\n\t\r\n", False),
+        "code after the block": (golden + b"Write-Output 1\r\n", False),
+        "a 0x1C line after the block": (golden + b"\x1c\r\n", False),
+        "a form-feed line after the block": (golden + b"\x0c\r\n", False),
+        "no CRLF after the End line": (golden[:-2], False),
+        "spaces after the End line": (golden[:-2] + b"  \r\n", False),
+        "LF-only line endings": (golden.replace(b"\r\n", b"\n"), False),
+        "a block with LF-only line endings": (code + block.replace(b"\r\n", b"\n"), False),
+        "a second Begin line in the block": (
+            code + block.replace(b"\r\n# ", b"\r\n# SIG # Begin signature block\r\n# ", 1),
+            False,
+        ),
+        "a UTF-8 BOM": (b"\xef\xbb\xbf" + golden, True),
+        "UTF-16": (b"\xff\xfe" + golden.decode("utf-8-sig").encode("utf-16-le"), True),
+        "changed code": (code.replace(b"Write-Output", b"Write-Output ", 1) + block, True),
+        "a stale copy of the block before the code": (block + code + block, True),
+    }
+    for kind, (blob, windows) in windows_reads.items():
+        expect(
+            f"the signed fixture with {kind} read differently from Windows",
+            script_is_signed(blob) == windows,
+        )
+
+    # A Microsoft-signed script, on Windows: a signer and a block this repo did not make.
+    modules = pathlib.Path(r"C:\Program Files\WindowsPowerShell\Modules")
+    sample = None
+    if os.name == "nt" and modules.is_dir():
+        for candidate in sorted(modules.rglob("*")):
+            if candidate.suffix.lower() in (".ps1", ".psm1", ".psd1") and candidate.is_file():
+                blob = candidate.read_bytes()
+                if b"# SIG # Begin signature block" in blob:
+                    sample = (candidate, blob)
+                    break
+    if sample is None:
+        print(f"self-test: skipped the Microsoft-signed script case (not Windows, or none under {modules})")
+    else:
+        expect(f"the Microsoft-signed {sample[0]} read as unsigned", script_is_signed(sample[1]))
     expect(
         "the Darling Viewer's Portable.zip was taken for the Darling zip",
         not is_darling_zip("PerformanceMonitorDarlingViewer-darlingviewer-Portable.zip"),
@@ -1100,6 +1280,19 @@ def self_test() -> int:
         f"{DARLING_ZIP} :: install-darling.ps1" in out and f"{DARLING_ZIP} :: upgrade-darling.ps1" in out,
     )
     by_tag("a zip64 Darling zip", {**release, DARLING_ZIP: {**darling_zip(), ZIP64: True}}, 2)
+    # The last entry is an unsigned exe: read, it fails the release (1); left out of a walk that
+    # ended early, the release would pass. A walk that ends early is a read error instead (#5796).
+    by_tag("a Darling zip whose last member is unsigned", {**release, DARLING_ZIP: late_unsigned}, 1)
+    by_tag(
+        "a Darling zip whose central directory is short",
+        {**release, DARLING_ZIP: {**late_unsigned, CD_SHORT: True}},
+        2,
+    )
+    by_tag(
+        "a Darling zip whose last central-directory entry has a bad signature",
+        {**release, DARLING_ZIP: {**late_unsigned, CD_BAD_SIG: True}},
+        2,
+    )
     by_tag(
         "an asset whose ranged read fails, beside a correct release",
         release,
